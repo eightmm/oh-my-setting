@@ -18,34 +18,7 @@ fn smoke_cases(source: &str) -> Vec<String> {
         .map(|c| c[1].into())
         .collect()
 }
-fn operator_sections(source: &str) -> BTreeMap<String, Option<String>> {
-    let line =
-        Regex::new(r#"^    \("([a-z/-]+)", [0-9]+, (?:"([A-Za-z0-9_.-]+)"|(None))\),$"#).unwrap();
-    let mut rows = BTreeMap::new();
-    let mut inside = false;
-    for raw in source.lines() {
-        if raw == "SECTIONS = (" {
-            inside = true;
-            continue;
-        }
-        if inside && raw == ")" {
-            break;
-        }
-        if inside && let Some(m) = line.captures(raw) {
-            rows.insert(m[1].to_owned(), m.get(2).map(|s| s.as_str().to_owned()));
-        }
-    }
-    rows
-}
-fn operator_manifest(
-    store: &Store,
-    source: &str,
-) -> Result<(BTreeMap<String, Option<String>>, bool)> {
-    if let Some(raw) = store.optional("tests/operator/runner.py", 4 * 1024 * 1024)? {
-        let body =
-            String::from_utf8(raw).map_err(|_| Error::new(2, "verify suite is not UTF-8"))?;
-        return Ok((operator_sections(&body), false));
-    }
+fn operator_manifest(store: &Store, source: &str) -> Result<BTreeMap<String, Option<String>>> {
     let mut rows = BTreeMap::new();
     for name in store.names("tests/operator", usize::MAX, true)? {
         let Some(file) = name.to_str() else { continue };
@@ -69,7 +42,7 @@ fn operator_manifest(
             rows.entry(name).or_insert(None);
         }
     }
-    Ok((rows, true))
+    Ok(rows)
 }
 fn inline_section(source: &str, section: &str) -> String {
     let mut lines = source.lines();
@@ -177,38 +150,25 @@ pub fn validate_with_continuation(
                     .map(|c| c[1].replace('_', "-"))
                     .filter(|s| !["core", "shared-cache"].contains(&s.as_str()))
                     .collect::<Vec<_>>();
-                for name in operator_manifest(&store, &source)?.0.keys() {
+                for name in operator_manifest(&store, &source)?.keys() {
                     if !names.contains(name) {
                         names.push(name.clone());
                     }
                 }
                 Some(names)
             } else if option == "--case" && suite == "tests/operator-tools-smoke.sh" {
-                let (manifest, shell_cases) = operator_manifest(&store, &source)?;
+                let manifest = operator_manifest(&store, &source)?;
                 if sections.len() != 1 {
                     None
                 } else if let Some(file) = manifest.get(&sections[0]) {
                     let body = if let Some(file) = file {
-                        if file.ends_with(".sh") && !shell_cases {
-                            String::new()
-                        } else {
-                            read(&store, &format!("tests/operator/{file}"))?
-                        }
+                        read(&store, &format!("tests/operator/{file}"))?
                     } else {
-                        inline_section(
-                            &source,
-                            if shell_cases {
-                                &sections[0]
-                            } else {
-                                "dispatch-exit"
-                            },
-                        )
+                        inline_section(&source, &sections[0])
                     };
                     Some(case_names(&body))
-                } else if shell_cases {
-                    Some(Vec::new())
                 } else {
-                    None
+                    Some(Vec::new())
                 }
             } else if option == "--only"
                 && (suite == "tests/run-smoke-shard.sh" || source.contains("run-smoke-shard.sh"))

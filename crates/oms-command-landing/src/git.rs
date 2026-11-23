@@ -2,6 +2,7 @@ use crate::{Error, Result, check, require};
 use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
 use std::{
     ffi::{OsStr, OsString},
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
@@ -45,10 +46,10 @@ pub(crate) fn process(
     ];
     request.environment.extend_from_slice(environment);
     request.remove_environment = std::env::vars_os()
-        .filter_map(|(k, _)| {
-            k.to_str()
-                .is_some_and(|s| s.starts_with("GIT_"))
-                .then_some(k)
+        .filter_map(|(key, _)| {
+            (key.as_bytes().to_ascii_uppercase().starts_with(b"GIT_")
+                && !request.environment.iter().any(|(fixed, _)| fixed == &key))
+            .then_some(key)
         })
         .collect();
     let id = reactor

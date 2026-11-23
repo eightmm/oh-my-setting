@@ -6,8 +6,7 @@ UX-01–06과 NF-01–06의 세부 설계·48개 수락 조건을 추가한다.
 이 12개 명세는 12개 독립 엔진이나 자동 구현 승인이 아니다.
 
 2026-11-18 정리: [Feature scope](FEATURE-SCOPE.md)와 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를
-먼저 적용한다. 아래 Python 수정 후보와 과거 구현 단계는 역사적 근거이며 현재 Rust wiring을
-다시 만드는 지시가 아니다. NF-01/02/03/04는 기존 brief/next/context/work-inspect의 consumer를
+먼저 적용한다. 아래 과거 구현 단계는 제안 이력이다. NF-01/02/03/04는 기존 brief/next/context/work-inspect의 consumer를
 재사용한다. 존재하는 projection과 해당 TUI UX의 완료는 별도로 확인한다. UX/NF 전체를 구현해야
 일상 코딩이나 correctness fix를 완료할 수 있는 것은 아니다.
 
@@ -294,16 +293,17 @@ focus loss, 잘못된 대상 action 시도, 실제 추가 모델 호출 수다.
 
 ## 9. 구현자 인계와 범위
 
-아래는 원 제안 당시의 수정 후보다. 현재는 해당 행동의 Rust owner와 실제 caller를 찾아
-통합 큐에서 채택한 범위만 수정한다. `panel_view.py`,
-`room_view.py`, `panel_state.py`,
-`panel_chats.py`, `panel_metrics.py`,
-`dashboard_projection.py`와 runtime read API다.
-모든 파일을 고치는 것이 목표가 아니다. 선택한 UX/NF의 최소 소비자 경로만 변경한다.
+통합 큐에서 채택한 UX/NF의 실제 Rust 호출 경로를 찾는다.
+[보드 렌더러](../crates/oms-command-panel/src/render.rs),
+[보드 입력·갱신](../crates/oms-command-panel/src/watch.rs),
+[패널 상태](../crates/oms-panel-core/src/state.rs),
+[하위 에이전트 관측](../crates/oms-command-panel/src/native_children.rs),
+[패널 지표](../crates/oms-panel-core/src/metrics.rs),
+[대시보드 투영](../crates/oms-command-state/src/state_projection.rs)과
+[runtime 읽기 계약](OMS-RUNTIME.md) 중 선택한 기능이 실제 사용하는 경로만 변경한다.
 
-회귀는 `visual_and_controls.py`,
-`room_and_board_rendering.py`,
-`native_integration.py`와 관련 existing case를 확장한다.
+회귀 검증은 해당 모듈의 테스트나 [패널 통합 테스트](../crates/oms-command-panel/tests/panel_parity.rs)의
+관련 사례를 확장한다.
 새 테스트 프레임워크·대규모 E2E 인프라·real provider/GPU 작업을 기본 요구하지 않는다.
 
 각 후속 PR은 UX/NF와 CP ID, baseline/candidate snapshot, 실제 action 경로,

@@ -35,7 +35,7 @@ the embedding UI. A missing Python executable is reported as unavailable
 metadata rather than becoming a native report runtime dependency.
 
 With `Unavailable`, `checkpoint`, `scratch-worktree`, `change-guard`,
-`candidate`, `land status|conflicts|notes|blame-session` and plain
+`candidate`, `land status|conflicts|batch-preview|batch-check|notes|blame-session` and plain
 `report --dry-run` run locally. `patch-admit` also runs locally (`ADMIT`)
 when no `--plan-task`, `--covers`, `--verify` or `scripts/check.sh` applies;
 under `Unavailable`, `--plan-task` refuses at `Services::plan`, `--covers` at
@@ -109,6 +109,47 @@ the native packet parser. Reference scopes use `Protocol`, the actual native
 checked lifecycle append, `Controller`, capture certificates and producer
 witness validation. The CPython cached-main execution shim has no native
 domain operation to reproduce.
+
+## Ordered landing preview
+
+`oms land batch-preview --base refs/remotes/origin/main refs/heads/oms/change-a refs/heads/oms/change-b --json`
+accepts one to eight branch refs in the input order. All refs must be fully
+qualified local branches or locally available remote-tracking branches.
+The report pins the base and each candidate to a commit ID, lists dependencies
+proved by commit ancestry among those candidates, and shows the cumulative tree
+IDs and a preview SHA-256 when the complete sequence merges cleanly. A conflict or a dependency listed
+after its child holds the remaining steps. The conflict report samples up to
+20 paths. A final ref check invalidates the preview if a ref no longer matches
+its pinned commit.
+
+The preview needs Git 2.38 or newer and local commit and merge objects.
+Git writes synthetic merge objects only in a disposable private object store.
+The preview uses isolated Git defaults for merge drivers and ignores user and
+system attribute files.
+The tree ID describes the simulated merge and carries no CI or landing
+approval. The command reads local refs, runs no verifier, and performs no
+checkout, patch application, push, or PR creation.
+
+### Check the exact preview locally
+
+`oms land batch-check --base refs/remotes/origin/main --expected-preview-sha256 SHA256 refs/heads/oms/change-a refs/heads/oms/change-b --json`
+requires the digest from a clean preview of the same base and ordered refs.
+Use it only for trees whose code you have approved to run. OMS recomputes all
+trees and checks the refs before each run. If a ref moves during verification,
+the report is stale and retains any completed outcome.
+
+On Linux with system bubblewrap and its JSON status channel, OMS copies the exact integration into a
+private detached checkout with its own Git object store and no remote. It runs
+`scripts/check.sh --affected --ci-parity` against the pinned base. The process
+has a fresh home, bounded output, a 30-minute limit, no host network, and
+read-only access to selected system tools and cached build inputs. Precaching
+dependencies may be necessary. If the verifier exits with a failure, OMS runs
+at most one earlier, distinct cumulative tree. Cancellation or a supervisor
+limit ends the check without another run.
+
+The report contains tree IDs, verification mode, duration and outcomes.
+Verifier streams stay private. This diagnostic carries no hosted CI or
+publication authority.
 
 ## Concurrency and interruption residues
 
@@ -229,12 +270,10 @@ recorded `push.base`; bounded archive capture requires UTF-8 names; the dedicate
 adversary coverage need the parent supervisor/verification lane. These are not claimed
 as passing behavior based on compilation.
 
-Nearest existing contracts include
-[`patch-admit.sh`](../../scripts/patch-admit.sh),
-[`patch-land.sh`](../../scripts/patch-land.sh),
-[`land.sh`](../../scripts/land.sh),
-`draft-pr-smoke.sh`,
-`durable-writers-contract-smoke.sh`,
-`scripts-smoke.sh`,
-`dispatch_results.py` and
-`auto_review.py`.
+The [landing contract suite](tests/landing_contract.rs) covers the native
+routes behind [`patch-admit.sh`](../../scripts/patch-admit.sh),
+[`patch-land.sh`](../../scripts/patch-land.sh), and
+[`land.sh`](../../scripts/land.sh).
+The original migration notes cited `draft-pr-smoke.sh`,
+`durable-writers-contract-smoke.sh`, `scripts-smoke.sh`,
+`dispatch_results.py` and `auto_review.py` as historical evidence.

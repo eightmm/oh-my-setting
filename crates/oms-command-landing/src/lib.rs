@@ -5,6 +5,7 @@
 
 pub mod admission;
 pub mod attribution;
+mod batch_preview;
 pub mod candidate;
 pub mod checkpoint;
 pub mod ci;

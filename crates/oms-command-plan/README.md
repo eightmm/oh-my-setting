@@ -33,7 +33,7 @@ The internal consumers have one authority entry point:
 |---|---|
 | `scripts/plan-from-spec.sh` | `Plan::execute` with `ApplyProposal`; all tasks and the reviewed project contract publish in one plan CAS; exact replay is read-only |
 | `scripts/goal-drive.sh`, `scripts/autopilot.sh` | `Plan::status_snapshot`, `Plan::execute` with `Next`, `RecoverOwner`, `Reclaim`, and `Accept`; schema-1 status retains verified/closed distinction |
-| `scripts/lib/panel_results.py`, panel dispatch/admission/landing | `EvidenceSnapshot`, `Claim`, `Start`, `Review`, `Land`, `Finish`; `json::projection` / `json::receipt_digest` implement the shared landing fence |
+| [Native panel control](../oms/src/services_control.rs) and [landing](../oms/src/services_landing.rs) | `EvidenceSnapshot`, `Claim`, `Start`, `Review`, `Land`, `Finish`; `json::projection` / `json::receipt_digest` implement the shared landing fence |
 | Room carry / reviewed research | `AcceptResearch`, `ApproveMainResearch`, `AcceptMainResearch`, `Satisfy`; receipt validation rechecks immutable stream prefixes and native ownership |
 | Native runtime/work projections | `Plan::work_status_snapshot(&[&str])` calls the existing `oms-work-inspect` status validator; it cannot grant a mutation |
 | State verification / landing recovery | `retirement::validate_ledger`, `validate_receipt`, `validate_active_lineage`, `completion::validate_done` return validated domain evidence |
