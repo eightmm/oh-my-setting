@@ -53,7 +53,7 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
 - `install-claude-hooks`: isolated, bounded capability negotiation before global
   receipt/transaction locking; conditional `onFailure` and compact-window
   convergence; adoption/removal of legacy OMS wrapper commands even when their
-  checkout was deleted. Native hook schema 12 is defined in the crate, so hook
+  checkout was deleted. Native hook schema 13 is defined in the crate, so hook
   installation and `doctor --surfaces` need no shell installer or script files.
   Statuslines invoke `oms claude-statusline` and `oms claude-subagent-statusline`.
   Account mode requires a matching effects reservation
@@ -104,6 +104,22 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   Neither recorded capabilities nor matching installed files prove which
   configuration a running provider selected; repository runtime profiles are
   not included in installation identity.
+- `doctor --surfaces` shows OMS Main-specific write-guard coverage alongside hook
+  registration. Claude's file-edit guard covers the managed checkout, linked
+  worktrees, and submodules when the panel Main conditions hold; shell writes and
+  the other providers remain advisory. The current environment's kill switch is
+  reported separately from the unknown effective state of an already running Main.
+  Codex diagnostics distinguish the selected environment's plugin declaration and
+  generated hook payload from retained callback evidence. The existing opt-in
+  `OMS_CODEX_HOOK_TRACE=1` writer records receipt, handler entry, and outcome in
+  `.oms/hooks/codex-trace.jsonl`; doctor reads at most 1 MiB without following
+  symlinks and reports bounded per-handler counts, malformed evidence, and
+  incomplete phases. It never starts a provider, enables tracing, or changes the
+  trace. Missing evidence cannot distinguish tracing availability from callback
+  delivery or provider loading; retained receipts have no account/session binding
+  and cannot prove current-session startup. Raw records, payloads, nonces, and
+  timestamps are omitted from the diagnostic. Missing Claude settings still
+  produce the remaining diagnostic rows.
 - Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
   native. Optional external adapters must actually satisfy profile requirements;
   their absence is accepted only by explicit allow-missing policy.

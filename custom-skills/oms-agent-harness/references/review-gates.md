@@ -16,8 +16,11 @@ CI or required checks as a side effect of ordinary feature work.
 
 Other projects use their declared release check, not an inferred full suite.
 For an authorized OMS deployment, finish focused checks and local commits, then
-use `oms land` once. Its default affected gate can push the committed SHA and
-follow CI, but does not install. Installation requires successful CI for that
+use `oms land` once. On GitHub it opens a PR and, without `--merge`, ends at
+`awaiting-merge` after CI without installing; pass `--merge` only when the user
+asked to merge, otherwise report the PR URL and summary. `--direct` is limited
+to a consented docs-only change of at most two lines. Its default affected gate
+can push the committed SHA and follow CI, but does not install. Installation requires successful CI for that
 SHA plus full proof: CI jobs that executed the full selection (default; for an
 affected-only push run request one with `gh workflow run test.yml --ref TARGET`
 or `oms land --ci-full`), or an explicit full local gate (option). Skipped CI or an affected-only gate does not authorize an

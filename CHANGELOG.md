@@ -6,6 +6,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+
+- `oms land` on a GitHub remote now opens a pull request and stops at
+  `awaiting-merge` after CI (exit 0); it merges only with `--merge`, and then
+  installs when GitHub's squash or merge commit holds the head's tree directly
+  on the checked base. The PR body carries Summary, Motivation (`--why` or the
+  commit bodies) and Verification sections, and the default head branch is
+  `oms/<type>/<slug>` from the commit subject. `--direct` to GitHub is limited
+  to a docs-only change of at most 2 lines, `OMS_LAND_MODE=auto` is gone, and
+  `agent-plan finish --landed-commit` accepts the head of a squash-merged PR.
+  The command guard refuses an agent's `git commit` on main/master and
+  `git push` to it outside a landing run. Global rules, templates and skills
+  describe this pull-request workflow for every OMS project.
+
 ### Added
 
 - `docs/examples/agent-adapter-conformance.sh` is a reference check of the
@@ -547,6 +561,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The panel watch PTY test no longer needs Python. Its fake tmux is a shell
+  script and the test makes the PTY in Rust; the child takes it as controlling
+  terminal itself. The source-distribution suite now refuses an OMS test or
+  script that runs the retired interpreter.
 - CI is now Linux-only: removed the `macos-latest` Rust and install lifecycle
   jobs (and macOS-only workflow steps) from `.github/workflows/test.yml`,
   keeping `lint`, `rust (ubuntu-24.04)`, `focused`,
