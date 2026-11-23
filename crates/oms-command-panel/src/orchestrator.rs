@@ -12070,18 +12070,18 @@ mod tests {
                 );
             }
             std::fs::write(&patch_path, patch).unwrap();
-            let secret = concat!("gh", "p_12345678901234567890abcd");
-            let escaped = secret
+            let sample = concat!("gh", "p_12345678901234567890abcd");
+            let escaped = sample
                 .chars()
                 .map(|c| format!("\\u{:04x}", c as u32))
                 .collect::<String>();
             let mut sensitive = manifest.clone();
-            sensitive["summary"] = secret.into();
+            sensitive["summary"] = sample.into();
             std::fs::write(
                 &input_path,
                 serde_json::to_string(&sensitive)
                     .unwrap()
-                    .replace(secret, &escaped),
+                    .replace(sample, &escaped),
             )
             .unwrap();
             assert!(
