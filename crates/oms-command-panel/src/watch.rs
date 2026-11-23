@@ -8460,7 +8460,7 @@ fi
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if reader_reaped.load(Ordering::Relaxed) {
+                            if reader_reaped.load(std::sync::atomic::Ordering::Relaxed) {
                                 quiet += 1;
                             }
                             std::thread::sleep(Duration::from_millis(10));
@@ -8479,7 +8479,7 @@ fi
             child_in.write_all(b"q").unwrap();
             child_in.flush().unwrap();
             let status = child.wait().unwrap();
-            reaped.store(true, Ordering::Relaxed);
+            reaped.store(true, std::sync::atomic::Ordering::Relaxed);
             if stalled_quit {
                 let entered = std::fs::read_to_string(&capture_entered).unwrap();
                 let (_, pid) = entered.split_once('\n').unwrap();
