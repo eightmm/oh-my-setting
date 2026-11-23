@@ -272,11 +272,15 @@ pub fn drive_overlay(plan: &Value, rows: &[Value]) -> Option<Value> {
         json!({"run_id": value::text(last, "run_id"), "reason": value::text(last, "reason"), "cycle": last.get("cycle").cloned().unwrap_or(Value::Null)}),
     )
 }
-pub fn handoff_decisions(packet: &[u8], max_entries: usize, max_bytes: usize) -> Vec<String> {
+pub fn handoff_decisions(
+    packet: &[u8],
+    max_entries: usize,
+    max_bytes: usize,
+) -> (Vec<String>, usize) {
     if oms_command_task::packet::metadata(packet, "status") == Some(b"closed".as_slice())
         || packet.len() > 65536
     {
-        return vec![];
+        return (vec![], 0);
     }
     let body = oms_command_task::packet::section(packet, "Decisions");
     let pattern = regex::Regex::new(r"^- (\d{4}-\d{2}-\d{2})T\S*Z \[[^\]]*\] (.+)$").unwrap();
@@ -286,6 +290,7 @@ pub fn handoff_decisions(packet: &[u8], max_entries: usize, max_bytes: usize) ->
             rows.push(format!("- {} {}", &found[1], found[2].trim()));
         }
     }
+    let total = rows.len();
     let mut used = 0;
     let mut selected = vec![];
     for row in rows.into_iter().rev() {
@@ -296,7 +301,8 @@ pub fn handoff_decisions(packet: &[u8], max_entries: usize, max_bytes: usize) ->
         selected.push(row);
     }
     selected.reverse();
-    selected
+    let omitted = total - selected.len();
+    (selected, omitted)
 }
 pub fn handoff_pickups(rows: &[Value]) -> Value {
     let mut seen = BTreeMap::<String, BTreeSet<String>>::new();
