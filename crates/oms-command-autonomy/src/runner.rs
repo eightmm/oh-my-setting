@@ -661,7 +661,16 @@ pub(crate) fn run_task(
                 return Ok(output);
             }
         }
-        task = show(ctx, &id)?;
+        task = if let Some(gates) = ctx.gates {
+            crate::checkpoint(ctx.interrupted)?;
+            let shown = {
+                let _gate = gates.plan();
+                ctx.plan()?.show_task_with_locked_snapshot(&id)?
+            };
+            value::parse(&shown.stdout)?
+        } else {
+            show(ctx, &id)?
+        };
         require(
             value::text(&task, "state") == "review"
                 && value::text(&task, "lease_id") == lease
