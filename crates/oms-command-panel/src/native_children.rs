@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const TRANSCRIPT: &str = ".system_generated/logs/transcript.jsonl";
@@ -114,6 +115,8 @@ thread_local!(static LEGACY_PARENT_READS: std::cell::Cell<usize> = const { std::
 thread_local!(static LEGACY_CANDIDATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 #[cfg(all(test, target_os = "linux"))]
 thread_local!(static LEGACY_CHILD_BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(all(test, target_os = "linux"))]
+thread_local!(static AGY_PARENT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn reset_agy_legacy_reads() {
@@ -121,6 +124,7 @@ pub(crate) fn reset_agy_legacy_reads() {
     LEGACY_PARENT_READS.with(|n| n.set(0));
     LEGACY_CANDIDATE_READS.with(|n| n.set(0));
     LEGACY_CHILD_BODY_READS.with(|n| n.set(0));
+    AGY_PARENT_BYTES.with(|n| n.set(0));
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -174,14 +178,23 @@ pub(crate) fn observe(
     repo: &Path,
     terminal: &str,
     agy_parent: &mut AgyParent,
+    reuse_agy_roster: bool,
 ) -> ObservedChildren {
     let Ok(owner) = terminals::process(pid) else {
+        agy_parent.take_roster();
         return ObservedChildren::default();
     };
     let observed = ObservedChildren {
         rows: match provider {
             "claude" => claude(pid, repo),
-            "antigravity" => agy(pid, &owner.birth, repo, terminal, agy_parent),
+            "antigravity" => agy(
+                pid,
+                &owner.birth,
+                repo,
+                terminal,
+                agy_parent,
+                reuse_agy_roster,
+            ),
             _ => None,
         }
         .unwrap_or_default(),
@@ -190,6 +203,7 @@ pub(crate) fn observe(
     if terminals::process(pid).is_ok_and(|current| current == owner) {
         observed
     } else {
+        agy_parent.take_roster();
         ObservedChildren::default()
     }
 }
@@ -1807,13 +1821,31 @@ pub(crate) fn chat_tail(history: &str) -> Option<String> {
     (!safe.is_empty()).then(|| safe.to_owned())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) enum AgyParent {
     #[default]
     Unseen,
     Legacy(PathBuf),
     // Once this pane needs a tail, it must prove custody on every observation.
-    Bounded,
+    Bounded(Option<Arc<AgyRoster>>),
+}
+
+impl AgyParent {
+    pub(crate) fn take_roster(&mut self) -> Option<Arc<AgyRoster>> {
+        match self {
+            Self::Bounded(projection) => projection.take(),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) struct AgyRoster {
+    custody: crate::agy_lead_custody::AgyLeadCustody,
+    // None identifies the independently validated, markerless display mode.
+    anchor_digest: Option<String>,
+    directory: Stat,
+    transcript: Stat,
+    rows: Vec<Value>,
 }
 
 fn agy_oversized(brain: &Path, file: &Path) -> bool {
@@ -1821,54 +1853,85 @@ fn agy_oversized(brain: &Path, file: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.len() > MAX_TRANSCRIPT as u64)
 }
 
+struct AgyTranscript {
+    dir: PathBuf,
+    directory: Stat,
+    file: File,
+    stat: Stat,
+}
+
+impl AgyTranscript {
+    fn open(custody: &crate::agy_lead_custody::AgyLeadCustody) -> Option<Self> {
+        let transcript = Path::new(TRANSCRIPT);
+        let dir = custody
+            .app_root
+            .join("brain")
+            .join(&custody.conversation_id)
+            .join(transcript.parent()?);
+        let (opened, directory) = agy_dir_strict(&dir)?;
+        let fd = fs::openat(
+            &opened,
+            transcript.file_name()?,
+            AGY_FILE_FLAGS,
+            Mode::empty(),
+        )
+        .ok()?;
+        let stat = fs::fstat(&fd).ok()?;
+        (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
+            && agy_strict_stat(&stat))
+        .then_some(Self {
+            dir,
+            directory,
+            file: File::from(fd),
+            stat,
+        })
+    }
+
+    fn rows(&mut self, anchor: Option<&str>, tail_limit: usize) -> Option<(Vec<Value>, usize)> {
+        // The byte preceding the suffix lets a record at the exact LF boundary survive.
+        let size = u64::try_from(self.stat.st_size).ok()?;
+        let len = size.min(tail_limit as u64 + 1);
+        self.file.seek(SeekFrom::Start(size - len)).ok()?;
+        let mut bytes = vec![0; len as usize];
+        self.file.read_exact(&mut bytes).ok()?;
+        #[cfg(all(test, target_os = "linux"))]
+        AGY_PARENT_BYTES.with(|n| n.set(n.get() + bytes.len()));
+        agy_recent_turn(&bytes, size > tail_limit as u64, anchor)
+    }
+
+    fn confirm(&self, custody: &crate::agy_lead_custody::AgyLeadCustody) -> bool {
+        note_legacy_custody_call(1);
+        if crate::agy_lead_custody::agy_lead_custody(custody.pid, &custody.birth, &custody.repo)
+            .as_ref()
+            != Some(custody)
+        {
+            return false;
+        }
+        (|| {
+            let (reopened, directory) = agy_dir_strict(&self.dir)?;
+            let after = fs::fstat(&self.file).ok()?;
+            let name = Path::new(TRANSCRIPT).file_name()?;
+            let named = fs::statat(&reopened, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+            Some(
+                codex_same_identity(&self.directory, &directory)
+                    && codex_same_identity(&self.stat, &after)
+                    && codex_same_version(&self.stat, &after)
+                    && codex_same_identity(&self.stat, &named)
+                    && codex_same_version(&self.stat, &named),
+            )
+        })() == Some(true)
+    }
+}
+
 fn agy_custody_rows(
     custody: &crate::agy_lead_custody::AgyLeadCustody,
     anchor: Option<&str>,
     tail_limit: usize,
 ) -> Option<(Vec<Value>, usize)> {
-    let dir = custody
-        .app_root
-        .join("brain")
-        .join(&custody.conversation_id)
-        .join(Path::new(TRANSCRIPT).parent()?);
-    let name = Path::new(TRANSCRIPT).file_name()?;
-    let (opened, opened_stat) = agy_dir_strict(&dir)?;
-    let fd = fs::openat(&opened, name, AGY_FILE_FLAGS, Mode::empty()).ok()?;
-    let before = fs::fstat(&fd).ok()?;
-    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
-        || before.st_nlink != 1
-        || !agy_strict_stat(&before)
-    {
-        return None;
-    }
-    // The byte preceding the suffix lets a record at the exact LF boundary survive.
-    let size = u64::try_from(before.st_size).ok()?;
-    let len = size.min(tail_limit as u64 + 1);
-    let offset = size - len;
-    let mut file = File::from(fd);
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut bytes = vec![0; len as usize];
-    file.read_exact(&mut bytes).ok()?;
-    let rows = agy_recent_turn(&bytes, size > tail_limit as u64, anchor)?;
-    note_legacy_custody_call(1);
-    if crate::agy_lead_custody::agy_lead_custody(custody.pid, &custody.birth, &custody.repo)
-        .as_ref()
-        != Some(custody)
-    {
-        return None;
-    }
-    let (reopened, reopened_stat) = agy_dir_strict(&dir)?;
-    let after = fs::fstat(&file).ok()?;
-    let named = fs::statat(&reopened, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
-    if !codex_same_identity(&opened_stat, &reopened_stat)
-        || !codex_same_identity(&before, &after)
-        || !codex_same_version(&before, &after)
-        || !codex_same_identity(&before, &named)
-        || !codex_same_version(&before, &named)
-    {
-        return None;
-    }
-    Some(rows)
+    let mut transcript = AgyTranscript::open(custody)?;
+    let rows = transcript.rows(anchor, tail_limit)?;
+    transcript.confirm(custody).then_some(rows)
 }
 
 pub(crate) fn agy_submitted_user_turn(
@@ -2014,7 +2077,9 @@ fn agy(
     repo: &Path,
     terminal: &str,
     parent: &mut AgyParent,
+    reuse_roster: bool,
 ) -> Option<Vec<Value>> {
+    let previous = parent.take_roster();
     let anchor = agy_display_anchor(terminal)?;
     let matches_prompt = |rows: &[Value], anchor: &str| {
         rows.iter().any(|row| {
@@ -2033,7 +2098,7 @@ fn agy(
     if matches!(parent, AgyParent::Legacy(file)
         if home.as_ref().is_some_and(|brain| agy_oversized(brain, file)))
     {
-        *parent = AgyParent::Bounded;
+        *parent = AgyParent::Bounded(None);
     }
     let cached_rows = (|| {
         let anchor = anchor?;
@@ -2054,7 +2119,6 @@ fn agy(
         *parent = AgyParent::Unseen;
     }
 
-    let mut bounded = None;
     let rows = if let Some(rows) = cached_rows {
         rows
     } else if let Some(custody) = {
@@ -2064,15 +2128,18 @@ fn agy(
         // 2. Optimized custody-proved cold path: direct read of custody.conversation_id only.
         let brain = custody.app_root.join("brain");
         let file = PathBuf::from(&custody.conversation_id).join(TRANSCRIPT);
-        if anchor.is_none() || matches!(parent, AgyParent::Bounded) || agy_oversized(&brain, &file)
+        if anchor.is_none()
+            || matches!(parent, AgyParent::Bounded(_))
+            || agy_oversized(&brain, &file)
         {
             if anchor.is_some() {
-                *parent = AgyParent::Bounded;
+                *parent = AgyParent::Bounded(None);
             }
-            let (rows, start) = agy_custody_rows(&custody, anchor, MAX_TRANSCRIPT)?;
-            bounded = Some((start, custody));
-            note_legacy_parent_read(1);
-            rows
+            let cache = match parent {
+                AgyParent::Bounded(cache) if reuse_roster => Some(cache),
+                _ => None,
+            };
+            return agy_bounded_roster(&custody, anchor, cache, previous);
         } else {
             let store = Store::open(&brain).ok()?;
             let rows = jsonl(&store, &file)?;
@@ -2086,7 +2153,7 @@ fn agy(
         }
     } else {
         // 3. Legacy fallback cold path only when custody is unavailable.
-        if matches!(parent, AgyParent::Bounded) {
+        if matches!(parent, AgyParent::Bounded(_)) {
             return None;
         }
         let anchor = anchor?;
@@ -2130,64 +2197,126 @@ fn agy(
         rows
     };
 
-    let scope = bounded.as_ref().map(|(start, custody)| AgyDisplayScope {
-        first_spawn: *start,
+    Some(agy_roster_rows(&rows, &mut AgyWorkspaces::new(repo), None))
+}
+
+fn agy_bounded_roster(
+    custody: &crate::agy_lead_custody::AgyLeadCustody,
+    anchor: Option<&str>,
+    mut cache: Option<&mut Option<Arc<AgyRoster>>>,
+    previous: Option<Arc<AgyRoster>>,
+) -> Option<Vec<Value>> {
+    let mut transcript = AgyTranscript::open(custody)?;
+    let anchor_digest = anchor.map(|anchor| oms_panel_core::digest(anchor.as_bytes()));
+    if let Some(cache) = cache.as_deref_mut()
+        && let Some(previous) = previous
+        && previous.custody == *custody
+        && previous.anchor_digest == anchor_digest
+        && codex_same_identity(&previous.directory, &transcript.directory)
+        && codex_same_identity(&previous.transcript, &transcript.stat)
+        && codex_same_version(&previous.transcript, &transcript.stat)
+    {
+        let rows = previous.rows.clone();
+        if !transcript.confirm(custody) {
+            return None;
+        }
+        *cache = Some(previous);
+        return Some(rows);
+    }
+    let (rows, start) = transcript.rows(anchor, MAX_TRANSCRIPT)?;
+    let scope = AgyDisplayScope {
+        first_spawn: start,
         custody,
         derived: anchor.is_none(),
-    });
-    let children = agy_children(&rows, &mut AgyWorkspaces::new(repo), scope);
-    Some(
-        children
-            .into_iter()
-            .rev()
-            // The Board can show the bounded roster. Usage samples only its first three.
-            .take(crate::agy_child_records::SPAWN_BUDGET)
-            .map(
-                |AgyProjectedChild {
-                     id,
-                     title,
-                     model,
-                     started,
-                     spawn_result_idx,
-                     recovered,
-                 }| {
-                    if recovered {
-                        // A parent delivery proves a message, which can precede
-                        // termination. The recovered identity proves no lifecycle.
-                        return row("antigravity", &id, &title, &model, started, "", "unknown");
-                    }
-                    let finished = rows[spawn_result_idx + 1..]
-                        .iter()
-                        .rev()
-                        .filter(|msg| {
-                            msg["type"] == "SYSTEM_MESSAGE"
-                                && msg["source"] == "SYSTEM"
-                                && msg["status"] == "DONE"
-                                && (scope.is_none() || msg.get("truncated_fields").is_none())
+    };
+    let mut workspaces = AgyWorkspaces::new(&custody.repo);
+    let rows = agy_roster_rows(&rows, &mut workspaces, Some(scope));
+    if !transcript.confirm(custody) {
+        return None;
+    }
+    note_legacy_parent_read(1);
+    if let Some(cache) = cache
+        && workspaces.verdicts.is_empty()
+        && rows.iter().all(|row| {
+            ["updated_at", "created_at", "started_at", "ended_at"]
+                .into_iter()
+                .all(|field| {
+                    row.get(field).is_none_or(|value| {
+                        value.as_str().is_some_and(|stamp| {
+                            stamp.is_empty()
+                                || (stamp.len() <= 35
+                                    && chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
                         })
-                        .find_map(|msg| {
-                            agy_delivery(text(msg, "content"), &id).map(|body| (msg, body))
-                        });
-                    let (state, updated, answer) = match finished {
-                        Some((msg, body)) => (
-                            "done",
-                            Some(text(msg, "created_at"))
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(started),
-                            body,
-                        ),
-                        None => ("unknown", started, ""),
-                    };
-                    let mut call = row("antigravity", &id, &title, &model, updated, answer, state);
-                    if let Some((msg, _)) = finished {
-                        call["started_at"] = json!(started);
-                        call["ended_at"] = json!(text(msg, "created_at"));
-                    }
-                    call
-                },
-            )
-            .collect(),
-    )
+                    })
+                })
+        })
+    {
+        *cache = Some(Arc::new(AgyRoster {
+            custody: custody.clone(),
+            anchor_digest,
+            directory: transcript.directory,
+            transcript: transcript.stat,
+            rows: rows.clone(),
+        }));
+    }
+    Some(rows)
+}
+
+fn agy_roster_rows(
+    rows: &[Value],
+    workspaces: &mut AgyWorkspaces,
+    scope: Option<AgyDisplayScope<'_>>,
+) -> Vec<Value> {
+    agy_children(rows, workspaces, scope)
+        .into_iter()
+        .rev()
+        // The Board can show the bounded roster. Usage samples only its first three.
+        .take(crate::agy_child_records::SPAWN_BUDGET)
+        .map(
+            |AgyProjectedChild {
+                 id,
+                 title,
+                 model,
+                 started,
+                 spawn_result_idx,
+                 recovered,
+             }| {
+                if recovered {
+                    // A parent delivery proves a message, which can precede
+                    // termination. The recovered identity proves no lifecycle.
+                    return row("antigravity", &id, &title, &model, started, "", "unknown");
+                }
+                let finished = rows[spawn_result_idx + 1..]
+                    .iter()
+                    .rev()
+                    .filter(|msg| {
+                        msg["type"] == "SYSTEM_MESSAGE"
+                            && msg["source"] == "SYSTEM"
+                            && msg["status"] == "DONE"
+                            && (scope.is_none() || msg.get("truncated_fields").is_none())
+                    })
+                    .find_map(|msg| {
+                        agy_delivery(text(msg, "content"), &id).map(|body| (msg, body))
+                    });
+                let (state, updated, answer) = match finished {
+                    Some((msg, body)) => (
+                        "done",
+                        Some(text(msg, "created_at"))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(started),
+                        body,
+                    ),
+                    None => ("unknown", started, ""),
+                };
+                let mut call = row("antigravity", &id, &title, &model, updated, answer, state);
+                if let Some((msg, _)) = finished {
+                    call["started_at"] = json!(started);
+                    call["ended_at"] = json!(text(msg, "created_at"));
+                }
+                call
+            },
+        )
+        .collect()
 }
 
 fn agy_child_model(event: &Value, tool: &Value) -> String {
@@ -5961,6 +6090,9 @@ mod tests {
             let legacy_id = std::env::var("OMS_TEST_LEGACY").unwrap();
             let unknown_id = std::env::var("OMS_TEST_UNKNOWN").unwrap();
             let terminal = format!("> {prompt_line}\n");
+            let observe = |provider, pid, repo: &Path, terminal: &str, parent: &mut AgyParent| {
+                super::observe(provider, pid, repo, terminal, parent, false)
+            };
 
             reset_agy_legacy_reads();
             let mut cached = AgyParent::default();
@@ -6099,7 +6231,7 @@ mod tests {
                 "oversized parent lost current children"
             );
             assert_eq!(legacy_agy_read_index(), (2, 1, 0, 0));
-            assert!(matches!(cached, AgyParent::Bounded));
+            assert!(matches!(cached, AgyParent::Bounded(None)));
 
             let mut boundary = b"\n".to_vec();
             boundary.extend_from_slice(&current);
@@ -6158,6 +6290,136 @@ mod tests {
                 output.push(b'\n');
                 std::fs::write(&transcript, output).unwrap();
             };
+
+            {
+                let bounded_bytes = MAX_TRANSCRIPT + 1;
+                let bytes_read = || AGY_PARENT_BYTES.with(std::cell::Cell::get);
+                let mut board = AgyParent::default();
+                let sample = |screen: &str, parent: &mut AgyParent, verified_board| {
+                    super::observe(
+                        "antigravity",
+                        lead_pid,
+                        &repo,
+                        screen,
+                        parent,
+                        verified_board,
+                    )
+                    .rows
+                };
+                // Mixed workspaces always revalidate the linked tree.
+                std::fs::write(&transcript, &long).unwrap();
+                reset_agy_legacy_reads();
+                for _ in 0..2 {
+                    assert_eq!(sample(&terminal, &mut board, true), cold.rows);
+                }
+                assert_eq!(bytes_read(), 2 * bounded_bytes);
+                assert!(matches!(board, AgyParent::Bounded(None)));
+
+                let mut root_rows = records.clone();
+                let linked = repo.with_file_name("repo-wt");
+                root_rows[5]["content"] =
+                    json!(text(&records[5], "content").replace(&uri(&linked), &uri(&repo)));
+                overwrite(&root_rows);
+                reset_agy_legacy_reads();
+                let root_roster = sample(&terminal, &mut board, true);
+                assert_eq!(root_roster, cold.rows);
+                assert_eq!(legacy_agy_read_index(), (2, 1, 0, 0));
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert!(matches!(board, AgyParent::Bounded(Some(_))));
+                reset_agy_legacy_reads();
+                for _ in 0..20 {
+                    assert_eq!(sample(&terminal, &mut board, true), root_roster);
+                }
+                assert_eq!(legacy_agy_read_index(), (40, 0, 0, 0));
+                assert_eq!(bytes_read(), 0);
+
+                let mut delivery = root_rows[8].clone();
+                delivery["step_index"] = json!(9);
+                let content =
+                    text(&delivery, "content").replace("PARENT_DELIVERED_TEXT", "APPENDED_RESULT");
+                delivery["content"] = json!(content);
+                let mut writer = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&transcript)
+                    .unwrap();
+                writeln!(writer, "{delivery}").unwrap();
+                drop(writer);
+                assert!(
+                    sample(&terminal, &mut board, true)
+                        .iter()
+                        .any(|row| row["native_answer"] == "APPENDED_RESULT")
+                );
+                assert_eq!(bytes_read(), bounded_bytes);
+
+                // Same-size rewrite with restored mtime must still miss on ctime.
+                let before = std::fs::metadata(&transcript).unwrap();
+                let replacement = std::fs::read_to_string(&transcript)
+                    .unwrap()
+                    .replace("APPENDED_RESULT", "REWRITTEN_REPLY");
+                assert_eq!(replacement.len() as u64, before.len());
+                std::fs::write(&transcript, &replacement).unwrap();
+                File::open(&transcript)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+                    .unwrap();
+                reset_agy_legacy_reads();
+                let rewritten = sample(&terminal, &mut board, true);
+                assert!(
+                    rewritten
+                        .iter()
+                        .any(|row| row["native_answer"] == "REWRITTEN_REPLY")
+                );
+                assert_eq!(bytes_read(), bounded_bytes);
+
+                let moved = transcript.with_file_name("replacement.jsonl");
+                std::fs::write(&moved, &replacement).unwrap();
+                std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600)).unwrap();
+                std::fs::rename(&moved, &transcript).unwrap();
+                reset_agy_legacy_reads();
+                assert_eq!(sample(&terminal, &mut board, true), rewritten);
+                assert_eq!(bytes_read(), bounded_bytes);
+                for mode in [0o640, 0o660, 0o600] {
+                    std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(mode))
+                        .unwrap();
+                    reset_agy_legacy_reads();
+                    let shown = sample(&terminal, &mut board, true);
+                    if mode == 0o660 {
+                        assert!(shown.is_empty() && matches!(board, AgyParent::Bounded(None)));
+                        assert_eq!(bytes_read(), 0);
+                    } else {
+                        assert_eq!(shown, rewritten);
+                        assert_eq!(bytes_read(), bounded_bytes);
+                    }
+                }
+
+                reset_agy_legacy_reads();
+                let shorter = terminal.replace(" Extra\n", "\n");
+                assert_eq!(sample(&shorter, &mut board, true), rewritten);
+                assert_eq!(bytes_read(), bounded_bytes);
+                reset_agy_legacy_reads();
+                let markerless = "Antigravity terminal ready\n";
+                let derived = sample(markerless, &mut board, true);
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert_eq!(sample(markerless, &mut board, true), derived);
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert_eq!(sample(markerless, &mut board, false), derived);
+                assert_eq!(bytes_read(), 2 * bounded_bytes);
+                assert!(matches!(board, AgyParent::Bounded(None)));
+
+                // A successful empty projection has the same metadata fences.
+                overwrite(&root_rows[..2]);
+                reset_agy_legacy_reads();
+                assert!(sample(&terminal, &mut board, true).is_empty());
+                assert!(matches!(board, AgyParent::Bounded(Some(_))));
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert!(sample(&terminal, &mut board, true).is_empty());
+                assert_eq!(bytes_read(), bounded_bytes);
+                println!(
+                    "AGY parent body: {bounded_bytes} bytes cold, 0 bytes across 20 stable frames"
+                );
+                std::fs::write(&transcript, &long).unwrap();
+            }
+
             let mut tool_omitted = records.clone();
             for index in [2, 4, 6] {
                 tool_omitted[index]["truncated_fields"] = json!(["tool_calls"]);
@@ -6531,8 +6793,18 @@ mod tests {
             overwrite(&three_and_one);
             let mut fresh = AgyParent::default();
             reset_agy_legacy_reads();
-            assert!(agy(lead_pid, "bad-birth", &repo, markerless, &mut fresh).is_none());
-            assert!(agy(lead_pid, &owner.birth, &worktree, markerless, &mut fresh).is_none());
+            assert!(agy(lead_pid, "bad-birth", &repo, markerless, &mut fresh, false).is_none());
+            assert!(
+                agy(
+                    lead_pid,
+                    &owner.birth,
+                    &worktree,
+                    markerless,
+                    &mut fresh,
+                    false
+                )
+                .is_none()
+            );
             assert!(
                 observe("antigravity", 0, &repo, markerless, &mut fresh)
                     .rows
@@ -6634,13 +6906,14 @@ mod tests {
                     "bad-birth",
                     &repo,
                     &terminal,
-                    &mut AgyParent::default()
+                    &mut AgyParent::default(),
+                    false,
                 )
                 .unwrap()
                 .len(),
                 3
             );
-            assert!(agy(lead_pid, "bad-birth", &repo, &terminal, &mut cached).is_none());
+            assert!(agy(lead_pid, "bad-birth", &repo, &terminal, &mut cached, false).is_none());
             assert_eq!(agy_legacy_child_reads(), 0);
 
             let by_id = |cid: &str| {

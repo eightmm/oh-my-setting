@@ -559,25 +559,6 @@ impl BoundCodexPane {
     }
 }
 
-impl Clone for Observation {
-    fn clone(&self) -> Self {
-        use crate::native_children::AgyParent;
-        Self {
-            identity: self.identity.clone(),
-            model: self.model.clone(),
-            weekly: self.weekly,
-            quota_visible: self.quota_visible,
-            pending: self.pending,
-            dismiss_pending_usage: self.dismiss_pending_usage,
-            agy_parent: match &self.agy_parent {
-                AgyParent::Unseen => AgyParent::Unseen,
-                AgyParent::Legacy(path) => AgyParent::Legacy(path.clone()),
-                AgyParent::Bounded => AgyParent::Bounded,
-            },
-        }
-    }
-}
-
 #[derive(PartialEq, Eq)]
 pub(crate) struct ObservationGeneration {
     session: terminals::SessionProof,
@@ -724,7 +705,7 @@ struct ObservationIdentity {
     account: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Observation {
     identity: ObservationIdentity,
     model: Option<String>,
@@ -733,6 +714,7 @@ struct Observation {
     pending: Option<Instant>,
     dismiss_pending_usage: Option<Instant>,
     agy_parent: crate::native_children::AgyParent,
+    agy_roster_scope: Option<(ChatPane, String)>,
 }
 
 impl<'a> Panel<'a> {
@@ -1327,12 +1309,33 @@ impl<'a> Panel<'a> {
                         "antigravity" => self.capture_recent(&pane.id).unwrap_or(screen),
                         _ => screen,
                     };
+                    let agy_roster_scope = expected
+                        .filter(|_| {
+                            provider == "antigravity"
+                                && same_pane_process
+                                && !self.stop.load(Ordering::Acquire)
+                                && self.has_live_report_scope(report)
+                        })
+                        .and_then(|generation| {
+                            let fresh = census.get_or_init(|| self.reload().ok()).as_ref()?;
+                            let pane = fresh.chat_pane_with_host(provider, host).ok()?;
+                            (fresh.attempt == self.attempt
+                                && fresh.participant == self.participant
+                                && fresh.owner == self.owner
+                                && generation.fences(&pane, provider))
+                            .then(|| (pane, fresh.participant.clone()))
+                        });
+                    if sample.agy_roster_scope != agy_roster_scope {
+                        sample.agy_parent.take_roster();
+                        sample.agy_roster_scope = agy_roster_scope;
+                    }
                     let mut observed = crate::native_children::observe(
                         provider,
                         pane.pid,
                         self.repo,
                         &recent,
                         &mut sample.agy_parent,
+                        sample.agy_roster_scope.is_some(),
                     );
                     if provider == "claude" {
                         let mut located = Vec::new();
