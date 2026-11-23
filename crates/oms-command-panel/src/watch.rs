@@ -1192,16 +1192,54 @@ impl MainSwitch {
             && attempt["terminal"] == false
             && attempt["state"] == "working"
             && oms_panel_core::state::main_participant(attempt) == main.member;
-        if current && legacy_main_switch_source(report, main, attempt) {
+        if !current {
+            let live_state = (attempt["attempt_id"] == main.attempt
+                && attempt["provider"] == main.owner
+                && attempt["terminal"] == false
+                && oms_panel_core::state::main_participant(attempt) == main.member)
+                .then(|| attempt["state"].as_str())
+                .flatten()
+                .filter(|state| {
+                    *state != "working" && oms_panel_core::state::LIVE_STATES.contains(state)
+                });
+            if let Some(state) = live_state {
+                return Err(Error::new(format!(
+                    "Current Main is {state}; wait until it is working to switch"
+                )));
+            }
+            return Err(Error::new(
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ));
+        }
+        if legacy_main_switch_source(report, main, attempt) {
             return Err(Error::new(
                 "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
             ));
         }
-        crate::require(
-            current && attempt["refs"]["panel_host"] == "tmux",
-            "Current Main is unavailable for a managed switch",
-        )?;
+        match attempt["refs"]["panel_host"].as_str() {
+            Some("tmux") => {}
+            Some("inline") => {
+                return Err(Error::new(
+                    "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+                ));
+            }
+        }
+        if attempt["refs"]["panel_native_scheduling"] == "campaign" {
+            return Err(Error::new(
+                "Main swap is unavailable during a managed campaign",
+            ));
+        }
         let current = attempt["refs"]["panel_harness"].as_str();
+        if current == Some("agy") && main.owner == "antigravity" {
+            return Err(Error::new(
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ));
+        }
         crate::native_panel::check_outgoing_main_swap_harness(current)?;
         let current = current.unwrap_or_default();
         let targets = targets(current)?;
@@ -5886,11 +5924,11 @@ mod tests {
             .unwrap();
         refs.remove("panel_host");
         refs.remove("panel_room_participant");
-        let blocked = |report: &Value| {
+        let blocked = |case_scope: &BoardScope, report: &Value| {
             let mut flow = MainSwitch::default();
             let mut nav = navigation::Navigation::default();
             let error = flow
-                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                .open_with(Some(case_scope), report, &mut nav, |_| {
                     panic!("unavailable Main must not resolve targets")
                 })
                 .unwrap_err();
@@ -5899,49 +5937,91 @@ mod tests {
             error.message
         };
         assert_eq!(
-            blocked(&legacy),
+            blocked(&legacy_scope, &legacy),
             "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
         );
-        for (path, value) in [
-            ("/collection/pending", json!(true)),
-            ("/room/closed", json!(true)),
+        for (path, value, expected) in [
+            (
+                "/collection/pending",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room/closed",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
             (
                 "/room_attempts/attempt-old/attempt_id",
                 json!("foreign-attempt"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_room_id",
                 json!("room-foreign"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_wrapper_pid",
                 json!("52"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_host",
                 json!("inline"),
+                "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
             ),
-            ("/room_attempts/attempt-old/state", json!("done")),
-            ("/room/participants/1/joined", json!(false)),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("done"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ),
+            (
+                "/room/participants/1/joined",
+                json!(false),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
         ] {
             let mut refused = legacy.clone();
             let (parent, key) = path.rsplit_once('/').unwrap();
             refused.pointer_mut(parent).unwrap()[key] = value;
-            assert_eq!(
-                blocked(&refused),
-                "Current Main is unavailable for a managed switch",
-                "{path}"
-            );
+            assert_eq!(blocked(&legacy_scope, &refused), expected, "{path}");
+        }
+        for (path, value, expected) in [
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("external"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("blocked"),
+                "Current Main is blocked; wait until it is working to switch",
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_native_scheduling",
+                json!("campaign"),
+                "Main swap is unavailable during a managed campaign",
+            ),
+        ] {
+            let mut refused = report.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(blocked(&scope, &refused), expected, "{path}");
         }
         let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
             .unwrap_err()
             .message;
-        for (owner, harness) in [
-            ("claude", Some("claude")),
-            ("antigravity", Some("agy")),
-            ("codex", Some("pi")),
-            ("codex", Some("unknown")),
-            ("codex", None),
+        for (owner, harness, expected) in [
+            ("claude", Some("claude"), expected_refusal.as_str()),
+            (
+                "antigravity",
+                Some("agy"),
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ),
+            ("codex", Some("pi"), expected_refusal.as_str()),
+            ("codex", Some("unknown"), expected_refusal.as_str()),
+            ("codex", None, expected_refusal.as_str()),
         ] {
             let mut case_scope = scope.clone();
             case_scope.main.as_mut().unwrap().owner = owner.into();
@@ -5966,7 +6046,7 @@ mod tests {
                     panic!("unsupported outgoing harness must not resolve targets")
                 })
                 .unwrap_err();
-            assert_eq!(error.message, expected_refusal);
+            assert_eq!(error.message, expected);
             assert!(nav.main_switch.is_none());
             assert!(flow.selection.is_none());
             assert!(flow.running.is_none());
