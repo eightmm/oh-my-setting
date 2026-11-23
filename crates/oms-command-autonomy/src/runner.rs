@@ -1,7 +1,7 @@
 //! One authorized plan task, with an exact lease and one durable landing repair.
 use crate::cli::Args;
 use crate::planning::{invoke, strings};
-use crate::storage::{Context, MAX_FILE};
+use crate::storage::{Context, MAX_FILE, PROGRESS};
 use crate::{Error, Output, Result, require, value, verify};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
@@ -340,34 +340,61 @@ fn delegate(
             "--terminalize-resumed-repair".into(),
         ]);
     }
-    crate::planning::invoke_configured(
-        ctx,
-        "peer-delegate",
-        call,
-        wall,
-        vec![
-            (
-                "OMS_MODEL_WORKLOAD".into(),
-                value::text(route, "workload").into(),
+    let operation = (!ctx.owner_id.is_empty())
+        .then(|| value::random("op_"))
+        .transpose()?;
+    let mut dispatch = Value::Null;
+    if let Some(operation) = &operation {
+        let task = show(ctx, id)?;
+        dispatch = json!({"schema":1,"kind":"autopilot-worker-call","phase":"intent","owner_id":ctx.owner_id,"run_id":ctx.run_id,
+            "operation_id":operation,"plan_id":ctx.plan_value()?["plan_id"],"task_id":id,"task_sha256":crate::adaptive::worker_contract(&task)?,
+            "lease_id":task["lease_id"],"lease_epoch":task["lease_epoch"],"head":ctx.git(&["rev-parse","HEAD"])?,"route":route,"ts":value::now()});
+        let _lock = ctx.lock(PROGRESS)?;
+        ctx.append(PROGRESS, &dispatch)?;
+    }
+    let mut environment = vec![
+        (
+            "OMS_MODEL_WORKLOAD".into(),
+            value::text(route, "workload").into(),
+        ),
+        (
+            "OMS_MODEL_EXPLICIT".into(),
+            value::text(route, "model").into(),
+        ),
+        (
+            "OMS_MODEL_FALLBACK_EXPLICIT".into(),
+            value::text(route, "fallback_model").into(),
+        ),
+        (
+            "OMS_REASONING_EFFORT_REQUEST".into(),
+            value::text(route, "reasoning_effort").into(),
+        ),
+        (
+            "OMS_REASONING_FALLBACK_EXPLICIT".into(),
+            value::text(route, "fallback_effort").into(),
+        ),
+    ];
+    if let Some(operation) = operation {
+        environment.push(("OMS_OPERATION_ID".into(), operation.into()));
+    }
+    let output = crate::planning::invoke_configured(ctx, "peer-delegate", call, wall, environment)?;
+    if !dispatch.is_null() {
+        dispatch["phase"] = "returned".into();
+        dispatch["exit"] = output.code.into();
+        dispatch["failure"] = crate::adaptive::classification(
+            ctx,
+            &format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             ),
-            (
-                "OMS_MODEL_EXPLICIT".into(),
-                value::text(route, "model").into(),
-            ),
-            (
-                "OMS_MODEL_FALLBACK_EXPLICIT".into(),
-                value::text(route, "fallback_model").into(),
-            ),
-            (
-                "OMS_REASONING_EFFORT_REQUEST".into(),
-                value::text(route, "reasoning_effort").into(),
-            ),
-            (
-                "OMS_REASONING_FALLBACK_EXPLICIT".into(),
-                value::text(route, "fallback_effort").into(),
-            ),
-        ],
-    )
+            output.code,
+        );
+        dispatch["ts"] = value::now().into();
+        let _lock = ctx.lock(PROGRESS)?;
+        ctx.append(PROGRESS, &dispatch)?;
+    }
+    Ok(output)
 }
 fn land(ctx: &Context<'_>, args: &Args, task: &Value, wall: Duration) -> Result<Output> {
     let _landing = ctx.gates.map(crate::storage::Gates::landing);

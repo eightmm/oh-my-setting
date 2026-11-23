@@ -2,7 +2,7 @@
 use crate::cli::Args;
 use crate::planning::invoke;
 use crate::storage::{Context, MAX_FILE, PROGRESS};
-use crate::{Error, Output, Result, checkpoint, require, value, verify};
+use crate::{Error, Output, Result, adaptive, checkpoint, require, value, verify};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -81,7 +81,24 @@ fn terminal(
 ) -> Result<Output> {
     let receipt = value::random("")?;
     let receipt = value::hash(receipt);
-    let row = json!({"schema": 1, "kind": "terminal", "ts": value::now(), "run_id": run, "cycle": cycle, "status": status, "reason": reason, "base_sha": ctx.git(&["rev-parse", "HEAD"])?, "receipt": receipt});
+    let mut row = json!({"schema": 1, "kind": "terminal", "ts": value::now(), "run_id": run, "cycle": cycle, "status": status, "reason": reason, "base_sha": ctx.git(&["rev-parse", "HEAD"])?, "receipt": receipt});
+    row["tree"] = ctx.git(&["rev-parse", "HEAD^{tree}"])?.into();
+    row["worktree_clean"] = ctx.clean().is_ok().into();
+    row["owner_id"] = ctx.owner_id.clone().into();
+    if let Some(raw) = ctx.store.optional(crate::storage::RECEIPT, 64 * 1024)? {
+        let contract = value::parse(&raw)?;
+        if contract["owner_id"] == ctx.owner_id {
+            row["spec_sha256"] = contract["spec_sha256"].clone();
+        }
+    }
+    if let Some(cause) = ctx
+        .rows(PROGRESS)?
+        .iter()
+        .rev()
+        .find(|r| r["kind"] == "autopilot-failure" && r["run_id"] == run)
+    {
+        row["cause"] = cause["failure"].clone();
+    }
     {
         let _lock = ctx.lock(PROGRESS)?;
         ctx.append(PROGRESS, &row)?;
@@ -806,13 +823,27 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         acceptance_plan.context.cycle = Some(cycle);
         let acceptance = acceptance_plan.execute(&Request::new(Action::Accept))?;
         let accept_code = acceptance.code;
+        if accept_code != 0 {
+            adaptive::record_failure(
+                ctx,
+                "acceptance",
+                &String::from_utf8_lossy(&acceptance.stderr),
+                accept_code,
+            )?;
+        }
+        let adaptive_progress = if ctx.owner_id.is_empty() {
+            None
+        } else {
+            Some(adaptive::cycle(ctx, &plan)?)
+        };
         output.append(Output {
             code: accept_code,
             stdout: acceptance.stdout,
             stderr: acceptance.stderr,
         });
         guard(ctx, expected_ref)?;
-        if accept_code == 0 {
+        let tranche = adaptive::tranche(ctx)?;
+        if accept_code == 0 && tranche["pending"] != true {
             let pending = plan["tasks"].as_object().is_some_and(|t| {
                 t.values()
                     .any(|t| !["done", "cancelled"].contains(&value::text(t, "state")))
@@ -834,8 +865,11 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             output.code = 0;
             return terminal(ctx, &run, cycle, "done", "acceptance-pass", output);
         }
-        if accept_code != 3 {
+        if accept_code != 3 && accept_code != 0 {
             return terminal(ctx, &run, cycle, "park", "acceptance-command-error", output);
+        }
+        if tranche["next_milestone"] == true && tranche["pending"] == false {
+            return terminal(ctx, &run, cycle, "park", "milestone-verification", output);
         }
         let current = Progress {
             head: ctx.git(&["rev-parse", "HEAD"])?,
@@ -856,11 +890,20 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             receipts: 0,
             stalled: 0,
         };
-        if previous.as_ref().is_some_and(|before| {
-            before.tree == current.tree
-                && !current.accept.is_empty()
-                && before.accept == current.accept
-        }) {
+        if tranche["first_attempt"] != true
+            && !plan["tasks"]
+                .as_object()
+                .is_some_and(|tasks| tasks.values().any(|t| t["state"] == "review"))
+            && (adaptive_progress
+                .as_ref()
+                .is_some_and(|p| p["stalled_cycles"].as_u64().unwrap_or(0) > 0)
+                || adaptive_progress.is_none()
+                    && previous.as_ref().is_some_and(|before| {
+                        before.tree == current.tree
+                            && !current.accept.is_empty()
+                            && before.accept == current.accept
+                    }))
+        {
             return terminal(ctx, &run, cycle, "park", "stuck", output);
         }
         let facts = progress(&current, previous.as_ref());
@@ -895,13 +938,41 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 return terminal(ctx, &run, cycle, "park", "cycles-exhausted", output);
             }
             let _ = ctx.action(&Request::new(Action::Reclaim));
-            let selected = match ctx.action(&Request::new(Action::Next).flag("json")) {
-                Ok(out) if out.code == 0 => value::parse(&out.stdout)?,
-                _ => return terminal(ctx, &run, cycle, "park", "tasks-exhausted", output),
+            let selected = if let Some(id) = tranche["retry_task_id"].as_str() {
+                let task = ctx.plan_value()?["tasks"][id].clone();
+                require(task["state"] == "ready", "retry task is no longer ready")?;
+                task
+            } else {
+                match ctx.action(&Request::new(Action::Next).flag("json")) {
+                    Ok(out) if out.code == 0 => value::parse(&out.stdout)?,
+                    Ok(out) => {
+                        let reason = adaptive::selection_reason(ctx)?;
+                        output.append(out);
+                        return terminal(ctx, &run, cycle, "park", reason, output);
+                    }
+                    Err(e) => {
+                        adaptive::record_failure(ctx, "selection", &e.message, e.code)?;
+                        output
+                            .stderr
+                            .extend_from_slice(format!("{}\n", e.message).as_bytes());
+                        return terminal(
+                            ctx,
+                            &run,
+                            cycle,
+                            "park",
+                            "plan-observation-error",
+                            output,
+                        );
+                    }
+                }
             };
             let selected_id = value::text(&selected, "id");
             require(value::id(selected_id, 160), "next task has invalid id")?;
             let mut reservation = json!({"schema": 1, "kind": if owner.is_empty() { "goal-cycle" } else { "autopilot-cycle" }, "ts": value::now(), "contract_id": owner, "run_id": run, "cycle": cycle, "task_id": selected_id, "lease_id": ""});
+            if !tranche.is_null() {
+                reservation["proposal_sha256"] = tranche["proposal_sha256"].clone();
+                reservation["retry_sha256"] = tranche["retry_sha256"].clone();
+            }
             reservation
                 .as_object_mut()
                 .unwrap()
@@ -919,6 +990,18 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     run_args.set(key, args.values[key].clone());
                 }
             }
+            if !tranche["retry_route"].is_null() {
+                for (flag, field) in [
+                    ("model", "model"),
+                    ("fallback-model", "fallback_model"),
+                    ("reasoning-effort", "reasoning_effort"),
+                ] {
+                    let text = value::text(&tranche["retry_route"], field);
+                    if !text.is_empty() {
+                        run_args.set(flag, text);
+                    }
+                }
+            }
             if args.flag("retry-known") {
                 run_args.flags.insert("retry-known".into());
             }
@@ -928,10 +1011,21 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     output.append(out);
                 }
                 Ok(out) => {
+                    adaptive::record_failure(
+                        ctx,
+                        "worker",
+                        &format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        ),
+                        out.code,
+                    )?;
                     output.append(out);
                     return terminal(ctx, &run, cycle, "park", "task-failed", output);
                 }
                 Err(e) => {
+                    adaptive::record_failure(ctx, "worker", &e.message, e.code)?;
                     output
                         .stderr
                         .extend_from_slice(format!("{}\n", e.message).as_bytes());
@@ -989,10 +1083,21 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         match crate::runner::execute_bound(ctx, &land_args, Some(&intent)) {
             Ok(out) if out.code == 0 => output.append(out),
             Ok(out) => {
+                adaptive::record_failure(
+                    ctx,
+                    "landing",
+                    &format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    out.code,
+                )?;
                 output.append(out);
                 return terminal(ctx, &run, cycle, "park", "task-failed", output);
             }
             Err(e) => {
+                adaptive::record_failure(ctx, "landing", &e.message, e.code)?;
                 output
                     .stderr
                     .extend_from_slice(format!("{}\n", e.message).as_bytes());
@@ -1006,6 +1111,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 format!("goal-drive: committed task={id} commit={commit}\n").as_bytes(),
             ),
             Err(e) => {
+                adaptive::record_failure(ctx, "commit", &e.message, e.code)?;
                 output
                     .stderr
                     .extend_from_slice(format!("{}\n", e.message).as_bytes());

@@ -75,6 +75,23 @@ pub trait AutopilotHost {
     ) -> std::result::Result<String, String>;
     /// "" when the approval may be resumed, else why not (`OMS_TICK_AUTOPILOT_MAX_AGE_DAYS`).
     fn stale_approval(&self, repo: &Path, contract: &ApprovedContract, now: i64) -> String;
+    /// Current receipt-bound external wait. A refresh may query/reconcile its
+    /// one producer, but must never submit work or call a model.
+    fn external_wait(&self, _repo: &Path, _refresh: bool) -> std::result::Result<Value, String> {
+        Err("external wait projection unavailable".into())
+    }
+    /// Native hosts pass this exact launch tuple to the child's existing
+    /// progress producer. Legacy hosts remain usable, but cannot claim that a
+    /// missing launch acknowledgement was delivered without that proof.
+    fn launch_bound(
+        &self,
+        argv: &[String],
+        log: &Path,
+        cwd: &Path,
+        _identity: &Value,
+    ) -> std::result::Result<u32, String> {
+        self.launch(argv, log, cwd)
+    }
     fn tmux_available(&self) -> bool {
         std::env::var_os("PATH")
             .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("tmux").is_file()))
@@ -184,6 +201,56 @@ fn compact(value: &Value) -> Result<String> {
 }
 fn hash16(parts: &[&str]) -> String {
     crate::digest(parts.join("\0").as_bytes())[..16].to_owned()
+}
+
+fn launch_progress(
+    repo: &Path,
+    id: &str,
+    owner: &str,
+    receipt: &str,
+) -> std::result::Result<(bool, Option<String>), Fail> {
+    let progress = Store::open(repo)
+        .and_then(|s| s.read(Path::new(".oms/plan/progress.jsonl"), 4 * 1024 * 1024, true))
+        .map_err(|e| Fail::Other(e.message))?;
+    if !progress.is_empty() && !progress.ends_with(b"\n") {
+        return Err(Fail::Other(
+            "autopilot launch progress has a torn tail".into(),
+        ));
+    }
+    let mut started = false;
+    let mut finished = None;
+    for raw in progress.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let event = crate::decode(raw, 1024 * 1024).map_err(|e| Fail::Other(e.message))?;
+        if event["kind"] != "autopilot-wake-launch" || event["launch_id"] != id {
+            continue;
+        }
+        if event["schema"] != 1
+            || event["owner_id"] != owner
+            || event["input_receipt_sha256"] != receipt
+        {
+            return Err(Fail::Other(
+                "autopilot launch progress identity mismatch".into(),
+            ));
+        }
+        match event["phase"].as_str() {
+            Some("started") if !started && finished.is_none() => started = true,
+            Some("finished")
+                if started
+                    && finished.is_none()
+                    && event["exit"]
+                        .as_i64()
+                        .is_some_and(|n| (0..=255).contains(&n)) =>
+            {
+                finished = Some(crate::digest(raw))
+            }
+            _ => {
+                return Err(Fail::Other(
+                    "autopilot launch progress order is invalid".into(),
+                ));
+            }
+        }
+    }
+    Ok((started, finished))
 }
 /// Python-style `shlex.quote`, so the printed continuation stays copyable.
 fn quote(word: &str) -> String {
@@ -594,6 +661,7 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
                 "launch_intent",
                 "launching",
                 "launch_unknown",
+                "launch_reconciled",
             ]
             .contains(&kind)
             || !owner_id(contract)
@@ -692,7 +760,9 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
                 if kind == "skipped" && !event["reason"].is_string() {
                     return Err(malformed());
                 }
-                let occurrence = if kind == "fired" || !event["occurrence"].is_null() {
+                let occurrence = if matches!(kind, "fired" | "launch_reconciled")
+                    || !event["occurrence"].is_null()
+                {
                     Some(
                         event["occurrence"]
                             .as_str()
@@ -705,16 +775,22 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
                 if let Some(o) = occurrence {
                     state.floor = state.floor.max(o);
                 }
-                if kind == "fired" {
+                if matches!(kind, "fired" | "launch_reconciled") {
                     if let Some(launch) = &state.launch {
                         if launch.prepared
                             || Some(launch.occurrence) != occurrence
                             || event["launch_id"] != launch.id
                             || event["receipt"] != launch.receipt
                             || event["stage"] != launch.stage
-                            || !event["pid"]
-                                .as_u64()
-                                .is_some_and(|pid| pid > 1 && pid <= i32::MAX as u64)
+                            || (kind == "fired"
+                                && !event["pid"]
+                                    .as_u64()
+                                    .is_some_and(|pid| pid > 1 && pid <= i32::MAX as u64))
+                            || (kind == "launch_reconciled"
+                                && (event["phase"] != "finished"
+                                    || !event["source_sha256"]
+                                        .as_str()
+                                        .is_some_and(|v| crate::hex(v, 64))))
                         {
                             return Err(malformed());
                         }
@@ -1256,7 +1332,7 @@ impl Env<'_> {
         Ok(pane)
     }
     /// (pane, participant) of the verified main once it has no live child and has idled long enough.
-    fn wake_target(&self) -> std::result::Result<(String, String), String> {
+    fn wake_target(&self) -> std::result::Result<(String, String, String), String> {
         let pane = self.live_main_pane()?;
         let (session, _) = self.resolve_session();
         let [_, attempt, main_pane, member, room] = self.main_window(&session)?;
@@ -1292,11 +1368,54 @@ impl Env<'_> {
                 WAKE_IDLE_SECONDS / 60
             ));
         }
-        Ok((pane, member))
+        Ok((pane, member, attempt))
     }
     /// Why an idle main should continue ("" when no shared work waits), and whether the
     /// autopilot proposal is held for a GitHub issue.
-    fn wake_reason(&self) -> std::result::Result<(String, bool), String> {
+    fn wake_reason(&self, refresh: bool) -> std::result::Result<(String, bool), String> {
+        let raw = Store::open(&self.repo)
+            .and_then(|s| {
+                s.read(
+                    Path::new(".oms/plan/autopilot-run.json"),
+                    TICK_RECEIPT_MAX,
+                    true,
+                )
+            })
+            .map_err(|e| e.message)?;
+        let receipt = if raw.is_empty() {
+            Value::Null
+        } else {
+            crate::decode(&raw, TICK_RECEIPT_MAX).map_err(|e| e.message)?
+        };
+        if receipt["stage"] == "parked" && receipt["diagnostic"]["reason_code"] == "parent-stopped"
+        {
+            return Ok((String::new(), false));
+        }
+        if receipt["stage"] == "parked" && !receipt["adaptive"]["wait"].is_null() {
+            // A waiting contract suppresses generic ready-plan work. Polling
+            // unfinished tasks must not turn an external wait into model calls.
+            let wait = self.host.external_wait(&self.repo, refresh)?;
+            if wait["owner_id"] != receipt["owner_id"]
+                || wait["binding_sha256"] != receipt["adaptive"]["wait"]["binding_sha256"]
+            {
+                return Err("external wait custody changed".into());
+            }
+            let result = wait["result_sha256"].as_str().unwrap_or("");
+            let reason = if wait["identity_valid"] == true
+                && wait["status"] == "terminal"
+                && wait["action"] == "resume"
+                && crate::hex(result, 64)
+                && receipt["adaptive"]["wait"]["consumed_result_sha256"] != result
+            {
+                format!(
+                    "external result {result} for autopilot {} awaits owner decision",
+                    receipt["owner_id"].as_str().unwrap_or("")
+                )
+            } else {
+                String::new()
+            };
+            return Ok((reason, false));
+        }
         let mut reasons = vec![];
         let listed = self
             .services
@@ -1328,10 +1447,6 @@ impl Env<'_> {
                 }
             ));
         }
-        let raw = Store::open(&self.repo)
-            .and_then(|s| s.read(Path::new(".oms/plan/autopilot-run.json"), 1024 * 1024, true))
-            .map_err(|e| e.message)?;
-        let receipt = crate::decode(&raw, 1024 * 1024).unwrap_or(Value::Null);
         let held = issue_held(&receipt);
         if receipt["stage"] == "proposal-review" && !held {
             reasons.push("an autopilot proposal waits in proposal-review".into());
@@ -1498,6 +1613,44 @@ impl Env<'_> {
             &contract.receipt_sha256,
             &contract.owner_id,
         );
+        if !ledger["pending_launch"].is_null() {
+            let previous = &ledger["pending_launch"];
+            let id = previous["launch_id"]
+                .as_str()
+                .filter(|s| crate::hex(s, 16))
+                .ok_or_else(|| Fail::Ledger("pending launch id is malformed".into()))?;
+            let bound = previous["receipt"]
+                .as_str()
+                .filter(|s| crate::hex(s, 64))
+                .ok_or_else(|| Fail::Ledger("pending launch receipt is malformed".into()))?;
+            if previous["owner_id"] != owner.as_str() {
+                return Ok(
+                    "skipped: an earlier owner's launch outcome is unknown; no resend".into(),
+                );
+            }
+            let (started, finished) = launch_progress(&self.repo, id, owner, bound)?;
+            if let Some(proof) = finished {
+                if !dry {
+                    let mut updated = ledger.clone();
+                    updated["pending_launch"] = Value::Null;
+                    updated["last_reconciled_launch"] =
+                        json!({"launch_id":id,"source_sha256":proof});
+                    record_wake(tx, &self.repo, &updated, wakes.clone())?;
+                }
+                return Ok(format!(
+                    "{} autopilot launch {id} from exact start/finish records; no command was resent",
+                    if dry { "would reconcile" } else { "reconciled" }
+                ));
+            }
+            return Ok(format!(
+                "skipped: autopilot launch {id} {}; no resend",
+                if started {
+                    "started without an exact finish record"
+                } else {
+                    "outcome unknown"
+                }
+            ));
+        }
         let plan = (!owner.is_empty())
             .then(|| schedules.get(owner))
             .flatten()
@@ -1520,6 +1673,24 @@ impl Env<'_> {
         let pending = plan.and_then(|p| p.launch.as_ref());
         if let Some(launch) = pending {
             if !launch.prepared {
+                let (started, finished) =
+                    launch_progress(&self.repo, &launch.id, owner, &launch.receipt)?;
+                if let Some(source) = finished {
+                    if !dry {
+                        self.append(tx, json!({"event":"launch_reconciled","contract":owner,"occurrence":utc(launch.occurrence),"receipt":launch.receipt,"stage":launch.stage,"launch_id":launch.id,"phase":"finished","source_sha256":source,"at":utc(now)}))?;
+                    }
+                    return Ok(format!(
+                        "{} autopilot launch {} from its exact start/finish records; no command was resent",
+                        if dry { "would reconcile" } else { "reconciled" },
+                        launch.id
+                    ));
+                }
+                if started {
+                    return Ok(format!(
+                        "skipped: autopilot launch {} started; no exact finish record, no resend",
+                        launch.id
+                    ));
+                }
                 return Ok(format!(
                     "skipped: schedule for {owner} launch {} outcome unknown; reconcile needed before another launch (occurrence {})",
                     launch.id,
@@ -1776,14 +1947,25 @@ impl Env<'_> {
             // Publication is deliberately before the external effect. A kill
             // after this line cannot prove whether launch happened.
             self.append(tx, json!({"event": "launching", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "launch_id": key, "at": utc(now)}))?;
+        } else {
+            let (mut current, spent) = self.ledger_checked(tx)?;
+            current["pending_launch"] =
+                json!({"launch_id":key,"owner_id":owner,"receipt":digest,"stage":stage});
+            record_wake(tx, &self.repo, &current, spent)?;
         }
-        match self
-            .host
-            .launch(&contract.argv, &self.repo.join(&log_relative), &self.repo)
-        {
+        match self.host.launch_bound(
+            &contract.argv,
+            &self.repo.join(&log_relative),
+            &self.repo,
+            &json!({"launch_id":key,"owner_id":owner,"input_receipt_sha256":digest}),
+        ) {
             Ok(pid) => {
                 if let Some(o) = occurrence {
                     self.append(tx, json!({"event": "fired", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "launch_id": key, "pid": pid, "at": utc(now)}))?;
+                } else {
+                    let (mut current, spent) = self.ledger_checked(tx)?;
+                    current["pending_launch"] = Value::Null;
+                    record_wake(tx, &self.repo, &current, spent)?;
                 }
                 Ok(format!(
                     "resumed autopilot ({scheduled}stage {stage}, receipt {short}, pid {pid}, output {log_relative}): {shown}"
@@ -1848,7 +2030,11 @@ impl Env<'_> {
                 cut(&why, 100)
             );
         }
-        let reason = match self.wake_reason() {
+        // Idle/custody checks precede even a bounded network observation.
+        if let Err(why) = self.wake_target() {
+            return format!("skipped: {}", cut(&why, 200));
+        }
+        let reason = match self.wake_reason(!dry) {
             Ok((r, held)) if r.is_empty() => {
                 return if held {
                     skip(ISSUE_PENDING, ISSUE_RESTAMP)
@@ -1876,10 +2062,43 @@ impl Env<'_> {
         reason: &str,
     ) -> std::result::Result<String, Fail> {
         let (receipt, wakes) = self.ledger_checked(tx)?;
-        let (pane, member) = self.wake_target().map_err(Fail::Other)?;
+        let (pane, member, main_attempt) = self.wake_target().map_err(Fail::Other)?;
+        if self.wake_reason(false).map_err(Fail::Other)?.0 != reason {
+            return Ok("skipped: wake evidence changed before submission".into());
+        }
+        let external_key = reason
+            .starts_with("external result ")
+            .then(|| crate::digest(format!("{reason}\0{main_attempt}").as_bytes()));
+        let external = match receipt.get("external_wakes") {
+            None => vec![],
+            Some(Value::Array(rows))
+                if rows.len() <= 128
+                    && rows
+                        .iter()
+                        .all(|v| v.as_str().is_some_and(|s| crate::hex(s, 64))) =>
+            {
+                rows.clone()
+            }
+            _ => return Err(Fail::Ledger("external wake history is malformed".into())),
+        };
+        if external_key
+            .as_ref()
+            .is_some_and(|key| external.iter().any(|v| v == key))
+        {
+            return Ok(format!(
+                "skipped: {member} already woken for this exact external result"
+            ));
+        }
+        if external_key.is_some() && external.len() == 128 {
+            return Err(Fail::Ledger("external wake history bound reached".into()));
+        }
         let day = self.day();
         let spent: Vec<&Value> = wakes.iter().filter(|w| w["outcome"] != "skipped").collect();
-        let key = hash16(&[&member, &day, reason]);
+        let key = if external_key.is_some() {
+            hash16(&[&member, &day, reason, &main_attempt])
+        } else {
+            hash16(&[&member, &day, reason])
+        };
         if spent
             .iter()
             .any(|w| w["main"] == member.as_str() && w["key"] == key.as_str())
@@ -1911,10 +2130,18 @@ impl Env<'_> {
             if let Some(why) = why {
                 row["reason"] = why.into();
             }
+            let mut retained = receipt.clone();
+            if let Some(key) = &external_key {
+                let mut seen = external.clone();
+                if outcome != "skipped" {
+                    seen.push(key.clone().into());
+                }
+                retained["external_wakes"] = seen.into();
+            }
             record_wake(
                 tx,
                 &self.repo,
-                &receipt,
+                &retained,
                 [wakes.clone(), vec![row]].concat(),
             )
         };
@@ -2892,6 +3119,8 @@ mod tests {
         launched: RefCell<Vec<(Vec<String>, PathBuf)>>,
         fail_launch: Cell<bool>,
         on_load: RefCell<Option<Box<dyn Fn()>>>,
+        external: RefCell<Value>,
+        refreshes: Cell<usize>,
     }
     impl Host {
         fn new(stage: &str) -> Self {
@@ -2903,6 +3132,8 @@ mod tests {
                 launched: RefCell::default(),
                 fail_launch: Cell::new(false),
                 on_load: RefCell::default(),
+                external: RefCell::new(Value::Null),
+                refreshes: Cell::new(0),
             }
         }
         fn change(&self, f: impl FnOnce(&mut ApprovedContract)) {
@@ -2910,6 +3141,12 @@ mod tests {
         }
     }
     impl AutopilotHost for Host {
+        fn external_wait(&self, _: &Path, refresh: bool) -> std::result::Result<Value, String> {
+            if refresh {
+                self.refreshes.set(self.refreshes.get() + 1);
+            }
+            Ok(self.external.borrow().clone())
+        }
         fn load_contract(&self, _: &Path) -> std::result::Result<ApprovedContract, ContractError> {
             if let Some(f) = self.on_load.borrow().as_ref() {
                 f();
@@ -2962,6 +3199,7 @@ mod tests {
         fail_send_at: Cell<usize>,
         ready: RefCell<String>,
         no_session: Cell<bool>,
+        main_attempt: RefCell<String>,
     }
     impl Fake {
         fn new(repo: &Path) -> Self {
@@ -2981,11 +3219,12 @@ mod tests {
                 fail_send_at: Cell::new(usize::MAX),
                 ready: RefCell::new("t1 ready\nt2 ready\n".into()),
                 no_session: Cell::new(false),
+                main_attempt: RefCell::new(ATT.to_owned()),
             }
         }
         /// A live tmux panel main in room-1.
         fn live_main(&self) {
-            self.history.borrow_mut().push(json!({"attempt_id": ATT, "tool": "panel-main", "terminal": false, "state": "working", "provider": "claude",
+            self.history.borrow_mut().push(json!({"attempt_id": self.main_attempt.borrow().as_str(), "tool": "panel-main", "terminal": false, "state": "working", "provider": "claude",
                 "refs": {"panel_room_id": ROOM, "panel_room_participant": MEMBER, "panel_host": "tmux", "panel_harness": "claude", "panel_role": "main"}}));
         }
         fn out(code: i32, text: impl Into<String>) -> CommandOutput {
@@ -3011,13 +3250,15 @@ mod tests {
             }
             assert_eq!(a[0], "tmux", "only tmux is executed: {a:?}");
             let repo = self.repo.display().to_string();
+            let current_attempt = self.main_attempt.borrow().clone();
             Ok(match a[1].as_str() {
                 "has-session" => Self::out(i32::from(self.no_session.get()), ""),
                 "show-options" => Self::out(0, format!("{repo}\n")),
                 "show-environment" => Self::out(0, format!("OMS_ROOM_ID={ROOM}\n")),
-                "list-windows" if a[5].starts_with("#{window_id}") => {
-                    Self::out(0, format!("@2\t{ATT}\t{PANE}\t{MEMBER}\t{ROOM}\t{repo}\n"))
-                }
+                "list-windows" if a[5].starts_with("#{window_id}") => Self::out(
+                    0,
+                    format!("@2\t{current_attempt}\t{PANE}\t{MEMBER}\t{ROOM}\t{repo}\n"),
+                ),
                 "list-windows" => {
                     Self::out(0, format!("{repo}\t{ROOM}\t{MEMBER}\tclaude\t@2\tclaude\n"))
                 }
@@ -3038,7 +3279,7 @@ mod tests {
                     let attempt = if n == self.change_stamp_at.get() {
                         format!("att_{}", "b".repeat(32))
                     } else {
-                        ATT.to_owned()
+                        current_attempt.clone()
                     };
                     Self::out(0, format!("{PANE}\t4242\t0\t{attempt}\t{PANE}\n"))
                 }
@@ -4642,7 +4883,7 @@ mod tests {
         );
         assert!(
             rig.tick("2026-11-10T09:30:00Z", false, None)
-                .contains("already resumed today")
+                .contains("outcome unknown; no resend")
         );
         let scheduled = Rig::new("driving");
         scheduled.schedule(
@@ -4734,6 +4975,145 @@ mod tests {
     const T: &str = "2026-11-10T09:00:00Z";
     fn wake(rig: &Rig, dry: bool) -> String {
         rig.env(T).wake_main(dry, None)
+    }
+    #[test]
+    fn external_pending_work_never_polls_a_model_and_terminal_wakes_once_across_days() {
+        let rig = typed_rig();
+        let binding = "b".repeat(64);
+        let result = "c".repeat(64);
+        let mut receipt = json!({"stage":"parked","owner_id":OWNER,"adaptive":{"wait":{"binding_sha256":binding,"consumed_result_sha256":""}}});
+        rig.dir
+            .put(".oms/plan/autopilot-run.json", &receipt.to_string());
+        for state in ["pending", "running", "unknown"] {
+            *rig.host.external.borrow_mut() = json!({"schema":1,"owner_id":OWNER,"binding_sha256":binding,"identity_valid":true,"status":state,"result_sha256":null,"action":"inspect"});
+            assert!(wake(&rig, false).contains("no ready plan work"));
+            assert!(
+                rig.fake.sent.borrow().is_empty(),
+                "ready tasks must not cause polling during {state}"
+            );
+        }
+        *rig.host.external.borrow_mut() = json!({"schema":1,"owner_id":OWNER,"binding_sha256":binding,"identity_valid":true,"status":"terminal","result_sha256":result,"action":"resume"});
+        assert!(wake(&rig, false).starts_with("woke "));
+        assert_eq!(rig.fake.sent.borrow().len(), 2);
+        assert!(wake(&rig, false).contains("already woken for this exact external result"));
+        assert!(
+            rig.env("2026-11-11T09:00:00Z")
+                .wake_main(false, None)
+                .contains("already woken for this exact external result")
+        );
+        assert_eq!(rig.fake.sent.borrow().len(), 2);
+        receipt["adaptive"]["wait"]["consumed_result_sha256"] = result.into();
+        rig.dir
+            .put(".oms/plan/autopilot-run.json", &receipt.to_string());
+        assert!(wake(&rig, false).contains("no ready plan work"));
+        rig.host.external.borrow_mut()["owner_id"] = OTHER.into();
+        assert!(wake(&rig, false).contains("custody changed"));
+        assert_eq!(rig.fake.sent.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_new_verified_main_gets_one_unconsumed_result_cue() {
+        let rig = typed_rig();
+        let mut receipt = json!({"stage":"parked","owner_id":OWNER,"adaptive":{"wait":{"binding_sha256":"b".repeat(64),"consumed_result_sha256":""}}});
+        rig.dir
+            .put(".oms/plan/autopilot-run.json", &receipt.to_string());
+        *rig.host.external.borrow_mut() = json!({"schema":1,"owner_id":OWNER,"binding_sha256":"b".repeat(64),"identity_valid":true,"status":"terminal","result_sha256":"c".repeat(64),"action":"resume"});
+        assert!(wake(&rig, false).starts_with("woke "));
+        assert!(wake(&rig, false).contains("already woken"));
+        // The native Main-swap owner proves this transition; the tick fixture
+        // exposes its new lifecycle/window/activity generation on the same
+        // stable Room participant. A stale generation must still refuse.
+        rig.fake.history.borrow_mut()[0]["terminal"] = true.into();
+        *rig.fake.main_attempt.borrow_mut() = format!("att_{}", "c".repeat(32));
+        rig.fake.live_main();
+        assert!(wake(&rig, false).contains("not idle"));
+        rig.dir.put(&format!(".oms/hooks/panel-activity/{MEMBER}.json"),&json!({"state":"idle","attempt":rig.fake.main_attempt.borrow().as_str(),"since":parse_utc(T).unwrap()-3600}).to_string());
+        assert!(wake(&rig, false).starts_with("woke "));
+        assert!(wake(&rig, false).contains("already woken"));
+        assert_eq!(rig.fake.sent.borrow().len(), 4);
+        receipt["adaptive"]["wait"]["consumed_result_sha256"] = "c".repeat(64).into();
+        rig.dir
+            .put(".oms/plan/autopilot-run.json", &receipt.to_string());
+        assert!(wake(&rig, false).contains("no ready plan work"));
+        assert_eq!(rig.fake.sent.borrow().len(), 4);
+    }
+
+    #[test]
+    fn parent_stopped_contract_suppresses_pending_terminal_and_generic_work() {
+        let rig = typed_rig();
+        let mut receipt = json!({"stage":"parked","owner_id":OWNER,"diagnostic":{"reason_code":"parent-stopped"},"adaptive":{"wait":{"binding_sha256":"b".repeat(64),"consumed_result_sha256":""}}});
+        for status in ["pending", "terminal"] {
+            *rig.host.external.borrow_mut() = json!({"schema":1,"owner_id":OWNER,"binding_sha256":"b".repeat(64),"identity_valid":true,"status":status,"result_sha256":"c".repeat(64),"action":"resume"});
+            rig.dir
+                .put(".oms/plan/autopilot-run.json", &receipt.to_string());
+            assert!(wake(&rig, false).contains("no ready plan work"));
+            assert!(rig.fake.sent.borrow().is_empty());
+        }
+        receipt["adaptive"]["wait"] = Value::Null;
+        rig.dir
+            .put(".oms/plan/autopilot-run.json", &receipt.to_string());
+        assert!(wake(&rig, false).contains("no ready plan work"));
+        assert!(
+            rig.fake.sent.borrow().is_empty(),
+            "unfinished Plan work cannot undo Parent stop"
+        );
+        assert_eq!(
+            rig.host.refreshes.get(),
+            0,
+            "stopped owner does not refresh an external wait"
+        );
+    }
+
+    #[test]
+    fn lost_launch_ack_requires_exact_start_finish_even_after_receipt_progress_and_restart() {
+        let rig = Rig::new("driving");
+        rig.host.fail_launch.set(true);
+        assert!(
+            rig.tick(T, false, None)
+                .contains("launch failed after it was recorded")
+        );
+        let last: Value = serde_json::from_str(&rig.dir.read(".oms/tick/last.json")).unwrap();
+        let pending = &last["pending_launch"];
+        rig.host.fail_launch.set(false);
+        rig.host.change(|c| {
+            c.receipt_sha256 = "f".repeat(64);
+            c.stage = "reviewing".into();
+        });
+        assert!(
+            rig.tick("2026-11-11T09:00:00Z", false, None)
+                .contains("outcome unknown; no resend")
+        );
+        assert!(rig.host.launched.borrow().is_empty());
+        let mut start = json!({"schema":1,"kind":"autopilot-wake-launch","launch_id":pending["launch_id"],"owner_id":OWNER,"input_receipt_sha256":pending["receipt"],"phase":"started"});
+        start["input_receipt_sha256"] = "a".repeat(64).into();
+        rig.dir
+            .put(".oms/plan/progress.jsonl", &format!("{start}\n"));
+        assert!(
+            rig.tick("2026-11-11T09:01:00Z", false, None)
+                .contains("identity mismatch")
+        );
+        start["input_receipt_sha256"] = pending["receipt"].clone();
+        rig.dir
+            .put(".oms/plan/progress.jsonl", &format!("{start}\n"));
+        assert!(
+            rig.tick("2026-11-11T09:02:00Z", false, None)
+                .contains("started without an exact finish")
+        );
+        let mut finish = start.clone();
+        finish["phase"] = "finished".into();
+        finish["exit"] = 3.into();
+        rig.dir
+            .put(".oms/plan/progress.jsonl", &format!("{start}\n{finish}\n"));
+        assert!(
+            rig.tick("2026-11-11T09:03:00Z", false, None)
+                .contains("reconciled autopilot launch")
+        );
+        assert!(
+            rig.host.launched.borrow().is_empty(),
+            "reconciliation cannot resend the old command"
+        );
+        let after: Value = serde_json::from_str(&rig.dir.read(".oms/tick/last.json")).unwrap();
+        assert!(after["pending_launch"].is_null());
     }
     #[test]
     fn an_idle_main_with_an_empty_prompt_is_woken_once_with_the_ledger_written_first() {

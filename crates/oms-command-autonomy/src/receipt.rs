@@ -2,7 +2,7 @@
 use crate::cli::Args;
 use crate::planning::{self, envelope, invoke};
 use crate::storage::{ACTIVE, Context, MAX_FILE, PROGRESS, RECEIPT};
-use crate::{Error, Output, Result, require, value, verify};
+use crate::{Error, Output, Result, adaptive, require, value, verify};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ pub fn immutable_view(row: &Value) -> Value {
             "diagnostic",
             "issue",
             "blocked",
+            "adaptive",
         ] {
             map.remove(key);
         }
@@ -52,6 +53,7 @@ pub fn valid_transition(before: &str, after: &str) -> bool {
         ]
         .contains(&after),
         "reviewing" => [
+            "proposing",
             "proposal-review",
             "approved",
             "reviewing",
@@ -99,8 +101,9 @@ pub fn validate(row: &Value) -> Result<()> {
             "owner_id",
             "updated",
         ],
-        &["diagnostic", "issue", "blocked"],
+        &["diagnostic", "issue", "blocked", "adaptive"],
     )?;
+    adaptive::validate_state(row)?;
     if let Some(issue) = row.get("issue") {
         require(
             issue.as_str().is_some_and(crate::github::shaped),
@@ -175,8 +178,34 @@ pub fn validate(row: &Value) -> Result<()> {
             "allow_floor_change",
             "collaboration",
         ],
-        &[],
+        &["milestones"],
     )?;
+    if let Some(milestones) = contract.get("milestones") {
+        let items = milestones
+            .as_array()
+            .ok_or_else(|| Error::new(2, "milestones must be an array"))?;
+        require(
+            !items.is_empty() && items.len() <= 40,
+            "milestones must contain 1..40 authorized ids",
+        )?;
+        let mut ids = std::collections::BTreeSet::new();
+        for item in items {
+            require(
+                value::id(value::text(item, "id"), 40) && ids.insert(value::text(item, "id")),
+                "invalid or duplicate milestone",
+            )?;
+            require(
+                item["criteria"]
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty() && a.len() <= 30),
+                "milestone criteria are required",
+            )?;
+        }
+        require(
+            row["adaptive"]["milestone_index"].as_u64().unwrap_or(0) < items.len() as u64,
+            "milestone cursor outside authorized list",
+        )?;
+    }
     let allowed = envelope(value::text(contract, "allowed"))?;
     require(!allowed.is_empty(), "run envelope cannot be empty")?;
     require(
@@ -497,6 +526,16 @@ pub fn continuation_argv(row: &Value) -> Vec<String> {
     put("max-cycles", contract["max_cycles"].to_string());
     put("initial-tasks", contract["initial_tasks"].to_string());
     put("replan-tasks", contract["replan_tasks"].to_string());
+    if let Some(items) = contract["milestones"].as_array() {
+        put(
+            "milestones",
+            items
+                .iter()
+                .map(|m| value::text(m, "id"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
     put("provider-timeout", text(routing, "provider_timeout"));
     for role in ["planner", "worker", "reviewer"] {
         put(&format!("{role}-timeout"), text(&routing[role], "timeout"));
@@ -593,7 +632,7 @@ pub fn reentry_refusal(
         }
         "parked" => {
             return Ok(
-                "the run is parked for an operator decision; resolve the park reason or abandon"
+                "the run is parked; inspect autopilot status and its exact Parent decide continuation"
                     .into(),
             );
         }
@@ -922,7 +961,7 @@ fn save(ctx: &Context<'_>, row: &mut Value, old: Option<&[u8]>) -> Result<Vec<u8
             require(
                 before["stage"] == "proposing" && row["stage"] == "proposal-review"
                     || restamped
-                    || ["driving", "parked"].contains(&value::text(&before, "stage"))
+                    || ["driving", "reviewing", "parked"].contains(&value::text(&before, "stage"))
                         && row["stage"] == "proposing"
                         && row["proposal"] == json!({"path": "", "sha256": ""}),
                 "outer receipt proposal transition is invalid",
@@ -952,7 +991,7 @@ fn park(
     let _lock = ctx.lock(PROGRESS)?;
     ctx.append(PROGRESS, &json!({"schema": 1, "kind": "terminal", "ts": value::now(), "run_id": value::text(row, "owner_id"), "status": "park", "reason": reason, "base_sha": ctx.git(&["rev-parse", "HEAD"])?, "receipt": value::hash(value::canonical(row)?)}))?;
     out.code = 3;
-    out.stderr.extend_from_slice(format!("autopilot: parked reason={reason}; inspect the receipt and abandon before changing its contract\n").as_bytes());
+    out.stderr.extend_from_slice(format!("autopilot: parked reason={reason}; use oms autopilot status, inspect its evidence, then the exact Parent decide continuation; the frozen contract and spent budget remain\n").as_bytes());
     Ok(out)
 }
 fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
@@ -1022,11 +1061,40 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
             "shadow"
         },
     )?;
-    let row = json!({"schema": 1, "kind": "autopilot-run", "stage": "proposing", "repo": ctx.repo, "spec_sha256": spec.sha256, "providers": {"planner": planner, "worker": worker, "reviewer": reviewer}, "routing": routing, "contract": {"allowed": allowed.join(","), "base": branch, "base_sha": base(ctx, remote, &branch)?, "remote": remote, "max_cycles": args.number("max-cycles", 10, 1, 10)?, "initial_tasks": args.number("initial-tasks", 6, 1, 12)?, "replan_tasks": args.number("replan-tasks", 2, 1, 2)?, "auto_repair": args.flag("auto-repair"), "retry_known": args.flag("retry-known"), "review_mode": review_mode, "draft_pr": args.flag("draft-pr"), "allow_verifier_change": args.flag("allow-verifier-change"), "allow_floor_change": args.text("allow-floor-change")?, "collaboration": args.get("collaboration", "off")?}, "proposal": {"path": "", "sha256": ""}, "branch": format!("oms/autopilot-{}", &spec.sha256[..12]), "owner_id": value::random("owner_")?, "updated": value::now()});
+    let mut row = json!({"schema": 1, "kind": "autopilot-run", "stage": "proposing", "repo": ctx.repo, "spec_sha256": spec.sha256, "providers": {"planner": planner, "worker": worker, "reviewer": reviewer}, "routing": routing, "contract": {"allowed": allowed.join(","), "base": branch, "base_sha": base(ctx, remote, &branch)?, "remote": remote, "max_cycles": args.number("max-cycles", 10, 1, 10)?, "initial_tasks": args.number("initial-tasks", 6, 1, 12)?, "replan_tasks": args.number("replan-tasks", 2, 1, 2)?, "auto_repair": args.flag("auto-repair"), "retry_known": args.flag("retry-known"), "review_mode": review_mode, "draft_pr": args.flag("draft-pr"), "allow_verifier_change": args.flag("allow-verifier-change"), "allow_floor_change": args.text("allow-floor-change")?, "collaboration": args.get("collaboration", "off")?}, "proposal": {"path": "", "sha256": ""}, "branch": format!("oms/autopilot-{}", &spec.sha256[..12]), "owner_id": value::random("owner_")?, "updated": value::now()});
+    if args.has("milestones") {
+        let ids = args.required("milestones")?.split(',').collect::<Vec<_>>();
+        require(
+            !ids.is_empty() && ids.len() <= 40,
+            "milestones must contain 1..40 ids",
+        )?;
+        let mut seen = std::collections::BTreeSet::new();
+        let milestones = ids
+            .into_iter()
+            .map(|id| {
+                require(seen.insert(id), "duplicate authorized milestone")?;
+                spec.milestone(id)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        row["contract"]["milestones"] = milestones.into();
+        adaptive::state(&mut row);
+    }
     validate(&row)?;
     Ok(row)
 }
 fn options_match(args: &Args, row: &Value) -> Result<()> {
+    if args.has("milestones") {
+        let ids = row["contract"]["milestones"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .map(|m| value::text(m, "id"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        require(args.text("milestones")? == ids, "frozen milestones differ")?;
+    }
     for role in ["planner", "worker", "reviewer"] {
         if args.has(role) {
             require(
@@ -1132,8 +1200,25 @@ fn propose_args(args: &Args, row: &Value, remainder: bool) -> Args {
             planning.set(option, text);
         }
     }
+    if let Some(milestones) = row["contract"]["milestones"].as_array() {
+        let index = row["adaptive"]["milestone_index"].as_u64().unwrap_or(0) as usize;
+        if let Some(milestone) = milestones.get(index) {
+            planning.set("milestone", value::text(milestone, "id"));
+            planning.set("id-prefix", format!("m{}-", index + 1));
+        }
+    }
     if remainder {
         planning.set("id-prefix", "r1-");
+    }
+    if !row["adaptive"]["recovery"].is_null() {
+        planning.set(
+            "_recovery-path",
+            value::text(&row["adaptive"]["recovery"], "path"),
+        );
+        planning.set(
+            "_recovery-sha256",
+            value::text(&row["adaptive"]["recovery"], "sha256"),
+        );
     }
     // The receipt owns the issue: an explicit --issue is persisted before
     // propose, and remainder replans inherit it.
@@ -1156,7 +1241,54 @@ fn propose(
     remainder: bool,
 ) -> Result<Output> {
     let planning = propose_args(args, row, remainder);
-    let mut out = planning::execute(ctx, &planning)?;
+    let recovery = value::text(&row["adaptive"]["recovery"], "sha256");
+    let intent = if recovery.is_empty() {
+        value::hash(format!(
+            "initial\0{}\0{}",
+            value::text(row, "owner_id"),
+            contract_digest(row)
+        ))
+    } else {
+        recovery.to_owned()
+    };
+    let attempts = ctx.rows(PROGRESS)?;
+    let prior = attempts
+        .iter()
+        .filter(|r| {
+            r["kind"] == "autopilot-planning"
+                && r["owner_id"] == row["owner_id"]
+                && (r["intent_sha256"] == intent
+                    || !recovery.is_empty() && r["recovery_sha256"] == recovery)
+        })
+        .collect::<Vec<_>>();
+    let complete = prior.iter().find(|r| r["phase"] == "completed");
+    require(
+        prior.len() <= 2
+            && prior.iter().filter(|r| r["phase"] == "completed").count() <= 1
+            && prior
+                .iter()
+                .all(|r| matches!(value::text(r, "phase"), "dispatch-intent" | "completed")),
+        "ambiguous corrective planning intent",
+    )?;
+    let mut out = if let Some(record) = complete {
+        let path = value::text(&record["proposal"], "path");
+        require(
+            value::hash(ctx.bytes(Path::new(path), MAX_FILE)?) == record["proposal"]["sha256"],
+            "retained corrective proposal changed",
+        )?;
+        Output::text(format!(
+            "plan-from-spec: proposed retained task(s) -> {path}"
+        ))
+    } else {
+        require(
+            prior.is_empty(),
+            "planner outcome unknown or failed; the reserved call must not be resent",
+        )?;
+        planning::preflight_propose(ctx, &planning)?;
+        ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-planning","owner_id":row["owner_id"],
+                "intent_sha256":intent,"recovery_sha256":recovery,"phase":"dispatch-intent","receipt_sha256":value::hash(raw),"ts":value::now()}))?;
+        planning::execute(ctx, &planning)?
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     if args.flag("discover")
         && !remainder
@@ -1189,6 +1321,10 @@ fn propose(
     let path = path.to_owned();
     let bytes = ctx.store.read(&path, MAX_FILE)?;
     let sha = value::hash(&bytes);
+    if complete.is_none() {
+        ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-planning","owner_id":row["owner_id"],
+            "intent_sha256":intent,"recovery_sha256":recovery,"phase":"completed","proposal":{"path":path,"sha256":sha},"ts":value::now()}))?;
+    }
     row["stage"] = "proposal-review".into();
     row["proposal"] = json!({"path": path, "sha256": sha});
     let blocked = mark_issue(ctx, row, &value::parse(&bytes)?)?;
@@ -1366,13 +1502,480 @@ fn commit_reenter(ctx: &Context<'_>, row: &Value, mut record: Value) -> Result<(
         }),
     )
 }
+fn review_once(
+    ctx: &Context<'_>,
+    row: &mut Value,
+    raw: &mut Vec<u8>,
+    command: &str,
+    covers: &[String],
+    purpose: &str,
+) -> Result<Output> {
+    let head = ctx.git(&["rev-parse", "HEAD"])?;
+    let plan_sha = value::hash(ctx.store.read(ACTIVE, 8 * MAX_FILE)?);
+    let previous = if !row["adaptive"]["review"].is_null() {
+        Some(adaptive::evidence(ctx, &row["adaptive"]["review"])?)
+    } else {
+        None
+    };
+    let same = previous.as_ref().filter(|p| {
+        p["head"] == head
+            && p["plan_sha256"] == plan_sha
+            && p["verify_sha256"] == value::hash(command)
+            && p["purpose"] == purpose
+    });
+    let (directory, replay) = if let Some(p) = same {
+        adaptive::check_review_sources(ctx, p)?;
+        (value::text(p, "directory").to_owned(), true)
+    } else {
+        let directory = format!(".oms/artifacts/autopilot-review-{}", value::random("")?);
+        let reference = adaptive::retain(
+            ctx,
+            &json!({"schema":1,"kind":"autopilot-review-intent",
+            "owner_id":row["owner_id"],"spec_sha256":row["spec_sha256"],"head":head,"plan_sha256":plan_sha,
+            "verify_sha256":value::hash(command),"directory":directory,"purpose":purpose}),
+        )?;
+        adaptive::state(row)["review"] = reference;
+        *raw = save(ctx, row, Some(raw))?;
+        (directory, false)
+    };
+    let mut output = if replay {
+        let entries = ctx.source.names(&directory, 24, true)?;
+        let name = entries
+            .iter()
+            .filter_map(|s| s.to_str())
+            .find(|s| s.starts_with("_verdicts-") && s.ends_with(".json"))
+            .ok_or_else(|| {
+                Error::new(
+                    3,
+                    "review dispatch outcome unknown; inspect the retained intent, never resend",
+                )
+            })?;
+        let verdict = value::parse(
+            &ctx.source
+                .read(Path::new(&directory).join(name), adaptive::MAX_EVIDENCE)?,
+        )?;
+        Output {
+            code: verdict["overall"]
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| Error::new(2, "invalid saved review outcome"))?,
+            stdout: b"autopilot: reconciled the exact retained review\n".to_vec(),
+            stderr: vec![],
+        }
+    } else {
+        let mut args = vec![
+            "--repo".into(),
+            ctx.repo.as_os_str().to_owned(),
+            "--base".into(),
+            value::text(&row["contract"], "base_sha").into(),
+            "--providers".into(),
+            value::text(&row["providers"], "reviewer").into(),
+            "--gate".into(),
+            "--verify".into(),
+            command.into(),
+            "--artifact-dir".into(),
+            directory.clone().into(),
+        ];
+        for id in covers {
+            args.extend(["--covers".into(), id.into()]);
+        }
+        for (option, field) in [
+            ("model", "model"),
+            ("fallback-model", "fallback_model"),
+            ("reasoning-effort", "reasoning_effort"),
+        ] {
+            let text = value::text(&row["routing"]["reviewer"], field);
+            if !text.is_empty() {
+                args.extend([format!("--{option}").into(), text.into()]);
+            }
+        }
+        invoke(
+            ctx,
+            "peer-review",
+            args,
+            verify::duration(value::text(&row["routing"]["reviewer"], "timeout"))?,
+        )?
+    };
+    match adaptive::review_evidence(ctx, row, &directory, output.code, command) {
+        Ok(reference) => {
+            let mut packet = adaptive::evidence(ctx, &reference)?;
+            packet["purpose"] = purpose.into();
+            adaptive::state(row)["review"] = adaptive::retain(ctx, &packet)?;
+            *raw = save(ctx, row, Some(raw))?;
+        }
+        Err(e) => {
+            adaptive::record_failure(
+                ctx,
+                "semantic-review",
+                &format!(
+                    "{}{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                    e.message
+                ),
+                output.code,
+            )?;
+            output.stderr.extend_from_slice(
+                format!("autopilot: review evidence unavailable: {}\n", e.message).as_bytes(),
+            );
+            output.code = 2;
+        }
+    }
+    Ok(output)
+}
+
+fn advance_milestone(
+    ctx: &Context<'_>,
+    args: &Args,
+    row: &mut Value,
+    raw: &mut Vec<u8>,
+) -> Result<Option<Output>> {
+    let Some(items) = row["contract"]["milestones"].as_array() else {
+        return Ok(None);
+    };
+    let index = row["adaptive"]["milestone_index"].as_u64().unwrap_or(0) as usize;
+    if index + 1 >= items.len() {
+        return Ok(None);
+    }
+    let milestone = items[index].clone();
+    let ready = adaptive::tranche(ctx)?;
+    if ready["pending"] == true {
+        return Ok(None);
+    }
+    let mut output = Output::default();
+    if !adaptive::milestone_ready(ctx, row)? {
+        if row["contract"]["review_mode"] == "off" {
+            return park(ctx, row, raw, "milestone-evidence-required", output).map(Some);
+        }
+        let proposal =
+            value::parse(&ctx.bytes(Path::new(value::text(&row["proposal"], "path")), MAX_FILE)?)?;
+        let plan = ctx.plan_value()?;
+        let tasks = proposal["tasks"]
+            .as_array()
+            .ok_or_else(|| Error::new(2, "milestone proposal unavailable"))?;
+        let mut checks = vec![];
+        for task in tasks {
+            let canonical = &plan["tasks"][value::text(task, "id")];
+            require(
+                canonical["state"] == "done" && canonical["verify"] == task["verify"],
+                "milestone task or verifier changed",
+            )?;
+            require(
+                canonical["provider"] != row["providers"]["reviewer"],
+                "milestone reviewer authored a task",
+            )?;
+            let command = value::text(canonical, "verify");
+            require(
+                !command.is_empty(),
+                "milestone task lacks a frozen verifier",
+            )?;
+            if !checks.contains(&command.to_owned()) {
+                checks.push(command.to_owned());
+            }
+        }
+        let command = checks
+            .iter()
+            .map(|c| format!("( {c}\n)"))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let covers = milestone["criteria"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        row["stage"] = "reviewing".into();
+        *raw = save(ctx, row, Some(raw))?;
+        let checked = match review_once(
+            ctx,
+            row,
+            raw,
+            &command,
+            &covers,
+            &format!("milestone:{}", value::text(&milestone, "id")),
+        ) {
+            Ok(out) => out,
+            Err(e) => {
+                output
+                    .stderr
+                    .extend_from_slice(format!("{}\n", e.message).as_bytes());
+                return park(ctx, row, raw, "semantic-review-unknown", output).map(Some);
+            }
+        };
+        let failed = checked.code != 0;
+        output.append(checked);
+        if failed {
+            return park(ctx, row, raw, "semantic-review-failed", output).map(Some);
+        }
+        if !adaptive::milestone_ready(ctx, row)? {
+            return park(ctx, row, raw, "milestone-evidence-required", output).map(Some);
+        }
+    }
+    if adaptive::budget(ctx, row)?["cycles_remaining"] == 0 {
+        return park(ctx, row, raw, "cycles-exhausted", output).map(Some);
+    }
+    let facts = adaptive::goal_progress(ctx, row)?;
+    let packet = json!({"schema":1,"kind":"autopilot-milestone-context","owner_id":row["owner_id"],
+        "spec_sha256":row["spec_sha256"],"head":ctx.git(&["rev-parse","HEAD"])?,
+        "plan_sha256":value::hash(ctx.store.read(ACTIVE,8*MAX_FILE)?),"completed_milestone":milestone,"progress":facts});
+    let reference = adaptive::retain(ctx, &packet)?;
+    let reservation = json!({"schema":1,"kind":"autopilot-milestone-reserved","owner_id":row["owner_id"],
+        "receipt_sha256":value::hash(&*raw),"index":index,"next_index":index+1,"evidence":reference});
+    let existing = ctx
+        .rows(PROGRESS)?
+        .into_iter()
+        .filter(|r| {
+            r["kind"] == "autopilot-milestone-reserved"
+                && r["owner_id"] == row["owner_id"]
+                && r["index"] == index
+        })
+        .collect::<Vec<_>>();
+    require(existing.len() <= 1, "ambiguous milestone reservation")?;
+    if let Some(old) = existing.first() {
+        require(
+            old["receipt_sha256"] == reservation["receipt_sha256"] && old["evidence"] == reference,
+            "milestone reservation no longer matches its predecessor",
+        )?;
+    } else {
+        ctx.append(PROGRESS, &reservation)?;
+    }
+    let state = adaptive::state(row);
+    state["completed_milestones"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":milestone["id"],"evidence":reference}));
+    state["milestone_index"] = (index + 1).into();
+    state["recovery"] = reference;
+    row["stage"] = "proposing".into();
+    row["proposal"] = json!({"path":"","sha256":""});
+    *raw = save(ctx, row, Some(raw))?;
+    output.append(propose(ctx, args, row, raw, false)?);
+    Ok(Some(output))
+}
+
+fn reserve_revision(
+    ctx: &Context<'_>,
+    args: &Args,
+    row: &Value,
+    raw: &[u8],
+    packet: Value,
+) -> Result<Value> {
+    let remaining = adaptive::budget(ctx, row)?;
+    let reserved = adaptive::reserved_recovery(ctx, row, raw)?;
+    require(
+        (remaining["replans_remaining"] == 1 || reserved.is_some())
+            && remaining["cycles_remaining"].as_u64().unwrap_or(0) > 0,
+        "corrective proposal exceeds the original lifetime budget",
+    )?;
+    let replay = reserved.is_some();
+    let packet = reserved.unwrap_or(packet);
+    let reference = adaptive::retain(ctx, &packet)?;
+    let mut next = row.clone();
+    adaptive::state(&mut next)["recovery"] = reference.clone();
+    let planning_args = propose_args(args, &next, true);
+    planning::preflight_propose(ctx, &planning_args)?;
+    if !replay {
+        ctx.append(".oms/plan/autopilot-replans.jsonl",&json!({"schema":1,"kind":"autopilot-replan-reserved",
+            "owner_id":row["owner_id"],"receipt_sha256":value::hash(raw),"proposal_sha256":row["proposal"]["sha256"],
+            "decision_sha256":packet["decision_sha256"],"evidence":reference,"ts":value::now()}))?;
+    }
+    Ok(next)
+}
+
+fn revision(
+    ctx: &Context<'_>,
+    args: &Args,
+    row: &mut Value,
+    raw: &[u8],
+    packet: Value,
+) -> Result<Output> {
+    *row = reserve_revision(ctx, args, row, raw, packet)?;
+    row.as_object_mut().unwrap().remove("diagnostic");
+    row["stage"] = "proposing".into();
+    row["proposal"] = json!({"path":"","sha256":""});
+    let raw = save(ctx, row, Some(raw))?;
+    propose(ctx, args, row, &raw, true)
+}
+
+fn decide(
+    ctx: &Context<'_>,
+    args: &Args,
+    row: &mut Value,
+    raw: &[u8],
+    wait_input: Option<Value>,
+) -> Result<Output> {
+    live(ctx, row)?;
+    options_match(args, row)?;
+    let decision = adaptive::decision(ctx, row, raw)?;
+    let expected = args.required("expected-decision-sha256")?;
+    require(
+        value::digest(expected) && expected == decision.sha256(),
+        "autopilot decision changed; observe status again",
+    )?;
+    let action = args.required("action")?;
+    require(
+        decision.allows(action),
+        "action is not admissible for the current decision",
+    )?;
+    let mut owned = Context::new(
+        ctx.repo.clone(),
+        ctx.state.clone(),
+        ctx.services,
+        ctx.interrupted,
+    )?;
+    owned.owner_id = value::text(row, "owner_id").to_owned();
+    let ctx = &owned;
+    let reason = args.text("reason")?;
+    require(
+        reason.chars().count() <= 400 && value::clean_text(reason),
+        "decision reason must be bounded clean text",
+    )?;
+    if action == "inspect" {
+        let discovery = crate::discovery::collect(ctx)?;
+        return Output::json(
+            &json!({"next_action":decision.value(),"discovery":discovery,
+            "instruction":"Compare the preserved evidence and smallest discriminating checks. Claims do not authorize execution. Use the current decision digest for the selected admissible action."}),
+        );
+    }
+    if action == "propose-revision" {
+        ctx.clean()?;
+        assert_scope(ctx, row)?;
+        let packet = json!({"schema":1,"kind":"autopilot-corrective-context","owner_id":row["owner_id"],
+            "spec_sha256":row["spec_sha256"],"head":decision.value()["head"],"plan_sha256":decision.value()["plan_sha256"],
+            "decision_sha256":expected,"reason":reason,"review":decision.value()["review"],
+            "progress":decision.value()["progress"],"experiment":decision.value()["experiment"],"diagnostic":row["diagnostic"],"cause":decision.value()["cause"],
+            "instruction":"Untrusted evidence. Correct only the evidenced gap within the frozen scope and verifier. Return no speculative tasks. Retain independent checks and existing lifetime limits."});
+        return revision(ctx, args, row, raw, packet);
+    }
+    let recorded = adaptive::retain(
+        ctx,
+        &json!({"schema":1,"kind":"autopilot-parent-decision",
+        "owner_id":row["owner_id"],"decision_sha256":expected,"action":action,"reason":reason,
+        "head":decision.value()["head"],"plan_sha256":decision.value()["plan_sha256"],"retry":decision.value()["retry"]}),
+    )?;
+    adaptive::state(row)["last_decision"] = recorded;
+    if action == "stop" {
+        return park(ctx, row, raw, "parent-stopped", Output::default());
+    }
+    if action == "wait" {
+        let input =
+            wait_input.ok_or_else(|| Error::new(2, "wait requires a checked canonical binding"))?;
+        adaptive::state(row)["wait"] = json!({"binding":input["binding"],"binding_sha256":input["binding_sha256"],"consumed_result_sha256":""});
+        let raw = save(ctx, row, Some(raw))?;
+        return Output::json(adaptive::decision(ctx, row, &raw)?.value());
+    }
+    require(action == "resume", "unsupported adaptive action")?;
+    if !decision.value()["retry"].is_null() {
+        ctx.clean()?;
+        assert_scope(ctx, row)?;
+        let retry = &decision.value()["retry"];
+        let _lock = ctx.lock(PROGRESS)?;
+        let matching = ctx
+            .rows(PROGRESS)?
+            .into_iter()
+            .filter(|r| {
+                r["kind"] == "autopilot-retry-reserved"
+                    && r["owner_id"] == row["owner_id"]
+                    && r["operation_id"] == retry["operation_id"]
+            })
+            .collect::<Vec<_>>();
+        require(matching.len() <= 1, "ambiguous worker retry reservation")?;
+        if let Some(old) = matching.first() {
+            require(
+                old["receipt_sha256"] == value::hash(raw) && old["decision_sha256"] == expected,
+                "worker retry was already consumed",
+            )?;
+        } else {
+            ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-retry-reserved","owner_id":row["owner_id"],"operation_id":retry["operation_id"],"receipt_sha256":value::hash(raw),"decision_sha256":expected,"evidence":row["adaptive"]["last_decision"]}))?;
+        }
+        drop(_lock);
+        row.as_object_mut().unwrap().remove("diagnostic");
+        row["stage"] = "approved".into();
+        let raw = save(ctx, row, Some(raw))?;
+        return Output::json(adaptive::decision(ctx, row, &raw)?.value());
+    }
+    let observation = &decision.value()["wait"];
+    require(
+        observation["identity_valid"] == true
+            && observation["status"] == "terminal"
+            && value::digest(value::text(observation, "result_sha256"))
+            && observation["binding_sha256"] == row["adaptive"]["wait"]["binding_sha256"],
+        "external result is not an exact terminal observation",
+    )?;
+    {
+        let _lock = ctx.lock(PROGRESS)?;
+        let prior = ctx.rows(PROGRESS)?;
+        if !prior.iter().any(|r| {
+            r["kind"] == "autopilot-external-result"
+                && r["owner_id"] == row["owner_id"]
+                && r["binding_sha256"] == observation["binding_sha256"]
+                && r["result_sha256"] == observation["result_sha256"]
+        }) {
+            ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-external-result","owner_id":row["owner_id"],
+                "binding_sha256":observation["binding_sha256"],"result_sha256":observation["result_sha256"],
+                "binding":row["adaptive"]["wait"]["binding"],"head":decision.value()["head"],"spec_sha256":row["spec_sha256"],
+                "tree":decision.value()["tree"],"worktree_clean":ctx.clean().is_ok(),
+                "observation":observation,"progress":observation["progress"]==true,"ts":value::now()}))?;
+        }
+    }
+    adaptive::state(row)["wait"]["consumed_result_sha256"] = observation["result_sha256"].clone();
+    row.as_object_mut().unwrap().remove("diagnostic");
+    row["stage"] = "approved".into();
+    if observation["source"] == "experiment" {
+        let kind = value::text(&observation["experiment"]["next_action"], "kind");
+        if matches!(
+            kind,
+            "input-required" | "review-hypothesis" | "stop" | "inspect"
+        ) {
+            row["stage"] = "parked".into();
+            let reason = if kind == "stop" {
+                "experiment-budget-stop"
+            } else if kind == "inspect" {
+                "experiment-inspect"
+            } else {
+                "experiment-planning-required"
+            };
+            row["diagnostic"] = json!({"phase":"autopilot","reason_code":reason,"reason":reason,"semantic_verdict":"unknown","evidence_path":""});
+        }
+    }
+    let raw = save(ctx, row, Some(raw))?;
+    let outcome = format!(
+        "external-result:{}:{}",
+        value::text(observation, "source"),
+        value::text(observation, "outcome")
+    );
+    let _ = ctx.services.observe_journal(
+        crate::services::JournalEvent {
+            repo: &ctx.repo,
+            source_kind: "goal-drive",
+            source_path: &ctx.state.join(PROGRESS),
+            source_id: value::text(observation, "result_sha256"),
+            outcome: &outcome,
+            verification: if observation["progress"] == true {
+                "passed"
+            } else {
+                "not_verified"
+            },
+        },
+        ctx.interrupted,
+    );
+    Output::json(adaptive::decision(ctx, row, &raw)?.value())
+}
+
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let old = ctx.store.optional(RECEIPT, 64 * 1024)?;
     if args.action == "status" {
         let receipt = old.as_ref().map(|r| value::parse(r)).transpose()?;
         let rows = ctx.rows(PROGRESS)?;
+        let next_action = match (&receipt, &old) {
+            (Some(row), Some(raw)) => adaptive::decision(ctx, row, raw)
+                .map(|d| d.value().clone())
+                .unwrap_or_else(|e| json!({"status":"unavailable","reason":e.message})),
+            _ => Value::Null,
+        };
         return Output::json(
-            &json!({"receipt": receipt, "plan": ctx.plan_value()?, "terminal": rows.iter().rev().find(|r| value::text(r, "kind") == "terminal")}),
+            &json!({"receipt": receipt, "plan": ctx.plan_value()?, "terminal": rows.iter().rev().find(|r| value::text(r, "kind") == "terminal"),"next_action":next_action}),
         );
     }
     require(
@@ -1380,6 +1983,54 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         "--issue and --restamp apply only to autopilot propose",
     )?;
     ctx.parent()?;
+    // Bounded remote observation precedes receipt/owner writer locks. Its
+    // immutable identity and the complete decision are checked again below.
+    if args.action == "decide" && args.text("action")? == "resume" {
+        let source = value::parse(
+            old.as_deref()
+                .ok_or_else(|| Error::new(2, "no wait receipt"))?,
+        )?;
+        validate(&source)?;
+        if !source["adaptive"]["wait"].is_null() {
+            let fresh = ctx.services.external_observation(
+                &ctx.repo,
+                &ctx.state,
+                &source["adaptive"]["wait"]["binding"],
+                true,
+                ctx.interrupted,
+            )?;
+            require(
+                fresh["identity_valid"] == true && fresh["status"] == "terminal",
+                "external result is not freshly confirmed terminal",
+            )?;
+        }
+    }
+    let wait_input = if args.action == "decide" && args.text("action")? == "wait" {
+        let bytes = ctx.bytes(
+            &args.path("wait-binding", &ctx.repo),
+            adaptive::MAX_EVIDENCE,
+        )?;
+        require(
+            value::hash(&bytes) == args.required("expected-wait-sha256")?,
+            "wait binding differs from reviewed bytes",
+        )?;
+        let binding = value::parse(&bytes)?;
+        let observed = ctx.services.external_observation(
+            &ctx.repo,
+            &ctx.state,
+            &binding,
+            true,
+            ctx.interrupted,
+        )?;
+        let binding_sha = value::hash(value::canonical(&binding)?);
+        require(
+            observed["identity_valid"] == true && observed["binding_sha256"] == binding_sha,
+            "external wait lacks a valid canonical identity",
+        )?;
+        Some(json!({"binding":binding,"binding_sha256":binding_sha}))
+    } else {
+        None
+    };
     // One controller owns the entire foreground run. Receipt writes still use
     // exact byte CAS; a killed owner releases this lock, never its spent cycles.
     let _owner = ctx.lock(".oms/plan/autopilot-controller")?;
@@ -1387,6 +2038,27 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let mut raw = ctx.store.optional(RECEIPT, 64 * 1024)?;
     let mut row = raw.as_ref().map(|r| value::parse(r)).transpose()?;
     let resuming_existing = row.is_some();
+    if args.action == "decide" {
+        return decide(
+            ctx,
+            args,
+            row.as_mut()
+                .ok_or_else(|| Error::new(2, "no live autopilot receipt"))?,
+            raw.as_deref().unwrap(),
+            wait_input,
+        );
+    }
+    for name in [
+        "expected-decision-sha256",
+        "action",
+        "wait-binding",
+        "expected-wait-sha256",
+    ] {
+        require(
+            !args.has(name),
+            format!("--{name} requires autopilot decide"),
+        )?;
+    }
     if args.action == "abandon" {
         let reason = args.required("reason")?;
         verify::reason(reason)?;
@@ -1527,6 +2199,17 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let ctx = &owned;
     live(ctx, &row)?;
     options_match(args, &row)?;
+    if let Some(packet) = adaptive::reserved_recovery(ctx, &row, &raw)? {
+        return revision(ctx, args, &mut row, &raw, packet);
+    }
+    if ctx.rows(PROGRESS)?.iter().any(|r| {
+        r["kind"] == "autopilot-milestone-reserved"
+            && r["owner_id"] == row["owner_id"]
+            && r["receipt_sha256"] == value::hash(&raw)
+    }) && let Some(output) = advance_milestone(ctx, args, &mut row, &mut raw)?
+    {
+        return Ok(output);
+    }
     let claim = legacy_claim_refusal(&ctx.state.join(".oms/plan"), &row, std::process::id());
     require(claim.is_empty(), claim)?;
     require(
@@ -1535,7 +2218,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     )?;
     require(
         row["stage"] != "parked",
-        "autopilot receipt is parked; an operator decision is open; abandon before a new contract",
+        "autopilot receipt is parked; inspect oms autopilot status and use its exact Parent decide continuation; the current owner and budget remain",
     )?;
     if row["stage"] == "done" {
         return Ok(Output::text("autopilot: done (acceptance passed)"));
@@ -1557,7 +2240,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             !args.has("proposal")
                 && !args.has("expected-proposal-sha256")
                 && row["stage"] == "proposing",
-            "a reviewed proposal cannot be silently replaced; abandon the receipt first",
+            "a reviewed proposal cannot be silently replaced; use the checked corrective or milestone proposal continuation, or explicitly terminate the contract",
         )?;
         if args.has("issue") {
             // Persist before the planner runs so a failed proposal's
@@ -1573,9 +2256,19 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             )?;
         }
         let reservations = ctx.rows(".oms/plan/autopilot-replans.jsonl")?;
-        let remainder = reservations
+        let mut remainder = reservations
             .iter()
             .any(|r| r["owner_id"] == row["owner_id"]);
+        require(
+            !remainder || !row["adaptive"]["recovery"].is_null(),
+            "legacy remainder has no exact dispatch/recovery evidence; inspect retained planner artifacts without resending or resetting its spent budget",
+        )?;
+        if !row["adaptive"]["recovery"].is_null()
+            && adaptive::evidence(ctx, &row["adaptive"]["recovery"])?["kind"]
+                == "autopilot-milestone-context"
+        {
+            remainder = false;
+        }
         let work_branch = value::text(&row, "branch");
         let current = ctx
             .git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -1789,6 +2482,14 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         Ok(row) => row,
         Err(_) => return park(ctx, &mut row, &raw, "goal-drive-result-invalid", output),
     };
+    if (terminal["status"] == "done"
+        || ["tasks-exhausted", "milestone-verification"]
+            .contains(&value::text(&terminal, "reason")))
+        && let Some(next) = advance_milestone(ctx, args, &mut row, &mut raw)?
+    {
+        output.append(next);
+        return Ok(output);
+    }
     if output.code != 0 {
         let reason = value::text(&terminal, "reason");
         let plan = ctx.plan_value()?;
@@ -1798,29 +2499,31 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         let replan_used = plan["tasks"]
             .as_object()
             .is_some_and(|t| t.keys().any(|id| id.starts_with("r1-")));
-        if reason == "tasks-exhausted" && all_done && !replan_used {
-            let reservations = ctx.rows(".oms/plan/autopilot-replans.jsonl")?;
-            let matching = reservations
+        let cause = ctx
+            .rows(PROGRESS)?
+            .into_iter()
+            .rev()
+            .find(|r| r["kind"] == "autopilot-failure" && r["owner_id"] == row["owner_id"])
+            .unwrap_or(Value::Null);
+        if reason == "tasks-exhausted"
+            && all_done
+            && !replan_used
+            && adaptive::failure_can_inform_revision(&cause)
+        {
+            let rows = ctx.rows(PROGRESS)?;
+            let last_acceptance = rows
                 .iter()
-                .filter(|r| r["owner_id"] == row["owner_id"])
-                .collect::<Vec<_>>();
-            require(
-                matching.len() <= 1,
-                "replan reservation ledger is ambiguous",
-            )?;
-            if matching.is_empty() {
-                ctx.append(".oms/plan/autopilot-replans.jsonl", &json!({"schema": 1, "kind": "autopilot-replan-reserved", "owner_id": row["owner_id"], "proposal_sha256": row["proposal"]["sha256"], "ts": value::now()}))?;
-            } else {
-                require(
-                    matching[0]["proposal_sha256"] == row["proposal"]["sha256"],
-                    "sole remainder reservation already belongs to a different tranche",
-                )?;
-            }
-            row["stage"] = "proposing".into();
-            row["proposal"] = json!({"path": "", "sha256": ""});
-            raw = save(ctx, &mut row, Some(&raw))?;
-            let next = propose(ctx, args, &mut row, &raw, true)?;
-            output.append(next);
+                .rev()
+                .find(|r| r["kind"] == "acceptance" && r["run_id"] == drive_run)
+                .cloned()
+                .unwrap_or(Value::Null);
+            let packet = json!({"schema":1,"kind":"autopilot-remainder-context","owner_id":row["owner_id"],
+                "spec_sha256":row["spec_sha256"],"head":ctx.git(&["rev-parse","HEAD"])?,
+                "plan_sha256":value::hash(ctx.store.read(ACTIVE,8*MAX_FILE)?),"terminal":terminal,
+                "acceptance":last_acceptance,"progress":adaptive::goal_progress(ctx,&row)?,
+                "cause":cause,
+                "instruction":"Preserve the frozen verifier and scope. Use the current failed acceptance and uncovered criteria, not speculative additional goals."});
+            output.append(revision(ctx, args, &mut row, &raw, packet)?);
             return Ok(output);
         }
         return park(
@@ -1866,34 +2569,20 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         if mode == "gate" && writers.contains(reviewer.as_str()) {
             return park(ctx, &mut row, &raw, "reviewer-authored-task", output);
         }
-        let mut review = vec![
-            "--repo".into(),
-            ctx.repo.as_os_str().to_owned(),
-            "--base".into(),
-            value::text(&row["contract"], "base_sha").into(),
-            "--providers".into(),
-            reviewer.into(),
-            "--gate".into(),
-            "--verify".into(),
-            accept.into(),
-        ];
-        for (option, field) in [
-            ("model", "model"),
-            ("fallback-model", "fallback_model"),
-            ("reasoning-effort", "reasoning_effort"),
-        ] {
-            let text = value::text(&row["routing"]["reviewer"], field);
-            if !text.is_empty() {
-                review.push(format!("--{option}").into());
-                review.push(text.into());
+        let covers = planning::contract(ctx)?
+            .criteria
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let checked = match review_once(ctx, &mut row, &mut raw, accept, &covers, "goal") {
+            Ok(out) => out,
+            Err(e) => {
+                output
+                    .stderr
+                    .extend_from_slice(format!("{}\n", e.message).as_bytes());
+                return park(ctx, &mut row, &raw, "semantic-review-unknown", output);
             }
-        }
-        let checked = invoke(
-            ctx,
-            "peer-review",
-            review,
-            verify::duration(value::text(&row["routing"]["reviewer"], "timeout"))?,
-        )?;
+        };
         let failed = checked.code != 0;
         output.append(checked);
         if failed && mode == "gate" {
@@ -1920,6 +2609,35 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             && ctx.store.read(ACTIVE, 8 * MAX_FILE)? == final_plan,
         "final snapshot changed during semantic review",
     )?;
+    let coverage = adaptive::goal_progress(ctx, &row)?;
+    if coverage["criteria"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|c| c["state"] != "verified"))
+    {
+        return park(ctx, &mut row, &raw, "acceptance-gap", output);
+    }
+    if let Some(milestones) = row["contract"]["milestones"].as_array() {
+        let index = row["adaptive"]["milestone_index"].as_u64().unwrap_or(0) as usize;
+        require(
+            index + 1 == milestones.len() && adaptive::milestone_ready(ctx, &row)?,
+            "final authorized milestone lacks canonical completion evidence",
+        )?;
+        let milestone = milestones[index].clone();
+        if !row["adaptive"]["completed_milestones"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["id"] == milestone["id"]))
+        {
+            let evidence = adaptive::retain(
+                ctx,
+                &json!({"schema":1,"kind":"autopilot-milestone-complete","owner_id":row["owner_id"],"spec_sha256":row["spec_sha256"],"head":final_head,"plan_sha256":value::hash(&final_plan),"milestone":milestone,"progress":coverage,"review":row["adaptive"]["review"]}),
+            )?;
+            adaptive::state(&mut row)["completed_milestones"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":milestone["id"],"evidence":evidence}));
+            raw = save(ctx, &mut row, Some(&raw))?;
+        }
+    }
     if row["contract"]["draft_pr"] == true {
         row["stage"] = "publishing".into();
         raw = save(ctx, &mut row, Some(&raw))?;
@@ -2111,6 +2829,699 @@ mod tests {
         );
         dir.write_receipt(&row);
         (dir, row)
+    }
+
+    #[derive(Default)]
+    struct AdaptiveHost {
+        acceptance: std::sync::Mutex<Vec<u8>>,
+        coverage: std::sync::Mutex<Value>,
+        external: std::sync::Mutex<Value>,
+        calls: std::sync::atomic::AtomicUsize,
+        worker_return: AtomicBool,
+        cleanup: AtomicBool,
+    }
+    impl oms_command_plan::Services for AdaptiveHost {
+        fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+            fn resolve(
+                gid: u32,
+            ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+                let uid = rustix::process::getuid().as_raw();
+                Ok(oms_command_plan::services::GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![uid],
+                    primary_member_uids: vec![uid],
+                })
+            }
+            Some(resolve)
+        }
+        fn supervise(
+            &self,
+            _: &oms_command_plan::services::SupervisedCommand,
+        ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+            Ok(oms_command_plan::services::Execution {
+                exit: 1,
+                runner_exit: 1,
+                timed_out: false,
+                output_limited: false,
+                launch_error: false,
+                supervision_error: false,
+                output: self.acceptance.lock().unwrap().clone(),
+                duration_s: 0,
+            })
+        }
+    }
+    impl crate::Services for AdaptiveHost {
+        fn classify_autonomy_failure(&self, text: &str, _: i32) -> Result<Value> {
+            Ok(if text.contains("rate limit") {
+                json!({"code":"provider_capacity","recovery":"one_explicit_fallback","retryable":true})
+            } else {
+                json!({"code":"unknown_failure","recovery":"preserve_and_escalate","retryable":false})
+            })
+        }
+        fn resolve_route(
+            &self,
+            _: &Path,
+            _: &Value,
+            _: &str,
+            _: &AtomicBool,
+        ) -> Result<crate::services::ModelRoute> {
+            Ok(crate::services::ModelRoute {
+                provider: "codex".into(),
+                model_class: "standard".into(),
+                primary: "gpt-6-sol".into(),
+                fallback: String::new(),
+                effort: "high".into(),
+                fallback_effort: String::new(),
+            })
+        }
+        fn state_repository(&self, work: &Path, _: &AtomicBool) -> Result<PathBuf> {
+            Ok(work.into())
+        }
+        fn discovery_section(&self, _: &Path, section: &str, _: &AtomicBool) -> Result<Value> {
+            require(section == "acceptance", "unsupported fixture discovery")?;
+            Ok(self.coverage.lock().unwrap().clone())
+        }
+        fn external_observation(
+            &self,
+            _: &Path,
+            _: &Path,
+            _: &Value,
+            _: bool,
+            _: &AtomicBool,
+        ) -> Result<Value> {
+            Ok(self.external.lock().unwrap().clone())
+        }
+        fn invoke(
+            &self,
+            call: &crate::services::Invocation,
+            stop: &AtomicBool,
+        ) -> Result<crate::CommandResult> {
+            if call.tool == "fail-ledger" {
+                return Ok((0, vec![], vec![]));
+            }
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call.tool == "peer-delegate"
+                && self.worker_return.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                use oms_command_telemetry::store::{physical, usage};
+                let operation = call
+                    .environment
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == "OMS_OPERATION_ID")
+                    .unwrap()
+                    .1
+                    .to_str()
+                    .unwrap();
+                let task = call
+                    .args
+                    .windows(2)
+                    .find(|p| p[0] == "--plan-task")
+                    .unwrap()[1]
+                    .to_str()
+                    .unwrap();
+                let identity = usage::Identity {
+                    call_id: value::random("call_")?,
+                    operation_id: operation.into(),
+                    provider: "codex".into(),
+                    selected_model: Some("gpt-6-sol".into()),
+                    task_id: Some(task.into()),
+                    attempt_id: Some(value::random("att_")?),
+                    ..Default::default()
+                };
+                let physical::Registration::New(mut receipt) = physical::begin(
+                    &call.cwd,
+                    identity,
+                    None,
+                    true,
+                    stop,
+                    std::time::Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap() else {
+                    panic!("new physical fixture")
+                };
+                receipt.revision += 1;
+                receipt.phase = usage::Phase::Unknown;
+                receipt.cleanup_complete =
+                    Some(self.cleanup.load(std::sync::atomic::Ordering::SeqCst));
+                receipt.source_sha256 = Some(value::hash(b"known-ended rate limit"));
+                usage::record(&call.cwd, &receipt, stop).unwrap();
+                return Ok((2, vec![], b"rate limit\n".to_vec()));
+            }
+            Err(Error::new(2, "provider outcome unknown"))
+        }
+    }
+    fn adaptive_fixture(host: &AdaptiveHost, stop: &AtomicBool) -> (Dir, Value) {
+        let dir = Dir::new();
+        git(&dir.0, &["init", "--quiet", "-b", "main"]);
+        std::fs::create_dir_all(dir.0.join("tests")).unwrap();
+        std::fs::create_dir_all(dir.0.join("src")).unwrap();
+        private(&dir.0.join("tests/check.sh"), b"exit 1\n");
+        private(&dir.0.join("src/one.rs"), b"pub fn one() {}\n");
+        private(&dir.0.join("PROJECT.md"),b"# Project\n\n## Status\n- State: confirmed\n\n## Goal\n- Goal: Check the behavior\n\n## Scope\n- Allowed: src\n\n## Acceptance\n- Behavior one is checked\n- Behavior two is checked\n\n## Verification\n- Required checks: bash tests/check.sh\n- Required check files: tests/check.sh\n");
+        std::fs::write(dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        git(&dir.0, &["add", "PROJECT.md", "src", "tests"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "initial"]);
+        let spec = value::hash(std::fs::read(dir.0.join("PROJECT.md")).unwrap());
+        let base = git(&dir.0, &["rev-parse", "HEAD"]);
+        let mut row = fixture(
+            dir.0.to_str().unwrap(),
+            &spec,
+            &base,
+            dir.plan("").to_str().unwrap(),
+        );
+        row["contract"]["allowed"] = "src".into();
+        row["contract"]["review_mode"] = "gate".into();
+        adaptive::state(&mut row);
+        let proposal = b"{\"tasks\":[{\"id\":\"t1\"}]}\n";
+        let digest = value::hash(proposal);
+        let path = dir.plan(&format!("approved-proposal-{digest}.json"));
+        private(&path, proposal);
+        row["proposal"] = json!({"path":path,"sha256":digest});
+        git(
+            &dir.0,
+            &["switch", "--quiet", "-c", value::text(&row, "branch")],
+        );
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), host, stop).unwrap();
+        let out = ctx
+            .action(
+                &Request::new(Action::Init)
+                    .with("goal", "Check the behavior")
+                    .with("accept", "bash tests/check.sh"),
+            )
+            .unwrap();
+        assert_eq!(out.code, 0, "{}", String::from_utf8_lossy(&out.stderr));
+        dir.write_receipt(&row);
+        (dir, row)
+    }
+
+    #[test]
+    fn adaptive_progress_survives_restart_without_receipt_or_git_churn_credit() {
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        let (dir, row) = adaptive_fixture(&host, &stop);
+        let observe = |run: &str, message: &str| {
+            *host.acceptance.lock().unwrap() = message.as_bytes().to_vec();
+            let mut ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+            ctx.owner_id = value::text(&row, "owner_id").into();
+            ctx.run_id = run.into();
+            ctx.cycle = Some(1);
+            assert_eq!(ctx.action(&Request::new(Action::Accept)).unwrap().code, 3);
+            adaptive::cycle(&ctx, &ctx.plan_value().unwrap()).unwrap()
+        };
+        let first = observe(
+            "run-first",
+            "2026-11-23T10:11:12Z test failed value=10001 /tmp/oms-one/check",
+        );
+        assert_eq!(first["stalled_cycles"], 0);
+        private(&dir.0.join("unrelated.txt"), b"unrelated churn\n");
+        git(&dir.0, &["add", "unrelated.txt"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "unrelated"]);
+        let second = observe(
+            "run-restarted",
+            "2026-11-24T10:11:12Z test failed value=10001 /tmp/oms-two/check",
+        );
+        assert_ne!(first["source_sha256"], second["source_sha256"]);
+        assert_ne!(first["head"], second["head"]);
+        assert_eq!(first["signature_sha256"], second["signature_sha256"]);
+        assert_eq!(second["stalled_cycles"], 1);
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        let contract = planning::contract(&ctx).unwrap();
+        let (id, statement) = contract.criteria.first_key_value().unwrap();
+        *host.coverage.lock().unwrap() = json!({"criteria":[{"id":id,"source":"project","criterion_digest":value::hash(format!("project\0{statement}")),"status":"verified","evidence":[{"status":"verified","stale":false,"signal":"execution_feedback","source_sha256":"a".repeat(64)}]}]});
+        let third = observe(
+            "run-new-criterion",
+            "test failed value=10001 /tmp/oms-three/check",
+        );
+        assert_eq!(third["stalled_cycles"], 0);
+        assert_eq!(
+            ctx.action(
+                &Request::new(Action::Add)
+                    .with("id", "unrelated")
+                    .with("title", "unrelated")
+                    .with("allowed", "src")
+                    .with("verify", "bash tests/check.sh")
+            )
+            .unwrap()
+            .code,
+            0
+        );
+        let cancellation = oms_command_plan::decision::retain_native(
+            &ctx.store,
+            &value::plan(&json!({"schema":1,"reason":"unrelated cancellation"})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.action(
+                &Request::new(Action::Cancel)
+                    .flag("all-inactive")
+                    .with("operator-consent", "cancel")
+                    .with(
+                        "expected-plan-sha256",
+                        value::hash(ctx.store.read(ACTIVE, 8 * MAX_FILE).unwrap())
+                    )
+                    .with("decision-artifact", cancellation.text("path"))
+                    .with(
+                        "expected-decision-artifact-sha256",
+                        cancellation.text("sha256")
+                    )
+                    .with("reason", "unrelated cancellation")
+            )
+            .unwrap()
+            .code,
+            0
+        );
+        // Fresh receipt identities with the same criterion proof do not add information.
+        host.coverage.lock().unwrap()["criteria"][0]["evidence"][0]["source_sha256"] =
+            "b".repeat(64).into();
+        let fourth = observe(
+            "run-duplicate-check",
+            "test failed value=10001 /tmp/oms-four/check",
+        );
+        assert_eq!(fourth["stalled_cycles"], 1);
+        ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-external-result","owner_id":row["owner_id"],"progress":true,"result_sha256":"1".repeat(64),"observation":{"progress_sha256":"2".repeat(64)}})).unwrap();
+        let fifth = observe(
+            "run-negative-result",
+            "test failed value=10001 /tmp/oms-five/check",
+        );
+        assert_eq!(fifth["head"], fourth["head"]);
+        assert_eq!(fifth["stalled_cycles"], 0);
+        ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-external-result","owner_id":row["owner_id"],"progress":true,"result_sha256":"3".repeat(64),"observation":{"progress_sha256":"2".repeat(64)}})).unwrap();
+        assert_eq!(
+            observe(
+                "run-duplicate-result",
+                "test failed value=10001 /tmp/oms-six/check"
+            )["stalled_cycles"],
+            1
+        );
+        assert_ne!(
+            adaptive::failure_signature("metric=10001"),
+            adaptive::failure_signature("metric=10002")
+        );
+        assert_eq!(
+            observe(
+                "run-new-failure",
+                "test failed value=10002 /tmp/oms-seven/check"
+            )["stalled_cycles"],
+            0
+        );
+        assert_eq!(
+            observe(
+                "run-oscillating-failure",
+                "test failed value=10001 /tmp/oms-eight/check"
+            )["stalled_cycles"],
+            1
+        );
+    }
+
+    #[test]
+    fn adaptive_revision_reservation_crash_replays_without_refund_or_provider_resend() {
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        let (dir, mut row) = adaptive_fixture(&host, &stop);
+        row["stage"] = "parked".into();
+        dir.write_receipt(&row);
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let mut ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        ctx.owner_id = value::text(&row, "owner_id").into();
+        let packet = json!({"schema":1,"kind":"autopilot-corrective-context","owner_id":row["owner_id"],"spec_sha256":row["spec_sha256"],"head":ctx.git(&["rev-parse","HEAD"]).unwrap(),"plan_sha256":value::hash(ctx.store.read(ACTIVE,8*MAX_FILE).unwrap()),"decision_sha256":"a".repeat(64),"review":null});
+        let args = Args::default();
+        let prepared = reserve_revision(&ctx, &args, &row, &raw, packet.clone()).unwrap();
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-run.json")).unwrap(),
+            raw,
+            "fault injected before receipt CAS"
+        );
+        assert_eq!(
+            adaptive::budget(&ctx, &row).unwrap()["replans_remaining"],
+            0
+        );
+        let mut restarted = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        restarted.owner_id = ctx.owner_id.clone();
+        let mut next = reserve_revision(&restarted, &args, &row, &raw, packet).unwrap();
+        assert_eq!(
+            next["adaptive"]["recovery"],
+            prepared["adaptive"]["recovery"]
+        );
+        assert_eq!(
+            ctx.rows(".oms/plan/autopilot-replans.jsonl").unwrap().len(),
+            1
+        );
+        next["stage"] = "proposing".into();
+        next["proposal"] = json!({"path":"","sha256":""});
+        let next_raw = save(&restarted, &mut next, Some(&raw)).unwrap();
+        assert!(propose(&restarted, &args, &mut next, &next_raw, true).is_err());
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let err = propose(&restarted, &args, &mut next, &next_raw, true)
+            .err()
+            .unwrap();
+        assert!(
+            err.message.contains("must not be resent"),
+            "{}",
+            err.message
+        );
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            adaptive::budget(&restarted, &next).unwrap()["replans_remaining"],
+            0
+        );
+    }
+
+    #[test]
+    fn adaptive_initial_planner_unknown_survives_receipt_refresh_without_resend() {
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        let (dir, mut row) = adaptive_fixture(&host, &stop);
+        row["stage"] = "proposing".into();
+        row["proposal"] = json!({"path":"","sha256":""});
+        dir.write_receipt(&row);
+        let mut ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        ctx.owner_id = value::text(&row, "owner_id").into();
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        assert!(propose(&ctx, &Args::default(), &mut row, &raw, false).is_err());
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        row["updated"] = "2026-11-24T00:00:00Z".into();
+        dir.write_receipt(&row);
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let mut restarted = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        restarted.owner_id = ctx.owner_id;
+        let error = propose(&restarted, &Args::default(), &mut row, &raw, false)
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains("must not be resent"),
+            "{}",
+            error.message
+        );
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            restarted
+                .rows(PROGRESS)
+                .unwrap()
+                .iter()
+                .filter(|r| r["kind"] == "autopilot-planning")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn adaptive_known_ended_retry_needs_cleanup_and_spends_original_cycle() {
+        use oms_command_telemetry::store::usage;
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        host.worker_return
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (dir, mut row) = adaptive_fixture(&host, &stop);
+        row["contract"]["retry_known"] = true.into();
+        dir.write_receipt(&row);
+        let mut ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        ctx.owner_id = value::text(&row, "owner_id").into();
+        ctx.run_id = "first-worker".into();
+        ctx.cycle = Some(1);
+        assert_eq!(
+            ctx.action(
+                &Request::new(Action::Add)
+                    .with("id", "t1")
+                    .with("title", "one")
+                    .with("allowed", "src")
+                    .with("verify", "bash tests/check.sh")
+            )
+            .unwrap()
+            .code,
+            0
+        );
+        ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-cycle","contract_id":ctx.owner_id,"run_id":ctx.run_id,"cycle":1,"task_id":"t1"})).unwrap();
+        let mut args = Args::default();
+        args.set("id", "t1");
+        args.set("to", "codex");
+        args.flags.insert("retry-known".into());
+        assert_eq!(crate::runner::execute(&ctx, &args).unwrap().code, 2);
+        assert_eq!(ctx.plan_value().unwrap()["tasks"]["t1"]["state"], "ready");
+        row["stage"] = "parked".into();
+        dir.write_receipt(&row);
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        assert!(
+            !adaptive::decision(&ctx, &row, &raw)
+                .unwrap()
+                .allows("resume"),
+            "a returned CLI with unconfirmed physical cleanup is insufficient"
+        );
+        let mut receipt = usage::load(&dir.0).unwrap().calls[0].receipt.clone();
+        receipt.revision += 1;
+        receipt.cleanup_complete = Some(true);
+        usage::record(&dir.0, &receipt, &stop).unwrap();
+        let decision = adaptive::decision(&ctx, &row, &raw).unwrap();
+        assert!(decision.allows("resume"));
+        // A changed registered criterion is a changed task even with unchanged source/verifier.
+        let before = ctx.store.read(ACTIVE, 8 * MAX_FILE).unwrap();
+        let mut changed = value::parse(&before).unwrap();
+        changed["tasks"]["t1"]["covers"] = json!(["different-criterion"]);
+        let altered = value::pretty(&changed).unwrap();
+        ctx.store
+            .mutate(ACTIVE, Some(&before), &altered, 8 * MAX_FILE, true)
+            .unwrap();
+        assert!(
+            !adaptive::decision(&ctx, &row, &raw)
+                .unwrap()
+                .allows("resume")
+        );
+        ctx.store
+            .mutate(ACTIVE, Some(&altered), &before, 8 * MAX_FILE, true)
+            .unwrap();
+        let mut decision_args = Args::default();
+        decision_args.set("action", "resume");
+        decision_args.set("expected-decision-sha256", decision.sha256());
+        assert_eq!(
+            decide(&ctx, &decision_args, &mut row, &raw, None)
+                .unwrap()
+                .code,
+            0
+        );
+        assert_eq!(adaptive::tranche(&ctx).unwrap()["retry_task_id"], "t1");
+        assert_eq!(adaptive::budget(&ctx, &row).unwrap()["cycles_spent"], 1);
+        host.cleanup
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut drive = Args::default();
+        drive.set("to", "codex");
+        drive.set("max-cycles", "10");
+        drive.set("contract-id", &ctx.owner_id);
+        drive.set("run-id", "retry-worker");
+        drive.set(
+            "expected-ref",
+            format!("refs/heads/{}", value::text(&row, "branch")),
+        );
+        drive.flags.insert("retry-known".into());
+        assert_eq!(crate::goal::execute(&ctx, &drive).unwrap().code, 3);
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            adaptive::budget(&ctx, &row).unwrap()["cycles_spent"],
+            2,
+            "resumption never refunds the earlier call"
+        );
+        let rows = ctx.rows(PROGRESS).unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["kind"] == "autopilot-retry-reserved")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn adaptive_decision_cas_stop_and_consumed_experiment_keep_existing_authority() {
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        let (dir, mut row) = adaptive_fixture(&host, &stop);
+        row["stage"] = "parked".into();
+        let binding = json!({"schema":1,"source":"experiment","identity":{"experiment_id":"registered","run_id":"run-1","contract_digest":"c".repeat(64),"request_sha256":"d".repeat(64)}});
+        let binding_sha = value::hash(value::canonical(&binding).unwrap());
+        adaptive::state(&mut row)["wait"] = json!({"binding":binding,"binding_sha256":binding_sha,"consumed_result_sha256":"e".repeat(64)});
+        *host.external.lock().unwrap() = json!({"schema":1,"source":"experiment","identity_valid":true,"binding_sha256":binding_sha,"status":"terminal","result_sha256":"e".repeat(64),"experiment":{"next_action":{"schema":1,"kind":"input-required","contract_digest":"c".repeat(64),"planning_context":{"missing":"seed2 command"}}}});
+        dir.write_receipt(&row);
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let decision = adaptive::decision(&ctx, &row, &raw).unwrap();
+        assert_eq!(decision.value()["action"], "propose-revision");
+        assert_eq!(
+            decision.value()["experiment"]["result_sha256"],
+            "e".repeat(64)
+        );
+        let mut args = Args::default();
+        args.set("action", "inspect");
+        args.set("expected-decision-sha256", decision.sha256());
+        // Same receipt/stage with changed Plan bytes cannot use the old decision.
+        let added = ctx
+            .action(
+                &Request::new(Action::Add)
+                    .with("id", "t1")
+                    .with("title", "one")
+                    .with("allowed", "src")
+                    .with("verify", "bash tests/check.sh"),
+            )
+            .unwrap();
+        assert_eq!(added.code, 0);
+        let err = decide(&ctx, &args, &mut row, &raw, None).err().unwrap();
+        assert!(err.message.contains("decision changed"));
+        assert_eq!(std::fs::read(dir.plan("autopilot-run.json")).unwrap(), raw);
+        row["adaptive"]["wait"]["consumed_result_sha256"] = "".into();
+        host.external.lock().unwrap()["status"] = "pending".into();
+        host.external.lock().unwrap()["result_sha256"] = Value::Null;
+        dir.write_receipt(&row);
+        let pending_raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let pending = adaptive::decision(&ctx, &row, &pending_raw).unwrap();
+        assert!(
+            !pending.allows("wait") && !pending.allows("resume"),
+            "an unresolved wait cannot be rebound or restarted"
+        );
+        let mut replace = Args::default();
+        replace.set("action", "wait");
+        replace.set("expected-decision-sha256", pending.sha256());
+        assert!(
+            decide(
+                &ctx,
+                &replace,
+                &mut row,
+                &pending_raw,
+                Some(json!({"binding":{"foreign":true}}))
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-run.json")).unwrap(),
+            pending_raw
+        );
+        host.external.lock().unwrap()["status"] = "terminal".into();
+        host.external.lock().unwrap()["result_sha256"] = "e".repeat(64).into();
+        row["diagnostic"] = json!({"phase":"autopilot","reason_code":"parent-stopped","reason":"parent-stopped","semantic_verdict":"unknown","evidence_path":""});
+        row["adaptive"]["wait"]["consumed_result_sha256"] = "".into();
+        dir.write_receipt(&row);
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let stopped = adaptive::decision(&ctx, &row, &raw).unwrap();
+        assert_eq!(stopped.value()["action"], "stop");
+        assert!(
+            !stopped.allows("resume")
+                && !stopped.allows("wait")
+                && !stopped.allows("propose-revision")
+        );
+        assert_eq!(
+            row["adaptive"]["wait"]["binding_sha256"], binding_sha,
+            "stop preserves evidence"
+        );
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn adaptive_review_requires_exact_native_sources_and_distinguishes_failed_checks() {
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        let (dir, mut row) = adaptive_fixture(&host, &stop);
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        let directory = ".oms/artifacts/autopilot-review-fixture";
+        std::fs::create_dir_all(dir.0.join(directory)).unwrap();
+        let run = "review-fixture";
+        let scope = json!({"kind":"review-scope","head":ctx.git(&["rev-parse","HEAD"]).unwrap(),"base":row["contract"]["base_sha"],"tracked_clean":true,"incremental":false,"diff_included":true,"diff_sha256":"f".repeat(64)});
+        let scope_raw = value::pretty(&scope).unwrap();
+        private(
+            &dir.0.join(format!("{directory}/_scope-{run}.json")),
+            &scope_raw,
+        );
+        private(
+            &dir.0.join(format!("{directory}/_verdicts-{run}.json")),
+            &value::pretty(&json!({"run":run,"overall":1,"seats":[{"verdict":"fail"}]})).unwrap(),
+        );
+        let finding = json!({"run":run,"severity":"blocking","quote_found":true,"line_anchor_status":"verified","diff_sha256":scope["diff_sha256"],"file":"src/one.rs","source_sha256":value::hash(std::fs::read(dir.0.join("src/one.rs")).unwrap()),"quote":"pub fn one() {}","message":"behavior one is missing"});
+        private(
+            &dir.0.join(format!("{directory}/_findings-{run}.jsonl")),
+            format!("{finding}\n").as_bytes(),
+        );
+        let verify_path = format!("{directory}/_verify-{run}.json");
+        private(&dir.0.join(&verify_path), &scope_raw);
+        let command = "bash tests/check.sh";
+        let check = json!({"kind":"review-verify","operation_id":run,"exit":0,"covers":[format!("criterion-plan-acceptance-{}",&value::hash(command)[..10])],"source":verify_path,"source_sha256":value::hash(&scope_raw),"verified_head":scope["head"]});
+        let outcome = json!({"kind":"review-outcome","operation_id":run,"exit":1,"review_scope":{"diff_sha256":scope["diff_sha256"],"head":scope["head"],"gate":true}});
+        let index = dir.0.join(".oms/artifacts/index.jsonl");
+        private(&index, format!("{check}\n{outcome}\n").as_bytes());
+        let reference = adaptive::review_evidence(&ctx, &row, directory, 1, command).unwrap();
+        let packet = adaptive::evidence(&ctx, &reference).unwrap();
+        assert_eq!(packet["corrective"], true);
+        adaptive::check_review_sources(&ctx, &packet).unwrap();
+        row["stage"] = "parked".into();
+        adaptive::state(&mut row)["review"] = reference;
+        dir.write_receipt(&row);
+        let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let decision = adaptive::decision(&ctx, &row, &raw).unwrap();
+        assert_eq!(decision.value()["action"], "propose-revision");
+        // A mechanical/environment failure is not a semantic code finding.
+        let mut failed = check.clone();
+        failed["exit"] = 1.into();
+        std::fs::write(&index, format!("{failed}\n{outcome}\n")).unwrap();
+        assert!(adaptive::check_review_sources(&ctx, &packet).is_err());
+        let failed_reference =
+            adaptive::review_evidence(&ctx, &row, directory, 1, command).unwrap();
+        assert_eq!(
+            adaptive::evidence(&ctx, &failed_reference).unwrap()["corrective"],
+            false
+        );
+        assert!(
+            adaptive::decision(&ctx, &row, &raw).is_err(),
+            "same receipt cannot hide changed review source"
+        );
+        let cause = json!({"phase":"acceptance","failure":{"code":"environment_unready"}});
+        assert!(!adaptive::failure_can_inform_revision(&cause));
+        assert!(!adaptive::failure_can_inform_revision(
+            &json!({"phase":"semantic-review","failure":{"code":"provider_timeout"}})
+        ));
+    }
+
+    #[test]
+    fn adaptive_milestone_requires_evidence_and_completed_work_not_coverage_claims() {
+        let host = AdaptiveHost::default();
+        let stop = AtomicBool::new(false);
+        let (dir, mut row) = adaptive_fixture(&host, &stop);
+        let mut ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+        ctx.owner_id = value::text(&row, "owner_id").into();
+        let contract = planning::contract(&ctx).unwrap();
+        let criteria = contract.criteria.keys().cloned().collect::<Vec<_>>();
+        row["contract"]["milestones"] = json!([{"id":"first","criteria":[criteria[0]]},{"id":"second","criteria":[criteria[1]]}]);
+        let plan_sha = value::hash(ctx.store.read(ACTIVE, 8 * MAX_FILE).unwrap());
+        let proposal = json!({"schema":1,"kind":"agent-plan-proposal","spec_sha256":row["spec_sha256"],"plan_sha256":plan_sha,"base_sha":row["contract"]["base_sha"],"id_prefix":"m1-","allowed_envelope":["src"],"acceptance_files":["tests/check.sh"],"tasks":[{"id":"m1-one","title":"first criterion","allowed":["src"],"verify":"bash tests/check.sh","depends":[],"covers":[criteria[0]]}]});
+        let bytes = value::pretty(&proposal).unwrap();
+        let sha = value::hash(&bytes);
+        let path = dir.plan(&format!("approved-proposal-{sha}.json"));
+        private(&path, &bytes);
+        row["proposal"] = json!({"path":path,"sha256":sha});
+        dir.write_receipt(&row);
+        assert_eq!(
+            ctx.action(
+                &Request::new(Action::ApplyProposal)
+                    .with("proposal", path.as_os_str())
+                    .with("expected-proposal-sha256", &sha)
+                    .with("expected-plan-sha256", &plan_sha)
+                    .with("allowed-envelope", "src")
+                    .with("accept-files", "tests/check.sh")
+            )
+            .unwrap()
+            .code,
+            0
+        );
+        assert_eq!(adaptive::tranche(&ctx).unwrap()["pending"], true);
+        assert!(!adaptive::milestone_ready(&ctx, &row).unwrap());
+        let statement = &contract.criteria[&criteria[0]];
+        *host.coverage.lock().unwrap() = json!({"criteria":[{"id":criteria[0],"source":"project","criterion_digest":value::hash(format!("project\0{statement}")),"status":"verified","evidence":[{"status":"verified","stale":false,"signal":"execution_feedback"}]}]});
+        assert!(
+            !adaptive::milestone_ready(&ctx, &row).unwrap(),
+            "a positive criterion observation cannot skip pending canonical work"
+        );
+        let mut raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        assert!(
+            advance_milestone(&ctx, &Args::default(), &mut row, &mut raw)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(row["adaptive"]["milestone_index"], 0);
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(adaptive::budget(&ctx, &row).unwrap()["cycles_spent"], 0);
     }
 
     #[test]
@@ -2364,7 +3775,7 @@ mod tests {
         for (stage, text) in [
             ("done", "complete"),
             ("proposal-review", "awaits parent review"),
-            ("parked", "parked for an operator"),
+            ("parked", "parked; inspect autopilot status"),
         ] {
             let mut staged = row.clone();
             staged["stage"] = stage.into();

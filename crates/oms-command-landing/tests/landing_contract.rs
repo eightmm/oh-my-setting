@@ -218,7 +218,15 @@ fn child_entry() {
         raw.split(SEP).map(OsString::from).collect()
     };
     let flag = AtomicBool::new(false);
-    let (code, out, err) = if tool == "feedback-candidate" {
+    let (code, out, err) = if tool == "exact-ci-observation" {
+        let identity = V::parse(args[0].to_str().unwrap().as_bytes()).unwrap();
+        match oms_command_landing::ci::observe_attempt(&cwd, &cwd, &identity, &flag)
+            .and_then(|v| v.json(false).map_err(oms_command_landing::Error::from))
+        {
+            Ok(raw) => (0, raw, vec![]),
+            Err(e) => (e.code, vec![], e.message.into_bytes()),
+        }
+    } else if tool == "feedback-candidate" {
         let result = oms_command_landing::feedback::repair_candidate(
             &cwd,
             &cwd,
@@ -868,6 +876,136 @@ fn ci_status_fails_closed_without_gh() {
         assert!(out.is_empty());
         assert!(err.contains("launch failed"), "{err}");
     }
+}
+
+#[test]
+fn exact_ci_observation_binds_repo_head_run_attempt_and_rechecks_after_gets() {
+    let f = FeedbackFixture::new();
+    let head = String::from_utf8(
+        f.isolated
+            .command(&f.repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    fs::write(&f.gh,r#"#!/bin/bash
+[[ "$1 $2 $3" == 'api --method GET' ]] || exit 93
+n=0
+if [[ -f "$OMS_CT_CALLS" ]]; then read -r n < "$OMS_CT_CALLS"; fi
+n=$((n+1)); printf '%s\n' "$n" > "$OMS_CT_CALLS"
+if [[ "$OMS_CT_MODE" == interrupt ]]; then exit 130; fi
+case "${@: -1}" in
+'repos/example/project/actions/runs/9/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_JOBS";;
+'repos/example/project/actions/runs/9')
+  if [[ "$n" == 3 && "$OMS_CT_MODE" == moved ]]; then git commit --allow-empty -qm changed || exit 91; fi
+  if [[ "$n" == 3 && "$OMS_CT_MODE" == rerun ]]; then printf '%s\n' "$OMS_CT_RERUN"; else printf '%s\n' "$OMS_CT_RUN"; fi;;
+*) exit 94;;
+esac
+"#).unwrap();
+    let identity = obj([
+        ("repository", "example/project".into()),
+        ("head_sha", head.clone().into()),
+        ("workflow_id", 7usize.into()),
+        ("run_id", 9usize.into()),
+        ("run_attempt", 1usize.into()),
+    ]);
+    let run = obj([
+        ("id", 9usize.into()),
+        ("workflow_id", 7usize.into()),
+        ("run_attempt", 1usize.into()),
+        ("head_sha", head.clone().into()),
+        ("repository", obj([("full_name", "EXAMPLE/Project".into())])),
+        ("status", "completed".into()),
+        ("conclusion", "success".into()),
+        ("updated_at", "2026-11-23T10:00:00Z".into()),
+    ]);
+    let job = obj([
+        ("id", 11usize.into()),
+        ("run_id", 9usize.into()),
+        ("run_attempt", 1usize.into()),
+        ("head_sha", head.into()),
+        (
+            "run_url",
+            "https://api.github.com/repos/example/project/actions/runs/9".into(),
+        ),
+        ("name", "rust".into()),
+        ("status", "completed".into()),
+        ("conclusion", "success".into()),
+        ("steps", V::Arr(vec!["not retained".into()])),
+    ]);
+    let calls = f.isolated.home.path().join("exact-ci-calls");
+    let query = |run: &V, job: &V, mode: &str| {
+        let _ = fs::remove_file(&calls);
+        let encode = |v: &V| String::from_utf8(v.json(false).unwrap()).unwrap();
+        let mut rerun = run.clone();
+        rerun.set("run_attempt", 2usize);
+        f.isolated.run_env(
+            "exact-ci-observation",
+            &f.repo,
+            &[&encode(&identity)],
+            &[
+                ("OMS_GH_BIN", f.gh.to_str().unwrap()),
+                ("OMS_CT_CALLS", calls.to_str().unwrap()),
+                ("OMS_CT_MODE", mode),
+                ("OMS_CT_RUN", &encode(run)),
+                ("OMS_CT_RERUN", &encode(&rerun)),
+                (
+                    "OMS_CT_JOBS",
+                    &encode(&obj([
+                        ("total_count", 1usize.into()),
+                        ("jobs", V::Arr(vec![job.clone()])),
+                    ])),
+                ),
+            ],
+        )
+    };
+    let ok = query(&run, &job, "");
+    assert_eq!(ok.0, 0, "{ok:?}");
+    let ledger = f.repo.join(".oms/ci.jsonl");
+    let first = fs::read(&ledger).unwrap();
+    assert!(!String::from_utf8_lossy(&first).contains("not retained"));
+    assert_eq!(query(&run, &job, "").0, 0);
+    assert_eq!(
+        fs::read(&ledger).unwrap(),
+        first,
+        "repeated observation does not grow source stream"
+    );
+    for field in ["run_id", "run_attempt", "head_sha", "run_url"] {
+        let mut wrong = job.clone();
+        wrong.set(
+            field,
+            match field {
+                "head_sha" => "b".repeat(40).into(),
+                "run_url" => "https://api.github.com/repos/foreign/project/actions/runs/9".into(),
+                _ => V::from(99usize),
+            },
+        );
+        assert_eq!(query(&run, &wrong, "").0, 2, "{field}");
+        assert_eq!(fs::read(&ledger).unwrap(), first);
+    }
+    let mut foreign = run.clone();
+    foreign.set("repository", obj([("full_name", "foreign/project".into())]));
+    assert_eq!(query(&foreign, &job, "").0, 2);
+    assert_eq!(
+        query(&run, &job, "rerun").0,
+        2,
+        "a rerun during observation is not the old successful attempt"
+    );
+    assert_eq!(query(&run, &job, "interrupt").0, 130);
+    assert_eq!(
+        query(&run, &job, "moved").0,
+        2,
+        "local HEAD is rechecked after network observations"
+    );
+    assert_eq!(
+        fs::read(&ledger).unwrap(),
+        first,
+        "refused observations do not mutate retained evidence"
+    );
 }
 
 #[test]

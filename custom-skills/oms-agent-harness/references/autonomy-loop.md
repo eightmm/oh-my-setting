@@ -22,8 +22,8 @@ When a panel main is asked to complete a project, or an autopilot contract
 already exists for its repository, the main supervises the same campaign rather
 than starting a competing panel plan driver. It inspects autopilot status and
 the receipt before acting, reviews the exact proposal bytes and digest before
-run, and uses only `oms autopilot propose`, `run --review-mode gate`, `status`,
-or validated receipt re-entry. It never dispatches panel write workers for
+run, and uses `oms autopilot propose`, `run --review-mode gate`, `status`,
+the checked `decide` continuation, or validated receipt re-entry. It never dispatches panel write workers for
 campaign-owned tasks, releases or reclaims them, resets cycle exhaustion, or
 overrides a parked receipt. Read-only reviewer, critic, or security-auditor
 judgment may inform proposals, parks, and final changes. Acceptance requires
@@ -34,7 +34,83 @@ and then run the exact reviewed proposal with `--review-mode gate` and its
 `--expected-proposal-sha256`.
 
 For a parked campaign, `oms autopilot status` leads with the recorded phase,
-reason, semantic verdict and evidence path.
+reason, semantic verdict, evidence and checked `next_action`. Do not abandon a
+recoverable owner or create another one to reset its budget.
+
+## Checked adaptive continuation
+
+There is no separate adaptive flag. The Main consumes the existing owner's
+`next_action` through the normal status, handoff and runtime views:
+
+1. Read `oms autopilot status`. Inspect the exact failure, review and external
+   evidence; distinguish a code finding from a provider, environment, capacity,
+   cancellation or unknown-delivery condition.
+2. Use the returned decision digest with `oms autopilot decide
+   --expected-decision-sha256 SHA --action inspect|propose-revision|wait|resume|stop`.
+   Only actions valid for that snapshot are admitted. A changed head, Plan,
+   receipt, review source or external result requires a fresh observation.
+3. If a correction is justified, `propose-revision` reserves the sole bounded
+   remainder and returns an exact `r1-` proposal. Review its scope, checks,
+   counterevidence and dependencies, then use the digest-bound `autopilot run`
+   continuation. This Parent review is the agent's job within user authority;
+   it is not a request for the user to approve every step.
+4. The admitted tasks must run and finish canonically before final acceptance.
+   An already-passing old check cannot skip a newly required correction. Review
+   the whole change again, re-run fresh acceptance and confirm actual criterion
+   evidence. A task's `covers` declaration only names the evidence to inspect.
+
+A semantic repair requires this invocation's unique native review directory,
+whole-change scope, actual successful verifier receipt, completed verdicts and
+source-backed blocking findings. Missing artifacts, changed source bytes,
+incomplete answers or a failed mechanical check do not become code findings.
+The existing frozen verifier and scope remain in force. Known transport
+fallbacks retain their existing configured bounds; `retry-known` never grants a
+resend of an unknown dispatch. An admitted known-ended retry additionally needs
+the native call's exact task/lease/head and all physical cleanup receipts and
+spends the same lifetime cycle budget.
+
+Progress survives process restart in the existing ledger. Criterion evidence,
+related canonical task completion and a newly validated experimental cell are
+meaningful signals. A repeated receipt, timestamp, temporary path, unrelated
+diff or task cancellation is not. Previously seen alternating failures also
+remain stalled unless a new meaningful signal appears. Exact source SHA values
+stay distinct from the narrow presentation-normalized failure signature. A new
+Parent-reviewed approach receives one budgeted attempt without deleting history.
+
+For a preauthorized Roadmap, freeze `--milestones ID,ID` on the initial proposal.
+Only those existing PROJECT milestones may advance. Each subset needs real
+criterion evidence and completed canonical tasks; its own approved verifiers may
+establish it while global acceptance is still failing. The next milestone is
+another exact Parent-reviewed proposal, sharing the original owner, scope,
+provider and total cycle cap. Final global acceptance and the configured final
+review remain necessary. Do not invent extra goals when the list is exhausted.
+
+When waiting for CI, SSH, Slurm or an experiment, retain its native binding and
+use `decide --action wait --wait-binding FILE --expected-wait-sha256 SHA` with
+the current decision digest. Status reads recorded state; wait admission and
+resume perform one bounded native refresh. Pending/running state is not a reason
+to poll or redispatch. A new exact terminal result can be consumed once; it is
+evidence for the next action, not goal acceptance. Inspect invalid or foreign
+results. A missing registered experiment command or a validated negative result
+can inform the existing bounded proposal path. Preserve preregistration and
+the original experiment budget; never reuse another arm/seed's argv by guess.
+If a new hypothesis needs more authority, retain it as a proposal instead of
+editing the registered contract.
+
+An explicit `decide --action stop` preserves evidence and spent budgets and is
+absorbing for automated continuation. A later external terminal result or ready
+Plan task cannot wake that owner. Lost wake acknowledgements are reconciled only
+from the exact launch/owner/input-receipt started/finished records, which prove
+CLI entry/exit and do not prove provider delivery. There is no new background
+queue or scheduler. Existing tick idle, live-child, daily-cap and authority gates
+continue to apply.
+
+Initial and remainder planning use bounded, source-checked Work Journal and
+eligible memory context. Treat prior facts as advisory; stale, dirty, foreign or
+unavailable sources are not fresh acceptance or new authority. Canonical local
+fixtures exercise these paths, including interrupted reservations and restarts.
+Do not claim paid-provider, GPU, SSH or Slurm operational effectiveness from
+those tests: live provider and HPC experiments are separate evidence.
 
 An analysis request does not authorize writes. Local implementation and commits
 may follow a clear implementation request; a Draft PR requires explicit current
@@ -49,10 +125,10 @@ propose, exact proposal review, run and recovery within the authorized task.
 A capability question alone does not start the loop. Keep small, clear edits
 local instead of paying for a planning council.
 
-The native runtime calls its current fixed Codex, Claude and Antigravity council
-at initial planning and the single permitted remainder proposal. It does not
-inherit panel council customization. Each seat gives an initial answer and one
-rebuttal; every required seat and round must complete. Registry and physical
+The native runtime requests its planning council at initial planning and the
+single permitted remainder proposal. It does not inherit panel council
+customization. Each requested seat gives an initial answer and one rebuttal;
+the configured quorum and required rounds must complete. Registry and physical
 transport checks still apply. Missing, refused or malformed responses stop
 planning; inspect the retained artifacts before retrying. Native mode does not
 automatically restate an incomplete answer. Omission of `--collaboration`
@@ -294,12 +370,13 @@ branch found from the base must be resumed explicitly rather than forked.
 
 For a custom/composed acceptance command, `PROJECT.md` must also name every
 repo-relative verifier file under `Required check files`; those bytes are bound
-to the proposal and protected during admission. Each cycle: acceptance command
-(pass = done) → one `plan-run --next --land` →
+to the proposal and protected during admission. Each cycle checks acceptance
+and required tranche completion, then runs one `plan-run --next --land` and a
 commit of exactly the admitted patch's paths, task title as subject. It
 refuses a dirty tree, parks on task exhaustion, an acceptance command edited
-mid-run, tracked changes beyond the admitted patch, or an unchanged tree with
-the same failing acceptance twice — every terminal leaves a reason row in
+mid-run or tracked changes beyond the admitted patch. Standalone goal-drive
+retains its local tree/failure stall rule; an owned autopilot uses persisted
+criterion/result/failure progress across restarts. Every terminal leaves a reason row in
 `.oms/plan/progress.jsonl` and a fail-ledger entry when parked. The driver
 never generates or re-plans tasks, never pushes, and never reclaims leases:
 task decomposition and recovery stay with the parent. Acceptance pass means

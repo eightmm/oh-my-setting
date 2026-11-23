@@ -2549,6 +2549,650 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
 const UNAVAILABLE: &str = "service unavailable; parent CLI integration is required";
 
 #[test]
+fn slurm_template_requires_native_checkpoint_provenance_before_training() {
+    use serde_json::json;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let f = Landing::new();
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let template = source.join("templates/slurm-job.sh");
+    let mkdir = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("mkdir"))
+        .find(|p| p.is_file())
+        .unwrap();
+    symlink(mkdir, f.tools.join("mkdir")).unwrap();
+    std::fs::create_dir(f.repo.join("tests")).unwrap();
+    std::fs::write(f.repo.join("tests/check.sh"), "true\n").unwrap();
+    std::fs::write(f.repo.join("PROJECT.md"),"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: verify checkpoint provenance\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: a.txt\n## Acceptance\n- Native checks pass\n").unwrap();
+    std::fs::write(
+        f.repo.join(".git/info/exclude"),
+        ".oms/\ncheckpoints/\nlogs/\n",
+    )
+    .unwrap();
+    f.git(&["add", "PROJECT.md", "tests/check.sh"]);
+    f.git(&["commit", "-qm", "checkpoint contract"]);
+    let head = f.git(&["rev-parse", "HEAD"]);
+    std::fs::create_dir(f.repo.join(".oms")).unwrap();
+    let raw = json!({"schema":2,"question":"q","hypothesis":"h","prediction":"p","baseline":{"config_digest":"b".repeat(64)},"treatment":{"independent_change":"x","config_digest":"c".repeat(64)},"controlled_variables":{"code_base":head,"dataset_split":"frozen-data"},"metrics":{"primary":{"name":"score","direction":"maximize"}},"seeds":[0],"success":{"min_improvement":1},"budget":{"runs":2}});
+    std::fs::write(f.repo.join(".oms/experiment-input.json"), raw.to_string()).unwrap();
+    f.ok(&[
+        "runtime",
+        "experiment",
+        "register",
+        ".oms/experiment-input.json",
+        "--id",
+        "resume",
+    ]);
+    let (code, out, err) = f.oms(&[
+        "runtime",
+        "experiment",
+        "run",
+        "--id",
+        "resume",
+        "--arm",
+        "baseline",
+        "--seed",
+        "0",
+        "--metrics",
+        ".oms/metrics.json",
+        "--",
+        "bash",
+        "-c",
+        "printf '{\"score\":10}\\n' > .oms/metrics.json",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let row: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let c: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(f.repo.join(".oms/experiments/contracts/resume.json")).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir(f.repo.join("checkpoints")).unwrap();
+    std::fs::write(f.repo.join("checkpoints/latest.pt"), b"model-state").unwrap();
+    let eval =
+        json!({"metrics":c["metrics"],"success":c["success"],"invariant_pack":c["invariant_pack"]});
+    let manifest = json!({"schema":1,"experiment_id":"resume","run_id":row["run_id"],"contract_digest":c["contract_digest"],"arm":"baseline","seed":0,"snapshot":null,"code_base":head,"dataset_split":"frozen-data","config_digest":"b".repeat(64),"evaluation_sha256":oms_runtime::value::sha(oms_runtime::value::canonical(&oms_runtime::value::from_serde(&eval).unwrap()).unwrap()),"step":7,"rng_state_sha256":"e".repeat(64),"checkpoint":{"path":"checkpoints/latest.pt","size":11,"sha256":format!("{:x}",Sha256::digest(b"model-state"))}});
+    std::fs::write(f.repo.join(".oms/checkpoint.json"), manifest.to_string()).unwrap();
+    let oms = f.tools.join("oms");
+    std::fs::write(&oms,format!("#!/bin/sh\nexec '{}' --oms-dispatch '{}' 1111111111111111111111111111111111111111 -- \"$@\"\n",f.f.binary().display(),f.f.0.display())).unwrap();
+    std::fs::set_permissions(&oms, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let srun = f.tools.join("srun");
+    std::fs::write(
+        &srun,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$TRAIN_LOG\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&srun, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let log = f.f.0.join("training-called");
+    let run = || {
+        let mut command = Command::new(f.tools.join("bash"));
+        f.env(&mut command);
+        command
+            .arg(&template)
+            .env("SLURM_SUBMIT_DIR", &f.repo)
+            .env("SLURM_RESTART_COUNT", "1")
+            .env("CKPT_DIR", "checkpoints")
+            .env("OMS_EXPERIMENT_ID", "resume")
+            .env("OMS_EXPERIMENT_RUN_ID", row["run_id"].as_str().unwrap())
+            .env("OMS_CHECKPOINT_MANIFEST", ".oms/checkpoint.json")
+            .env("TRAIN_LOG", &log)
+            .output()
+            .unwrap()
+    };
+    let out = run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("checkpoints/latest.pt")
+    );
+    std::fs::remove_file(&log).unwrap();
+    let mut wrong = manifest.clone();
+    wrong["seed"] = 1.into();
+    std::fs::write(f.repo.join(".oms/checkpoint.json"), wrong.to_string()).unwrap();
+    assert!(!run().status.success());
+    assert!(!log.exists(), "mismatched provenance cannot reach training");
+    std::fs::write(f.repo.join(".oms/checkpoint.json"), manifest.to_string()).unwrap();
+    std::fs::rename(
+        f.repo.join(".oms/experiments/runs.jsonl"),
+        f.repo.join(".oms/experiments/runs.retained"),
+    )
+    .unwrap();
+    assert!(!run().status.success());
+    assert!(
+        !log.exists(),
+        "a Git-only remote checkout has no canonical run authority"
+    );
+}
+
+#[test]
+fn native_autopilot_review_repair_calls_the_worker_after_acceptance_passes() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Landing::new();
+    f.provider_config();
+    std::fs::create_dir(f.repo.join("tests")).unwrap();
+    std::fs::write(
+        f.repo.join("tests/check.sh"),
+        "set -eu\ntest \"$(cat a.txt)\" != a\n",
+    )
+    .unwrap();
+    std::fs::write(f.repo.join("PROJECT.md"),"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: repair the source-backed semantic defect\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: a.txt\n## Acceptance\n- Native checks pass\n").unwrap();
+    f.git(&["add", "PROJECT.md", "tests/check.sh"]);
+    f.git(&["commit", "-qm", "contract"]);
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("python3"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let script = format!(
+        "#!{}\n{}",
+        python.display(),
+        r#"import json, os, pathlib, re, sys
+prompt=sys.stdin.read()
+provider=pathlib.Path(sys.argv[0]).name
+log=pathlib.Path(os.environ['ADAPTIVE_LOG'])
+if provider == 'codex':
+    role='review'
+    bad=pathlib.Path('a.txt').read_text().strip()=='bad'
+    finding={'file':'a.txt','line':1,'summary':'replace the demonstrated bad result','severity':'blocking','quote':'bad'}
+    answer=('```findings\n'+json.dumps(finding)+'\n```\nGATE: fail') if bad else 'GATE: pass'
+    print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':answer}}))
+    print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}))
+elif 'Decompose remaining work into at most' in prompt:
+    role='planner'
+    prefix=json.loads(re.search(r'Ids start with ("[^"]*")\.',prompt).group(1))
+    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'repair the demonstrated source defect','allowed':['a.txt'],'verify':'bash tests/check.sh','depends':[]}]})
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':answer}))
+else:
+    role='worker'
+    p=pathlib.Path('a.txt');p.write_text('bad\n' if p.read_text().strip()=='a' else 'good\n')
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'updated the assigned file'}))
+with log.open('a') as out: out.write(json.dumps({'role':role,'cwd':os.getcwd(),'prompt':prompt})+'\n')
+"#
+    );
+    for name in ["claude", "codex"] {
+        let p = f.tools.join(name);
+        std::fs::write(&p, &script).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let log = f.f.0.join("adaptive-provider-calls.jsonl");
+    let ci_run = f.f.0.join("ci-run.json");
+    let ci_jobs = f.f.0.join("ci-jobs.json");
+    let invoke = |args: &[&str]| {
+        f.oms_env(
+            args,
+            &[
+                ("ADAPTIVE_LOG", log.to_str().unwrap()),
+                ("EXACT_CI_RUN", ci_run.to_str().unwrap()),
+                ("EXACT_CI_JOBS", ci_jobs.to_str().unwrap()),
+            ],
+        )
+    };
+    let receipt = || {
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(f.repo.join(".oms/plan/autopilot-run.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let status = || {
+        let (code, out, err) = invoke(&["autopilot", "status"]);
+        assert_eq!(code, 0, "{out}{err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+    let count = |role: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["role"] == role)
+            .count()
+    };
+    let (code, out, err) = invoke(&[
+        "autopilot",
+        "propose",
+        "--planner",
+        "claude",
+        "--planner-model",
+        "fixture",
+        "--worker",
+        "claude",
+        "--worker-model",
+        "fixture",
+        "--reviewer",
+        "codex",
+        "--reviewer-model",
+        "fixture",
+        "--review-mode",
+        "gate",
+        "--allowed",
+        "a.txt",
+        "--base",
+        "main",
+        "--max-cycles",
+        "4",
+        "--initial-tasks",
+        "1",
+        "--replan-tasks",
+        "1",
+        "--provider-timeout",
+        "30s",
+    ]);
+    assert_eq!(code, 4, "{out}{err}");
+    let first = receipt();
+    let run = |row: &serde_json::Value| {
+        invoke(&[
+            "autopilot",
+            "run",
+            "--proposal",
+            row["proposal"]["path"].as_str().unwrap(),
+            "--expected-proposal-sha256",
+            row["proposal"]["sha256"].as_str().unwrap(),
+        ])
+    };
+    let (code, out, err) = run(&first);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(count("worker"), 1, "{out}{err}");
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
+        "bad\n"
+    );
+    let stopped = receipt();
+    assert_eq!(
+        stopped["diagnostic"]["reason_code"], "semantic-review-failed",
+        "{out}{err}"
+    );
+    let ready = status();
+    assert_eq!(
+        ready["next_action"]["action"], "propose-revision",
+        "{ready}"
+    );
+    // Actual native host observation, pending refusal, stale decision CAS,
+    // terminal consumption and duplicate rejection all run through the CLI.
+    f.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/project.git",
+    ]);
+    let head = f.git(&["rev-parse", "HEAD"]);
+    let binding = serde_json::json!({"schema":1,"source":"ci","identity":{"repository":"example/project","head_sha":head,"workflow_id":7,"run_id":9,"run_attempt":1}});
+    let raw = binding.to_string();
+    let binding_path = f.repo.join(".oms/wait.json");
+    std::fs::write(&binding_path, &raw).unwrap();
+    let wait_sha = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let mut ci = serde_json::json!({"id":9,"workflow_id":7,"run_attempt":1,"head_sha":head,"repository":{"full_name":"example/project"},"status":"in_progress","conclusion":null,"updated_at":"2026-11-23T10:00:00Z"});
+    let mut jobs = serde_json::json!({"total_count":1,"jobs":[{"id":11,"run_id":9,"run_attempt":1,"head_sha":head,"run_url":"https://api.github.com/repos/example/project/actions/runs/9","name":"check","status":"in_progress","conclusion":null}]});
+    std::fs::write(&ci_run, ci.to_string()).unwrap();
+    std::fs::write(&ci_jobs, jobs.to_string()).unwrap();
+    let gh = f.tools.join("gh");
+    std::fs::write(
+        &gh,
+        r#"#!/bin/bash
+[[ "$1 $2 $3" == 'api --method GET' ]] || exit 93
+case "${@: -1}" in
+  repos/example/project/actions/runs/9) cat "$EXACT_CI_RUN";;
+  'repos/example/project/actions/runs/9/attempts/1/jobs?per_page=100') cat "$EXACT_CI_JOBS";;
+  *) exit 94;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ready = status();
+    let (code, out, err) = invoke(&[
+        "autopilot",
+        "decide",
+        "--expected-decision-sha256",
+        ready["next_action"]["decision_sha256"].as_str().unwrap(),
+        "--action",
+        "wait",
+        "--wait-binding",
+        binding_path.to_str().unwrap(),
+        "--expected-wait-sha256",
+        &wait_sha,
+        "--reason",
+        "await this exact CI run",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let waiting = status();
+    assert_eq!(waiting["next_action"]["wait"]["status"], "running");
+    let (code, _, _) = invoke(&[
+        "autopilot",
+        "decide",
+        "--expected-decision-sha256",
+        waiting["next_action"]["decision_sha256"].as_str().unwrap(),
+        "--action",
+        "resume",
+    ]);
+    assert_eq!(code, 2, "pending external work cannot resume");
+    assert_eq!(count("worker"), 1);
+    assert_eq!(count("review"), 1);
+    ci["status"] = "completed".into();
+    ci["conclusion"] = "failure".into();
+    jobs["jobs"][0]["status"] = "completed".into();
+    jobs["jobs"][0]["conclusion"] = "failure".into();
+    std::fs::write(&ci_run, ci.to_string()).unwrap();
+    std::fs::write(&ci_jobs, jobs.to_string()).unwrap();
+    let (code, _, _) = invoke(&[
+        "autopilot",
+        "decide",
+        "--expected-decision-sha256",
+        waiting["next_action"]["decision_sha256"].as_str().unwrap(),
+        "--action",
+        "resume",
+    ]);
+    assert_eq!(
+        code, 2,
+        "refresh exposes a new exact decision before it can be consumed"
+    );
+    let terminal = status();
+    assert_eq!(terminal["next_action"]["action"], "resume");
+    let (code, out, err) = invoke(&[
+        "autopilot",
+        "decide",
+        "--expected-decision-sha256",
+        terminal["next_action"]["decision_sha256"].as_str().unwrap(),
+        "--action",
+        "resume",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let consumed = receipt();
+    assert_eq!(
+        consumed["adaptive"]["wait"]["consumed_result_sha256"],
+        terminal["next_action"]["wait"]["result_sha256"]
+    );
+    let result_sha = terminal["next_action"]["wait"]["result_sha256"]
+        .as_str()
+        .unwrap();
+    let (code, handoff, err) = invoke(&["session-handoff", "prompt", "--max-bytes", "8192"]);
+    assert_eq!(code, 0, "{handoff}{err}");
+    assert!(
+        handoff.contains(result_sha) && handoff.contains("source-checked journal experience"),
+        "{handoff}"
+    );
+    assert_eq!(count("worker"), 1, "handoff never dispatches work");
+    assert_eq!(count("review"), 1, "handoff never calls a model");
+    std::fs::write(f.repo.join("a.txt"), "dirty unrelated state\n").unwrap();
+    let (code, stale, err) = invoke(&["session-handoff", "prompt", "--max-bytes", "8192"]);
+    assert_eq!(code, 0, "{stale}{err}");
+    assert!(
+        !stale.contains("Advisory prior outcome:"),
+        "experience with stale worktree applicability must be withheld: {stale}"
+    );
+    std::fs::write(f.repo.join("a.txt"), "bad\n").unwrap();
+    let (code, _, _) = invoke(&[
+        "autopilot",
+        "decide",
+        "--expected-decision-sha256",
+        terminal["next_action"]["decision_sha256"].as_str().unwrap(),
+        "--action",
+        "resume",
+    ]);
+    assert_eq!(code, 2, "duplicate result cannot be consumed twice");
+    let (code, out, err) = run(&consumed);
+    assert_eq!(
+        code, 3,
+        "a failed CI result never grants acceptance: {out}{err}"
+    );
+    assert_eq!(
+        count("worker"),
+        1,
+        "observation and fresh review do not resend completed tasks"
+    );
+    // Read the decision after this fresh acceptance receipt, preserving CAS
+    // over all producer evidence rather than reusing the earlier projection.
+    assert_eq!(f.oms(&["agent-plan", "accept"]).0, 0);
+    let ready = status();
+    assert_eq!(
+        ready["next_action"]["action"], "propose-revision",
+        "{ready}"
+    );
+    // The verifier already succeeds; the semantic finding, source bytes,
+    // native scope/verdicts and exact review receipt authorize the correction.
+    let (code, out, err) = invoke(&[
+        "autopilot",
+        "decide",
+        "--expected-decision-sha256",
+        ready["next_action"]["decision_sha256"].as_str().unwrap(),
+        "--action",
+        "propose-revision",
+        "--reason",
+        "repair the retained source-backed finding",
+    ]);
+    assert_eq!(code, 4, "{out}{err}");
+    let correction = receipt();
+    assert_eq!(correction["stage"], "proposal-review");
+    let planner_calls = std::fs::read_to_string(&log).unwrap();
+    let planner = planner_calls
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rfind(|row| row["role"] == "planner")
+        .unwrap();
+    let prompt = planner["prompt"].as_str().unwrap();
+    assert!(
+        prompt.contains("advisory experience") && prompt.contains(result_sha),
+        "the next real planner must receive the exact source-checked prior result: {prompt}"
+    );
+    assert_eq!(
+        count("worker"),
+        1,
+        "proposing a correction cannot execute it"
+    );
+    let proposal: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(correction["proposal"]["path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        proposal["tasks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("r1-")
+    );
+    let (code, out, err) = run(&correction);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        count("worker"),
+        2,
+        "reviewed corrective work must execute although the prior acceptance command already passed"
+    );
+    assert_eq!(
+        count("review"),
+        2,
+        "each exact resulting snapshot gets its native review"
+    );
+    assert_eq!(receipt()["stage"], "done", "{out}{err}");
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
+        "good\n"
+    );
+    let tasks: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(f.repo.join(".oms/plan/tasks.json")).unwrap())
+            .unwrap();
+    assert_eq!(tasks["tasks"]["r1-t1"]["state"], "done");
+    let (code, _, _) = run(&correction);
+    assert_eq!(code, 0);
+    assert_eq!(
+        count("worker"),
+        2,
+        "replay never dispatches an already completed correction"
+    );
+}
+
+#[test]
+fn native_autopilot_advances_a_verified_milestone_before_global_acceptance() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Landing::new();
+    f.provider_config();
+    std::fs::create_dir(f.repo.join("tests")).unwrap();
+    std::fs::write(f.repo.join("b.txt"), "b\n").unwrap();
+    for (name, body) in [
+        ("first.sh", "test \"$(cat a.txt)\" = good\n"),
+        ("second.sh", "test \"$(cat b.txt)\" = good\n"),
+        (
+            "check.sh",
+            "set -eu\nbash tests/first.sh\nbash tests/second.sh\n",
+        ),
+    ] {
+        std::fs::write(f.repo.join("tests").join(name), body).unwrap();
+    }
+    std::fs::write(f.repo.join("PROJECT.md"),"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: complete two independently verified milestones\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh, tests/first.sh, tests/second.sh\n## Scope\n- Scope defaults: a.txt, b.txt\n## Acceptance\n- [id:C1] The first output is good\n- [id:C2] The second output is good\n## Roadmap\n- [ ] first: first output (C1)\n- [ ] second: second output (C2)\n").unwrap();
+    f.git(&["add", "PROJECT.md", "tests", "b.txt"]);
+    f.git(&["commit", "-qm", "two milestone contract"]);
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("python3"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let script = format!(
+        "#!{}\n{}",
+        python.display(),
+        r#"import json, os, pathlib, re, sys
+prompt=sys.stdin.read()
+if pathlib.Path(sys.argv[0]).name=='codex':
+    role='review'
+    print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'GATE: pass'}}))
+    print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}))
+elif 'Decompose remaining work into at most' in prompt:
+    role='planner'
+    prefix=json.loads(re.search(r'Ids start with ("[^"]*")\.',prompt).group(1))
+    first=prefix=='m1-'
+    assert first or prefix=='m2-', prefix
+    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'implement the frozen milestone','allowed':['a.txt' if first else 'b.txt'],'verify':'bash tests/'+('first.sh' if first else 'second.sh'),'depends':[],'covers':['C1' if first else 'C2']}]})
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':answer}))
+else:
+    role='worker'
+    path=pathlib.Path('a.txt' if pathlib.Path('a.txt').read_text().strip()!='good' else 'b.txt')
+    path.write_text('good\n')
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'implemented the assigned milestone'}))
+with pathlib.Path(os.environ['ADAPTIVE_LOG']).open('a') as out: out.write(json.dumps({'role':role,'prompt':prompt})+'\n')
+"#
+    );
+    for name in ["claude", "codex"] {
+        let path = f.tools.join(name);
+        std::fs::write(&path, &script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let log = f.f.0.join("milestone-provider-calls.jsonl");
+    let invoke = |args: &[&str]| f.oms_env(args, &[("ADAPTIVE_LOG", log.to_str().unwrap())]);
+    let receipt = || {
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(f.repo.join(".oms/plan/autopilot-run.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let calls = |role: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["role"] == role)
+            .count()
+    };
+    let run = |row: &serde_json::Value| {
+        invoke(&[
+            "autopilot",
+            "run",
+            "--proposal",
+            row["proposal"]["path"].as_str().unwrap(),
+            "--expected-proposal-sha256",
+            row["proposal"]["sha256"].as_str().unwrap(),
+        ])
+    };
+    let (code, out, err) = invoke(&[
+        "autopilot",
+        "propose",
+        "--planner",
+        "claude",
+        "--planner-model",
+        "fixture",
+        "--worker",
+        "claude",
+        "--worker-model",
+        "fixture",
+        "--reviewer",
+        "codex",
+        "--reviewer-model",
+        "fixture",
+        "--review-mode",
+        "gate",
+        "--allowed",
+        "a.txt,b.txt",
+        "--base",
+        "main",
+        "--max-cycles",
+        "4",
+        "--initial-tasks",
+        "1",
+        "--replan-tasks",
+        "1",
+        "--provider-timeout",
+        "30s",
+        "--milestones",
+        "first,second",
+    ]);
+    assert_eq!(code, 4, "{out}{err}");
+    let first = receipt();
+    let (code, out, err) = run(&first);
+    assert_eq!(
+        code, 4,
+        "the verified first milestone should produce the next reviewed proposal: {out}{err}"
+    );
+    assert_eq!(calls("worker"), 1);
+    assert_eq!(
+        calls("review"),
+        1,
+        "the first subset requires fresh native review evidence"
+    );
+    assert_eq!(
+        f.oms(&["agent-plan", "accept"]).0,
+        3,
+        "global acceptance must still fail after only the first milestone"
+    );
+    let second = receipt();
+    assert_eq!(second["owner_id"], first["owner_id"]);
+    assert_eq!(
+        second["contract"], first["contract"],
+        "milestone continuation preserves the lifetime budget"
+    );
+    assert_eq!(second["stage"], "proposal-review");
+    assert_eq!(second["adaptive"]["milestone_index"], 1);
+    assert_eq!(second["adaptive"]["completed_milestones"][0]["id"], "first");
+    let proposal: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(second["proposal"]["path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(proposal["tasks"][0]["id"], "m2-t1");
+    let (code, _, _) = run(&first);
+    assert_eq!(
+        code, 2,
+        "the previous Parent approval cannot approve the next proposal"
+    );
+    assert_eq!(calls("worker"), 1);
+    let (code, out, err) = run(&second);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(calls("worker"), 2);
+    assert_eq!(
+        calls("review"),
+        2,
+        "final whole-goal review is fresh after the second task"
+    );
+    assert_eq!(receipt()["stage"], "done");
+    assert_eq!(
+        receipt()["adaptive"]["completed_milestones"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(f.oms(&["agent-plan", "accept"]).0, 0);
+    let (code, _, _) = run(&second);
+    assert_eq!(code, 0);
+    assert_eq!(
+        calls("worker"),
+        2,
+        "replay cannot dispatch a completed milestone"
+    );
+}
+
+#[test]
 fn native_delegate_context_manifest_reaches_the_physical_provider_boundary() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Landing::new();

@@ -5,6 +5,108 @@ use oms_supervisor::process::{
     DuplexOptions, OutputEvent, OutputStream, Progress, Reactor, Request, StopReason, Streams,
 };
 
+/// One wall deadline covers the entire SSH observer, including a connected
+/// peer that never produces a complete response. Killing this local transport
+/// does not prove that the remote operation stopped.
+pub(super) fn output(
+    command: &Command,
+    deadline: Instant,
+    interrupted: &AtomicBool,
+) -> Result<std::process::Output> {
+    use std::os::unix::process::ExitStatusExt;
+    if Instant::now() >= deadline {
+        return Err(status(124, "SSH request deadline already expired"));
+    }
+    let argv = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(OsStr::to_os_string)
+        .collect();
+    let mut request = Request::new(argv);
+    request.cwd = command.get_current_dir().map(Path::to_path_buf);
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            request.environment.push((key.into(), value.into()));
+        } else {
+            request.remove_environment.push(key.into());
+        }
+    }
+    request.deadline = Some(deadline);
+    request.streams = Streams::Separate;
+    request.terminate_grace = Duration::from_millis(250);
+    request.capture = CaptureOptions {
+        max_bytes: 2 * MAX_LEDGER_OUTPUT + 65536,
+        on_limit: LimitAction::Terminate,
+        lines: None,
+    };
+    request.stderr_capture = Some(CaptureOptions {
+        max_bytes: MAX_STDERR_BYTES as usize,
+        on_limit: LimitAction::Terminate,
+        lines: None,
+    });
+    let mut reactor = Reactor::new();
+    let job = reactor.start(request).map_err(error)?;
+    let mut stopping = None;
+    loop {
+        if interrupted.load(Ordering::Relaxed) {
+            reactor.stop(job, StopReason::Cancelled).map_err(error)?;
+            stopping.get_or_insert_with(Instant::now);
+        }
+        match reactor
+            .poll(job, Duration::from_millis(10))
+            .map_err(error)?
+        {
+            Progress::Pending(snapshot) => {
+                if snapshot.stop.is_some() {
+                    stopping.get_or_insert_with(Instant::now);
+                }
+                if stopping.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+                    return Err(status(
+                        75,
+                        "SSH transport stopped; local cleanup and remote result remain unknown",
+                    ));
+                }
+            }
+            Progress::Complete(done) => {
+                require(
+                    done.cleanup_complete(),
+                    "SSH local cleanup incomplete; remote result remains unknown",
+                )?;
+                match done.stop {
+                    Some(StopReason::Cancelled | StopReason::Signal(_)) => {
+                        return Err(status(
+                            130,
+                            "SSH interrupted; remote result remains unknown",
+                        ));
+                    }
+                    Some(StopReason::Deadline) => {
+                        return Err(status(
+                            124,
+                            "SSH wall deadline exceeded; remote result remains unknown",
+                        ));
+                    }
+                    Some(_) => {
+                        return Err(status(
+                            75,
+                            "SSH output incomplete; remote result remains unknown",
+                        ));
+                    }
+                    None => {}
+                }
+                require(
+                    done.output_complete(),
+                    "SSH output incomplete; remote result remains unknown",
+                )?;
+                let code = done.exit.map_or(1, |exit| exit.shell_code());
+                return Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(code << 8),
+                    stdout: done.stdout.bytes,
+                    stderr: done.stderr.map_or_else(Vec::new, |v| v.bytes),
+                });
+            }
+        }
+    }
+}
+
 fn consume(
     event: &OutputEvent,
     file: &mut impl Write,

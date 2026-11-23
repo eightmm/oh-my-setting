@@ -4460,6 +4460,22 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 }
             }
             impl Executor for Reads {
+                fn experience_context(
+                    &self,
+                    _repo: &Path,
+                    query: &str,
+                    _interrupted: &AtomicBool,
+                ) -> oms_command_peer::Result<serde_json::Value> {
+                    if self.mode != "autopilot" {
+                        return Err(oms_command_peer::Error::new(
+                            2,
+                            "fixture experience unavailable",
+                        ));
+                    }
+                    assert!(query.contains("Plan continuity"));
+                    Ok(serde_json::json!({"schema":1,"authority":"advisory",
+                        "entries":[{"outcome":"valid negative measurement","source_sha256":"d".repeat(64)}]}))
+                }
                 fn execute(
                     &self,
                     request: Invocation,
@@ -4486,6 +4502,14 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         interrupted.store(true, Ordering::Release);
                         return Err(oms_command_peer::Error::new(130, "fixture interrupted"));
                     }
+                    if self.mode == "autopilot_interrupted"
+                        && projection == HandoffProjection::AutopilotStatus
+                    {
+                        return Err(oms_command_peer::Error::new(
+                            130,
+                            "fixture late cancellation",
+                        ));
+                    }
                     let mut stdout = match projection {
                     HandoffProjection::TaskStatus => {
                         br#"{"schema":1,"status":"active","verification":"not_verified"}"#.to_vec()
@@ -4502,16 +4526,28 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     HandoffProjection::ReviewFindings => {
                         br#"[{"id":"finding_1","status":"open","summary":"review freshness"}]"#.to_vec()
                     }
+                    HandoffProjection::AutopilotStatus => {
+                        serde_json::to_vec(&serde_json::json!({"next_action":{"schema":1,"kind":"autopilot-next-action",
+                            "owner_id":"fixture-owner","stage":"parked","receipt_sha256":"a".repeat(64),
+                            "decision_sha256":"b".repeat(64),"action":"resume","reason":"exact terminal result remains unconsumed",
+                            "wait":{"status":"terminal","result_sha256":"c".repeat(64)},"budget":{"remaining_cycles":2},
+                            "commands":[["oms","autopilot","status"]]}})).unwrap()
+                    }
                 };
                     if matches!(self.mode, "empty" | "omitted_only" | "omitted_one")
-                        && projection != HandoffProjection::TaskStatus
+                        && !matches!(
+                            projection,
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus
+                        )
                     {
                         let key = match projection {
                             HandoffProjection::EvidenceMatrix => "criteria",
                             HandoffProjection::NextStep => "actions",
                             HandoffProjection::JournalDecisions => "decisions",
                             HandoffProjection::ReviewFindings => "",
-                            HandoffProjection::TaskStatus => unreachable!(),
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus => {
+                                unreachable!()
+                            }
                         };
                         stdout = if key.is_empty() {
                             b"[]".to_vec()
@@ -4530,7 +4566,12 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         };
                     }
                     let mut complete = true;
-                    if self.mode == "collections" && projection != HandoffProjection::TaskStatus {
+                    if self.mode == "collections"
+                        && !matches!(
+                            projection,
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus
+                        )
+                    {
                         let (key, name, count, omitted, bounded) = match projection {
                             HandoffProjection::EvidenceMatrix => {
                                 ("criteria", "criterion", 24, 2, true)
@@ -4540,7 +4581,9 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                                 ("decisions", "decision", 32, 7, false)
                             }
                             HandoffProjection::ReviewFindings => ("", "finding", 17, 0, false),
-                            HandoffProjection::TaskStatus => unreachable!(),
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus => {
+                                unreachable!()
+                            }
                         };
                         let rows = V::Arr(
                             (0..count)
@@ -4714,6 +4757,38 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 packet.as_bytes()
             );
             assert!(!repo.0.join(".oms/handoffs").exists());
+
+            // A receipt is only a discovery signal here. The checked next
+            // action must come from the fixed native status producer, while
+            // experience crosses the real peer -> autonomy adapter as advisory.
+            repo.write(".oms/plan/autopilot-run.json", b"{}");
+            let adaptive = Reads::new("autopilot");
+            let result = call(&adaptive, &["prompt", "--max-bytes", "8192"]);
+            assert_eq!(result.0, 0, "{}", message(&result));
+            let body = std::str::from_utf8(&result.1).unwrap();
+            for expected in [
+                "fixture-owner",
+                "exact terminal result remains unconsumed",
+                "remaining_cycles",
+                "Advisory prior outcome",
+                "valid negative measurement",
+                "source-checked journal experience",
+            ] {
+                assert!(body.contains(expected), "missing {expected}: {body}");
+            }
+            assert_eq!(
+                adaptive
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(projection, _)| *projection == HandoffProjection::AutopilotStatus)
+                    .count(),
+                1
+            );
+            let interrupted_read = call(&Reads::new("autopilot_interrupted"), &["prompt"]);
+            assert_eq!(interrupted_read.0, 130, "{}", message(&interrupted_read));
+            fs::remove_file(repo.0.join(".oms/plan/autopilot-run.json")).unwrap();
 
             let small = call(&Reads::new("complete"), &["prompt", "--max-bytes", "512"]);
             assert_eq!(small.0, 0, "{}", message(&small));

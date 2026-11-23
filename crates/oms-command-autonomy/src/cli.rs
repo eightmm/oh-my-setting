@@ -138,7 +138,9 @@ impl Args {
                 ],
             ),
             "autopilot" => (
-                &["propose", "run", "status", "abandon", "reenter", "shadow"],
+                &[
+                    "propose", "run", "status", "abandon", "reenter", "shadow", "decide",
+                ],
                 &[
                     "repo",
                     "proposal",
@@ -152,6 +154,11 @@ impl Args {
                     "max-cycles",
                     "initial-tasks",
                     "replan-tasks",
+                    "milestones",
+                    "expected-decision-sha256",
+                    "action",
+                    "wait-binding",
+                    "expected-wait-sha256",
                     "allow-floor-change",
                     "provider-timeout",
                     "planner-timeout",
@@ -265,7 +272,7 @@ pub(crate) fn usage(tool: &str) -> &'static str {
             "Usage: oms plan-run --to PROVIDER (--id ID | --next) [--repo PATH]\n       oms plan-run --to PROVIDER --parallel [--max-writers 1..16] [--max-review-backlog 1..64] [--repo PATH]\n       oms plan-run --verify-combined --base-ref REF --base-sha SHA --candidates SHAS [--verify-cmd CMD] [--repo PATH]\nOptions: --repair 0..3 --land --auto-repair --retry-known --dry-run\n         --model MODEL --fallback-model MODEL --reasoning-effort E (auto|low|medium|high|xhigh|max|ultra)\n         --allow-verifier-change --allow-floor-change REASON --context-pack FILE\nRuns one preauthorized task; stops in review unless --land explicitly requests admission. Never commits or publishes.\n--parallel (opt-in; one controller per state repository) keeps up to --max-writers (default 2) non-overlapping ready tasks running, refilling each slot as a task ends. A failed task releases only its own lease. Landing is serialized. Exit 3: review backlog reached --max-review-backlog and no new task was claimed; 1: a task failed; 130: interrupted; 75: another controller holds the lock. --id and --dry-run are refused."
         }
         "autopilot" => {
-            "Usage: oms autopilot [options] propose|run|status|abandon|reenter|shadow\nOptions: --proposal FILE --expected-proposal-sha256 SHA --repo PATH\n         --planner P --worker P --reviewer P --allowed PATHS --base BRANCH --remote NAME\n         --max-cycles 1..10 --initial-tasks 1..12 --replan-tasks 1..2\n         --auto-repair --retry-known --allow-verifier-change --allow-floor-change REASON\n         --review-mode shadow|gate|off --collaboration off|auto --draft-pr --discover\n         --provider-timeout DUR --ROLE-timeout DUR --ROLE-model MODEL\n         --ROLE-fallback-model MODEL --ROLE-reasoning-effort E --reason TEXT --session ID\n         propose --issue REF; propose --restamp FILE --expected-proposal-sha256 SHA --issue REF\n         rebinds a proposal-review receipt to a stamped copy and clears blocked: github-issue\nExit 4 requires exact proposal review; unsafe stops exit 3. Frozen contracts, parks and exhausted lifetime budgets cannot silently reset."
+            "Usage: oms autopilot [options] propose|run|status|abandon|reenter|shadow|decide\nOptions: --proposal FILE --expected-proposal-sha256 SHA --repo PATH\n         --planner P --worker P --reviewer P --allowed PATHS --base BRANCH --remote NAME\n         --max-cycles 1..10 --initial-tasks 1..12 --replan-tasks 1..2 --milestones ID,ID\n         --auto-repair --retry-known --allow-verifier-change --allow-floor-change REASON\n         --review-mode shadow|gate|off --collaboration off|auto --draft-pr --discover\n         --provider-timeout DUR --ROLE-timeout DUR --ROLE-model MODEL\n         --ROLE-fallback-model MODEL --ROLE-reasoning-effort E --reason TEXT --session ID\n         propose --issue REF; propose --restamp FILE --expected-proposal-sha256 SHA --issue REF\n         rebinds a proposal-review receipt to a stamped copy and clears blocked: github-issue\n         decide --expected-decision-sha256 SHA --action inspect|propose-revision|wait|resume|stop\n         wait requires --wait-binding FILE --expected-wait-sha256 SHA\nStatus returns a checked next action and exact continuation. Parent agents inspect evidence and review proposals internally; ordinary transitions require no new user approval. Milestones are an initial authorized PROJECT list and share the same owner and lifetime budget.\nExit 4 requires exact proposal review; unsafe stops exit 3. Frozen contracts, parks and exhausted lifetime budgets cannot silently reset."
         }
         "goal-drive" => {
             "Usage: oms goal-drive [--repo PATH] [--to PROVIDER] [--max-cycles 1..10]\nOptions: --run-id ID --contract-id OWNER_ID --expected-ref REF --auto-repair\n         --retry-known --allow-verifier-change --allow-floor-change REASON\n         --model MODEL --fallback-model MODEL --reasoning-effort E --provider-timeout DUR\n         --campaign FILE [--dry-run|--status]\n         --commit-task ID [--commit-message TEXT]\nDrive an existing approved plan with fresh acceptance and bounded attempts. Every terminal writes a progress receipt; unsafe stops park."

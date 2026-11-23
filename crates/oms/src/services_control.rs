@@ -662,6 +662,299 @@ impl<'a> ControlServices<'a> {
 }
 
 impl oms_command_autonomy::Services for ControlServices<'_> {
+    fn classify_autonomy_failure(
+        &self,
+        text: &str,
+        exit: i32,
+    ) -> oms_command_autonomy::Result<Value> {
+        let args = vec![
+            "classify".into(),
+            "--exit".into(),
+            exit.to_string().into(),
+            "--".into(),
+            text.into(),
+        ];
+        let (code, raw, _) = oms_command_failure::run(&args, &self.source, self.interrupted);
+        if code != 0 {
+            return Err(autonomy_error(
+                code,
+                "native failure classification unavailable",
+            ));
+        }
+        oms_command_autonomy::value::parse(&raw)
+    }
+
+    fn discovery_section(
+        &self,
+        repo: &Path,
+        section: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        if section != "acceptance" {
+            return Err(autonomy_error(2, "native discovery section unavailable"));
+        }
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|e| autonomy_error(2, e))?;
+        let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+        let runtime = oms_runtime::storage::Runtime::open(
+            &roots.execution_repo,
+            &roots.state_repo,
+            &self.source,
+            &services,
+            interrupted,
+        )?;
+        let envelope = oms_runtime::projection::envelope(&runtime)?;
+        oms_command_autonomy::value::parse(&oms_runtime::value::canonical(&envelope)?)
+    }
+
+    fn external_observation(
+        &self,
+        repo: &Path,
+        state: &Path,
+        binding: &Value,
+        refresh: bool,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|e| autonomy_error(2, e))?;
+        let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+        if roots.state_repo != state {
+            return Err(autonomy_error(2, "external wait state repository changed"));
+        }
+        let runtime = oms_runtime::storage::Runtime::open(
+            &roots.execution_repo,
+            &roots.state_repo,
+            &self.source,
+            &services,
+            interrupted,
+        )?;
+        let binding = oms_runtime::value::from_serde(binding)?;
+        let row = oms_runtime::external::observe(&runtime, &binding, refresh)?;
+        oms_command_autonomy::value::parse(&oms_runtime::value::canonical(&row)?)
+    }
+
+    fn experience_context(
+        &self,
+        repo: &Path,
+        query: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        use oms_command_autonomy::value;
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|e| autonomy_error(2, e))?;
+        let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+        let runtime = oms_runtime::storage::Runtime::open(
+            &roots.execution_repo,
+            &roots.state_repo,
+            &self.source,
+            &services,
+            interrupted,
+        )?;
+        let head = &runtime.repository.head;
+        let clean_output = self
+            .run_supervised(
+                Spawn::new(
+                    self.scope,
+                    [
+                        "git",
+                        "--no-optional-locks",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all",
+                    ]
+                    .map(OsString::from)
+                    .to_vec(),
+                    Duration::from_secs(2),
+                    64 * 1024,
+                )
+                .cwd(repo),
+                interrupted,
+            )
+            .map_err(|e| autonomy_error(2, e))?;
+        let current_clean = clean_output.code == 0 && clean_output.stdout.is_empty();
+        let tree_output = self
+            .run_supervised(
+                Spawn::new(
+                    self.scope,
+                    ["git", "--no-optional-locks", "rev-parse", "HEAD^{tree}"]
+                        .map(OsString::from)
+                        .to_vec(),
+                    Duration::from_secs(2),
+                    128,
+                )
+                .cwd(repo),
+                interrupted,
+            )
+            .map_err(|e| autonomy_error(2, e))?;
+        let tree = String::from_utf8_lossy(&tree_output.stdout)
+            .trim()
+            .to_owned();
+        let spec = runtime
+            .bytes("PROJECT.md", 1024 * 1024)?
+            .ok_or_else(|| autonomy_error(2, "experience requires the current project contract"))?;
+        let spec_sha = value::hash(spec.as_ref());
+        let progress = runtime
+            .bytes(".oms/plan/progress.jsonl", 4 * 1024 * 1024)?
+            .unwrap_or_default();
+        if !progress.is_empty() && !progress.ends_with(b"\n") {
+            return Err(autonomy_error(
+                2,
+                "experience progress source has a torn tail",
+            ));
+        }
+        let mut facts = Vec::new();
+        for line in progress.split(|b| *b == b'\n').filter(|v| !v.is_empty()) {
+            if facts.len() >= 4096 {
+                return Err(autonomy_error(2, "experience source row bound exceeded"));
+            }
+            facts.push(value::parse(line)?);
+        }
+        let args = [
+            "show",
+            "--repo",
+            roots
+                .state_repo
+                .to_str()
+                .ok_or_else(|| autonomy_error(2, "experience requires a Unicode repository"))?,
+            "--recent",
+            "32",
+            "--json",
+        ]
+        .map(OsString::from);
+        let mut read_journal =
+            oms_command_autonomy::Invocation::new("journal", repo, args.to_vec());
+        read_journal.wall = Duration::from_secs(5);
+        read_journal.output_limit = 256 * 1024;
+        // The journal's own lock remains authoritative, inside a bounded
+        // native observer process so a busy writer cannot stall planning.
+        let (journal_code, journal_raw, _) = self
+            .invoke_with_scope(&read_journal, self.scope, interrupted)
+            .unwrap_or((2, Vec::new(), Vec::new()));
+        let journal = if journal_code == 0 && journal_raw.len() <= 256 * 1024 {
+            value::parse(&journal_raw)?
+        } else {
+            Value::Null
+        };
+        let mut entries = vec![];
+        let mut seen = std::collections::BTreeSet::new();
+        for event in journal["events"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+        {
+            let id = value::text(&event["source"], "id");
+            if !matches!(
+                value::text(&event["source"], "type"),
+                "autopilot" | "goal-drive"
+            ) {
+                continue;
+            }
+            let Some(fact) = facts
+                .iter()
+                .rev()
+                .find(|r| r["run_id"] == id || r["result_sha256"] == id)
+            else {
+                continue;
+            };
+            if !current_clean
+                || tree_output.code != 0
+                || fact["worktree_clean"] != true
+                || fact["tree"] != tree
+                || fact["spec_sha256"] != spec_sha
+                || !(fact["base_sha"] == head.as_str() || fact["head"] == head.as_str())
+            {
+                continue;
+            }
+            if !matches!(
+                value::text(fact, "kind"),
+                "terminal" | "autopilot-external-result"
+            ) {
+                continue;
+            }
+            if fact["kind"] == "autopilot-external-result" {
+                let Ok(current) = oms_runtime::external::observe(
+                    &runtime,
+                    &oms_runtime::value::from_serde(&fact["binding"])?,
+                    false,
+                ) else {
+                    continue;
+                };
+                let current = value::parse(&oms_runtime::value::canonical(&current)?)?;
+                if current["identity_valid"] != true
+                    || current["status"] != "terminal"
+                    || current["result_sha256"] != fact["result_sha256"]
+                {
+                    continue;
+                }
+            }
+            let sha = value::hash(value::canonical(fact)?);
+            if !seen.insert(sha.clone()) {
+                continue;
+            }
+            let item = serde_json::json!({"kind":"observed-outcome","journal_event_id":event["event_id"],"source_path":".oms/plan/progress.jsonl","source_sha256":sha,
+                "head":head,"spec_sha256":spec_sha,"status":fact["status"],"reason":fact["reason"],"cause":fact["cause"],
+                "outcome":fact["observation"]["outcome"],"progress_sha256":fact["observation"]["progress_sha256"],"result_sha256":fact["result_sha256"]});
+            if value::canonical(&item)?.len() <= 2048 {
+                entries.push(item);
+            }
+            if entries.len() == 6 {
+                break;
+            }
+        }
+        // The existing provider view applies curation, retirement, source
+        // citation validation and query-ranked project/global fallback. Only
+        // its relevant section is retained; unrelated recency is not injected.
+        let (memory_code, memory_raw, _) = oms_command_memory::provider_context(
+            repo,
+            &query.chars().take(300).collect::<String>(),
+            interrupted,
+        );
+        let memory = if memory_code == 0 {
+            String::from_utf8_lossy(&memory_raw)
+                .find("### relevant recall (")
+                .map(|at| {
+                    String::from_utf8_lossy(&memory_raw)[at..]
+                        .chars()
+                        .take(4096)
+                        .collect::<String>()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        runtime.invalidate(Path::new("PROJECT.md"));
+        let final_view = oms_runtime::Services::repository_view(&services, repo)?;
+        if final_view.head != *head
+            || final_view.worktree_state != runtime.repository.worktree_state
+            || runtime
+                .bytes("PROJECT.md", 1024 * 1024)?
+                .as_ref()
+                .is_none_or(|raw| value::hash(raw.as_ref()) != spec_sha)
+        {
+            return Err(autonomy_error(
+                2,
+                "experience applicability changed during read",
+            ));
+        }
+        let result = serde_json::json!({"schema":1,"advisory":true,"repo_head":head,"spec_sha256":spec_sha,
+            "source_refs":[{"path":".oms/plan/progress.jsonl","sha256":value::hash(progress.as_ref())}],
+            "entries":entries,"memory_recall":memory,"journal_available":journal_code==0,"memory_available":memory_code==0,
+            "authority":"reference only; current source and fresh verification govern"});
+        if value::canonical(&result)?.len() > 16 * 1024 {
+            return Err(autonomy_error(2, "experience context exceeds byte bound"));
+        }
+        Ok(result)
+    }
+
     /// Resolves explicit assignments and `config/panel-routing.json` tier defaults
     /// using the native `oms-command-peer` routing table, failing closed on missing
     /// tiers or `provider-default`.

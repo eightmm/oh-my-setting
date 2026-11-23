@@ -43,6 +43,7 @@ pub enum HandoffProjection {
     NextStep,
     JournalDecisions,
     ReviewFindings,
+    AutopilotStatus,
 }
 impl HandoffProjection {
     pub fn command(self, repo: &Path, state: &Path, timeout: Duration) -> Invocation {
@@ -55,6 +56,7 @@ impl HandoffProjection {
                 "peer-review",
                 &["findings", "list", "--status", "open", "--json"],
             ),
+            Self::AutopilotStatus => ("autopilot", &["status"]),
         };
         let mut argv = vec!["oms".into(), tool.into()];
         argv.extend(args.iter().map(|arg| OsString::from(*arg)));
@@ -398,6 +400,16 @@ impl TeamLaunchBinding<'_> {
     }
 }
 pub trait Executor: Sync {
+    /// Advisory source-checked context from the existing journal/memory owners.
+    /// This read cannot dispatch work or grant acceptance/resume authority.
+    fn experience_context(
+        &self,
+        _repo: &Path,
+        _query: &str,
+        _interrupted: &AtomicBool,
+    ) -> Result<oms_command_autonomy::services::ExperienceContext> {
+        Err(Error::new(2, "native experience context unavailable"))
+    }
     /// A host with an existing staged native launcher may execute only this
     /// fixed read. Missing integration is an explicit gap, never a PATH fallback.
     fn handoff_projection(

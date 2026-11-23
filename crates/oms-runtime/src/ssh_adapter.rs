@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 mod resumable;
 mod stream;
 
-const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]\ncollect: --host HOST --repo REPO --remote-dir DIR --remote-path PATH --dest PATH [--expected-sha256 HEX] [--max-bytes N] [--timeout-seconds N] [--resume --expected-size N [--chunk-bytes N]]";
+const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]\nprobe, exec, reconcile, cancel: [--timeout-seconds N] bounds the complete local SSH observer, including connected waits; a timeout preserves remote outcome as unknown. Defaults: exec 300s, others 30s.\ncollect: --host HOST --repo REPO --remote-dir DIR --remote-path PATH --dest PATH [--expected-sha256 HEX] [--max-bytes N] [--timeout-seconds N] [--resume --expected-size N [--chunk-bytes N]]";
 const DEFAULT_COLLECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COLLECT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_LEDGER_OUTPUT: usize = 512 * 1024;
@@ -147,7 +147,14 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             "--expected-size" if action == "collect" => &mut expected_size,
             "--chunk-bytes" if action == "collect" => &mut chunk_bytes,
             "--max-bytes" if action == "collect" => &mut max_bytes,
-            "--timeout-seconds" if action == "collect" => &mut timeout_seconds,
+            "--timeout-seconds"
+                if matches!(
+                    action,
+                    "collect" | "exec" | "reconcile" | "cancel" | "probe"
+                ) =>
+            {
+                &mut timeout_seconds
+            }
             _ => return Err(error(format!("unknown option: {flag}"))),
         };
         i += 1;
@@ -217,7 +224,11 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 .ok_or_else(|| error("--timeout-seconds must be in 1..=86400"))
         })
         .transpose()?
-        .unwrap_or(300);
+        .unwrap_or(if matches!(action, "reconcile" | "cancel" | "probe") {
+            30
+        } else {
+            300
+        });
     if let Some(digest) = expected_sha256.as_deref() {
         validate_sha256_hex(digest, "--expected-sha256")?;
     }
@@ -261,7 +272,11 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     let mut value = serde_json::json!({"schema":1,"action":action,"host":host});
     let code;
     if action == "probe" {
-        let out = ssh.arg("printf ok").output().map_err(error)?;
+        let out = stream::output(
+            ssh.arg("printf ok"),
+            started + Duration::from_secs(timeout_seconds),
+            interrupted,
+        )?;
         code = exit_code(out.status);
         value["control_path"] = control.into();
         value["exit_code"] = code.into();
@@ -292,6 +307,8 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 op_id,
                 control: &control,
                 pretty,
+                deadline: started + Duration::from_secs(timeout_seconds),
+                interrupted,
             })
         } else {
             run_cancel(CancelRequest {
@@ -305,6 +322,8 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 grace_seconds,
                 control: &control,
                 pretty,
+                deadline: started + Duration::from_secs(timeout_seconds),
+                interrupted,
             })
         };
     }
@@ -419,6 +438,8 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             tail: &tail,
             control: &control,
             pretty,
+            deadline: started + Duration::from_secs(timeout_seconds),
+            interrupted,
         });
     } else {
         require(!tail.is_empty(), "command required after --")?;
@@ -445,7 +466,11 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         value["command_sha256"] = sha256(remote_command.as_bytes()).into();
         value["control_path"] = control.into();
         value["started_at"] = now()?.into();
-        let out = ssh.arg(&remote_command).output().map_err(error)?;
+        let out = stream::output(
+            ssh.arg(&remote_command),
+            started + Duration::from_secs(timeout_seconds),
+            interrupted,
+        )?;
         value["completed_at"] = now()?.into();
         code = exit_code(out.status);
         value["exit_code"] = code.into();
@@ -812,13 +837,27 @@ fn resolve_existing(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn lock_remote_op(repo: &Path, cwd: &Path, op_id: &str) -> Result<oms_lock::Guard> {
+fn lock_remote_op(
+    repo: &Path,
+    cwd: &Path,
+    op_id: &str,
+    deadline: Instant,
+) -> Result<oms_lock::Guard> {
     let rel = PathBuf::from(format!(".oms/runtime/remote-ops/{op_id}.json"));
     let resolved = resolve_existing(&repo.join(&rel))?;
     let mut settings = oms_lock::Settings::from_env()
         .map_err(|e| status(e.exit_code(), format!("remote op lock: {e}")))?;
     settings.mode = oms_lock::Mode::Mkdir;
-    settings.timeout = Duration::from_secs(15);
+    settings.timeout = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero())
+        .ok_or_else(|| {
+            status(
+                124,
+                "SSH operation deadline exceeded while acquiring custody",
+            )
+        })?
+        .min(Duration::from_secs(15));
     settings.cwd = cwd.to_path_buf();
     let root = if let Some(raw) = std::env::var_os("OMS_LOCK_DIR") {
         let raw_bytes = raw.as_bytes();
@@ -1142,6 +1181,8 @@ struct DurableExecRequest<'a> {
     tail: &'a [OsString],
     control: &'a str,
     pretty: bool,
+    deadline: Instant,
+    interrupted: &'a AtomicBool,
 }
 
 fn request_matches(
@@ -1246,7 +1287,7 @@ pub(crate) fn command_digest(argv: &[OsString]) -> Result<String> {
 fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
     let cmd_script = command_script(req.tail)?;
     let command_sha256 = sha256(cmd_script.as_bytes());
-    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
+    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id, req.deadline)?;
 
     if let Some(mut existing) = read_remote_op(req.repo, req.op_id)? {
         require(
@@ -1434,10 +1475,14 @@ fi
         snap_val = quote(req.snapshot.unwrap_or("")),
         op_tag = quote(&op_tag),
     );
-    let out = build_ssh(req.host, req.port, req.control)
-        .arg(format!("sh -lc {}", quote(&remote_script)))
-        .output()
-        .map_err(error)?;
+    let out = operation_output(
+        build_ssh(req.host, req.port, req.control).arg(format!("sh -lc {}", quote(&remote_script))),
+        req.repo,
+        req.op_id,
+        &mut record,
+        req.deadline,
+        req.interrupted,
+    )?;
 
     let ssh_uncertain = out.status.code().is_none() || out.status.code() == Some(255);
     if ssh_uncertain || !out.status.success() {
@@ -1556,6 +1601,32 @@ fn verify_remote_meta_binding(record: &serde_json::Value, meta: &serde_json::Val
     Ok(())
 }
 
+fn operation_output(
+    command: &Command,
+    repo: &Path,
+    op_id: &str,
+    record: &mut serde_json::Value,
+    deadline: Instant,
+    interrupted: &AtomicBool,
+) -> Result<std::process::Output> {
+    match stream::output(command, deadline, interrupted) {
+        Ok(output) => Ok(output),
+        Err(e) => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            record["observation_exit"] = e.code.into();
+            record["reconcile_required"] = true.into();
+            // In particular, a killed cancel observer is not a remote cancel
+            // receipt. Reconciliation must prove the eventual remote result.
+            if record["action"] == "cancel" {
+                record["signal_sent"] = serde_json::Value::Null;
+            }
+            write_remote_op(repo, op_id, record)?;
+            Err(e)
+        }
+    }
+}
+
 struct ReconcileRequest<'a> {
     cwd: &'a Path,
     repo: &'a Path,
@@ -1566,6 +1637,8 @@ struct ReconcileRequest<'a> {
     op_id: &'a str,
     control: &'a str,
     pretty: bool,
+    deadline: Instant,
+    interrupted: &'a AtomicBool,
 }
 
 fn validate_existing_scope(
@@ -1607,7 +1680,7 @@ fn validate_existing_scope(
 }
 
 fn run_reconcile(req: ReconcileRequest<'_>) -> Result<Response> {
-    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
+    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id, req.deadline)?;
     let mut record =
         read_remote_op(req.repo, req.op_id)?.ok_or_else(|| error("unknown --op-id"))?;
     let remote_dir = validate_existing_scope(
@@ -1694,10 +1767,14 @@ emit_part "$tok" meta "$op_dir/meta.json"
             .and_then(|v| v.as_u64())
             .and_then(|n| u16::try_from(n).ok())
     });
-    let out = build_ssh(req.host, effective_port, req.control)
-        .arg(format!("sh -lc {}", quote(&script)))
-        .output()
-        .map_err(error)?;
+    let out = operation_output(
+        build_ssh(req.host, effective_port, req.control).arg(format!("sh -lc {}", quote(&script))),
+        req.repo,
+        req.op_id,
+        &mut record,
+        req.deadline,
+        req.interrupted,
+    )?;
     if !out.status.success() {
         record["state"] = "unknown".into();
         record["updated_at"] = now()?.into();
@@ -1845,10 +1922,12 @@ struct CancelRequest<'a> {
     grace_seconds: u64,
     control: &'a str,
     pretty: bool,
+    deadline: Instant,
+    interrupted: &'a AtomicBool,
 }
 
 fn run_cancel(req: CancelRequest<'_>) -> Result<Response> {
-    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
+    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id, req.deadline)?;
     let mut record =
         read_remote_op(req.repo, req.op_id)?.ok_or_else(|| error("unknown --op-id"))?;
     let remote_dir = validate_existing_scope(
@@ -2103,10 +2182,14 @@ emit_part "$tok" stderr "$op_dir/stderr"
             .and_then(|v| v.as_u64())
             .and_then(|n| u16::try_from(n).ok())
     });
-    let out = build_ssh(req.host, effective_port, req.control)
-        .arg(format!("sh -lc {}", quote(&script)))
-        .output()
-        .map_err(error)?;
+    let out = operation_output(
+        build_ssh(req.host, effective_port, req.control).arg(format!("sh -lc {}", quote(&script))),
+        req.repo,
+        req.op_id,
+        &mut record,
+        req.deadline,
+        req.interrupted,
+    )?;
     if !out.status.success() {
         record["state"] = "unknown".into();
         record["updated_at"] = now()?.into();
@@ -2970,6 +3053,111 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    #[test]
+    fn connected_exec_reconcile_and_cancel_observers_share_a_wall_deadline() {
+        if std::env::var_os("OMS_SSH_WALL_CHILD").is_none() {
+            let temp = TempDir::new().unwrap();
+            let fake = temp.0.join("ssh");
+            std::fs::write(
+                &fake,
+                "#!/bin/sh\nprintf 'connected\\n' >> \"$OMS_TEST_ARGS\"\nexec sleep 30\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result=Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","ssh_adapter::tests::connected_exec_reconcile_and_cancel_observers_share_a_wall_deadline","--nocapture"])
+                .env("OMS_SSH_WALL_CHILD","1").env("OMS_SSH_BIN",fake)
+                .env("OMS_TEST_DIR",&temp.0).env("OMS_TEST_ARGS",temp.0.join("calls"))
+                .env("OMS_LOCK_DIR",temp.0.join("locks")).env_remove("OMS_HARNESS_CHILD")
+                .status().unwrap();
+            assert!(result.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        init_temp_git_repo(&repo);
+        std::fs::create_dir(&remote).unwrap();
+        let args = [
+            "exec",
+            "--host",
+            "fixture",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--remote-dir",
+            remote.to_str().unwrap(),
+            "--op-id",
+            "wall-op",
+            "--timeout-seconds",
+            "1",
+            "--",
+            "true",
+        ];
+        let before = Instant::now();
+        let first = invoke(&args, &root);
+        assert_eq!(
+            first.code,
+            124,
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert!(
+            before.elapsed() < Duration::from_secs(5),
+            "connected exec observer was unbounded"
+        );
+        let path = repo.join(".oms/runtime/remote-ops/wall-op.json");
+        let read =
+            || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(read()["state"], "unknown");
+        assert_eq!(read()["observation_exit"], 124);
+        let calls = || {
+            std::fs::read_to_string(root.join("calls"))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        assert_eq!(calls(), 1);
+        assert_eq!(invoke(&args, &root).code, 75);
+        assert_eq!(calls(), 1, "unknown start must never resend exec");
+        for action in ["reconcile", "cancel"] {
+            let start = Instant::now();
+            let out = invoke(
+                &[
+                    action,
+                    "--host",
+                    "fixture",
+                    "--repo",
+                    repo.to_str().unwrap(),
+                    "--op-id",
+                    "wall-op",
+                    "--timeout-seconds",
+                    "1",
+                ],
+                &root,
+            );
+            assert_eq!(
+                out.code,
+                124,
+                "{action}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "connected {action} observer was unbounded"
+            );
+            let row = read();
+            assert_eq!(row["state"], "unknown");
+            assert_eq!(row["reconcile_required"], true);
+            if action == "cancel" {
+                assert!(
+                    row["signal_sent"].is_null(),
+                    "local timeout is not remote cancellation proof"
+                );
+            }
+        }
+        assert_eq!(calls(), 3);
     }
 
     #[test]

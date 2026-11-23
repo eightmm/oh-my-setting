@@ -1204,6 +1204,90 @@ impl<'a> RuntimeServices<'a> {
 }
 
 impl oms_runtime::Services for RuntimeServices<'_> {
+    fn refresh_external(
+        &self,
+        repo: &Path,
+        state: &Path,
+        binding: &oms_runtime::value::Value,
+    ) -> oms_command_plan::Result<()> {
+        oms_runtime::external::validate_binding(binding)?;
+        match binding.text("source") {
+            "ci" => {
+                let identity = oms_command_landing::V::parse(&oms_runtime::value::canonical(
+                    binding.get("identity"),
+                )?)
+                .map_err(plan_error)?;
+                oms_command_landing::ci::observe_attempt(repo, state, &identity, self.cancel())
+                    .map_err(|e| oms_command_plan::Error {
+                        code: e.code,
+                        message: e.message,
+                    })?;
+            }
+            "slurm" | "experiment" => {
+                let id = binding.get("identity");
+                let experiment = binding.text("source") == "experiment";
+                let mut invocation = oms_command_autonomy::Invocation::new(
+                    if experiment {
+                        "runtime"
+                    } else {
+                        "slurm-submit"
+                    },
+                    state,
+                    vec![],
+                );
+                if experiment {
+                    invocation.args = vec![
+                        "experiment".into(),
+                        "reconcile".into(),
+                        "--repo".into(),
+                        state.as_os_str().to_owned(),
+                        "--run-id".into(),
+                        id.text("run_id").into(),
+                    ];
+                } else {
+                    invocation.args = vec![
+                        "reconcile".into(),
+                        "--repo".into(),
+                        state.as_os_str().to_owned(),
+                        "--key".into(),
+                        id.text("key").into(),
+                        "--json".into(),
+                    ];
+                    if !id.text("job_id").is_empty() {
+                        invocation
+                            .args
+                            .extend(["--job-id".into(), id.text("job_id").into()]);
+                    }
+                    invocation.environment.push((
+                        "OMS_SLURM_SUBMITS_FILE".into(),
+                        state.join(".oms/slurm-submits.jsonl").into_os_string(),
+                    ));
+                }
+                invocation.wall = Duration::from_secs(15);
+                invocation.output_limit = 64 * 1024;
+                let (exit, _, _) = oms_command_autonomy::Services::invoke(
+                    &self.control,
+                    &invocation,
+                    self.cancel(),
+                )
+                .map_err(|e| oms_command_plan::Error {
+                    code: e.code,
+                    message: e.message,
+                })?;
+                if ![0, 1, 75].contains(&exit) {
+                    return Err(oms_command_plan::Error {
+                        code: exit,
+                        message:
+                            "external observation unavailable or timed out; execution was not retried"
+                                .into(),
+                    });
+                }
+            }
+            _ => return Err(plan_error("external source has no refresh adapter")),
+        }
+        Ok(())
+    }
+
     fn resource_action(
         &self,
         repo: &Path,

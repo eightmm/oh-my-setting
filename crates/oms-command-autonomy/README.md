@@ -34,6 +34,9 @@ that producer's approval, lifecycle, room, publication and acceptance interfaces
 | `read_issue` | One bounded GitHub GET, without linked-content traversal. The local implementation uses `gh api` with a 20-second, 512-KiB bound. |
 | `repair_feedback`, `revalidate_repair_feedback` | Native landing feedback observations and fresh exact-PR/head/run-attempt or comment-revision checks. Defaults refuse; evidence never grants task, provider or publication authority. |
 | `discovery_section` | Supply native metrics, review and CI projections. Missing sections carry explicit incomplete coverage. |
+| `classify_autonomy_failure` | Preserve the existing native failure code and recovery label. A retryable label never authorizes a retry. |
+| `external_observation` | Observe one exact CI, SSH, Slurm or experiment identity through its owning producer. Read-only status uses retained state; wait admission and resume refresh bounded native observations without submission. |
+| `experience_context` | Return bounded journal facts and eligible memory after current source/head/spec checks. Planning consumes them as advisory observations only. |
 | `observe_journal` | Forward durable goal/autopilot observations to the existing native Work Journal producer; observation failures do not replace canonical outcomes. |
 | inherited plan services | Supply native approval records, producer locks/projections, acceptance execution, controller identity, and publication products where those plan operations require them. |
 
@@ -64,6 +67,7 @@ trusted host integrations; no CLI argument selects an alternate backend.
 | `runner` | One task, reviewed assignment, exact lease, failure-ledger preflight, isolated delegation, explicit patch landing and one durable same-lease repair. |
 | `goal` | Fresh acceptance, vacuity/stall checks, lifetime cycle reservations, serial landing and exact-tree Git publication with restartable commit intents. |
 | `receipt` | Schema-1 frozen autopilot receipts, exact proposal approval, parked/exhausted refusal, reentry/shadow evidence, one durable remainder reservation, semantic review and optional Draft PR producer calls. |
+| `adaptive` | Checked next actions, retained review sources, meaningful criterion/result progress across restarts, explicit external-result consumption and authorized milestone observation. No alternate Plan or acceptance authority. |
 | `campaign` | Digest-bound campaign manifests, locked lifetime reservations/settlements, bounded candidate artifacts, isolated verification, consolidation and double-verified handoff evidence. Execution is serial within the declared concurrency ceilings. |
 | `campaign_usage` | Optional soft token/cost admission against canonical provider receipts, historical settlement and retained unknown liabilities. |
 | `advisory`, `handoff`, `conflicts` | Lifecycle overlays, stall/repair projections, baseline and allocation arithmetic, mechanical handoffs, pickup markers and read-only pairwise conflict previews. These observations grant no authority. |
@@ -108,6 +112,73 @@ the same reference. Auto apply/resume require it, while legacy proposals without
 the field remain usable outside auto mode. Reviewed proposal SHA/CAS and fresh
 acceptance remain separate authority boundaries; discussion never applies tasks
 or starts an unbounded next cycle.
+
+## Evidence-driven continuation
+
+The normal `autopilot` entry enables checked continuation; there is no additional
+`--adaptive` mode. The active Main uses `autopilot status`, reads `next_action`,
+and follows its exact argv. On a park, `autopilot decide
+--expected-decision-sha256 SHA --action inspect` returns existing discovery and
+preserved evidence. `--action propose-revision` may create one bounded `r1-`
+proposal when the observed evidence and original budget permit it. The Main
+reviews the exact proposal and supplies its SHA to `autopilot run`, using the
+existing native Plan transaction. This is Parent agent review within the user's
+authority; it does not ask the user to approve every cycle.
+
+Configured native provider fallback remains bounded. An incomplete or unknown
+retained review stays an inspection hold; this controller does not add a new
+automatic reviewer resend policy. A known-ended worker may resume only under
+the frozen `retry-known` choice, unchanged task/lease lineage, native retryable
+failure and complete physical cleanup evidence. The resumed worker consumes
+another original cycle; late or unknown accounting never refunds earlier cost.
+
+Decision tokens bind receipt bytes, owner, Plan bytes, current head/tree, frozen
+spec, review sources and current external observations. Changing any bound
+source requires a new status observation. Review runs use unique directories;
+their whole-change scope, verifier receipt, verdict, accepted source quotations
+and artifact hashes are checked. A mechanical test failure, provider timeout,
+incomplete review or changed source is not a verified semantic finding. A valid
+blocking finding can inform a corrective proposal but cannot apply it, accept a
+task, or change the frozen scope/verifier/provider. A corrective tranche must
+actually finish its canonical tasks even if the old acceptance already passes.
+The next review and final acceptance are fresh.
+
+Progress is persisted in existing `progress.jsonl`. Exact output identities stay
+separate from narrow timestamp/temporary-path normalization. New verified
+criteria, canonical completion of related tasks and a newly validated experiment
+cell may advance progress. Reissued receipt IDs, unrelated Git changes, task
+cancellations and repeated results do not. A newly admitted correction receives
+one attempt under its proposal identity without erasing earlier stalls. Cycle
+and sole-remainder reservations survive restarts. A crash between reservation
+and receipt CAS recovers that exact intent; a dispatched planner with an unknown
+outcome is never automatically sent again.
+
+`--milestones ID,ID` freezes an ordered subset of the existing PROJECT Roadmap at
+initial proposal. Each selected milestone requires actual criterion evidence and
+canonical completion of its tasks. Its checks can establish the subset while
+the global goal acceptance still fails. The next milestone goes through a new
+exact proposal review under the same owner, scope, provider and lifetime cycle
+budget. No new goal is synthesized. The last milestone still needs global
+acceptance, criterion coverage and the configured final review.
+
+External waiting is explicit: `decide --action wait --wait-binding FILE
+--expected-wait-sha256 SHA` binds one canonical identity; `--action resume`
+consumes a newly confirmed exact terminal result. Both use the decision digest.
+Pending/running observations grant no launch or completion authority. A terminal
+CI result does not accept the goal. A negative experiment result can be useful
+diagnostic evidence. Its native `experiment.next_action` can request a missing
+registered cell or a separately reviewed hypothesis through the same bounded
+planning path, without guessing another arm's command or changing preregistration.
+An explicit `decide --action stop` retains evidence and spent budgets; a later
+terminal result cannot restart it.
+
+The current Main, handoff and runtime projections expose these continuations.
+The existing opt-in tick applies its idle, live-child and daily-cap gates; it does
+not create another scheduler. A wake launch carries an exact owner/input-receipt
+tuple and durable CLI started/finished observations. Those observations prove
+entry/exit only, never provider delivery or task acceptance. Prior journal and
+memory facts are advisory inputs to actual initial/remainder planning; stale or
+unavailable experience contributes no authority.
 
 ## Campaign usage admission
 
@@ -179,6 +250,7 @@ any apply, followed by the plan producer's locked digest/CAS check.
 | `.oms/plan/tasks.json` and native plan records | The native plan producer owns locks, CAS and replay. A failed worker cleanup releases only this call's exact active lease. Review/repair evidence and another claimant's lease are preserved. |
 | `progress.jsonl`, frozen commit patches, Git objects/ref/index | Attempts are recorded before calls. Frozen patches precede commit intents. A standard exclusive `index.lock` fences immutable-tree publication through expected-old ref CAS and exact index synchronization. A stop after ref publication retains an open intent for parent/tree reconciliation. A hard kill can leave Git's lock: it is never stolen automatically. Unreferenced objects and orphan immutable patches confer no publication authority. |
 | `autopilot-run.json`, archives, abandonment/approval/reentry/shadow/replan records | A foreground controller lock serializes native controllers, with exact receipt-byte CAS. Frozen fields cannot change. Archive/retirement evidence precedes removal. Parked receipts cannot silently resume; cycle and sole-remainder reservations survive restart. Reentry uses native dead-owner lease recovery. |
+| `.oms/plan/adaptive/*.json` and existing progress rows | Immutable evidence binds checked Parent decisions, corrective/milestone intents and consumed external results. Exact reservation prefixes replay without refund; unknown dispatched calls do not resend. Explicit stop remains absorbing for automatic wake. |
 | Campaign manifest, `events.jsonl`, artifacts and handoff | Manifest bytes bind the directory digest. A controller lock and ledger lock serialize mutations. Reservations remain spent after a kill; unsettled reservations become abandoned under the next controller, never refunded. Candidate/handoff publication is immutable. Solved/stopped ledgers do not restart. |
 | Temporary indices, merge object directories and candidate checkouts | Private indices/merge objects are removed on ordinary exit. Hard-kill leftovers grant no ref/index authority. Managed candidate checkout creation/removal belongs to the injected native scratch producer and its ownership records. |
 | `.oms/handoffs/consumed.jsonl` | Advisory pickup records use the shared durable writer under a file lock. Distinct sessions are counted by projection. No pickup hides a handoff or grants resume authority. |
@@ -257,3 +329,7 @@ fixture tests. The owning host must inject native services before selecting
 this family for live orchestration. In particular, `Services` extends the
 plan producer's interfaces; the default unavailable callbacks grant no provider,
 approval, publication, routing, context-validation or controller authority.
+Local regression tests exercise decision/source drift, reservation interruption,
+restart progress, duplicate evidence, negative experiment observations and the
+real CLI boundaries. They do not establish paid-provider or HPC operational
+effectiveness; no live provider, SSH, Slurm or GPU run is part of these gates.
