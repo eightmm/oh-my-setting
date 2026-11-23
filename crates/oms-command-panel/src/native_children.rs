@@ -222,6 +222,18 @@ fn safe(s: &str, chars: usize) -> String {
     oms_panel_core::redact(bounded.as_bytes()).unwrap_or_default()
 }
 
+/// A provider-reported model exactly as published, or `None`: never trimmed, clipped or
+/// redacted into a different value.
+pub(crate) fn observed_model(raw: &str) -> Option<&str> {
+    let placeholder = raw.starts_with('<') && raw.ends_with('>');
+    let plain = !raw.is_empty()
+        && raw.trim() == raw
+        && raw.chars().count() <= 80
+        && !raw.chars().any(char::is_control)
+        && !placeholder;
+    (plain && oms_panel_core::redact(raw.as_bytes()).is_ok_and(|shown| shown == raw)).then_some(raw)
+}
+
 /// The opaque row id a provider-native child is painted and bound under.
 pub(crate) fn participant_id(provider: &str, id: &str) -> String {
     format!(
@@ -1288,7 +1300,10 @@ fn codex_rows_checked(
                 &mut usage_budget,
             )
         {
-            child_row["native_response_usage"] = usage;
+            child_row["native_response_usage"] = usage.0;
+            if let Some(model) = usage.1.as_deref() {
+                child_row["observed_model"] = json!(model);
+            }
         }
         let participant = text(&child_row, "participant").to_owned();
         let participant = participant.as_str();
@@ -1298,11 +1313,13 @@ fn codex_rows_checked(
                 .as_object_mut()
                 .unwrap()
                 .remove("native_response_usage");
+            child_row.as_object_mut().unwrap().remove("observed_model");
             for earlier in &mut observed.rows {
                 if text(earlier, "participant") == participant
                     && let Some(fields) = earlier.as_object_mut()
                 {
                     fields.remove("native_response_usage");
+                    fields.remove("observed_model");
                     fields.remove("seen_at");
                     fields.remove("seen_observed_ms");
                 }
@@ -1361,7 +1378,9 @@ fn codex_rows_checked(
         }
         if !confirmed {
             for row in &mut observed.rows {
-                row.as_object_mut().unwrap().remove("native_response_usage");
+                let fields = row.as_object_mut().unwrap();
+                fields.remove("native_response_usage");
+                fields.remove("observed_model");
             }
         }
     }
@@ -1379,7 +1398,7 @@ fn codex_child_usage(
     parent: &str,
     parent_header: &[u8],
     remaining: &mut usize,
-) -> Option<Value> {
+) -> Option<(Value, Option<String>)> {
     #[cfg(test)]
     CODEX_TEST_APPEND_PARENT.with(|path| {
         if let Some((path, alter)) = path.borrow_mut().take() {
@@ -1435,9 +1454,10 @@ fn codex_child_usage(
             json!({"input_tokens":u.input, "output_tokens":u.output, "cached_input_tokens":u.cache_read, "cache_write_input_tokens":u.cache_write, "reasoning_output_tokens":u.reasoning, "total_tokens":u.total}),
         )
     };
-    Some(json!({"response": counters(&observation.payload["usage"])?,
+    let usage = json!({"response": counters(&observation.payload["usage"])?,
         "turn": counters(&observation.payload["turn_token_usage"])?,
-        "thread": counters(&observation.payload["thread_token_usage"])?}))
+        "thread": counters(&observation.payload["thread_token_usage"])?});
+    Some((usage, observation.model))
 }
 
 pub(crate) fn codex_chat_turn_matches(terminal: &str, expected: &CodexLocator) -> bool {
@@ -1616,6 +1636,7 @@ struct CodexUsageObservation {
     offset: usize,
     payload: Value,
     usage: CodexResponseUsage,
+    model: Option<String>,
 }
 
 fn codex_history(
@@ -1646,6 +1667,8 @@ fn codex_history_parts(
     collect_chat: bool,
 ) -> (String, Option<CodexUsageObservation>) {
     let mut contexts = BTreeMap::new();
+    // Per turn: the one model every turn_context named; None once they disagree or omit it.
+    let mut models = BTreeMap::<String, Option<String>>::new();
     let mut current = None;
     let mut messages = Vec::new();
     let mut observations = BTreeMap::<String, Option<CodexUsageObservation>>::new();
@@ -1667,6 +1690,19 @@ fn codex_history_parts(
                         && payload.get("thread_id").is_none_or(|id| id == child);
                     let prior = contexts.entry(turn.to_owned()).or_insert(exact);
                     *prior &= exact;
+                    let model = payload["model"]
+                        .as_str()
+                        .and_then(observed_model)
+                        .filter(|_| exact)
+                        .map(str::to_owned);
+                    models
+                        .entry(turn.to_owned())
+                        .and_modify(|known| {
+                            if *known != model {
+                                *known = None;
+                            }
+                        })
+                        .or_insert(model);
                     if *prior {
                         current = Some(turn.to_owned());
                     }
@@ -1693,6 +1729,7 @@ fn codex_history_parts(
                                 offset,
                                 usage: CodexResponseUsage::parse(payload)?,
                                 payload: payload.clone(),
+                                model: None,
                             })
                         });
                 }
@@ -1733,6 +1770,15 @@ fn codex_history_parts(
                     .is_none_or(|exact| *exact)
             })
             .max_by_key(|observation| observation.offset)
+            .map(|mut observation| {
+                let turn = text(&observation.payload, "turn_id");
+                observation.model = contexts
+                    .get(turn)
+                    .copied()
+                    .filter(|exact| *exact)
+                    .and_then(|_| models.remove(turn).flatten());
+                observation
+            })
     });
     (history, observation)
 }
@@ -3450,6 +3496,102 @@ mod tests {
         assert_eq!(ambiguous.rows.len(), 1);
         assert!(ambiguous.codex.is_empty());
         assert!(fixture.chat(&terminal, locator).is_none());
+    }
+
+    #[test]
+    fn observed_model_validator_returns_the_input_unchanged_or_none() {
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        for ok in ["gpt-child".to_owned(), "m".repeat(80)] {
+            assert_eq!(observed_model(&ok), Some(ok.as_str()));
+        }
+        for bad in [
+            "m".repeat(81),
+            String::new(),
+            " ".into(),
+            " gpt".into(),
+            "gpt\n".into(),
+            "\u{1b}[31mgpt".into(),
+            "gpt\u{0}".into(),
+            "\u{9b}31m".into(),
+            "<synthetic>".into(),
+            "<placeholder>".into(),
+            format!("gpt-{leaked}"),
+        ] {
+            assert_eq!(observed_model(&bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn codex_child_rows_publish_only_the_proven_turn_context_model() {
+        let fixture = RolloutFixture::new("observed-model");
+        let repo = fixture.store.repo();
+        let mut parent = codex_meta(PARENT, repo, json!("vscode"));
+        parent["payload"]["session_id"] = json!(PARENT);
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[parent.clone(), codex_user_event(PARENT, TURN)],
+        );
+        let mut child = codex_child_meta(CHILD, repo);
+        child["payload"]["session_id"] = json!(PARENT);
+        let counters = |total| {
+            json!({"input_tokens":1, "output_tokens":1, "cached_input_tokens":0,
+                "cache_write_input_tokens":0, "reasoning_output_tokens":0, "total_tokens":total})
+        };
+        let usage = json!({"type":"token_usage_record","payload":{
+            "thread_id":CHILD,"session_id":PARENT,"turn_id":"child-turn",
+            "root_turn_id":"root-turn","response_id":"r1","usage":counters(2),
+            "turn_token_usage":counters(2),"thread_token_usage":counters(2)}});
+        let context = |turn: &str, model: Option<&str>| {
+            let mut value = codex_context(turn, repo);
+            if let Some(model) = model {
+                value["payload"]["model"] = json!(model);
+            }
+            value
+        };
+        let observed = |contexts: Vec<Value>| {
+            let mut rows = vec![child.clone()];
+            rows.extend(contexts);
+            rows.push(usage.clone());
+            fixture.write(fixture.date, CHILD, &rows);
+            fixture.projection(TURN).unwrap().rows.remove(0)
+        };
+        let exact = observed(vec![context("child-turn", Some("gpt-child"))]);
+        assert_eq!(exact["observed_model"], "gpt-child");
+        assert_eq!(exact["model"], "");
+        // Another turn's model and conflicting same-turn contexts prove nothing.
+        for contexts in [
+            vec![context("other-turn", Some("gpt-other"))],
+            vec![
+                context("child-turn", Some("gpt-child")),
+                context("child-turn", Some("gpt-else")),
+            ],
+            vec![
+                context("child-turn", Some("gpt-child")),
+                context("child-turn", None),
+            ],
+            vec![context("child-turn", Some(" "))],
+            vec![],
+        ] {
+            let row = observed(contexts);
+            assert!(row.get("native_response_usage").is_some());
+            assert!(row.get("observed_model").is_none(), "{row}");
+        }
+        // A model the shared validator rejects is omitted; the usage is unchanged.
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        for bad in [
+            "m".repeat(81),
+            "\u{1b}[31mgpt".to_owned(),
+            format!("gpt-{leaked}"),
+        ] {
+            let row = observed(vec![context("child-turn", Some(&bad))]);
+            assert!(row.get("observed_model").is_none(), "{bad:?}: {row}");
+            assert_eq!(row["native_response_usage"], exact["native_response_usage"]);
+        }
+        // A context from a foreign repository is not this child's.
+        let mut foreign = context("child-turn", Some("gpt-foreign"));
+        foreign["payload"]["cwd"] = json!("/somewhere/else");
+        assert!(observed(vec![foreign]).get("observed_model").is_none());
     }
 
     #[test]
