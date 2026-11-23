@@ -1922,7 +1922,7 @@ fn acceptance_output(request: &results::AcceptRequest, accepted: &Value) -> Stri
                 shell_quote(text(accepted, "patch_sha256"))));
         }
     }
-    result.push_str(&format!("Next: oms land --repo {execution}\nThen: oms panel --finalize --repo {execution} --landed-commit <full head SHA that oms land pushed>\n"));
+    result.push_str(&format!("Next: oms land --repo {execution} (opens a pull request; add --merge only when the user asked to merge)\nThen, once merged: oms panel --finalize --repo {execution} --landed-commit <full head SHA that oms land pushed>\n"));
     result
 }
 
