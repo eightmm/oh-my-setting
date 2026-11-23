@@ -4,6 +4,8 @@ use oms_command_operations as events;
 use oms_command_operations::value::{V, obj};
 use oms_panel_core::native_contract::{CheckedAssignment, CheckedReport};
 
+pub(super) const UNSENT_RETIREMENT: &str = "native_intent_unsent";
+
 pub(super) struct Current {
     pub assignment: CheckedAssignment,
     pub operation: Value,
@@ -80,7 +82,22 @@ pub(super) fn guard_lead(
         {
             continue;
         }
-        let bytes = packet(panel, operation)?;
+        // Replacing a pane/account cannot discard the ordinary Lead slot's
+        // unresolved reservation. A same-task retry separately checks lineage
+        // and custody, and may recover a binding its crashed send never recorded.
+        if operation["task_id"] == task["id"]
+            && operation["refs"]["plan_id"] == task["plan_id"]
+            && operation["refs"]["lease_id"] == task["lease_id"]
+            && native_succession::selected(panel, operation)
+        {
+            continue;
+        }
+        let unresolved = format!(
+            "native Lead still owns unresolved task {}; reconcile its exact report and finish the canonical Plan before assigning another task",
+            text(operation, "task_id")
+        );
+        let bytes = packet(panel, operation)
+            .map_err(|error| Error::new(format!("{unresolved} ({})", error.message)))?;
         let binding = oms_panel_core::decode(&bytes, native_assignment::MAX_BINDING)?;
         require(
             binding["kind"] == "oms-native-assignment"
@@ -91,35 +108,20 @@ pub(super) fn guard_lead(
                 && binding["task"]["id"] == operation["task_id"],
             "native reservation lineage changed",
         )?;
-        // Replacing a pane/account cannot discard the ordinary Lead slot's
-        // unresolved reservation. A same-task retry separately checks custody.
-        if operation["task_id"] == task["id"]
-            && operation["refs"]["plan_id"] == task["plan_id"]
-            && operation["refs"]["lease_id"] == task["lease_id"]
-            && native_succession::selected(panel, operation)
-        {
-            continue;
-        }
         let old = native_assignment::task(panel, text(operation, "task_id"))?;
         require(
             old["plan_id"] == operation["refs"]["plan_id"]
                 && old["lease_id"] == operation["refs"]["lease_id"]
                 && old["lease_epoch"] == binding["task"]["lease_epoch"]
                 && old["provider"] == binding["task"]["provider"]
-                && old["claimed_by_participant"]
-                    == binding
-                        .get("parent_participant")
-                        .unwrap_or(&binding["parent_attempt_id"])
-                        .clone()
+                && binding
+                    .get("parent_participant")
+                    .unwrap_or(&binding["parent_attempt_id"])
+                    == &old["claimed_by_participant"]
                 && settled(&old)
                 && native_succession::selected(panel, operation),
-            &format!(
-                "native Lead still owns unresolved task {}; reconcile its exact report and finish the canonical Plan before assigning another task",
-                text(operation, "task_id")
-            ),
+            &unresolved,
         )?;
-        let checked = native_succession::assignment(panel, operation)?;
-        native_succession::authorize(panel, operation, &checked)?;
         fresh_main(panel, &AttemptCache::default())?;
         tx.check()?;
         retire(panel, operation, text(&old, "state"))?;
@@ -129,8 +131,7 @@ pub(super) fn guard_lead(
 
 fn retire(panel: &Panel<'_>, operation: &Value, plan_state: &str) -> Result<()> {
     let attempt = text(operation, "attempt_id");
-    let assignment = native_succession::assignment(panel, operation)?;
-    native_succession::authorize(panel, operation, &assignment)?;
+    let parent = native_succession::retirement_parent(panel, operation)?;
     let room = commands::query(
         panel.services,
         NativeCommand::Room,
@@ -146,7 +147,7 @@ fn retire(panel: &Panel<'_>, operation: &Value, plan_state: &str) -> Result<()> 
         .iter()
         .find(|p| {
             p["participant"] == attempt
-                && p["parent"] == assignment.parent_participant()
+                && p["parent"] == parent
                 && p["provider"] == "codex"
                 && p["role"] == "worker"
                 && p["joined"].is_boolean()
@@ -280,6 +281,10 @@ pub(super) fn annotate_checked(
     )
     .map_err(Error::new)?;
     let sequence = operation["sequence"].to_string();
+    // Room membership, Plan lease, tmux pane identity, and account custody are
+    // sampled across separate stores before/after the lifecycle lock; only
+    // exact Main liveness/currentness and assignment state are checked
+    // atomically under the lifecycle ledger lock (not atomic cross-store custody).
     events::append_lifecycle_checked_with_projection(
         panel.repo,
         candidate,
@@ -538,6 +543,135 @@ fn notice(
         .success()
 }
 
+fn reviewed_binding(current: &Current, retained: &Value) -> Result<()> {
+    require(
+        matches!(current.task["state"].as_str(), Some("review" | "done"))
+            && current.task["review_lease_id"] == current.assignment.lease_id()
+            && current.task["artifact"] == retained["artifact"]
+            && (current.task["state"] == "done"
+                || current.task["patch"] == retained["patch"]["path"])
+            && current.task["review_evidence"]["schema"] == 1
+            && current.task["review_evidence"]["artifact"]["path"] == retained["artifact"]
+            && current.task["review_evidence"]["artifact"]["sha256"] == retained["artifact_sha256"]
+            && current.task["review_evidence"]["patch"]["path"] == retained["patch"]["path"]
+            && current.task["review_evidence"]["patch"]["sha256"] == retained["patch"]["sha256"],
+        "Plan review lacks the exact native evidence binding; reconciliation cannot overwrite it",
+    )
+}
+
+/// The first lifecycle sequence is the only pre-binding state. The sender
+/// records its binding and sending boundary before joining the native input path.
+fn retire_unsent(
+    panel: &Panel<'_>,
+    attempt: &str,
+    intent: &str,
+    tx: &Transaction<'_>,
+) -> Result<Value> {
+    let operation = native_assignment::current_operation(panel, attempt)?;
+    let refs = &operation["refs"];
+    require(
+        operation["tool"] == "panel-native-assignment"
+            && operation["provider"] == "codex"
+            && native_succession::original_custodian(panel, &operation)
+            && refs["native_assignment_schema"] == "1"
+            && refs["native_return_schema"] == "1"
+            && refs["native_intent_sha256"] == intent,
+        "native intent is not the exact typed assignment owned by this Main and Room",
+    )?;
+    let replay = operation["state"] == "cancelled"
+        && operation["sequence"] == 2
+        && operation["reason_code"] == UNSENT_RETIREMENT
+        && refs["native_resolution"] == "retired";
+    require(
+        native_assignment::original_unbound_intent(&operation)
+            || (replay && native_assignment::unbound_intent(&operation)),
+        "only the original pre-binding native intent can be retired as unsent",
+    )?;
+    if !replay {
+        let task = native_assignment::task(panel, text(&operation, "task_id"))?;
+        require(
+            matches!(task["state"].as_str(), Some("claimed" | "running"))
+                && task["plan_id"] == refs["plan_id"]
+                && task["lease_id"] == refs["lease_id"]
+                && task["provider"] == panel.owner
+                && task["claimed_by_participant"] == panel.participant,
+            "native intent no longer owns its exact canonical Plan claim",
+        )?;
+    }
+    fresh_main(panel, &AttemptCache::default())?;
+    let repo = panel
+        .repo
+        .to_str()
+        .ok_or_else(|| Error::new("repository cannot be represented in a Room locator"))?;
+    let room = commands::query(
+        panel.services,
+        NativeCommand::Room,
+        panel.repo,
+        &[
+            "show", "--repo", repo, "--id", panel.room, "--exact", "--json",
+        ],
+        panel.stop,
+    )?;
+    require(
+        panel.has_live_main_membership(&room)
+            && !crate::rows(&room["participants"])
+                .iter()
+                .any(|member| member["participant"] == attempt),
+        "native intent retirement requires an exact Room with no assignment member",
+    )?;
+    let artifact = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
+    let candidate = events::new_event(
+        attempt,
+        0usize.into(),
+        "attempt.state_changed",
+        obj([
+            ("from_state", V::Null),
+            ("to_state", "cancelled".into()),
+            ("expected_state", "queued".into()),
+            ("expected_seq", 1usize.into()),
+            ("reason_code", UNSENT_RETIREMENT.into()),
+            (
+                "actor",
+                obj([
+                    ("kind", "owner".into()),
+                    ("name", "panel-native-result".into()),
+                ]),
+            ),
+            (
+                "idempotency_key",
+                format!("native-retire-unsent-{intent}").into(),
+            ),
+            ("refs", obj([("native_resolution", "retired".into())])),
+        ]),
+    )
+    .map_err(Error::new)?;
+    tx.check()?;
+    let sequence = if replay { "2" } else { "1" };
+    events::append_lifecycle_checked_with_projection(
+        panel.repo,
+        candidate,
+        panel.stop,
+        |_, projected, current| {
+            native_assignment::require_live_main_in_locked_ledger(panel, projected)?;
+            let current = current.ok_or_else(|| "native intent disappeared".to_owned())?;
+            if current.get("sequence").py() != sequence
+                || current.get("refs").get("native_intent_sha256").py() != intent
+            {
+                return Err("native intent changed before retirement".into());
+            }
+            match native_assignment::initial_packet_missing(panel.repo, Path::new(&artifact)) {
+                Ok(true) => Ok(()),
+                _ => Err("native intent retirement requires a missing binding path".into()),
+            }
+        },
+    )
+    .map_err(Error::new)?;
+    Ok(
+        json!({"schema":1,"status":"retired-unsent","attempt_id":attempt,
+        "intent_sha256":intent,"reused":replay,"plan_changed":false}),
+    )
+}
+
 pub(super) fn reconcile(
     panel: &Panel<'_>,
     options: &Options,
@@ -546,6 +680,10 @@ pub(super) fn reconcile(
     tx: &Transaction<'_>,
 ) -> Result<Value> {
     let attempt = options.required("native-reconcile")?;
+    let decision = options.required("decision")?;
+    if decision == "retire-unsent" {
+        return retire_unsent(panel, &attempt, &options.required("intent-sha256")?, tx);
+    }
     let current = load(panel, &attempt, host, attempts)?;
     require(
         current.operation["terminal"] == false || settled(&current.task),
@@ -559,7 +697,18 @@ pub(super) fn reconcile(
         "native result changed; review its current retained digest",
     )?;
     let source = source_report(panel, &current.assignment, &retained)?;
-    let decision = options.required("decision")?;
+    let candidate = retained["patch"].is_object();
+    let artifact = text(&retained, "artifact");
+    let patch_path = text(&retained["patch"], "path");
+    let replayed = current.operation["refs"]["native_resolution"] == decision
+        && current.operation["refs"]["native_resolution_result_sha256"] == result_sha;
+    if decision == "reviewed"
+        && candidate
+        && current.task["state"] != "cancelled"
+        && (replayed || matches!(current.task["state"].as_str(), Some("review" | "done")))
+    {
+        reviewed_binding(&current, &retained)?;
+    }
     if settled(&current.task) {
         require(
             decision == "reviewed",
@@ -573,21 +722,8 @@ pub(super) fn reconcile(
             "child_cleanup":"unsupported","native_session":"preserved",
             "next_action":"select the next canonical ready task"}));
     }
-    let replayed = current.operation["refs"]["native_resolution"] == decision
-        && current.operation["refs"]["native_resolution_result_sha256"] == result_sha;
-    let candidate = retained["patch"].is_object();
-    let artifact = text(&retained, "artifact");
-    let patch_path = text(&retained["patch"], "path");
     // Capture already froze these exact bytes before publishing its reference.
     // The independent Plan review never consumes a report-supplied verifier.
-    if decision == "reviewed" && candidate && current.task["state"] == "review" {
-        require(
-            current.task["review_lease_id"] == current.assignment.lease_id()
-                && current.task["artifact"] == artifact
-                && current.task["patch"] == patch_path,
-            "Plan review changed; native reconciliation cannot overwrite it",
-        )?;
-    }
     if !replayed {
         require(
             current.operation["refs"]["native_resolution"] != "reviewed",
@@ -612,6 +748,10 @@ pub(super) fn reconcile(
                             artifact,
                             "--patch",
                             patch_path,
+                            "--expected-review-artifact-sha256",
+                            result_sha,
+                            "--expected-review-patch-sha256",
+                            text(&retained["patch"], "sha256"),
                         ]),
                         panel.stop,
                     )?
@@ -625,6 +765,9 @@ pub(super) fn reconcile(
             fresh.operation == current.operation,
             "native assignment changed before reconciliation",
         )?;
+        if decision == "reviewed" && candidate {
+            reviewed_binding(&fresh, &retained)?;
+        }
         tx.check()?;
         annotate(
             panel,

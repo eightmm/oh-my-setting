@@ -345,7 +345,7 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
             "--goal",
             "Preserve native work across Main succession",
         ]);
-        for task in ["native-one", "native-two"] {
+        for task in ["native-one", "native-two", "native-unsent"] {
             plan(&[
                 "add",
                 "--id",
@@ -361,6 +361,12 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
         spy.load()
             .execute_with_host("codex", Some("acct-a"), None, &host)
             .unwrap();
+        let direct = spy.load();
+        assert_eq!(direct.connected(), json!(["codex"]));
+        assert_eq!(
+            direct.chat_pane_with_host("codex", &host).unwrap().lead.id,
+            "%4"
+        );
         spy.screens
             .borrow_mut()
             .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
@@ -415,6 +421,42 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
         return;
     }
     annotate_main(&spy.main_attempt);
+    let require_private_lead = || {
+        spy.calls.borrow_mut().clear();
+        let panel = spy.load();
+        assert_eq!(panel.connected(), json!([]));
+        assert!(panel.focus("codex").is_err());
+        assert!(panel.chat_pane_with_host("codex", &host).is_err());
+        let mut report = json!({});
+        panel.observe_with_host(&mut Observations::default(), &mut report, false, &host);
+        assert_eq!(report["provider_sessions"], json!([]));
+        assert!(report["provider_models"].get("codex").is_none());
+        assert!(
+            panel
+                .execute_with_host("codex", Some("acct-a"), None, &host)
+                .is_err(),
+            "a generic reconnect cannot consume the retained Lead"
+        );
+        assert!(spy.calls_named("select-window").is_empty());
+        assert!(spy.calls_named("select-pane").is_empty());
+        assert!(spy.calls_named("new-window").is_empty());
+        assert!(
+            spy.calls_named("capture-pane")
+                .iter()
+                .all(|args| { !args.iter().any(|value| value == "%4") })
+        );
+    };
+    require_private_lead();
+    let ledger = repo.join(".oms/lifecycle/events.jsonl");
+    let before = std::fs::read(&ledger).unwrap();
+    let unadopted = send("native-two", "must wait for exact adoption", None).unwrap_err();
+    assert!(
+        unadopted
+            .to_string()
+            .contains("requires explicit native adoption")
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), before);
+    assert!(spy.mutating_calls().is_empty());
     let first = flow["first"].clone();
     let attempt = text(&first, "attempt_id");
     let raw = std::fs::read(repo.join(text(&first, "binding"))).unwrap();
@@ -547,7 +589,7 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
         let options = Options::parse(&args).unwrap();
         let before = std::fs::read(repo.join(".oms/lifecycle/events.jsonl")).unwrap();
         {
-            let panel = spy.load();
+            let panel = spy.load().with_native_codex_candidate().unwrap();
             let store = Store::open(&repo).unwrap();
             let tx = store
                 .transaction("succession-fixture", Duration::from_secs(3))
@@ -566,6 +608,8 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
         );
     }
     let adopted = adopt(&current_binding, current_result.as_deref()).unwrap();
+    assert!(spy.mutating_calls().is_empty());
+    require_private_lead();
     let retirement = settled || stage == "second";
     assert_eq!(
         adopted["mode"],
@@ -709,10 +753,34 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
         let task = native_assignment::task(&spy.load(), "native-one").unwrap();
         assert_eq!(task["state"], "review");
         assert_eq!(task["review_lease_id"], assignment.lease_id());
+        assert_eq!(task["review_evidence"]["artifact"]["sha256"], sha);
+        assert_eq!(
+            task["review_evidence"]["patch"]["sha256"],
+            oms_panel_core::digest(patch)
+        );
         assert_eq!(
             std::fs::read(repo.join(text(&task, "patch"))).unwrap(),
             patch
         );
+        let mut substituted = task["review_evidence"].clone();
+        substituted["patch"]["sha256"] = "0".repeat(64).into();
+        let ledger = repo.join(".oms/lifecycle/events.jsonl");
+        let before = std::fs::read(&ledger).unwrap();
+        spy.task_snapshot_override.replace(Some(json!({
+            "id":"native-one","review_evidence":substituted
+        })));
+        let refusal = invoke(&[
+            "--native-reconcile",
+            attempt,
+            "--result-sha256",
+            &sha,
+            "--decision",
+            "reviewed",
+        ])
+        .unwrap_err();
+        assert!(refusal.message.contains("exact native evidence binding"));
+        spy.task_snapshot_override.replace(None);
+        assert_eq!(std::fs::read(&ledger).unwrap(), before);
         assert_eq!(
             native_assignment::task(&spy.load(), "native-one").unwrap()["lease_epoch"],
             1
@@ -741,6 +809,41 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
     spy.screens
         .borrow_mut()
         .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+    if !settled {
+        native_assignment::CRASH_AFTER_BINDING_WRITE.with(|crash| crash.set(true));
+        let recorded = send("native-unsent", "preserve the successor claim", None).unwrap_err();
+        assert!(recorded.message.contains("test crash"));
+        let history = AttemptCache::default()
+            .attempts(&repo, &spy, &spy.stop)
+            .unwrap();
+        let pending = crate::rows(&history)
+            .iter()
+            .find(|row| row["task_id"] == "native-unsent")
+            .unwrap();
+        assert_eq!(pending["parent_attempt_id"], spy.main_attempt);
+        let task = native_assignment::task(&spy.load(), "native-unsent").unwrap();
+        assert_eq!(task["claimed_by_participant"], MAIN);
+        let id = text(pending, "attempt_id");
+        let artifact = repo.join(format!(
+            ".oms/lifecycle/attempts/{id}/native-assignment.json"
+        ));
+        std::fs::remove_file(&artifact).unwrap();
+        let plan_file = repo.join(".oms/plan/tasks.json");
+        let before = std::fs::read(&plan_file).unwrap();
+        let retired = invoke(&[
+            "--native-reconcile",
+            id,
+            "--intent-sha256",
+            text(&pending["refs"], "native_intent_sha256"),
+            "--decision",
+            "retire-unsent",
+        ])
+        .unwrap();
+        assert_eq!(retired["status"], "retired-unsent");
+        assert_eq!(std::fs::read(&plan_file).unwrap(), before);
+        assert!(!artifact.exists());
+        assert!(spy.mutating_calls().is_empty());
+    }
     let second = send("native-two", "next task after retirement", None).unwrap();
     let second_raw = std::fs::read(repo.join(text(&second, "binding"))).unwrap();
     let second_assignment = oms_panel_core::native_contract::CheckedAssignment::parse(&second_raw)

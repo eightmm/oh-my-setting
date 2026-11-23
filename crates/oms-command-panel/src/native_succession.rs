@@ -7,6 +7,15 @@ use oms_panel_core::native_succession::CheckedSuccession;
 pub(super) fn assignment(panel: &Panel<'_>, operation: &Value) -> Result<CheckedAssignment> {
     let checked = CheckedAssignment::parse(&native_result::packet(panel, operation)?)?
         .ok_or_else(|| Error::new("native succession requires a typed assignment"))?;
+    check_assignment(panel, operation, &checked)?;
+    Ok(checked)
+}
+
+fn check_assignment(
+    panel: &Panel<'_>,
+    operation: &Value,
+    checked: &CheckedAssignment,
+) -> Result<()> {
     require(
         operation["tool"] == "panel-native-assignment"
             && operation["provider"] == "codex"
@@ -18,8 +27,79 @@ pub(super) fn assignment(panel: &Panel<'_>, operation: &Value) -> Result<Checked
             && operation["refs"]["panel_room_id"] == checked.room()
             && checked.room() == panel.room,
         "native assignment identity differs from its lifecycle owner",
+    )
+}
+
+/// Historical prose assignments were bound to the original Main attempt and
+/// its matching Room participant. They carry no authority to change either.
+pub(super) fn authorize_legacy(panel: &Panel<'_>, operation: &Value, packet: &Value) -> Result<()> {
+    let refs = &operation["refs"];
+    let task = &packet["task"];
+    require(
+        packet["schema"] == 1
+            && packet["kind"] == "oms-native-assignment"
+            && packet["result_contract"].is_string()
+            && packet["provider"] == "codex"
+            && operation["tool"] == "panel-native-assignment"
+            && operation["provider"] == "codex"
+            && operation["attempt_id"] == packet["attempt_id"]
+            && operation["parent_attempt_id"] == panel.attempt
+            && packet["parent_attempt_id"] == panel.attempt
+            && panel.participant == panel.attempt
+            && task["claimed_by_participant"] == panel.participant
+            && task["provider"] == panel.owner
+            && packet["room"] == panel.room
+            && refs["panel_room_id"] == panel.room
+            && refs["panel_owner"] == panel.owner
+            && refs["native_assignment_schema"] == "1"
+            && refs["native_return_schema"].is_null()
+            && !refs.as_object().is_some_and(|refs| {
+                refs.keys().any(|key| {
+                    key.starts_with("native_succession_") || key == "native_custodian_attempt"
+                })
+            })
+            && operation["task_id"] == task["id"]
+            && refs["plan_id"] == task["plan_id"]
+            && refs["lease_id"] == task["lease_id"],
+        "legacy native assignment does not belong to the exact original Main, Room and claim",
     )?;
-    Ok(checked)
+    if refs["native_binding_sha256"].is_null() {
+        let mut intent = packet.clone();
+        intent
+            .as_object_mut()
+            .ok_or_else(|| Error::new("invalid legacy native assignment intent"))?
+            .remove("attempt_id");
+        let digest = oms_panel_core::digest(&serde_json::to_vec(&intent).map_err(Error::new)?);
+        require(
+            refs["native_transport"] == "intent"
+                && refs["native_binding"].is_null()
+                && refs["native_intent_sha256"] == digest,
+            "legacy native assignment has no exact binding or unsent intent digest",
+        )?;
+    } else {
+        require(
+            refs["native_binding_sha256"].as_str().is_some_and(|value| {
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) && refs["native_binding"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "legacy native assignment binding receipt is incomplete",
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn retirement_parent(panel: &Panel<'_>, operation: &Value) -> Result<String> {
+    let raw = native_result::packet(panel, operation)?;
+    if let Some(checked) = CheckedAssignment::parse(&raw)? {
+        check_assignment(panel, operation, &checked)?;
+        authorize(panel, operation, &checked)?;
+        Ok(checked.parent_participant().to_owned())
+    } else {
+        let packet = oms_panel_core::decode(&raw, native_assignment::MAX_BINDING)?;
+        authorize_legacy(panel, operation, &packet)?;
+        Ok(panel.participant.clone())
+    }
 }
 
 fn prove(panel: &Panel<'_>, checked: &CheckedAssignment, previous: &str) -> Result<()> {
@@ -80,7 +160,7 @@ pub(super) fn claimed(panel: &Panel<'_>, task: &Value, operation: &Value) -> Res
     authorize(panel, operation, &checked)?;
     require(
         checked.matches_task(task)?,
-        "native assignment frozen criteria changed",
+        "native assignment task, lease or frozen criteria changed",
     )?;
     native_assignment::claimed_by(task, checked.parent_participant(), checked.owner())
 }
@@ -92,8 +172,20 @@ pub(super) fn selected(panel: &Panel<'_>, operation: &Value) -> bool {
     if successor.is_empty() {
         operation["parent_attempt_id"] == panel.attempt
     } else {
-        successor == panel.attempt
+        successor == panel.attempt && !native_assignment::unbound_intent(operation)
     }
+}
+
+pub(super) fn original_custodian(panel: &Panel<'_>, operation: &Value) -> bool {
+    let refs = &operation["refs"];
+    operation["parent_attempt_id"] == panel.attempt
+        && refs["panel_room_id"] == panel.room
+        && refs["panel_owner"] == panel.owner
+        && !refs.as_object().is_some_and(|refs| {
+            refs.keys().any(|key| {
+                key.starts_with("native_succession_") || key == "native_custodian_attempt"
+            })
+        })
 }
 
 pub(super) fn custody(panel: &Panel<'_>, packet: &Value) -> Result<Value> {
@@ -102,11 +194,7 @@ pub(super) fn custody(panel: &Panel<'_>, packet: &Value) -> Result<Value> {
     // The exact-byte reader owns the digest; parsing this value is only for
     // legacy discrimination, never for trusting a reencoded assignment digest.
     if CheckedAssignment::parse(&raw)?.is_none() {
-        require(
-            operation["parent_attempt_id"] == panel.attempt
-                && packet["parent_attempt_id"] == panel.attempt,
-            "legacy native assignment belongs to another Main",
-        )?;
+        authorize_legacy(panel, &operation, packet)?;
         return Ok(packet.clone());
     }
     let checked = assignment(panel, &operation)?;

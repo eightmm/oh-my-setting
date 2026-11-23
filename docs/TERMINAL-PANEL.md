@@ -1336,9 +1336,9 @@ users. Every ancestor through the filesystem root must be owned by the current u
 root. An ancestor writable by the group or other users must have the sticky bit.
 
 Refusals name the offending directory and `--home PATH` elsewhere as a fix; the command
-never changes existing permissions automatically. Registration requires verifiable
-ownership, so native Windows Python, which cannot report file owners, refuses it. The
-main home is the parent environment's `CODEX_HOME`, or `~/.codex`. The new home links
+never changes existing permissions automatically. Registration verifies ownership on
+supported hosts. On Windows, run OMS [inside WSL2](INSTALL.md#windows-via-wsl2).
+The main home is the parent environment's `CODEX_HOME`, or `~/.codex`. The new home links
 `AGENTS.md`, `config.toml`, `hooks.json`, `.hook-trust`, `plugins`, `rules`, and
 `skills` to the matching main-home entries. Re-running keeps matching links and existing
 files. Conflicting links are reported; `--repair` replaces only those links.
@@ -1689,14 +1689,14 @@ a scoped brief and a verifier.
 
 | Verification path | Default timeout |
 |---|---|
-| Panel `--verify`, patch-admit and patch-land admission | 20m |
-| `oms peer-review --gate` | 20m |
-| Other standalone peer commands | 10m |
+| Patch admission via `oms patch-admit` or `oms patch-land` | 20m per verifier command |
+| Native peer verifier, including the `oms peer-review --gate` verify step | 30m |
+| Panel `--finalize --verify` | 30m |
+| Plan completion verifier | 10m |
 
-Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must
-be positive finite durations up to 24h; zero, malformed and larger values are refused
-before the command runs on both native and Python timeout backends. An empty value keeps
-the caller's default, and fractional durations remain valid.
+Panel finalization accepts `--verify-timeout SECONDS` with a whole number from 1 to
+86,400. The Plan completion verifier reads `OMS_PEER_VERIFY_TIMEOUT`. When set, it
+must be a positive finite duration up to 24h, such as `1.5m`.
 
 #### Heartbeats during verification
 
@@ -2433,6 +2433,11 @@ actual verification and completion. Report commands and claimed checks are never
 executed. A native candidate remains external patch evidence rather than managed
 delegate provenance, and report ingestion/review alone grants no acceptance.
 
+The Plan review freezes both retained evidence digests. Admission and the final
+Plan land/finish fences reject a changed report or patch, while landing can move
+the exact patch bytes into its existing frozen store. Reconciliation cannot adopt
+an older path-only review as an exact native review.
+
 After genuine canonical Plan completion or cancellation, repeating exact-result
 `--native-reconcile ... --decision reviewed` retires the assignment lifecycle and
 Room reservation. The reusable Lead session remains open; this administrative
@@ -2440,6 +2445,21 @@ retirement supplies no native child-cleanup proof. Results then points to the ne
 ready task instead of recommending admission again. Native consumption and
 completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
 permissions `unknown`, and child cleanup `unsupported`.
+
+If a first assignment was interrupted before writing its packet and its frozen
+inputs have changed, the owning Main can explicitly retire the original intent.
+Read `refs.native_intent_sha256` from `oms events show --attempt ATTEMPT --json`.
+
+```bash
+oms panel --repo . --room ROOM --owner codex --native-reconcile ATTEMPT \
+  --intent-sha256 INTENT_SHA256 --decision retire-unsent
+```
+
+This requires the original queued record, the exact Plan claim, a missing packet
+and no assignment member in the Room. It frees the Lead reservation without
+changing the Plan. To assign that task again, explicitly release the exact Plan
+lease and claim a fresh one. Bound, sent and uncertain attempts retain their
+existing reconciliation path.
 
 #### Continue after a Main swap
 
@@ -3356,10 +3376,9 @@ are excluded from live receiver discovery. Unconfirmed sends never retry
 implicitly, and safe-point delivery still requires a live participating session.
 Incomplete native registry discovery cannot authorize an otherwise apparently
 unique inbox. Collection and room errors stay visible in graph and narrow views.
-The canonical operator suite has an optional `OMS_PANEL_SOAK_SECONDS=30..3600`
-Unix fixture run for sustained watch, addressed delivery, explicit ack, invalid
-cursor and temporary room-loss recovery. It is off in ordinary gates and uses
-fake providers rather than live accounts or GUI delivery.
+The [native watch tests](../crates/oms-command-panel/src/watch.rs) exercise refresh
+and recovery with fixtures. The [Room contract tests](../crates/oms-command-room/tests/room_contract.rs)
+cover addressed delivery and cursor behavior.
 
 Sources: [Codex thread links](https://learn.chatgpt.com/docs/reference/commands#deep-links),
 [Claude CLI to Desktop](https://code.claude.com/docs/en/desktop#coming-from-the-cli).
@@ -3529,45 +3548,25 @@ Native launches propagate the process exit. Existing tools retain patch
 admission, verification and publication authority. No permission bypass,
 automatic patch application, commit, push, installation or new service is added.
 
-The existing operator-tools suite exercises exact role routes through real OMS front
-doors and lifecycle writers using fixture provider executables. It checks model/effort
-arguments, parent links, titles, read/write separation, worktree isolation, returned
-patches, review gates, worker recursion rejection and read-only views. Native PTY and
-real tmux checks cover inline restoration, exact resume, main selection, independent
-sidebars and detach/preservation. Width/height, Korean title wrapping, cached frame
-cadence, changed-row repaint, resize, reduced motion, attribution and unsafe-label tests
-cover the renderer.
+The native [panel integration fixtures](../crates/oms-command-panel/tests/panel_parity.rs)
+cover routing, account conflicts and result views. [Panel core fixtures](../crates/oms-panel-core/tests/parity.rs)
+cover dispatch, acceptance and recovery. The [renderer](../crates/oms-command-panel/src/render.rs)
+and [watch tests](../crates/oms-command-panel/src/watch.rs) cover views, controls and PTY
+refresh. [Peer](../crates/oms-command-peer/tests/peer_contract.rs),
+[Room](../crates/oms-command-room/tests/room_contract.rs) and
+[provider hook](../crates/oms-command-hooks/tests/host_adapter.rs) fixtures cover their
+respective review, message and notifier contracts.
 
-A PTY watch verifies actual incremental animation output without lifecycle writes. The
-lifecycle-events suite covers bounded refs and immutable idempotency. Fixture execution
-does not establish account access or a live main's judgment quality. When a sandbox
-denies Unix sockets, the suite reports socket-dependent sections as skipped and exits
-77; parent verification outside that sandbox remains authoritative. The same operator
-suite covers council routes, durable results, verifier and patch lineage, privacy
-refusal and delivery deduplication/retry after interruption.
+```bash
+cargo test --locked --offline -p oms-command-panel --lib --test panel_parity
+cargo test --locked --offline -p oms-panel-core --lib --test parity
+cargo test --locked --offline -p oms-command-room --test room_contract
+```
 
-The notifier suite covers unloaded and busy receivers, shell wrappers, early events,
-lost acknowledgements and correlated persisted output. The operator suite prints
-per-section and per-shard timings. `ci-status history` shows recent completed CI runs
-and ranked failing jobs/tests. The operator suite also verifies the main hierarchy with
-earlier mains on record, legacy ownership, separate review groups, compact/detail
-budgets, attention filtering, numbered result selection, menu cycling and view
-inheritance in an existing tmux server. Use `tests/operator-tools-smoke.sh
---list-sections` to see focused verification areas: `auto-review` covers the review
-gate, `native-pty` covers terminal lifecycle behavior, and `room-rollover` covers room
-succession; combine independent areas with commas.
-
-`core/room-and-board-rendering` covers board rendering and shared-plan verifier
-warnings; `dispatch-results` covers dispatch and result handling. Size a composed
-`--verify` from its measured section timings: sequential sections add together, and slot
-waiting precedes the verifier clock. Use a finite caller override when that composition
-outlasts the default. Local measurements on 2026-10-31 were 16s for
-`core/room-and-board-rendering`, 422s for `dispatch-results` and 4s for the two selected
-timeout regressions (`test_python_timeout_fallback_bounds_verifier` and
-`test_run_with_timeout_require_refuses_unbounded`).
-
-These scoped runs did not reproduce a 20m budget exhaustion; they do not bound the full
-serial suite or other host loads.
+`oms ci-status history` shows recent CI runs. Use measured timings to size composed
+verifiers, since sequential commands share one timeout. Historical timings from the
+retired operator suite on 2026-10-31 were 16s for Board rendering, 422s for dispatch
+results and 4s for two timeout cases.
 
 
 ## Researcher, scholar and supporting strategies

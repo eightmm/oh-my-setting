@@ -289,8 +289,21 @@ pub(crate) fn admit(
     };
     let mut allowed = vec![];
     let mut forbidden = vec![];
+    let mut reviewed_task = None;
     if !policy.task.is_empty() {
         let row = task(c, repo, &policy.task)?;
+        if row.has("review_evidence") {
+            require(
+                row.get("state").text() == Some("review"),
+                "exact reviewed evidence requires a task in review",
+            )?;
+            require(
+                row.get("review_evidence").get("patch").get("sha256").text()
+                    == Some(digest(&bytes).as_str()),
+                "patch differs from exact reviewed evidence",
+            )?;
+            reviewed_task = Some((row.get("plan_id").clone(), row.get("task_sha256").clone()));
+        }
         let stored = string(&row, "verify");
         require(
             !stored.is_empty(),
@@ -703,6 +716,13 @@ pub(crate) fn admit(
         git.snapshot()? == snapshot,
         "source changed after admission checks; no outcome witness published",
     )?;
+    if let Some((plan_id, task_sha)) = reviewed_task {
+        let current = task(c, repo, &policy.task)?;
+        require(
+            current.get("plan_id") == &plan_id && current.get("task_sha256") == &task_sha,
+            "exact reviewed evidence or task changed during admission; no outcome witness published",
+        )?;
+    }
     storage::write_external(&report, None, body.as_bytes(), c.interrupted)?;
     let report_rel = report
         .strip_prefix(&state)
