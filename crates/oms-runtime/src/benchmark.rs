@@ -5,6 +5,7 @@ use crate::value::*;
 use crate::{Result, error, require};
 use std::collections::BTreeMap;
 use std::path::Path;
+const MEASUREMENT_BASIS: &str = "provider-calls/explicit-verification-v1";
 pub const METRICS: &[&str] = &[
     "human_corrections",
     "escaped_defects",
@@ -571,10 +572,7 @@ pub fn snapshot(rt: &Runtime<'_>) -> Result<Value> {
     acceptance.set("verified_weight", number(verified_weight))?;
     let mut result = object([
         ("schema", number(1)),
-        (
-            "measurement_basis",
-            string("provider-calls/explicit-verification-v1"),
-        ),
+        ("measurement_basis", string(MEASUREMENT_BASIS)),
         ("generated_at", string(&rt.now)),
         ("state_digest", envelope.get("state_digest").clone()),
         ("acceptance", acceptance),
@@ -687,13 +685,11 @@ pub fn compare(left: &Value, right: &Value) -> Result<Value> {
     fields.extend(extras.iter().map(String::as_str));
     let mut changes = vec![];
     for field in fields {
-        let get = |value: &Value| {
-            field
-                .split('.')
-                .fold(value.clone(), |v, k| v.get(k).clone())
+        let get = |value: &Value, path: &str| {
+            path.split('.').fold(value.clone(), |v, k| v.get(k).clone())
         };
-        let l = get(left);
-        let r = get(right);
+        let l = get(left, field);
+        let r = get(right, field);
         let delta = finite(&l)
             .zip(finite(&r))
             .map(|(l, r)| number(r - l))
@@ -704,20 +700,59 @@ pub fn compare(left: &Value, right: &Value) -> Result<Value> {
             ("right", r),
             ("delta", delta),
         ]);
-        if [
+        let basis_sensitive = [
             "success_rate",
             concat!("to", "kens"),
             "cost_usd",
             "duration_seconds",
         ]
-        .contains(&field.split('.').next().unwrap_or(""))
-            && left.get("measurement_basis") != right.get("measurement_basis")
+        .contains(&field.split('.').next().unwrap_or(""));
+        let samples = match field {
+            "success_rate" => Some("decided_outcomes"),
+            concat!("to", "kens.sum") => Some(concat!("to", "kens.count")),
+            "cost_usd.sum" => Some("cost_usd.count"),
+            "duration_seconds.sum" => Some("duration_seconds.count"),
+            "skill_evals.task_pass_delta_sum" => Some("skill_evals.count"),
+            _ if field.starts_with("manual_outcomes.totals.") => Some("manual_outcomes.count"),
+            _ => None,
+        };
+        let reason = if basis_sensitive
+            && [left, right]
+                .iter()
+                .any(|v| v.get("measurement_basis").str() != Ok(MEASUREMENT_BASIS))
         {
+            Some(
+                if left.get("measurement_basis") != right.get("measurement_basis") {
+                    "measurement basis differs; not comparable"
+                } else {
+                    "measurement basis is missing or unsupported; not comparable"
+                },
+            )
+        } else if samples.is_some_and(|path| {
+            [left, right]
+                .iter()
+                .any(|v| !get(v, path).int().is_ok_and(|n| n > 0))
+        }) {
+            Some("positive sample counts are required; not comparable")
+        } else if field
+            .strip_prefix("manual_outcomes.totals.")
+            .is_some_and(|metric| {
+                [left, right].iter().any(|v| {
+                    !v.get("unknown_metrics").array().is_ok_and(|unknown| {
+                        unknown
+                            .iter()
+                            .all(|name| name.str().is_ok_and(|name| name != metric))
+                    })
+                })
+            })
+        {
+            Some("manual metric coverage is unknown; not comparable")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
             item.set("delta", Value::Null)?;
-            item.set(
-                "reason",
-                string("measurement basis differs; not comparable"),
-            )?;
+            item.set("reason", string(reason))?;
         }
         changes.push(item)
     }

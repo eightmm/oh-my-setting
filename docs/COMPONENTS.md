@@ -2813,7 +2813,8 @@ HUDs. When supported by the CLI, OMS sets the Opus 5.5 per-model
 `modelSettings.<model>.autoCompactWindow` to 300000 and removes equal values;
 as with effort, an identical user value is treated as OMS-owned on removal.
 Model routing stays explicit in
-delegate/run commands; direct edits do not pay for a separate policy hook.
+delegate/run commands. Direct edits pay for one pre-edit hook, the
+[Main write guard](#main-write-guard), which returns at once outside a panel Main.
 
 
 #### Destructive command guard
@@ -2873,7 +2874,7 @@ refuses the same session again, the refusal line adds `This is refusal N of
 this rule in this session: stop and ask the owner instead of rewording the
 command.` (no blocking or ending; the count reads the log, so a removed log
 restarts it). A script's inside is still unseen. `bash scripts/command-guard-hook.sh --audit [N]` prints the
-newest N rows (default 50) counted by verdict and rule. The log records what
+newest N rows (default 50) counted by verdict and rule; `--audit --hours H` (1-720) counts the rows of the last H UTC hours instead, by verdict category only, and reports unusable timestamps and whether the 1000-row cap makes the window possibly incomplete or unknown (the cutoff is inclusive, so an oldest row exactly at it is not proof of coverage). The log records what
 the guard saw and is not a boundary: any process of the same user, an OMS
 worker included, can write or remove the file.
 
@@ -2912,6 +2913,38 @@ Codex and Antigravity remain uncovered. No Codex or Antigravity CLI was
 available to confirm a pre-tool hook contract, `codex execpolicy` rules or
 Antigravity `command(...)` deny rules, so nothing is generated for them.
 
+
+#### Main write guard
+
+A panel Overall Main manages only
+([Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)). This accident-prevention
+hook gates the four Claude native file-edit tools: a PreToolUse hook on
+`Edit`, `Write`, `MultiEdit` and `NotebookEdit` refuses such a call from the
+panel Main when its target is inside the repository the panel manages
+(`OMS_ROOM_REPO`, else the session's directory) or one of that repository's
+linked worktrees. The refusal names the routes: `oms panel --dispatch ROLE
+--access write`, `--continue TASK_ID` for a fix and `--dispatch integrator` for
+a conflict. Files outside that repository and sessions without a panel are not checked.
+Dispatched workers (which carry `OMS_PANEL_DISPATCH=1`) and delegated children
+(`OMS_HARNESS_CHILD=1` or `OMS_HARNESS_DELEGATE_DEPTH`, which include Provider
+Leads and managed workers) are allowed. Unmanaged native subagents
+spawned directly by a Claude panel Main inherit Main's environment without those
+markers and are likewise refused. A brief for `--brief-file` is an outside file:
+Main writes it to session scratch or `TMPDIR`, not into the checkout.
+
+The guard judges the edit tool's target path. It covers files in the managed
+repository and in its linked worktrees, and it also covers submodules inside
+them. When the tool payload cannot be parsed, the call passes and the guard
+prints one stderr diagnostic line. Changes made through Bash are not judged
+by this guard. Shell access stays governed by the provider's own shell
+permissions. The guard runs under Claude Code only, as the command guard
+does. A Codex or Antigravity Main relies on its startup contract.
+
+The switch belongs to the person: `OMS_MAIN_WRITE_GUARD=0` in the environment
+`oms panel` was started from turns the guard off for that Main. When the user
+tells a running Main to make one change itself, the user makes it in their own
+shell or restarts the panel with the switch; the Room records the instruction
+either way.
 
 #### Hook ownership and audits
 
@@ -3075,6 +3108,11 @@ supported or partial cell names its implementation and test, and
 test references without running providers. The
 [native lifecycle fixture](../crates/oms-command-lifecycle/tests/native_lifecycle.rs)
 exercises this check.
+A custom adapter author can check the one-shot contract directly with the
+[reference conformance script](examples/agent-adapter-conformance.sh): name,
+executable and bounded probes by default, and with `--run` a read call (plus
+`--write`) in a throwaway repository. It calls the adapter, not OMS, records
+nothing, and a pass is not sandbox, live-provider or admission evidence.
 
 `oms doctor --providers --conformance PATH [--probe-bound SECONDS]` is a separate,
 explicit probe of one `oms-agent-adapter-ID` executable. Relative paths resolve
@@ -3298,6 +3336,7 @@ documentation references without its CI orchestration, installation or CLI-help 
 that probe once before installing: only a proven answer (exit 0) installs the quick
 hook; absent (1) and unknown (2) refuse with the probe's line and leave the existing
 hook untouched.
+`--repo PATH` targets another OMS source worktree root. It converges that root's hooks, or withdraws them with `--remove`. The root must hold `scripts/check.sh` to install. `--check-protection` then probes that target. The default hook stays full.
 
 
 ### CI selection and execution
@@ -3307,16 +3346,18 @@ download. Selected smoke runs validate names before dispatch, partition each
 case once, and cap workers to the selected count. Event/ref
 [concurrency groups](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 keep scheduled/manual runs separate from pushes; newer pushes supersede older
-pushes. Native platform checks reuse the lifecycle matrix's macOS runner.
-[`!cancelled()`](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
-lets later checks report failures after an earlier failure without continuing
-a cancelled run.
+pushes.
 
-PR and main pushes select affected or full verification. Full runs use Linux
-lint and focused Bash checks, the Ubuntu and macOS Rust matrix, and a Linux
-copy-install lifecycle fixture. The lifecycle matrix adds macOS when the
-selector requires native platform checks. The stable `gate` checks the
-selected jobs and their planned skips. [CI workflow](../.github/workflows/test.yml)
+CI is Linux-only. PR and main pushes select affected or full verification. Full
+runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)`, and the
+`native (ubuntu-latest, copy)` install lifecycle fixture. The stable `gate`
+checks the selected jobs and their planned skips.
+[CI workflow](../.github/workflows/test.yml)
+
+macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
+userland compatibility), but macOS runners are no longer part of GitHub Actions
+CI; verify macOS/BSD-sensitive changes locally with
+`tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
 
 Require it in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
@@ -3382,8 +3423,8 @@ the run's jobs prove the full selection (the default proof) or a full local gate
 was affected-only or its scope cannot be read, it supplies no full proof. For an
 affected-only run without a dispatch land finishes `passed`, installs nothing and prints the command that
 requests a full-selection run of the same SHA, `gh workflow run test.yml --repo
-OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full selection, including the
-macOS lifecycle leg), then the command that resumes the landing. Rerunning it with
+OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full Linux selection),
+then the command that resumes the landing. Rerunning it with
 `--wait` checks for that run and waits within `--ci-wait` when it is pending;
 when none is visible it returns promptly. Pending proof and a requested receipt
 handoff remain blocked until proof is complete, so a retry can safely hand off.

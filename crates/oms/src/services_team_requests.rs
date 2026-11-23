@@ -637,6 +637,53 @@ impl<'a, 's> Channel<'a, 's> {
             && self.consumed == self.responses.len()
             && self.buffer.is_empty()
     }
+    /// Failed channel conditions, without frames, ids or paths. A partial
+    /// frame is reported independently of the phase that was reached.
+    fn channel_cues(&self) -> Vec<&'static str> {
+        let mut cues = Vec::new();
+        if !self.hello {
+            cues.push("channel-no-hello");
+        } else if self.responses.is_empty() {
+            cues.push("channel-no-request");
+        } else if self.consumed != self.responses.len() {
+            cues.push("channel-unconsumed-response");
+        }
+        if !self.buffer.is_empty() {
+            cues.push("channel-partial-frame");
+        }
+        cues
+    }
+}
+
+/// Nonsecret failed-condition names, in the order `complete` evaluates them.
+fn incomplete_cues(
+    enrollment_settled: bool,
+    protocol_failed: bool,
+    stopped: bool,
+    output_complete: bool,
+    cleanup_complete: bool,
+    channel: &[&'static str],
+    exit: Option<i32>,
+) -> String {
+    let mut cues = Vec::new();
+    if !enrollment_settled {
+        cues.push("enrollment-unsettled");
+    }
+    if protocol_failed {
+        cues.push("protocol-failed");
+    }
+    if stopped {
+        cues.push("supervisor-stopped");
+    }
+    if !output_complete {
+        cues.push("output-incomplete");
+    }
+    if !cleanup_complete {
+        cues.push("cleanup-incomplete");
+    }
+    cues.extend_from_slice(channel);
+    let exit = exit.map_or("none".to_owned(), |c| c.to_string());
+    format!("cause={}; exit={exit}", cues.join(","))
 }
 impl super::OwnedDuplexConsumer for Channel<'_, '_> {
     fn check(&self) -> Result<()> {
@@ -706,11 +753,13 @@ impl CollabServices<'_> {
         let enrollment_settled = done
             .owned_cleanup()
             .is_some_and(|proof| channel.settle_enrollment(proof).is_ok());
+        let output_complete = done.output_complete();
+        let cleanup_complete = done.cleanup_complete();
         let complete = enrollment_settled
             && !protocol_failed
             && done.stop.is_none()
-            && done.output_complete()
-            && done.cleanup_complete()
+            && output_complete
+            && cleanup_complete
             && channel.complete();
         // Protocol bytes include the private nonce. They never become an outward
         // provider artifact, even when the child prints a frame on stderr.
@@ -734,12 +783,49 @@ impl CollabServices<'_> {
             stderr: if complete {
                 vec![]
             } else {
-                b"Team report channel incomplete; reconcile durable request receipts\n".to_vec()
+                format!(
+                    "Team report channel incomplete; reconcile durable request receipts ({})\n",
+                    incomplete_cues(
+                        enrollment_settled,
+                        protocol_failed,
+                        done.stop.is_some(),
+                        output_complete,
+                        cleanup_complete,
+                        &channel.channel_cues(),
+                        done.exit.map(|e| e.shell_code()),
+                    )
+                )
+                .into_bytes()
             },
             complete,
             cleanup_complete: Some(done.cleanup_complete()),
             owned_cleanup: done.owned_cleanup().cloned(),
             elapsed: done.duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::incomplete_cues;
+
+    #[test]
+    fn incomplete_cues_name_each_failed_condition_only() {
+        assert_eq!(
+            incomplete_cues(
+                true,
+                false,
+                false,
+                true,
+                true,
+                &["channel-no-hello", "channel-partial-frame"],
+                Some(0)
+            ),
+            "cause=channel-no-hello,channel-partial-frame; exit=0"
+        );
+        assert_eq!(
+            incomplete_cues(false, true, true, false, false, &[], None),
+            "cause=enrollment-unsettled,protocol-failed,supervisor-stopped,output-incomplete,cleanup-incomplete; exit=none"
+        );
     }
 }

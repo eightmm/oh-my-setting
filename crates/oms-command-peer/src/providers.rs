@@ -1988,7 +1988,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         return fail("custom provider does not support write access without explicit opt-in");
     }
     if route.model != "provider-default"
-        && matches!(route.provider.as_str(), "deepseek" | "vibe" | "openhands")
+        && !oms_command_agent_role::native_model::supports_exact_model_override(&route.provider)
     {
         return fail("provider has no documented per-invocation model override");
     }

@@ -69,7 +69,7 @@ privately first. Please allow time for a fix before public disclosure.
   Memory provenance stores bounded hashes and IDs, never branch names, paths,
   commands, or raw diffs, and is omitted from compact provider prompts.
 - Outbound prompts/diffs to external agent CLIs are scanned for secrets and
-  machine/cluster details; a match blocks the call (`scripts/lib/agent-memory-common.sh`).
+  machine/cluster details; a match blocks the call (`crates/oms-scrub/src/lib.rs`, `crates/oms-command-peer/src/safety.rs`).
 - The Claude Code HUD reads the vendor-provided status JSON locally but ignores
   transcript and path fields. It shell-evaluates nothing, strips terminal
   control characters, bounds input/output, and performs no network request.

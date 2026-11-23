@@ -20,6 +20,12 @@ pub fn normalized_effort(effort: &str) -> &str {
     if effort == "auto" { "" } else { effort }
 }
 
+/// Whether the current native transport accepts an invocation-level model ID.
+/// This does not establish model availability or account access.
+pub fn supports_exact_model_override(provider: &str) -> bool {
+    !matches!(provider, "deepseek" | "vibe" | "openhands")
+}
+
 pub fn fixed_effort_model(provider: &str, model: &str) -> Option<&'static str> {
     if provider != "antigravity" {
         return None;

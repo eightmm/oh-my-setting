@@ -350,6 +350,84 @@ fn card_top_styled(
     out
 }
 
+const MAIN_SWITCH_LABELS: [&str; 2] = ["[s Switch Main]", "[s Switch]"];
+
+fn card_top_with_action(
+    title: &str,
+    tag: Option<&str>,
+    action_labels: &[&'static str],
+    columns: usize,
+    colored: bool,
+    title_style: &'static str,
+) -> (String, Option<(usize, usize)>) {
+    if columns < 44 {
+        return (
+            card_top_styled(title, tag, columns, colored, title_style),
+            None,
+        );
+    }
+    let clean_tag = tag
+        .filter(|v| !v.is_empty())
+        .map(|v| clip(v, (columns / 3).max(6)))
+        .filter(|v| !v.is_empty());
+    let clean_title = clean(title, columns);
+    let title_w = width(&clean_title);
+    let prefix_len = 3usize; // "╭─ "
+    let title_space = 1usize; // " "
+    let end_cap = 1usize; // "╮"
+    let tag_w = clean_tag.as_deref().map_or(0, width);
+    let Some(&action) = action_labels.iter().find(|&&label| {
+        let action_w = width(label);
+        let right_len = if clean_tag.is_some() {
+            tag_w + action_w + 6
+        } else {
+            action_w + 3
+        };
+        prefix_len + title_w + title_space + right_len + end_cap < columns
+    }) else {
+        return (
+            card_top_styled(title, tag, columns, colored, title_style),
+            None,
+        );
+    };
+    let action_w = width(action);
+    let right_len = if clean_tag.is_some() {
+        tag_w + action_w + 6
+    } else {
+        action_w + 3
+    };
+    let used = prefix_len + title_w + title_space + right_len + end_cap;
+    let fill = columns.saturating_sub(used);
+    let mut spans = vec![
+        Span::literal("╭─ ", Some(SGR_BORDER)),
+        Span {
+            plain: clean_title,
+            sgr: Some(title_style),
+        },
+        Span::literal(" ", None),
+        Span {
+            plain: "─".repeat(fill),
+            sgr: Some(SGR_BORDER),
+        },
+        Span::literal(" ", None),
+    ];
+    if let Some(t) = clean_tag {
+        spans.push(Span {
+            plain: t,
+            sgr: Some(SGR_MUTED),
+        });
+        spans.push(Span::literal(" · ", Some(SGR_MUTED)));
+    }
+    let start = spans_width(&spans) + 1;
+    let end = start + action_w - 1;
+    spans.push(Span::literal(action, Some(SGR_GOLD_BOLD)));
+    spans.push(Span::literal(" ─", Some(SGR_BORDER)));
+    spans.push(Span::literal("╮", Some(SGR_BORDER)));
+    let mut out = String::new();
+    emit_spans(&mut out, &spans, colored, None);
+    (out, Some((start, end)))
+}
+
 fn card_row_lr(
     left: Vec<Span>,
     right: Vec<Span>,
@@ -1298,13 +1376,25 @@ fn compact_tokens(total: u64) -> String {
     " >999B".to_owned()
 }
 
-/// Counters of one native child's last verified response: `(total, input,
-/// output)`. Lead, turn and cumulative counters are never read here.
-fn native_response(call: &Value) -> Option<[Option<u64>; 3]> {
+/// Last-response producer keys and labels in display priority: Codex and AGY
+/// write `cached_input`, Claude `cache_read` and `cache_creation`.
+const RESPONSE_COUNTERS: [(&str, &str); 8] = [
+    ("total_tokens", "total"),
+    ("input_tokens", "in"),
+    ("output_tokens", "out"),
+    ("cached_input_tokens", "cache read"),
+    ("cache_read_input_tokens", "cache read"),
+    ("cache_creation_input_tokens", "cache write"),
+    ("cache_write_input_tokens", "cache write"),
+    ("reasoning_output_tokens", "reasoning"),
+];
+
+/// Counters of one native child's last verified response, ordered as
+/// `RESPONSE_COUNTERS`. Lead, turn and cumulative counters are never read here.
+fn native_response(call: &Value) -> Option<[Option<u64>; 8]> {
     let response = &call["native_response_usage"]["response"];
-    (call["native_child"] == true && response.is_object()).then(|| {
-        ["total_tokens", "input_tokens", "output_tokens"].map(|key| response[key].as_u64())
-    })
+    (call["native_child"] == true && response.is_object())
+        .then(|| RESPONSE_COUNTERS.map(|(key, _)| response[key].as_u64()))
 }
 
 /// Token field: a fixed `~` slot (space unless last-observed) before the
@@ -1372,7 +1462,7 @@ fn token_span_with(
         .then(|| native_response(call))
         .flatten()
         .filter(|counts| counts[0].is_none())
-        .map(|[_, input, output]| {
+        .map(|[_, input, output, ..]| {
             let part = |label: &str, count: Option<u64>| {
                 count.map(|n| format!("{label} {}", compact_tokens(n).trim_start()))
             };
@@ -1555,6 +1645,21 @@ pub(crate) struct BoardFrame {
     /// Painted calls, including Overall Main, keyed by zero-based terminal row.
     pub worker_rows: BTreeMap<usize, (String, String)>,
     pub weekly_usage: Option<WeeklyUsageHit>,
+    pub main_switch: Option<ActionZone>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActionZone {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl ActionZone {
+    pub(crate) fn contains(self, x: u16, y: u16) -> bool {
+        let col = usize::from(x);
+        usize::from(y).checked_sub(1) == Some(self.row) && (self.start..=self.end).contains(&col)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1639,6 +1744,7 @@ fn frame_with_capacity(
     let mut provider_rows = [None; 3];
     let mut worker_rows = BTreeMap::new();
     let mut weekly_usage = None;
+    let mut main_switch = None;
     let use_cards = columns >= 44;
     let inner_width = if use_cards {
         columns.saturating_sub(4)
@@ -1695,8 +1801,17 @@ fn frame_with_capacity(
         columns,
         colored,
     ));
+    let overlay = nav.help || nav.health || nav.detail;
     let mut main_cards = use_cards && height >= 12;
-    let mut main = render_main_section(goal, pinned, main_selected, columns, main_cards, colored);
+    let (mut main, mut main_switch_cols) = render_main_section(
+        goal,
+        pinned,
+        main_selected,
+        columns,
+        main_cards,
+        colored,
+        !overlay,
+    );
     let mut notices = Vec::new();
     if let Some(notice) = &nav.notice {
         for part in wrap(notice, columns.saturating_sub(2).max(1))
@@ -1718,7 +1833,6 @@ fn frame_with_capacity(
     }
 
     let stale = report["collection"]["ok"] != true || report["capacity_stale"] == true;
-    let overlay = nav.help || nav.health || nav.detail;
     let filtering = !nav.filter.is_empty() || nav.editing;
     let short_board = (9..14).contains(&height) && !overlay;
     let filtered_out = total.saturating_sub(history + inactive + filtered_count);
@@ -1734,7 +1848,7 @@ fn frame_with_capacity(
     let required = fixed + main.len();
     // Keep the Main and Goal, dropping their card borders only when needed for Weekly.
     let compact_main = (short_board && main_cards && !main.is_empty() && required >= height)
-        .then(|| render_main_section(goal, pinned, main_selected, columns, false, colored))
+        .then(|| render_main_section(goal, pinned, main_selected, columns, false, colored, false).0)
         .filter(|compact| fixed + compact.len() < height);
     let mut optional = Vec::new();
     if height >= 14 || (short_board && required < height) || compact_main.is_some() {
@@ -1751,6 +1865,7 @@ fn frame_with_capacity(
             if let Some(compact) = compact_main {
                 main = compact;
                 main_cards = false;
+                main_switch_cols = None;
             }
             lines.push(line);
         }
@@ -1798,7 +1913,14 @@ fn frame_with_capacity(
                 colored,
                 height.saturating_sub(1 + lines.len()),
             ),
-            None => render_detail_card(selected_call, columns, inner_width, use_cards, colored),
+            None => render_detail_card(
+                selected_call,
+                columns,
+                inner_width,
+                use_cards,
+                colored,
+                height.saturating_sub(1 + lines.len()),
+            ),
         });
     } else {
         if filtering {
@@ -1826,7 +1948,8 @@ fn frame_with_capacity(
         lines.truncate(body.saturating_sub(worker_row + main_row));
         let main_room = body.saturating_sub(lines.len() + worker_row);
         if main_cards && main.len() > main_room {
-            main = render_main_section(goal, pinned, main_selected, columns, false, colored);
+            (main, main_switch_cols) =
+                render_main_section(goal, pinned, main_selected, columns, false, colored, false);
             main_cards = false;
         }
         main.truncate(main_room);
@@ -1852,9 +1975,9 @@ fn frame_with_capacity(
         } else {
             &[]
         };
+        let roster = &roster[..roster.len().min(crate::provider_activity::AGY_ROSTER_LIMIT)];
         let roster_limit = roster
             .len()
-            .min(crate::provider_activity::AGY_ROSTER_LIMIT)
             .min(height.saturating_sub(chrome_start + provider_chrome + minimum));
         let chrome = if provider_view {
             provider_chrome + roster_limit
@@ -1873,6 +1996,16 @@ fn frame_with_capacity(
             .saturating_sub(lines.len() + main.len());
         lines.extend(optional.into_iter().chain(notices).take(remaining));
         if let Some(call) = pinned {
+            if main_cards
+                && !main.is_empty()
+                && let Some((start, end)) = main_switch_cols
+            {
+                main_switch = Some(ActionZone {
+                    row: lines.len(),
+                    start,
+                    end,
+                });
+            }
             let row = usize::from(main_cards);
             if row < main.len() {
                 register_call(&mut worker_rows, lines.len() + row, call);
@@ -1934,7 +2067,8 @@ fn frame_with_capacity(
                 &report["provider_accounts"],
                 &report["provider_activity"],
                 !stale && report["collection"]["pending"] != true,
-                &roster[..roster_limit],
+                roster,
+                roster_limit,
                 &mut provider_rows,
                 &mut worker_rows,
                 base,
@@ -2041,6 +2175,7 @@ fn frame_with_capacity(
     }
     worker_rows.retain(|row, _| *row < painted);
     weekly_usage = weekly_usage.filter(|hit| hit.row < painted);
+    main_switch = main_switch.filter(|zone| zone.row < painted);
     let tab = if nav.view == View::Auto {
         "All"
     } else {
@@ -2073,6 +2208,7 @@ fn frame_with_capacity(
         provider_rows,
         worker_rows,
         weekly_usage,
+        main_switch,
     }
 }
 
@@ -2706,6 +2842,7 @@ fn render_provider_rows(
     activity: &Value,
     current: bool,
     agy_roster: &[Value],
+    agy_roster_limit: usize,
     provider_rows: &mut [Option<usize>; 3],
     worker_rows: &mut BTreeMap<usize, (String, String)>,
     base: usize,
@@ -2847,8 +2984,9 @@ fn render_provider_rows(
             detail.push_str(" · ");
             detail.push_str(body);
         }
-        if connected && group == 2 && !agy_roster.is_empty() {
-            let count = agy_roster.len();
+        let visible_agy_roster = &agy_roster[..agy_roster_limit.min(agy_roster.len())];
+        if connected && group == 2 && !visible_agy_roster.is_empty() {
+            let count = visible_agy_roster.len();
             let label = if count == 1 { "agent" } else { "agents" };
             detail.push_str(&format!(" · {count} {label}"));
         }
@@ -2878,7 +3016,38 @@ fn render_provider_rows(
             .iter()
             .filter(|(index, _)| *index >= offset && *index < offset + capacity)
             .collect();
-        let children: Vec<_> = agy_roster
+        let agy_matches: BTreeMap<&str, &Value> = if connected && group == 2 {
+            let mut roster_by_title: BTreeMap<&str, Option<&Value>> = BTreeMap::new();
+            for child in agy_roster {
+                let title = text(child, "title");
+                if !title.is_empty() {
+                    roster_by_title
+                        .entry(title)
+                        .and_modify(|slot| *slot = None)
+                        .or_insert(Some(child));
+                }
+            }
+            let mut native_counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for (_, call) in &members {
+                if call["native_child"] == true {
+                    let title = text(call, "title");
+                    if !title.is_empty() {
+                        *native_counts.entry(title).or_default() += 1;
+                    }
+                }
+            }
+            roster_by_title
+                .into_iter()
+                .filter_map(|(title, child)| {
+                    (native_counts.get(title).copied() == Some(1))
+                        .then_some(child.map(|child| (title, child)))
+                        .flatten()
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        let children: Vec<_> = visible_agy_roster
             .iter()
             .filter(|_| connected && group == 2)
             .filter(|child| {
@@ -2937,8 +3106,12 @@ fn render_provider_rows(
                     .map(|parent| format!(" ← {parent}"))
                     .unwrap_or_default()
             };
+            let projected = (call["native_child"] == true && text(call, "state") != "done")
+                .then(|| agy_matches.get(text(call, "title")).copied())
+                .flatten()
+                .map(|roster_child| project_agy_roster_match(call, roster_child));
             lines.push(render_card_row(
-                call,
+                projected.as_ref().unwrap_or(call),
                 branch(children.len() + row),
                 &parent_label,
                 Some(index) == selected_worker,
@@ -2951,6 +3124,27 @@ fn render_provider_rows(
     }
     lines.extend(card_bottom(columns, true, colored));
     lines
+}
+
+fn project_agy_roster_match(call: &Value, roster_child: &Value) -> Value {
+    let mut projected = call.clone();
+    let roster_role = text(roster_child, "role");
+    if !roster_role.is_empty() && matches!(text(call, "role"), "" | "subagent" | "worker") {
+        projected["role"] = json!(roster_role.to_ascii_lowercase());
+    }
+    let roster_state = text(roster_child, "state");
+    if text(call, "state") == "unknown" && !roster_state.is_empty() {
+        projected["state"] = roster_child["state"].clone();
+    }
+    if !roster_child["activity"].is_null() && text(call, "activity").is_empty() {
+        projected["activity"] = roster_child["activity"].clone();
+    }
+    let roster_elapsed = text(roster_child, "elapsed");
+    let current_elapsed = text(call, "board_elapsed");
+    if !roster_elapsed.is_empty() && (current_elapsed.is_empty() || current_elapsed == "—") {
+        projected["board_elapsed"] = json!(roster_elapsed);
+    }
+    projected
 }
 
 fn register_call(hits: &mut BTreeMap<usize, (String, String)>, row: usize, call: &Value) {
@@ -3662,9 +3856,10 @@ fn render_main_section(
     columns: usize,
     use_cards: bool,
     colored: bool,
-) -> Vec<String> {
+    allow_switch: bool,
+) -> (Vec<String>, Option<(usize, usize)>) {
     if main.is_none() && goal.is_empty() {
-        return vec![];
+        return (vec![], None);
     }
     let model = main
         .map(|call| {
@@ -3683,14 +3878,31 @@ fn render_main_section(
         .unwrap_or("");
     let state = main.map(|call| text(call, "state")).unwrap_or("");
     let mut out = Vec::new();
+    let mut switch_cols = None;
     if use_cards {
-        out.push(card_top_styled(
-            "Overall Main",
-            Some(state),
-            columns,
-            colored,
-            SGR_MAIN_TITLE,
-        ));
+        let (top, cols) = if allow_switch && main.is_some() {
+            card_top_with_action(
+                "Overall Main",
+                Some(state),
+                &MAIN_SWITCH_LABELS,
+                columns,
+                colored,
+                SGR_MAIN_TITLE,
+            )
+        } else {
+            (
+                card_top_styled(
+                    "Overall Main",
+                    Some(state),
+                    columns,
+                    colored,
+                    SGR_MAIN_TITLE,
+                ),
+                None,
+            )
+        };
+        switch_cols = cols;
+        out.push(top);
     }
     let identity = if main.is_none() {
         "No active Main".to_owned()
@@ -3779,7 +3991,7 @@ fn render_main_section(
     if let Some(bottom) = card_bottom(columns, use_cards, colored) {
         out.push(bottom);
     }
-    out
+    (out, switch_cols)
 }
 
 pub(crate) fn main_switch_frame(
@@ -3813,6 +4025,7 @@ pub(crate) fn main_switch_frame(
         provider_rows: [None; 3],
         worker_rows: Default::default(),
         weekly_usage: None,
+        main_switch: None,
     }
 }
 
@@ -4225,6 +4438,7 @@ fn render_detail_card(
     inner_width: usize,
     use_cards: bool,
     colored: bool,
+    room: usize,
 ) -> Vec<String> {
     let Some(call) = selected else {
         let mut out = vec![card_top("Call Detail", Some("Esc back"), columns, colored)];
@@ -4303,6 +4517,7 @@ fn render_detail_card(
         }
         None => "unreported".to_owned(),
     };
+    let unreported_row = observed["total"].as_u64().is_none() && width(&tokens) <= token_width;
     if width(&tokens) <= token_width {
         out.push(card_row_lr(
             vec![Span::literal("Tokens", Some(SGR_MUTED))],
@@ -4313,6 +4528,7 @@ fn render_detail_card(
             colored,
         ));
     }
+    let response_at = out.len();
     out.extend(receipt_token_details(
         call,
         columns,
@@ -4375,7 +4591,127 @@ fn render_detail_card(
     if let Some(bottom) = card_bottom(columns, use_cards, colored) {
         out.push(bottom);
     }
+    // The response gets the viewport's spare rows plus the slot of a Tokens row
+    // that would only say "unreported", which it replaces; beside a real
+    // headline with no spare row it is not shown. Counters past the cap are
+    // counted by `+K more`, never clipped.
+    let slot = usize::from(unreported_row);
+    let cap = room
+        .saturating_sub(out.len())
+        .saturating_add(slot)
+        .min(LAST_RESPONSE_ROWS);
+    let rows = if cap == 0 {
+        Vec::new()
+    } else {
+        last_response_rows(call, inner_width, cap)
+    };
+    if !rows.is_empty() {
+        let tail = out.split_off(response_at);
+        out.truncate(response_at - slot);
+        out.extend(rows.into_iter().enumerate().map(|(index, value)| {
+            let left = if index == 0 {
+                vec![Span::literal(LAST_RESPONSE, Some(SGR_MUTED))]
+            } else {
+                Vec::new()
+            };
+            card_row_lr(
+                left,
+                vec![Span::raw(value, inner_width, Some(SGR_TEXT))],
+                columns,
+                use_cards,
+                None,
+                colored,
+            )
+        }));
+        out.extend(tail);
+    }
     out
+}
+
+const LAST_RESPONSE: &str = "Last response";
+const LAST_RESPONSE_ROWS: usize = 4;
+
+/// Values of the Call Detail's "Last response" rows; the first sits beside
+/// the label and may be empty. Only known counters appear, never summed, as
+/// whole `N label` parts in priority order. Parts past `cap` rows are counted
+/// by a final `+K more`. Empty when neither a part nor the count fits.
+fn last_response_rows(call: &Value, inner_width: usize, cap: usize) -> Vec<String> {
+    let Some(counts) = native_response(call) else {
+        return Vec::new();
+    };
+    let codex = call["provider"] == "codex";
+    let known: Vec<(&str, &str, u64)> = RESPONSE_COUNTERS
+        .iter()
+        .zip(counts)
+        .filter_map(|(&(key, label), count)| count.map(|n| (key, label, n)))
+        .collect();
+    // Two producer keys sharing a label keep apart by their own names.
+    // Codex maps omitted cache/reasoning detail to zeros, so 0 renders as `?`.
+    let parts = known.iter().map(|&(key, label, n)| {
+        let value = if codex
+            && n == 0
+            && matches!(
+                key,
+                "cached_input_tokens" | "cache_write_input_tokens" | "reasoning_output_tokens"
+            ) {
+            "?".to_owned()
+        } else {
+            n.to_string()
+        };
+        if known.iter().filter(|other| other.1 == label).count() > 1 {
+            format!(
+                "{value} {}",
+                key.trim_end_matches("_tokens").replace('_', " ")
+            )
+        } else {
+            format!("{value} {label}")
+        }
+    });
+    // Continuation rows keep a two-cell indent so they never read as a label.
+    let budget = |row: usize| {
+        if row == 0 {
+            left_budget(inner_width, width(LAST_RESPONSE))
+        } else {
+            inner_width.saturating_sub(2)
+        }
+    };
+    let fits = |row: &[String], extra: &str, budget: usize| {
+        width(&row.join(" · ")) + 3 * usize::from(!row.is_empty()) + width(extra) <= budget
+    };
+    let mut rows: Vec<Vec<String>> = vec![Vec::new()];
+    let mut more = 0;
+    for part in parts {
+        let last = rows.len() - 1;
+        if more > 0 {
+            more += 1;
+        } else if fits(&rows[last], &part, budget(last)) {
+            rows[last].push(part);
+        } else if rows.len() < cap && width(&part) <= budget(1) {
+            rows.push(vec![part]);
+        } else {
+            more = 1;
+        }
+    }
+    while more > 0 {
+        let marker = format!("+{more} more");
+        let last = rows.len() - 1;
+        if fits(&rows[last], &marker, budget(last)) {
+            rows[last].push(marker);
+            break;
+        }
+        if rows.len() < cap && width(&marker) <= budget(1) {
+            rows.push(vec![marker]);
+            break;
+        }
+        if rows[last].pop().is_none() {
+            return Vec::new();
+        }
+        more += 1;
+    }
+    if width(LAST_RESPONSE) > inner_width || rows.iter().all(Vec::is_empty) {
+        return Vec::new();
+    }
+    rows.iter().map(|row| row.join(" · ")).collect()
 }
 
 fn receipt_token_details(
@@ -5483,6 +5819,7 @@ mod tests {
             96,
             true,
             false,
+            usize::MAX,
         )
         .join("\n");
         for (label, raw) in [
@@ -5535,7 +5872,8 @@ mod tests {
         }
         let headless_calls = calls(&headless);
         assert_eq!(headless_calls[0]["role"], "worker");
-        let detail = render_detail_card(headless_calls.first(), 120, 116, true, false).join("\n");
+        let detail = render_detail_card(headless_calls.first(), 120, 116, true, false, usize::MAX)
+            .join("\n");
         for raw in [participant, attempt, "codex-runtime"] {
             assert!(detail.contains(raw), "missing {raw}: {detail}");
         }
@@ -5570,7 +5908,7 @@ mod tests {
             .unwrap();
         native["title"] =
             json!("Research a practical path for the native panel and compare the options");
-        let narrow_detail = render_detail_card(Some(&native), 44, 40, true, false);
+        let narrow_detail = render_detail_card(Some(&native), 44, 40, true, false, usize::MAX);
         assert!(
             narrow_detail
                 .iter()
@@ -5629,7 +5967,8 @@ mod tests {
             Some("Own goal")
         );
         let reviewer = calls.iter().find(|call| call["attempt"] == review).unwrap();
-        let detail = render_detail_card(Some(reviewer), 200, 196, true, false).join("\n");
+        let detail =
+            render_detail_card(Some(reviewer), 200, 196, true, false, usize::MAX).join("\n");
         for expected in [review, main, "codex-peer-review", "Review label pass"] {
             assert!(detail.contains(expected), "{expected}: {detail}");
         }
@@ -5694,7 +6033,7 @@ mod tests {
             .find(|call| call["attempt"] == "read-done")
             .expect("returned call remains in history");
         assert!(
-            render_detail_card(Some(&done), 100, 96, true, false)
+            render_detail_card(Some(&done), 100, 96, true, false, usize::MAX)
                 .iter()
                 .any(|line| line.contains("✓ returned"))
         );
@@ -7654,6 +7993,272 @@ mod tests {
     }
 
     #[test]
+    fn agy_roster_dedup_carries_live_fields_only_on_unique_active_match() {
+        let now = oms_panel_core::timestamp();
+        let paint = |r: &Value| {
+            board_frame(
+                r,
+                &Default::default(),
+                140,
+                27,
+                &BTreeMap::new(),
+                false,
+                true,
+            )
+        };
+        let agy_card_rows = |frame: &BoardFrame| -> Vec<usize> {
+            let heading = frame
+                .lines
+                .iter()
+                .position(|line| line.contains("Antigravity · "))
+                .unwrap();
+            (heading + 1..frame.lines.len())
+                .take_while(|row| frame.lines[*row].starts_with('│'))
+                .collect()
+        };
+        let roster_item = || {
+            json!({
+                "role": "Researcher",
+                "title": "Inspect custody",
+                "state": "reading",
+                "activity": "Reading file",
+                "elapsed": "12s"
+            })
+        };
+        let native_child = |id: &str, state: &str| {
+            json!({
+                "participant": id,
+                "native_child": true,
+                "provider": "antigravity",
+                "role": "subagent",
+                "state": state,
+                "title": "Inspect custody",
+                "native_response_usage": {
+                    "response": {
+                        "input_tokens": 1200,
+                        "output_tokens": 340
+                    }
+                }
+            })
+        };
+        let base = || {
+            let mut report = top_bar_report();
+            report["generated_at"] = json!(now);
+            report["provider_sessions"] = json!(["claude", "antigravity"]);
+            report["provider_activity"]["antigravity"] = json!({
+                "state": "working",
+                "children": [roster_item()]
+            });
+            report
+        };
+
+        // 1. Unique match (working/reading): suppresses duplicate preview, carries live role,
+        // activity and elapsed, preserves real split response tokens and selection identity.
+        let mut unique = base();
+        unique["native_children"] = json!([native_child(
+            "native-antigravity-1111111111111111",
+            "unknown"
+        )]);
+        let frame = paint(&unique);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 1, "{:?}", frame.lines);
+        let line = &frame.lines[agy[0]];
+        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.contains("Researcher Inspect custody"), "{line}");
+        assert!(line.contains("[⟳ reading]"), "{line}");
+        assert!(line.contains("12s"), "{line}");
+        assert!(line.contains("— tok"), "{line}");
+        assert!(line.contains("rsp in 1.2K out 340"), "{line}");
+        assert!(!line.contains("1.5K"), "{line}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111"),
+            "{line}"
+        );
+
+        // 2a. Duplicate title in native_children (ambiguous): no carryover onto either row.
+        let mut dup_native = base();
+        dup_native["native_children"] = json!([
+            native_child("native-antigravity-1111111111111111", "unknown"),
+            native_child("native-antigravity-2222222222222222", "unknown")
+        ]);
+        let frame = paint(&dup_native);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 2, "{:?}", frame.lines);
+        for (at, row) in agy.iter().enumerate() {
+            let line = &frame.lines[*row];
+            let branch = if at == 0 {
+                "│  ├─ "
+            } else {
+                "│  └─ "
+            };
+            assert!(line.starts_with(branch), "{line}");
+            assert!(line.contains("Worker"), "{line}");
+            assert!(!line.contains("Researcher"), "{line}");
+            assert!(!line.contains("[⟳ reading]"), "{line}");
+            assert!(!line.contains("12s"), "{line}");
+        }
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111")
+        );
+        assert_eq!(
+            frame.worker_rows.get(&agy[1]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-2222222222222222")
+        );
+
+        // 2b. Duplicate title in agy_roster (ambiguous): no carryover onto transcript child.
+        let mut dup_roster = base();
+        dup_roster["provider_activity"]["antigravity"]["children"] =
+            json!([roster_item(), roster_item()]);
+        dup_roster["native_children"] = json!([native_child(
+            "native-antigravity-1111111111111111",
+            "unknown"
+        )]);
+        let frame = paint(&dup_roster);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 1, "{:?}", frame.lines);
+        let line = &frame.lines[agy[0]];
+        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.contains("Worker"), "{line}");
+        assert!(!line.contains("Researcher"), "{line}");
+        assert!(!line.contains("[⟳ reading]"), "{line}");
+        assert!(!line.contains("12s"), "{line}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111")
+        );
+
+        // 2c. Short viewport truncates a 2-row duplicate roster to 1 visible row:
+        // ambiguity still evaluates against the full observed roster, so no merge occurs.
+        let selected = visible(&dup_roster, &Default::default())
+            .iter()
+            .position(|call| call["participant"] == "native-antigravity-1111111111111111")
+            .unwrap();
+        let agy_nav = navigation::Navigation {
+            selected,
+            ..Default::default()
+        };
+        let paint_short = |r: &Value, height: usize| {
+            board_frame(r, &agy_nav, 140, height, &BTreeMap::new(), false, true)
+        };
+        let truncated_height = (10..=20)
+            .find(|&height| {
+                let frame = paint_short(&dup_roster, height);
+                frame.provider_rows[2]
+                    .is_some_and(|heading| frame.lines[heading].contains("1 agent"))
+            })
+            .expect("viewport height truncating 2-row roster to 1");
+        let frame = paint_short(&dup_roster, truncated_height);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 1, "{:?}", frame.lines);
+        let line = &frame.lines[agy[0]];
+        assert!(line.starts_with("│ ▸└─ "), "{line}");
+        assert!(line.contains("Worker"), "{line}");
+        assert!(!line.contains("Researcher"), "{line}");
+        assert!(!line.contains("[⟳ reading]"), "{line}");
+        assert!(!line.contains("12s"), "{line}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111")
+        );
+
+        // 2d. Genuine unique match in that same short viewport still merges cleanly.
+        let frame = paint_short(&unique, truncated_height);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 1, "{:?}", frame.lines);
+        let line = &frame.lines[agy[0]];
+        assert!(line.starts_with("│ ▸└─ "), "{line}");
+        assert!(line.contains("Researcher Inspect custody"), "{line}");
+        assert!(line.contains("[⟳ reading]"), "{line}");
+        assert!(line.contains("12s"), "{line}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111")
+        );
+
+        // 3a. Terminal/stale transcript child (state: "done"): never inherits live roster state.
+        let mut terminal = base();
+        let mut done_child = native_child("native-antigravity-3333333333333333", "done");
+        done_child["updated_at"] = json!(now.saturating_sub(10));
+        done_child["refs"] = json!({"panel_access": "write"});
+        terminal["native_children"] = json!([done_child]);
+        let frame = paint(&terminal);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 1, "{:?}", frame.lines);
+        let line = &frame.lines[agy[0]];
+        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.contains("Worker"), "{line}");
+        assert!(line.contains("[✓ exited]"), "{line}");
+        assert!(!line.contains("Researcher"), "{line}");
+        assert!(!line.contains("[⟳ reading]"), "{line}");
+        assert!(!line.contains("12s"), "{line}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-3333333333333333")
+        );
+
+        // 3b. Disconnected AGY card (!connected): never merges roster state.
+        let mut disconnected = base();
+        disconnected["provider_sessions"] = json!(["claude"]);
+        disconnected["native_children"] = json!([native_child(
+            "native-antigravity-1111111111111111",
+            "unknown"
+        )]);
+        let frame = paint(&disconnected);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 1, "{:?}", frame.lines);
+        let line = &frame.lines[agy[0]];
+        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.contains("Worker"), "{line}");
+        assert!(!line.contains("Researcher"), "{line}");
+        assert!(!line.contains("[⟳ reading]"), "{line}");
+        assert!(!line.contains("12s"), "{line}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[0]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111")
+        );
+
+        // 4. Unmatched roster preview + uniquely matched working child: stable branches and elapsed.
+        let mut mixed = base();
+        mixed["provider_activity"]["antigravity"]["children"] = json!([
+            {
+                "role": "Advisor",
+                "title": "Plan next step",
+                "state": "working",
+                "activity": "Generating",
+                "elapsed": "45s"
+            },
+            roster_item()
+        ]);
+        mixed["native_children"] = json!([native_child(
+            "native-antigravity-1111111111111111",
+            "unknown"
+        )]);
+        let frame = paint(&mixed);
+        let agy = agy_card_rows(&frame);
+        assert_eq!(agy.len(), 2, "{:?}", frame.lines);
+        let preview = &frame.lines[agy[0]];
+        let matched = &frame.lines[agy[1]];
+        assert!(preview.starts_with("│  ├─ "), "{preview}");
+        assert!(preview.contains("Advisor"), "{preview}");
+        assert!(preview.contains("Plan next step"), "{preview}");
+        assert!(preview.contains("[⟳ generating]"), "{preview}");
+        assert!(preview.contains("45s"), "{preview}");
+        assert!(!frame.worker_rows.contains_key(&agy[0]), "{preview}");
+        assert!(matched.starts_with("│  └─ "), "{matched}");
+        assert!(matched.contains("Researcher Inspect custody"), "{matched}");
+        assert!(matched.contains("[⟳ reading]"), "{matched}");
+        assert!(matched.contains("rsp in 1.2K out 340"), "{matched}");
+        assert!(matched.contains("12s"), "{matched}");
+        assert_eq!(
+            frame.worker_rows.get(&agy[1]).map(|(id, _)| id.as_str()),
+            Some("native-antigravity-1111111111111111")
+        );
+        assert!(frame.lines.iter().all(|line| width(line) <= 140));
+    }
+
+    #[test]
     fn weekly_line_carries_lead_activity_without_new_rows() {
         let now = 1_000_000.0;
         let base = json!({"collection":{"ok":true}, "provider_status":{
@@ -8304,13 +8909,73 @@ mod tests {
                 assert_eq!(*plain, strip_sgr(styled));
                 assert!(width(plain) <= columns);
             }
+            if wide {
+                let expected = if columns >= 46 {
+                    "[s Switch Main]"
+                } else {
+                    "[s Switch]"
+                };
+                let zone = board
+                    .main_switch
+                    .expect("Switch Main hit zone on Overall Main card");
+                assert_eq!(colored.main_switch, Some(zone));
+                assert_eq!(zone.row, main_row - 1);
+                let top = &board.lines[zone.row];
+                let hit_text: String = top
+                    .chars()
+                    .skip(zone.start - 1)
+                    .take(zone.end - zone.start + 1)
+                    .collect();
+                assert_eq!(hit_text, expected, "{columns}: {top}");
+                assert!(zone.contains(zone.start as u16, (zone.row + 1) as u16));
+                assert!(zone.contains(zone.end as u16, (zone.row + 1) as u16));
+                assert!(!zone.contains((zone.start - 1) as u16, (zone.row + 1) as u16));
+                assert!(!zone.contains((zone.end + 1) as u16, (zone.row + 1) as u16));
+                assert!(!zone.contains(zone.start as u16, zone.row as u16));
+                assert!(!zone.contains(zone.start as u16, (zone.row + 2) as u16));
+            } else {
+                assert!(board.main_switch.is_none());
+                assert!(colored.main_switch.is_none());
+            }
         }
+        let clipped = board_frame(
+            &report,
+            &navigation::Navigation::default(),
+            100,
+            11,
+            &read,
+            false,
+            true,
+        );
+        assert!(clipped.main_switch.is_none());
+        assert!(!clipped.lines.iter().any(|line| line.contains("[s Switch")));
+        let mut unpinned = report.clone();
+        unpinned["room"]["main"] = Value::Null;
+        unpinned["room"]["participants"] = json!([
+            {"participant":"worker","attempt":"build-1","role":"worker","alias":"아다","provider":"codex","state":"working","title":"Fix"}
+        ]);
+        unpinned["room_attempts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("main-1");
+        let no_main = board_frame(
+            &unpinned,
+            &navigation::Navigation::default(),
+            100,
+            20,
+            &read,
+            false,
+            true,
+        );
+        assert!(no_main.main_switch.is_none());
+        assert!(!no_main.lines.iter().any(|line| line.contains("[s Switch")));
         let detail = render_detail_card(
             calls(&report).iter().find(|c| c["participant"] == "worker"),
             100,
             96,
             true,
             false,
+            usize::MAX,
         )
         .join("\n");
         assert!(
@@ -8335,7 +9000,10 @@ mod tests {
                 selected,
                 ..Default::default()
             };
-            let card = frame(&report, &nav, 100, 30, &read).join("\n");
+            let detail_board = board_frame(&report, &nav, 100, 30, &read, false, false);
+            assert!(detail_board.main_switch.is_none());
+            let card = detail_board.lines.join("\n");
+            assert!(!card.contains("[s Switch"), "{card}");
             assert!(
                 card.lines()
                     .any(|line| line.contains(heading) && line.contains("Esc back")),
@@ -8715,6 +9383,330 @@ mod tests {
             100,
         );
         assert!(both.ends_with("99 rsp") && !both.contains(" in "), "{both}");
+        // The selected Call Detail lists the same response counters as whole
+        // `N label` parts on bounded rows and leaves the Tokens line as it was.
+        let detail = |call: &Value, columns: usize| {
+            let lines =
+                render_detail_card(Some(call), columns, columns - 4, true, false, usize::MAX);
+            assert!(
+                lines.iter().skip(1).all(|line| width(line) == columns),
+                "{lines:#?}"
+            );
+            let bodies: Vec<&str> = lines
+                .iter()
+                .skip(1)
+                .filter_map(|line| line.strip_prefix("│ ")?.strip_suffix(" │"))
+                .collect();
+            let tokens = bodies.iter().find_map(|body| {
+                let rest = body.strip_prefix("Tokens ")?;
+                Some(rest.trim().to_owned())
+            });
+            let start = bodies
+                .iter()
+                .position(|body| body.starts_with("Last response"));
+            let rows = start.map(|start| {
+                let first = &bodies[start]["Last response".len()..];
+                let rest = bodies[start + 1..]
+                    .iter()
+                    .take_while(|body| body.starts_with(' '));
+                [first]
+                    .into_iter()
+                    .chain(rest.copied())
+                    .map(|row| {
+                        row.split(" · ")
+                            .map(str::trim)
+                            .filter(|part| !part.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            });
+            (tokens, rows)
+        };
+        let unreported = Some("unreported".to_owned());
+        let codex = json!({"total_tokens":12_500,"input_tokens":14_000,
+            "cached_input_tokens":9_000,"cache_write_input_tokens":0,"output_tokens":5,
+            "reasoning_output_tokens":3});
+        let claude = json!({"input_tokens":3,"output_tokens":700,
+            "cache_creation_input_tokens":1_200,"cache_read_input_tokens":20_000});
+        let agy = json!({"input_tokens":1_200,"cached_input_tokens":800,"output_tokens":40});
+        let both_keys = json!({"cached_input_tokens":9_000,"cache_read_input_tokens":20_000,
+            "cache_creation_input_tokens":1,"cache_write_input_tokens":2});
+        let cases = [
+            (json!({"total_tokens":12_500}), vec!["12500 total"]),
+            (
+                json!({"total_tokens":12_500,"input_tokens":14_000,"output_tokens":5}),
+                vec!["12500 total", "14000 in", "5 out"],
+            ),
+            (
+                json!({"input_tokens":14_000,"output_tokens":5}),
+                vec!["14000 in", "5 out"],
+            ),
+            (
+                json!({"total_tokens":0,"output_tokens":0,"input_tokens":"x"}),
+                vec!["0 total", "0 out"],
+            ),
+            (
+                codex.clone(),
+                vec![
+                    "12500 total",
+                    "14000 in",
+                    "5 out",
+                    "9000 cache read",
+                    "0 cache write",
+                    "3 reasoning",
+                ],
+            ),
+            (
+                json!({"total_tokens":20,"input_tokens":10,"cached_input_tokens":0,"output_tokens":10}),
+                vec!["20 total", "10 in", "10 out", "0 cache read"],
+            ),
+            (
+                claude.clone(),
+                vec!["3 in", "700 out", "20000 cache read", "1200 cache write"],
+            ),
+            (
+                json!({"input_tokens":3,"output_tokens":700,"cache_creation_input_tokens":0}),
+                vec!["3 in", "700 out", "0 cache write"],
+            ),
+            (agy.clone(), vec!["1200 in", "40 out", "800 cache read"]),
+            (
+                json!({"input_tokens":1_200,"cached_input_tokens":0,"output_tokens":40}),
+                vec!["1200 in", "40 out", "0 cache read"],
+            ),
+            (
+                json!({"input_tokens":1_200,"output_tokens":40}),
+                vec!["1200 in", "40 out"],
+            ),
+            (
+                json!({"input_tokens":5,"cached_input_tokens":-1,"cache_read_input_tokens":1.5,
+                    "cache_write_input_tokens":"12","reasoning_output_tokens":null}),
+                vec!["5 in"],
+            ),
+            (
+                both_keys.clone(),
+                vec![
+                    "9000 cached input",
+                    "20000 cache read input",
+                    "1 cache creation input",
+                    "2 cache write input",
+                ],
+            ),
+        ];
+        for (response, expected) in &cases {
+            let values: Vec<u64> = response
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(Value::as_u64)
+                .collect();
+            for columns in [100, 44, 30] {
+                let (tokens, rows) = detail(&child(response.clone()), columns);
+                let at = format!("{response} at {columns}: {rows:?}");
+                // The response takes the slot of a Tokens row saying "unreported".
+                assert_eq!(tokens, None, "{at}");
+                let rows = rows.expect(&at);
+                let parts: Vec<&str> = rows.iter().flatten().map(String::as_str).collect();
+                let (marker, shown): (Vec<&str>, Vec<&str>) =
+                    parts.iter().partition(|part| part.starts_with('+'));
+                let more = match marker[..] {
+                    [] => 0,
+                    [marker] => marker
+                        .strip_prefix('+')
+                        .and_then(|rest| rest.strip_suffix(" more"))
+                        .and_then(|count| count.parse().ok())
+                        .expect(&at),
+                    _ => panic!("{at}"),
+                };
+                // Shown parts keep priority order; the marker counts the rest.
+                assert!(!shown.is_empty() && rows.len() <= 4, "{at}");
+                assert_eq!(shown[..], expected[..shown.len()], "{at}");
+                assert_eq!(shown.len() + more, expected.len(), "{at}");
+                let one_row = width(&expected.join(" · ")) + 14 <= columns - 4;
+                assert_eq!(rows.len() == 1, one_row, "{at}");
+                if response.get("total_tokens").is_none() {
+                    assert!(parts.iter().all(|part| !part.contains("total")), "{at}");
+                }
+                for (i, a) in values.iter().enumerate() {
+                    for b in &values[i + 1..] {
+                        let sum = format!("{} ", a + b);
+                        let invented = !values.contains(&(a + b));
+                        assert!(
+                            !(invented && parts.iter().any(|p| p.starts_with(&sum))),
+                            "{at}"
+                        );
+                    }
+                }
+            }
+        }
+        // Every provider shape fits one row at normal width and splits narrow.
+        for response in [&codex, &claude, &agy] {
+            let rows = |columns| detail(&child(response.clone()), columns).1.unwrap().len();
+            assert_eq!(rows(100), 1, "{response}");
+            assert!(rows(44) > 1 && rows(30) > 1, "{response}");
+        }
+        // The fourth row ends with an exact count of the parts it could not
+        // hold, and a part too wide beside the label starts the next row.
+        let codex_narrow = detail(&child(codex.clone()), 30).1.unwrap();
+        assert_eq!(codex_narrow.len(), 4);
+        assert_eq!(codex_narrow[3].last().map(String::as_str), Some("+1 more"));
+        let keys_narrow = detail(&child(both_keys), 30).1.unwrap();
+        assert!(keys_narrow[0].is_empty(), "{keys_narrow:?}");
+        assert_eq!(keys_narrow[3], ["+2 more"]);
+        // A known part wider than any row is counted, never silently dropped.
+        let wide_part = json!({"input_tokens":5,"cache_creation_input_tokens":20_000});
+        let (tokens, rows) = detail(&child(wide_part), 22);
+        let parts: Vec<String> = rows.into_iter().flatten().flatten().collect();
+        assert_eq!(tokens, None);
+        assert!(parts.contains(&"5 in".to_owned()), "{parts:?}");
+        assert!(parts.contains(&"+1 more".to_owned()), "{parts:?}");
+        assert!(
+            !parts.iter().any(|part| part.contains("20000")),
+            "{parts:?}"
+        );
+        // The board row keeps its own compact split and never reads components.
+        assert!(rendered(child(agy), 80, 100).contains("— tok  rsp in 1.2K out 40"));
+        assert!(rendered(child(claude), 80, 100).contains("— tok  rsp in 3 out 700"));
+        // Too narrow for the label: omitted rather than shown unlabelled.
+        let tiny = detail(&child(json!({"input_tokens":14_000,"output_tokens":5})), 14);
+        assert_eq!(tiny, (None, None));
+        let mut session = child(json!({"total_tokens":7}));
+        session["native_session_tokens"] = json!({"total":9_000});
+        for columns in [100, 44] {
+            assert_eq!(
+                detail(&session, columns),
+                (
+                    Some("9000 · Session incl. cache".to_owned()),
+                    Some(vec![vec!["7 total".to_owned()]])
+                )
+            );
+        }
+        let managed = json!({"receipt_tokens":{"total":300_000},
+            "native_response_usage":{"response":{"total_tokens":7,"cached_input_tokens":7}}});
+        let foreign = json!({"native_response_usage":{"response":{"cache_read_input_tokens":7}}});
+        assert_eq!(detail(&managed, 100).1, None);
+        assert_eq!(detail(&foreign, 100), (unreported.clone(), None));
+        for response in [
+            json!(null),
+            json!({}),
+            json!({"total_tokens":-1,"input_tokens":1.5,"output_tokens":"12"}),
+            json!({"thread_total_tokens":7,"turn_total_tokens":7}),
+            json!({"cached_input_tokens":-1,"cache_creation_input_tokens":"3"}),
+        ] {
+            for columns in [100, 44, 30] {
+                let shown = detail(&child(response.clone()), columns);
+                assert_eq!(shown, (unreported.clone(), None), "{response}");
+            }
+        }
+        // The selected Board Detail spends only the viewport's rows: at 30×10
+        // under the pinned Main and Goal, every known part is shown or counted.
+        let mut report = top_bar_report();
+        report["native_children"] = json!([{"participant":"native-codex-r1","native_child":true,
+            "provider":"codex","role":"subagent","parent":"M","state":"working",
+            "native_response_usage":{"response":codex}}]);
+        let selected = visible(&report, &Default::default())
+            .iter()
+            .position(|call| call["participant"] == "native-codex-r1")
+            .unwrap();
+        let nav = navigation::Navigation {
+            selected,
+            detail: true,
+            ..Default::default()
+        };
+        let known = [
+            "12500 total",
+            "14000 in",
+            "5 out",
+            "9000 cache read",
+            "? cache write",
+            "3 reasoning",
+        ];
+        // The first response row reuses the "Tokens unreported" slot, so Role
+        // stays visible at 30×10 and every counter is still counted there.
+        for (columns, height, visible, counted) in [(30, 10, 0, 6), (100, 30, 6, 0)] {
+            let board = frame(&report, &nav, columns, height, &BTreeMap::new());
+            let at = board.join("\n");
+            assert!(board.len() <= height, "{at}");
+            assert!(at.contains("Goal") && at.contains("Last response"), "{at}");
+            assert!(board.iter().any(|line| line.contains("Role")), "{at}");
+            assert!(
+                !board
+                    .iter()
+                    .any(|line| line.contains("Tokens") && line.contains("unreported")),
+                "{at}"
+            );
+            let shown = known.iter().filter(|part| at.contains(*part)).count();
+            let more: usize = at
+                .match_indices('+')
+                .filter_map(|(index, _)| {
+                    let rest = &at[index + 1..];
+                    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                    rest[digits..]
+                        .starts_with(" more")
+                        .then(|| rest[..digits].parse::<usize>().ok())?
+                })
+                .sum();
+            assert_eq!((shown, more), (visible, counted), "{at}");
+            assert_eq!(shown + more, known.len(), "{at}");
+        }
+        // Codex maps omitted cache/reasoning detail to 0, so Call Detail renders
+        // those as `?` while keeping explicit total/in/out 0s, positive values,
+        // and AGY/Claude zero detail semantics intact.
+        let codex_zeros = json!({"participant":"native-codex-z0","native_child":true,
+            "provider":"codex","native_response_usage":{"response":{
+                "total_tokens":0,"input_tokens":0,"output_tokens":0,
+                "cached_input_tokens":0,"cache_write_input_tokens":0,
+                "reasoning_output_tokens":0}}});
+        let codex_pos = json!({"participant":"native-codex-p1","native_child":true,
+            "provider":"codex","native_response_usage":{"response":{
+                "total_tokens":19,"input_tokens":14,"output_tokens":5,
+                "cached_input_tokens":7,"cache_write_input_tokens":3,
+                "reasoning_output_tokens":2}}});
+        let agy_zero = json!({"participant":"native-antigravity-z0","native_child":true,
+            "provider":"antigravity","native_response_usage":{"response":{
+                "input_tokens":1_200,"cached_input_tokens":0,"output_tokens":40}}});
+        let claude_zero = json!({"participant":"native-claude-z0","native_child":true,
+            "provider":"claude","native_response_usage":{"response":{
+                "input_tokens":3,"output_tokens":700,
+                "cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
+        for (entry, expected) in [
+            (
+                codex_zeros,
+                vec![
+                    "0 total",
+                    "0 in",
+                    "0 out",
+                    "? cache read",
+                    "? cache write",
+                    "? reasoning",
+                ],
+            ),
+            (
+                codex_pos,
+                vec![
+                    "19 total",
+                    "14 in",
+                    "5 out",
+                    "7 cache read",
+                    "3 cache write",
+                    "2 reasoning",
+                ],
+            ),
+            (agy_zero, vec!["1200 in", "40 out", "0 cache read"]),
+            (
+                claude_zero,
+                vec!["3 in", "700 out", "0 cache read", "0 cache write"],
+            ),
+        ] {
+            let (tokens, rows) = detail(&entry, 120);
+            assert_eq!(tokens, None, "{entry}");
+            let parts: Vec<String> = rows
+                .unwrap_or_else(|| panic!("{entry}"))
+                .into_iter()
+                .flatten()
+                .collect();
+            assert_eq!(parts, expected, "{entry}");
+        }
     }
 
     #[test]
@@ -8961,6 +9953,12 @@ mod tests {
         ] {
             assert!(detail.contains(label), "{label}: {detail}");
         }
+        report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"]["launch_accounts"][0]["reasoning"] =
+            json!(6);
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(detail.contains("Rsn 6 · Total 0"), "{detail}");
+        report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"]["launch_accounts"][0]["reasoning"] =
+            json!(null);
         let narrow = frame(&report, &nav, 43, 13, &read);
         assert!(
             narrow.iter().any(
@@ -9039,7 +10037,7 @@ mod tests {
                 .iter()
                 .find(|row| row["participant"] == participant)
                 .unwrap();
-            render_detail_card(Some(call), 80, 76, true, false)
+            render_detail_card(Some(call), 80, 76, true, false, usize::MAX)
                 .into_iter()
                 .find(|line| line.contains("Tokens"))
                 .unwrap()

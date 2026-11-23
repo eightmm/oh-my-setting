@@ -1412,12 +1412,95 @@ fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
     }
     Ok(rows)
 }
+
+fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    let receipt = paths
+        .require_owner()?
+        .ok_or_else(|| r::Error(2, "integration checks require an install receipt".into()))?;
+    let components = &receipt["components"];
+    let mut rows = Vec::new();
+    let mut record = |component: &str, enabled: bool, healthy: bool| {
+        let (level, message) = if !enabled {
+            ("note", "not recorded; skipped")
+        } else if healthy {
+            ("ok", "recorded integration matches")
+        } else {
+            (
+                "error",
+                "recorded integration is missing, changed, or unproven",
+            )
+        };
+        rows.push(finding(component, level, message));
+    };
+    r::check(flag)?;
+    let hooks = components["claude_hooks"] == true;
+    record(
+        "claude_hooks",
+        hooks,
+        !hooks || surfaces(paths).is_ok_and(|rows| rows.iter().all(|row| row["level"] != "error")),
+    );
+    let codex = components["codex_plugin"] == true;
+    record(
+        "codex_plugin",
+        codex,
+        !codex || crate::plugins::codex_healthy(paths, flag).unwrap_or(false),
+    );
+    r::check(flag)?;
+    let agy = components["agy_plugin"] == true;
+    let agy_owned = !agy
+        || crate::install::owned(
+            &paths.source.join("plugins/antigravity"),
+            &paths.home.join(".gemini/config/plugins/oh-my-setting"),
+        )
+        .unwrap_or(false);
+    record("agy_plugin", agy, agy_owned);
+    let mcp = components["mcp"] == true;
+    if mcp || agy {
+        // Reuse doctor inventory parsing, but require only the managed scopes
+        // written by installation. Unrelated custom servers are never launched.
+        let inventory = specs(paths)?;
+        for (enabled, provider, scope, section) in [
+            (mcp, "claude", "user", "claude_mcp"),
+            (mcp, "codex", "user", "codex_mcp"),
+            (agy, "antigravity", "plugin-oh-my-setting", "agy_mcp"),
+        ] {
+            let healthy = inventory.servers.iter().any(|server| {
+                server.provider == provider
+                    && server.scope == scope
+                    && server.name == "oh-my-setting"
+                    && server.spec["args"] == json!(["mcp-server"])
+                    && crate::integrations::owned_mcp_entry(
+                        &server.spec,
+                        paths,
+                        &paths.home.join(".local/bin/oms"),
+                    )
+                    .unwrap_or(false)
+            }) && inventory.layers.iter().any(|layer| {
+                layer["provider"] == provider
+                    && layer["scope"] == scope
+                    && layer["status"] == "parsed"
+            });
+            record(section, enabled, healthy);
+        }
+    } else {
+        record("mcp", false, true);
+    }
+    r::check(flag)?;
+    let mut result = report(paths, rows);
+    result.as_object_mut().unwrap().remove("repo");
+    result["kind"] = json!("oms-doctor-integrations");
+    result["runtime"] = json!("not_probed");
+    emit(result, options)
+}
 pub(crate) fn run(
     paths: &Paths,
     options: &Options,
     flag: &AtomicBool,
     services: &dyn crate::Services,
 ) -> Result<crate::Output> {
+    if options.has("--integrations") {
+        return integrations(paths, options, flag);
+    }
     if options.has("--contract") {
         return contract(paths, options, flag, services);
     }
@@ -1896,6 +1979,92 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrations_accept_owned_generated_agy_payload_and_detect_drift() {
+        let scratch = r::Scratch::new().unwrap();
+        let paths = Paths {
+            home: scratch.0.join("home"),
+            source: scratch.0.join("source"),
+            receipt: scratch.0.join("config/install.json"),
+            config: scratch.0.join("config"),
+            state: scratch.0.join("state"),
+            data: scratch.0.join("data"),
+            cwd: scratch.0.join("source"),
+        };
+        let source = paths.source.join("plugins/antigravity");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("plugin.json"),
+            br#"{"name":"oh-my-setting","version":"template"}"#,
+        )
+        .unwrap();
+        let target = paths.home.join(".gemini/config/plugins/oh-my-setting");
+        let plugin = br#"{"name":"oh-my-setting","version":"1"}"#;
+        let mcp = r::bytes(&json!({"mcpServers":{"oh-my-setting":{
+            "command":paths.home.join(".local/bin/oms"),"args":["mcp-server"]
+        }}}))
+        .unwrap();
+        // Use the same generated-directory writer and ownership identity as
+        // plugin installation; source-template equality is not its contract.
+        let mut tx = crate::transaction::Transaction::begin(&paths).unwrap();
+        tx.files(
+            &target,
+            &[
+                ("plugin.json", plugin, 0o600),
+                ("mcp_config.json", &mcp, 0o600),
+            ],
+        )
+        .unwrap();
+        let marker = json!({"schema":1,"kind":"directory","source":source,
+            "sha256":crate::transaction::identity(&target).unwrap()});
+        tx.write(
+            &crate::install::marker(&target),
+            &r::bytes(&marker).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let receipt = r::bytes(
+            &json!({"schema":1,"source_root":paths.source,"commit":"fixture",
+            "version":"1","channel":"edge","installed_at":"fixture",
+            "plugin":{"name":"oh-my-setting","version":"1","sha256":"fixture"},
+            "components":{"agy_plugin":true}}),
+        )
+        .unwrap();
+        tx.write(&paths.receipt, &receipt, 0o600).unwrap();
+        tx.commit().unwrap();
+        let options =
+            crate::cli::parse("doctor", &["--integrations".into(), "--json".into()]).unwrap();
+        let inspect = || {
+            let out = integrations(&paths, &options, &AtomicBool::new(false)).unwrap();
+            assert_eq!(fs::read(&paths.receipt).unwrap(), receipt);
+            let row = r::parse(&out.1).unwrap();
+            (out.0, row)
+        };
+        let (code, report) = inspect();
+        assert_eq!(code, 0, "{report}");
+        for section in ["agy_plugin", "agy_mcp"] {
+            assert!(
+                report["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["section"] == section && r["level"] == "ok")
+            );
+        }
+        fs::write(target.join("mcp_config.json"), b"{\"mcpServers\":{}}").unwrap();
+        let (code, report) = inspect();
+        assert_eq!(code, 1);
+        for section in ["agy_plugin", "agy_mcp"] {
+            assert!(
+                report["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["section"] == section && r["level"] == "error")
+            );
+        }
+    }
 
     #[test]
     fn owned_status_lines_are_ok_and_foreign_ones_stay_a_warning() {

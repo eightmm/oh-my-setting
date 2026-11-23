@@ -642,6 +642,7 @@ impl<'a> Plan<'a> {
                 | Retire
                 | ApplyProposal
                 | Add
+                | AddBatch
                 | Cancel
                 | RelocateDecision
                 | Amend
@@ -928,6 +929,7 @@ impl<'a> Plan<'a> {
             }
             RefreshContracts => return crate::contracts::refresh(self, req, s),
             Add => return self.add(req, s),
+            AddBatch => return self.add_batch(req, s),
             ApplyProposal => return self.proposal(req, s),
             Amend => return self.amend(req, s),
             Cancel => return self.cancel(req, s),

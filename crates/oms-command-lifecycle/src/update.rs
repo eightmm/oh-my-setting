@@ -28,13 +28,28 @@ fn read_state(paths: &Paths) -> Result<Option<Value>> {
     }
     let raw = r::read(&file, r::LIMIT)?;
     if raw.first() == Some(&b'{') {
-        return Ok(Some(r::parse(&raw)?));
+        let mut row = r::parse(&raw)?;
+        if saved_diagnostic(&row["last_apply_diagnostic"]).is_none()
+            && let Some(object) = row.as_object_mut()
+        {
+            object.remove("last_apply_diagnostic");
+        }
+        return Ok(Some(row));
     }
     let text = std::str::from_utf8(&raw)
         .map_err(|_| r::Error(2, "auto-update state is not UTF-8".into()))?;
     let mut row = serde_json::Map::new();
     for line in text.lines() {
-        if let Some((key, value)) = line.split_once('=')
+        if let Some(value) = line.strip_prefix("last_apply_diagnostic=") {
+            if let Some(diagnostic) = r::parse(value.as_bytes())
+                .ok()
+                .as_ref()
+                .and_then(saved_diagnostic)
+            {
+                row.entry("last_apply_diagnostic")
+                    .or_insert(json!(diagnostic));
+            }
+        } else if let Some((key, value)) = line.split_once('=')
             && (matches!(
                 key,
                 "last_run"
@@ -52,12 +67,17 @@ fn read_state(paths: &Paths) -> Result<Option<Value>> {
     }
     Ok(Some(Value::Object(row)))
 }
+fn saved_diagnostic(value: &Value) -> Option<crate::IncomingDiagnostic> {
+    serde_json::from_value::<crate::IncomingDiagnostic>(value.clone())
+        .ok()
+        .filter(|d| d.valid() && d.exit != 0)
+}
 fn last_apply(state: &Value) -> Option<Value> {
     let saved = state["last_apply_status"].is_string();
     if !saved && state["mode"] != "apply" {
         return None;
     }
-    Some(Value::Object(
+    let mut apply = Value::Object(
         APPLY_STATE_FIELDS
             .iter()
             .filter_map(|(field, stored)| {
@@ -73,7 +93,11 @@ fn last_apply(state: &Value) -> Option<Value> {
                     .map(|value| ((*field).into(), json!(value)))
             })
             .collect(),
-    ))
+    );
+    if let Some(diagnostic) = saved_diagnostic(&state["last_apply_diagnostic"]) {
+        apply["diagnostic"] = json!(diagnostic);
+    }
+    Some(apply)
 }
 fn publish(
     paths: &Paths,
@@ -82,7 +106,7 @@ fn publish(
     target: &str,
     reference: &str,
 ) -> Result<()> {
-    publish_mode(paths, status, current, target, reference, "check")
+    publish_mode(paths, status, current, target, reference, "check", None)
 }
 fn publish_mode(
     paths: &Paths,
@@ -91,6 +115,7 @@ fn publish_mode(
     target: &str,
     reference: &str,
     mode: &str,
+    diagnostic: Option<&crate::IncomingDiagnostic>,
 ) -> Result<()> {
     let path = state_path(paths)?;
     let _guard = r::lock(&path, &paths.cwd)?;
@@ -108,14 +133,14 @@ fn publish_mode(
         "up_to_date" => "already up to date",
         "failed" => "update failed",
         "updated" => "update applied",
-        "partial" => "core updated; provider/tool refresh failed",
+        "partial" => "core updated; provider/tool refresh or integration verification failed",
         "skipped" => "update deferred by an admission fence",
         _ => "update available",
     };
     let now = r::now();
     let apply = if mode == "apply" {
         Some(
-            json!({"last_run":now,"status":status,"local":current,"remote":target,"upstream":reference}),
+            json!({"last_run":now,"status":status,"local":current,"remote":target,"upstream":reference,"diagnostic":diagnostic}),
         )
     } else {
         // A successful fetch says nothing about an earlier apply/tool failure.
@@ -132,6 +157,12 @@ fn publish_mode(
                 }
                 body.push_str(&format!("{stored}={value}\n"));
             }
+        }
+        if let Some(diagnostic) = saved_diagnostic(&apply["diagnostic"]) {
+            body.push_str(&format!(
+                "last_apply_diagnostic={}\n",
+                serde_json::to_string(&diagnostic).expect("fixed diagnostic fields serialize")
+            ));
         }
     }
     r::atomic(&path, body.as_bytes())
@@ -625,6 +656,13 @@ fn run_selected(
                             ));
                         }
                     }
+                    if let Some(diagnostic) = saved_diagnostic(&apply["diagnostic"]) {
+                        out.push_str(&format!(
+                            "\nlast apply diagnostic: {}",
+                            serde_json::to_string(&diagnostic)
+                                .expect("fixed diagnostic fields serialize")
+                        ));
+                    }
                 }
                 for key in ["upstream", "local", "remote"] {
                     if let Some(value) = state[key].as_str() {
@@ -932,6 +970,72 @@ fn gate(
     r::check(flag)?;
     Ok(out)
 }
+
+struct PostRefresh {
+    tools: &'static str,
+    integrations: &'static str,
+    skip_reason: Option<&'static str>,
+    diagnostics: Vec<crate::IncomingDiagnostic>,
+}
+impl PostRefresh {
+    fn exit(&self) -> i32 {
+        self.diagnostics.last().map_or(0, |d| d.exit)
+    }
+}
+fn post_refresh(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+    revision: &str,
+    receipt: &[u8],
+) -> PostRefresh {
+    use crate::{IncomingDiagnostic, IncomingPhase as Phase};
+    let mut result = PostRefresh {
+        tools: "skipped",
+        integrations: "skipped",
+        skip_reason: None,
+        diagnostics: Vec::new(),
+    };
+    if options.has("--rollback") || options.has("--no-tools") {
+        result.skip_reason = Some(if options.has("--rollback") {
+            "rollback"
+        } else {
+            "no_tools"
+        });
+        return result;
+    }
+    let run = |phase| {
+        let out = if r::check(flag).is_err() {
+            (130, Vec::new(), Vec::new())
+        } else {
+            services.incoming_lifecycle(phase, &paths.source, revision, receipt, &options.raw, flag)
+        };
+        let mut diagnostic = IncomingDiagnostic::capture(phase, &out);
+        if r::check(flag).is_err() {
+            diagnostic.exit = 130;
+        }
+        diagnostic
+    };
+    result.diagnostics.push(run(Phase::RefreshTools));
+    if result.exit() != 0 {
+        result.tools = "failed";
+        result.skip_reason = Some("refresh_failed");
+        return result;
+    }
+    result.tools = "updated";
+    if options.has("--no-doctor") {
+        result.skip_reason = Some("no_doctor");
+        return result;
+    }
+    result.diagnostics.push(run(Phase::VerifyIntegrations));
+    result.integrations = match result.exit() {
+        0 => "passed",
+        130 => "cancelled",
+        _ => "failed",
+    };
+    result
+}
 fn managed_paths(paths: &Paths, old: &Value) -> Result<Vec<PathBuf>> {
     let mut targets = std::collections::BTreeSet::new();
     for name in [
@@ -1057,6 +1161,7 @@ fn apply_update(
             &attempt.target,
             &attempt.reference,
             "apply",
+            None,
         )?;
     }
     result
@@ -1368,39 +1473,48 @@ fn apply_update_locked(
         )
         .unwrap_or_else(|_| "detached".into())
     );
-    tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
+    let receipt_bytes = r::bytes(&row)?;
+    tx.write(&paths.receipt, &receipt_bytes, 0o600)?;
     if prepared.is_some() {
         tx.remove(&crate::prepared::path(paths))?;
     }
     tx.commit()?;
-    if !options.has("--no-tools")
-        && !options.has("--rollback")
-        && let Err(error) = gate(
-            paths,
-            options,
-            flag,
-            services,
-            Phase::RefreshTools,
-            &target,
-            &row,
-        )
-    {
+    let post = post_refresh(paths, options, flag, services, &target, &receipt_bytes);
+    if post.exit() != 0 {
         if options.tool == "auto-update" {
-            publish_mode(paths, "partial", &current, &target, reference, "apply")?;
+            publish_mode(
+                paths,
+                "partial",
+                &current,
+                &target,
+                reference,
+                "apply",
+                post.diagnostics.last(),
+            )?;
         }
-        let message = "core update succeeded; provider/tool refresh failed and was not rolled back";
+        let diagnostic = serde_json::to_string(post.diagnostics.last().unwrap())
+            .expect("fixed diagnostic fields serialize");
+        let message = format!(
+            "core update succeeded; post-update phase failed: {diagnostic}; core and provider/tool changes were not rolled back"
+        );
         let stdout = if options.has("--json") {
             r::bytes(&json!({
                 "schema": 1, "status": "partial", "current_commit": target,
                 "previous_commit": current, "target_commit": target,
-                "ref": reference, "core": "updated", "tools": "failed",
+                "ref": reference, "core": "updated", "tools": post.tools,
+                "integrations": post.integrations, "integrations_skip_reason": post.skip_reason,
+                "diagnostics": post.diagnostics,
             }))?
         } else {
             Vec::new()
         };
         // Preserve the failing tool's status without relabeling the committed
         // core update as a failed transaction in the scheduled caller.
-        return Ok((error.0, stdout, format!("error: {message}\n").into_bytes()));
+        return Ok((
+            post.exit(),
+            stdout,
+            format!("error: {message}\n").into_bytes(),
+        ));
     }
     if options.tool == "auto-update" {
         publish_mode(
@@ -1414,6 +1528,7 @@ fn apply_update_locked(
             &target,
             reference,
             "apply",
+            None,
         )?;
     }
     if options.has("--json") {
@@ -1421,11 +1536,16 @@ fn apply_update_locked(
             "schema": 1, "status": if current == target { "up_to_date" } else { "updated" },
             "current_commit": target, "previous_commit": current, "target_commit": target,
             "ref": reference, "core": "updated",
-            "tools": if options.has("--no-tools") || options.has("--rollback") { "skipped" } else { "updated" },
+            "tools": post.tools, "integrations": post.integrations,
+            "integrations_skip_reason": post.skip_reason, "diagnostics": post.diagnostics,
         }))
     } else {
+        let integration = post.skip_reason.map_or_else(
+            || post.integrations.to_owned(),
+            |reason| format!("skipped ({reason})"),
+        );
         Ok(r::text(format!(
-            "updated: {current} -> {target}\nupdate: ok"
+            "updated: {current} -> {target}\nintegrations: {integration}\nupdate: ok"
         )))
     }
 }

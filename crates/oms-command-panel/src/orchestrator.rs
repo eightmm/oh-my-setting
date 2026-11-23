@@ -1030,13 +1030,14 @@ impl<'a> Panel<'a> {
             if let Ok(screen) = self.tmux(&["capture-pane", "-p", "-t", &pane.id]) {
                 let activity = crate::provider_activity::native_activity(provider, &screen);
                 let detail = activity.and_then(crate::provider_activity::NativeActivity::detail);
-                let same_pane_process = (provider == "antigravity" || detail.is_some())
-                    && !sample.identity.birth.is_empty()
-                    && host.process_owner(pane.pid).is_ok_and(|identity| {
-                        identity.pid == pane.pid
-                            && identity.uid == host.uid()
-                            && identity.birth == sample.identity.birth
-                    });
+                let same_pane_process =
+                    (provider == "antigravity" || provider == "claude" || detail.is_some())
+                        && !sample.identity.birth.is_empty()
+                        && host.process_owner(pane.pid).is_ok_and(|identity| {
+                            identity.pid == pane.pid
+                                && identity.uid == host.uid()
+                                && identity.birth == sample.identity.birth
+                        });
                 if activity.is_some() {
                     report["provider_activity"][provider] =
                         detail.filter(|_| same_pane_process).map_or_else(
@@ -1176,6 +1177,20 @@ impl<'a> Panel<'a> {
                                 ));
                             }
                         }
+                        let roster_current = same_pane_process
+                            && !self.stop.load(Ordering::Acquire)
+                            && report["capacity_stale"] != true
+                            && report
+                                .get("collection")
+                                .is_none_or(|c| c["ok"] == true && c["pending"] != true)
+                            && self.still_observes(expected, &census, provider, host);
+                        project_claude_pane_roster(
+                            roster_current,
+                            &recent,
+                            activity.is_some(),
+                            &mut observed.rows,
+                            &mut report["provider_activity"],
+                        );
                     } else if provider == "antigravity"
                         && chat_current
                         && !observed.rows.is_empty()
@@ -5210,6 +5225,44 @@ pub(crate) fn merge_claude_rows(
     }
 }
 
+/// Project display-only Claude background-agent summary rows from an owned pane
+/// footer after `claude_sighting`. Keeps one row per distinct slug, deduplicates
+/// against authority-backed rows only on proven participant identity, and never
+/// binds `readings.chats` or grants detail transcript access.
+fn project_claude_pane_roster(
+    same_pane_process: bool,
+    screen: &str,
+    activity_present: bool,
+    rows: &mut Vec<Value>,
+    provider_activity: &mut Value,
+) {
+    if !same_pane_process {
+        return;
+    }
+    let roster = crate::provider_activity::claude_roster(screen);
+    if !activity_present && roster.iter().any(|row| row.state == "working") {
+        provider_activity["claude"] = json!("working");
+    }
+    let existing = rows.len();
+    let mut seen_slugs = BTreeSet::new();
+    for roster_row in &roster {
+        if !seen_slugs.insert(roster_row.slug.as_str()) {
+            continue;
+        }
+        let participant = crate::native_children::participant_id("claude", &roster_row.slug);
+        let duplicate = rows[..existing]
+            .iter()
+            .any(|row| row["participant"].as_str() == Some(participant.as_str()));
+        if !duplicate {
+            rows.push(crate::native_children::claude_child_row(
+                &roster_row.slug,
+                &roster_row.title,
+                roster_row.state,
+            ));
+        }
+    }
+}
+
 /// Only children painted as rows can be opened, under the row's own id.
 pub(crate) fn painted_claude_children(
     children: Vec<crate::claude_child_chat::ClaudeChild>,
@@ -5857,6 +5910,84 @@ mod tests {
         assert!(rows == collector && bound.is_empty());
         let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), None);
         assert!(rows == collector && bound.is_empty());
+    }
+
+    #[test]
+    fn claude_pane_roster_projects_owned_summary_rows_without_chat_binding() {
+        use super::{claude_sighting, project_claude_pane_roster};
+        use crate::claude_child_chat::ClaudeChild;
+        use serde_json::json;
+
+        let ruler = "─".repeat(80);
+        let same_title_screen = format!(
+            "prior\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents\n\n  ● main\n  ◯ worker-a  Audit panel  9m 49s · ↓ 218.9k tokens\n  ◯ worker-b  Audit panel  idle\n  ◯ worker-a  Audit panel  9m 50s · ↓ 219.0k tokens\n"
+        );
+        let spy = super::codex_chat_fixture::BoardSpy::new("claude-pane-roster");
+        let turn = super::codex_chat_fixture::TURN;
+        let transcript_child = ClaudeChild {
+            locator: spy.claude_locator(turn),
+            title: "Audit panel".into(),
+            state: "working",
+            usage: None,
+        };
+
+        // 1. Two distinct live slugs with the same title both project with distinct
+        // participant IDs; duplicate slug in roster collapses; an authority-backed row
+        // with only a matching title (different participant ID) does not suppress them;
+        // transcript sighting keeps sole authority over chat bindings.
+        let (mut rows, bound) = claude_sighting(
+            Vec::new(),
+            &"pane",
+            Some(&"pane"),
+            Some((turn.to_owned(), vec![transcript_child])),
+        );
+        let mut activity = json!({});
+        project_claude_pane_roster(true, &same_title_screen, false, &mut rows, &mut activity);
+        let worker_a = crate::native_children::participant_id("claude", "worker-a");
+        let worker_b = crate::native_children::participant_id("claude", "worker-b");
+        assert_ne!(worker_a, worker_b);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["title"], "Audit panel");
+        assert_eq!(rows[1]["participant"], worker_a);
+        assert_eq!(rows[1]["title"], "Audit panel");
+        assert_eq!(rows[1]["state"], "working");
+        assert_eq!(rows[2]["participant"], worker_b);
+        assert_eq!(rows[2]["title"], "Audit panel");
+        assert_eq!(rows[2]["state"], "unknown");
+        assert_eq!(activity["claude"], "working");
+        assert_eq!(bound.len(), 1);
+        assert_ne!(bound[0].0, worker_a);
+        assert_ne!(bound[0].0, worker_b);
+
+        // 2. Authority-backed row with matching proven participant ID is deduplicated,
+        // and liveness is omitted when all roster rows are idle.
+        let idle_only = format!(
+            "prior\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent\n\n  ● main\n  ◯ builder-gh-templates  Build issue and PR templates  idle\n"
+        );
+        let builder_participant =
+            crate::native_children::participant_id("claude", "builder-gh-templates");
+        let mut dedup_rows = vec![json!({
+            "participant": builder_participant,
+            "title": "Other title",
+            "state": "done"
+        })];
+        let mut idle_activity = json!({});
+        project_claude_pane_roster(true, &idle_only, false, &mut dedup_rows, &mut idle_activity);
+        assert_eq!(dedup_rows.len(), 1);
+        assert!(idle_activity.get("claude").is_none());
+
+        // 3. Unowned or fenced-out pane projects nothing and sets no activity.
+        let mut unowned_rows = Vec::new();
+        let mut unowned_activity = json!({});
+        project_claude_pane_roster(
+            false,
+            &same_title_screen,
+            false,
+            &mut unowned_rows,
+            &mut unowned_activity,
+        );
+        assert!(unowned_rows.is_empty());
+        assert!(unowned_activity.get("claude").is_none());
     }
 
     #[test]
@@ -10508,6 +10639,13 @@ mod tests {
             assert!(
                 spy.calls_named("set-buffer")[0][5].chars().count() <= CODEX_VISIBLE_PASTE_CHARS
             );
+            // Only registered public verbs may appear in the copyable reader line.
+            let pasted = spy.calls_named("set-buffer")[0][5].clone();
+            assert!(
+                pasted
+                    .contains("oms agent-plan --repo \"$R\" evidence-snapshot --id 'native-one';")
+            );
+            assert!(!pasted.contains("oms plan "));
             assert_eq!(spy.calls_named("send-keys").len(), 1);
             let binding: Value = serde_json::from_slice(
                 &std::fs::read(repo.join(first["binding"].as_str().unwrap())).unwrap(),
