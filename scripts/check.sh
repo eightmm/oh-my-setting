@@ -5,7 +5,7 @@ umask 022
 
 # Repository verification gate: shellcheck lint, skill manifest validation,
 # markdown reference checks, Rust migration inventory/tests, and pure-Bash E2E
-# smoke suites. Pure Bash + Rust only (no Python required).
+# smoke suites. Pure Bash + Rust only.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
@@ -56,8 +56,7 @@ if [ "${1:-}" = --preflight ]; then
   pf_mode() { if [ "$2" = 1 ]; then echo "  yes  $1"; else echo "  no   $1"; fi; }
   pf_native=0; [ "$pf_tool" = 1 ] && [ "$pf_deps" = 1 ] && pf_native=1
   pf_both=0; [ "$pf_native" = 1 ] && [ "$pf_shellcheck" = 1 ] && pf_both=1
-  # Lint also runs the oms-migrate check through Cargo, so it needs the native build.
-  pf_mode "--lint-only (shellcheck + native build)" "$pf_both"
+  pf_mode "--lint-only (shellcheck + Cargo checks)" "$pf_both"
   pf_mode "--focused-only (native build)" "$pf_native"
   pf_mode "--affected, --quick, full (default gate)" "$pf_both"
   [ "$pf_missing" = 0 ] || { echo "preflight: prerequisites missing" >&2; exit 1; }
@@ -119,8 +118,8 @@ usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
 
-Runs the pure-Rust repository gate: lint (shellcheck, oms-migrate inventory,
-skill manifest, doc references) then focused smoke suites and Rust tests.
+Runs the pure-Rust repository gate: lint (shellcheck, oms-migrate inventory and
+policy, skill manifest, doc references) then focused smoke suites and Rust tests.
 
   --no-lint             Skip lint only when equivalent checks ran separately.
   --lint-only           Run only lint stages.
@@ -138,7 +137,7 @@ skill manifest, doc references) then focused smoke suites and Rust tests.
   --quick               Run changed-file checks plus invariants.
   --affected            Plan and verify affected scope (--changed-from/--changed-to).
   --print-affected-mode Print affected or full after planning and exit.
-  --ci-output FILE      Append mode, native, python, operator, and docs_only to FILE.
+  --ci-output FILE      Append mode, native and docs_only to FILE.
   --ci-parity           Affected gate with provider CLIs hidden from PATH.
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
@@ -339,6 +338,17 @@ run_stage_with_deadline() {
   return "$rc"
 }
 
+# The migration inventory and the static repository policy share one stage.
+rust_migration_checks() {
+  local migrate=(cargo +1.99.1 run --quiet --manifest-path Cargo.toml -p oms-migrate --locked --offline --)
+  "${migrate[@]}" check --repo . && "${migrate[@]}" policy --repo .
+}
+
+lint_skill_manifest() {
+  cargo +1.99.1 run --quiet --manifest-path Cargo.toml -p oms-command-lifecycle \
+    --example skill_manifest --locked --offline
+}
+
 stage() {
   local name="$1" log rc=0 started elapsed deadline=1800
   shift
@@ -478,7 +488,7 @@ if [ "$RUN_AFFECTED" = 1 ]; then
   if [ -n "$CI_OUTPUT" ]; then
     docs_only=false
     if [ "$RUN_DOCS" = 1 ]; then docs_only=true; fi
-    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' \
+    printf 'mode=%s\nnative=%s\ndocs_only=%s\n' \
       "$AFFECTED_MODE" "$AFFECTED_NATIVE" "$docs_only" >> "$CI_OUTPUT"
     [ "$PRINT_AFFECTED_MODE" = 1 ] && { verify_oms_state; exit 0; }
     [ "$AFFECTED_MODE" != full ] || { verify_oms_state; exit 0; }
@@ -487,7 +497,7 @@ if [ "$RUN_AFFECTED" = 1 ]; then
   fi
 fi
 
-if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ]; then
+if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ] && [ "$MODE" != lint ]; then
   ensure_native_payload
 fi
 
@@ -495,9 +505,13 @@ if [ "$RUN_LINT" = 1 ]; then
   stage shellcheck lint_shell install.sh scripts/oms scripts/*.sh \
     scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh docs/examples/*.sh \
     templates/*.sh tests/*.sh tests/lib/*.sh
-  stage skill-manifest bash scripts/install-skills.sh
+  if [ "$MODE" = lint ]; then
+    stage skill-manifest lint_skill_manifest
+  else
+    stage skill-manifest bash scripts/install-skills.sh
+  fi
   stage doc-references bash tests/source-distribution-smoke.sh --docs-only
-  stage rust-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+  stage rust-migration-check rust_migration_checks
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
@@ -528,7 +542,7 @@ if [ "$RUN_INVARIANTS" = 1 ] || [ "$RUN_QUICK" = 1 ]; then
   if [ "$RUN_LINT" != 1 ]; then
     stage invariants-skill-manifest bash scripts/install-skills.sh
     stage invariants-doc-references bash tests/source-distribution-smoke.sh --docs-only
-    stage invariants-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+    stage invariants-migration-check rust_migration_checks
   fi
   stage invariants-source-distribution bash tests/source-distribution-smoke.sh
 fi

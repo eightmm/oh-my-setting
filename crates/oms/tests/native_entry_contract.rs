@@ -3695,13 +3695,20 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         "--title",
         "T",
         "--allowed",
-        "a.txt",
+        "a.txt,tests/review-binding.txt",
         "--verify",
         "true",
     ]);
     l.ok(&["agent-plan", "claim", "--id", "t2", "--provider", "codex"]);
     let task: serde_json::Value =
         serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
+    let reviewed_patch = ".oms/p/exact.patch";
+    let mut reviewed = std::fs::read(l.repo.join(".oms/p/p.patch")).unwrap();
+    // Red checks execute only for test-file hunks. Keep one in the exact
+    // candidate so the later advisory command really mutates the report.
+    reviewed.extend_from_slice(b"diff --git a/tests/review-binding.txt b/tests/review-binding.txt\nnew file mode 100644\n--- /dev/null\n+++ b/tests/review-binding.txt\n@@ -0,0 +1 @@\n+bound\n");
+    let report = std::fs::read(l.repo.join(".oms/p/r.md")).unwrap();
+    std::fs::write(l.repo.join(reviewed_patch), &reviewed).unwrap();
     l.ok(&[
         "agent-plan",
         "review",
@@ -3712,28 +3719,113 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         "--artifact",
         ".oms/p/r.md",
         "--patch",
-        ".oms/p/p.patch",
+        reviewed_patch,
+        "--expected-review-artifact-sha256",
+        &oms_command_plan::json::sha(&report),
+        "--expected-review-patch-sha256",
+        &oms_command_plan::json::sha(&reviewed),
     ]);
+    let before = std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap();
+    let alternative = ".oms/p/alternative.patch";
+    std::fs::write(
+        l.repo.join(alternative),
+        String::from_utf8(reviewed.clone())
+            .unwrap()
+            .replace("+b", "+other"),
+    )
+    .unwrap();
+    let (code, out, err) = l.oms(&["patch-admit", "--patch", alternative, "--plan-task", "t2"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(
+        err.contains("patch differs from exact reviewed evidence"),
+        "{err}"
+    );
+    for (path, original, changed, message) in [
+        (
+            reviewed_patch,
+            reviewed.as_slice(),
+            String::from_utf8(reviewed.clone())
+                .unwrap()
+                .replace("+b", "+changed")
+                .into_bytes(),
+            "reviewed patch bytes changed",
+        ),
+        (
+            ".oms/p/r.md",
+            report.as_slice(),
+            b"changed report\n".to_vec(),
+            "reviewed artifact bytes changed",
+        ),
+    ] {
+        std::fs::write(l.repo.join(path), changed).unwrap();
+        for verb in ["patch-admit", "patch-land"] {
+            let (code, out, err) = l.oms(&[verb, "--patch", reviewed_patch, "--plan-task", "t2"]);
+            assert_eq!(code, 2, "{out}{err}");
+            assert!(err.contains(message), "{err}");
+            assert_eq!(
+                std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap(),
+                before
+            );
+            assert_eq!(
+                std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
+                "a\n"
+            );
+        }
+        std::fs::write(l.repo.join(path), original).unwrap();
+    }
+    let mutate_report = format!(
+        "printf 'changed during advisory verification\\n' > '{}'",
+        l.repo.join(".oms/p/r.md").display(),
+    );
     let (code, out, err) = l.oms(&[
         "patch-admit",
         "--patch",
-        ".oms/p/p.patch",
+        reviewed_patch,
+        "--plan-task",
+        "t2",
+        "--red-check",
+        &mutate_report,
+    ]);
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join(".oms/p/r.md")).unwrap(),
+        "changed during advisory verification\n",
+        "advisory command did not run: {out}{err}"
+    );
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("reviewed artifact bytes changed"), "{err}");
+    assert_eq!(
+        std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
+        "a\n"
+    );
+    assert!(!l.repo.join("tests/review-binding.txt").exists());
+    std::fs::write(l.repo.join(".oms/p/r.md"), &report).unwrap();
+    let (code, out, err) = l.oms(&[
+        "patch-admit",
+        "--patch",
+        reviewed_patch,
         "--plan-task",
         "t2",
     ]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("ADMIT"), "{out}");
-    let (code, out, err) = l.oms(&[
-        "patch-land",
-        "--patch",
-        ".oms/p/p.patch",
-        "--plan-task",
-        "t2",
-    ]);
+    let (code, out, err) = l.oms(&["patch-land", "--patch", reviewed_patch, "--plan-task", "t2"]);
     assert_eq!(code, 0, "{out}{err}");
     let done: serde_json::Value =
         serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
     assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(
+        done["review_evidence"]["patch"]["sha256"],
+        oms_command_plan::json::sha(&reviewed)
+    );
+    assert_ne!(done["patch"], reviewed_patch);
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join("tests/review-binding.txt")).unwrap(),
+        "bound\n"
+    );
     assert_eq!(
         std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
         "a\nb\n"
@@ -3887,6 +3979,24 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     let live_s = std::process::id().to_string();
     let removable = residue(&tmp, "delegate", "dead", &dead_s, &l.repo);
     let delegate_root = residue(&l.f.0.join("wtroot"), "admit", "root", &dead_s, &l.repo);
+    let capture_dir = ".oms/artifacts/output-digest";
+    let managed_root = l.f.0.join("wtroot");
+    let captured = residue(&managed_root, "scratch", "captured", &dead_s, &l.repo);
+    let captures = captured.join("wt-captured").join(capture_dir);
+    std::fs::create_dir_all(&captures).unwrap();
+    let capture = captures.join("20261124T000000Z-100000000000000000000.log");
+    let proof = b"ERROR: focused verifier failed\n";
+    std::fs::write(&capture, proof).unwrap();
+    let unsafe_store = residue(&managed_root, "scratch", "unsafe", &dead_s, &l.repo);
+    let unsafe_ancestor = unsafe_store.join("wt-unsafe/.oms/artifacts");
+    std::fs::create_dir(unsafe_ancestor.parent().unwrap()).unwrap();
+    symlink(l.f.0.join("missing-artifacts"), &unsafe_ancestor).unwrap();
+    // An empty capture store and ignored build cache are not evidence.
+    let clean_worktree = delegate_root.join("wt-root");
+    std::fs::create_dir_all(clean_worktree.join(capture_dir)).unwrap();
+    std::fs::write(l.repo.join(".git/info/exclude"), ".oms/\n/target/\n").unwrap();
+    std::fs::create_dir(clean_worktree.join("target")).unwrap();
+    std::fs::write(clean_worktree.join("target/.rustc_info.json"), "{}\n").unwrap();
     let live = residue(&tmp, "delegate", "live", &live_s, &l.repo);
     let unproven = residue(&tmp, "land", "pid", "notapid", &l.repo);
     let dirty = residue(&tmp, "scratch", "dirty", &dead_s, &l.repo);
@@ -3920,7 +4030,14 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     for path in [&removable, &delegate_root, &ours] {
         assert!(line("would remove", path), "{}: {report}", path.display());
     }
-    for path in [&unproven, &dirty, &foreign, &swapped] {
+    for path in [
+        &unproven,
+        &dirty,
+        &foreign,
+        &swapped,
+        &captured,
+        &unsafe_store,
+    ] {
         assert!(line("kept", path), "{}: {report}", path.display());
     }
     assert!(
@@ -3930,15 +4047,21 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     assert!(report.contains("owned by another repository"), "{report}");
     assert!(report.contains("owner pid is unproven"), "{report}");
     assert!(report.contains("unsafe residue worktree path"), "{report}");
+    assert!(report.contains(&format!("holds {capture_dir}")), "{report}");
+    assert!(
+        report.contains(&format!("{capture_dir} is unsafe or unreadable")),
+        "{report}"
+    );
     assert!(
         !report.contains(&live.display().to_string()) && !report.contains("linked"),
         "{report}"
     );
     assert!(
-        report.ends_with("\ncleanup: 3 removable item(s) found, 4 kept with work\n"),
+        report.ends_with("\ncleanup: 3 removable item(s) found, 6 kept with work\n"),
         "{report}"
     );
     assert!(removable.exists() && ours.symlink_metadata().is_ok());
+    assert_eq!(std::fs::read(&capture).unwrap(), proof);
 
     let (code, _, err) = l.oms_env(&["cleanup", "--apply"], &[("OMS_HARNESS_CHILD", "1")]);
     assert_eq!(code, 2, "{err}");
@@ -3946,7 +4069,7 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
 
     let applied = l.ok(&["cleanup", "--apply"]);
     assert!(
-        applied.ends_with("\ncleanup: removed 3 item(s), 4 kept with work\n"),
+        applied.ends_with("\ncleanup: removed 3 item(s), 6 kept with work\n"),
         "{applied}"
     );
     assert!(!removable.exists() && !delegate_root.exists() && ours.symlink_metadata().is_err());
@@ -3959,9 +4082,18 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         std::fs::read_to_string(dirty.join("wt-dirty/a.txt")).unwrap(),
         "changed\n"
     );
+    assert_eq!(std::fs::read(&capture).unwrap(), proof);
+    assert_eq!(
+        std::fs::read_link(&unsafe_ancestor).unwrap(),
+        l.f.0.join("missing-artifacts")
+    );
     let registered = l.git(&["worktree", "list", "--porcelain"]);
     assert!(
-        !registered.contains("wt-dead") && registered.contains("wt-dirty"),
+        !registered.contains("wt-dead")
+            && !registered.contains("wt-root")
+            && registered.contains("wt-dirty")
+            && registered.contains("wt-captured")
+            && registered.contains("wt-unsafe"),
         "{registered}"
     );
 }

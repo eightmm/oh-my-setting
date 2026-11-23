@@ -4468,42 +4468,64 @@ esac"#,
     fn preflight_rejects_corrupt_or_tainted_staged_payload() {
         use oms_command_lifecycle::Services as Lifecycle;
         use std::os::unix::fs::PermissionsExt;
+
+        // A sibling test can fork while stage() has the fake executable open
+        // for writing. The inherited fd can block exec even after stage returns.
+        const CHILD: &str = "OMS_TEST_STAGED_PREFLIGHT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_collab::tests::preflight_rejects_corrupt_or_tainted_staged_payload",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed; 0 failed"),
+                "{}{}",
+                stdout,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+
         let stop = Arc::new(AtomicBool::new(false));
         let fixture = Fixture::new();
         let root = std::fs::canonicalize(fixture.path()).unwrap();
         let host = CollabServices::new(&stop, &root).unwrap();
         let rev = "0123456789abcdef0123456789abcdef01234567";
         let dir = root.join("target/oms-native").join(rev);
-        let run = || {
-            host.incoming_lifecycle(IncomingPhase::Preflight, &root, rev, b"{}", &[], &stop)
-                .0
-        };
+        let run =
+            || host.incoming_lifecycle(IncomingPhase::Preflight, &root, rev, b"{}", &[], &stop);
 
         stage(&root, rev, "exit 0");
-        let preflight =
-            host.incoming_lifecycle(IncomingPhase::Preflight, &root, rev, b"{}", &[], &stop);
+        let preflight = run();
         assert_eq!(preflight.0, 0, "{}", String::from_utf8_lossy(&preflight.2));
 
         // Corrupt manifest is refused before spawning.
         std::fs::write(dir.join("manifest.json"), b"not json").unwrap();
-        assert_eq!(run(), 2);
+        assert_eq!(run().0, 2);
 
         // Bad or missing oms.sha256 is refused.
         stage(&root, rev, "exit 0");
         std::fs::write(dir.join("oms.sha256"), format!("{}\n", "0".repeat(64))).unwrap();
-        assert_eq!(run(), 2);
+        assert_eq!(run().0, 2);
         std::fs::remove_file(dir.join("oms.sha256")).unwrap();
-        assert_eq!(run(), 2);
+        assert_eq!(run().0, 2);
 
         // Non-executable staged binary is refused.
         stage(&root, rev, "exit 0");
         std::fs::set_permissions(dir.join("oms"), std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(run(), 2);
+        assert_eq!(run().0, 2);
 
         // Foreign file inside payload dir is refused.
         stage(&root, rev, "exit 0");
         std::fs::write(dir.join("stray.txt"), b"unexpected").unwrap();
-        assert_eq!(run(), 2);
+        assert_eq!(run().0, 2);
         std::fs::remove_file(dir.join("stray.txt")).unwrap();
 
         // Failing `list` check or missing expected surface names fails closed.
@@ -4518,6 +4540,11 @@ esac"#,
         )
         .unwrap();
         std::fs::write(dir.join("oms.sha256"), format!("{digest}\n")).unwrap();
-        assert_eq!(run(), 2);
+        let rejected = run();
+        assert_eq!(rejected.0, 2);
+        assert_eq!(
+            rejected.2,
+            b"error: incoming staged binary failed list check\n"
+        );
     }
 }

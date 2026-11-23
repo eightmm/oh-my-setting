@@ -1,9 +1,8 @@
 # Native slurm-submit domain
 
-Internal library for `oms slurm-submit`. The temporary standalone workspace and
-its exact Cargo.lock isolate this worker's changes. The parent owns workspace
-registration, public routing, consumer migration, independent tests, installation,
-and retirement of the Bash/Python backends. This crate adds no PATH executable.
+This crate implements [`oms slurm-submit`](../../docs/COMPONENTS.md) in the root
+Rust workspace. The [shell compatibility entry point](../../scripts/slurm-submit.sh)
+routes to the same native command.
 
 ## Public adapters and modes
 
@@ -71,9 +70,8 @@ existing fixed process-identity query; this command adds no such subprocess.
 
 ## Internal helper consumers
 
-The existing direct helper consumer is `scripts/slurm-submit.sh`, which invokes
-`scripts/lib/slurm_submit.py` for key/status/begin/finish. Future native consumers
-can use the following operations without an interpreter or a second state store:
+The [native command](src/lib.rs) uses [`ledger`](src/ledger.rs) for request keys
+and submission state. Native callers share these operations and the same ledger.
 
 | Existing operation | Native function |
 | --- | --- |
@@ -158,16 +156,14 @@ No measured NFS/XFS speedup or global transaction guarantee is claimed.
 
 ## Source and acceptance boundaries
 
-Behavior sources: `scripts/slurm-submit.sh` (public parsing/tagging/execution),
-`scripts/lib/slurm_submit.py` (key/schema/window/helpers),
-`scripts/lib/agent-memory-common.sh` (repo root, ignore and sensitive scanning),
-and `scripts/lib/file-lock.sh` (shared lock authority). The read-only behavior
-reference is `test_slurm_submit_detects_repeat_submissions` in
-`tests/scripts-smoke.sh`. Public prose is in `docs/COMPONENTS.md`.
+The native sources cover [public parsing and execution](src/lib.rs),
+[keys, schema and submission windows](src/ledger.rs),
+[repository resolution](src/repository.rs), and [scheduler reconciliation](src/reconcile.rs).
+The [contract tests](tests/reconcile_contract.rs) exercise the ledger and fake
+scheduler. Public usage is documented in [Components](../../docs/COMPONENTS.md).
 
-Production routing and direct consumers are intentionally unchanged in this
-worker's scope. Compilation and disposable fake-scheduler probes do not establish
-full acceptance, installed activation, macOS execution, cross-provider routing,
-or legacy retirement. Canonical tests, CI and install checks remain for the parent.
-The prior independent gate remains failed pending the parent's review of these
-repairs; worker compilation does not clear that gate.
+Historical port references include the former Bash implementation of
+`scripts/slurm-submit.sh`, `scripts/lib/slurm_submit.py` and
+`test_slurm_submit_detects_repeat_submissions` in the retired Bash smoke suite.
+The fake scheduler tests cover local behavior. Installed activation, macOS
+execution and a live Slurm deployment require separate evidence.

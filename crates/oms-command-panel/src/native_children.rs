@@ -222,6 +222,18 @@ fn safe(s: &str, chars: usize) -> String {
     oms_panel_core::redact(bounded.as_bytes()).unwrap_or_default()
 }
 
+/// A provider-reported model exactly as published, or `None`: never trimmed, clipped or
+/// redacted into a different value.
+pub(crate) fn observed_model(raw: &str) -> Option<&str> {
+    let placeholder = raw.starts_with('<') && raw.ends_with('>');
+    let plain = !raw.is_empty()
+        && raw.trim() == raw
+        && raw.chars().count() <= 80
+        && !raw.chars().any(char::is_control)
+        && !placeholder;
+    (plain && oms_panel_core::redact(raw.as_bytes()).is_ok_and(|shown| shown == raw)).then_some(raw)
+}
+
 /// The opaque row id a provider-native child is painted and bound under.
 pub(crate) fn participant_id(provider: &str, id: &str) -> String {
     format!(
@@ -1288,7 +1300,10 @@ fn codex_rows_checked(
                 &mut usage_budget,
             )
         {
-            child_row["native_response_usage"] = usage;
+            child_row["native_response_usage"] = usage.0;
+            if let Some(model) = usage.1.as_deref() {
+                child_row["observed_model"] = json!(model);
+            }
         }
         let participant = text(&child_row, "participant").to_owned();
         let participant = participant.as_str();
@@ -1298,11 +1313,13 @@ fn codex_rows_checked(
                 .as_object_mut()
                 .unwrap()
                 .remove("native_response_usage");
+            child_row.as_object_mut().unwrap().remove("observed_model");
             for earlier in &mut observed.rows {
                 if text(earlier, "participant") == participant
                     && let Some(fields) = earlier.as_object_mut()
                 {
                     fields.remove("native_response_usage");
+                    fields.remove("observed_model");
                     fields.remove("seen_at");
                     fields.remove("seen_observed_ms");
                 }
@@ -1361,7 +1378,9 @@ fn codex_rows_checked(
         }
         if !confirmed {
             for row in &mut observed.rows {
-                row.as_object_mut().unwrap().remove("native_response_usage");
+                let fields = row.as_object_mut().unwrap();
+                fields.remove("native_response_usage");
+                fields.remove("observed_model");
             }
         }
     }
@@ -1379,7 +1398,7 @@ fn codex_child_usage(
     parent: &str,
     parent_header: &[u8],
     remaining: &mut usize,
-) -> Option<Value> {
+) -> Option<(Value, Option<String>)> {
     #[cfg(test)]
     CODEX_TEST_APPEND_PARENT.with(|path| {
         if let Some((path, alter)) = path.borrow_mut().take() {
@@ -1435,9 +1454,10 @@ fn codex_child_usage(
             json!({"input_tokens":u.input, "output_tokens":u.output, "cached_input_tokens":u.cache_read, "cache_write_input_tokens":u.cache_write, "reasoning_output_tokens":u.reasoning, "total_tokens":u.total}),
         )
     };
-    Some(json!({"response": counters(&observation.payload["usage"])?,
+    let usage = json!({"response": counters(&observation.payload["usage"])?,
         "turn": counters(&observation.payload["turn_token_usage"])?,
-        "thread": counters(&observation.payload["thread_token_usage"])?}))
+        "thread": counters(&observation.payload["thread_token_usage"])?});
+    Some((usage, observation.model))
 }
 
 pub(crate) fn codex_chat_turn_matches(terminal: &str, expected: &CodexLocator) -> bool {
@@ -1613,9 +1633,9 @@ impl CodexResponseUsage {
 }
 
 struct CodexUsageObservation {
-    offset: usize,
     payload: Value,
     usage: CodexResponseUsage,
+    model: Option<String>,
 }
 
 fn codex_history(
@@ -1646,10 +1666,13 @@ fn codex_history_parts(
     collect_chat: bool,
 ) -> (String, Option<CodexUsageObservation>) {
     let mut contexts = BTreeMap::new();
+    // Per turn: the one model every turn_context named; None once they disagree or omit it.
+    let mut models = BTreeMap::<String, Option<String>>::new();
     let mut current = None;
     let mut messages = Vec::new();
     let mut observations = BTreeMap::<String, Option<CodexUsageObservation>>::new();
-    for (offset, line) in codex_complete_records(body, recent_only).enumerate() {
+    let mut latest_response = None;
+    for line in codex_complete_records(body, recent_only) {
         let Ok(event) = oms_panel_core::decode(line, MAX_LINE) else {
             current = None;
             // An unreadable complete row can hide a conflicting response record.
@@ -1667,6 +1690,19 @@ fn codex_history_parts(
                         && payload.get("thread_id").is_none_or(|id| id == child);
                     let prior = contexts.entry(turn.to_owned()).or_insert(exact);
                     *prior &= exact;
+                    let model = payload["model"]
+                        .as_str()
+                        .and_then(observed_model)
+                        .filter(|_| exact)
+                        .map(str::to_owned);
+                    models
+                        .entry(turn.to_owned())
+                        .and_modify(|known| {
+                            if *known != model {
+                                *known = None;
+                            }
+                        })
+                        .or_insert(model);
                     if *prior {
                         current = Some(turn.to_owned());
                     }
@@ -1678,23 +1714,28 @@ fn codex_history_parts(
             {
                 let response_id = text(payload, "response_id");
                 if codex_rollout_identifier(response_id) {
-                    observations
-                        .entry(response_id.to_owned())
-                        .and_modify(|known| {
-                            if known
-                                .as_ref()
-                                .is_some_and(|first| first.payload != *payload)
-                            {
-                                *known = None;
-                            }
-                        })
-                        .or_insert_with(|| {
-                            Some(CodexUsageObservation {
-                                offset,
-                                usage: CodexResponseUsage::parse(payload)?,
+                    if let Some(known) = observations.get_mut(response_id) {
+                        if known
+                            .as_ref()
+                            .is_some_and(|first| first.payload != *payload)
+                        {
+                            *known = None;
+                        }
+                    } else {
+                        // First-seen identities define recency. Replayed records
+                        // cannot restore an older response after a newer one fails.
+                        latest_response = Some(response_id.to_owned());
+                        observations.insert(
+                            response_id.to_owned(),
+                            CodexResponseUsage::parse(payload).map(|usage| CodexUsageObservation {
+                                usage,
                                 payload: payload.clone(),
-                            })
-                        });
+                                model: None,
+                            }),
+                        );
+                    }
+                } else {
+                    latest_response = None;
                 }
             }
             "event_msg"
@@ -1723,17 +1764,23 @@ fn codex_history_parts(
         .filter_map(|(turn, message)| contexts[&turn].then_some(message))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let observation = usage_session.and_then(|_| {
-        observations
-            .into_values()
-            .flatten()
-            .filter(|observation| {
-                contexts
-                    .get(text(&observation.payload, "turn_id"))
-                    .is_none_or(|exact| *exact)
-            })
-            .max_by_key(|observation| observation.offset)
-    });
+    let observation = usage_session
+        .and(latest_response)
+        .and_then(|response| observations.remove(&response).flatten())
+        .filter(|observation| {
+            contexts
+                .get(text(&observation.payload, "turn_id"))
+                .is_none_or(|exact| *exact)
+        })
+        .map(|mut observation| {
+            let turn = text(&observation.payload, "turn_id");
+            observation.model = contexts
+                .get(turn)
+                .copied()
+                .filter(|exact| *exact)
+                .and_then(|_| models.remove(turn).flatten());
+            observation
+        });
     (history, observation)
 }
 
@@ -1777,6 +1824,7 @@ fn agy_oversized(brain: &Path, file: &Path) -> bool {
 fn agy_custody_rows(
     custody: &crate::agy_lead_custody::AgyLeadCustody,
     anchor: Option<&str>,
+    tail_limit: usize,
 ) -> Option<(Vec<Value>, usize)> {
     let dir = custody
         .app_root
@@ -1795,13 +1843,13 @@ fn agy_custody_rows(
     }
     // The byte preceding the suffix lets a record at the exact LF boundary survive.
     let size = u64::try_from(before.st_size).ok()?;
-    let len = size.min(MAX_TRANSCRIPT as u64 + 1);
+    let len = size.min(tail_limit as u64 + 1);
     let offset = size - len;
     let mut file = File::from(fd);
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut bytes = vec![0; len as usize];
     file.read_exact(&mut bytes).ok()?;
-    let rows = agy_recent_turn(&bytes, size > MAX_TRANSCRIPT as u64, anchor)?;
+    let rows = agy_recent_turn(&bytes, size > tail_limit as u64, anchor)?;
     note_legacy_custody_call(1);
     if crate::agy_lead_custody::agy_lead_custody(custody.pid, &custody.birth, &custody.repo)
         .as_ref()
@@ -1821,6 +1869,30 @@ fn agy_custody_rows(
         return None;
     }
     Some(rows)
+}
+
+pub(crate) fn agy_submitted_user_turn(
+    pid: u32,
+    birth: &str,
+    repo: &Path,
+    turn: &str,
+    expected: &str,
+) -> bool {
+    const SEND_TAIL_LIMIT: usize = 64 * 1024;
+    crate::agy_lead_custody::agy_lead_custody(pid, birth, repo)
+        .and_then(|custody| agy_custody_rows(&custody, None, SEND_TAIL_LIMIT))
+        .is_some_and(|(rows, start)| {
+            // agy_recent_turn first validates the latest explicit user row and its wrapper.
+            agy_user_request(&rows[start - 1]).is_some_and(|(body, _)| {
+                body == expected && body.lines().next().and_then(codex_turn) == Some(turn)
+            })
+        })
+}
+
+fn agy_user_request(row: &Value) -> Option<(&str, &str)> {
+    text(row, "content")
+        .strip_prefix("<USER_REQUEST>\n")?
+        .split_once("\n</USER_REQUEST>")
 }
 
 fn agy_display_request_suffix(suffix: &str) -> bool {
@@ -1870,9 +1942,7 @@ fn agy_recent_turn(
     let user = |row: &Value| row["type"] == "USER_INPUT" || row["source"] == "USER_EXPLICIT";
     let current = rows.iter().rposition(user)?;
     let input = &rows[current];
-    let (body, suffix) = text(input, "content")
-        .strip_prefix("<USER_REQUEST>\n")?
-        .split_once("\n</USER_REQUEST>")?;
+    let (body, suffix) = agy_user_request(input)?;
     let first = body.lines().next()?;
     let turn = codex_turn(first)?;
     if input["type"] != "USER_INPUT"
@@ -1999,7 +2069,7 @@ fn agy(
             if anchor.is_some() {
                 *parent = AgyParent::Bounded;
             }
-            let (rows, start) = agy_custody_rows(&custody, anchor)?;
+            let (rows, start) = agy_custody_rows(&custody, anchor, MAX_TRANSCRIPT)?;
             bounded = Some((start, custody));
             note_legacy_parent_read(1);
             rows
@@ -3453,6 +3523,102 @@ mod tests {
     }
 
     #[test]
+    fn observed_model_validator_returns_the_input_unchanged_or_none() {
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        for ok in ["gpt-child".to_owned(), "m".repeat(80)] {
+            assert_eq!(observed_model(&ok), Some(ok.as_str()));
+        }
+        for bad in [
+            "m".repeat(81),
+            String::new(),
+            " ".into(),
+            " gpt".into(),
+            "gpt\n".into(),
+            "\u{1b}[31mgpt".into(),
+            "gpt\u{0}".into(),
+            "\u{9b}31m".into(),
+            "<synthetic>".into(),
+            "<placeholder>".into(),
+            format!("gpt-{leaked}"),
+        ] {
+            assert_eq!(observed_model(&bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn codex_child_rows_publish_only_the_proven_turn_context_model() {
+        let fixture = RolloutFixture::new("observed-model");
+        let repo = fixture.store.repo();
+        let mut parent = codex_meta(PARENT, repo, json!("vscode"));
+        parent["payload"]["session_id"] = json!(PARENT);
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[parent.clone(), codex_user_event(PARENT, TURN)],
+        );
+        let mut child = codex_child_meta(CHILD, repo);
+        child["payload"]["session_id"] = json!(PARENT);
+        let counters = |total| {
+            json!({"input_tokens":1, "output_tokens":1, "cached_input_tokens":0,
+                "cache_write_input_tokens":0, "reasoning_output_tokens":0, "total_tokens":total})
+        };
+        let usage = json!({"type":"token_usage_record","payload":{
+            "thread_id":CHILD,"session_id":PARENT,"turn_id":"child-turn",
+            "root_turn_id":"root-turn","response_id":"r1","usage":counters(2),
+            "turn_token_usage":counters(2),"thread_token_usage":counters(2)}});
+        let context = |turn: &str, model: Option<&str>| {
+            let mut value = codex_context(turn, repo);
+            if let Some(model) = model {
+                value["payload"]["model"] = json!(model);
+            }
+            value
+        };
+        let observed = |contexts: Vec<Value>| {
+            let mut rows = vec![child.clone()];
+            rows.extend(contexts);
+            rows.push(usage.clone());
+            fixture.write(fixture.date, CHILD, &rows);
+            fixture.projection(TURN).unwrap().rows.remove(0)
+        };
+        let exact = observed(vec![context("child-turn", Some("gpt-child"))]);
+        assert_eq!(exact["observed_model"], "gpt-child");
+        assert_eq!(exact["model"], "");
+        // Another turn's model and conflicting same-turn contexts prove nothing.
+        for contexts in [
+            vec![context("other-turn", Some("gpt-other"))],
+            vec![
+                context("child-turn", Some("gpt-child")),
+                context("child-turn", Some("gpt-else")),
+            ],
+            vec![
+                context("child-turn", Some("gpt-child")),
+                context("child-turn", None),
+            ],
+            vec![context("child-turn", Some(" "))],
+            vec![],
+        ] {
+            let row = observed(contexts);
+            assert!(row.get("native_response_usage").is_some());
+            assert!(row.get("observed_model").is_none(), "{row}");
+        }
+        // A model the shared validator rejects is omitted; the usage is unchanged.
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        for bad in [
+            "m".repeat(81),
+            "\u{1b}[31mgpt".to_owned(),
+            format!("gpt-{leaked}"),
+        ] {
+            let row = observed(vec![context("child-turn", Some(&bad))]);
+            assert!(row.get("observed_model").is_none(), "{bad:?}: {row}");
+            assert_eq!(row["native_response_usage"], exact["native_response_usage"]);
+        }
+        // A context from a foreign repository is not this child's.
+        let mut foreign = context("child-turn", Some("gpt-foreign"));
+        foreign["payload"]["cwd"] = json!("/somewhere/else");
+        assert!(observed(vec![foreign]).get("observed_model").is_none());
+    }
+
+    #[test]
     fn codex_chat_adds_only_the_latest_unambiguous_recorded_response_usage() {
         use std::io::Write;
 
@@ -3529,7 +3695,7 @@ mod tests {
                 &[
                     first.clone(),
                     latest.clone(),
-                    first,
+                    first.clone(),
                     parent_usage.clone(),
                     sibling.clone(),
                     wrong_session.clone(),
@@ -3612,6 +3778,42 @@ mod tests {
             fixture.write(fixture.date, CHILD, &rows);
             fixture.projection(TURN).unwrap().rows.remove(0)
         };
+        let mut invalid_latest = latest.clone();
+        invalid_latest["payload"]["usage"]["input_tokens"] = json!(-1);
+        let mut conflicting_latest = latest.clone();
+        conflicting_latest["payload"]["usage"]["total_tokens"] = json!(20);
+        let mut invalid_id = latest.clone();
+        invalid_id["payload"]["response_id"] = json!("two words");
+        let recovered = record("response-three", counters(20, 4, 7, 3, 2, 24));
+        // A later owned response withholds stale counters even when an older
+        // response is still valid; only a new response can restore them.
+        for mut records in [
+            vec![first.clone(), invalid_latest],
+            vec![first.clone(), latest.clone(), conflicting_latest.clone()],
+            vec![
+                first.clone(),
+                latest.clone(),
+                conflicting_latest,
+                first.clone(),
+            ],
+            vec![first.clone(), invalid_id],
+        ] {
+            assert_eq!(output(&child, &records), "Ordinary owned reply");
+            assert!(
+                projected(&child, &records)
+                    .get("native_response_usage")
+                    .is_none()
+            );
+            records.push(recovered.clone());
+            assert_eq!(
+                output(&child, &records),
+                "Ordinary owned reply\n\nCodex recorded response usage · in 20 · out 4 · cache 7/3 · reasoning 2 · total 24"
+            );
+            assert_eq!(
+                projected(&child, &records)["native_response_usage"]["response"]["total_tokens"],
+                24
+            );
+        }
         let valid = projected(&child, &[latest.clone(), latest.clone()]);
         assert_eq!(valid["native_response_usage"]["turn"]["total_tokens"], 280);
         assert_eq!(
@@ -5791,10 +5993,104 @@ mod tests {
             );
 
             let current = std::fs::read(&transcript).unwrap();
+            let birth = oms_panel_core::terminals::process(lead_pid).unwrap().birth;
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                "01234567890123456789",
+                &prompt_line
+            ));
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                "0",
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+
+            let mut quoted: Vec<Value> = current
+                .strip_suffix(b"\n")
+                .unwrap()
+                .split(|&b| b == b'\n')
+                .take(2)
+                .map(|line| serde_json::from_slice(line).unwrap())
+                .collect();
+            // This raw model response could match the visible user-row pattern exactly.
+            quoted[1] = json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE",
+                "status":"DONE","content":format!("> {prompt_line}")});
+            let model_quote = quoted
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&transcript, &model_quote).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+
+            let header_only = format!("{TASK_PREFIX} Turn {TURN}. You own this provider's work.");
+            quoted[1] = json!({"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT",
+                "status":"DONE","content":format!("<USER_REQUEST>\n{header_only}\n</USER_REQUEST>")});
+            let short_request = quoted
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&transcript, &short_request).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &header_only
+            ));
+
+            const GEOMETRY_TURN: &str = "014589abcde2345678fa";
+            crate::orchestrator::tests::check_ordinary_agy_delivery_geometry(
+                GEOMETRY_TURN,
+                |body| {
+                    assert!(!agy_submitted_user_turn(
+                        lead_pid,
+                        &birth,
+                        &repo,
+                        GEOMETRY_TURN,
+                        body
+                    ));
+                    let request = json!({"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT",
+                        "status":"DONE","content":format!("<USER_REQUEST>\n{body}\n</USER_REQUEST>")});
+                    std::fs::write(&transcript, format!("{}\n{request}\n", quoted[0])).unwrap();
+                },
+                |body| agy_submitted_user_turn(lead_pid, &birth, &repo, GEOMETRY_TURN, body),
+            );
+
             let mut long = vec![b'x'; MAX_TRANSCRIPT];
             long.push(b'\n');
             long.extend_from_slice(&current);
             std::fs::write(&transcript, &long).unwrap();
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
             reset_agy_legacy_reads();
             let recent = observe("antigravity", lead_pid, &repo, &terminal, &mut cached);
             assert_eq!(
@@ -5822,6 +6118,13 @@ mod tests {
             let mut incomplete = long.clone();
             incomplete.extend_from_slice(b"{\"type\":\"USER_INPUT\"");
             std::fs::write(&transcript, incomplete).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
             assert!(
                 observe("antigravity", lead_pid, &repo, &terminal, &mut cached)
                     .rows

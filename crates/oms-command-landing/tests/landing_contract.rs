@@ -312,6 +312,74 @@ impl Services for TestServices {
             elapsed: started.elapsed(),
         })
     }
+    #[cfg(target_os = "linux")]
+    fn supervise_batch(
+        &self,
+        request: &oms_command_landing::services::VerifyRequest,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<oms_command_landing::services::BatchVerification> {
+        use oms_command_landing::services::{BatchVerification, VerificationOutcome::*};
+        use oms_supervisor::process::{Progress, Reactor, Request, StopReason};
+        use std::time::{Duration, Instant};
+        let mode = std::env::var("OMS_CT_BATCH_MODE").unwrap_or_default();
+        assert_ne!(
+            mode, "never",
+            "stale or invalid preview launched a verifier"
+        );
+        assert!(!request.cwd.starts_with(std::env::current_dir().unwrap()));
+        assert_eq!(request.wall, Duration::from_secs(1800));
+        if mode == "setup-unavailable" {
+            return Ok(BatchVerification {
+                outcome: Unavailable,
+                verifier_exit: None,
+                elapsed: Duration::ZERO,
+            });
+        }
+        let mut command = Request::new(request.argv.clone());
+        command.cwd = Some(request.cwd.clone());
+        command.capture.max_bytes = 512;
+        command.capture.on_limit = oms_supervisor::capture::LimitAction::Terminate;
+        command.deadline = Some(Instant::now() + Duration::from_secs(5));
+        let mut reactor = Reactor::new();
+        let job = reactor.start(command).unwrap();
+        if mode == "cancel" {
+            interrupted.store(true, Ordering::Release);
+            reactor.stop(job, StopReason::Cancelled).unwrap();
+        }
+        if let (Ok(branch), Ok(new), Ok(old)) = (
+            std::env::var("OMS_CT_BATCH_MOVE_REF"),
+            std::env::var("OMS_CT_BATCH_MOVE_TO"),
+            std::env::var("OMS_CT_BATCH_MOVE_FROM"),
+        ) {
+            assert!(
+                Command::new("git")
+                    .args(["update-ref", &branch, &new, &old])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        loop {
+            if let Progress::Complete(done) = reactor.poll(job, Duration::from_millis(10)).unwrap()
+            {
+                assert!(done.cleanup_complete());
+                let exit = done.exit.map(|exit| exit.shell_code());
+                let outcome = match (done.stop, exit) {
+                    (Some(StopReason::Cancelled), _) => Cancelled,
+                    (Some(StopReason::OutputLimit), _) => OutputLimited,
+                    (None, Some(0)) => Passed,
+                    (None, Some(1)) => Failed,
+                    _ => panic!("unexpected verifier completion: {:?}", done.stop),
+                };
+                return Ok(BatchVerification {
+                    outcome,
+                    verifier_exit: if done.stop.is_none() { exit } else { None },
+                    elapsed: done.duration,
+                });
+            }
+        }
+    }
+
     fn publication_guard(
         &self,
         _: &Path,
@@ -487,7 +555,17 @@ fn parse_errors_exit_two() {
         (
             "land",
             vec!["--pr", "--local-merge", "--from", "x"],
-            "--pr and --local-merge are mutually exclusive",
+            "--pr, --direct and --local-merge are mutually exclusive",
+        ),
+        (
+            "land",
+            vec!["--pr", "--direct"],
+            "--pr, --direct and --local-merge are mutually exclusive",
+        ),
+        (
+            "land",
+            vec!["--pr", "--merge-method", "merge"],
+            "--merge-method requires --merge",
         ),
         (
             "land",
@@ -858,6 +936,255 @@ fn ci_status_fails_closed_without_gh() {
         assert!(out.is_empty());
         assert!(err.contains("launch failed"), "{err}");
     }
+}
+
+#[test]
+fn ci_attention_observes_maintenance_without_certifying_head_or_writing_state() {
+    let fixture = FeedbackFixture::new();
+    fs::write(&fixture.gh, r#"#!/bin/bash
+[[ "$1 $2 $3" == 'api --method GET' ]] || exit 93
+case "$OMS_CT_INTERRUPT:${@: -1}" in
+  'default:repos/example/project'|'schedule:repos/example/project/actions/runs?event=schedule&branch=main&per_page=20'|'manual:repos/example/project/actions/runs?event=workflow_dispatch&branch=main&per_page=20') exit 130;;
+esac
+case "${@: -1}" in
+  'repos/example/project') printf '%s\n' '{"default_branch":"main"}';;
+  'repos/example/project/actions/runs?event=schedule&branch=main&per_page=20'|'repos/example/project/actions/runs?event=schedule&branch=release%2Fnightly&per_page=20') printf '%s\n' "$OMS_CT_SCHEDULE";;
+  'repos/example/project/actions/runs?event=workflow_dispatch&branch=main&per_page=20'|'repos/example/project/actions/runs?event=workflow_dispatch&branch=release%2Fnightly&per_page=20')
+    [[ "$OMS_CT_MANUAL" != null ]] || { printf 'private transport detail' >&2; exit 2; }
+    printf '%s\n' "$OMS_CT_MANUAL";;
+  *) exit 94;;
+esac
+"#).unwrap();
+    let row = |event: &str,
+               id: usize,
+               workflow: usize,
+               number: usize,
+               attempt: usize,
+               status: &str,
+               conclusion: &str| {
+        obj([
+            ("id", id.into()),
+            ("workflow_id", workflow.into()),
+            ("run_number", number.into()),
+            ("run_attempt", attempt.into()),
+            ("event", event.into()),
+            ("head_branch", "main".into()),
+            ("head_sha", "a".repeat(40).into()),
+            ("updated_at", "2026-11-23T03:23:00Z".into()),
+            ("status", status.into()),
+            ("conclusion", conclusion.into()),
+            (
+                "html_url",
+                format!("https://github.com/example/project/actions/runs/{id}").into(),
+            ),
+        ])
+    };
+    let envelope = |rows: Vec<V>, total: usize| {
+        obj([
+            ("total_count", total.into()),
+            ("workflow_runs", V::Arr(rows)),
+        ])
+    };
+    let query = |schedule: &V, manual: &V, args: &[&str]| {
+        let encode = |v: &V| String::from_utf8(v.json(false).unwrap()).unwrap();
+        fixture.isolated.run_env(
+            "ci-status",
+            &fixture.repo,
+            args,
+            &[
+                ("OMS_GH_BIN", fixture.gh.to_str().unwrap()),
+                ("OMS_CT_SCHEDULE", &encode(schedule)),
+                ("OMS_CT_MANUAL", &encode(manual)),
+            ],
+        )
+    };
+    let failed = row("schedule", 71, 7, 1, 1, "completed", "failure");
+    let passed = row("schedule", 72, 7, 2, 1, "completed", "success");
+    let manual = envelope(
+        vec![row(
+            "workflow_dispatch",
+            81,
+            8,
+            1,
+            1,
+            "completed",
+            "failure",
+        )],
+        1,
+    );
+    // Select by run order, not input ordering or the local checkout's unrelated SHA.
+    let schedule = envelope(vec![failed.clone(), passed.clone()], 2);
+    let output = query(&schedule, &manual, &["attention", "--json"]);
+    assert_eq!(output.0, 1, "{output:?}");
+    let report = V::parse(output.1.as_bytes()).unwrap();
+    assert_eq!(report.get("kind").text(), Some("oms-ci-attention"));
+    assert_eq!(report.get("branch").text(), Some("main"));
+    assert_eq!(report.get("observations").array().len(), 2);
+    assert_eq!(
+        report.get("observations").array()[0].get("state").text(),
+        Some("clear")
+    );
+    assert_eq!(
+        report.get("observations").array()[1].get("state").text(),
+        Some("failed")
+    );
+    let output = query(&schedule, &manual, &["attention", "main"]);
+    assert!(
+        output
+            .1
+            .contains("workflow_dispatch workflow 8 failed failure"),
+        "{output:?}"
+    );
+    assert!(!output.1.contains("actions/runs/71"));
+    assert!(output.1.contains("updated 2026-11-23T03:23:00Z"));
+
+    let mut selected = passed.clone();
+    selected.set("head_branch", "release/nightly");
+    let mut selected_manual = row("workflow_dispatch", 81, 8, 1, 1, "completed", "success");
+    selected_manual.set("head_branch", "release/nightly");
+    let output = query(
+        &envelope(vec![selected], 1),
+        &envelope(vec![selected_manual], 1),
+        &["attention", "release/nightly", "--json"],
+    );
+    assert_eq!(output.0, 0, "percent-encoded branch: {output:?}");
+    assert_eq!(
+        V::parse(output.1.as_bytes()).unwrap().get("branch").text(),
+        Some("release/nightly")
+    );
+
+    let another_workflow = envelope(
+        vec![
+            passed.clone(),
+            row("schedule", 91, 9, 1, 1, "completed", "failure"),
+        ],
+        2,
+    );
+    let output = query(&another_workflow, &manual, &["attention"]);
+    assert_eq!(output.0, 1, "{output:?}");
+    assert!(
+        output.1.contains("schedule workflow 9 failed failure"),
+        "{output:?}"
+    );
+
+    // A successful later attempt resolves the observation; queued work never counts as green.
+    let retry = envelope(
+        vec![failed, row("schedule", 71, 7, 1, 2, "completed", "success")],
+        2,
+    );
+    let green = envelope(
+        vec![row(
+            "workflow_dispatch",
+            81,
+            8,
+            1,
+            2,
+            "completed",
+            "success",
+        )],
+        1,
+    );
+    assert_eq!(query(&retry, &green, &["attention"]).0, 0);
+    let pending = envelope(
+        vec![passed.clone(), row("schedule", 73, 7, 3, 1, "queued", "")],
+        2,
+    );
+    let output = query(&pending, &green, &["attention"]);
+    assert_eq!(output.0, 2, "{output:?}");
+    assert!(output.1.contains("pending queued"), "{output:?}");
+
+    for bad in [
+        V::Null,
+        envelope(vec![], 0),
+        obj([("workflow_runs", V::Arr(vec![]))]),
+        envelope(
+            vec![row("schedule", 72, 7, 2, 1, "completed", "skipped")],
+            1,
+        ),
+    ] {
+        let output = query(&bad, &green, &["attention"]);
+        assert_eq!(output.0, 2, "{output:?}");
+        assert!(output.1.contains("unknown"), "{output:?}");
+    }
+    let output = query(&schedule, &V::Null, &["attention"]);
+    assert_eq!(output.0, 2, "{output:?}");
+    assert!(!format!("{}{}", output.1, output.2).contains("private transport detail"));
+    for (key, value) in [
+        ("event", "push"),
+        ("head_branch", "other"),
+        ("head_sha", "short"),
+        ("html_url", "https://example.invalid/foreign"),
+        (
+            "html_url",
+            "https://github.com/example/project/actions/runs/73",
+        ),
+        (
+            "html_url",
+            "https://github.com/example/project/Actions/runs/72",
+        ),
+        ("updated_at", "not-a-date"),
+    ] {
+        let mut foreign = passed.clone();
+        foreign.set(key, value);
+        let output = query(&envelope(vec![foreign], 1), &green, &["attention"]);
+        assert_eq!(output.0, 2, "{key}: {output:?}");
+        assert!(output.1.contains("unknown"));
+    }
+    let bounded = envelope(vec![passed], 100);
+    let output = query(&bounded, &green, &["attention"]);
+    assert_eq!(output.0, 0, "{output:?}");
+    assert!(output.1.contains("bounded window"), "{output:?}");
+    assert_eq!(
+        query(&bounded, &green, &["attention", "--limit", "101"]).0,
+        2
+    );
+    for phase in ["default", "schedule", "manual"] {
+        let output = fixture.isolated.run_env(
+            "ci-status",
+            &fixture.repo,
+            &["attention", "--json"],
+            &[
+                ("OMS_GH_BIN", fixture.gh.to_str().unwrap()),
+                ("OMS_CT_INTERRUPT", phase),
+                (
+                    "OMS_CT_SCHEDULE",
+                    &String::from_utf8(bounded.json(false).unwrap()).unwrap(),
+                ),
+                (
+                    "OMS_CT_MANUAL",
+                    &String::from_utf8(green.json(false).unwrap()).unwrap(),
+                ),
+            ],
+        );
+        assert_eq!(output.0, 130, "interrupted {phase}: {output:?}");
+        assert!(
+            output.1.is_empty(),
+            "interruption must not publish an observation"
+        );
+    }
+    fixture.isolated.git(
+        &fixture.repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/EXAMPLE/Project.git",
+        ],
+    );
+    let script = fs::read_to_string(&fixture.gh)
+        .unwrap()
+        .replace("repos/example/project", "repos/EXAMPLE/Project");
+    fs::write(&fixture.gh, script).unwrap();
+    let output = query(&bounded, &green, &["attention", "--json"]);
+    assert_eq!(output.0, 0, "GitHub repository casing: {output:?}");
+    assert!(
+        !fixture.repo.join(".oms").exists(),
+        "read-only attention created state"
+    );
+    assert!(
+        !fixture.repo.join(".gitignore").exists(),
+        "read-only attention changed ignores"
+    );
 }
 
 struct FeedbackFixture {
@@ -1652,15 +1979,43 @@ impl Isolated {
         self.git(&repo, &["push", "-q", "origin", "main"]);
         (repo, bare)
     }
+    /// Like `with_remote`, but the push destination reads as GitHub: a bare
+    /// repository inside the work tree at the relative path `github.com/owner/NAME.git`.
+    fn with_github_remote(&self, name: &str) -> (PathBuf, PathBuf) {
+        let repo = self.repo(name);
+        let bare = repo.join(format!("github.com/owner/{name}.git"));
+        fs::create_dir_all(&bare).expect("bare dir");
+        self.git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        fs::create_dir_all(repo.join(".git/info")).expect("info dir");
+        fs::write(repo.join(".git/info/exclude"), "/github.com/\n").expect("exclude");
+        let url = format!("github.com/owner/{name}.git");
+        self.git(&repo, &["remote", "add", "origin", &url]);
+        self.git(&repo, &["push", "-q", "origin", "main"]);
+        strip_group_world_write(&repo);
+        (repo, bare)
+    }
     fn commit_file(&self, repo: &Path, file: &str) -> String {
-        fs::write(repo.join(file), format!("{file}\n")).expect("write");
+        self.commit_as(repo, file, &format!("{file}\n"), &[&format!("add {file}")])
+    }
+    /// Commit `text` as `file`; each message is one `-m` paragraph (subject, body...).
+    fn commit_as(&self, repo: &Path, file: &str, text: &str, message: &[&str]) -> String {
+        let path = repo.join(file);
+        fs::create_dir_all(path.parent().unwrap()).expect("parent");
+        fs::write(path, text).expect("write");
         self.git(repo, &["add", file]);
-        self.git(repo, &["commit", "-q", "-m", &format!("add {file}")]);
+        let mut args = vec!["commit", "-q"];
+        for m in message {
+            args.extend(["-m", m]);
+        }
+        self.git(repo, &args);
         strip_group_world_write(repo);
         self.git_out(repo, &["rev-parse", "HEAD"])
     }
     /// Fake `gh`: logs argv, answers JSON queries from the bare remote, and
-    /// reports CI as `ci` for the exact `--commit` it is asked about.
+    /// reports CI as `ci` for the exact `--commit` it is asked about. It keeps
+    /// the created PR body in `gh.pr.body`. With `gh.pr.squash` present, `pr
+    /// merge` squashes the head tree onto main; `gh.pr.moved` first moves main
+    /// by one empty commit, as a concurrent merge would.
     fn fake_gh(&self, bare: &Path, ci: &str) -> (PathBuf, PathBuf) {
         let log = self.home.path().join("gh.log");
         let state = self.home.path().join("gh.pr");
@@ -1668,23 +2023,38 @@ impl Isolated {
         let body = format!(
             r#"#!{bash}
 printf '%s\n' "$*" >> '{log}'
-head=; commit=; event=
+head=; commit=; event=; body=; match=
 args=("$@")
 for ((i = 0; i < ${{#args[@]}}; i++)); do
   case "${{args[i]}}" in
     --head) head=${{args[i+1]}} ;;
     --commit) commit=${{args[i+1]}} ;;
     --event) event=${{args[i+1]}} ;;
+    --body-file) body=${{args[i+1]}} ;;
+    --match-head-commit) match=${{args[i+1]}} ;;
   esac
 done
+squash() {{
+  git --git-dir='{bare}' -c user.name=T -c user.email=t@example.invalid commit-tree "$@" -p refs/heads/main -m squash
+}}
 case "$1 $2" in
   "pr list")
-    if [ -f '{state}' ]; then
+    if [ -z "$head" ]; then
+      if [ -f '{state}.dependents' ]; then
+        IFS= read -rd '' text < '{state}.dependents'; printf '%s' "$text"
+      else echo '[]'; fi
+    elif [ -f '{state}' ]; then
       tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
       printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s"}}]\n' "$tip"
     else echo '[]'; fi ;;
-  "pr create") : > '{state}'; echo https://example.invalid/pull/7 ;;
-  "pr merge") ;;
+  "pr create") : > '{state}'; IFS= read -rd '' text < "$body"; printf '%s' "$text" > '{state}.body'; echo https://example.invalid/pull/7 ;;
+  "pr merge")
+    if [ -f '{state}.moved' ]; then
+      git --git-dir='{bare}' update-ref refs/heads/main "$(squash 'refs/heads/main^{{tree}}')"
+    fi
+    if [ -f '{state}.squash' ]; then
+      git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
+    fi ;;
   "pr view") printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)" ;;
   "run list")
     if [ "$event" = pull_request ]; then
@@ -1705,48 +2075,96 @@ esac
 }
 
 #[test]
-fn land_pr_pushes_feature_branch_and_merges_after_exact_sha_ci() {
+fn land_to_github_opens_a_pr_and_merges_only_with_merge() {
     let iso = Isolated::new();
-    let (repo, bare) = iso.with_remote("pr");
-    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
-    let head = iso.commit_file(&repo, "feat.txt");
+    let (repo, bare) = iso.with_github_remote("pr");
+    let head = iso.commit_as(
+        &repo,
+        "feat.txt",
+        "feat\n",
+        &["feat: Add Feature X, now!", "Users asked for X."],
+    );
     let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
     let (gh, log) = iso.fake_gh(&bare, "success");
-    let r = iso.run_with_services(
-        "land",
-        &repo,
-        &["--pr", "--gate", "true", "--ignore-siblings", "--no-update"],
-        &[("OMS_GH_BIN", gh.to_str().unwrap())],
-    );
+    let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
+    // the gate passes once only, so a resumed land must reuse its result
+    let gate = r#"bash -c '! test -e "$HOME/gate-ran" && : > "$HOME/gate-ran"'"#;
+    let args = ["--gate", gate, "--ignore-siblings", "--no-update"];
+    // the default on a GitHub destination opens a PR and never merges
+    let r = iso.run_with_services("land", &repo, &args, &env);
     assert_eq!(r.0, 0, "{r:?}");
-    assert!(r.1.contains("merged PR #7 (squash)"), "{r:?}");
+    assert!(
+        r.1.contains("pull request #7 open: https://example.invalid/pull/7; CI success; not merged \u{2014} pass --merge only when the user asked to merge"),
+        "{r:?}"
+    );
     assert_eq!(
         iso.git_out(&bare, &["rev-parse", "refs/heads/main"]),
         main_before
     );
-    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
+    let branch = "refs/heads/oms/feat/add-feature-x-now";
+    assert_eq!(iso.git_out(&bare, &["rev-parse", branch]), head);
+    let calls = fs::read_to_string(&log).expect("gh log");
+    assert!(
+        calls.contains("pr create") && !calls.contains("pr merge"),
+        "{calls}"
+    );
+    let body = fs::read_to_string(iso.home.path().join("gh.pr.body")).expect("PR body");
+    let short = iso.git_out(&repo, &["rev-parse", "--short", "HEAD"]);
+    assert_eq!(
+        body,
+        format!(
+            "## Summary\n- {short} feat: Add Feature X, now!\n\n## Motivation\nUsers asked for X.\n\n## Verification\n- Local gate `{gate}` passed (scope unknown) on exact head {head}\n- `oms land` checks CI on this exact head; merge only with explicit `--merge`\n"
+        )
+    );
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    for needle in [
+        "\"state\": \"awaiting-merge\"",
+        "\"reason\": \"awaiting-merge\"",
+    ] {
+        assert!(status.contains(needle), "{needle}: {status}");
+    }
+    // --merge (any method) resumes the same receipt and merges after exact-SHA CI
+    let merge = ["--merge", "--merge-method", "merge"];
+    let r = iso.run_with_services("land", &repo, &[&args[..], &merge].concat(), &env);
+    assert_eq!(r.0, 0, "{r:?}");
+    assert!(r.1.contains("merged PR #7 (merge)"), "{r:?}");
     let calls = fs::read_to_string(log).expect("gh log");
-    let create = calls.find("pr create").expect("pr create");
     let ci = calls
-        .find(&format!("--commit {head} --event pull_request"))
+        .rfind(&format!("--commit {head} --event pull_request"))
         .expect("exact-SHA CI query");
     let merge = calls
         .find(&format!(
-            "pr merge 7 --repo {} --squash --delete-branch --match-head-commit {head}",
-            bare.to_string_lossy().trim_end_matches(".git")
+            "pr merge 7 --repo github.com/owner/pr --merge --delete-branch --match-head-commit {head}"
         ))
         .expect("pr merge");
-    assert!(create < ci && ci < merge, "{calls}");
+    assert!(
+        ci < merge && calls.matches("pr create").count() == 1,
+        "{calls}"
+    );
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     for needle in [
         "\"mode\": \"pr\"",
-        "\"head_branch\": \"feat\"",
+        "\"head_branch\": \"oms/feat/add-feature-x-now\"",
         "\"pr_number\": 7",
         "\"state\": \"passed\"",
         "\"state\": \"MERGED\"",
     ] {
         assert!(status.contains(needle), "{needle}: {status}");
     }
+    // the resumed merge keeps the first run's push row, which plan completion
+    // reads as the landed range
+    let row = V::parse(status.as_bytes()).expect("status json");
+    assert_eq!(row.get("push").get("rc"), &0usize.into(), "{status}");
+    assert_eq!(row.get("push").get("moved"), &1usize.into(), "{status}");
+    assert_eq!(
+        row.get("push").get("base").text(),
+        Some(main_before.as_str())
+    );
+    let merged = row.get("merge").get("commit").text().unwrap_or_default();
+    assert!(
+        merged.len() == 40 && merged.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{status}"
+    );
 }
 
 #[test]
@@ -1758,7 +2176,14 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
     let (gh, log) = iso.fake_gh(&bare, "failure");
     let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
     let args = ["--pr", "--gate", "true", "--ignore-siblings", "--no-update"];
+    // a subject-only commit carries no motivation; refused before the gate
     let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_refused(
+        &r,
+        "a pull request needs a motivation: pass --why TEXT or write a commit body",
+    );
+    let args = [&args[..], &["--why", "fixture"]].concat();
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
     assert!(r.1.contains("CI failure"), "{r:?}");
     let calls = fs::read_to_string(log).expect("gh log");
@@ -1774,13 +2199,28 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
         &env,
     );
     assert_refused(&r, "PR head branch must differ from the target branch");
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &[&args[..], &["--merge", "--ci-wait", "0"]].concat(),
+        &env,
+    );
+    assert_refused(&r, "--merge needs --ci-wait above zero");
+    // shared sync and receipt handoff act only after a real merge
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &[&args[..], &["--sync-shared", "shared"]].concat(),
+        &env,
+    );
+    assert_refused(&r, "need --merge in pull-request mode");
     let r = iso.run_env(
         "land",
         &repo,
         &["--gate", "true"],
-        &[("OMS_LAND_MODE", "sometimes")],
+        &[("OMS_LAND_MODE", "auto")],
     );
-    assert_refused(&r, "OMS_LAND_MODE must be pr, auto or direct");
+    assert_refused(&r, "OMS_LAND_MODE must be pr or direct");
 }
 
 #[test]
@@ -1795,8 +2235,16 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
     let head = iso.commit_file(&repo, "feat.txt");
     let (gh, log) = iso.fake_gh(&bare, "success");
     let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
-    let args = ["--pr", "--gate", "true", "--ignore-siblings", "--no-update"];
-    let r = iso.run_with_services("land", &repo, &args, &env);
+    let args = [
+        "--pr",
+        "--why",
+        "fixture",
+        "--gate",
+        "true",
+        "--ignore-siblings",
+        "--no-update",
+    ];
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
     assert!(r.1.contains("diverged"), "{r:?}");
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
@@ -1808,30 +2256,71 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
         &env,
     );
     assert_eq!(r.0, 0, "{r:?}");
-    assert!(r.1.contains("merge skipped because --ci-wait=0"), "{r:?}");
+    assert!(r.1.contains("CI skipped; not merged"), "{r:?}");
     let calls = fs::read_to_string(log).expect("gh log");
     assert!(
-        calls.contains("pr create") && !calls.contains("pr merge"),
+        calls.contains("pr create --repo")
+            && calls.contains("--head feat --title")
+            && !calls.contains("pr merge"),
         "{calls}"
     );
 }
 
 #[test]
-fn land_pr_defers_install_when_merge_commit_differs_from_head() {
-    let iso = Isolated::new();
-    let (repo, bare) = iso.with_remote("prsquash");
-    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
-    iso.commit_file(&repo, "feat.txt");
-    let (gh, _) = iso.fake_gh(&bare, "success");
-    let r = iso.run_with_services(
-        "land",
-        &repo,
-        &["--pr", "--gate", "true", "--ignore-siblings"],
-        &[("OMS_GH_BIN", gh.to_str().unwrap())],
-    );
-    assert_eq!(r.0, 0, "{r:?}");
-    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
-    assert!(status.contains("merge-commit-pending-ci"), "{status}");
+fn land_pr_installs_a_tree_equal_squash_and_defers_when_the_base_moved() {
+    for moved in [false, true] {
+        let iso = Isolated::new();
+        let (repo, bare) = iso.with_github_remote("prsquash");
+        iso.commit_as(
+            &repo,
+            "scripts/check.sh",
+            "exit 0\n",
+            &["fix: add gate", "Fixture gate."],
+        );
+        let (gh, log) = iso.fake_gh(&bare, "success");
+        fs::write(iso.home.path().join("gh.pr.squash"), "").expect("squash flag");
+        if moved {
+            fs::write(iso.home.path().join("gh.pr.moved"), "").expect("moved flag");
+        }
+        let r = iso.run_with_services(
+            "land",
+            &repo,
+            &[
+                "--merge",
+                "--gate",
+                "bash scripts/check.sh --parallel",
+                "--ignore-siblings",
+            ],
+            &[("OMS_GH_BIN", gh.to_str().unwrap())],
+        );
+        assert_eq!(r.0, 0, "{r:?}");
+        let calls = fs::read_to_string(&log).expect("gh log");
+        assert!(calls.contains("--squash --delete-branch"), "{calls}");
+        let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+        let row = V::parse(status.as_bytes()).expect("status json");
+        assert_eq!(
+            row.get("merge").get("tree_equal"),
+            &V::Bool(true),
+            "{status}"
+        );
+        if moved {
+            assert_eq!(
+                row.get("update").get("reason").text(),
+                Some("merge-commit-pending-ci"),
+                "{status}"
+            );
+        } else {
+            assert_eq!(row.get("update").get("rc"), &0usize.into(), "{status}");
+            assert_eq!(row.get("state").text(), Some("passed"), "{status}");
+            assert_eq!(row.get("push").get("moved"), &1usize.into(), "{status}");
+            let merged = row.get("merge").get("commit").text().unwrap_or_default();
+            assert_eq!(row.get("merge").get("state").text(), Some("MERGED"));
+            assert_eq!(
+                iso.git_out(&repo, &["rev-parse", &format!("{merged}^")]),
+                row.get("push").get("base").text().unwrap_or_default()
+            );
+        }
+    }
 }
 
 #[test]
@@ -1906,6 +2395,23 @@ fn land_direct_still_gates_then_pushes_the_target() {
     assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     assert!(status.contains("\"mode\": \"direct\""), "{status}");
+    // a GitHub target takes a direct push only for a docs-only change of at most 2 lines
+    let (repo, bare) = iso.with_github_remote("directgh");
+    let main = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+    let refusal = "direct land to main is limited to a docs-only change of at most 2 lines; land without --direct to open a pull request";
+    iso.commit_file(&repo, "code.rs");
+    let r = iso.run_with_services("land", &repo, &args, &[("OMS_LAND_MODE", "direct")]);
+    assert_refused(&r, refusal);
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), main);
+    iso.git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    iso.commit_as(&repo, "README.md", "one\ntwo\nthree\n", &["docs: grow"]);
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--direct"]].concat(), &[]);
+    assert_refused(&r, refusal);
+    iso.git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    let head = iso.commit_as(&repo, "README.md", "one\ntwo\n", &["docs: note"]);
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--direct"]].concat(), &[]);
+    assert_eq!(r.0, 0, "{r:?}");
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
 }
 
 /// Multi-repo manifest fixture: repo-app depends on repo-core, repo-docs is
@@ -2052,6 +2558,408 @@ fn manifest_failure_holds_dependents_keeps_integrated_repos_and_resumes_idempote
     let again = iso.run_with_services("land", iso.home.path(), &args, &[]);
     assert_eq!(again.0, 0, "{again:?}");
     assert_eq!(m.count(&iso, "repo-app"), 1);
+}
+
+#[test]
+fn batch_preview_pins_the_order_and_leaves_source_unchanged() {
+    let iso = Isolated::new();
+    let repo = iso.repo("ordered-preview");
+    let version = iso.git_out(&repo, &["version"]);
+    let mut version = version.split_whitespace().nth(2).unwrap().split('.');
+    let major = version.next().unwrap().parse::<u32>().unwrap();
+    let minor = version.next().unwrap().parse::<u32>().unwrap();
+    if (major, minor) < (2, 38) {
+        let branch = "refs/heads/main";
+        let (code, out, err) = iso.run("land", &repo, &["batch-preview", "--base", branch, branch]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("requires Git 2.38"), "{err}");
+        return;
+    }
+    let base = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let branch = |name: &str, from: &str, file: &str, content: &str| {
+        iso.git(&repo, &["checkout", "-qb", name, from]);
+        fs::write(repo.join(file), content).unwrap();
+        iso.git(&repo, &["add", "--", file]);
+        iso.git(&repo, &["commit", "-qm", name]);
+        iso.git_out(&repo, &["rev-parse", "HEAD"])
+    };
+    let first = "refs/heads/oms/first";
+    let first_alias = "refs/remotes/origin/first";
+    let stacked = "refs/heads/oms/stacked";
+    let independent = "refs/remotes/origin/independent";
+    let conflicting = "refs/heads/oms/conflicting";
+    let target = "refs/remotes/origin/main";
+    let first_oid = branch("oms/first", &base, "a.txt", "first\n");
+    let stacked_oid = branch("oms/stacked", &first_oid, "stacked.txt", "stacked\n");
+    let independent_oid = branch("oms/independent", &base, "independent.txt", "solo\n");
+    let conflicting_oid = branch("oms/conflicting", &base, "a.txt", "other\n");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    iso.git(&repo, &["update-ref", target, &base]);
+    iso.git(&repo, &["update-ref", first_alias, &first_oid]);
+    iso.git(&repo, &["update-ref", independent, &independent_oid]);
+    fs::write(repo.join("local.txt"), "user work\n").unwrap();
+    let source = || {
+        (
+            iso.git_out(
+                &repo,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            ),
+            iso.git_out(&repo, &["rev-parse", "HEAD"]),
+            iso.git_out(&repo, &["worktree", "list", "--porcelain"]),
+            iso.git_out(&repo, &["cat-file", "--batch-all-objects", "--batch-check"]),
+            fs::read(repo.join(".git/index")).unwrap(),
+            fs::read_to_string(repo.join("local.txt")).unwrap(),
+        )
+    };
+    let before = source();
+    let preview = |candidates: &[&str], code: i32| {
+        let mut args = vec!["batch-preview", "--base", target, "--json"];
+        args.extend_from_slice(candidates);
+        let (actual, out, err) = iso.run("land", &repo, &args);
+        assert_eq!(actual, code, "{out}{err}");
+        V::parse(out.as_bytes()).unwrap()
+    };
+    let clean = preview(&[first, independent, stacked, first_alias], 0);
+    assert_eq!(clean.get("status").text(), Some("clean"));
+    assert_eq!(clean.get("base").get("oid").text(), Some(base.as_str()));
+    let rows = clean.get("steps").array();
+    assert_eq!(rows[0].get("oid").text(), Some(first_oid.as_str()));
+    assert_eq!(rows[1].get("oid").text(), Some(independent_oid.as_str()));
+    assert_eq!(rows[2].get("oid").text(), Some(stacked_oid.as_str()));
+    assert_eq!(rows[2].get("depends_on").array().len(), 1);
+    assert_eq!(rows[2].get("depends_on").array()[0].text(), Some(first));
+    assert_eq!(rows[3].get("ref").text(), Some(first_alias));
+    assert_eq!(rows[3].get("oid").text(), Some(first_oid.as_str()));
+    assert_eq!(rows[3].get("status").text(), Some("already_present"));
+
+    assert_eq!(
+        preview(&[conflicting], 0).get("status").text(),
+        Some("clean")
+    );
+    let user_git_config = iso.home.path().join(".config/git");
+    fs::create_dir_all(&user_git_config).unwrap();
+    let user_attributes = user_git_config.join("attributes");
+    fs::write(&user_attributes, "a.txt merge=union\n").unwrap();
+    let blocked = preview(
+        &[first, independent, stacked, conflicting, "refs/heads/main"],
+        1,
+    );
+    assert_eq!(blocked.get("status").text(), Some("conflict"));
+    assert!(matches!(blocked.get("tree_oid"), V::Null));
+    assert_eq!(
+        blocked.get("conflict_paths").array()[0].text(),
+        Some("a.txt")
+    );
+    let rows = blocked.get("steps").array();
+    assert_eq!(rows[3].get("oid").text(), Some(conflicting_oid.as_str()));
+    assert_eq!(rows[3].get("status").text(), Some("conflict"));
+    assert_eq!(rows[4].get("status").text(), Some("blocked"));
+    fs::remove_file(user_attributes).unwrap();
+
+    let wrong_order = preview(&[stacked, first_alias, first], 3);
+    let rows = wrong_order.get("steps").array();
+    assert_eq!(rows[0].get("status").text(), Some("out_of_order"));
+    assert_eq!(rows[0].get("depends_on").array().len(), 1);
+    assert_eq!(
+        rows[0].get("depends_on").array()[0].text(),
+        Some(first_alias)
+    );
+    assert_eq!(rows[1].get("status").text(), Some("blocked"));
+    assert_eq!(rows[2].get("status").text(), Some("blocked"));
+    assert!(matches!(wrong_order.get("tree_oid"), V::Null));
+    for extra in ["--pr", "--merge", "--local-merge", "--execute-manifest"] {
+        let (code, out, err) = iso.run(
+            "land",
+            &repo,
+            &["batch-preview", "--base", target, first, extra],
+        );
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("accepts only"), "{err}");
+    }
+    assert_eq!(source(), before);
+    assert!(!repo.join(".oms").exists());
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
+
+    // Simulate an independent ref update after pinning, during merge-tree.
+    let git = iso.bin.join("git");
+    let real_git = fs::read_link(&git).unwrap();
+    fs::remove_file(&git).unwrap();
+    fs::write(
+        &git,
+        r#"#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == merge-tree ]]; then
+        "$PREVIEW_TEST_GIT" -C "$PREVIEW_TEST_REPO" update-ref "$PREVIEW_TEST_REF" "$PREVIEW_TEST_OID" || exit $?
+        break
+    fi
+done
+exec "$PREVIEW_TEST_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    let (code, out, err) = iso.run_env(
+        "land",
+        &repo,
+        &["batch-preview", "--base", target, first, "--json"],
+        &[
+            ("PREVIEW_TEST_GIT", real_git.to_str().unwrap()),
+            ("PREVIEW_TEST_REPO", repo.to_str().unwrap()),
+            ("PREVIEW_TEST_REF", first),
+            ("PREVIEW_TEST_OID", &conflicting_oid),
+        ],
+    );
+    assert_eq!(code, 3, "{out}{err}");
+    let stale = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert_eq!(stale.get("moved_refs").array()[0].text(), Some(first));
+    assert!(matches!(stale.get("tree_oid"), V::Null));
+    fs::remove_file(&git).unwrap();
+    std::os::unix::fs::symlink(real_git, git).unwrap();
+    iso.git(&repo, &["update-ref", first, &first_oid]);
+    assert_eq!(source(), before);
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
+
+    iso.git(&repo, &["checkout", "-qb", "expected", &base]);
+    for head in [first, independent, stacked] {
+        iso.git(&repo, &["merge", "-q", "--no-ff", "--no-edit", head]);
+    }
+    let expected = iso.git_out(&repo, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(clean.get("tree_oid").text(), Some(expected.as_str()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn batch_check_copied_candidates_are_bounded_and_cannot_supply_hosted_ci() {
+    let iso = Isolated::new();
+    let repo = iso.repo("ordered-check");
+    let version = iso.git_out(&repo, &["version"]);
+    let mut parts = version.split_whitespace().nth(2).unwrap().split('.');
+    if (
+        parts.next().unwrap().parse::<u32>().unwrap(),
+        parts.next().unwrap().parse::<u32>().unwrap(),
+    ) < (2, 38)
+    {
+        return;
+    }
+    fs::create_dir(repo.join("scripts")).unwrap();
+    fs::write(
+        repo.join("scripts/check.sh"),
+        r#"#!/bin/bash
+set -eu
+[[ "$1 $2 $3 $5 $6" == "--affected --ci-parity --changed-from --changed-to HEAD" ]]
+git merge-base --is-ancestor "$4" HEAD
+[[ -z "$(git remote)" && ! -e .git/objects/info/alternates && ! -e user-untracked ]]
+if [[ ${OMS_CT_BATCH_MODE:-} == output ]]; then
+    for ((i = 0; i < 1024; i++)); do
+        printf 'private-verifier-output\n'
+    done
+fi
+[[ ! -e first-flag || ! -e final-flag ]]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".gitattributes"),
+        "final-flag filter=fixture-smudge\n",
+    )
+    .unwrap();
+    iso.git(&repo, &["add", "scripts/check.sh", ".gitattributes"]);
+    iso.git(&repo, &["commit", "-qm", "verifier"]);
+    let base = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let pin = |name: &str, from: &str, file: &str| {
+        iso.git(&repo, &["checkout", "-qb", name, from]);
+        fs::write(repo.join(file), "fixture\n").unwrap();
+        iso.git(&repo, &["add", file]);
+        iso.git(&repo, &["commit", "-qm", name]);
+        iso.git_out(&repo, &["rev-parse", "HEAD"])
+    };
+    let first_oid = pin("oms/first", &base, "first-flag");
+    let stacked_oid = pin("oms/stacked", &first_oid, "stacked-flag");
+    let side_oid = pin("oms/side", &base, "final-flag");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    fs::write(
+        repo.join("user-untracked"),
+        "untouched
+",
+    )
+    .unwrap();
+    let base_ref = "refs/heads/main";
+    let first = "refs/heads/oms/first";
+    let stacked = "refs/heads/oms/stacked";
+    let side = "refs/heads/oms/side";
+    let names = [first, stacked, side];
+    let state = || {
+        (
+            iso.git_out(&repo, &["rev-parse", "HEAD"]),
+            iso.git_out(
+                &repo,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            ),
+            iso.git_out(&repo, &["worktree", "list", "--porcelain"]),
+            iso.git_out(&repo, &["cat-file", "--batch-all-objects", "--batch-check"]),
+            fs::read(repo.join(".git/index")).unwrap(),
+            fs::read(repo.join("user-untracked")).unwrap(),
+        )
+    };
+    let before = state();
+    let preview = |refs: &[&str]| {
+        let mut args = vec!["batch-preview", "--base", base_ref, "--json"];
+        args.extend(refs);
+        let (code, out, err) =
+            iso.run_with_services("land", &repo, &args, &[("OMS_CT_BATCH_MODE", "never")]);
+        assert_eq!(code, 0, "{out}{err}");
+        V::parse(out.as_bytes()).unwrap()
+    };
+    let checked = |refs: &[&str], digest: &str, mode: &str, expected_code| {
+        let mut args = vec![
+            "batch-check",
+            "--base",
+            base_ref,
+            "--expected-preview-sha256",
+            digest,
+            "--json",
+        ];
+        args.extend(refs);
+        let (code, out, err) =
+            iso.run_with_services("land", &repo, &args, &[("OMS_CT_BATCH_MODE", mode)]);
+        assert_eq!(code, expected_code, "{out}{err}");
+        assert!(!out.contains("private-verifier-output"), "{out}");
+        assert!(out.len() < 8192, "unexpected diagnostic size");
+        (out.clone(), V::parse(out.as_bytes()).unwrap())
+    };
+    let full = preview(&names);
+    let digest = full.get("preview_sha256").text().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert_eq!(
+        full.get("steps").array()[1].get("depends_on").array(),
+        &[V::from(first)]
+    );
+    let (_, stale) = checked(&[first, side, stacked], digest, "never", 3);
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert!(stale.get("checks").array().is_empty());
+    iso.git(&repo, &["update-ref", side, &stacked_oid, &side_oid]);
+    let (_, stale) = checked(&names, digest, "never", 3);
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert!(stale.get("checks").array().is_empty());
+    iso.git(&repo, &["update-ref", side, &side_oid, &stacked_oid]);
+    assert_eq!(state(), before);
+
+    let mut race = vec![
+        "batch-check",
+        "--base",
+        base_ref,
+        "--expected-preview-sha256",
+        digest,
+        "--json",
+    ];
+    race.extend(names);
+    let (code, out, err) = iso.run_with_services(
+        "land",
+        &repo,
+        &race,
+        &[
+            ("OMS_CT_BATCH_MOVE_REF", side),
+            ("OMS_CT_BATCH_MOVE_TO", &stacked_oid),
+            ("OMS_CT_BATCH_MOVE_FROM", &side_oid),
+        ],
+    );
+    assert_eq!(code, 3, "{out}{err}");
+    let stale = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(stale.get("moved_refs").array(), &[V::from(side)]);
+    assert_eq!(
+        stale.get("checks").array().len(),
+        1,
+        "stale run cannot launch a prefix"
+    );
+    assert_eq!(
+        stale.get("checks").array()[0].get("tree_oid"),
+        full.get("tree_oid")
+    );
+    iso.git(&repo, &["update-ref", side, &side_oid, &stacked_oid]);
+    assert_eq!(state(), before);
+
+    let (_, outcome) = checked(&names, digest, "", 1);
+    assert_eq!(outcome.get("status").text(), Some("failed"));
+    assert_eq!(outcome.get("hosted_ci_evidence"), &V::Bool(false));
+    let rows = outcome.get("checks").array();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("tree_oid"), full.get("tree_oid"));
+    assert_eq!(rows[0].get("candidate_count").py(), "3");
+    assert_eq!(rows[0].get("outcome").text(), Some("failed"));
+    assert_eq!(
+        rows[1].get("tree_oid"),
+        full.get("steps").array()[1].get("tree_oid")
+    );
+    assert_eq!(rows[1].get("candidate_count").py(), "2");
+    assert_eq!(rows[1].get("outcome").text(), Some("passed"));
+    assert!(
+        rows.iter()
+            .all(|row| row.get("scope").text() == Some("affected-ci-parity")
+                && row.get("duration_ms").integer(false))
+    );
+
+    for (mode, code, status) in [
+        ("cancel", 130, "cancelled"),
+        ("output", 125, "output_limited"),
+        ("setup-unavailable", 2, "unavailable"),
+    ] {
+        let (_, result) = checked(&names, digest, mode, code);
+        assert_eq!(result.get("status").text(), Some(status));
+        assert_eq!(result.get("checks").array().len(), 1);
+    }
+    let alone = preview(&[side]);
+    let sentinel = iso.home.path().join("checkout-filter-ran");
+    let global_config = iso.home.path().join(".gitconfig");
+    let filter = format!(
+        "[filter \"fixture-smudge\"]\n    smudge = \"printf fixture > '{}'; /bin/cat\"\n",
+        sentinel.display(),
+    );
+    fs::write(&global_config, filter).unwrap();
+    let (code, local_success, error) = iso.run_with_services(
+        "land",
+        &repo,
+        &[
+            "batch-check",
+            "--base",
+            base_ref,
+            "--expected-preview-sha256",
+            alone.get("preview_sha256").text().unwrap(),
+            side,
+            "--json",
+        ],
+        &[
+            ("GIT_CONFIG_GLOBAL", global_config.to_str().unwrap()),
+            ("GIT_CONFIG_NOSYSTEM", "0"),
+        ],
+    );
+    assert!(
+        !sentinel.exists(),
+        "private Git copy ran an ambient smudge filter"
+    );
+    assert_eq!(code, 0, "{local_success}{error}");
+    let parsed = V::parse(local_success.as_bytes()).unwrap();
+    assert_eq!(parsed.get("status").text(), Some("passed"));
+    assert_eq!(parsed.get("hosted_ci_evidence"), &V::Bool(false));
+    let gh = iso.bin.join("gh");
+    fs::write(
+        &gh,
+        b"#!/bin/bash\nprintf '%s' \"$OMS_CT_BATCH_DIAGNOSTIC\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(gh, fs::Permissions::from_mode(0o700)).unwrap();
+    let (code, output, error) = iso.run_env(
+        "ci-status",
+        &repo,
+        &[],
+        &[("OMS_CT_BATCH_DIAGNOSTIC", &local_success)],
+    );
+    assert_eq!(code, 2, "{output}{error}");
+    assert!(error.contains("unreadable run list"), "{output}{error}");
+
+    assert_eq!(state(), before);
+    assert!(!repo.join(".oms").exists());
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
 }
 
 #[test]
@@ -3147,4 +4055,72 @@ fn github_state_is_shared_by_scratch_checkouts() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("already posted"), "{out}");
     assert_eq!(r.posts(), 1, "{}", r.calls());
+}
+
+#[test]
+fn land_pr_merge_preserves_head_branch_when_dependent_pr_is_open_or_unverified() {
+    for (dependents_payload, expected_reason, expected_notice) in [
+        (
+            "[{\"number\":345}]\n",
+            "open-dependent-pr",
+            "branch kept: open dependent PR targets head branch",
+        ),
+        (
+            "not-json\n",
+            "dependent-pr-check-unverified",
+            "branch kept: dependent PR check unverified",
+        ),
+    ] {
+        let iso = Isolated::new();
+        let (repo, bare) = iso.with_github_remote("prstack");
+        let head = iso.commit_as(
+            &repo,
+            "stack.txt",
+            "base slice\n",
+            &["feat: base slice", "Stacked base PR."],
+        );
+        let (gh, log) = iso.fake_gh(&bare, "success");
+        fs::write(iso.home.path().join("gh.pr.dependents"), dependents_payload)
+            .expect("dependents payload");
+        let r = iso.run_with_services(
+            "land",
+            &repo,
+            &[
+                "--merge",
+                "--gate",
+                "true",
+                "--ignore-siblings",
+                "--no-update",
+            ],
+            &[("OMS_GH_BIN", gh.to_str().unwrap())],
+        );
+        assert_eq!(r.0, 0, "{r:?}");
+        assert!(r.1.contains(expected_notice), "{r:?}");
+        let calls = fs::read_to_string(&log).expect("gh log");
+        assert!(
+            calls.contains(
+                "pr list --repo github.com/owner/prstack --state open --base oms/feat/base-slice --json number --limit 1"
+            ),
+            "{calls}"
+        );
+        assert!(
+            calls.contains(&format!(
+                "pr merge 7 --repo github.com/owner/prstack --squash --match-head-commit {head}"
+            )),
+            "{calls}"
+        );
+        assert!(!calls.contains("--delete-branch"), "{calls}");
+        let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+        let row = V::parse(status.as_bytes()).expect("status json");
+        assert_eq!(
+            row.get("merge").get("delete_branch"),
+            &V::Bool(false),
+            "{status}"
+        );
+        assert_eq!(
+            row.get("merge").get("delete_branch_skipped").text(),
+            Some(expected_reason),
+            "{status}"
+        );
+    }
 }

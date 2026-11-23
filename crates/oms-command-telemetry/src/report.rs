@@ -607,9 +607,9 @@ pub(crate) fn report(
         report["waste"] =
             crate::waste::report(root, selected, rows, &admitted, options.top, interrupted)?;
     }
-    let calls = crate::store::usage::load(root.physical_root())
-        .map_err(|e| e.to_string())?
-        .calls;
+    let (projection, storage) =
+        crate::store::usage::load_with_storage(root.physical_root()).map_err(|e| e.to_string())?;
+    let calls = projection.calls;
     if !calls.is_empty() {
         use crate::store::usage::{Cost, Phase};
         let mut lifetime = obj!("scope":"lifetime-OMS-provider-calls", "calls":calls.len(),
@@ -618,6 +618,14 @@ pub(crate) fn report(
             "provider_estimate_calls":0,
             "cleanup_confirmed_calls":0,"cleanup_incomplete_calls":0,"cleanup_unknown_calls":0,
             "basis":"absolute receipt revisions; cumulative session differences with known baselines; independent of artifact window; costs are reported values, not authoritative billing");
+        lifetime["storage"] = obj!(
+            "retained_bytes":storage.retained_bytes,
+            "receipt_rows":storage.receipt_rows,
+            "max_bytes":crate::store::MAX_INDEX_BYTES,
+            "remaining_bytes":crate::store::MAX_INDEX_BYTES.saturating_sub(storage.retained_bytes),
+            "update_mode":"full-ledger-atomic-replacement",
+            "basis":"validated receipt snapshot including superseded revisions; excludes reasoning supplement; remaining bytes are not a call allowance or measured device I/O"
+        );
         for call in calls {
             lifetime.inc(match call.receipt.cleanup_complete {
                 Some(true) => "cleanup_confirmed_calls",

@@ -473,7 +473,7 @@ fn run_with_source_writer(
                                     .then(|| target.sample(repo, services, interrupted).ok())
                                     .flatten()
                             },
-                            |scope, target| start_main_switch(repo, scope, target),
+                            |scope, target| start_main_switch(repo, source, scope, target),
                         ) {
                             changed = true;
                             break;
@@ -1192,16 +1192,54 @@ impl MainSwitch {
             && attempt["terminal"] == false
             && attempt["state"] == "working"
             && oms_panel_core::state::main_participant(attempt) == main.member;
-        if current && legacy_main_switch_source(report, main, attempt) {
+        if !current {
+            let live_state = (attempt["attempt_id"] == main.attempt
+                && attempt["provider"] == main.owner
+                && attempt["terminal"] == false
+                && oms_panel_core::state::main_participant(attempt) == main.member)
+                .then(|| attempt["state"].as_str())
+                .flatten()
+                .filter(|state| {
+                    *state != "working" && oms_panel_core::state::LIVE_STATES.contains(state)
+                });
+            if let Some(state) = live_state {
+                return Err(Error::new(format!(
+                    "Current Main is {state}; wait until it is working to switch"
+                )));
+            }
+            return Err(Error::new(
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ));
+        }
+        if legacy_main_switch_source(report, main, attempt) {
             return Err(Error::new(
                 "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
             ));
         }
-        crate::require(
-            current && attempt["refs"]["panel_host"] == "tmux",
-            "Current Main is unavailable for a managed switch",
-        )?;
+        match attempt["refs"]["panel_host"].as_str() {
+            Some("tmux") => {}
+            Some("inline") => {
+                return Err(Error::new(
+                    "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+                ));
+            }
+        }
+        if attempt["refs"]["panel_native_scheduling"] == "campaign" {
+            return Err(Error::new(
+                "Main swap is unavailable during a managed campaign",
+            ));
+        }
         let current = attempt["refs"]["panel_harness"].as_str();
+        if current == Some("agy") && main.owner == "antigravity" {
+            return Err(Error::new(
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ));
+        }
         crate::native_panel::check_outgoing_main_swap_harness(current)?;
         let current = current.unwrap_or_default();
         let targets = targets(current)?;
@@ -1290,11 +1328,12 @@ impl MainSwitch {
 
 fn start_main_switch(
     repo: &Path,
+    source: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
 ) -> Result<Receiver<Result<()>>> {
     let services = oms_panel_core::SubcommandServices::sibling()?;
-    let request = main_switch_request(&services.executable, repo, scope, target)?;
+    let request = main_switch_request(&services.executable, source, repo, scope, target)?;
     let (completed, result) = mpsc::channel();
     // The canonical host owns lifecycle reconciliation once submitted. Closing
     // this display neither retries the transition nor sends a second request.
@@ -1328,6 +1367,7 @@ fn start_main_switch(
 
 fn main_switch_request(
     executable: &Path,
+    source: &Path,
     repo: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
@@ -1337,11 +1377,18 @@ fn main_switch_request(
         .as_ref()
         .ok_or_else(|| Error::new("No current Main verified"))?;
     crate::require(
-        executable.is_absolute() && executable.file_name().is_some_and(|name| name == "oms"),
+        executable.is_absolute()
+            && rustix::fs::access(executable, rustix::fs::Access::EXEC_OK).is_ok(),
         "Canonical OMS dispatcher unavailable",
     )?;
+    let (source, revision) = crate::native_panel::staged_dispatch_args(source, executable)
+        .ok_or_else(|| Error::new("Canonical staged OMS dispatcher unavailable"))?;
     let mut argv = vec![
         executable.as_os_str().into(),
+        "--oms-dispatch".into(),
+        source.into(),
+        revision.into(),
+        "--".into(),
         "panel".into(),
         "--repo".into(),
         repo.as_os_str().into(),
@@ -1835,12 +1882,13 @@ pub(crate) struct NativeReading {
     agy: Option<AgyDockCheck>,
 }
 
-const NATIVE_FIELDS: [&str; 11] = [
+const NATIVE_FIELDS: [&str; 12] = [
     "native_children",
     "native_dock",
     "provider_sessions",
     "provider_models",
     "provider_activity",
+    "provider_delivery",
     "provider_accounts",
     "provider_status",
     "claude_local_weekly",
@@ -1941,6 +1989,7 @@ impl NativeRequest {
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshPhase {
     Pending,
+    RetryingAfterFailure,
     Fresh,
     Failed(String),
 }
@@ -1964,6 +2013,10 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 }
 
 impl RefreshPhase {
+    fn pending(&self) -> bool {
+        matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
     fn frame_report(
         &self,
         snapshot: Option<Snapshot>,
@@ -1971,7 +2024,7 @@ impl RefreshPhase {
         room: &str,
     ) -> Value {
         // Render hides a failed read's AGY roster; pending must not relabel it.
-        if *self == Self::Pending
+        if self.pending()
             && let Some(previous) = previous.as_mut().filter(|report| stale_report(report))
             && let Some(activity) = previous
                 .get_mut("provider_activity")
@@ -1985,7 +2038,7 @@ impl RefreshPhase {
             let mut current = snapshot.report;
             // A display-only result has no pane reads of its own. Retain the
             // same-scope observations so its native rows keep their identity.
-            if *self == Self::Pending {
+            if self.pending() {
                 let mut previous = match previous {
                     Some(Value::Object(previous)) => previous,
                     _ => Default::default(),
@@ -1994,6 +2047,7 @@ impl RefreshPhase {
                     "provider_sessions",
                     "provider_models",
                     "provider_activity",
+                    "provider_delivery",
                     "provider_accounts",
                     "provider_status",
                     "native_children",
@@ -2018,9 +2072,17 @@ impl RefreshPhase {
     }
 
     fn report(&self, mut report: Value) -> Value {
+        // A pending frame can carry a proof only from the current scope.
+        // Erase known failures before relabeling a held report as pending.
+        if stale_report(&report)
+            || matches!(self, Self::RetryingAfterFailure | Self::Failed(_))
+            || report.get("board_write_slots").is_none()
+        {
+            report["board_write_slots"] = Value::Null;
+        }
         match self {
             Self::Fresh => {}
-            Self::Pending => {
+            Self::Pending | Self::RetryingAfterFailure => {
                 // The visible data describes the last successful read. The
                 // pending flag and private phase prevent acting on it.
                 report["collection"] = json!({"ok":true,"pending":true});
@@ -2184,6 +2246,7 @@ impl InteractiveRefresh {
         }
         let result = ready.then(|| self.worker.poll(&scope.key)).flatten();
         let follow_up = !self.worker.busy() && std::mem::take(&mut self.deferred_refresh);
+        let replied = result.is_some();
         let completed = result.and_then(|result| match result {
             Ok(snapshot)
                 if snapshot.status == 0
@@ -2239,6 +2302,9 @@ impl InteractiveRefresh {
                 }
             }
             self.request(&scope, seed);
+            if replied && completed.is_none() && self.phase == RefreshPhase::Pending {
+                self.phase = RefreshPhase::RetryingAfterFailure;
+            }
         }
         self.scope = Some(scope);
         (changed, completed, native)
@@ -5306,7 +5372,7 @@ mod tests {
     fn carried_board_report_drops_private_claude_weekly() {
         use super::{RefreshPhase, clear_private_weekly, clear_rejected_native, idle_report};
         use oms_panel_core::state::Snapshot;
-        use serde_json::json;
+        use serde_json::{Value, json};
 
         let mut previous = idle_report("room-fixture");
         previous["provider_status"] = json!({"codex":{"weekly_used":14}});
@@ -5315,6 +5381,8 @@ mod tests {
         previous["claude_local_weekly"] = json!({"weekly_used":14});
         previous["codex_weekly_account"] = json!("acct-b");
         previous["agy_footer_weekly"] = json!({"remaining":"99%"});
+        let slots = json!({"used":10,"limit":10,"active":0,"awaiting":8,"unconfirmed":2});
+        previous["board_write_slots"] = slots.clone();
         previous["provider_activity"] =
             json!({"antigravity":{"children":[{"role":"Worker","title":"Draft notes"}]}});
 
@@ -5369,6 +5437,15 @@ mod tests {
             );
             assert!(roster(&pending(sampled, None)).is_null());
         }
+        // Only a healthy same-scope held frame keeps its write slot evidence.
+        let held = pending(false, Some(previous.clone()));
+        assert_eq!(held["board_write_slots"], slots);
+        assert_eq!(pending(false, Some(held))["board_write_slots"], slots);
+        assert_eq!(pending(false, None)["board_write_slots"], Value::Null);
+        assert_eq!(
+            pending(true, Some(previous.clone()))["board_write_slots"],
+            Value::Null
+        );
         // A failed or stale frame hides its roster; pending must not relabel it.
         let failed = RefreshPhase::Failed("boom".into()).frame_report(
             None,
@@ -5377,11 +5454,15 @@ mod tests {
         );
         let mut stale = previous.clone();
         stale["capacity_stale"] = true.into();
+        assert_eq!(failed["board_write_slots"], Value::Null);
         for unhealthy in [failed.clone(), stale] {
             for sampled in [false, true] {
                 let replay = pending(sampled, Some(unhealthy.clone()));
                 assert!(roster(&replay).is_null(), "pending replayed failed roster");
-                assert!(roster(&pending(sampled, Some(replay))).is_null());
+                assert_eq!(replay["board_write_slots"], Value::Null);
+                let next = pending(sampled, Some(replay));
+                assert!(roster(&next).is_null());
+                assert_eq!(next["board_write_slots"], Value::Null);
             }
         }
         let mut sampled = idle_report("room-fixture");
@@ -5659,8 +5740,17 @@ mod tests {
     #[test]
     fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
         use super::*;
+        use crate::orchestrator::account_binding::test_support::TempDir;
         use input::Key;
+        use std::os::unix::fs::PermissionsExt;
         let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let staged = TempDir::new("board-main-switch");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let payload = staged.0.join("target/oms-native").join(revision);
+        std::fs::create_dir_all(&payload).unwrap();
+        let executable = payload.join("oms");
+        std::fs::write(&executable, b"fixture executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let scope = BoardScope {
             key: RefreshKey::new(&repo, Some("room-one"), Some("attempt-old"))
                 .unwrap()
@@ -5854,11 +5944,11 @@ mod tests {
             .unwrap();
         refs.remove("panel_host");
         refs.remove("panel_room_participant");
-        let blocked = |report: &Value| {
+        let blocked = |case_scope: &BoardScope, report: &Value| {
             let mut flow = MainSwitch::default();
             let mut nav = navigation::Navigation::default();
             let error = flow
-                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                .open_with(Some(case_scope), report, &mut nav, |_| {
                     panic!("unavailable Main must not resolve targets")
                 })
                 .unwrap_err();
@@ -5867,49 +5957,91 @@ mod tests {
             error.message
         };
         assert_eq!(
-            blocked(&legacy),
+            blocked(&legacy_scope, &legacy),
             "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
         );
-        for (path, value) in [
-            ("/collection/pending", json!(true)),
-            ("/room/closed", json!(true)),
+        for (path, value, expected) in [
+            (
+                "/collection/pending",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room/closed",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
             (
                 "/room_attempts/attempt-old/attempt_id",
                 json!("foreign-attempt"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_room_id",
                 json!("room-foreign"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_wrapper_pid",
                 json!("52"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_host",
                 json!("inline"),
+                "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
             ),
-            ("/room_attempts/attempt-old/state", json!("done")),
-            ("/room/participants/1/joined", json!(false)),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("done"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ),
+            (
+                "/room/participants/1/joined",
+                json!(false),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
         ] {
             let mut refused = legacy.clone();
             let (parent, key) = path.rsplit_once('/').unwrap();
             refused.pointer_mut(parent).unwrap()[key] = value;
-            assert_eq!(
-                blocked(&refused),
-                "Current Main is unavailable for a managed switch",
-                "{path}"
-            );
+            assert_eq!(blocked(&legacy_scope, &refused), expected, "{path}");
+        }
+        for (path, value, expected) in [
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("external"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("blocked"),
+                "Current Main is blocked; wait until it is working to switch",
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_native_scheduling",
+                json!("campaign"),
+                "Main swap is unavailable during a managed campaign",
+            ),
+        ] {
+            let mut refused = report.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(blocked(&scope, &refused), expected, "{path}");
         }
         let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
             .unwrap_err()
             .message;
-        for (owner, harness) in [
-            ("claude", Some("claude")),
-            ("antigravity", Some("agy")),
-            ("codex", Some("pi")),
-            ("codex", Some("unknown")),
-            ("codex", None),
+        for (owner, harness, expected) in [
+            ("claude", Some("claude"), expected_refusal.as_str()),
+            (
+                "antigravity",
+                Some("agy"),
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ),
+            ("codex", Some("pi"), expected_refusal.as_str()),
+            ("codex", Some("unknown"), expected_refusal.as_str()),
+            ("codex", None, expected_refusal.as_str()),
         ] {
             let mut case_scope = scope.clone();
             case_scope.main.as_mut().unwrap().owner = owner.into();
@@ -5934,7 +6066,7 @@ mod tests {
                     panic!("unsupported outgoing harness must not resolve targets")
                 })
                 .unwrap_err();
-            assert_eq!(error.message, expected_refusal);
+            assert_eq!(error.message, expected);
             assert!(nav.main_switch.is_none());
             assert!(flow.selection.is_none());
             assert!(flow.running.is_none());
@@ -5998,8 +6130,24 @@ mod tests {
             || Some(scope.clone()),
             |expected, target| {
                 assert_eq!(expected, &scope);
-                let req = main_switch_request(Path::new("/fixture/oms"), &repo, expected, target)?;
-                let opts = Options::parse(&req.argv[2..])?;
+                assert!(
+                    main_switch_request(&executable, &staged.0, &repo, expected, target).is_err()
+                );
+                std::fs::write(payload.join("manifest.json"), b"{}").unwrap();
+                assert!(main_switch_request(&executable, &repo, &repo, expected, target).is_err());
+                let req = main_switch_request(&executable, &staged.0, &repo, expected, target)?;
+                assert_eq!(
+                    req.argv[..6],
+                    [
+                        executable.as_os_str().to_owned(),
+                        "--oms-dispatch".into(),
+                        staged.0.as_os_str().to_owned(),
+                        revision.into(),
+                        "--".into(),
+                        "panel".into(),
+                    ]
+                );
+                let opts = Options::parse(&req.argv[6..])?;
                 assert_eq!(opts.get("room"), Some("room-one"));
                 assert_eq!(opts.get("swap-main"), Some("agy"));
                 assert_eq!(opts.get("model"), Some("gemini-4-carbon-high"));
@@ -6491,6 +6639,7 @@ mod tests {
         let pending = board.phase.report(idle_report(ROOM));
         assert_eq!(pending["collection"]["pending"], true);
         assert!(render::calls(&pending).is_empty());
+        assert_eq!(pending["board_write_slots"], Value::Null);
         let report_room = json!({"id":ROOM,"closed":false,"participants":[
             {"participant":MAIN,"role":"main","provider":"codex","joined":true},
             {"participant":"call-worker","role":"worker","joined":true,"state":"working"}
@@ -6574,8 +6723,10 @@ mod tests {
             requested.recv_timeout(Duration::from_secs(5)).unwrap(),
             ROOM
         );
-        let held = board.phase.report(fresh.clone());
+        let held = board.phase.frame_report(None, Some(fresh.clone()), ROOM);
         assert!(!render::calls(&held).is_empty());
+        assert_eq!(fresh["board_write_slots"]["used"], 0);
+        assert_eq!(held["board_write_slots"], fresh["board_write_slots"]);
         assert!(board.chat_cache().is_none());
         assert!(!settle_chat_dock(&mut dock, &observations, &held));
         let paint = |report: &Value, nav: &navigation::Navigation, dock: Option<&mut ChatDock>| {
@@ -6618,6 +6769,7 @@ mod tests {
             let painted = paint(&retained, &nav, dock.as_mut());
             displayed.push((label, painted.contains(label)));
             assert_eq!(retained["native_children"][0]["participant"], native);
+            assert_eq!(retained["board_write_slots"], fresh["board_write_slots"]);
             assert_eq!(retained["provider_accounts"]["codex"]["account"], "backup");
             assert_eq!(retained["provider_status"]["codex"]["weekly_used"], 14);
             assert!(!painted.contains("Refreshing Board"));
@@ -6649,12 +6801,10 @@ mod tests {
         ready(&mut board);
         let (_, failed) = board.update(Ok(scope(ROOM)), true, true);
         assert!(failed.is_none());
-        assert_eq!(board.phase, RefreshPhase::Pending);
-        let painted = paint(
-            &board.phase.frame_report(failed, Some(retained), ROOM),
-            &nav,
-            dock.as_mut(),
-        );
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
+        let retrying = board.phase.frame_report(failed, Some(retained), ROOM);
+        assert_eq!(retrying["board_write_slots"], Value::Null);
+        let painted = paint(&retrying, &nav, dock.as_mut());
         assert!(painted.contains("Second wake result"));
         assert!(!painted.contains("refresh failed"));
         assert_eq!(
@@ -6752,8 +6902,9 @@ mod tests {
         let (changed, replacement) = board.update(Ok(scope(new_room)), false, false);
         assert!(changed && replacement.is_none());
         assert!(board.chat_cache().is_none());
-        let cold = board.phase.report(idle_report(new_room));
+        let cold = board.phase.frame_report(replacement, None, new_room);
         assert_eq!(cold["room"]["id"], new_room);
+        assert_eq!(cold["board_write_slots"], Value::Null);
         assert!(render::calls(&cold).is_empty());
     }
 
@@ -8027,7 +8178,15 @@ mod tests {
             return;
         }
 
-        if std::env::var_os(WATCH_PTY).is_some() {
+        if let Some(tty) = std::env::var_os(WATCH_PTY) {
+            // The watch needs its terminal as controlling terminal. A session leader that
+            // has none acquires the terminal it opens.
+            rustix::process::setsid().unwrap();
+            let _controlling = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&tty)
+                .unwrap();
             let repo = PathBuf::from(std::env::var_os("OMS_TEST_REPO").unwrap());
             let counters_file = PathBuf::from(std::env::var_os("OMS_TEST_COUNTERS").unwrap());
             let options = Options::parse(&commands::strings(&["--watch"])).unwrap();
@@ -8284,197 +8443,93 @@ mod tests {
         set_model("Fixture initial");
         std::fs::write(&lead_window, "@4").unwrap();
 
-        // Private fake tmux binary logging all calls; PATH holds ONLY <tmp>/bin (with real git symlinked).
+        // Private fake tmux script logging all calls; PATH holds ONLY <tmp>/bin (with real git symlinked).
         let git_bin = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .map(|d| d.join("git"))
             .find(|p| p.is_file())
             .unwrap();
         std::os::unix::fs::symlink(&git_bin, bin.join("git")).unwrap();
         let fake_tmux = bin.join("tmux");
-        let fake_tmux_src = r##"#!/usr/bin/python3
-import os, sys, time
-args = sys.argv[1:]
-log = os.environ.get("OMS_FAKE_TMUX_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as f:
-        f.write(" ".join(args) + "\n")
-ppid = os.getppid()
-quota = os.environ.get("OMS_FAKE_QUOTA_STAGE")
-def stage():
-    if quota and os.path.exists(quota):
-        with open(quota, encoding="utf-8") as source:
-            return source.read()
-    return ""
-def advance(value):
-    with open(quota, "w", encoding="utf-8") as target:
-        target.write(value)
-if args == [
-    "list-panes",
-    "-t",
-    "%2",
-    "-F",
-    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_main_watch}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_owner}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_panel_repo}\t.\t#{?#{m/r:[[:cntrl:]],#{pane_start_path}},,#{pane_start_path}}",
-]:
-    repo = os.environ["OMS_TEST_REPO"]
-    room = os.environ["OMS_FAKE_ROOM"]
-    attempt = os.environ["OMS_FAKE_ATTEMPT"]
-    execution = os.environ["OMS_TEST_EXECUTION"]
-    print(f"$1\t@1\t%2\t{ppid}\t0\t1\t{attempt}\t%1\tcodex\t{attempt}\t{room}\t{repo}\t.")
-    print(f"$1\t@1\t%1\t{ppid}\t0\t0\t{attempt}\t%1\tcodex\t{attempt}\t{room}\t{repo}\t.\t{execution}")
-elif args == [
-    "list-panes",
-    "-s",
-    "-t",
-    "%2",
-    "-F",
-    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_active}\t#{@oms_panel_native_pane}\t#{@oms_panel_main_attempt}\t#{@oms_panel_owner}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_provider_session}\t#{@oms_provider_parent}\t#{pane_active}\t.#{@oms_panel_main_account_ready}_#{@oms_codex_chat_bound}_#{@oms_claude_quota_bound}",
-]:
-    room = os.environ["OMS_FAKE_ROOM"]
-    attempt = os.environ["OMS_FAKE_ATTEMPT"]
-    lead_pid = os.environ["OMS_FAKE_LEAD_PID"]
-    print(f"$1\t@1\t%1\t{ppid}\t0\t1\t%1\t{attempt}\tcodex\t{attempt}\t{room}\t\t\t1\t.__")
-    print(f"$1\t@1\t%2\t{ppid}\t0\t1\t%1\t{attempt}\tcodex\t{attempt}\t{room}\t\t\t0\t.__")
-    window = "@4"
-    if "OMS_FAKE_LEAD_WINDOW" in os.environ:
-        with open(os.environ["OMS_FAKE_LEAD_WINDOW"], encoding="utf-8") as source:
-            window = source.read()
-    print(f"$1\t{window}\t%4\t{lead_pid}\t0\t0\t\t\t\t\t{room}\tantigravity\t{attempt}\t0\t.__")
-elif args == [
-    "display-message",
-    "-p",
-    "-t",
-    "$1",
-    "#{session_id}\t#{pid}\t#{socket_path}\t.",
-    ";",
-    "show-options",
-    "-v",
-    "-t",
-    "$1",
-    "@oms_panel_repo",
-]:
-    repo = os.environ["OMS_TEST_REPO"]
-    print(f"$1\t{ppid}\tfake-socket\t.\n{repo}")
-elif args == ["display-message", "-p", "-t", "%2", "#{pane_width} #{pane_height}"]:
-    print("160 45")
-elif args == [
-    "display-message",
-    "-p",
-    "-t",
-    "%2",
-    "#{session_id}\t#{window_id}\t#{pane_pid}\t#{pane_dead}\t#{window_active}\t#{pane_in_mode}\t#{@oms_panel_main_watch}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room}\t#{@oms_panel_repo}",
-]:
-    repo = os.environ["OMS_TEST_REPO"]
-    room = os.environ["OMS_FAKE_ROOM"]
-    attempt = os.environ["OMS_FAKE_ATTEMPT"]
-    print(f"$1\t@1\t{ppid}\t0\t1\t0\t1\t{attempt}\t{room}\t{repo}")
-elif quota and stage() and args == ["display-message", "-p", "-t", "%4", "#{pane_in_mode}|#{cursor_x}|#{cursor_y}"]:
-    print("0|2|0")
-elif quota and stage() and args in (["capture-pane", "-p", "-t", "%4", "-S", "0", "-E", "0"], ["capture-pane", "-p", "-e", "-S", "0", "-t", "%4"]):
-    print("> /usage" if stage() == "draft" else ">")
-elif quota and stage() == "armed" and len(args) == 5 and args[:2] == ["set-buffer", "-b"] and args[3:] == ["--", "/usage"]:
-    pass
-elif quota and stage() == "armed" and len(args) == 7 and args[:4] == ["paste-buffer", "-p", "-d", "-b"] and args[5:] == ["-t", "%4"]:
-    advance("draft")
-elif quota and stage() == "draft" and args == ["send-keys", "-t", "%4", "Enter"]:
-    advance("dialog")
-elif quota and stage() == "confirm" and args == ["send-keys", "-t", "%4", "Escape"]:
-    advance("closed")
-elif quota and stage() in ("dialog", "confirm") and args == ["capture-pane", "-p", "-t", "%4"]:
-    if stage() == "dialog":
-        advance("confirm")
-    else:
-        stall = os.environ["OMS_FAKE_STALL_CAPTURE"]
-        with open(os.environ["OMS_FAKE_CAPTURE_ENTERED"], "w", encoding="utf-8") as entry:
-            entry.write(f"quota\n{os.getpid()}")
-        while os.path.exists(stall):
-            time.sleep(0.01)
-    print("└ Models & Quota\nGEMINI MODELS\nWeekly Limit Remaining\n[███] 94%\nFive Hour Limit Remaining\n[███] 86%\nCLAUDE AND GPT MODELS\nWeekly Limit Remaining\n[███] 100%")
-elif args == ["capture-pane", "-p", "-t", "%1"]:
-    print("› \n\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts")
-elif args == ["capture-pane", "-p", "-t", "%4"] or args == ["capture-pane", "-p", "-J", "-S", "-100", "-t", "%4"]:
-    stall = os.environ.get("OMS_FAKE_STALL_CAPTURE")
-    if stall and args == ["capture-pane", "-p", "-t", "%4"] and os.path.exists(stall):
-        with open(stall, encoding="utf-8") as source:
-            ticket = source.read()
-        with open(os.environ["OMS_FAKE_CAPTURE_ENTERED"], "w", encoding="utf-8") as entry:
-            entry.write(f"{ticket}\n{os.getpid()}")
-        while True:
-            try:
-                with open(stall, encoding="utf-8") as source:
-                    if source.read() != ticket:
-                        break
-            except FileNotFoundError:
-                break
-            time.sleep(0.01)
-    prompt_file = os.environ["OMS_FAKE_PROMPT_FILE"]
-    with open(prompt_file, "r", encoding="utf-8") as pf:
-        sys.stdout.write(pf.read())
-    if "OMS_FAKE_PROVIDER_MODEL" in os.environ:
-        with open(os.environ["OMS_FAKE_PROVIDER_MODEL"], encoding="utf-8") as source:
-            print(f"{source.read()} (Antigravity ) | ctx 32% | main")
-else:
-    if log:
-        with open(log, "a", encoding="utf-8") as f:
-            f.write(f"UNEXPECTED: {args!r}\n")
-    sys.stderr.write(f"unexpected fake tmux call: {args!r}\n")
-    sys.exit(1)
+        let fake_tmux_src = r##"#!/bin/sh
+# Private fake tmux for the watch fixture. The fixture PATH holds no tools, so
+# this uses shell builtins and absolute /bin paths only.
+T=$(printf '\t')
+S=$(printf '\037')
+join() { r=; for a in "$@"; do r="$r$S$a"; done; }
+join "$@"; call=$r
+is() { join "$@"; [ "$call" = "$r" ]; }
+log=${OMS_FAKE_TMUX_LOG:-}
+[ -z "$log" ] || printf '%s\n' "$*" >> "$log"
+quota=${OMS_FAKE_QUOTA_STAGE:-}
+stage=
+if [ -n "$quota" ] && [ -e "$quota" ]; then IFS= read -r stage < "$quota" || :; fi
+advance() { printf '%s' "$1" > "$quota"; }
+PANES="#{session_id}$T#{window_id}$T#{pane_id}$T#{pane_pid}$T#{pane_dead}$T#{@oms_panel_main_watch}$T#{@oms_panel_main_attempt}$T#{@oms_panel_native_pane}$T#{@oms_panel_owner}$T#{@oms_panel_room_participant}$T#{@oms_panel_room}$T#{@oms_panel_repo}$T.$T#{?#{m/r:[[:cntrl:]],#{pane_start_path}},,#{pane_start_path}}"
+SESSION="#{session_id}$T#{window_id}$T#{pane_id}$T#{pane_pid}$T#{pane_dead}$T#{window_active}$T#{@oms_panel_native_pane}$T#{@oms_panel_main_attempt}$T#{@oms_panel_owner}$T#{@oms_panel_room_participant}$T#{@oms_panel_room}$T#{@oms_provider_session}$T#{@oms_provider_parent}$T#{pane_active}$T.#{@oms_panel_main_account_ready}_#{@oms_codex_chat_bound}_#{@oms_claude_quota_bound}"
+SERVER="#{session_id}$T#{pid}$T#{socket_path}$T."
+WATCH="#{session_id}$T#{window_id}$T#{pane_pid}$T#{pane_dead}$T#{window_active}$T#{pane_in_mode}$T#{@oms_panel_main_watch}$T#{@oms_panel_main_attempt}$T#{@oms_panel_room}$T#{@oms_panel_repo}"
+if is list-panes -t %2 -F "$PANES"; then
+  repo=${OMS_TEST_REPO?} room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?} execution=${OMS_TEST_EXECUTION?}
+  printf '$1\t@1\t%%2\t%s\t0\t1\t%s\t%%1\tcodex\t%s\t%s\t%s\t.\n' "$PPID" "$attempt" "$attempt" "$room" "$repo"
+  printf '$1\t@1\t%%1\t%s\t0\t0\t%s\t%%1\tcodex\t%s\t%s\t%s\t.\t%s\n' "$PPID" "$attempt" "$attempt" "$room" "$repo" "$execution"
+elif is list-panes -s -t %2 -F "$SESSION"; then
+  room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?} lead_pid=${OMS_FAKE_LEAD_PID?}
+  printf '$1\t@1\t%%1\t%s\t0\t1\t%%1\t%s\tcodex\t%s\t%s\t\t\t1\t.__\n' "$PPID" "$attempt" "$attempt" "$room"
+  printf '$1\t@1\t%%2\t%s\t0\t1\t%%1\t%s\tcodex\t%s\t%s\t\t\t0\t.__\n' "$PPID" "$attempt" "$attempt" "$room"
+  window=@4
+  if [ -n "${OMS_FAKE_LEAD_WINDOW+x}" ]; then IFS= read -r window < "$OMS_FAKE_LEAD_WINDOW" || :; fi
+  printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+elif is display-message -p -t '$1' "$SERVER" ';' show-options -v -t '$1' @oms_panel_repo; then
+  repo=${OMS_TEST_REPO?}
+  printf '$1\t%s\tfake-socket\t.\n%s\n' "$PPID" "$repo"
+elif is display-message -p -t %2 '#{pane_width} #{pane_height}'; then
+  printf '160 45\n'
+elif is display-message -p -t %2 "$WATCH"; then
+  repo=${OMS_TEST_REPO?} room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?}
+  printf '$1\t@1\t%s\t0\t1\t0\t1\t%s\t%s\t%s\n' "$PPID" "$attempt" "$room" "$repo"
+elif [ -n "$stage" ] && is display-message -p -t %4 '#{pane_in_mode}|#{cursor_x}|#{cursor_y}'; then
+  printf '0|2|0\n'
+elif [ -n "$stage" ] && { is capture-pane -p -t %4 -S 0 -E 0 || is capture-pane -p -e -S 0 -t %4; }; then
+  if [ "$stage" = draft ]; then printf '> /usage\n'; else printf '>\n'; fi
+elif [ "$stage" = armed ] && [ $# -eq 5 ] && [ "$1" = set-buffer ] && [ "$2" = -b ] && [ "$4" = -- ] && [ "$5" = /usage ]; then
+  :
+elif [ "$stage" = armed ] && [ $# -eq 7 ] && [ "$1" = paste-buffer ] && [ "$2" = -p ] && [ "$3" = -d ] && [ "$4" = -b ] && [ "$6" = -t ] && [ "$7" = %4 ]; then
+  advance draft
+elif [ "$stage" = draft ] && is send-keys -t %4 Enter; then
+  advance dialog
+elif [ "$stage" = confirm ] && is send-keys -t %4 Escape; then
+  advance closed
+elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p -t %4; then
+  if [ "$stage" = dialog ]; then
+    advance confirm
+  else
+    stall=${OMS_FAKE_STALL_CAPTURE?}
+    printf 'quota\n%s' "$$" > "${OMS_FAKE_CAPTURE_ENTERED?}"
+    while [ -e "$stall" ]; do /bin/sleep 0.01; done
+  fi
+  printf '%s\n' '└ Models & Quota' 'GEMINI MODELS' 'Weekly Limit Remaining' '[███] 94%' 'Five Hour Limit Remaining' '[███] 86%' 'CLAUDE AND GPT MODELS' 'Weekly Limit Remaining' '[███] 100%'
+elif is capture-pane -p -t %1; then
+  printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
+elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
+  stall=${OMS_FAKE_STALL_CAPTURE:-}
+  if [ -n "$stall" ] && is capture-pane -p -t %4 && [ -e "$stall" ]; then
+    ticket=$(/bin/cat "$stall")
+    printf '%s\n%s' "$ticket" "$$" > "${OMS_FAKE_CAPTURE_ENTERED?}"
+    while [ -e "$stall" ] && [ "$(/bin/cat "$stall" 2>/dev/null)" = "$ticket" ]; do /bin/sleep 0.01; done
+  fi
+  /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
+  if [ -n "${OMS_FAKE_PROVIDER_MODEL+x}" ]; then
+    IFS= read -r model < "$OMS_FAKE_PROVIDER_MODEL" || :
+    printf '%s (Antigravity ) | ctx 32%% | main\n' "$model"
+  fi
+else
+  [ -z "$log" ] || printf 'UNEXPECTED: %s\n' "$*" >> "$log"
+  printf 'unexpected fake tmux call: %s\n' "$*" >&2
+  exit 1
+fi
 "##;
         std::fs::write(&fake_tmux, fake_tmux_src).unwrap();
         std::fs::set_permissions(&fake_tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        let pty_py = r#"
-import fcntl, os, pty, select, struct, subprocess, sys, termios
-master, slave = pty.openpty()
-fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
-def pre():
-    os.setsid()
-    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-    os.close(master)
-proc = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, preexec_fn=pre, close_fds=True)
-os.close(slave)
-in_fd = sys.stdin.fileno()
-out_fd = sys.stdout.fileno()
-def write_all(fd, data):
-    while data:
-        n = os.write(fd, data)
-        data = data[n:]
-in_open = True
-while True:
-    rlist = [master] + ([in_fd] if in_open else [])
-    try:
-        r, _, _ = select.select(rlist, [], [], 0.05)
-    except InterruptedError:
-        continue
-    if master in r:
-        try:
-            data = os.read(master, 8192)
-        except OSError:
-            break
-        if not data:
-            break
-        write_all(out_fd, data)
-    if in_fd in r:
-        data = os.read(in_fd, 8192)
-        if not data:
-            in_open = False
-        else:
-            write_all(master, data)
-    if proc.poll() is not None:
-        while True:
-            r, _, _ = select.select([master], [], [], 0.05)
-            if not r:
-                break
-            try:
-                data = os.read(master, 8192)
-            except OSError:
-                break
-            if not data:
-                break
-            write_all(out_fd, data)
-        break
-os.close(master)
-sys.exit(proc.wait())
-"#;
 
         let count_captures = || -> usize {
             std::fs::read_to_string(&log)
@@ -8559,12 +8614,8 @@ sys.exit(proc.wait())
             }
         };
 
-        type PtyDriver<'a> = dyn FnMut(
-                &mut std::process::ChildStdin,
-                &mut String,
-                &mut [String],
-                &mpsc::Receiver<Vec<u8>>,
-            ) + 'a;
+        type PtyDriver<'a> = dyn FnMut(&mut std::fs::File, &mut String, &mut [String], &mpsc::Receiver<Vec<u8>>)
+            + 'a;
         let run_pty = |first_capture_held: bool,
                        stalled_quit: bool,
                        drive: &mut PtyDriver<'_>|
@@ -8577,11 +8628,41 @@ sys.exit(proc.wait())
             }
             let _ = std::fs::remove_file(&log);
             let _ = std::fs::remove_file(&counters);
-            let mut pty_cmd = Command::new("/usr/bin/python3");
+            // A PTY sized like the fixture pane; the child takes it as controlling terminal.
+            let master = rustix::pty::openpt(
+                rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY,
+            )
+            .unwrap();
+            rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC).unwrap();
+            rustix::pty::grantpt(&master).unwrap();
+            rustix::pty::unlockpt(&master).unwrap();
+            let tty = rustix::pty::ptsname(&master, Vec::new()).unwrap();
+            let slave = rustix::fs::open(
+                tty.as_c_str(),
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .unwrap();
+            rustix::termios::tcsetwinsize(
+                &slave,
+                rustix::termios::Winsize {
+                    ws_row: 45,
+                    ws_col: 160,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                },
+            )
+            .unwrap();
+            let slave = std::fs::File::from(slave);
+            rustix::fs::fcntl_setfl(
+                &master,
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK,
+            )
+            .unwrap();
+            let mut child_out = std::fs::File::from(master);
+            let mut child_in = child_out.try_clone().unwrap();
+            let mut pty_cmd = Command::new(&exe);
             pty_cmd
-                .arg("-c")
-                .arg(pty_py)
-                .arg(&exe)
                 .args(["--exact", TEST_NAME, "--nocapture"])
                 .env_clear()
                 .env("PATH", &bin)
@@ -8590,7 +8671,7 @@ sys.exit(proc.wait())
                 .env("XDG_STATE_HOME", &state)
                 .env("TERM", "xterm-256color")
                 .env("TMUX_PANE", "%2")
-                .env(WATCH_PTY, "1")
+                .env(WATCH_PTY, tty.to_str().unwrap())
                 .env("OMS_TEST_REPO", &repo)
                 .env("OMS_TEST_EXECUTION", &wt)
                 .env("OMS_TEST_COUNTERS", &counters)
@@ -8604,22 +8685,38 @@ sys.exit(proc.wait())
                 .env("OMS_FAKE_PROVIDER_MODEL", &model)
                 .env("OMS_FAKE_LEAD_WINDOW", &lead_window)
                 .env("OMS_FAKE_QUOTA_STAGE", &quota_stage)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
+                .stdin(slave.try_clone().unwrap())
+                .stdout(slave)
                 .stderr(Stdio::inherit());
             let mut child = pty_cmd.spawn().unwrap();
-            let mut child_in = child.stdin.take().unwrap();
-            let mut child_out = child.stdout.take().unwrap();
+            // The command holds the last parent copies of the slave.
+            drop(pty_cmd);
 
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            let reaped = std::sync::Arc::new(AtomicBool::new(false));
+            let reader_reaped = std::sync::Arc::clone(&reaped);
             let reader_thread = std::thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-                while let Ok(n) = child_out.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
+                let mut quiet = 0;
+                // The master is non-blocking. Read until the child side closes, or until the
+                // child was reaped and nothing more arrives.
+                while quiet < 5 {
+                    match child_out.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            quiet = 0;
+                            if tx.send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if reader_reaped.load(std::sync::atomic::Ordering::Relaxed) {
+                                quiet += 1;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
                     }
                 }
             });
@@ -8632,6 +8729,7 @@ sys.exit(proc.wait())
             child_in.write_all(b"q").unwrap();
             child_in.flush().unwrap();
             let status = child.wait().unwrap();
+            reaped.store(true, std::sync::atomic::Ordering::Relaxed);
             if stalled_quit {
                 let entered = std::fs::read_to_string(&capture_entered).unwrap();
                 let (_, pid) = entered.split_once('\n').unwrap();

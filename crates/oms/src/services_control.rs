@@ -18,6 +18,8 @@
 //! non-Linux hosts; if a Linux caller cannot guarantee exclusive child
 //! ownership, the supervisor fails closed rather than weakening containment.
 use oms_command_graph::Error as GraphError;
+#[cfg(target_os = "linux")]
+use oms_command_landing::services::{BatchVerification, VerificationOutcome};
 use oms_command_landing::services::{
     Execution as LandingExecution, PublicationGuard, PublicationScan, VerifyRequest,
 };
@@ -226,6 +228,57 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
                 });
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn batch_verification_result(child: Child) -> BatchVerification {
+    let complete = |raw: &[u8]| {
+        const STATUS_LIMIT: usize = 4096;
+        if raw.len() > STATUS_LIMIT {
+            return false;
+        }
+        let Some(raw) = raw.strip_suffix(b"\n") else {
+            return false;
+        };
+        let mut frames = raw.split(|byte| *byte == b'\n');
+        let (Some(start), Some(exit), None) = (frames.next(), frames.next(), frames.next()) else {
+            return false;
+        };
+        let (Ok(start), Ok(exit)) = (
+            serde_json::from_slice::<Value>(start),
+            serde_json::from_slice::<Value>(exit),
+        ) else {
+            return false;
+        };
+        // Bubblewrap can publish child-pid before mount setup. Only its
+        // terminal frame distinguishes a command exit from a setup error.
+        start["child-pid"].as_u64().is_some_and(|pid| pid > 0)
+            && exit.as_object().is_some_and(|row| row.len() == 1)
+            && exit["exit-code"].as_i64() == Some(i64::from(child.code))
+    };
+    let outcome = match (
+        child.cancelled,
+        child.timed_out,
+        child.output_limited,
+        child.code,
+    ) {
+        (true, _, _, _) => VerificationOutcome::Cancelled,
+        (_, true, _, _) => VerificationOutcome::TimedOut,
+        (_, _, true, _) => VerificationOutcome::OutputLimited,
+        (_, _, _, 125..=127) => VerificationOutcome::Unavailable,
+        _ if !complete(&child.stdout) => VerificationOutcome::Unavailable,
+        (_, _, _, 0) => VerificationOutcome::Passed,
+        _ => VerificationOutcome::Failed,
+    };
+    BatchVerification {
+        outcome,
+        verifier_exit: matches!(
+            outcome,
+            VerificationOutcome::Passed | VerificationOutcome::Failed
+        )
+        .then_some(child.code),
+        elapsed: child.elapsed,
     }
 }
 
@@ -1111,6 +1164,113 @@ impl oms_command_landing::Services for ControlServices<'_> {
             stderr: child.stderr,
             elapsed: child.elapsed,
         })
+    }
+    #[cfg(target_os = "linux")]
+    fn supervise_batch(
+        &self,
+        request: &VerifyRequest,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<BatchVerification> {
+        let unavailable =
+            || oms_command_landing::Error::unavailable("isolated Linux batch verification");
+        if self.scope != Scope::WholeTree {
+            return Err(unavailable());
+        }
+        let (program, args) = request.argv.split_first().ok_or_else(unavailable)?;
+        let state = request.cwd.join(".git");
+        let private_home = state.join("batch-home");
+        let private_tmp = state.join("batch-tmp");
+        let cargo = state.join("batch-cargo");
+        let rustup = state.join("batch-rustup");
+        for directory in [&private_home, &private_tmp, &cargo, &rustup] {
+            std::fs::create_dir(directory)?;
+        }
+        let mut mounts: Vec<_> = [
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/lib32",
+            "/etc/ld.so.cache",
+            "/etc/alternatives",
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/nsswitch.conf",
+            "/etc/os-release",
+            "/etc/localtime",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .map(|path| (path.clone(), path))
+        .collect();
+        let host_home = std::env::home_dir().ok_or_else(unavailable)?;
+        let mut mount_cache = |name, default: &str, target: &Path, items: &[&str]| {
+            let root = std::env::var_os(name)
+                .filter(|value| Path::new(value).is_absolute())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| host_home.join(default));
+            if let Ok(root) = root.canonicalize() {
+                for item in items {
+                    if let Ok(source) = root.join(item).canonicalize()
+                        && source.starts_with(&root)
+                    {
+                        mounts.push((source, target.join(item)));
+                    }
+                }
+            }
+        };
+        mount_cache(
+            "CARGO_HOME",
+            ".cargo",
+            &cargo,
+            &[
+                "bin/cargo",
+                "bin/rustup",
+                "bin/rustc",
+                "bin/rustfmt",
+                "bin/rustdoc",
+                "bin/clippy-driver",
+                "bin/cargo-clippy",
+                "bin/cargo-fmt",
+                "registry/cache",
+                "registry/index",
+                "registry/src",
+                "git/db",
+                "git/checkouts",
+            ],
+        );
+        mount_cache("RUSTUP_HOME", ".rustup", &rustup, &["toolchains"]);
+        let (wrapper, arguments) =
+            oms_supervisor::sandbox::isolated_checkout(program, args, &request.cwd, &mounts)
+                .map_err(|_| unavailable())?;
+        let argv = std::iter::once(wrapper).chain(arguments).collect();
+        let path = std::env::join_paths([
+            cargo.join("bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .map_err(|_| unavailable())?;
+        let environment = vec![
+            ("PATH".into(), path),
+            ("HOME".into(), private_home.into_os_string()),
+            ("TMPDIR".into(), private_tmp.into_os_string()),
+            ("CARGO_HOME".into(), cargo.into_os_string()),
+            ("RUSTUP_HOME".into(), rustup.into_os_string()),
+            ("CARGO_NET_OFFLINE".into(), "true".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ];
+        let mut spawn = Spawn::new(self.scope, argv, request.wall, VERIFY_OUTPUT_LIMIT)
+            .cwd(&request.cwd)
+            .environment(environment);
+        spawn.clear_environment = true;
+        let child = self
+            .run_supervised(spawn, interrupted)
+            .map_err(|_| unavailable())?;
+        Ok(batch_verification_result(child))
     }
     /// The worker lowers `RLIMIT_AS` for its whole process lifetime, so it only
     /// ever runs in a dedicated re-executed child; this parent's limits are
@@ -2908,6 +3068,60 @@ mod tests {
             max_total_bytes: 1 << 24,
             memory_bytes: memory,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn batch_bubblewrap_status_discriminates_real_exit_and_setup_refusal() {
+        let checkout = Tmp::new();
+        let mut mounts: Vec<_> = ["/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache"]
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .map(|path| (path.clone(), path))
+            .collect();
+        let run = |mounts: &[(PathBuf, PathBuf)], script: &str| -> Option<Child> {
+            let (wrapper, arguments) = oms_supervisor::sandbox::isolated_checkout(
+                std::ffi::OsStr::new("/bin/sh"),
+                &osv(&["-c", script]),
+                checkout.path(),
+                mounts,
+            )
+            .ok()?;
+            let argv = std::iter::once(wrapper).chain(arguments).collect();
+            let mut spawn = Spawn::new(Scope::ProcessGroup, argv, Duration::from_secs(5), 4096)
+                .cwd(checkout.path());
+            spawn.clear_environment = true;
+            Some(run_child(spawn, &AtomicBool::new(false)).unwrap())
+        };
+        let Some(probe) = run(&mounts, "exit 0") else {
+            eprintln!("system bubblewrap unavailable; status fixture skipped");
+            return;
+        };
+        if probe.code != 0 {
+            eprintln!("bubblewrap namespaces unavailable; status fixture skipped");
+            return;
+        }
+        assert_eq!(
+            batch_verification_result(probe).outcome,
+            VerificationOutcome::Passed
+        );
+        let child = run(&mounts, "printf 'private fixture output'; exit 1").unwrap();
+        assert_eq!(child.code, 1);
+        assert_eq!(child.stderr, b"private fixture output");
+        let status = batch_verification_result(child);
+        assert_eq!(status.outcome, VerificationOutcome::Failed);
+        assert_eq!(status.verifier_exit, Some(1));
+
+        mounts.push((
+            checkout.path().join("missing-mount"),
+            "/missing-mount".into(),
+        ));
+        let child = run(&mounts, "exit 1").unwrap();
+        assert_eq!(child.code, 1);
+        let status = batch_verification_result(child);
+        assert_eq!(status.outcome, VerificationOutcome::Unavailable);
+        assert_eq!(status.verifier_exit, None);
     }
 
     #[test]
@@ -5111,7 +5325,8 @@ done
 
     #[test]
     fn failure_and_verify_observations_use_native_ledgers() {
-        let repo = Tmp::repo(&[("a", "x")]);
+        // In-worktree state: the ledger is a tracked file of the task repo.
+        let repo = Tmp::repo(&[("a", "x"), (".oms/failures.jsonl", "")]);
         let stop = Arc::new(AtomicBool::new(false));
         let control = services(&stop, repo.path(), Vec::new());
         let mut task = control.task();
@@ -5163,6 +5378,36 @@ done
         )
         .unwrap();
         assert!(observed.lines.starts_with(b"env: "));
+        // A real verify resolves its tracked ledger row after the receipt;
+        // that append is not source drift, while a source edit still is.
+        let run = |task: &mut ControlTask<'_>, args: &[&str]| {
+            let (code, out, err) =
+                oms_command_task::run_with_services(&osv(args), repo.path(), &stop, task);
+            (code, [out, err].concat())
+        };
+        let (code, log) = run(
+            &mut task,
+            &["init", "--goal", "ledger", "--verify", "test ! -e broken"],
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&log));
+        std::fs::write(repo.path().join("broken"), "").unwrap();
+        assert_eq!(run(&mut task, &["verify"]).0, 1);
+        std::fs::remove_file(repo.path().join("broken")).unwrap();
+        let (code, log) = run(&mut task, &["verify"]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&log));
+        let ledger = std::fs::read_to_string(repo.path().join(".oms/failures.jsonl")).unwrap();
+        let rows: Vec<_> = ledger.lines().filter(|l| l.contains("broken")).collect();
+        assert_eq!(rows.len(), 1, "{ledger}");
+        assert!(ledger.lines().last().unwrap().contains("\"resolved\""));
+        assert_eq!(
+            git(repo.path(), &["diff", "--name-only"]),
+            ".oms/failures.jsonl"
+        );
+        let status =
+            |task: &mut ControlTask<'_>| String::from_utf8(run(task, &["status"]).1).unwrap();
+        assert!(status(&mut task).contains("verification: fresh"));
+        std::fs::write(repo.path().join("a"), "y").unwrap();
+        assert!(status(&mut task).contains("verification: stale"));
     }
 
     #[test]

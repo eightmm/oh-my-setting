@@ -5,8 +5,8 @@
 상태: **2026-11-09 제안의 설계·acceptance 기록. 문서 병합은 기능 구현·설치·권한 확대 승인이 아니다.**
 
 2026-11-18 정리: 제품 범위는 [Feature scope](FEATURE-SCOPE.md), 현재 착수 순서는
-[통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)가 소유한다. 아래 Python 파일·과거 test command와
-I1–I11 순서는 당시 근거다. 현재 Rust source에서 이미 연결된 producer를 다시 만들거나
+[통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)가 소유한다. 아래 당시 코드 근거와
+I1–I11 순서는 제안 이력이다. 현재 Rust source에서 이미 연결된 producer를 다시 만들거나
 모든 CP를 미완료로 재등록하지 않는다. CP-01~05/08의 관측·읽기는 REL-01/PERF-01/02,
 CP-09의 lifecycle은 LC/CC-09, CP-10은 기존 evidence/acceptance owner에 연결한다.
 CP-06/07의 UX는 실제 사용 문제에 맞춰 선택하고 CP-11~15는 필요한 host/연구 경로에서만 검토한다.
@@ -32,7 +32,7 @@ Claude/Codex native subagent와 사용량을 제한적으로 읽는 경로가 �
 따라서 “native discovery를 처음부터 새로 구현”하는 계획은 부정확하다.
 **기존 읽기 경로의 범위·identity·신선도·부분 실패를 명시하고 확장하는 것이 출발점이다.**
 
-| 영역 | 기준 코드/문서에서 확인한 현재 기능 | 남은 작업의 성격 |
+| 영역 | 제안 당시 기준에서 확인한 기능 | 남은 작업의 성격 |
 |---|---|---|
 | Native 관측 | `panel_chats.py`: `native_index`, `_read_owned`, `native_advisors`, `_codex_native_agents`, `native_subagents`; 등록된 Main과 연결된 메타데이터/사용량 읽기 | 기존 adapter 재사용; 외부 세션 범위 확대는 opt-in |
 | Native 상태의 의미 | `room_view.py`: native 행은 room participant가 아니며 최근 파일 기록을 lifecycle 증거로 취급하지 않음 | 관측 신호와 실제 liveness의 구분을 일관되게 노출 |
@@ -44,11 +44,10 @@ Claude/Codex native subagent와 사용량을 제한적으로 읽는 경로가 �
 | 터미널 호스트 | tmux/inline 및 별도 선택형 Herdr host 관련 계약 | 기존 adapter의 기능 차이를 점검; 제거된 pane-control 계층 부활 금지 |
 | 연구·HPC | 기존 runtime backend 및 job-digest 등 제한된 관찰 도구 | Job/attempt/실험 근거의 읽기 전용 연결; 새 scheduler 금지 |
 
-주요 확인 경로: `panel_chats.py`,
-`room_view.py`, `panel_state.py`,
-`dashboard_projection.py`,
-[패널 계약](TERMINAL-PANEL.md), [대시보드 계약](DASHBOARD.md), [runtime 계약](OMS-RUNTIME.md).
-이는 해당 코드·문서의 정적 확인이며 전체 기능을 실사용 검증했다는 뜻은 아니다.
+현재 소스는 [패널 관측](../crates/oms-command-panel/src/native_children.rs),
+[패널 상태](../crates/oms-panel-core/src/state.rs), [대시보드 투영](../crates/oms-command-state/src/state_projection.rs)을 참고한다.
+동작 범위는 [패널 계약](TERMINAL-PANEL.md), [대시보드 계약](DASHBOARD.md),
+[runtime 계약](OMS-RUNTIME.md)에 있다. 위 표는 당시의 정적 확인을 기록한다.
 
 ## 2. 보존할 설계 원칙
 
@@ -134,7 +133,8 @@ CP-16/17은 별도 거대 테스트·문서 PR이 아니라 각 구현 PR에 함
 
 ### CP-02 — identity·liveness·권한 경계
 
-수정 후보: `panel_chats.py`, `panel_state.py`, `room_view.py`와 기존 process/room identity helper.
+현재 [native 관측](../crates/oms-command-panel/src/native_children.rs),
+[패널 상태](../crates/oms-panel-core/src/state.rs), 기존 process/Room identity 검사를 재사용한다.
 Identity는 provider/account/host/session namespace를 포함한다. Live control에는
 session binding과 가능한 process generation을 재확인하고, 모호하면 거부한다.
 
@@ -145,8 +145,9 @@ session binding과 가능한 process generation을 재확인하고, 모호하면
 
 ### CP-03 — provider 관측 확장
 
-`native_index`, `native_subagents`, `_read_owned`, `hook_state.py`,
-`pi-oms-extension.mjs`를 먼저 재사용한다. Claude/Codex 연결 세션의 parity부터 맞추고,
+[하위 에이전트 관측](../crates/oms-command-panel/src/native_children.rs),
+[provider 활동 관측](../crates/oms-command-panel/src/provider_activity.rs),
+[Pi 확장](../crates/oms-command-providers-skills/assets/pi-oms-extension.mjs)을 먼저 확인한다. Claude/Codex 연결 세션의 parity부터 맞추고,
 Pi/Agy는 실제 native 계약으로 확인되는 신호만 추가한다. 전체 머신 발견은 별도 opt-in이다.
 
 - [ ] Opt-in이 꺼져 있으면 기존 repo/room 범위와 provider-home 접근 범위가 넓어지지 않는다.
@@ -167,7 +168,9 @@ Pi/Agy는 실제 native 계약으로 확인되는 신호만 추가한다. 전체
 
 ### CP-05 — projection 통합과 호환성
 
-`panel_state.py`, `room_view.py`, `dashboard_projection.py`를 확장하되,
+[패널 상태](../crates/oms-panel-core/src/state.rs),
+[패널 렌더러](../crates/oms-command-panel/src/render.rs),
+[대시보드 투영](../crates/oms-command-state/src/state_projection.rs)을 확장할 때
 공유 collector와 표면별 coverage를 분리한다. 한 세션이 여러 출처에 등장하면
 identity 증거로만 연결하고, 관측 누락을 성공이나 0으로 보정하지 않는다.
 
@@ -178,7 +181,9 @@ identity 증거로만 연결하고, 관측 누락을 성공이나 0으로 보정
 
 ### CP-06 — 패널 탐색 UX
 
-`panel_view.py`, `room_view.py`, 기존 board/reader를 재사용한다.
+[보드 렌더러](../crates/oms-command-panel/src/render.rs),
+[입력과 갱신](../crates/oms-command-panel/src/watch.rs),
+[결과 reader](../crates/oms-command-panel/src/reader.rs)를 재사용한다.
 Repo/role/provider/status/source별 검색·필터, 선택 유지, graph dependency와 결과 연결을
 개선한다. 별도 전역 프로젝트 manager나 새 task DAG는 만들지 않는다.
 
@@ -200,7 +205,9 @@ Repo/role/provider/status/source별 검색·필터, 선택 유지, graph depende
 
 ### CP-08 — 실행 Timeline·사용량·진단
 
-`panel_metrics.py`, `panel_chats.py`, `artifact-telemetry.py`의 기존 집계를 우선 사용한다.
+[패널 지표](../crates/oms-panel-core/src/metrics.rs),
+[패널 사용량](../crates/oms-command-panel/src/usage.rs),
+[텔레메트리 지표](../crates/oms-command-telemetry/src/metrics.rs)의 기존 집계를 먼저 확인한다.
 도구 실행 시간, 대기 원인, 오류 반복을 local metadata로 표현한다.
 비싼 모델이 로그를 읽어 매 refresh 요약하는 기능은 만들지 않는다.
 
@@ -339,25 +346,22 @@ I7–I11이 보류돼도 MVP를 미완료로 보지 않는다. 반대로 문서 
 
 ## 6. 테스트 연결과 측정 계획
 
-기존 section 이름은 `operator runner`를 기준으로 한다.
-아래는 **후속 구현자가 실행할 명령**이며 이번 문서 PR에서 실행했다는 뜻이 아니다.
+초기 제안에서 사용한 operator runner는 폐기됐다. 후속 변경은 아래의 현행 Rust fixture를
+확장하고 영향 범위 게이트로 확인한다. 이 목록은 실행 결과를 기록한 것이 아니다.
 
 | 작업 | 우선 확장할 기존 검사 |
 |---|---|
-| CP-01–05 | `core/native-integration`, `core/dashboard`, `shared-cache` |
-| CP-06/07 | `core/visual-and-controls`, `core/room-and-board-rendering`, `native-pty` |
-| CP-08 | `core/native-integration`, `core/dashboard`, `dispatch-results`의 관련 case |
-| CP-09/15 | `worker-leases`, `room-rollover`, `salvage`, `native-pty` |
-| CP-10 | `auto-review`, `dispatch-results`, 기존 runtime evidence 회귀 |
-| CP-11/12/13 | 기존 경계 fixture 재사용; transport 미커버 경로만 새 bounded case 추가 |
-| CP-14 | 기존 job-digest/runtime backend fixture; fake Slurm |
+| CP-01–05/08 | [패널 통합](../crates/oms-command-panel/tests/panel_parity.rs), [상태 수집과 캐시](../crates/oms-panel-core/src/state.rs) |
+| CP-06/07 | [렌더링](../crates/oms-command-panel/src/render.rs), [watch와 PTY](../crates/oms-command-panel/src/watch.rs) |
+| CP-09/15 | [패널 복구와 worker 결과](../crates/oms-panel-core/tests/parity.rs), [Room 계약](../crates/oms-command-room/tests/room_contract.rs) |
+| CP-10 | [Peer 리뷰 계약](../crates/oms-command-peer/tests/peer_contract.rs), [패널 결과 검증](../crates/oms-panel-core/tests/parity.rs) |
+| CP-11/12/13 | 기존 경계 fixture를 재사용하고, 검증되지 않은 전송 경로에만 범위를 제한한 case를 추가 |
+| CP-14 | [Runtime 계약](../crates/oms-runtime/tests/runtime_contract.rs), [Slurm fixture](../crates/oms-command-slurm-submit/tests/reconcile_contract.rs) |
 
 ```bash
-bash tests/operator-tools-smoke.sh --list-sections
-bash tests/operator-tools-smoke.sh --section core/native-integration
-bash tests/operator-tools-smoke.sh --section core/dashboard,shared-cache
-bash tests/operator-tools-smoke.sh --section core/visual-and-controls,core/room-and-board-rendering
-bash tests/operator-tools-smoke.sh --section auto-review
+cargo test --locked --offline -p oms-command-panel --lib --test panel_parity
+cargo test --locked --offline -p oms-panel-core --lib --test parity
+cargo test --locked --offline -p oms-command-peer --test peer_contract
 bash scripts/check.sh --affected --changed-from BASE --changed-to HEAD
 ```
 
