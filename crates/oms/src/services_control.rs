@@ -3488,9 +3488,18 @@ mod tests {
         use oms_command_plan::{Action, Context, Plan, Request, json};
         use std::os::unix::fs::MetadataExt;
 
-        let repo = Tmp::repo(&[(".gitignore", ".oms/\n"), ("a.txt", "before\n")]);
+        let project = "# Project\n## Status\n- State: confirmed\n## Goal\n- Goal: commit the exact landed patch\n## Scope\n- Allowed: a.txt\n## Acceptance\n- [id:C1] The assigned change is checked\n## Verification\n- Required checks: bash check.sh\n- Required check files: check.sh\n";
+        let repo = Tmp::repo(&[
+            (".gitignore", ".oms/\n"),
+            ("a.txt", "before\n"),
+            ("check.sh", "test \"$(cat a.txt)\" = after\n"),
+            ("PROJECT.md", project),
+        ]);
         git(repo.path(), &["config", "user.name", "t"]);
         git(repo.path(), &["config", "user.email", "t@example.invalid"]);
+        let spec_sha = json::sha(project.as_bytes());
+        let branch = format!("oms/autopilot-{}", &spec_sha[..12]);
+        git(repo.path(), &["switch", "-qc", &branch]);
         let stop = Arc::new(AtomicBool::new(false));
         let control = services(&stop, repo.path(), Vec::new());
         let context = Context::from_environment_at(
@@ -3501,14 +3510,30 @@ mod tests {
         )
         .unwrap();
         let plan = Plan::open(context, &control, &stop).unwrap();
-        plan.execute(&Request::new(Action::Init).with("goal", "commit the exact landed patch"))
+        plan.execute(
+            &Request::new(Action::Init)
+                .with("goal", "commit the exact landed patch")
+                .with("accept", "bash check.sh"),
+        )
+        .unwrap();
+        let ordinary = oms_command_plan::storage::Store::open(repo.path()).unwrap();
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        let plan_sha = json::sha(plan.load().unwrap().raw.unwrap());
+        let proposal = serde_json::json!({"schema":1,"kind":"agent-plan-proposal","spec_sha256":spec_sha,"plan_sha256":plan_sha,"base_sha":base,"id_prefix":"t","allowed_envelope":["a.txt"],"acceptance_files":["check.sh"],
+            "tasks":[{"id":"t1","title":"implement the assigned change","allowed":["a.txt"],"verify":"bash check.sh","depends":[],"covers":["C1"]}]});
+        let proposal_raw = serde_json::to_vec(&proposal).unwrap();
+        let proposal_sha = json::sha(&proposal_raw);
+        let proposal_path = repo.path().join(".oms/plan/proposal-milestone.json");
+        ordinary
+            .publish_once(&proposal_path, &proposal_raw, 1024 * 1024)
             .unwrap();
         plan.execute(
-            &Request::new(Action::Add)
-                .with("id", "t1")
-                .with("title", "implement the assigned change")
-                .with("allowed", "a.txt")
-                .with("verify", "true"),
+            &Request::new(Action::ApplyProposal)
+                .with("proposal", proposal_path.as_os_str())
+                .with("expected-proposal-sha256", &proposal_sha)
+                .with("expected-plan-sha256", &plan_sha)
+                .with("allowed-envelope", "a.txt")
+                .with("accept-files", "check.sh"),
         )
         .unwrap();
         let issued = plan
@@ -3521,7 +3546,6 @@ mod tests {
             .unwrap();
         let issued = json::parse(&issued.stdout).unwrap();
         let lease = issued.text("lease_id");
-        let base = git(repo.path(), &["rev-parse", "HEAD"]);
         std::fs::write(repo.path().join("a.txt"), "after\n").unwrap();
         let patch = format!("{}\n", git(repo.path(), &["diff", "--binary"]));
         git(repo.path(), &["checkout", "--", "a.txt"]);
@@ -3545,7 +3569,6 @@ mod tests {
         let _capture = Tmp(capture.parent().unwrap().to_owned());
         assert_eq!(std::fs::metadata(&frozen).unwrap().nlink(), 2);
         // The general Plan store must continue refusing multiply linked files.
-        let ordinary = oms_command_plan::storage::Store::open(repo.path()).unwrap();
         assert!(
             ordinary
                 .read(&frozen, 16 * 1024 * 1024)
@@ -3567,7 +3590,7 @@ mod tests {
                 .with("lease-id", lease)
                 .with("expected-review-patch", source.as_os_str())
                 .with("expected-review-patch-sha256", &digest)
-                .with("expected-review-verify", "true")
+                .with("expected-review-verify", "bash check.sh")
                 .with("expected-review-executor-id", "")
                 .with("expected-review-executor-soul-sha256", "")
                 .with("expected-review-lease-id", lease),
@@ -3584,6 +3607,10 @@ mod tests {
         )
         .unwrap();
         let snapshot = plan.load().unwrap();
+        let task = snapshot.task("t1").unwrap();
+        assert_eq!(task.get("covers").strings().unwrap(), ["C1"]);
+        assert!(task.get("completion_receipt").object().is_err());
+        assert!(task.get("landing").object().is_err());
         let complete = serde_json::json!({"schema":1,"event":"complete","landing_id":landing,
             "task":"t1","worktree":repo.path(),"plan_id":snapshot.plan.text("plan_id"),
             "lease":lease,"plan_done_receipt_sha":json::receipt_digest(snapshot.task("t1").unwrap()).unwrap(),
@@ -3618,12 +3645,201 @@ mod tests {
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD^"]), base);
         assert!(git(repo.path(), &["status", "--porcelain"]).is_empty());
 
+        // Read the actual local Finish through the public status and native
+        // criterion projection. A task's coverage declaration is insufficient;
+        // this execution feedback comes from a successful supervised check.
+        let verified = oms_command_plan::Services::supervise(
+            &control,
+            &oms_command_plan::services::SupervisedCommand {
+                argv: sh("bash check.sh"),
+                cwd: repo.path().to_owned(),
+                wall: Duration::from_secs(20),
+                output_limit: 1024,
+                label: "milestone-check",
+                remove_environment: Vec::new(),
+                environment: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!((verified.exit, verified.runner_exit), (0, 0));
+        assert!(!verified.launch_error && !verified.supervision_error && !verified.timed_out);
+        let source_path = ".oms/artifacts/_verify-scope-milestone.json";
+        let source_bytes = serde_json::to_vec(
+            &serde_json::json!({"head":committed,"exit":verified.exit,"covers":["C1"]}),
+        )
+        .unwrap();
+        ordinary
+            .publish_once(source_path, &source_bytes, 1024)
+            .unwrap();
+        ordinary
+            .publish_once(".oms/artifacts/index.jsonl", b"", 0)
+            .unwrap();
+        let verification = serde_json::json!({"schema":1,"kind":"review-verify","event_id":"evt_milestone","operation_id":"review-milestone","provider":"local","verified_head":committed,
+            "plan_id":snapshot.plan.text("plan_id"),"covers":["C1"],"source":source_path,"source_sha256":json::sha(&source_bytes),"exit":verified.exit,
+            "dependency_digests":{"PROJECT.md":spec_sha,".oms/plan/tasks.json":json::sha(ordinary.read(".oms/plan/tasks.json", 8*1024*1024).unwrap())}});
+        ordinary
+            .append(
+                ".oms/artifacts/index.jsonl",
+                &json::parse(&serde_json::to_vec(&verification).unwrap()).unwrap(),
+            )
+            .unwrap();
+        let route = serde_json::json!({"model":"fixture","fallback_model":"","reasoning_effort":"auto","timeout":"1m"});
+        let receipt = serde_json::json!({"schema":1,"kind":"autopilot-run","stage":"parked","repo":repo.path(),"spec_sha256":spec_sha,
+            "providers":{"planner":"claude","worker":"claude","reviewer":"codex"},"routing":{"provider_timeout":"1m","planner":route,"worker":route,"reviewer":route},
+            "contract":{"allowed":"a.txt","base":"main","base_sha":base,"remote":"origin","max_cycles":4,"initial_tasks":1,"replan_tasks":1,"auto_repair":false,"retry_known":false,"review_mode":"gate","draft_pr":false,"allow_verifier_change":false,"allow_floor_change":"","collaboration":"off","milestones":[{"id":"first","criteria":["C1"]}]},
+            "proposal":{"path":proposal_path,"sha256":proposal_sha},"branch":branch,"owner_id":format!("owner_{}","1".repeat(32)),"updated":"2026-11-23T00:00:00Z"});
+        oms_command_autonomy::receipt::validate(&receipt).unwrap();
+        ordinary
+            .publish_once(
+                ".oms/plan/autopilot-run.json",
+                &serde_json::to_vec(&receipt).unwrap(),
+                64 * 1024,
+            )
+            .unwrap();
+        // The in-process test harness supplies only the repository view and
+        // invokes the existing Plan owner directly. Whole-tree supervision is
+        // exercised by the separate native_entry_contract milestone fixture.
+        struct MilestoneHost<'a, 'b> {
+            control: &'a ControlServices<'b>,
+            stop: &'a AtomicBool,
+        }
+        impl oms_command_plan::Services for MilestoneHost<'_, '_> {
+            fn read_managed_patch(
+                &self,
+                state: &Path,
+                path: &Path,
+                limit: usize,
+            ) -> oms_command_plan::Result<Option<Vec<u8>>> {
+                self.control.read_managed_patch(state, path, limit)
+            }
+            fn group_membership_resolver(
+                &self,
+            ) -> Option<oms_command_plan::services::GroupResolver> {
+                self.control.group_membership_resolver()
+            }
+        }
+        impl oms_runtime::Services for MilestoneHost<'_, '_> {
+            fn repository_view(
+                &self,
+                repo: &Path,
+            ) -> oms_runtime::Result<oms_runtime::services::RepositoryView> {
+                Ok(oms_runtime::services::RepositoryView {
+                    head: git(repo, &["rev-parse", "HEAD"]),
+                    branch: git(repo, &["symbolic-ref", "--short", "HEAD"]),
+                    worktree_state: String::new(),
+                })
+            }
+            fn plan_status(
+                &self,
+                repo: &Path,
+                state: &Path,
+                _: &[u8],
+            ) -> oms_runtime::Result<Vec<u8>> {
+                assert_eq!(repo, state);
+                let (code, out, err) = oms_command_plan::run_with_services(
+                    &["status".into(), "--json".into()],
+                    repo,
+                    self.stop,
+                    self.control,
+                );
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                Ok(out)
+            }
+            fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+                self.control.group_membership_resolver()
+            }
+        }
+        impl oms_command_autonomy::Services for MilestoneHost<'_, '_> {
+            fn discovery_section(
+                &self,
+                repo: &Path,
+                section: &str,
+                stop: &AtomicBool,
+            ) -> oms_command_autonomy::Result<Value> {
+                assert_eq!(section, "acceptance");
+                let runtime = oms_runtime::storage::Runtime::open(repo, repo, repo, self, stop)?;
+                let projection = oms_runtime::projection::envelope(&runtime)?;
+                oms_command_autonomy::value::parse(&oms_runtime::value::canonical(&projection)?)
+            }
+        }
+        let status_host = MilestoneHost {
+            control: &control,
+            stop: &stop,
+        };
+        let criterion = || {
+            let (code, out, err) = oms_command_autonomy::run_with_services(
+                "autopilot",
+                &["status".into()],
+                repo.path(),
+                &stop,
+                &status_host,
+            );
+            assert_eq!(
+                code,
+                0,
+                "{}{}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            );
+            let status: Value = serde_json::from_slice(&out).unwrap();
+            status["next_action"]["progress"]["criteria"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{status}"))
+                .iter()
+                .find(|c| c["id"] == "C1")
+                .unwrap()
+                .clone()
+        };
+        let proof = criterion();
+        assert_eq!(proof["state"], "verified", "{proof}");
+        assert!(
+            proof["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["status"] == "verified"
+                    && e["stale"] == false
+                    && e["signal"] == "execution_feedback")
+        );
+        assert_eq!(proof["claimed_tasks"], serde_json::json!(["t1"]));
+        assert_eq!(proof["completed_tasks"], serde_json::json!(["t1"]));
+        let ledger = repo.path().join(".oms/landings.jsonl");
+        let valid = std::fs::read(&ledger).unwrap();
+        std::fs::write(&ledger, b"").unwrap();
+        assert_eq!(
+            criterion()["completed_tasks"],
+            serde_json::json!([]),
+            "done alone is not completed landing proof"
+        );
+        for (field, foreign) in [
+            ("lease", "lease-foreign".to_owned()),
+            ("plan_id", format!("plan_{}", "f".repeat(32))),
+            ("plan_done_receipt_sha", "f".repeat(64)),
+            ("patch_sha", "f".repeat(64)),
+            (
+                "worktree",
+                repo.path().join("foreign").to_string_lossy().into_owned(),
+            ),
+        ] {
+            let mut changed = complete.clone();
+            changed[field] = foreign.into();
+            std::fs::write(&ledger, format!("{changed}\n")).unwrap();
+            assert_eq!(
+                criterion()["completed_tasks"],
+                serde_json::json!([]),
+                "foreign {field} must not complete the task"
+            );
+        }
+        std::fs::write(&ledger, &valid).unwrap();
+        assert_eq!(criterion()["completed_tasks"], serde_json::json!(["t1"]));
+
         // A real publication's anchor identity alone is insufficient after its
         // bytes change. Re-entry must neither commit nor accept those bytes.
         std::fs::write(&frozen, "changed capture\n").unwrap();
         let (code, _, err) = run();
         assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
         assert!(String::from_utf8_lossy(&err).contains("native generation anchor changed"));
+        assert_eq!(criterion()["completed_tasks"], serde_json::json!([]));
         std::fs::write(&frozen, &patch).unwrap();
 
         // Matching bytes with two links do not create a native certificate.
@@ -3636,6 +3852,7 @@ mod tests {
         let (code, _, err) = run();
         assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
         assert!(String::from_utf8_lossy(&err).contains("landing publication replaced"));
+        assert_eq!(criterion()["completed_tasks"], serde_json::json!([]));
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), committed);
     }
 
