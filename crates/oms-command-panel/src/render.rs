@@ -4335,6 +4335,51 @@ fn render_help_card(
     out
 }
 
+fn write_slots_line(report: &Value, columns: usize) -> Option<String> {
+    let slots = report.get("board_write_slots")?;
+    let unavailable = || Some("Write slots unavailable".to_owned());
+    if report["collection"]["ok"] != true || report["capacity_stale"] == true {
+        return unavailable();
+    }
+    let Some(used) = slots["used"].as_u64() else {
+        return unavailable();
+    };
+    let Some(limit) = slots["limit"].as_u64() else {
+        return unavailable();
+    };
+    let counts = [
+        slots["active"].as_u64(),
+        slots["awaiting"].as_u64(),
+        slots["unconfirmed"].as_u64(),
+    ];
+    let [Some(active), Some(awaiting), Some(unconfirmed)] = counts else {
+        return unavailable();
+    };
+    let line = |title, labels: [&str; 3], separator, between| {
+        let mut parts = vec![format!("{title} {used}/{limit}")];
+        for (count, label) in [active, awaiting, unconfirmed].into_iter().zip(labels) {
+            if count > 0 {
+                parts.push(format!("{count}{separator}{label}"));
+            }
+        }
+        parts.join(between)
+    };
+    let wide = line(
+        "Write slots",
+        ["active", "awaiting decision", "unconfirmed"],
+        " ",
+        " · ",
+    );
+    if width(&wide) <= columns {
+        return Some(wide);
+    }
+    let compact = line("Write", ["act", "dec", "unconf"], " ", " · ");
+    if width(&compact) <= columns {
+        return Some(compact);
+    }
+    Some(line("Write", ["act", "dec", "unconf"], "", " "))
+}
+
 fn render_health_card(
     report: &Value,
     all: &[Value],
@@ -4352,6 +4397,16 @@ fn render_health_card(
         columns,
         colored,
     )];
+    if let Some(line) = write_slots_line(report, inner_width) {
+        out.push(card_row_lr(
+            vec![Span::raw(line, inner_width, Some(SGR_TEXT))],
+            vec![],
+            columns,
+            use_cards,
+            None,
+            colored,
+        ));
+    }
     let status = if report["collection"]["ok"] == true && report["capacity_stale"] != true {
         ("ok", SGR_SAGE_BOLD)
     } else {
@@ -5837,6 +5892,70 @@ mod tests {
 
     fn strip_sgr(text: &str) -> String {
         clean(text, 10_000)
+    }
+
+    #[test]
+    fn capacity_shows_exact_write_slots_in_narrow_and_wide_frames() {
+        let report = json!({
+            "collection": {"ok": true},
+            "project_name": "Work",
+            "room": {"id":"room", "main":"M", "participants":[
+                {"participant":"M","role":"main","state":"working","provider":"codex","joined":true}
+            ]},
+            "board_write_slots": {"used":10,"limit":10,"active":0,"awaiting":8,"unconfirmed":2}
+        });
+        let nav = navigation::Navigation {
+            health: true,
+            ..Default::default()
+        };
+        let read = BTreeMap::new();
+        for ((cols, height), label) in [
+            ((30, 10), "Write 10/10 · 8 dec · 2 unconf"),
+            ((44, 16), "Write 10/10 · 8 dec · 2 unconf"),
+            (
+                (100, 30),
+                "Write slots 10/10 · 8 awaiting decision · 2 unconfirmed",
+            ),
+        ] {
+            let lines = frame(&report, &nav, cols, height, &read);
+            assert!(lines.iter().any(|line| line.contains(label)), "{lines:?}");
+            assert!(lines.iter().all(|line| width(line) <= cols));
+        }
+        let mut pending = report.clone();
+        pending["collection"]["pending"] = true.into();
+        assert!(
+            frame(&pending, &nav, 44, 16, &read)
+                .iter()
+                .any(|line| line.contains("Write 10/10 · 8 dec · 2 unconf"))
+        );
+        let mut active = report.clone();
+        active["board_write_slots"]["active"] = 1.into();
+        active["board_write_slots"]["awaiting"] = 7.into();
+        assert_eq!(
+            write_slots_line(&active, 96).as_deref(),
+            Some("Write slots 10/10 · 1 active · 7 awaiting decision · 2 unconfirmed")
+        );
+        let compressed = write_slots_line(&active, 30).unwrap();
+        assert!(width(&compressed) <= 30, "{compressed}");
+        assert!(compressed.contains("1act") && compressed.contains("2unconf"));
+        for (key, value) in [
+            ("board_write_slots", Value::Null),
+            ("collection", json!({"ok":false,"error":"failed"})),
+            ("capacity_stale", json!(true)),
+        ] {
+            let mut unavailable = report.clone();
+            unavailable[key] = value;
+            let lines = frame(&unavailable, &nav, 30, 10, &read);
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("Write slots unavailable")),
+                "{lines:?}"
+            );
+            assert!(lines.iter().all(|line| !line.contains("10/10")));
+        }
+        let ordinary = frame(&report, &navigation::Navigation::default(), 100, 30, &read);
+        assert!(ordinary.iter().all(|line| !line.contains("Write slots")));
     }
 
     #[test]

@@ -167,8 +167,42 @@ fn wip_counts(
             entry["route"]["owner"] == request.route.owner
         }
     };
-    let mut running = 0usize;
-    let mut awaiting = 0usize;
+    let slots = occupied_write_slots(
+        attempts,
+        calls,
+        owner_matches_attempt,
+        owner_matches_reservation,
+    );
+    (slots.active + slots.unconfirmed, slots.awaiting)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteSlots {
+    pub active: usize,
+    pub awaiting: usize,
+    pub unconfirmed: usize,
+}
+
+pub(crate) fn write_slots_for_main(
+    attempts: &[Value],
+    calls: &serde_json::Map<String, Value>,
+    main: &str,
+) -> WriteSlots {
+    occupied_write_slots(
+        attempts,
+        calls,
+        |row| row["parent_attempt_id"] == main,
+        |entry| entry["main_attempt"] == main,
+    )
+}
+
+fn occupied_write_slots(
+    attempts: &[Value],
+    calls: &serde_json::Map<String, Value>,
+    owner_matches_attempt: impl Fn(&Value) -> bool,
+    owner_matches_reservation: impl Fn(&Value) -> bool,
+) -> WriteSlots {
+    let mut slots = WriteSlots::default();
     let mut seen_members = std::collections::HashSet::new();
     for att in attempts {
         if att["refs"]["panel_access"] != "write" || !owner_matches_attempt(att) {
@@ -176,9 +210,9 @@ fn wip_counts(
         }
         let state = text(att, "state");
         if state == "review" {
-            awaiting += 1;
+            slots.awaiting += 1;
         } else if crate::state::LIVE_STATES.contains(&state.as_str()) {
-            running += 1;
+            slots.active += 1;
         } else {
             continue;
         }
@@ -200,10 +234,10 @@ fn wip_counts(
             entry["state"].as_str(),
             Some("reserved" | "running" | "unknown")
         ) {
-            running += 1;
+            slots.unconfirmed += 1;
         }
     }
-    (running, awaiting)
+    slots
 }
 pub fn command(request: &DispatchRequest, store: &Store) -> Result<(NativeCommand, Vec<OsString>)> {
     let route = &request.route;
