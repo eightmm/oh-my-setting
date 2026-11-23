@@ -2139,7 +2139,8 @@ fn agy(
         children
             .into_iter()
             .rev()
-            .take(3)
+            // The Board can show the bounded roster. Usage samples only its first three.
+            .take(crate::agy_child_records::SPAWN_BUDGET)
             .map(
                 |AgyProjectedChild {
                      id,
@@ -6328,7 +6329,7 @@ mod tests {
                     .map(|child| child.id.as_str())
                     .collect::<Vec<_>>(),
                 ids,
-                "all four creation records must be admitted before the three-row display cap"
+                "all four creation records must be admitted"
             );
             reset_agy_legacy_reads();
             let visible = observe_candidate(&three_and_one, &mut cached);
@@ -6338,7 +6339,8 @@ mod tests {
                     .iter()
                     .map(|row| text(row, "participant"))
                     .collect::<Vec<_>>(),
-                [fourth_id, &unknown_id, &legacy_id].map(|id| participant_id("antigravity", id))
+                [fourth_id, &unknown_id, &legacy_id, &delivered_id]
+                    .map(|id| participant_id("antigravity", id))
             );
             assert!(
                 visible
