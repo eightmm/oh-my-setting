@@ -301,6 +301,10 @@ fn failures(root: &Root, attempt: &V, cwd: &Path) -> V {
                 item.set("correlation", "time-window-only");
             }
         }
+        // Reserve the bounded view for exact evidence before unrelated time
+        // candidates, preserving ledger order within each correlation group.
+        found
+            .sort_by_key(|item| item.get("correlation").text() != Some("native-reference-attempt"));
     }
     let mut out = section(FAILURES, found);
     out.set("match", if correlated {
