@@ -40,6 +40,44 @@ pub(super) fn options() -> DuplexOptions {
     }
 }
 
+/// Code-owned issuance boundaries only; provider frames and storage errors may
+/// contain the private session, so they must not supply these outward labels.
+#[derive(Clone, Copy)]
+pub(super) enum IssuanceStage {
+    Unavailable,
+    ProcessSnapshot,
+    NativeIdentity,
+    DuplexConnection,
+    SessionRandomness,
+    ControllerCheck,
+    SessionRecord,
+    PrivateStore,
+    IssuanceLock,
+    PrivatePublication,
+    PrivateBinding,
+    AdmissionRecheck,
+    HelloDelivery,
+}
+impl IssuanceStage {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::ProcessSnapshot => "process-snapshot",
+            Self::NativeIdentity => "native-identity",
+            Self::DuplexConnection => "duplex-connection",
+            Self::SessionRandomness => "session-randomness",
+            Self::ControllerCheck => "controller-check",
+            Self::SessionRecord => "session-record",
+            Self::PrivateStore => "private-store",
+            Self::IssuanceLock => "issuance-lock",
+            Self::PrivatePublication => "private-publication",
+            Self::PrivateBinding => "private-binding",
+            Self::AdmissionRecheck => "admission-recheck",
+            Self::HelloDelivery => "hello-delivery",
+        }
+    }
+}
+
 struct PrivateBinding {
     path: PathBuf,
     raw: Vec<u8>,
@@ -141,6 +179,7 @@ pub(super) struct Channel<'a, 's> {
     consumed: usize,
     actions: Vec<TeamRequestAction>,
     private: Option<PrivateBinding>,
+    issuance_stage: IssuanceStage,
 }
 impl<'a, 's> Channel<'a, 's> {
     fn prepare(
@@ -279,23 +318,30 @@ impl<'a, 's> Channel<'a, 's> {
             consumed: 0,
             actions: launch.actions().to_vec(),
             private: None,
+            issuance_stage: IssuanceStage::Unavailable,
         })
     }
     fn start_owned(&mut self, reactor: &mut Reactor, job: JobId) -> Result<()> {
+        self.issuance_stage = IssuanceStage::ProcessSnapshot;
         let snapshot = reactor.snapshot(job).map_err(err)?;
+        self.issuance_stage = IssuanceStage::NativeIdentity;
         self.owner = Some(
             NativeIdentity
                 .owner_identity(snapshot.pid)
                 .map_err(|_| err("Team child native generation unavailable"))?,
         );
+        self.issuance_stage = IssuanceStage::DuplexConnection;
         self.generation = snapshot
             .duplex
             .ok_or_else(|| err("Team child has no duplex connection"))?
             .generation;
+        self.issuance_stage = IssuanceStage::SessionRandomness;
         self.session = oms_command_plan::storage::random_hex(16).map_err(plan_error)?;
         self.nonce = oms_command_plan::storage::random_hex(32).map_err(plan_error)?;
+        self.issuance_stage = IssuanceStage::ControllerCheck;
         self.controller.check().map_err(err)?;
         let owner = self.owner.as_ref().unwrap();
+        self.issuance_stage = IssuanceStage::SessionRecord;
         let record = object([
             ("schema", number(1)),
             ("kind", string("oms-team-request-session")),
@@ -326,6 +372,7 @@ impl<'a, 's> Channel<'a, 's> {
             ),
         ]);
         let raw = json::canonical(&record).map_err(plan_error)?;
+        self.issuance_stage = IssuanceStage::PrivateStore;
         let private = oms_panel_core::terminals::controller_store(&self.context.state_repo, true)
             .map_err(|e| err(e.message))?;
         let relative = PathBuf::from(format!("team-request-{}/session.json", self.session));
@@ -338,15 +385,23 @@ impl<'a, 's> Channel<'a, 's> {
             .deadline
             .saturating_duration_since(Instant::now())
             .min(wall_remaining);
-        private
+        self.issuance_stage = IssuanceStage::IssuanceLock;
+        let locked = private
             .lock_at(
                 Path::new("team-request-issuance.lock"),
                 Duration::from_secs(1).min(remaining),
             )
-            .map_err(|e| err(e.message))?
+            .map_err(|e| err(e.message))?;
+        self.issuance_stage = IssuanceStage::PrivatePublication;
+        locked
             .write(&relative, &raw, true, 8192)
             .map_err(|e| err(e.message))?;
+        drop(locked);
+        self.issuance_stage = IssuanceStage::PrivateBinding;
         self.private = Some(PrivateBinding::open(private.repo().join(relative), raw)?);
+        self.issuance_stage = IssuanceStage::AdmissionRecheck;
+        let expires_at = self.expiry()?;
+        self.issuance_stage = IssuanceStage::HelloDelivery;
         let mut hello = object([
             ("schema", number(1)),
             ("kind", string("hello")),
@@ -354,7 +409,7 @@ impl<'a, 's> Channel<'a, 's> {
             ("nonce", string(&self.nonce)),
             ("connection_generation", number(self.generation as i128)),
             ("binding_sha256", string(&self.binding_sha)),
-            ("expires_at", number(self.expiry()?)),
+            ("expires_at", number(expires_at)),
         ]);
         if self.actions != [TeamRequestAction::ReportBlocker] {
             hello
@@ -686,6 +741,10 @@ fn incomplete_cues(
     format!("cause={}; exit={exit}", cues.join(","))
 }
 impl super::OwnedDuplexConsumer for Channel<'_, '_> {
+    fn issuance_stage(&self) -> IssuanceStage {
+        self.issuance_stage
+    }
+
     fn check(&self) -> Result<()> {
         if Instant::now() >= self.deadline || now() >= self.expires_at {
             Err(Error::new(124, "Team request channel expired"))

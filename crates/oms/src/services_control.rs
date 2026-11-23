@@ -3420,9 +3420,22 @@ mod tests {
             } else {
                 None
             };
+            // Exercise the real issuance boundary while the adapter waits for
+            // its hello. This fixture-owned lock grants no session authority.
+            let issuance_store = (mode == "protocol-issuance-blocked")
+                .then(|| oms_panel_core::terminals::controller_store(&repo, true).unwrap());
+            let issuance_lock = issuance_store.as_ref().map(|store| {
+                store
+                    .lock_at(
+                        Path::new("team-request-issuance.lock"),
+                        Duration::from_secs(1),
+                    )
+                    .unwrap()
+            });
             let output = oms_command_peer::run_with_executor(
                 "peer-ask", &args, &repo, source, &stop, &collab,
             );
+            drop(issuance_lock);
             if let Some(handler) = handler {
                 signal_hook::low_level::unregister(handler);
             }
@@ -3475,7 +3488,7 @@ mod tests {
             }
             assert!(!String::from_utf8_lossy(&output.1).contains("nonce"));
             assert!(!String::from_utf8_lossy(&output.2).contains("nonce"));
-            if mode == "protocol-partial" {
+            if mode == "protocol-partial" || mode == "protocol-issuance-blocked" {
                 let mut seen = String::from_utf8_lossy(&output.2).into_owned();
                 for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
                     .unwrap()
@@ -3485,10 +3498,12 @@ mod tests {
                         &std::fs::read(entry.path()).unwrap_or_default(),
                     ));
                 }
-                assert!(
-                    seen.contains("channel-partial-frame"),
-                    "partial-frame cue not delivered"
-                );
+                let cue = if mode == "protocol-partial" {
+                    "channel-partial-frame"
+                } else {
+                    "Team channel issuance failed; pending intent retained (stage=issuance-lock)"
+                };
+                assert!(seen.contains(cue), "diagnostic cue not delivered: {cue}");
             }
             return;
         }
@@ -4838,6 +4853,28 @@ done
                 .get("team-a")
                 .get("requests")
                 .clone();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", "protocol-issuance-blocked")
+            .env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &head)
+            .env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team")
+            .env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters)
+            .status().unwrap();
+        assert!(status.success(), "blocked Team issuance diagnostic failed");
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 21,
+            "failed issuance must not resend the provider"
+        );
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "failed issuance cannot publish a Team request"
+        );
         spec["generation"] = 5.into();
         spec["previous_sha256"] = head.clone().into();
         std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
