@@ -200,6 +200,11 @@ blocked/skipped로 보고한다. 개인 정책은 추적되는 설치 트리 밖
 Incoming 설치는 도구를 다시 설치하거나 capability 선택을 덮어쓰지 않고 OMS 구성만
 맞춘다. 업데이트를 소유한 부모가 core commit 뒤 선택된 도구를 갱신하며,
 `--no-tools`와 rollback에서는 그 갱신도 생략한다.
+갱신 성공 뒤에는 `doctor --integrations`로 기록된 hook·plugin·OMS MCP 설정을
+검사한다. 실제 모델 호출이나 임의 MCP 서버 실행은 추가하지 않으며,
+`--no-doctor`는 이 검사도 명시적으로 생략한다. 갱신 뒤 연동 검사가 실패하면
+partial 결과와 허용된 phase·tool·exit 진단을 남기고 확정된 core receipt를
+유지한다. Vendor binary를 rollback했다고 보고하지 않는다.
 Incoming revision의 설치기를 실행하므로, 이 분리 이전의 오래된 revision으로
 rollback하면 그 revision의 기존 설치 동작이 적용된다.
 
