@@ -2728,6 +2728,184 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
 }
 
 #[test]
+fn cumulative_attribution_fences_later_unproved_overlapping_calls() {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Order {
+        SettlesBeforeMeasured,
+        PendingAtMeasurement,
+        StartsAfterMeasurement,
+    }
+    use Order::{PendingAtMeasurement, SettlesBeforeMeasured, StartsAfterMeasurement};
+
+    for (case, provider, session, account, known_at_begin, order, expected) in [
+        (
+            "settled",
+            "codex",
+            "same",
+            Some("other"),
+            true,
+            SettlesBeforeMeasured,
+            None,
+        ),
+        (
+            "pending",
+            "codex",
+            "same",
+            Some("other"),
+            true,
+            PendingAtMeasurement,
+            None,
+        ),
+        (
+            "deferred",
+            "codex",
+            "same",
+            Some("other"),
+            false,
+            PendingAtMeasurement,
+            None,
+        ),
+        (
+            "unnamed",
+            "codex",
+            "same",
+            None,
+            true,
+            SettlesBeforeMeasured,
+            None,
+        ),
+        (
+            "after",
+            "codex",
+            "same",
+            Some("other"),
+            false,
+            StartsAfterMeasurement,
+            Some(20),
+        ),
+        (
+            "other_provider",
+            "agy",
+            "same",
+            Some("other"),
+            true,
+            SettlesBeforeMeasured,
+            Some(20),
+        ),
+        (
+            "other_session",
+            "codex",
+            "different",
+            Some("other"),
+            true,
+            SettlesBeforeMeasured,
+            Some(20),
+        ),
+    ] {
+        let root = Temp::new();
+        let stop = AtomicBool::new(false);
+        let cumulative = |session: &str, baseline_unknown| Cumulative {
+            session_id: session.into(),
+            baseline_unknown,
+        };
+        let begin_proved = |call, fresh: bool| {
+            usage::begin(
+                &root.0,
+                Identity {
+                    account_scope_sha256: Some("a".repeat(64)),
+                    ..bound_identity(call)
+                },
+                Some(cumulative("same", !fresh)),
+                &stop,
+            )
+            .unwrap()
+        };
+        let measure = |pending, total| {
+            let mut receipt = observe(pending, 1, total, Cost::Reported(total * 10));
+            receipt.usage.input_tokens = Some(total / 2);
+            receipt.usage.output_tokens = Some(total / 2);
+            receipt.usage.cache_in_input = Some(true);
+            usage::record(&root.0, &receipt, &stop).unwrap();
+        };
+        let begin_unproved = || {
+            usage::begin(
+                &root.0,
+                Identity {
+                    provider: provider.into(),
+                    account: account.map(str::to_owned),
+                    ..bound_identity("unproved")
+                },
+                known_at_begin.then(|| cumulative(session, true)),
+                &stop,
+            )
+            .unwrap()
+        };
+        let finish_unproved = |mut pending: Receipt| {
+            pending.cumulative = Some(cumulative(session, true));
+            measure(pending, 110);
+        };
+        let check = |expected| {
+            let result = usage::load(&root.0).unwrap();
+            let measured = &result.calls[1];
+            let board = result.attributed_calls()[1];
+            assert_eq!(measured.receipt.identity.call_id, "measured");
+            assert_eq!(measured.tokens, expected, "ledger total: {case}");
+            assert_eq!(
+                measured.cost_microusd,
+                expected.map(|n| n * 10),
+                "ledger cost: {case}"
+            );
+            assert_eq!(board.usage.total_tokens, expected, "Board total: {case}");
+            assert_eq!(
+                board.usage.input_tokens,
+                expected.map(|n| n / 2),
+                "Board input: {case}"
+            );
+            assert_eq!(
+                board.usage.output_tokens,
+                expected.map(|n| n / 2),
+                "Board output: {case}"
+            );
+        };
+
+        measure(begin_proved("baseline", true), 100);
+        let measured = begin_proved("measured", false);
+        match order {
+            SettlesBeforeMeasured => {
+                finish_unproved(begin_unproved());
+                measure(measured, 120);
+            }
+            PendingAtMeasurement => {
+                let pending = begin_unproved();
+                measure(measured, 120);
+                check(if known_at_begin { None } else { Some(20) });
+                finish_unproved(pending);
+            }
+            StartsAfterMeasurement => {
+                measure(measured, 120);
+                finish_unproved(begin_unproved());
+            }
+        }
+        check(expected);
+        if expected.is_none() {
+            measure(begin_proved("rebaseline", false), 130);
+            measure(begin_proved("after_rebaseline", false), 138);
+            let result = usage::load(&root.0).unwrap();
+            let board = result.attributed_calls();
+            for (index, expected) in [(3, None), (4, Some(8))] {
+                assert_eq!(result.calls[index].tokens, expected, "ledger: {case}");
+                assert_eq!(
+                    result.calls[index].cost_microusd,
+                    expected.map(|n| n * 10),
+                    "cost: {case}"
+                );
+                assert_eq!(board[index].usage.total_tokens, expected, "Board: {case}");
+            }
+        }
+    }
+}
+
+#[test]
 fn attribution_uses_checked_standalone_totals() {
     let root = Temp::new();
     let stop = AtomicBool::new(false);

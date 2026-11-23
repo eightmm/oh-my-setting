@@ -4,7 +4,7 @@
 //! only when their identity, ordering and measured baseline are known.
 use super::*;
 use crate::value::{encode, obj};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 pub const RECEIPTS: &str = ".oms/usage/receipts.jsonl";
@@ -173,7 +173,6 @@ struct AttributionSession<'a> {
 struct SessionFamily {
     aliases: BTreeMap<String, String>,
     last_unscoped: u64,
-    unsettled_through: u64,
 }
 
 impl SessionFamily {
@@ -1000,33 +999,69 @@ struct LedgerSession {
     totals: MeasuredTotals,
     last_usage: Option<Usage>,
 }
-fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
-    let latest = current(rows)?;
-    let mut settled_named_unscoped = BTreeMap::new();
-    let mut last_admitted = 0;
-    // Terminal revisions are appended under the same lock as admissions.
-    // Keep the overlap visible even after a formerly pending call settles.
-    for row in rows {
-        last_admitted = last_admitted.max(row.ordinal);
-        if row.cumulative.is_some()
-            && row.identity.account.is_some()
-            && row.identity.account_scope_sha256.is_none()
-        {
-            let (revision, through) = settled_named_unscoped
-                .entry(row.identity.call_id.as_str())
-                .or_insert((0, None));
-            if row.revision < *revision {
-                continue;
-            }
-            *revision = row.revision;
-            match row.phase {
-                Phase::Pending | Phase::Partial => *through = None,
-                Phase::Final | Phase::Unknown => {
-                    through.get_or_insert(last_admitted);
-                }
+struct CallInterval<'a> {
+    admitted_at: usize,
+    observed_at: usize,
+    latest: &'a Receipt,
+    terminal_at: Option<usize>,
+}
+
+fn unscoped_home_overlaps(rows: &[Receipt]) -> BTreeSet<u64> {
+    let mut intervals = BTreeMap::new();
+    // Admissions and revisions share the ledger's append lock. Ignore stale
+    // and identical repeats, which add no new lifecycle or measurement evidence.
+    for (at, row) in rows.iter().enumerate() {
+        let interval = intervals
+            .entry(row.identity.call_id.as_str())
+            .or_insert(CallInterval {
+                admitted_at: at,
+                observed_at: at,
+                latest: row,
+                terminal_at: None,
+            });
+        if at != interval.admitted_at && row.revision <= interval.latest.revision {
+            continue;
+        }
+        interval.latest = row;
+        interval.observed_at = at;
+        match row.phase {
+            Phase::Pending | Phase::Partial => interval.terminal_at = None,
+            Phase::Final | Phase::Unknown => {
+                interval.terminal_at.get_or_insert(at);
             }
         }
     }
+
+    let mut terminal_by_session = BTreeMap::new();
+    let mut overlaps = BTreeSet::new();
+    for (at, row) in rows.iter().enumerate() {
+        let interval = &intervals[row.identity.call_id.as_str()];
+        // A terminal revision can identify the session of an admission that
+        // initially had no session evidence.
+        let Some(session) = &interval.latest.cumulative else {
+            continue;
+        };
+        let key = (row.identity.provider.as_str(), session.session_id.as_str());
+        if row.identity.account_scope_sha256.is_none() {
+            if at == interval.admitted_at {
+                let terminal = terminal_by_session.entry(key).or_insert(0);
+                *terminal = (*terminal).max(interval.terminal_at.unwrap_or(usize::MAX));
+            }
+        } else if at == interval.observed_at
+            && row.phase == Phase::Final
+            && terminal_by_session
+                .get(&key)
+                .is_some_and(|terminal| *terminal > interval.admitted_at)
+        {
+            overlaps.insert(row.ordinal);
+        }
+    }
+    overlaps
+}
+
+fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
+    let latest = current(rows)?;
+    let overlaps = unscoped_home_overlaps(rows);
     let mut sessions = BTreeMap::<SessionIdentity, LedgerSession>::new();
     let mut families = BTreeMap::<_, SessionFamily>::new();
     let mut calls = Vec::new();
@@ -1034,7 +1069,7 @@ fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
         let mut tokens = receipt.usage.tokens();
         let mut cost = receipt.cost.microusd();
         let mut conflict = false;
-        let mut unscoped_home_overlap = false;
+        let unscoped_home_overlap = overlaps.contains(&receipt.ordinal);
         if let Some(session) = &receipt.cumulative {
             let family = families
                 .entry((
@@ -1045,14 +1080,6 @@ fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
             let identity = &receipt.identity;
             let scope = identity.account_scope_sha256.as_deref();
             let alias_changed = family.observe(identity, receipt.ordinal);
-            if scope.is_none() && identity.account.is_some() {
-                let through = settled_named_unscoped
-                    .get(identity.call_id.as_str())
-                    .and_then(|(_, through)| *through)
-                    .unwrap_or(u64::MAX);
-                family.unsettled_through = family.unsettled_through.max(through);
-            }
-            unscoped_home_overlap = scope.is_some() && receipt.ordinal <= family.unsettled_through;
             let key = (
                 receipt.identity.provider.clone(),
                 receipt.identity.account.clone(),
