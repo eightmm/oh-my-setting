@@ -74,7 +74,7 @@ fn unsupported_locator_current_fenced(post_fence: impl FnOnce() -> bool) -> bool
     false
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(test, not(target_os = "linux")))]
 pub(crate) fn agy_open_selected_child_fenced(
     _repo: &Path,
     _selected: &AgySelectedChild,
@@ -83,7 +83,7 @@ pub(crate) fn agy_open_selected_child_fenced(
     unsupported_open_selected(post_fence)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(test, not(target_os = "linux")))]
 pub(crate) fn agy_locator_still_current_fenced(
     _repo: &Path,
     _expected: &AgyChildChatLocator,
@@ -121,22 +121,6 @@ pub(crate) fn agy_board_child_usage(
     _painted: &std::collections::BTreeSet<String>,
     _selected: SelectedGroupProof<'_>,
 ) -> Option<AgyBoardUsage> {
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn agy_current_children_with_usage(
-    _pid: u32,
-    _birth: &str,
-    _repo: &Path,
-    _expected_turn: Option<&str>,
-    _painted: &std::collections::BTreeSet<String>,
-    _include_usage: bool,
-) -> Option<(
-    String,
-    Vec<AgyChildChatLocator>,
-    std::collections::BTreeMap<String, serde_json::Value>,
-)> {
     None
 }
 
@@ -390,7 +374,7 @@ mod linux {
             return AgyChatOpen::Unavailable;
         }
         let Some(rec) = matches.pop() else {
-            if post_fence()
+            if confirm_workspace_through_pane(&strict_ws, post_fence).is_ok()
                 && confirm_open_custody(
                     repo,
                     selected.pid,
@@ -401,7 +385,6 @@ mod linux {
                     &brain_dir.trail.borrow(),
                     (&lead_file, &lead_stat),
                     None,
-                    Some(&strict_ws),
                 )
                 .is_ok()
             {
@@ -438,7 +421,7 @@ mod linux {
         };
         let history = format_selected_child_reader(&setup, &chat);
 
-        if !post_fence()
+        if confirm_workspace_through_pane(&strict_ws, post_fence).is_err()
             || confirm_open_custody(
                 repo,
                 selected.pid,
@@ -449,7 +432,6 @@ mod linux {
                 &brain_dir.trail.borrow(),
                 (&lead_file, &lead_stat),
                 Some((&child_file, &child_stat, None)),
-                Some(&strict_ws),
             )
             .is_err()
         {
@@ -582,7 +564,7 @@ mod linux {
             .filter(|rec| participant_id("antigravity", &rec.child_id) == target_pid)
             .count();
         gate(exact_matches == 1 && pid_matches == 1, "child-unmatched")?;
-        gate(post_fence(), "post-fence")?;
+        confirm_workspace_through_pane(&strict_ws, post_fence)?;
 
         confirm_open_custody(
             repo,
@@ -594,7 +576,6 @@ mod linux {
             &brain_dir.trail.borrow(),
             (&lead_file, &lead_stat),
             Some((&child_file, &child_stat, Some(expected.child_min_size))),
-            Some(&strict_ws),
         )
     }
 
@@ -644,7 +625,6 @@ mod linux {
         trail: &Trail,
         lead: (&File, &Stat),
         child: Option<(&File, &Stat, Option<u64>)>,
-        strict_ws: Option<&AgyStrictWorkspaces<'_>>,
     ) -> Stage<()> {
         if let Some((child_file, child_stat, min_size)) = child {
             let child_now = fs::fstat(child_file).map_err(|_| "child-changed")?;
@@ -667,9 +647,6 @@ mod linux {
             "lead-changed",
         )?;
         same_names(&custody.app_root, uid, trail)?;
-        if let Some(ws) = strict_ws {
-            gate(ws.confirm(), "workspace-changed")?;
-        }
         gate(
             checked_lead_custody(pid, birth, repo).as_ref() == Some(custody),
             "custody-changed",
@@ -679,6 +656,17 @@ mod linux {
             "process-changed",
         )?;
         Ok(())
+    }
+
+    fn confirm_workspace_through_pane(
+        workspace: &AgyStrictWorkspaces<'_>,
+        pane_current: impl FnOnce() -> bool,
+    ) -> Stage<()> {
+        let proof = workspace
+            .confirm_group_membership()
+            .ok_or("workspace-changed")?;
+        gate(pane_current(), "post-fence")?;
+        gate(proof.recheck(), "workspace-changed")
     }
 
     fn strict(stat: &Stat, uid: u32) -> bool {
@@ -1036,8 +1024,7 @@ mod linux {
         }
 
         let lead_min_size = u64::try_from(lead_stat.st_size).map_err(|_| "lead-read")?;
-        let mut locators = Vec::new();
-        let mut held_usage = Vec::new();
+        let mut held_children = Vec::new();
         let records = scan
             .into_iter()
             .flat_map(|scan| scan.children)
@@ -1070,13 +1057,14 @@ mod linux {
                 app_dir.trail.borrow_mut().0.truncate(snap);
                 continue;
             };
-            if include_usage
-                && let Ok((bytes, recent)) = read_child_suffix(&child_file, &child_stat)
-                && let Some(value) = latest_child_response_usage(&bytes, recent)
-            {
-                held_usage.push((participant, value, child_file, child_stat, selected_only));
-            }
-            locators.push(AgyChildChatLocator {
+            let response = if include_usage {
+                read_child_suffix(&child_file, &child_stat)
+                    .ok()
+                    .and_then(|(bytes, recent)| latest_child_response_usage(&bytes, recent))
+            } else {
+                None
+            };
+            let locator = AgyChildChatLocator {
                 pid,
                 birth: owner.birth.clone(),
                 app_root: custody.app_root.clone(),
@@ -1086,9 +1074,28 @@ mod linux {
                 lead_min_size,
                 child: (child_stat.st_dev, child_stat.st_ino),
                 child_min_size,
-            });
+            };
+            held_children.push((
+                locator,
+                participant,
+                response,
+                child_file,
+                child_stat,
+                selected_only,
+            ));
         }
 
+        // The selected workspace may run a host group lookup. Recheck AGY
+        // custody and all held transcript names and versions after it returns.
+        if prove_selected {
+            gate(
+                selected_ws.is_some_and(|ws| ws.confirm()),
+                "workspace-changed",
+            )?;
+        }
+        if let Some(ws) = strict_ws {
+            gate(ws.confirm(), "workspace-changed")?;
+        }
         confirm_open_custody(
             repo,
             pid,
@@ -1099,29 +1106,26 @@ mod linux {
             &app_dir.trail.borrow(),
             (&lead_file, &lead_stat),
             None,
-            strict_ws.as_ref(),
         )?;
-        if prove_selected {
-            gate(
-                selected_ws.is_some_and(|ws| ws.confirm()),
-                "workspace-changed",
-            )?;
-        }
+        let mut locators = Vec::new();
         let mut usage = AgyBoardUsage {
             turn,
             rows: BTreeMap::new(),
             selected: None,
         };
-        for (participant, value, file, stat, selected_only) in held_usage {
+        for (locator, participant, response, file, stat, selected_only) in held_children {
             if !fs::fstat(&file)
                 .is_ok_and(|now| unchanged(&stat, &now) && strict(&now, uid) && now.st_nlink == 1)
             {
                 continue;
             }
-            if selected_only {
-                usage.selected = Some((participant, value));
-            } else {
-                usage.rows.insert(participant, value);
+            locators.push(locator);
+            if let Some(value) = response {
+                if selected_only {
+                    usage.selected = Some((participant, value));
+                } else {
+                    usage.rows.insert(participant, value);
+                }
             }
         }
         Ok((locators, usage))
@@ -1193,7 +1197,7 @@ mod linux {
         )
         .ok_or("extract-failed")?;
 
-        gate(post_fence(), "post-fence")?;
+        confirm_workspace_through_pane(&strict_ws, post_fence)?;
 
         confirm_open_custody(
             repo,
@@ -1205,7 +1209,6 @@ mod linux {
             &app_dir.trail.borrow(),
             (&lead_file, &lead_stat),
             Some((&child_file, &child_stat, None)),
-            Some(&strict_ws),
         )?;
 
         Ok(chat)
@@ -2515,8 +2518,9 @@ mod tests {
             turn: TURN_CUR.into(),
             participant: selected.clone(),
         };
-        let usage =
-            |group| agy_board_child_usage(pid, &birth, &fixture.repo, TURN_CUR, &painted, group);
+        let usage = |group: super::SelectedGroupProof<'_>| {
+            agy_board_child_usage(pid, &birth, &fixture.repo, TURN_CUR, &painted, group)
+        };
         for group in [
             None,
             Some((selected.as_str(), &(|_| false) as &dyn Fn(u32) -> bool)),
@@ -2543,6 +2547,49 @@ mod tests {
             || true
         ));
 
+        // Retain the same PID, lock, Turn, transcript bytes and child while the
+        // resolver replaces the *named* lead transcript on its final call.
+        let lead = fixture.transcript_path(LEAD_ID);
+        let before = fixture.base.join("held-lead-transcript");
+        let lead_bytes = fs::read(&lead).unwrap();
+        type ReadWithGroup<'a> = dyn Fn(&dyn Fn(u32) -> bool) + 'a;
+        let swap_during_confirmation = |read: &ReadWithGroup<'_>| {
+            let calls = Cell::new(0);
+            read(&|id| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    fs::rename(&lead, &before).unwrap();
+                    write_private(&lead, &lead_bytes);
+                }
+                allowed(id)
+            });
+            assert_eq!(calls.get(), 2);
+            fs::rename(&before, &lead).unwrap();
+        };
+        let pane_after_group = || {
+            assert!(before.exists(), "pane recheck must follow group lookup");
+            true
+        };
+        swap_during_confirmation(&|race| {
+            assert!(matches!(
+                agy_open_selected_child_with_group(
+                    &fixture.repo,
+                    &selection,
+                    race,
+                    pane_after_group
+                ),
+                AgyChatOpen::Unavailable
+            ));
+        });
+        swap_during_confirmation(&|race| {
+            assert!(!agy_locator_still_current_with_group(
+                &fixture.repo,
+                &locator,
+                race,
+                pane_after_group,
+            ));
+        });
+
         fixture.write_transcript(
             CHILD_A,
             &[json!({"type":"PLANNER_RESPONSE", "source":"MODEL",
@@ -2562,6 +2609,15 @@ mod tests {
         let (participant, response) = exact.selected.unwrap();
         assert_eq!(participant, selected);
         assert_eq!(response["input_tokens"], 5);
+        swap_during_confirmation(&|race| {
+            assert!(usage(Some((&selected, race))).is_none());
+        });
+        assert!(
+            usage(Some((&selected, &allowed)))
+                .unwrap()
+                .selected
+                .is_some()
+        );
 
         let membership_calls = Cell::new(0);
         let revoked = |id| {

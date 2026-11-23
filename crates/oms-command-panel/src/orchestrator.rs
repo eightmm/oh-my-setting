@@ -394,6 +394,7 @@ pub(crate) struct ChatBinding {
 pub(crate) struct AgySelectedResponseUsage {
     pub(crate) response: Value,
     pub(crate) observed_model: Option<String>,
+    pub(crate) requires_group: bool,
 }
 
 impl ChatBinding {
@@ -1429,6 +1430,14 @@ impl<'a> Panel<'a> {
                                     && self
                                         .chat_pane_with_host("antigravity", host)
                                         .is_ok_and(|again| again == pane)
+                                    && (selected_participant.is_none()
+                                        || self
+                                            .capture_recent(&pane.lead.id)
+                                            .ok()
+                                            .as_deref()
+                                            .and_then(crate::native_children::agy_current_turn)
+                                            == Some(shown_turn))
+                                    && !self.stop.load(Ordering::Acquire)
                             },
                         ) {
                             selected_agy_usage_result = Some(usage);
@@ -6097,9 +6106,9 @@ fn agy_usage_sighting(
     {
         return None;
     }
-    let mut detail_response = usage
-        .selected
-        .and_then(|(participant, value)| (selected == Some(participant.as_str())).then_some(value));
+    let mut detail_response = usage.selected.and_then(|(participant, value)| {
+        (selected == Some(participant.as_str())).then_some((value, true))
+    });
     for (participant, value) in usage.rows {
         if ambient.contains(&participant) {
             let mut named = rows
@@ -6116,15 +6125,16 @@ fn agy_usage_sighting(
                     json!({"scope": "latest_child_response", "response": value});
             }
         } else if selected_only == Some(participant.as_str()) {
-            detail_response = Some(value);
+            detail_response = Some((value, false));
         }
     }
-    detail_response.map(|response| AgySelectedResponseUsage {
+    detail_response.map(|(response, requires_group)| AgySelectedResponseUsage {
         observed_model: response["model"]
             .as_str()
             .and_then(crate::native_children::observed_model)
             .map(str::to_owned),
         response,
+        requires_group,
     })
 }
 

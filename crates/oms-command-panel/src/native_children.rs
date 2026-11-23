@@ -3241,13 +3241,49 @@ impl<'a> AgyStrictWorkspaces<'a> {
     }
 
     pub(crate) fn confirm(&self) -> bool {
+        self.confirm_group_membership()
+            .is_some_and(|proof| proof.recheck())
+    }
+
+    pub(crate) fn confirm_group_membership(&self) -> Option<AgyWorkspaceConfirmation<'_>> {
         let mut fresh = AgyWorkspaceAuthority {
             group: self.authority.group,
             ..Default::default()
         };
+        let confirmed = self.trail.iter().all(|(_, entry)| match entry {
+            AgyWorkspaceEntry::Directory(_, Some(root)) => root
+                .recheck_private_workspace(|gid| fresh.private_group(gid))
+                .is_ok(),
+            AgyWorkspaceEntry::Metadata(stat) if !agy_strict_stat(stat) => {
+                fresh.private_group(stat.st_gid)
+            }
+            _ => true,
+        });
+        confirmed.then_some(AgyWorkspaceConfirmation {
+            trail: &self.trail,
+            groups: fresh.proven_groups,
+        })
+    }
+}
+
+pub(crate) struct AgyWorkspaceConfirmation<'a> {
+    trail: &'a AgyWorkspaceTrail,
+    groups: BTreeMap<u32, bool>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl AgyWorkspaceConfirmation<'_> {
+    /// Re-walk names and ACL metadata using the groups checked before the pane
+    /// fence. This stage must never call the host account database again.
+    pub(crate) fn recheck(&self) -> bool {
+        let confirmed = |gid| self.groups.get(&gid) == Some(&true);
+        let mut authority = AgyWorkspaceAuthority {
+            group: (!self.groups.is_empty()).then_some(&confirmed),
+            ..Default::default()
+        };
         self.trail
             .iter()
-            .all(|(path, entry)| fresh.confirm_entry(path, entry).is_some())
+            .all(|(path, entry)| authority.confirm_entry(path, entry).is_some())
     }
 }
 

@@ -139,7 +139,7 @@ fn run_with_source_writer(
         let mut accepted_refresh = false;
         let mut checkout_changed = false;
         let mut scope_changed = false;
-        let mut rejected_agy_detail_frame = false;
+        let mut agy_detail_frame = AgyDetailFrame::Unchanged;
         let mut checked_agy = None;
         let mut incoming_agy_detail = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
@@ -156,6 +156,18 @@ fn run_with_source_writer(
                 footer: main_footer.clone(),
                 agy: chat.as_ref().and_then(AgyDockCheck::new),
                 agy_detail: None,
+                agy_detail_binding: selected_chat
+                    .as_ref()
+                    .and_then(|(_, binding)| binding.as_ref())
+                    .filter(|binding| {
+                        agy_binding_matches_selection(
+                            binding,
+                            &nav,
+                            before.as_ref().and_then(|rows| rows.get(nav.selected)),
+                            &observations,
+                        )
+                    })
+                    .cloned(),
             };
             let (changed, result, native) =
                 board.update_with_native(live, launch, ready, Some(seed), &mut pending_agy_detail);
@@ -167,7 +179,13 @@ fn run_with_source_writer(
                     .scope
                     .as_ref()
                     .is_some_and(|scope| scope.main.is_some());
-            rejected_agy_detail_frame = rejected_native || !board.phase.retains_agy_detail();
+            agy_detail_frame = if rejected_native || !board.phase.retains_agy_detail() {
+                AgyDetailFrame::Rejected
+            } else if native.is_some() {
+                AgyDetailFrame::Observed
+            } else {
+                AgyDetailFrame::Unchanged
+            };
             let mut native_projection = None;
             if let Some(reading) = native {
                 native_projection = Some(reading.projection);
@@ -353,7 +371,7 @@ fn run_with_source_writer(
             &report,
             &nav,
             &observations,
-            rejected_agy_detail_frame,
+            agy_detail_frame,
             scope_changed,
         );
         settle_main_dock(&mut chat, &report);
@@ -1949,6 +1967,14 @@ struct AgyDetailUsageEvidence {
     binding: ChatBinding,
     response: Value,
     observed_model: Option<String>,
+    requires_group: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgyDetailFrame {
+    Unchanged,
+    Observed,
+    Rejected,
 }
 
 fn report_has_live_main(report: &Value, main: &LiveMain) -> bool {
@@ -2035,13 +2061,13 @@ fn reconcile_agy_detail_evidence(
     report: &Value,
     nav: &navigation::Navigation,
     observations: &Observations,
-    rejected_refresh: bool,
+    frame: AgyDetailFrame,
     scope_changed: bool,
 ) {
     if retained.is_none() && incoming.is_none() {
         return;
     }
-    if scope_changed || rejected_refresh || !nav.detail {
+    if scope_changed || frame == AgyDetailFrame::Rejected || !nav.detail {
         *retained = None;
         return;
     }
@@ -2087,13 +2113,17 @@ fn reconcile_agy_detail_evidence(
             )
             && observations.chat_binding(participant) == Some(&ev.binding)
     };
-    if let Some(ev) = incoming
+    if frame == AgyDetailFrame::Observed
+        && let Some(ev) = incoming
         && matches(&ev)
     {
         *retained = Some(ev);
         return;
     }
-    if retained.as_ref().is_some_and(|ev| !matches(ev)) {
+    if retained
+        .as_ref()
+        .is_some_and(|ev| !matches(ev) || (ev.requires_group && frame == AgyDetailFrame::Observed))
+    {
         *retained = None;
     }
 }
@@ -2142,6 +2172,7 @@ struct NativeSeed {
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
     agy_detail: Option<AgyDetailUsageRequest>,
+    agy_detail_binding: Option<ChatBinding>,
 }
 
 struct AgyDockCheck {
@@ -2262,6 +2293,7 @@ impl NativeRequest {
                     binding: req.binding.clone(),
                     response: usage.response,
                     observed_model: usage.observed_model,
+                    requires_group: usage.requires_group,
                 })
             });
         report["native_dock"] = json!(panel.docked());
@@ -2484,6 +2516,7 @@ struct InteractiveRefresh {
     scope: Option<BoardScope>,
     phase: RefreshPhase,
     deferred_refresh: bool,
+    agy_group_renewal: Option<AgyDetailUsageRequest>,
 }
 
 impl InteractiveRefresh {
@@ -2496,6 +2529,7 @@ impl InteractiveRefresh {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         })
     }
 
@@ -2543,14 +2577,19 @@ impl InteractiveRefresh {
         pending_agy_detail: &mut Option<AgyDetailUsageRequest>,
     ) -> (bool, Option<Snapshot>, Option<NativeReading>) {
         let changed = !self.matches(&live);
+        let detail_binding = seed
+            .as_ref()
+            .and_then(|seed| seed.agy_detail_binding.clone());
         if changed {
             self.quota.cancel();
             self.deferred_refresh = false;
             *pending_agy_detail = None;
+            self.agy_group_renewal = None;
             if let Some(seed) = &mut seed {
                 seed.observations = Observations::default();
                 seed.agy = None;
                 seed.agy_detail = None;
+                seed.agy_detail_binding = None;
                 seed.footer = MainFooter::default();
             }
         }
@@ -2559,6 +2598,7 @@ impl InteractiveRefresh {
             Err(error) => {
                 self.scope = None;
                 *pending_agy_detail = None;
+                self.agy_group_renewal = None;
                 self.phase = RefreshPhase::Failed(error.message);
                 return (changed, None, None);
             }
@@ -2568,10 +2608,18 @@ impl InteractiveRefresh {
         {
             *pending_agy_detail = None;
         }
+        if self.agy_group_renewal.as_ref().is_some_and(|detail| {
+            detail_binding.as_ref() != Some(&detail.binding)
+                || !same_footer_scope(&detail.scope, &scope)
+        }) {
+            self.agy_group_renewal = None;
+        }
         if changed || (request && !self.worker.busy()) {
             let mut dispatched = seed.take();
             if let Some(seed) = &mut dispatched {
-                seed.agy_detail = pending_agy_detail.take();
+                seed.agy_detail = pending_agy_detail
+                    .take()
+                    .or_else(|| self.agy_group_renewal.clone());
             }
             self.request(&scope, dispatched);
         } else if request && !self.worker.queued() {
@@ -2616,6 +2664,19 @@ impl InteractiveRefresh {
         if rejected_native {
             self.quota.cancel();
             *pending_agy_detail = None;
+            self.agy_group_renewal = None;
+        }
+        if !changed
+            && let Some(evidence) = native
+                .as_ref()
+                .and_then(|reading| reading.agy_detail_evidence.as_ref())
+            && detail_binding.as_ref() == Some(&evidence.binding)
+            && same_footer_scope(&evidence.scope, &scope)
+        {
+            self.agy_group_renewal = evidence.requires_group.then(|| AgyDetailUsageRequest {
+                scope: evidence.scope.clone(),
+                binding: evidence.binding.clone(),
+            });
         }
         if follow_up {
             if let Some(seed) = &mut seed {
@@ -2627,7 +2688,9 @@ impl InteractiveRefresh {
                     seed.footer = MainFooter::default();
                     seed.agy = None;
                 }
-                seed.agy_detail = pending_agy_detail.take();
+                seed.agy_detail = pending_agy_detail
+                    .take()
+                    .or_else(|| self.agy_group_renewal.clone());
             }
             self.request(&scope, seed);
             if replied && completed.is_none() && self.phase == RefreshPhase::Pending {
@@ -5339,6 +5402,7 @@ mod tests {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let scope = |room: &str| BoardScope {
             key: RefreshKey::new(repo, Some(room), None).unwrap(),
@@ -6943,6 +7007,7 @@ mod tests {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let scope = |room: &str| BoardScope {
             key: RefreshKey::new(repo, Some(room), Some(MAIN)).unwrap(),
@@ -7841,10 +7906,10 @@ mod tests {
     #[test]
     fn agy_detail_usage_request_and_interactive_dispatch() {
         use super::{
-            AgyDetailUsageEvidence, BoardScope, BoardTarget, InteractiveRefresh, LiveMain,
-            MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase, SelectionFence,
-            agy_detail_usage_request, apply_selection_key, reconcile_agy_detail_evidence,
-            report_for_frame,
+            AgyDetailFrame, AgyDetailUsageEvidence, BoardScope, BoardTarget, InteractiveRefresh,
+            LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
+            SelectionFence, agy_detail_usage_request, apply_selection_key,
+            reconcile_agy_detail_evidence, report_for_frame,
         };
         use crate::board_refresh::BoardRefresh;
         use crate::input::Key;
@@ -8032,6 +8097,7 @@ mod tests {
                 "output_tokens": 40
             }),
             observed_model: Some("gemini".into()),
+            requires_group: false,
         };
         let mut retained = None;
         reconcile_agy_detail_evidence(
@@ -8041,7 +8107,7 @@ mod tests {
             &report,
             &nav,
             &observations,
-            false,
+            AgyDetailFrame::Observed,
             false,
         );
         assert!(retained.as_ref() == Some(&ev));
@@ -8088,7 +8154,7 @@ mod tests {
             &report,
             &nav,
             &observations,
-            !RefreshPhase::Pending.retains_agy_detail(),
+            AgyDetailFrame::Unchanged,
             false,
         );
         assert!(retained.as_ref() == Some(&ev));
@@ -8102,6 +8168,40 @@ mod tests {
             "{detail_after_ambient}"
         );
 
+        let mut group = ev.clone();
+        group.requires_group = true;
+        let mut retained_group = Some(group.clone());
+        let refresh_group = |retained: &mut Option<AgyDetailUsageEvidence>, incoming, frame| {
+            reconcile_agy_detail_evidence(
+                retained,
+                incoming,
+                Some(&current_scope),
+                &report,
+                &nav,
+                &observations,
+                frame,
+                false,
+            );
+        };
+        refresh_group(&mut retained_group, None, AgyDetailFrame::Unchanged);
+        assert!(retained_group.as_ref() == Some(&group));
+        let mut renewed = group;
+        renewed.response["input_tokens"] = 1300.into();
+        refresh_group(
+            &mut retained_group,
+            Some(renewed.clone()),
+            AgyDetailFrame::Observed,
+        );
+        assert!(retained_group.as_ref() == Some(&renewed));
+        assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+
+        // The same row and Turn can survive a revoked membership or ACL change.
+        refresh_group(&mut retained_group, None, AgyDetailFrame::Observed);
+        assert!(retained_group.is_none());
+        assert!(!render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+        refresh_group(&mut retained_group, Some(renewed), AgyDetailFrame::Observed);
+        assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+
         // 3a. Closing D or moving selection before an in-flight response lands rejects
         //     incoming evidence (zero bleed).
         let mut closed_nav = nav.clone();
@@ -8114,7 +8214,7 @@ mod tests {
             &report,
             &closed_nav,
             &observations,
-            false,
+            AgyDetailFrame::Observed,
             false,
         );
         assert!(bleed_check.is_none());
@@ -8127,7 +8227,7 @@ mod tests {
             &report,
             &other_sel_nav,
             &observations,
-            false,
+            AgyDetailFrame::Observed,
             false,
         );
         assert!(bleed_check.is_none());
@@ -8143,7 +8243,7 @@ mod tests {
             &report,
             &nav,
             &new_turn_obs,
-            false,
+            AgyDetailFrame::Unchanged,
             false,
         );
         assert!(stale_turn.is_none());
@@ -8158,7 +8258,7 @@ mod tests {
             &report,
             &nav,
             &observations,
-            true,
+            AgyDetailFrame::Rejected,
             false,
         );
         assert!(on_rejected.is_none());
@@ -8171,7 +8271,7 @@ mod tests {
             &report,
             &nav,
             &observations,
-            false,
+            AgyDetailFrame::Observed,
             true,
         );
         assert!(on_scope_change.is_none());
@@ -8195,7 +8295,7 @@ mod tests {
             &ambient_report,
             &nav,
             &observations,
-            false,
+            AgyDetailFrame::Observed,
             false,
         );
         assert!(retained.is_none());
@@ -8267,6 +8367,7 @@ mod tests {
             scope: Some(current_scope.clone()),
             phase: RefreshPhase::Fresh,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let make_seed = || NativeSeed {
             target: BoardTarget {
@@ -8278,6 +8379,7 @@ mod tests {
             footer: MainFooter::default(),
             agy: None,
             agy_detail: None,
+            agy_detail_binding: None,
         };
         let mut seed = make_seed();
         seed.agy_detail = Some(req.clone());
@@ -8378,7 +8480,7 @@ mod tests {
             &retrying,
             &nav,
             &observations,
-            !board.phase.retains_agy_detail(),
+            AgyDetailFrame::Rejected,
             changed,
         );
         assert!(rejected.is_none());
@@ -8397,6 +8499,29 @@ mod tests {
             &mut pending,
         );
         assert!(pending.is_none());
+
+        board.agy_group_renewal = Some(req.clone());
+        let mut open = make_seed();
+        open.agy_detail_binding = Some(binding.clone());
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            false,
+            Some(open),
+            &mut pending,
+        );
+        assert!(board.agy_group_renewal.as_ref() == Some(&req));
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(
+            board.agy_group_renewal.is_none(),
+            "closed detail must stop renewal"
+        );
 
         // 3. Dropped on scope change.
         pending = Some(req);
