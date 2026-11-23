@@ -282,7 +282,7 @@ validator reports `ambiguous_routes`.
 Router nodes carry no work: their outgoing edges are evaluated by `when`
 predicates in priority order and the router's own outcome is `completed`.
 
-Fact predicate grammar (`predicates.py`): `key` (truthy), `!key` (falsy or
+Fact predicate grammar (`execution.rs`): `key` (truthy), `!key` (falsy or
 missing), `key=value`, `key!=value`. Keys match
 `^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,199}$`; values compare as strings, with
 booleans rendered `true`/`false`.
@@ -311,7 +311,7 @@ non-terminal node has no edge for `failed`/`unverified`), `dead_end`,
 
 ### Tool capabilities
 
-`capabilities.py` is the registry: a tool node that says `tool: <name>`
+`execution_validate.rs` holds the registry: a tool node that says `tool: <name>`
 carries no shell text, takes its `effect` from the registry (a conflicting
 declaration is `invalid_effect`), and runs the registry's exact argv.
 
@@ -337,7 +337,8 @@ reachable from that writer. `plan_task: next` on a write node is legal.
 
 `plan_task: "next"` is a *selector* — a rule for choosing a task — not a task.
 The runner resolves it to one concrete id before anything is scheduled, through
-`adapters.plan.peek_next_task` (`agent-plan next --json`, never `--claim`):
+a read-only `agent-plan next --json` request (never `--claim`; see
+[execution_runner.rs](../crates/oms-command-graph/src/execution_runner.rs)):
 the graph selects, `plan-run` claims. The concrete id is written onto the
 `node_started` row as `task_id`, together with `binding: <bind_task>` when
 the node declares one, and only then does `plan-run --id <id>` run. Because
@@ -530,35 +531,10 @@ views. The graph's events retain the execution record.
 
 ## Plan adapter
 
-`adapters/plan.py`:
-
-```python
-task_view(repo, task_id) -> dict                # agent-plan show --id
-peek_next_task(repo) -> dict | None             # agent-plan next --json (read-only; None = nothing actionable)
-scope_of(task_view) -> {"allowed": [...], "forbidden": [...]}
-outcome_from_task(node_spec, task_view, facts) -> (outcome, proof_missing)
-build_command(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, dry_run=False, context_pack="") -> List[str]
-execute(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, timeout=2700, dry_run=False, context_pack="") -> dict
-```
-
-The adapter accepts only a concrete node: a `plan_task` selector or a
-`plan_task_from` reference is refused, and `_plan_argv` refuses `--claim`
-outright. `execute` runs
-`plan-run --repo R --to P --id T [--land] [--repair N] [--context-pack FILE]`,
-then rereads the task. Outcome mapping:
-
-| mode | condition after `plan-run` | outcome |
-|---|---|---|
-| run | exit 0, state `review`, patch present | `completed` |
-| run / land | state `blocked` | `blocked` |
-| run / land | exit 3 (no actionable task) | `blocked` (reason `no-actionable-task`) |
-| land | exit 0, state `done`, `receipt.land.<task>.present` | `completed` |
-| land | exit 75 (landing lock held) | `partial` |
-| any | exit ≠ 0 otherwise | `failed` |
-| any | state `claimed`/`running` (process gone) | `unverified` |
-
-The adapter has, by construction, no code path to `agent-plan land`,
-`finish`, `claim`, or `review`; a regression test asserts the built argv.
+Native plan dispatch is part of the [graph command](../crates/oms-command-graph/README.md)
+and is exercised by the [host adapter fixtures](../crates/oms-command-graph/tests/host_adapter.rs).
+The retired Python `adapters/plan.py` signatures and outcome table remain in the
+[archived guide at 20b775f6](https://github.com/eightmm/oh-my-setting/blob/20b775f6/docs/GRAPH-ENGINEERING.md#plan-adapter).
 
 ## Scheduler
 
@@ -607,7 +583,7 @@ Tool nodes see the run in their environment: `OMS_GRAPH_RUN_ID`,
 `patch-land` applies a reviewed patch and never commits, and it refuses to
 land onto a dirty tree, so a multi-task run needs a commit between landings.
 `oms graph exec commit --binding NAME [--run ID]` is the narrowest step that
-provides one (`oms_graph/commit.py`): the bound task must be `done` with a
+provides one (`execution_commit.rs`): the bound task must be `done` with a
 landing receipt (both read through the adapter's read verbs), the paths are
 taken from the task's stored patch headers, the tree may hold no other
 change (strangers are refused, never swept), and the commit is made with
@@ -651,7 +627,7 @@ Execution node cache (limited): only `tool` nodes with `effect: read` and
 `cacheable: true`. Key v2 = `sha256(EXEC_SCHEMA, normalized node (command
 included), git.head, workspace fingerprint, upstream finished outcomes)`,
 stored under `.oms/graph/cache/<key>.json`. The workspace fingerprint
-(`oms_graph/workspace.py`) covers what HEAD cannot: tracked modified paths,
+(`execution_workspace.rs`) covers what HEAD cannot: tracked modified paths,
 staged blobs (`git diff-index --cached`), and untracked non-ignored paths,
 each with a content digest; `.oms/` and `.git/` are excluded (the run's own
 event appends must not invalidate the cache). It fails closed — a symlink,
@@ -811,9 +787,9 @@ brings them back, while `blast` and `context` always keep them; `neighbors(id, r
 and 160 slim edges by default, with `limits`, `truncated`, and omitted-edge
 metadata instead of a broken partial JSON value; `map_summary()` returns counts by
 kind and language, top hubs, and module groups. Analytics
-(`analytics.py`) are stdlib: evidence degrees and structural assurance.
+(`project_analytics.rs`) are native: evidence degrees and structural assurance.
 
-Ranked search (`ranked.py`): `oms graph project search --ranked "WORDS"`
+Ranked search (`project_index.rs`): `oms graph project search --ranked "WORDS"`
 reads the query as words, not a literal, and ranks the blocks about them.
 Each indexed line belongs to its innermost symbol, or to its file when none
 encloses it; that block is one document, scored with BM25 (k1 1.2, b 0.75)
@@ -825,7 +801,7 @@ secret-shaped previews are handled as in `search`. It is not wired into
 `context` ranking; use the recall benchmark's `--snapshot`/`--compare`
 before making it a default.
 
-Symbol view (`symbol.py`): `oms graph project symbol NAME [--limit 1..500]
+Symbol view (`project_index.rs`): `oms graph project symbol NAME [--limit 1..500]
 [--json]` answers "where is it and who uses it" in one read and keeps three
 zones apart. `extracted` holds the definitions (path, line, signature) plus
 the callers and tests whose edges a parser read from source; `inferred` holds
@@ -840,7 +816,7 @@ skipped files. Each zone is cut to `--limit` with the cut counted in
 run it, and MCP exposes it as `oms_project_graph_symbol`. An empty zone is
 not proof that code is unused.
 
-Blast radius (`blast.py`): `changed_paths(repo, base)` compares the working
+Blast radius (`project_affected.rs`): `changed_paths(repo, base)` compares the working
 tree with `merge-base(base, HEAD)` plus untracked files. Without a base it
 compares with `HEAD`, or combines staged and unstaged paths before the first
 commit. `blast_radius(graph, paths, depth,
@@ -853,7 +829,7 @@ explicit depth is diagnostic-only for selection: if it truncates, the plan is
 `mode: full`, never a silently incomplete affected set. Selection follows only
 `EXTRACTED` edges; `INFERRED`/`AMBIGUOUS` frontier counts are diagnostic. A
 consumer reached only through a variable-prefixed call, such as
-`python3 "$ROOT/scripts/lib/work_discovery.py"`, is an `INFERRED` edge and is
+`bash "$ROOT/scripts/lib/platform.sh"`, is an `INFERRED` edge and is
 not selected, and neither are tests that reach it the same way. A file reached
 both at top level and inside a test function runs only that case, though a
 shell suite's top-level statements still run under `--only`; only assertions
@@ -872,7 +848,7 @@ deletions and renames remain conservative; a `.txt` suffix is not proof of prose
 Each non-document changed path needs its own extracted route to a selected
 test; one covered file does not hide another changed file's missing evidence.
 
-Co-change coupling (`history.py`): `oms graph project coupling` reads the last
+Co-change coupling (`project_history.rs`): `oms graph project coupling` reads the last
 N commits (`--commits`, default 500, `--no-merges`, commits touching more than
 `--max-changeset` 50 files skipped as bulk moves and counted) and scores every
 pair of tracked paths by Code Maat's temporal-coupling measure,
@@ -897,7 +873,7 @@ cut no lower-ranked file takes the leftover bytes. `--entry-path` anchors it
 to exact files, `--max-files` bounds the ranking, and `--task`/`--entry-path`
 without `--signatures` are refused. It is deterministic and makes no model call.
 
-Impact brief (`impact.py`): `oms graph project impact --base REF [--head REF]`
+Impact brief (`project_affected.rs`): `oms graph project impact --base REF [--head REF]`
 joins what a reviewer or worker brief needs for one range: the `affected`
 plan (mode, reasons, tests, cases, documentation paths), the files that depend
 on the changed ones through EXTRACTED edges (`--depth`, default 3; changed
@@ -912,7 +888,7 @@ Every list is cut to `--limit` (default 20, 1–500) with the cut counted in
 `omitted`. The brief is labelled orientation: it says where to look and is
 never evidence that a change is safe, tested or approved.
 
-Unreferenced symbols (`unreferenced.py`): `oms graph project unreferenced
+Unreferenced symbols (`project_index.rs`): `oms graph project unreferenced
 [--limit N] [--include-tests] [--json]` lists function, method and class nodes
 whose only incoming edges are `contains`. `main` and dunder methods are skipped
 and tests are hidden by default. Rows are review candidates, not dead code: a
@@ -920,7 +896,7 @@ dynamic call, decorator, entrypoint table, framework hook or unparsed file
 leaves no edge, and the output says so. It reads the graph only and may run in a
 harness child.
 
-Context pack (`context.py`): lexical query → path-deduplicated entry nodes →
+Context pack (`project_context.rs`): lexical query → path-deduplicated entry nodes →
 EXTRACTED/INFERRED neighborhood (depth 2; AMBIGUOUS omitted) → confidence-
 and-distance-ranked files, tests, selectable test cases, capped blast view,
 hubs, canonical structural assurance, graph revision, and parser coverage,
@@ -935,7 +911,7 @@ edges never become impact proof. `--bundle` compiles the selected files through
 `oms_runtime.context.plan_context(explicit=...)` so the existing bounded
 bundle format is reused, not duplicated.
 
-Interactive view (`render.py`): Project Graph views select a deterministic
+Interactive view (`project_visual.rs`): Project Graph views select a deterministic
 hub neighborhood or the production entries/files in a context pack, then cap
 the payload at 200 nodes and 1 MiB. Schema 3 hides test files, cases, and their
 symbols from the normal topology while retaining their edges as assurance

@@ -57,6 +57,10 @@ pub(crate) struct ClaudeResponse {
     pub(crate) id: String,
     pub(crate) at: String,
     pub(crate) usage: [u64; 4],
+    /// `message.model` all of this spawn's own replies agree on; `None` when
+    /// they differ, one lacks a usable model, or there is no reply. Never a
+    /// requested, lead or inherited model.
+    pub(crate) observed_model: Option<String>,
 }
 
 pub(crate) const USAGE_KEYS: [&str; 4] = [
@@ -830,6 +834,12 @@ mod linux {
         Some((id, stamp(entry).map(|(raw, _)| (counts, raw))))
     }
 
+    /// One assistant row's `message.model` when the shared validator accepts it.
+    fn model_of(entry: &Value) -> Option<String> {
+        let model = entry["message"]["model"].as_str()?;
+        crate::native_children::observed_model(model).map(str::to_owned)
+    }
+
     /// Rows of one `message.id` seen within the segment.
     struct Group {
         last: usize,
@@ -843,7 +853,11 @@ mod linux {
     /// timed by its last row. Only the response of the newest assistant row
     /// counts: a bad id, clock or counter there, or differing counters under
     /// its id, leave it unknown rather than letting an older response pose as latest.
-    fn latest(groups: BTreeMap<String, Group>, newest: Option<usize>) -> Option<ClaudeResponse> {
+    fn latest(
+        groups: BTreeMap<String, Group>,
+        newest: Option<usize>,
+        observed_model: Option<String>,
+    ) -> Option<ClaudeResponse> {
         let (id, group) = groups
             .into_iter()
             .find(|(_, group)| Some(group.last) == newest)?;
@@ -851,6 +865,7 @@ mod linux {
             id,
             at: group.at,
             usage: group.usage?,
+            observed_model,
         })
     }
 
@@ -869,6 +884,8 @@ mod linux {
         let mut history = Vec::new();
         let mut groups = BTreeMap::<String, Group>::new();
         let mut newest = None;
+        // `Some(None)` once any reply lacks a model or two disagree.
+        let mut model: Option<Option<String>> = None;
         for (position, entry) in records(body, recent, "child-partial")?
             .into_iter()
             .enumerate()
@@ -908,6 +925,12 @@ mod linux {
                 continue;
             }
             newest = Some(position);
+            let seen = model_of(&entry);
+            model = Some(match (model.take(), seen) {
+                (None, seen) => seen,
+                (Some(Some(prior)), Some(seen)) if prior == seen => Some(prior),
+                _ => None,
+            });
             if let Some((id, row)) = claim(&entry) {
                 let group = groups.entry(id.to_owned()).or_insert(Group {
                     last: position,
@@ -938,7 +961,10 @@ mod linux {
             }
         }
         gate(matched, "no-boundary")?;
-        Ok((history.join("\n\n"), latest(groups, newest)))
+        Ok((
+            history.join("\n\n"),
+            latest(groups, newest, model.flatten()),
+        ))
     }
 }
 
@@ -2208,6 +2234,80 @@ mod tests {
         let locator = fixture.locator(AGENT);
         let shown = fixture.chat(&locator).unwrap();
         assert!(shown.contains("[oms-redacted:github-token]") && !shown.contains(&sample));
+    }
+
+    #[test]
+    fn observed_model_is_the_childs_own_agreed_reply_model_or_omitted() {
+        const AT: &str = "2026-11-22T01:01:00.000Z";
+        let mut fixture = Fixture::new("model");
+        let locator = fixture.locator(AGENT);
+        let seen = |f: &Fixture| {
+            let (_, children) = current(&f.lead(), &f.repo, USAGE_TAILS, || {}).unwrap();
+            let child = children.into_iter().find(|c| c.locator == locator).unwrap();
+            child.usage.unwrap().response.and_then(|r| r.observed_model)
+        };
+        let modeled = |row: &Value, model: Value| {
+            let mut row = row.clone();
+            row["message"]["model"] = model;
+            row
+        };
+        let (first, second) = (fixture.child[1].clone(), fixture.child[3].clone());
+        let billed_as = |row: &Value, id: &str| billed(row.clone(), id, AT, [1, 1, 1, 1]);
+        // No model on the replies: nothing is guessed from the lead or the request.
+        fixture.child[1] = billed_as(&first, "msg_a");
+        fixture.child[3] = billed_as(&second, "msg_b");
+        fixture.lead[5] = modeled(&fixture.lead[5], json!("lead-model"));
+        fixture.save();
+        assert_eq!(seen(&fixture), None);
+        // Both own replies agree.
+        fixture.child[1] = modeled(&billed_as(&first, "msg_a"), json!("claude-x"));
+        fixture.child[3] = modeled(&billed_as(&second, "msg_b"), json!("claude-x"));
+        fixture.save();
+        assert_eq!(seen(&fixture).as_deref(), Some("claude-x"));
+        // Disagreement, a reply without a model, or a placeholder omits it.
+        for bad in [
+            json!("claude-y"),
+            Value::Null,
+            json!(""),
+            json!(7),
+            json!("<synthetic>"),
+        ] {
+            fixture.child[3] = modeled(&billed_as(&second, "msg_b"), bad);
+            fixture.save();
+            assert_eq!(seen(&fixture), None);
+        }
+        // A model only before the spawn prompt is stale.
+        fixture.child[1] = billed_as(&first, "msg_a");
+        fixture.child[3] = billed_as(&second, "msg_b");
+        let stale = modeled(&billed_as(&second, "msg_z"), json!("old-model"));
+        fixture.child.insert(0, stale);
+        fixture.save();
+        assert_eq!(seen(&fixture), None);
+        // Values the shared validator rejects are omitted, never trimmed, capped or redacted;
+        // the reply's usage stays published.
+        fixture.child.remove(0);
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        for bad in [
+            "m".repeat(81),
+            " claude-x".to_owned(),
+            "claude\u{1b}[31mx".to_owned(),
+            "claude\nx".to_owned(),
+            format!("claude-{leaked}"),
+        ] {
+            fixture.child[1] = modeled(&billed_as(&first, "msg_a"), json!(bad));
+            fixture.child[3] = modeled(&billed_as(&second, "msg_b"), json!(bad));
+            fixture.save();
+            assert_eq!(seen(&fixture), None, "{bad:?}");
+            let (_, children) =
+                current(&fixture.lead(), &fixture.repo, USAGE_TAILS, || {}).unwrap();
+            let child = children.into_iter().find(|c| c.locator == locator).unwrap();
+            assert!(child.usage.unwrap().response.is_some(), "{bad:?}");
+        }
+        let exact = json!("m".repeat(80));
+        fixture.child[1] = modeled(&billed_as(&first, "msg_a"), exact.clone());
+        fixture.child[3] = modeled(&billed_as(&second, "msg_b"), exact);
+        fixture.save();
+        assert_eq!(seen(&fixture).map(|m| m.len()), Some(80));
     }
 
     #[test]

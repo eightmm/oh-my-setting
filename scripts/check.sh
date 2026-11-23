@@ -5,7 +5,7 @@ umask 022
 
 # Repository verification gate: shellcheck lint, skill manifest validation,
 # markdown reference checks, Rust migration inventory/tests, and pure-Bash E2E
-# smoke suites. Pure Bash + Rust only (no Python required).
+# smoke suites. Pure Bash + Rust only.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
@@ -138,7 +138,7 @@ policy, skill manifest, doc references) then focused smoke suites and Rust tests
   --quick               Run changed-file checks plus invariants.
   --affected            Plan and verify affected scope (--changed-from/--changed-to).
   --print-affected-mode Print affected or full after planning and exit.
-  --ci-output FILE      Append mode, native, python, operator, and docs_only to FILE.
+  --ci-output FILE      Append mode, native and docs_only to FILE.
   --ci-parity           Affected gate with provider CLIs hidden from PATH.
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
@@ -484,7 +484,7 @@ if [ "$RUN_AFFECTED" = 1 ]; then
   if [ -n "$CI_OUTPUT" ]; then
     docs_only=false
     if [ "$RUN_DOCS" = 1 ]; then docs_only=true; fi
-    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' \
+    printf 'mode=%s\nnative=%s\ndocs_only=%s\n' \
       "$AFFECTED_MODE" "$AFFECTED_NATIVE" "$docs_only" >> "$CI_OUTPUT"
     [ "$PRINT_AFFECTED_MODE" = 1 ] && { verify_oms_state; exit 0; }
     [ "$AFFECTED_MODE" != full ] || { verify_oms_state; exit 0; }

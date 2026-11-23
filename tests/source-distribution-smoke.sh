@@ -69,7 +69,7 @@ EOF
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
   expected_ci_record() {
-    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' "$1" "$2" "$3"
+    printf 'mode=%s\nnative=%s\ndocs_only=%s\n' "$1" "$2" "$3"
   }
   oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/README.md"
@@ -403,6 +403,12 @@ check_affected_planning
 # 1. Zero retired .py files in scripts/, tests/, docs/
 leftover_py="$(git -C "$ROOT" ls-files -- 'scripts/*.py' 'scripts/**/*.py' 'tests/*.py' 'tests/**/*.py' 'docs/*.py' 'docs/**/*.py')"
 [ -z "$leftover_py" ] || fail "retired Python sources remain tracked: $leftover_py"
+# No OMS test or script runs the retired interpreter itself. The name is split so
+# this check does not count as a reference to it.
+retired='pyth''on'
+interp_use="$(git -C "$ROOT" grep -n -E "#!/usr/bin/(env )?$retired|Command::new\\(\"(/usr/bin/)?${retired}3?\"\\)" -- \
+  'crates/*.rs' 'crates/**/*.rs' 'scripts/*.sh' 'scripts/**/*.sh' 'tests/*.sh' 'tests/**/*.sh' || true)"
+[ -z "$interp_use" ] || fail "OMS sources run the retired interpreter: $interp_use"
 
 # 2. Shared namespace prefix and Korean coding-instructions invariants
 for surface in custom-skills templates/project-skills; do

@@ -60,7 +60,7 @@ const REQUESTED_PROVIDER_MODEL: &str = "@oms_provider_requested_model";
 const ALTERNATE_LEAD_TAG: &str = "codex-alternate";
 const ALTERNATE_TASK_INPUT_FORMAT: &str = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}\t.\t#{window_active}\t#{pane_in_mode}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_command}\t.";
 const CODEX_VISIBLE_PASTE_CHARS: usize = 1000;
-const ALTERNATE_STARTUP_PROMPT: &str = "Coordinate under Overall Main. Use oms list and oms agent-role show --name ROLE. Delegate substantive work to native children. Make only necessary integration or unblocking edits yourself. Give each child a role, disjoint scope and checks. Research, review and verification use native read-only controls when available. Builders edit assigned paths. Children may not delegate, commit, push, land, install or publish. Leave parent-only actions to Main. Verify and report evidence, blockers and unverified child access.";
+const ALTERNATE_STARTUP_PROMPT: &str = "oms list; oms agent-role show --name ROLE. Delegate substantive work to native children. Make only necessary integration or unblocking edits yourself. Role/disjoint scope/checks; native read-only research/review/verify if available; builders edit assigned paths. No child delegate/commit/push/land/install/publish; parent to Main. Simple bounded: cheaper supported native model, escalate on scope/risk, keep user choice/account/isolation/spend. Verify; report evidence/blockers/unverified access/actual model/unknown.";
 const PROVIDER_SPAWN_FORMAT: &str = "#{pane_id}\t#{pane_pid}";
 const ALTERNATE_SPAWN_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}";
 const ALTERNATE_PANE_FORMAT: &str =
@@ -142,6 +142,47 @@ struct Pane {
     id: String,
     pid: u32,
     active: bool,
+}
+
+const NATIVE_DOCK_ROWS: &str = "@oms_panel_native_dock_rows";
+const NATIVE_DOCK_GEOMETRY: &str = concat!(
+    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t",
+    "#{window_zoomed_flag}\t#{window_panes}\t#{window_width}\t#{window_height}\t",
+    "#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{@oms_panel_main_attempt}\t.",
+);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct NativeDockGeometry {
+    window_size: (usize, usize),
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Geometry observed in one census of the managed Main window.
+#[derive(PartialEq, Eq)]
+struct NativeDockWindow {
+    board: NativeDockGeometry,
+    main: NativeDockGeometry,
+    dock: Option<NativeDockGeometry>,
+}
+
+impl NativeDockWindow {
+    fn collapse(&self) -> Option<NativeDockWindow> {
+        let dock = self.dock?;
+        (dock.left == self.board.left
+            && dock.width == self.board.width
+            && dock.top == self.board.top + self.board.height + 1)
+            .then(|| Self {
+                board: NativeDockGeometry {
+                    height: self.board.height + dock.height + 1,
+                    ..self.board
+                },
+                main: self.main,
+                dock: None,
+            })
+    }
 }
 
 pub struct Panel<'a> {
@@ -2361,9 +2402,14 @@ impl<'a> Panel<'a> {
         crate::parent_only()?;
         let store = Store::open(self.repo)?;
         let tx = store.transaction("panel-provider-sessions", Duration::from_secs(3))?;
-        let fresh = Self::load(self.repo, self.room, self.services, self.stop)?;
+        let fresh = self.reload()?;
         require(
-            self.main == fresh.main && self.leads == fresh.leads,
+            self.main == fresh.main
+                && self.leads == fresh.leads
+                && self.session_proof == fresh.session_proof
+                && self.attempt == fresh.attempt
+                && self.participant == fresh.participant
+                && self.owner == fresh.owner,
             "provider panes changed; select the provider again",
         )?;
         fresh.require_board(owner)?;
@@ -2376,45 +2422,38 @@ impl<'a> Panel<'a> {
                     .ok_or_else(|| Error::new("provider session is unavailable"))
             })
             .transpose()?;
-        let board_panes = self.tmux(&[
-            "display-message",
-            "-p",
-            "-t",
-            &self.caller,
-            "#{window_panes}",
-        ])?;
-        require(
-            board_panes == if current.is_some() { "3" } else { "2" },
-            "native chat needs the managed board and Main layout",
-        )?;
-        let size = if let Some(lead) = lead {
-            require(
-                self.tmux(&["display-message", "-p", "-t", &lead.id, "#{window_panes}"])? == "1",
-                "provider window has additional panes",
-            )?;
-            let geometry = self.tmux(&[
-                "display-message",
-                "-p",
-                "-t",
-                &self.caller,
-                "#{window_width}\t#{window_height}\t#{pane_height}\t#{window_zoomed_flag}",
-            ])?;
-            let cells = |value: &str| value.parse::<u16>().map(usize::from).map_err(Error::new);
-            let parts: Vec<_> = geometry.split('\t').collect();
-            let [width, height, board_height, "0"] = parts.as_slice() else {
-                return Err(Error::new("native chat needs an unzoomed Main window"));
-            };
-            let rows = if let Some(current) = current {
-                let pane = &self.leads[current];
-                cells(&self.tmux(&["display-message", "-p", "-t", &pane.id, "#{pane_height}"])?)?
+        if current.is_none() && lead.is_none() {
+            return Ok(None);
+        }
+        let remembered = if current.is_none() {
+            self.tmux(&["show-options", "-pqv", "-t", &self.caller, NATIVE_DOCK_ROWS])
+                .ok()
+        } else {
+            None
+        };
+        let current_pane = current.map(|provider| &self.leads[provider]);
+        let window = self.native_dock_window(current_pane, lead)?;
+        let collapsed = window.collapse();
+        let size = if lead.is_some() {
+            let (destination, rows) = if let Some(dock) = window.dock {
+                let collapsed = collapsed.as_ref().ok_or_else(|| {
+                    Error::new("native chat needs a dock immediately below the managed board")
+                })?;
+                (collapsed, dock.height)
             } else {
-                preferred_rows
+                let scope = self.native_dock_preference_scope(&window);
+                let rows = remembered
+                    .as_deref()
+                    .and_then(|value| value.strip_prefix(&scope)?.parse::<u16>().ok())
+                    .filter(|&rows| rows != 0)
+                    .map_or(preferred_rows, usize::from);
+                (&window, rows)
             };
             Some(
                 crate::layout::dock_join_rows(
-                    cells(width)?,
-                    cells(height)?,
-                    cells(board_height)?,
+                    destination.board.window_size.0,
+                    destination.board.window_size.1,
+                    destination.board.height,
                     rows,
                 )
                 .ok_or_else(|| Error::new("make the panel larger to dock native chat"))?
@@ -2423,8 +2462,7 @@ impl<'a> Panel<'a> {
         } else {
             None
         };
-        if let Some(current) = current {
-            let pane = &self.leads[current];
+        if let Some((current, pane)) = current.zip(current_pane) {
             tx.check()?;
             self.tmux(&[
                 "break-pane",
@@ -2433,11 +2471,40 @@ impl<'a> Panel<'a> {
                 &pane.id,
                 "-n",
                 &format!("{} Orchestrator", provider_name(current)),
+                ";",
+                "set-option",
+                "-pqu",
+                "-t",
+                &self.caller,
+                NATIVE_DOCK_ROWS,
             ])?;
             self.tag_provider(&pane.id, current, "-w")?;
+            if next.is_none()
+                && let (Some(expected), Some(dock)) = (&collapsed, window.dock)
+                && self
+                    .native_dock_window(None, None)
+                    .is_ok_and(|actual| actual == *expected)
+            {
+                let scope = self.native_dock_preference_scope(expected);
+                let rows = dock.height;
+                self.tmux(&[
+                    "set-option",
+                    "-p",
+                    "-t",
+                    &self.caller,
+                    NATIVE_DOCK_ROWS,
+                    &format!("{scope}{rows}"),
+                ])?;
+            }
         }
         if let (Some(provider), Some(lead), Some(size)) = (next, lead, size) {
             tx.check()?;
+            if let Some(expected) = &collapsed {
+                require(
+                    self.native_dock_window(None, Some(lead))? == *expected,
+                    "native chat pane layout changed; select the provider again",
+                )?;
+            }
             self.tag_provider(&lead.id, provider, "-p")?;
             self.tmux(&[
                 "join-pane",
@@ -2449,12 +2516,157 @@ impl<'a> Panel<'a> {
                 &lead.id,
                 "-t",
                 &self.caller,
+                ";",
+                "set-option",
+                "-pqu",
+                "-t",
+                &self.caller,
+                NATIVE_DOCK_ROWS,
             ])?;
             self.tmux(&["select-pane", "-t", &lead.id])?;
         }
         Ok(PROVIDERS
             .into_iter()
             .find(|provider| Some(*provider) == next))
+    }
+
+    fn native_dock_preference_scope(&self, window: &NativeDockWindow) -> String {
+        let (width, height) = window.board.window_size;
+        let (board, main) = (&window.board, &window.main);
+        format!(
+            "{}:{}:{}:{width}x{height}:{}x{}+{}+{}:{}x{}+{}+{}:",
+            self.session,
+            self.main.window,
+            self.attempt,
+            board.width,
+            board.height,
+            board.left,
+            board.top,
+            main.width,
+            main.height,
+            main.left,
+            main.top,
+        )
+    }
+
+    fn native_dock_window(
+        &self,
+        current: Option<&Pane>,
+        incoming: Option<&Pane>,
+    ) -> Result<NativeDockWindow> {
+        let mut args = vec!["list-panes", "-t", &self.caller, "-F", NATIVE_DOCK_GEOMETRY];
+        if let Some(pane) = incoming {
+            args.extend([
+                ";",
+                "display-message",
+                "-p",
+                "-t",
+                &pane.id,
+                NATIVE_DOCK_GEOMETRY,
+            ]);
+        }
+        let sample = self.tmux(&args)?;
+        let count = 2 + usize::from(current.is_some());
+        let mut rows: Vec<_> = sample.lines().collect();
+        require(
+            rows.len() == count + usize::from(incoming.is_some()),
+            "native chat needs the managed Board and Main layout",
+        )?;
+        if let Some(pane) = incoming {
+            let sample = rows
+                .pop()
+                .ok_or_else(|| Error::new("native chat target is unavailable"))?;
+            self.native_dock_geometry(sample, &pane.id, &pane.window, pane.pid, "1", None)?;
+        }
+        let count = count.to_string();
+        let read = |id: &str, pid, attempt| {
+            let mut matching = rows.iter().filter(|row| row.split('\t').nth(2) == Some(id));
+            let row = matching
+                .next()
+                .ok_or_else(|| Error::new("native chat pane is unavailable"))?;
+            require(
+                matching.next().is_none(),
+                "native chat pane layout is ambiguous",
+            )?;
+            self.native_dock_geometry(row, id, &self.main.window, pid, &count, attempt)
+        };
+        let (board, main, dock) = (
+            read(
+                &self.caller,
+                std::process::id(),
+                Some(self.attempt.as_str()),
+            )?,
+            read(&self.main.id, self.main.pid, Some(self.attempt.as_str()))?,
+            current
+                .map(|pane| read(&pane.id, pane.pid, None))
+                .transpose()?,
+        );
+        require(
+            board.window_size == main.window_size
+                && dock.is_none_or(|dock| dock.window_size == board.window_size),
+            "native chat pane layout changed; select the provider again",
+        )?;
+        Ok(NativeDockWindow { board, main, dock })
+    }
+
+    fn native_dock_geometry(
+        &self,
+        sample: &str,
+        pane: &str,
+        window: &str,
+        pid: u32,
+        panes: &str,
+        attempt: Option<&str>,
+    ) -> Result<NativeDockGeometry> {
+        let fields: Vec<_> = sample.split('\t').collect();
+        let [
+            s,
+            w,
+            p,
+            process,
+            "0",
+            "0",
+            count,
+            window_width,
+            window_height,
+            left,
+            top,
+            width,
+            height,
+            observed_attempt,
+            ".",
+        ] = fields.as_slice()
+        else {
+            return Err(Error::new(
+                "native chat needs an unzoomed managed pane layout",
+            ));
+        };
+        require(
+            *s == self.session
+                && *w == window
+                && *p == pane
+                && process.parse() == Ok(pid)
+                && *count == panes
+                && attempt.is_none_or(|attempt| *observed_attempt == attempt),
+            "native chat pane layout changed; select the provider again",
+        )?;
+        let cell = |value: &str| value.parse::<u16>().map(usize::from).map_err(Error::new);
+        let (window_width, window_height) = (cell(window_width)?, cell(window_height)?);
+        let (left, top, width, height) = (cell(left)?, cell(top)?, cell(width)?, cell(height)?);
+        require(
+            width != 0
+                && height != 0
+                && left + width <= window_width
+                && top + height <= window_height,
+            "native chat pane geometry is invalid",
+        )?;
+        Ok(NativeDockGeometry {
+            window_size: (window_width, window_height),
+            left,
+            top,
+            width,
+            height,
+        })
     }
 
     fn tag_provider(&self, id: &str, provider: &str, scope: &str) -> Result<()> {
@@ -3694,10 +3906,14 @@ impl CodexComposer {
 
     fn input(&self) -> Option<(&str, &str)> {
         let (area, _) = codex_chrome(&self.screen, CodexChromeUse::Composer)?;
+        Self::input_in(area, self.cursor_y)
+    }
+
+    fn input_in(area: &str, cursor_y: usize) -> Option<(&str, &str)> {
         let mut lines = area.split_inclusive('\n');
         let mut offset = 0;
         let mut marker = None;
-        for _ in 0..=self.cursor_y {
+        for _ in 0..=cursor_y {
             let line = lines.next()?;
             let plain = CHAT_SGR.replace_all(line, "");
             if plain.starts_with("› ") || plain.trim_end_matches('\n') == "›" {
@@ -3760,9 +3976,11 @@ impl CodexComposer {
         if self.busy() {
             return false;
         }
-        let Some((_, input)) = self.input() else {
-            return false;
-        };
+        self.input()
+            .is_some_and(|(_, input)| Self::draft_text_matches(input, expected, self.cursor_x))
+    }
+
+    fn draft_text_matches(input: &str, expected: &str, cursor_x: u32) -> bool {
         let plain = CHAT_SGR.replace_all(input, "");
         let Some(visible) = plain.strip_prefix("› ") else {
             return false;
@@ -3781,7 +3999,7 @@ impl CodexComposer {
             remaining = rest;
             cursor_line = line;
         }
-        remaining.is_empty() && self.cursor_x as usize == crate::render::width(cursor_line) + 2
+        remaining.is_empty() && cursor_x as usize == crate::render::width(cursor_line) + 2
     }
 
     fn acknowledged(&self, turn: &str) -> bool {
@@ -3808,6 +4026,130 @@ impl CodexComposer {
             matched
         })
     }
+}
+
+const ORDINARY_CODEX_DRAFT_FORMAT: &str = concat!(
+    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t",
+    "#{pane_in_mode}\t#{pane_active}\t#{window_active}\t#{cursor_x}\t#{cursor_y}\t",
+    "#{pane_width}\t#{pane_height}\t#{pane_current_command}\t.",
+);
+
+#[derive(PartialEq, Eq)]
+enum OrdinaryCodexDraft {
+    Exact(String),
+    Opaque(String),
+}
+
+fn ordinary_codex_draft(
+    tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
+    pane: &str,
+    expected: &str,
+) -> Option<OrdinaryCodexDraft> {
+    let frame = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        pane,
+        ORDINARY_CODEX_DRAFT_FORMAT,
+        ";",
+        "capture-pane",
+        "-p",
+        "-e",
+        "-J",
+        "-S",
+        "0",
+        "-t",
+        pane,
+    ])
+    .ok()?;
+    if frame.len() > MAX_CODEX_CAPTURE_BYTES || expected.is_empty() {
+        return None;
+    }
+    let (identity, screen) = frame.split_once('\n')?;
+    let fields: Vec<_> = identity.split('\t').collect();
+    let [
+        session,
+        win,
+        id,
+        pid,
+        "0",
+        "0",
+        active,
+        focused,
+        x,
+        y,
+        w,
+        h,
+        command,
+        ".",
+    ] = fields.as_slice()
+    else {
+        return None;
+    };
+    if *id != pane
+        || !commands::valid_target(session, '$')
+        || !commands::valid_target(win, '@')
+        || !pid.parse::<u32>().is_ok_and(|pid| pid > 0)
+        || !matches!((*active, *focused), ("0", "0" | "1") | ("1", "0"))
+        || command.is_empty()
+        || command.len() > 128
+        || command.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let (x, y, w, h) = (
+        x.parse().ok()?,
+        y.parse().ok()?,
+        w.parse().ok()?,
+        h.parse().ok()?,
+    );
+    if x >= w || y >= h {
+        return None;
+    }
+    let area = codex_chrome(screen, CodexChromeUse::Composer)
+        .map(|(area, _)| area)
+        .or_else(|| ordinary_status_only_area(screen, y, h))?;
+    let (above, input) = CodexComposer::input_in(area, y)?;
+    let plain = CHAT_SGR.replace_all(input, "");
+    if plain.lines().any(|line| {
+        line.trim().is_empty()
+            || line.chars().any(char::is_control)
+            || crate::render::width(line) > w as usize
+    }) {
+        return None;
+    }
+    let prompt = input.lines().next()?;
+    if oms_panel_core::tick::screen_input_empty(input).0
+        || crate::provider_activity::observe("codex", &format!("{above}{prompt}")).is_some()
+    {
+        return None;
+    }
+    if codex_opaque_paste_placeholder(input) {
+        return Some(OrdinaryCodexDraft::Opaque(frame));
+    }
+    CodexComposer::draft_text_matches(input, expected, x)
+        .then_some(OrdinaryCodexDraft::Exact(frame))
+}
+
+fn ordinary_status_only_area(screen: &str, cursor_y: usize, height: usize) -> Option<&str> {
+    // In this composer shape the last draft row, one blank row and one
+    // indented native status occupy the bottom three physical rows.
+    if cursor_y.checked_add(3)? != height || screen.lines().count() != height {
+        return None;
+    }
+    let (before_status, status) = screen.rsplit_once('\n')?;
+    let (input, blank) = before_status.rsplit_once('\n')?;
+    let status = CHAT_SGR.replace_all(status, "");
+    let blank = CHAT_SGR.replace_all(blank, "");
+    if status.len() > MAX_CODEX_CHROME_ROW_BYTES
+        || status.chars().any(char::is_control)
+        || !status.starts_with("  ")
+        || codex_footer_model(&status).is_none()
+        || !blank.bytes().all(|b| b == b' ')
+    {
+        return None;
+    }
+    Some(input)
 }
 
 struct AlternateTurn<'a> {
@@ -3940,6 +4282,35 @@ fn paste_and_submit(
                 "Enter was withheld after pasting. The draft may remain unsubmitted: {error}"
             ))
         })?;
+    } else if provider == "codex" && matches!(proof, Proof::Turn(_)) {
+        let mut previous = None;
+        let settled = pace.poll(PASTE_DEADLINE, || {
+            let draft = ordinary_codex_draft(tmux, pane, prompt);
+            let settled = draft.is_some() && draft == previous;
+            previous = draft;
+            settled
+        });
+        if !settled {
+            return Err(uncertain(
+                "task paste was not observed; Enter was not sent and a draft may remain — inspect the provider input before resending".into(),
+            ));
+        }
+        if matches!(previous, Some(OrdinaryCodexDraft::Opaque(_))) {
+            return Err(uncertain(
+                "Enter was withheld after pasting; Codex collapsed the draft into an opaque placeholder — inspect the provider input before resending".into(),
+            ));
+        }
+        fence().map_err(|error| {
+            uncertain(format!(
+                "pane changed after pasting; the task draft may remain unsubmitted: {error}"
+            ))
+        })?;
+        if ordinary_codex_draft(tmux, pane, prompt) != previous {
+            return Err(uncertain(
+                "Enter was withheld after pasting; the exact Codex draft changed before submission"
+                    .into(),
+            ));
+        }
     } else {
         let mut previous = None;
         let settled = pace.poll(PASTE_DEADLINE, || {
@@ -3961,16 +4332,6 @@ fn paste_and_submit(
             return Err(uncertain(
             "task paste was not observed; Enter was not sent and a draft may remain — inspect the provider input before resending".into(),
         ));
-        }
-        if provider == "codex"
-            && matches!(proof, Proof::Turn(_))
-            && previous
-                .as_deref()
-                .is_some_and(codex_opaque_paste_placeholder)
-        {
-            return Err(uncertain(
-                "Enter was withheld after pasting; Codex collapsed the draft into an opaque placeholder — inspect the provider input before resending".into(),
-            ));
         }
         fence().map_err(|error| {
             uncertain(format!(
@@ -4031,28 +4392,23 @@ fn codex_turn_shown(capture: &str, turn: &str) -> bool {
     if !rows.pop().is_some_and(|row| row.starts_with('›')) {
         return false;
     }
-    let mut message: Option<String> = None;
-    let mut found = false;
-    for row in rows.into_iter().chain([""]) {
-        let start = row.strip_prefix('›');
-        if start.is_some() || row.trim().is_empty() {
-            found |= message.take().is_some_and(|message| {
-                // Rewrapped rows carry indentation; compare word by word.
-                message
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains(turn)
-            });
-        }
-        if let Some(start) = start {
-            message = Some(start.into());
-        } else if let Some(message) = &mut message {
-            message.push(' ');
-            message.push_str(row);
-        }
-    }
-    found
+    let Some(turn_id) = turn.strip_prefix("Turn ") else {
+        return false;
+    };
+    let Some(user) = rows.iter().rposition(|row| row.starts_with("› ")) else {
+        return false;
+    };
+    let expected = format!("{turn_id}.");
+    let mut words = rows[user..]
+        .iter()
+        .take_while(|row| !row.trim().is_empty())
+        .flat_map(|row| row.split_whitespace());
+    let mut previous = words.next();
+    words.any(|word| {
+        let matched = previous == Some("Turn") && word == expected;
+        previous = Some(word);
+        matched
+    })
 }
 
 /// Captures the input from its native prompt row with that row, or None while
@@ -5085,6 +5441,14 @@ fn claude_sighting<P: PartialEq>(
             .filter(|row| row["participant"] == participant);
         if let (Some(usage), Some(row), None) = (&child.usage, painted.next(), painted.next()) {
             row["native_response_usage"] = claude_usage_field(usage);
+            if let Some(model) = usage
+                .response
+                .as_ref()
+                .and_then(|response| response.observed_model.as_deref())
+                .and_then(crate::native_children::observed_model)
+            {
+                row["observed_model"] = json!(model);
+            }
             // Only the proven spawn and delivered-notice clocks; never from `state`.
             for (key, at) in [
                 ("started_at", &usage.spawned_at),
@@ -5177,6 +5541,12 @@ fn agy_usage_sighting(
         if let (true, Some(row), None) =
             (painted.contains(&participant), named.next(), named.next())
         {
+            if let Some(model) = value["model"]
+                .as_str()
+                .and_then(crate::native_children::observed_model)
+            {
+                row["observed_model"] = json!(model);
+            }
             row["native_response_usage"] =
                 json!({"scope": "latest_child_response", "response": value});
         }
@@ -5591,7 +5961,7 @@ mod tests {
     const CODEX_DISPLAY_STATUS: &str = "\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts";
     const CODEX_EMPTY: &str =
         "\x1b[1m›\x1b[0m\x1b[48;5;235m \x1b[2mAsk Codex to do anything\x1b[0m\x1b[48;5;235m\n";
-    const CODEX_DRAFT: &str = "\x1b[1m›\x1b[0m Task from Overall Main. Work.\n";
+    const CODEX_DRAFT: &str = "\x1b[1m›\x1b[0m do the work\n";
     const CODEX_OPAQUE_PASTE: &str = "\x1b[1m›\x1b[0m [Pasted Content 1234 chars]\n";
     const TURN_ID: &str = concat!("abcde01234", "56789abcde");
     const OLD_TURN_ID: &str = concat!("0123456789", "fedcba9876");
@@ -5607,6 +5977,24 @@ mod tests {
         (deadline.as_millis() / POLL_STEP.as_millis()) as u32
     }
 
+    fn ordinary_frame(pane: &str, screen: &str, width: usize, x_offset: usize) -> String {
+        let plain = CHAT_SGR.replace_all(screen, "");
+        let lines: Vec<_> = plain.lines().collect();
+        let marker = lines
+            .iter()
+            .position(|line| line.starts_with('›'))
+            .unwrap_or(0);
+        let y = marker
+            + lines[marker..]
+                .iter()
+                .take_while(|row| !row.trim().is_empty())
+                .count()
+                .saturating_sub(1);
+        let x = crate::render::width(lines.get(y).unwrap_or(&"").trim_end()) + x_offset;
+        let h = lines.len();
+        format!("$1\t@1\t{pane}\t42\t0\t0\t1\t0\t{x}\t{y}\t{width}\t{h}\tcodex\t.\n{screen}")
+    }
+
     /// Scripted tmux: each cursor read advances to the next screen, repeating
     /// the last; each call costs `cost` on the shared fake clock.
     struct FakePane {
@@ -5614,6 +6002,8 @@ mod tests {
         reads: usize,
         fail_paste: bool,
         cursor_at_marker: bool,
+        draft_cursor_offset: usize,
+        draft_width: usize,
         history: String,
         prompt_row: Option<&'static str>,
         cost: Duration,
@@ -5631,6 +6021,8 @@ mod tests {
                 reads: 0,
                 fail_paste: false,
                 cursor_at_marker: false,
+                draft_cursor_offset: 0,
+                draft_width: 1600,
                 history: user_message(TURN_ID),
                 prompt_row: None,
                 cost: Duration::ZERO,
@@ -5649,6 +6041,14 @@ mod tests {
             let screen = &self.screens[self.reads.saturating_sub(1).min(self.screens.len() - 1)];
             let editable = screen.lines().next().unwrap_or_default();
             match args[0] {
+                "display-message" if args.get(4) == Some(&super::ORDINARY_CODEX_DRAFT_FORMAT) => {
+                    Ok(ordinary_frame(
+                        args[3],
+                        screen,
+                        self.draft_width,
+                        self.draft_cursor_offset,
+                    ))
+                }
                 "display-message" if self.cursor_at_marker || screen.contains("Ask Codex") => {
                     Ok("0|2|5".into())
                 }
@@ -5730,7 +6130,7 @@ mod tests {
 
     #[test]
     fn task_is_pasted_once_and_confirmed_by_its_wrapped_turn_row() {
-        let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
+        let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
         let (result, sleeps) = task(&mut fake);
         result.unwrap();
         assert_eq!(sleeps, 1);
@@ -5822,6 +6222,7 @@ mod tests {
                 id: "msg_1".into(),
                 at: "2026-11-22T01:00:00Z".into(),
                 usage,
+                observed_model: Some("claude-opus-5-5".into()),
             }),
             spawned_at: Some("2026-11-22T00:59:00Z".into()),
             delivered_at: None,
@@ -5849,6 +6250,24 @@ mod tests {
             "spawned_at": "2026-11-22T00:59:00Z", "delivered_at": null});
         assert_eq!(rows[1]["native_response_usage"], field);
         assert!(rows[0].get("native_response_usage").is_none());
+        // The exact reply model is its own row key, never inside the usage object.
+        assert_eq!(rows[1]["observed_model"], "claude-opus-5-5");
+        assert!(rows[0].get("observed_model").is_none());
+        assert!(field["response"].get("observed_model").is_none());
+        let mut unseen = read([1, 2, 3, 4]);
+        unseen.response.as_mut().unwrap().observed_model = None;
+        let no_model = Some((
+            turn.to_owned(),
+            vec![ClaudeChild {
+                usage: Some(unseen),
+                ..child(turn, "done")
+            }],
+        ));
+        let (rows_nm, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), no_model);
+        assert!(
+            rows_nm[1].get("observed_model").is_none()
+                && rows_nm[1].get("native_response_usage").is_some()
+        );
         // Row clocks come from the proven spawn and delivered notice, never the state.
         let clocks = |row: &serde_json::Value| {
             (row.get("started_at").cloned(), row.get("ended_at").cloned())
@@ -5860,9 +6279,10 @@ mod tests {
         let own = json!({"participant": bound[0].0, "state": "working"});
         let (rows, _) = claude_sighting(vec![own.clone()], &"pane", Some(&"pane"), single());
         assert!(rows.len() == 1 && rows[0]["native_response_usage"] == field);
-        // Two rows of one participant stay bound, but neither gets usage.
+        // Two rows of one participant stay bound, but neither gets usage or a model.
         let (rows, bound) = claude_sighting(vec![own.clone(); 2], &"pane", Some(&"pane"), single());
         assert!(rows == vec![own.clone(); 2] && bound.len() == 1);
+        assert!(rows.iter().all(|row| row.get("observed_model").is_none()));
         // Usage withheld (over the tail budget or unproven) leaves the field absent;
         // a total past u64 is unknown, the clocks stay.
         let with = |usage| {
@@ -5874,6 +6294,7 @@ mod tests {
         assert!(
             rows.len() == 2 && rows[1].get("native_response_usage").is_none() && bound.len() == 1
         );
+        assert!(rows[1].get("observed_model").is_none());
         assert_eq!(clocks(&rows[1]), (None, None));
         let clocked = |state, delivered: Option<&str>| {
             let mut usage = read([1, 2, 3, 4]);
@@ -5993,7 +6414,7 @@ mod tests {
     #[test]
     fn empty_codex_input_without_the_turn_row_is_unconfirmed() {
         for history in [user_message(OLD_TURN_ID), String::new()] {
-            let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
+            let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
             fake.history = history;
             let (result, sleeps) = task(&mut fake);
             assert_unconfirmed(&fake, result);
@@ -6003,7 +6424,7 @@ mod tests {
 
     #[test]
     fn turn_in_the_editable_prompt_row_is_not_a_submission() {
-        let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
+        let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
         fake.history = user_message(OLD_TURN_ID);
         fake.prompt_row = Some("› Task from Overall Main. Turn bfa1177f8c289615d17e. Task: x");
         let result = task(&mut fake).0;
@@ -6019,6 +6440,18 @@ mod tests {
         assert!(!codex_turn_shown(&format!("• Ran {turn}\n› Ask"), &turn));
         // A capture that no longer ends at the prompt row proves nothing.
         assert!(!codex_turn_shown(&user_message(TURN_ID), &turn));
+        assert!(!codex_turn_shown(
+            &format!("{}\n{CODEX_EMPTY}", user_message(&format!("{TURN_ID}0"))),
+            &turn
+        ));
+        assert!(!codex_turn_shown(
+            &format!(
+                "{}\n{}\n{CODEX_EMPTY}",
+                user_message(TURN_ID),
+                user_message(OLD_TURN_ID)
+            ),
+            &turn
+        ));
     }
 
     #[test]
@@ -6089,8 +6522,14 @@ mod tests {
             "\x1b[1m›\x1b[0m Task from Overall Main. [Pasted Content 1560 chars] {}\n",
             "x".repeat(1500)
         );
-        let mut fake = FakePane::new(&[&visible_long, &visible_long, CODEX_EMPTY]);
-        let (result, _) = submit(&mut fake, &"x".repeat(1560), Proof::Turn(TURN_ID), 2);
+        let mut fake = FakePane::new(&[&visible_long, &visible_long, &visible_long, CODEX_EMPTY]);
+        let intended = CHAT_SGR.replace_all(&visible_long, "");
+        let (result, _) = submit(
+            &mut fake,
+            intended.trim_start_matches("› ").trim_end(),
+            Proof::Turn(TURN_ID),
+            2,
+        );
         result.unwrap();
         assert_eq!(fake.enters(), 1);
     }
@@ -6101,9 +6540,9 @@ mod tests {
         fake.cost = Duration::from_millis(300);
         let error = task(&mut fake).0.unwrap_err();
         assert!(error.message.starts_with("task paste was not observed"));
-        // Three 0.9s checks span the 2s paste wait after set-buffer and paste.
-        assert_eq!(fake.reads, 3);
-        assert_eq!(fake.clock.get(), Duration::from_millis(3500));
+        // Six atomic 0.3s samples with 0.1s sleeps span the 2s paste wait.
+        assert_eq!(fake.reads, 6);
+        assert_eq!(fake.clock.get(), Duration::from_millis(2900));
 
         let mut fake = FakePane::new(&[CODEX_DRAFT]);
         fake.cost = Duration::from_millis(400);
@@ -6144,7 +6583,7 @@ mod tests {
 
     #[test]
     fn task_buffers_are_unique_and_keep_a_terminal_semicolon_literal() {
-        let mut fake = FakePane::new(&[CODEX_DRAFT, CODEX_DRAFT, CODEX_EMPTY]);
+        let mut fake = FakePane::new(&["› same;\n", "› same;\n", "› same;\n", CODEX_EMPTY]);
         submit(&mut fake, "same;", Proof::Turn(TURN_ID), 2)
             .0
             .unwrap();
@@ -6318,6 +6757,69 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn native_child_model_cost_prompt_contract_preserves_codex_capacity() {
+        let forbidden_aliases = [
+            "haiku", "sonnet", "opus", "flash", "mini", "gpt-", "gemini-", "claude-", "o3", "o4",
+        ];
+        for (name, prompt) in [
+            ("STARTUP_PROMPT", STARTUP_PROMPT.trim()),
+            ("ALTERNATE_STARTUP_PROMPT", super::ALTERNATE_STARTUP_PROMPT),
+        ] {
+            let lower = prompt.to_ascii_lowercase();
+            for required in [
+                "cheaper supported native model",
+                "simple bounded",
+                "escalate",
+                "scope",
+                "risk",
+                "user",
+                "choice",
+                "account",
+                "isolation",
+                "spend",
+                "report",
+                "actual",
+                "model",
+                "unknown",
+            ] {
+                assert!(
+                    lower.contains(required),
+                    "{name} missing required model-cost policy phrase {required:?}: {prompt}"
+                );
+            }
+            for alias in forbidden_aliases {
+                assert!(
+                    !lower.contains(alias),
+                    "{name} must not hardcode unauthenticated model alias {alias:?}: {prompt}"
+                );
+            }
+        }
+
+        assert!(
+            super::ALTERNATE_STARTUP_PROMPT.chars().count() <= 517,
+            "ALTERNATE_STARTUP_PROMPT grew past 517 chars ({})",
+            super::ALTERNATE_STARTUP_PROMPT.chars().count(),
+        );
+
+        let locator = super::assignment_locator(
+            std::path::Path::new("/repo/oh-my-setting"),
+            "room-20261123-demo",
+        )
+        .unwrap();
+        let task = "Implement the bounded change and run targeted unit checks.";
+        let alternate_prompt = format!(
+            "Task from Overall Main. Work within this task and report the result here. Turn {TURN_ID}. {}{locator} Task: {task}",
+            super::ALTERNATE_STARTUP_PROMPT,
+        );
+        let primary_prompt = format!(
+            "Task from Overall Main. Work within this task and report the result here. Turn {TURN_ID}. You own this provider's work. {}{locator} Task: {task}",
+            super::ALTERNATE_STARTUP_PROMPT,
+        );
+        assert!(alternate_prompt.chars().count() <= super::CODEX_VISIBLE_PASTE_CHARS);
+        assert!(primary_prompt.chars().count() <= super::CODEX_VISIBLE_PASTE_CHARS);
     }
 
     #[test]
@@ -6515,6 +7017,130 @@ mod tests {
         ));
         assert!(!input_ready("codex", &format!("{prompt}{status_only}")));
         assert!(super::codex_input_state("› earlier\n│ › \n").is_none());
+    }
+
+    #[test]
+    fn ordinary_codex_verifies_the_status_only_editor_and_rechecks_before_enter() {
+        let rows = [
+            "Task from Overall Main. Review the bounded work and describe the results. ",
+            "Keep the checkout read only and report the evidence for each completion check. ",
+            "Coordinate file ownership with the existing builder before considering changes. ",
+            "Use the branch and task references supplied by the managed panel. ",
+            "Inspect only the relevant callers and avoid inspecting other providers. ",
+            "Return concrete observations and any uncertainty to the current Main. ",
+            "Include the scoped verification checks.",
+        ];
+        let intended = rows.concat();
+        let screen = |draft: &[&str], blank: &str, footer: &str| {
+            format!(
+                "{}› {}\n  {}\n{blank}\n{footer}",
+                "\n".repeat(21),
+                draft[0],
+                draft[1..].join("\n  "),
+            )
+        };
+        let status = CODEX_DISPLAY_STATUS
+            .trim_start_matches('\n')
+            .lines()
+            .next()
+            .unwrap();
+        let exact = screen(&rows, "", status);
+        let mut fake = FakePane::new(&[]);
+        fake.draft_width = 145;
+        fake.screens = vec![
+            exact.clone(),
+            exact.clone(),
+            exact.clone(),
+            format!("{CODEX_EMPTY}{CODEX_STATUS}"),
+        ];
+        submit(&mut fake, &intended, Proof::Turn(TURN_ID), 2)
+            .0
+            .unwrap();
+        assert_eq!(fake.enters(), 1);
+        assert_eq!(fake.sent("paste-buffer").len(), 1);
+
+        let wrong = exact.replacen("read only", "read once", 1);
+        let missing = exact.replacen("read only", "read", 1);
+        let extra = exact.replacen("read only", "read only here", 1);
+        let inverted = exact.replacen("read only", "\x1b[7mread only\x1b[0m", 1);
+        let omitted_separator = exact.replacen("results. \n", "results.\n", 1);
+        let malformed = exact.replace("Main [default]", "Main [default");
+        let crowded = screen(&rows, "  unexpected row", status);
+        let duplicate = screen(&rows, status, status);
+        let missing_footer = screen(&rows, "", "");
+        for other in [
+            wrong.clone(),
+            missing,
+            extra,
+            inverted,
+            omitted_separator,
+            malformed,
+            crowded,
+            duplicate,
+            missing_footer,
+        ] {
+            fake.reads = 0;
+            fake.calls.clear();
+            fake.screens = vec![other];
+            let error = submit(&mut fake, &intended, Proof::Turn(TURN_ID), 2)
+                .0
+                .unwrap_err();
+            assert!(error.publication_uncertain);
+            assert_eq!(fake.enters(), 0);
+        }
+
+        fake.reads = 0;
+        fake.calls.clear();
+        fake.draft_cursor_offset = 1;
+        fake.screens = vec![exact.clone()];
+        assert!(
+            submit(&mut fake, &intended, Proof::Turn(TURN_ID), 2)
+                .0
+                .is_err()
+        );
+        assert_eq!(fake.enters(), 0);
+
+        fake.reads = 0;
+        fake.calls.clear();
+        fake.draft_cursor_offset = 0;
+        fake.screens = vec![exact.clone(), exact.clone(), wrong];
+        let error = submit(&mut fake, &intended, Proof::Turn(TURN_ID), 2)
+            .0
+            .unwrap_err();
+        assert!(error.message.contains("exact Codex draft changed"));
+        assert_eq!(fake.enters(), 0);
+
+        fake.reads = 0;
+        fake.calls.clear();
+        fake.screens = vec![exact.clone()];
+        let error = submit(&mut fake, &intended, Proof::Turn(TURN_ID), 1)
+            .0
+            .unwrap_err();
+        assert!(error.message.starts_with("pane changed after pasting"));
+        assert_eq!(fake.enters(), 0);
+
+        let frame = ordinary_frame("%7", &exact, 145, 0);
+        for invalid in [
+            frame.replacen("%7\t42", "%8\t42", 1),
+            frame.replacen("42\t0\t0", "42\t0\t1", 1),
+            frame.replacen("0\t0\t1\t0", "0\t0\t1\t1", 1),
+        ] {
+            assert!(
+                super::ordinary_codex_draft(&mut |_| Ok(invalid.clone()), "%7", &intended)
+                    .is_none()
+            );
+        }
+        let idle = format!("{CODEX_EMPTY}\n{status}");
+        assert!(!input_ready("codex", &idle));
+        let spoof = ordinary_frame("%7", &idle, 145, 0);
+        assert!(
+            super::ordinary_codex_draft(
+                &mut |_| Ok(spoof.clone()),
+                "%7",
+                "Ask Codex to do anything"
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -6767,7 +7393,7 @@ mod tests {
         use super::super::*;
         use super::{
             AGY_QUOTA_MISORDERED, AGY_QUOTA_VIEWPORT, CODEX_DISPLAY_STATUS, CODEX_DRAFT,
-            CODEX_EMPTY, CODEX_OPAQUE_PASTE, CODEX_STATUS, TURN_ID,
+            CODEX_EMPTY, CODEX_OPAQUE_PASTE, CODEX_STATUS, TURN_ID, ordinary_frame,
         };
         use crate::orchestrator::account_binding::test_support::{FakeHost, TempDir, private_dir};
         use oms_panel_core::native::reference::process::Owner;
@@ -6835,6 +7461,9 @@ mod tests {
             provider_tag_writes: RefCell<Vec<String>>,
             cursor_x: Cell<u32>,
             allow_board_queries: Cell<bool>,
+            dock_geometries: RefCell<BTreeMap<String, String>>,
+            dock_after_break: RefCell<Option<[String; 2]>>,
+            dock_rows: RefCell<String>,
             task_transition: RefCell<Option<TaskTransition>>,
         }
 
@@ -6886,6 +7515,9 @@ mod tests {
                     provider_tag_writes: RefCell::new(Vec::new()),
                     cursor_x: Cell::new(2),
                     allow_board_queries: Cell::new(false),
+                    dock_geometries: Default::default(),
+                    dock_after_break: Default::default(),
+                    dock_rows: Default::default(),
                     task_transition: RefCell::new(None),
                 }
             }
@@ -6967,6 +7599,18 @@ mod tests {
                         _,
                         "#{pane_current_path}",
                     ] if self.canonical_assignment.get() => self.repo.to_str().unwrap().into(),
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane,
+                        ORDINARY_CODEX_DRAFT_FORMAT,
+                        ..,
+                    ] => {
+                        let screens = self.screens.borrow();
+                        ordinary_frame(pane, screens.get(*pane).map_or("", String::as_str), 80, 0)
+                    }
                     ["tmux", "list-panes", "-s", "-t", _, "-F", PANE_FORMAT] => {
                         let mut lines = vec![format!(
                             "$1\t@1\t{}\t{}\t0\t1\t{}\t{}\t{}\t{}\t{}\t\t\t1\t.{}__",
@@ -7040,46 +7684,94 @@ mod tests {
                     }
                     [
                         "tmux",
-                        "display-message",
-                        "-p",
+                        "list-panes",
                         "-t",
                         "%2",
-                        "#{window_panes}",
-                    ] if self.allow_board_queries.get() => {
-                        format!(
-                            "{}",
-                            2 + self
-                                .leads
-                                .borrow()
-                                .iter()
-                                .filter(|lead| lead.window == "@1")
-                                .count()
-                        )
+                        "-F",
+                        NATIVE_DOCK_GEOMETRY,
+                        extra @ ..,
+                    ] => {
+                        let geometry = self.dock_geometries.borrow();
+                        let mut rows: Vec<_> = geometry
+                            .values()
+                            .filter(|row| row.split('\t').nth(1) == Some("@1"))
+                            .map(String::as_str)
+                            .collect();
+                        if let [
+                            ";",
+                            "display-message",
+                            "-p",
+                            "-t",
+                            pane,
+                            NATIVE_DOCK_GEOMETRY,
+                        ] = extra
+                        {
+                            rows.push(geometry[*pane].as_str());
+                        } else {
+                            assert!(extra.is_empty(), "{extra:?}");
+                        }
+                        rows.join("\n")
+                    }
+                    ["tmux", "show-options", "-pqv", "-t", "%2", NATIVE_DOCK_ROWS] => {
+                        self.dock_rows.borrow().clone()
                     }
                     [
                         "tmux",
-                        "display-message",
-                        "-p",
-                        "-t",
-                        "%4",
-                        "#{window_panes}",
-                    ] => "1".into(),
-                    [
-                        "tmux",
-                        "display-message",
-                        "-p",
-                        "-t",
-                        "%3",
-                        "#{pane_height}",
-                    ] => "8".into(),
-                    [
-                        "tmux",
-                        "display-message",
+                        "set-option",
                         "-p",
                         "-t",
                         "%2",
-                        "#{window_width}\t#{window_height}\t#{pane_height}\t#{window_zoomed_flag}",
-                    ] if self.allow_board_queries.get() => "59\t32\t17\t0".into(),
+                        NATIVE_DOCK_ROWS,
+                        rows,
+                    ] => {
+                        self.dock_rows.replace((*rows).into());
+                        String::new()
+                    }
+                    [
+                        "tmux",
+                        "break-pane",
+                        "-d",
+                        "-s",
+                        pane,
+                        "-n",
+                        _,
+                        ";",
+                        "set-option",
+                        "-pqu",
+                        "-t",
+                        "%2",
+                        NATIVE_DOCK_ROWS,
+                    ] => {
+                        self.dock_rows.replace(String::new());
+                        let mut geometry = self.dock_geometries.borrow_mut();
+                        geometry.remove(*pane);
+                        if let Some([board, main]) = self.dock_after_break.borrow_mut().take() {
+                            geometry.insert("%2".into(), board);
+                            geometry.insert("%1".into(), main);
+                        }
+                        String::new()
+                    }
+                    [
+                        "tmux",
+                        "join-pane",
+                        "-d",
+                        "-v",
+                        "-l",
+                        _,
+                        "-s",
+                        _,
+                        "-t",
+                        "%2",
+                        ";",
+                        "set-option",
+                        "-pqu",
+                        "-t",
+                        "%2",
+                        NATIVE_DOCK_ROWS,
+                    ] => {
+                        self.dock_rows.replace(String::new());
+                        String::new()
+                    }
                     ["tmux", "display-message", "-p", "-t", "%2", _]
                         if self.allow_board_queries.get() =>
                     {
@@ -7389,6 +8081,19 @@ mod tests {
                             let (draft, cursor) = alternate_draft(&text);
                             self.screens.borrow_mut().insert(pane.into(), draft);
                             self.alternate_task_cursor.set(cursor);
+                        } else if self
+                            .leads
+                            .borrow()
+                            .iter()
+                            .any(|lead| lead.pane_id == pane && lead.provider == "codex")
+                        {
+                            let text = self.recent_screens.borrow()["_pending_paste"].clone();
+                            let text = text
+                                .strip_suffix(r"\;")
+                                .map_or(Cow::Borrowed(text.as_str()), |p| format!("{p};").into());
+                            let (draft, cursor) = alternate_draft(&text);
+                            self.cursor_x.set(cursor.0 as u32);
+                            self.screens.borrow_mut().insert(pane.into(), draft);
                         } else {
                             self.cursor_x.set(12);
                             self.screens
@@ -7799,6 +8504,30 @@ mod tests {
                     active: false,
                     provider: "antigravity".into(),
                 });
+                spy.dock_geometries.borrow_mut().extend([
+                    (
+                        "%1".into(),
+                        format!(
+                            "$1\t@1\t%1\t{}\t0\t0\t3\t59\t32\t0\t27\t59\t5\t{MAIN}\t.",
+                            spy.main_pid
+                        ),
+                    ),
+                    (
+                        "%2".into(),
+                        format!(
+                            "$1\t@1\t%2\t{}\t0\t0\t3\t59\t32\t0\t0\t59\t17\t{MAIN}\t.",
+                            spy.main_pid
+                        ),
+                    ),
+                    (
+                        "%3".into(),
+                        format!("$1\t@1\t%3\t2002\t0\t0\t3\t59\t32\t0\t18\t59\t8\t{MAIN}\t."),
+                    ),
+                    (
+                        "%4".into(),
+                        "$1\t@4\t%4\t2001\t0\t0\t1\t59\t32\t0\t0\t59\t32\t\t.".into(),
+                    ),
+                ]);
                 let panel =
                     Panel::load_for_caller(&spy.repo, ROOM, &caller, &spy, &spy.stop).unwrap();
                 assert_eq!(panel.docked(), Some("antigravity"));
@@ -7807,6 +8536,290 @@ mod tests {
                     .unwrap_err();
                 assert_eq!(err.message, "make the panel larger to dock native chat");
                 assert!(spy.mutating_calls().is_empty());
+            }
+        }
+
+        #[test]
+        fn native_dock_switch_and_reopen_reuse_the_owned_slot() {
+            let tmp = TempDir::new("native-dock-geometry");
+            for (width, height, lane, board_rows) in [(316, 90, 145, 29), (140, 130, 140, 36)] {
+                let spy = SpyPanel::new(private_dir(&tmp.0.join(width.to_string())));
+                spy.allow_board_queries.set(true);
+                for (window, pane, pid, provider) in [
+                    ("@1", "%3", 2002, "claude"),
+                    ("@4", "%4", 2001, "codex"),
+                    ("@5", "%5", 2003, "antigravity"),
+                ] {
+                    spy.leads.borrow_mut().push(FakeLead {
+                        window: window.into(),
+                        pane_id: pane.into(),
+                        pid,
+                        active: false,
+                        provider: provider.into(),
+                    });
+                }
+                let geometry = |window: &str, pane: &str, pid, panes, (left, top, cols, rows)| {
+                    let attempt = if window == "@1" { MAIN } else { "" };
+                    format!(
+                        "$1\t{window}\t{pane}\t{pid}\t0\t0\t{panes}\t{width}\t{height}\t{left}\t{top}\t{cols}\t{rows}\t{attempt}\t."
+                    )
+                };
+                let board =
+                    |panes, rows| geometry("@1", "%2", spy.main_pid, panes, (0, 0, lane, rows));
+                let main = |panes| {
+                    let bounds = if lane == width {
+                        (0, board_rows + 62, width, height - board_rows - 62)
+                    } else {
+                        (lane + 1, 0, width - lane - 1, height)
+                    };
+                    geometry("@1", "%1", spy.main_pid, panes, bounds)
+                };
+                let undocked = || [board(2, board_rows + 61), main(2)];
+                spy.dock_geometries.borrow_mut().extend([
+                    ("%1".into(), main(3)),
+                    ("%2".into(), board(3, board_rows)),
+                    (
+                        "%3".into(),
+                        geometry("@1", "%3", 2002, 3, (0, board_rows + 1, lane, 60)),
+                    ),
+                    (
+                        "%4".into(),
+                        geometry("@4", "%4", 2001, 1, (0, 0, width, height)),
+                    ),
+                    (
+                        "%5".into(),
+                        geometry("@5", "%5", 2003, 1, (0, 0, width, height)),
+                    ),
+                ]);
+                let load =
+                    || Panel::load_for_caller(&spy.repo, ROOM, "%2", &spy, &spy.stop).unwrap();
+                for (previous, next, provider, pane) in [
+                    (0, 1, "codex", "%4"),
+                    (1, 2, "antigravity", "%5"),
+                    (2, 0, "claude", "%3"),
+                ] {
+                    spy.calls.borrow_mut().clear();
+                    spy.dock_after_break.replace(Some(undocked()));
+                    assert_eq!(
+                        load().toggle_dock(Some(provider), 12, None).unwrap(),
+                        Some(provider)
+                    );
+                    assert_eq!(spy.calls_named("break-pane").len(), 1);
+                    let joins = spy.calls_named("join-pane");
+                    assert_eq!(
+                        joins[0][..10],
+                        [
+                            "tmux",
+                            "join-pane",
+                            "-d",
+                            "-v",
+                            "-l",
+                            "60",
+                            "-s",
+                            pane,
+                            "-t",
+                            "%2"
+                        ]
+                    );
+                    assert_eq!(
+                        spy.calls_named("select-pane"),
+                        [["tmux", "select-pane", "-t", pane]]
+                    );
+                    let mut leads = spy.leads.borrow_mut();
+                    let mut geometries = spy.dock_geometries.borrow_mut();
+                    leads[previous].window = format!("@{}", 6 + previous);
+                    let old = &leads[previous];
+                    geometries.insert(
+                        old.pane_id.clone(),
+                        geometry(&old.window, &old.pane_id, old.pid, 1, (0, 0, width, height)),
+                    );
+                    leads[next].window = "@1".into();
+                    let new = &leads[next];
+                    geometries.insert(
+                        new.pane_id.clone(),
+                        geometry(
+                            "@1",
+                            &new.pane_id,
+                            new.pid,
+                            3,
+                            (0, board_rows + 1, lane, 60),
+                        ),
+                    );
+                    geometries.insert("%2".into(), board(3, board_rows));
+                    geometries.insert("%1".into(), main(3));
+                }
+
+                spy.dock_after_break.replace(Some(undocked()));
+                assert_eq!(load().toggle_dock(None, 0, None).unwrap(), None);
+                let remembered = spy.dock_rows.borrow().clone();
+                assert!(remembered.ends_with(":60"), "{remembered}");
+                spy.leads.borrow_mut()[0].window = "@6".into();
+                let lead = geometry("@6", "%3", 2002, 1, (0, 0, width, height));
+                spy.dock_geometries
+                    .borrow_mut()
+                    .insert("%3".into(), lead.clone());
+                let open = |rows: &str| {
+                    spy.calls.borrow_mut().clear();
+                    assert_eq!(
+                        load().toggle_dock(Some("claude"), 12, None).unwrap(),
+                        Some("claude")
+                    );
+                    assert_eq!(spy.calls_named("join-pane")[0][5], rows);
+                    assert!(spy.dock_rows.borrow().is_empty());
+                };
+                open("60");
+                // An externally removed dock leaves no preference to replay.
+                open("12");
+
+                let preference_scope = remembered.strip_suffix("60").unwrap();
+                for invalid in [
+                    remembered.replacen("$1", "$8", 1),
+                    remembered.replacen("@1", "@8", 1),
+                    remembered.replacen(MAIN, "other", 1),
+                    format!("{preference_scope}0"),
+                    format!("{preference_scope}invalid"),
+                ] {
+                    spy.dock_rows.replace(invalid);
+                    open("12");
+                }
+
+                // A new canvas or a changed Board divider invalidates a genuine preference.
+                spy.dock_rows.replace(remembered.clone());
+                let canvas = format!("\t{width}\t{height}\t");
+                let resized = format!("\t{}\t{height}\t", width + 20);
+                spy.dock_geometries.borrow_mut().extend([
+                    ("%1".into(), main(2).replacen(&canvas, &resized, 1)),
+                    (
+                        "%2".into(),
+                        board(2, board_rows + 61).replacen(&canvas, &resized, 1),
+                    ),
+                ]);
+                open("12");
+
+                spy.dock_rows.replace(remembered);
+                let (board_bounds, main_bounds) = if lane == width {
+                    (
+                        (0, 0, lane, board_rows + 60),
+                        (0, board_rows + 61, width, height - board_rows - 61),
+                    )
+                } else {
+                    ((0, 0, lane - 1, height), (lane, 0, width - lane, height))
+                };
+                spy.dock_geometries.borrow_mut().extend([
+                    (
+                        "%1".into(),
+                        geometry("@1", "%1", spy.main_pid, 2, main_bounds),
+                    ),
+                    (
+                        "%2".into(),
+                        geometry("@1", "%2", spy.main_pid, 2, board_bounds),
+                    ),
+                ]);
+                open("12");
+
+                spy.calls.borrow_mut().clear();
+                spy.dock_geometries.borrow_mut().insert(
+                    "%1".into(),
+                    main(2).replacen(&format!("\t{}\t", spy.main_pid), "\t63100\t", 1),
+                );
+                assert!(load().toggle_dock(Some("claude"), 12, None).is_err());
+                assert!(spy.mutating_calls().is_empty());
+
+                spy.dock_geometries
+                    .borrow_mut()
+                    .insert("%1".into(), main(2));
+                spy.dock_geometries
+                    .borrow_mut()
+                    .insert("%3".into(), lead.replacen("$1", "$5", 1));
+                assert!(load().toggle_dock(Some("claude"), 12, None).is_err());
+                assert!(spy.mutating_calls().is_empty());
+
+                spy.dock_geometries.borrow_mut().extend([
+                    (
+                        "%2".into(),
+                        board(2, board_rows + 61).replacen("\t0\t0\t2\t", "\t0\t1\t2\t", 1),
+                    ),
+                    ("%3".into(), lead),
+                ]);
+                assert!(load().toggle_dock(Some("claude"), 12, None).is_err());
+                assert!(spy.mutating_calls().is_empty());
+
+                spy.dock_geometries.borrow_mut().extend([
+                    ("%2".into(), board(2, board_rows + 61)),
+                    ("%6".into(), geometry("@1", "%6", 2004, 3, (0, 0, lane, 1))),
+                ]);
+                let assert_no_dock = |provider, message| {
+                    spy.calls.borrow_mut().clear();
+                    assert_eq!(
+                        load()
+                            .toggle_dock(Some(provider), 12, None)
+                            .unwrap_err()
+                            .message,
+                        message
+                    );
+                    assert!(spy.mutating_calls().is_empty());
+                    assert!(spy.calls_named("select-pane").is_empty());
+                };
+                assert_no_dock(
+                    "claude",
+                    "native chat needs the managed Board and Main layout",
+                );
+                spy.dock_geometries.borrow_mut().remove("%6");
+
+                spy.dock_geometries.borrow_mut().insert(
+                    "%3".into(),
+                    geometry("@6", "%3", 2002, 2, (0, 0, width, height)),
+                );
+                assert_no_dock(
+                    "claude",
+                    "native chat pane layout changed; select the provider again",
+                );
+
+                let dead = geometry("@6", "%3", 2002, 1, (0, 0, width, height))
+                    .replacen("	0	0	1	", "	1	0	1	", 1);
+                spy.dock_geometries.borrow_mut().insert("%3".into(), dead);
+                assert_no_dock(
+                    "claude",
+                    "native chat needs an unzoomed managed pane layout",
+                );
+
+                // A Main replacement after the outgoing pane broke stops the incoming join.
+                spy.leads.borrow_mut()[0].window = "@1".into();
+                spy.dock_geometries.borrow_mut().extend([
+                    ("%1".into(), main(3)),
+                    ("%2".into(), board(3, board_rows)),
+                    (
+                        "%3".into(),
+                        geometry("@1", "%3", 2002, 3, (0, board_rows + 1, lane, 60)),
+                    ),
+                ]);
+                let [after_board, after_main] = undocked();
+                spy.dock_after_break.replace(Some([
+                    after_board,
+                    after_main.replacen(&format!("\t{}\t", spy.main_pid), "\t63100\t", 1),
+                ]));
+                spy.calls.borrow_mut().clear();
+                assert!(load().toggle_dock(Some("codex"), 12, None).is_err());
+                assert_eq!(spy.calls_named("break-pane").len(), 1);
+                assert!(spy.calls_named("join-pane").is_empty());
+
+                // The owned nonadjacent pane can close, with no size remembered.
+                spy.leads.borrow_mut()[0].window = "@1".into();
+                spy.dock_geometries.borrow_mut().extend([
+                    ("%1".into(), main(3)),
+                    ("%2".into(), board(3, board_rows)),
+                    (
+                        "%3".into(),
+                        geometry("@1", "%3", 2002, 3, (1, board_rows + 1, lane - 1, 60)),
+                    ),
+                ]);
+                assert_no_dock(
+                    "codex",
+                    "native chat needs a dock immediately below the managed board",
+                );
+                spy.dock_rows.replace("old preference".into());
+                assert_eq!(load().toggle_dock(None, 0, None).unwrap(), None);
+                assert!(spy.dock_rows.borrow().is_empty());
             }
         }
 
@@ -12343,6 +13356,7 @@ mod tests {
             let (got, offered, proofs) = sample(rows.clone(), turn, turn, true);
             assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
             assert_eq!(got[0]["native_response_usage"], field(2));
+            assert_eq!(got[0]["observed_model"], "gemini");
             assert!(
                 got[0]["native_response_usage"]["response"]
                     .get("total_tokens")
@@ -12365,6 +13379,12 @@ mod tests {
             assert_eq!(offered, vec![set(&[&b])]);
             assert!(got[0] == rows[0] && got[1] == rows[1] && got[3] == rows[3]);
             assert_eq!(got[2]["native_response_usage"], field(2));
+            assert_eq!(got[2]["observed_model"], "gemini");
+            assert!(
+                got.iter()
+                    .enumerate()
+                    .all(|(i, r)| i == 2 || r.get("observed_model").is_none())
+            );
 
             // More than three eligible: only the first three in participant order.
             let mut order = [&a, &b, &c, &d];
@@ -12392,6 +13412,26 @@ mod tests {
             let mut none = rows.clone();
             agy_usage_sighting(&mut none, turn, |_| None, || unreachable!());
             assert_eq!(none, rows);
+            assert!(none[0].get("observed_model").is_none());
+
+            // A model the shared validator rejects is omitted; the usage is unchanged.
+            for bad in ["<synthetic>", "\u{1b}[31mgemini", " gemini"] {
+                let mut invalid = usage(2);
+                invalid["model"] = json!(bad);
+                let scan = BTreeMap::from([(b.clone(), invalid.clone())]);
+                let mut rows = vec![row(&b)];
+                agy_usage_sighting(
+                    &mut rows,
+                    turn,
+                    |_| Some((turn.to_owned(), scan.clone())),
+                    || true,
+                );
+                assert!(rows[0].get("observed_model").is_none(), "{bad:?}");
+                assert_eq!(
+                    rows[0]["native_response_usage"],
+                    json!({"scope": "latest_child_response", "response": invalid})
+                );
+            }
 
             // No eligible row or no shown Turn: neither the scan nor the fence runs.
             for (rows, shown) in [

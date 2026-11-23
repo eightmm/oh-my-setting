@@ -101,7 +101,7 @@ hit@8 and median canonical pack bytes. Archives and graph state stay in
 temporary directories; the default graph tests run only a tiny fixture:
 
 ```bash
-PYTHONPATH=scripts/lib python3 -m oms_graph.project.benchmark --repo . --output /tmp/oms-context-recall.json
+oms graph project benchmark --count 60 --revision HEAD --output /tmp/oms-context-recall.json
 ```
 
 Before changing retrieval, keep `--snapshot before.json` (commit ids and
