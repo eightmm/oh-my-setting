@@ -3500,7 +3500,7 @@ mod tests {
 
     #[test]
     fn observed_model_validator_returns_the_input_unchanged_or_none() {
-        let token = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
         for ok in ["gpt-child".to_owned(), "m".repeat(80)] {
             assert_eq!(observed_model(&ok), Some(ok.as_str()));
         }
@@ -3515,7 +3515,7 @@ mod tests {
             "\u{9b}31m".into(),
             "<synthetic>".into(),
             "<placeholder>".into(),
-            format!("gpt-{token}"),
+            format!("gpt-{leaked}"),
         ] {
             assert_eq!(observed_model(&bad), None, "{bad:?}");
         }
@@ -3578,11 +3578,11 @@ mod tests {
             assert!(row.get("observed_model").is_none(), "{row}");
         }
         // A model the shared validator rejects is omitted; the usage is unchanged.
-        let token = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
         for bad in [
             "m".repeat(81),
             "\u{1b}[31mgpt".to_owned(),
-            format!("gpt-{token}"),
+            format!("gpt-{leaked}"),
         ] {
             let row = observed(vec![context("child-turn", Some(&bad))]);
             assert!(row.get("observed_model").is_none(), "{bad:?}: {row}");

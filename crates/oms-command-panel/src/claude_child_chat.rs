@@ -2286,13 +2286,13 @@ mod tests {
         // Values the shared validator rejects are omitted, never trimmed, capped or redacted;
         // the reply's usage stays published.
         fixture.child.remove(0);
-        let token = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
+        let leaked = ["ghp", "_1234567890abcdefghijklmnopqrstuvwxyz"].concat();
         for bad in [
             "m".repeat(81),
             " claude-x".to_owned(),
             "claude\u{1b}[31mx".to_owned(),
             "claude\nx".to_owned(),
-            format!("claude-{token}"),
+            format!("claude-{leaked}"),
         ] {
             fixture.child[1] = modeled(&billed_as(&first, "msg_a"), json!(bad));
             fixture.child[3] = modeled(&billed_as(&second, "msg_b"), json!(bad));
