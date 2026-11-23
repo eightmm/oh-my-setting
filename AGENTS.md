@@ -36,15 +36,15 @@
   crates) and `OMS_AFFECTED_FULL=1` get full coverage. Skill/template/role prose
   uses its bounded `skill-manifest` suite; executable templates stay broad.
 - Before reporting completion, run the root `./verify`.
-- Land/install with `oms land`: it checks the committed HEAD, pushes only while
-  HEAD and the tracked tree stay unchanged, runs no duplicate hook gate, defaults
-  to `check.sh --affected --ci-parity`. Install needs same-SHA green CI plus `gate`,
-  `lint`, `focused`, `native (ubuntu-latest, copy)`, optional `rust (ubuntu-24.04)`.
-- Hosted CI is Linux-only for PRs and main pushes alike: pure-Rust lint, Rust
-  fmt/clippy/tests on Ubuntu, pure-Bash focused E2E and a Linux copy-install
-  lifecycle, on pinned Rust `1.99.1`. Only plan-authorized skips pass the stable
-  gate; CI remains authoritative for Linux runner userland. No macOS CI: macOS
-  remains a supported runtime/install host (`tests/bsd-portability-smoke.sh`).
+- `oms land` pins HEAD and tracked files and avoids a duplicate hook gate.
+  Its default is `check.sh --affected --ci-parity`. Resume the exact receipt
+  to reuse the gate. GitHub PRs stop at `awaiting-merge`. Use `--merge` only
+  when the user asks. Install needs same-SHA full CI proof (`gate`, `lint`,
+  `focused`, `native (ubuntu-latest, copy)`, optional `rust (ubuntu-24.04)`).
+  Squash installation requires an identical tree on an unchanged base.
+- Hosted CI is Linux-only for PRs and main pushes, with Rust `1.99.1`. Only
+  plan-authorized skips pass the stable gate. macOS remains an optional
+  runtime and installation host.
 - Every tracked file passes `scrubber_passes_tracked_repository_sources`: in
   fixtures split key-shaped strings and home paths across quotes; avoid
   identifiers that read as a credential assignment.

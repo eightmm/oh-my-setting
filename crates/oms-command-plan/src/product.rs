@@ -239,8 +239,23 @@ pub(crate) fn commit_landing(
                 continue;
             }
             let reference = format!("refs/remotes/{remote}/{target}");
+            // A squash or merge commit GitHub built lands the exact head's
+            // reviewed content; the head itself never reaches the target.
+            let merge = receipt.get("merge");
+            let reached = match merge.text("commit") {
+                merged if merge.text("state") == "MERGED" && crate::repository::commit(merged) => {
+                    merged
+                }
+                _ => commit,
+            };
+            let tree = |c: &str| {
+                plan.git()
+                    .text(&["rev-parse", "--verify", &format!("{c}^{{tree}}")])
+            };
             if plan.git().run(&["check-ref-format", &reference]).is_err()
-                || plan.git().ancestor(commit, &reference).is_err()
+                || reached != commit
+                    && (tree(reached).ok().is_none() || tree(reached).ok() != tree(commit).ok())
+                || plan.git().ancestor(reached, &reference).is_err()
                 || base.is_some_and(|b| plan.git().ancestor(b, commit).is_err())
             {
                 continue;
@@ -271,6 +286,11 @@ pub(crate) fn commit_landing(
     if passed {
         return Err(error(format!(
             "landed commit {commit} is not reachable from a passed receipt's local pushed target ref; fetch its remote first"
+        )));
+    }
+    if unfinished.as_deref() == Some("awaiting-merge") {
+        return Err(error(format!(
+            "no passed oms land receipt for {commit}: its pull request is open and unmerged; it is not landed until a merge the user asked for"
         )));
     }
     if let Some(state) = unfinished {
