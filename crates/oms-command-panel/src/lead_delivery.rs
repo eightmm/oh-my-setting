@@ -424,7 +424,7 @@ fn send_guarded_enter(
     }
 }
 
-fn group_check<'a>(panel: &'a Panel<'_>) -> impl FnMut(u32) -> bool + 'a {
+pub(super) fn group_check<'a>(panel: &'a Panel<'_>) -> impl Fn(u32) -> bool + 'a {
     let deadline = Instant::now() + GROUP_PROOF_BUDGET;
     let uid = rustix::process::getuid().as_raw();
     move |gid| {

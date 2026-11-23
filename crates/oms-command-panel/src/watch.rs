@@ -90,7 +90,7 @@ fn run_with_source_writer(
         managed: false,
     };
     let mut board = (options.has("watch") && max_count.is_none() && terminal.is_some())
-        .then(InteractiveRefresh::start)
+        .then(|| InteractiveRefresh::start(services.workspace_group_resolver()))
         .transpose()?;
     if board.is_some() {
         room.clear();
@@ -118,6 +118,8 @@ fn run_with_source_writer(
     let mut main_checkout = MainCheckout::default();
     let mut selection_changed = SelectionFence::None;
     let mut switch = MainSwitch::default();
+    let mut pending_agy_detail: Option<AgyDetailUsageRequest> = None;
+    let mut retained_agy_detail: Option<AgyDetailUsageEvidence> = None;
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
@@ -136,7 +138,10 @@ fn run_with_source_writer(
             });
         let mut accepted_refresh = false;
         let mut checkout_changed = false;
+        let mut scope_changed = false;
+        let mut agy_detail_frame = AgyDetailFrame::Unchanged;
         let mut checked_agy = None;
+        let mut incoming_agy_detail = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
                 let ready = board.worker.ready();
@@ -150,9 +155,23 @@ fn run_with_source_writer(
                 observations: observations.clone(),
                 footer: main_footer.clone(),
                 agy: chat.as_ref().and_then(AgyDockCheck::new),
+                agy_detail: None,
+                agy_detail_binding: selected_chat
+                    .as_ref()
+                    .and_then(|(_, binding)| binding.as_ref())
+                    .filter(|binding| {
+                        agy_binding_matches_selection(
+                            binding,
+                            &nav,
+                            before.as_ref().and_then(|rows| rows.get(nav.selected)),
+                            &observations,
+                        )
+                    })
+                    .cloned(),
             };
             let (changed, result, native) =
-                board.update_with_native(live, launch, ready, Some(seed));
+                board.update_with_native(live, launch, ready, Some(seed), &mut pending_agy_detail);
+            scope_changed = changed;
             accepted_refresh = result.is_some() && board.phase == RefreshPhase::Fresh;
             let rejected_native = native.is_none()
                 && result.is_some()
@@ -160,12 +179,22 @@ fn run_with_source_writer(
                     .scope
                     .as_ref()
                     .is_some_and(|scope| scope.main.is_some());
+            agy_detail_frame = if rejected_native || !board.phase.retains_agy_detail() {
+                AgyDetailFrame::Rejected
+            } else if native.is_some() {
+                AgyDetailFrame::Observed
+            } else {
+                AgyDetailFrame::Unchanged
+            };
             let mut native_projection = None;
             if let Some(reading) = native {
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
                     checked_agy = reading.agy;
                 }
+                // A queued same-scope refresh restricts actions, while this
+                // completed and generation-checked reading can still paint.
+                incoming_agy_detail = reading.agy_detail_evidence;
                 observations = reading.observations;
                 main_footer = reading.footer;
             } else if rejected_native {
@@ -324,6 +353,27 @@ fn run_with_source_writer(
             selection_changed = SelectionFence::Native;
             nav.detail = false;
         }
+        if pending_agy_detail.as_ref().is_some_and(|pending| {
+            let visible = render::visible(&report, &nav);
+            !agy_binding_matches_selection(
+                &pending.binding,
+                &nav,
+                visible.get(nav.selected),
+                &observations,
+            )
+        }) {
+            pending_agy_detail = None;
+        }
+        reconcile_agy_detail_evidence(
+            &mut retained_agy_detail,
+            incoming_agy_detail,
+            board.as_ref().and_then(|board| board.scope.as_ref()),
+            &report,
+            &nav,
+            &observations,
+            agy_detail_frame,
+            scope_changed,
+        );
         settle_main_dock(&mut chat, &report);
         let owner = board
             .as_ref()
@@ -364,8 +414,9 @@ fn run_with_source_writer(
                 crate::layout::reflow(repo, &room, services, interrupted);
                 size = crate::layout::dimensions();
             }
+            let display_report = report_for_frame(&report, &nav, retained_agy_detail.as_ref());
             let frame = frame(
-                &report,
+                &display_report,
                 &nav,
                 size,
                 &read,
@@ -671,6 +722,7 @@ fn run_with_source_writer(
                     }
                     let identity = calls.get(nav.selected).map(call_identity);
                     let old_view = nav.view;
+                    let was_detail = nav.detail;
                     let page = key_page(
                         &report,
                         &nav,
@@ -890,6 +942,56 @@ fn run_with_source_writer(
                         navigation::Action::None => {}
                     }
                     card_replaces_main_dock(&nav, &mut chat);
+                    if direct_detail
+                        && !was_detail
+                        && nav.detail
+                        && row_authority
+                        && let Some(req) = board.as_ref().and_then(|board| {
+                            agy_detail_usage_request(
+                                board.scope.as_ref(),
+                                &report,
+                                calls.get(nav.selected),
+                                &observations,
+                            )
+                        })
+                    {
+                        pending_agy_detail = Some(req);
+                        refresh = true;
+                    }
+                }
+                if scope.changed {
+                    pending_agy_detail = None;
+                    retained_agy_detail = None;
+                } else if pending_agy_detail.is_some() || retained_agy_detail.is_some() {
+                    let current_visible;
+                    let selected_call = if calls_key.as_ref()
+                        == Some(&(nav.filter.clone(), nav.attention_only, nav.view))
+                    {
+                        calls.get(nav.selected)
+                    } else {
+                        current_visible = render::visible(&report, &nav);
+                        current_visible.get(nav.selected)
+                    };
+                    if pending_agy_detail.as_ref().is_some_and(|pending| {
+                        !agy_binding_matches_selection(
+                            &pending.binding,
+                            &nav,
+                            selected_call,
+                            &observations,
+                        )
+                    }) {
+                        pending_agy_detail = None;
+                    }
+                    if retained_agy_detail.as_ref().is_some_and(|retained| {
+                        !agy_binding_matches_selection(
+                            &retained.binding,
+                            &nav,
+                            selected_call,
+                            &observations,
+                        )
+                    }) {
+                        retained_agy_detail = None;
+                    }
                 }
                 // Opening an owned native transcript uses the shorter revalidation
                 // cadence even when this frame began with the event-backed deadline.
@@ -925,8 +1027,10 @@ fn run_with_source_writer(
                         crate::layout::reflow(repo, &room, services, interrupted);
                     }
                     let size = pane_size(repo, services, interrupted);
+                    let display_report =
+                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
                     let frame = frame(
-                        &report,
+                        &display_report,
                         &nav,
                         size,
                         &read,
@@ -958,8 +1062,10 @@ fn run_with_source_writer(
                     || ((detail_repaint || scope.checkout_repaint) && !dock_moved))
                     && !scope.changed
                 {
+                    let display_report =
+                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
                     let frame = frame(
-                        &report,
+                        &display_report,
                         &nav,
                         last_size,
                         &read,
@@ -993,8 +1099,10 @@ fn run_with_source_writer(
                     }
                     let size = crate::layout::dimensions();
                     last_size = size;
+                    let display_report =
+                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
                     let frame = frame(
-                        &report,
+                        &display_report,
                         &nav,
                         size,
                         &read,
@@ -1847,11 +1955,224 @@ impl BoardTarget {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct AgyDetailUsageRequest {
+    scope: BoardScope,
+    binding: ChatBinding,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AgyDetailUsageEvidence {
+    scope: BoardScope,
+    binding: ChatBinding,
+    response: Value,
+    observed_model: Option<String>,
+    requires_group: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgyDetailFrame {
+    Unchanged,
+    Observed,
+    Rejected,
+}
+
+fn report_has_live_main(report: &Value, main: &LiveMain) -> bool {
+    let attempt = &report["room_attempts"][&main.attempt];
+    let member = crate::rows(&report["room"]["participants"])
+        .iter()
+        .find(|row| row["participant"] == main.member);
+    attempt["provider"] == main.owner
+        && oms_panel_core::state::main_participant(attempt) == main.member
+        && member.is_some_and(|row| {
+            row["terminal"] != true
+                && !row["state"]
+                    .as_str()
+                    .is_some_and(|state| oms_panel_core::state::TERMINAL_STATES.contains(&state))
+        })
+}
+
+fn agy_detail_usage_request(
+    scope: Option<&BoardScope>,
+    report: &Value,
+    call: Option<&Value>,
+    observations: &Observations,
+) -> Option<AgyDetailUsageRequest> {
+    let scope = scope?;
+    let main = scope.main.as_ref()?;
+    if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
+        return None;
+    }
+    let call = call?;
+    if call["native_child"] != true
+        || call["provider"] != "antigravity"
+        || call["native_response_usage"]["response"].is_object()
+    {
+        return None;
+    }
+    let participant = crate::text(call, "participant");
+    if participant.is_empty() {
+        return None;
+    }
+    let binding = observations.chat_binding(participant)?;
+    binding
+        .matches_agy_detail_scope(
+            &scope.room,
+            &main.attempt,
+            &main.owner,
+            &main.pane,
+            main.pid,
+            &main.birth,
+            participant,
+        )
+        .then(|| AgyDetailUsageRequest {
+            scope: scope.clone(),
+            binding: binding.clone(),
+        })
+}
+
+fn agy_binding_matches_selection(
+    binding: &ChatBinding,
+    nav: &navigation::Navigation,
+    call: Option<&Value>,
+    observations: &Observations,
+) -> bool {
+    if !nav.detail {
+        return false;
+    }
+    let Some(call) = call else {
+        return false;
+    };
+    if call["native_child"] != true
+        || call["provider"] != "antigravity"
+        || call["native_response_usage"]["response"].is_object()
+    {
+        return false;
+    }
+    let participant = crate::text(call, "participant");
+    !participant.is_empty() && observations.chat_binding(participant) == Some(binding)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_agy_detail_evidence(
+    retained: &mut Option<AgyDetailUsageEvidence>,
+    incoming: Option<AgyDetailUsageEvidence>,
+    scope: Option<&BoardScope>,
+    report: &Value,
+    nav: &navigation::Navigation,
+    observations: &Observations,
+    frame: AgyDetailFrame,
+    scope_changed: bool,
+) {
+    if retained.is_none() && incoming.is_none() {
+        return;
+    }
+    if scope_changed || frame == AgyDetailFrame::Rejected || !nav.detail {
+        *retained = None;
+        return;
+    }
+    let Some(scope) = scope else {
+        *retained = None;
+        return;
+    };
+    let Some(main) = scope.main.as_ref() else {
+        *retained = None;
+        return;
+    };
+    if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
+        *retained = None;
+        return;
+    }
+    let visible = render::visible(report, nav);
+    let Some(call) = visible.get(nav.selected) else {
+        *retained = None;
+        return;
+    };
+    if call["native_child"] != true
+        || call["provider"] != "antigravity"
+        || call["native_response_usage"]["response"].is_object()
+    {
+        *retained = None;
+        return;
+    }
+    let participant = crate::text(call, "participant");
+    if participant.is_empty() {
+        *retained = None;
+        return;
+    }
+    let matches = |ev: &AgyDetailUsageEvidence| {
+        same_footer_scope(&ev.scope, scope)
+            && ev.binding.matches_agy_detail_scope(
+                &scope.room,
+                &main.attempt,
+                &main.owner,
+                &main.pane,
+                main.pid,
+                &main.birth,
+                participant,
+            )
+            && observations.chat_binding(participant) == Some(&ev.binding)
+    };
+    if frame == AgyDetailFrame::Observed
+        && let Some(ev) = incoming
+        && matches(&ev)
+    {
+        *retained = Some(ev);
+        return;
+    }
+    if retained
+        .as_ref()
+        .is_some_and(|ev| !matches(ev) || (ev.requires_group && frame == AgyDetailFrame::Observed))
+    {
+        *retained = None;
+    }
+}
+
+fn report_for_frame<'a>(
+    report: &'a Value,
+    nav: &navigation::Navigation,
+    retained: Option<&AgyDetailUsageEvidence>,
+) -> std::borrow::Cow<'a, Value> {
+    if !nav.detail {
+        return std::borrow::Cow::Borrowed(report);
+    }
+    let Some(ev) = retained else {
+        return std::borrow::Cow::Borrowed(report);
+    };
+    let Some(participant) = ev.binding.agy_participant() else {
+        return std::borrow::Cow::Borrowed(report);
+    };
+    let mut cloned = report.clone();
+    if let Some(rows) = cloned["native_children"].as_array_mut() {
+        let mut matching = rows.iter_mut().filter(|row| {
+            row["native_child"] == true
+                && row["provider"] == "antigravity"
+                && row["participant"] == participant
+        });
+        if let (Some(row), None) = (matching.next(), matching.next())
+            && !row["native_response_usage"]["response"].is_object()
+        {
+            if let Some(model) = &ev.observed_model
+                && row.get("observed_model").is_none()
+            {
+                row["observed_model"] = json!(model);
+            }
+            row["native_response_usage"] = json!({
+                "scope": "latest_child_response",
+                "response": ev.response,
+            });
+        }
+    }
+    std::borrow::Cow::Owned(cloned)
+}
+
 struct NativeSeed {
     target: BoardTarget,
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
+    agy_detail: Option<AgyDetailUsageRequest>,
+    agy_detail_binding: Option<ChatBinding>,
 }
 
 struct AgyDockCheck {
@@ -1880,6 +2201,7 @@ pub(crate) struct NativeReading {
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
+    agy_detail_evidence: Option<AgyDetailUsageEvidence>,
 }
 
 const NATIVE_FIELDS: [&str; 12] = [
@@ -1921,6 +2243,15 @@ fn clear_rejected_native(report: &mut Value) {
 }
 
 impl NativeRequest {
+    fn authorized_agy_detail(&self, report: &Value) -> Option<&AgyDetailUsageRequest> {
+        let main = self.scope.main.as_ref()?;
+        self.seed.agy_detail.as_ref().filter(|req| {
+            same_footer_scope(&req.scope, &self.scope)
+                && report["room"]["id"] == self.scope.room
+                && report_has_live_main(report, main)
+        })
+    }
+
     pub(crate) fn observe(
         &self,
         snapshot: &mut Snapshot,
@@ -1947,7 +2278,24 @@ impl NativeRequest {
         let mut footer = self.seed.footer.clone();
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
-        panel.observe_passively(&mut observations, report, &generation);
+        let agy_detail_req = self.authorized_agy_detail(report);
+        let agy_detail_evidence = panel
+            .observe_passively(
+                &mut observations,
+                report,
+                &generation,
+                agy_detail_req.map(|req| &req.binding),
+            )
+            .and_then(|usage| {
+                let req = agy_detail_req?;
+                Some(AgyDetailUsageEvidence {
+                    scope: self.scope.clone(),
+                    binding: req.binding.clone(),
+                    response: usage.response,
+                    observed_model: usage.observed_model,
+                    requires_group: usage.requires_group,
+                })
+            });
         report["native_dock"] = json!(panel.docked());
         footer.project(Some(&self.scope), true, report, Instant::now(), |scope| {
             target.read_footer(repo, services, stop, scope)
@@ -1982,6 +2330,7 @@ impl NativeRequest {
             observations,
             footer,
             agy,
+            agy_detail_evidence,
         })
     }
 }
@@ -2015,6 +2364,10 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 impl RefreshPhase {
     fn pending(&self) -> bool {
         matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
+    fn retains_agy_detail(&self) -> bool {
+        matches!(self, Self::Pending | Self::Fresh)
     }
 
     fn frame_report(
@@ -2163,16 +2516,20 @@ struct InteractiveRefresh {
     scope: Option<BoardScope>,
     phase: RefreshPhase,
     deferred_refresh: bool,
+    agy_group_renewal: Option<AgyDetailUsageRequest>,
 }
 
 impl InteractiveRefresh {
-    fn start() -> Result<Self> {
+    fn start(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
+    ) -> Result<Self> {
         Ok(Self {
-            worker: BoardRefresh::start()?,
+            worker: BoardRefresh::start(workspace_group)?,
             quota: QuotaCompletion::default(),
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         })
     }
 
@@ -2207,7 +2564,7 @@ impl InteractiveRefresh {
         request: bool,
         ready: bool,
     ) -> (bool, Option<Snapshot>) {
-        let (changed, snapshot, _) = self.update_with_native(live, request, ready, None);
+        let (changed, snapshot, _) = self.update_with_native(live, request, ready, None, &mut None);
         (changed, snapshot)
     }
 
@@ -2217,14 +2574,22 @@ impl InteractiveRefresh {
         request: bool,
         ready: bool,
         mut seed: Option<NativeSeed>,
+        pending_agy_detail: &mut Option<AgyDetailUsageRequest>,
     ) -> (bool, Option<Snapshot>, Option<NativeReading>) {
         let changed = !self.matches(&live);
+        let detail_binding = seed
+            .as_ref()
+            .and_then(|seed| seed.agy_detail_binding.clone());
         if changed {
             self.quota.cancel();
             self.deferred_refresh = false;
+            *pending_agy_detail = None;
+            self.agy_group_renewal = None;
             if let Some(seed) = &mut seed {
                 seed.observations = Observations::default();
                 seed.agy = None;
+                seed.agy_detail = None;
+                seed.agy_detail_binding = None;
                 seed.footer = MainFooter::default();
             }
         }
@@ -2232,12 +2597,31 @@ impl InteractiveRefresh {
             Ok(scope) => scope,
             Err(error) => {
                 self.scope = None;
+                *pending_agy_detail = None;
+                self.agy_group_renewal = None;
                 self.phase = RefreshPhase::Failed(error.message);
                 return (changed, None, None);
             }
         };
+        if let Some(pending) = pending_agy_detail.as_ref()
+            && !same_footer_scope(&pending.scope, &scope)
+        {
+            *pending_agy_detail = None;
+        }
+        if self.agy_group_renewal.as_ref().is_some_and(|detail| {
+            detail_binding.as_ref() != Some(&detail.binding)
+                || !same_footer_scope(&detail.scope, &scope)
+        }) {
+            self.agy_group_renewal = None;
+        }
         if changed || (request && !self.worker.busy()) {
-            self.request(&scope, seed.take());
+            let mut dispatched = seed.take();
+            if let Some(seed) = &mut dispatched {
+                seed.agy_detail = pending_agy_detail
+                    .take()
+                    .or_else(|| self.agy_group_renewal.clone());
+            }
+            self.request(&scope, dispatched);
         } else if request && !self.worker.queued() {
             // Keep the current scope's read eligible to paint even if wakes
             // arrive faster than it completes. An already queued scope change
@@ -2251,20 +2635,10 @@ impl InteractiveRefresh {
             Ok(snapshot)
                 if snapshot.status == 0
                     && snapshot.report["collection"]["ok"] == true
-                    && scope.main.as_ref().is_none_or(|main| {
-                        let attempt = &snapshot.report["room_attempts"][&main.attempt];
-                        let member = crate::rows(&snapshot.report["room"]["participants"])
-                            .iter()
-                            .find(|row| row["participant"] == main.member);
-                        attempt["provider"] == main.owner
-                            && oms_panel_core::state::main_participant(attempt) == main.member
-                            && member.is_some_and(|row| {
-                                row["terminal"] != true
-                                    && !row["state"].as_str().is_some_and(|state| {
-                                        oms_panel_core::state::TERMINAL_STATES.contains(&state)
-                                    })
-                            })
-                    }) =>
+                    && scope
+                        .main
+                        .as_ref()
+                        .is_none_or(|main| report_has_live_main(&snapshot.report, main)) =>
             {
                 if !follow_up {
                     self.phase = RefreshPhase::Fresh;
@@ -2289,6 +2663,20 @@ impl InteractiveRefresh {
         let rejected_native = native.is_none() && completed.is_some() && scope.main.is_some();
         if rejected_native {
             self.quota.cancel();
+            *pending_agy_detail = None;
+            self.agy_group_renewal = None;
+        }
+        if !changed
+            && let Some(evidence) = native
+                .as_ref()
+                .and_then(|reading| reading.agy_detail_evidence.as_ref())
+            && detail_binding.as_ref() == Some(&evidence.binding)
+            && same_footer_scope(&evidence.scope, &scope)
+        {
+            self.agy_group_renewal = evidence.requires_group.then(|| AgyDetailUsageRequest {
+                scope: evidence.scope.clone(),
+                binding: evidence.binding.clone(),
+            });
         }
         if follow_up {
             if let Some(seed) = &mut seed {
@@ -2300,6 +2688,9 @@ impl InteractiveRefresh {
                     seed.footer = MainFooter::default();
                     seed.agy = None;
                 }
+                seed.agy_detail = pending_agy_detail
+                    .take()
+                    .or_else(|| self.agy_group_renewal.clone());
             }
             self.request(&scope, seed);
             if replied && completed.is_none() && self.phase == RefreshPhase::Pending {
@@ -5011,6 +5402,7 @@ mod tests {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let scope = |room: &str| BoardScope {
             key: RefreshKey::new(repo, Some(room), None).unwrap(),
@@ -6615,6 +7007,7 @@ mod tests {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let scope = |room: &str| BoardScope {
             key: RefreshKey::new(repo, Some(room), Some(MAIN)).unwrap(),
@@ -7508,6 +7901,646 @@ mod tests {
         }
         super::apply_selection_key(&mut nav, &mut selection, &Key::Escape, 1, 1);
         assert!(!nav.detail);
+    }
+
+    #[test]
+    fn agy_detail_usage_request_and_interactive_dispatch() {
+        use super::{
+            AgyDetailFrame, AgyDetailUsageEvidence, BoardScope, BoardTarget, InteractiveRefresh,
+            LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
+            SelectionFence, agy_detail_usage_request, apply_selection_key,
+            reconcile_agy_detail_evidence, report_for_frame,
+        };
+        use crate::board_refresh::BoardRefresh;
+        use crate::input::Key;
+        use crate::orchestrator::Observations;
+        use crate::orchestrator::codex_chat_fixture::{BoardSpy, NEW_TURN, TURN};
+        use oms_panel_core::{
+            CommandOutput, Error, NativeCommand, PeerExecutor, Result, Services, Value,
+        };
+        use serde_json::json;
+        use std::path::Path;
+        use std::sync::{atomic::AtomicBool, mpsc};
+        use std::time::{Duration, Instant};
+
+        const ROOM: &str = "room-fixture";
+        const MAIN: &str = "att_11111111111111111111111111111111";
+
+        let spy = BoardSpy::new("agy-detail-usage");
+        spy.provider.set("antigravity");
+        let child = crate::native_children::participant_id(
+            "antigravity",
+            "44444444-4444-4444-4444-dddddddddddd",
+        );
+        let observations = spy.agy_observations(&child, TURN);
+        let binding = observations.chat_binding(&child).unwrap().clone();
+        let repo = binding.repo().to_path_buf();
+        let pid = std::process::id();
+        let birth = oms_panel_core::terminals::process(pid).unwrap().birth;
+        let make_scope = |room_id: &str| BoardScope {
+            key: RefreshKey::new(&repo, Some(room_id), Some(MAIN)).unwrap(),
+            room: room_id.into(),
+            main: Some(LiveMain {
+                attempt: MAIN.into(),
+                member: MAIN.into(),
+                owner: "codex".into(),
+                session: "$1".into(),
+                window: "@1".into(),
+                pane: "%1".into(),
+                pid,
+                birth: birth.clone(),
+            }),
+        };
+        let current_scope = make_scope(ROOM);
+        let call = json!({
+            "participant": child,
+            "native_child": true,
+            "provider": "antigravity",
+            "role": "subagent",
+            "state": "working"
+        });
+        let report = json!({
+            "collection": {"ok": true},
+            "room": {
+                "id": ROOM,
+                "closed": false,
+                "participants": [
+                    {"participant": MAIN, "role": "main", "provider": "codex", "joined": true, "state": "working", "terminal": false}
+                ]
+            },
+            "room_attempts": {
+                MAIN: {
+                    "attempt_id": MAIN,
+                    "provider": "codex",
+                    "tool": "panel-main",
+                    "state": "working",
+                    "terminal": false,
+                    "refs": {"panel_role": "main", "panel_room_id": ROOM, "panel_room_participant": MAIN}
+                }
+            },
+            "native_children": [call.clone()]
+        });
+
+        let req =
+            agy_detail_usage_request(Some(&current_scope), &report, Some(&call), &observations)
+                .expect("unsampled AGY child under exact scope should request usage");
+        assert_eq!(req.scope, current_scope);
+        assert!(req.binding == binding);
+
+        // Already sampled -> None.
+        let mut sampled_call = call.clone();
+        sampled_call["native_response_usage"] = json!({
+            "scope": "latest_child_response",
+            "response": {"input_tokens": 1200, "cached_input_tokens": 0, "output_tokens": 40}
+        });
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &report,
+                Some(&sampled_call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Non-AGY -> None.
+        let mut codex_call = call.clone();
+        codex_call["provider"] = json!("codex");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &report,
+                Some(&codex_call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Wrong Room -> None.
+        let mut wrong_room = report.clone();
+        wrong_room["room"]["id"] = json!("other-room");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &wrong_room,
+                Some(&call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Wrong Main birth -> None.
+        let mut wrong_birth = current_scope.clone();
+        wrong_birth.main.as_mut().unwrap().birth = "other-birth".into();
+        assert!(
+            agy_detail_usage_request(Some(&wrong_birth), &report, Some(&call), &observations)
+                .is_none()
+        );
+
+        // Wrong participant -> None.
+        let mut wrong_child = call.clone();
+        wrong_child["participant"] = json!("native-antigravity-other");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &report,
+                Some(&wrong_child),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Terminal Main membership (flag or terminal state) -> None.
+        let mut terminal_flag = report.clone();
+        terminal_flag["room"]["participants"][0]["terminal"] = json!(true);
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &terminal_flag,
+                Some(&call),
+                &observations
+            )
+            .is_none()
+        );
+        let mut terminal_state = report.clone();
+        terminal_state["room"]["participants"][0]["state"] = json!("done");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &terminal_state,
+                Some(&call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Targeted detail-only evidence lifecycle:
+        // 1. Successful targeted response while D is open is admitted and rendered via
+        //    report_for_frame without polluting raw report["native_children"].
+        let mut nav = crate::navigation::Navigation::default();
+        let calls = crate::render::visible(&report, &nav);
+        nav.selected = calls
+            .iter()
+            .position(|row| row["participant"] == child)
+            .unwrap();
+        let mut selection = SelectionFence::None;
+        apply_selection_key(&mut nav, &mut selection, &Key::Char('D'), calls.len(), 1);
+        assert!(nav.detail);
+
+        let ev = AgyDetailUsageEvidence {
+            scope: current_scope.clone(),
+            binding: binding.clone(),
+            response: json!({
+                "model": "gemini",
+                "input_tokens": 1200,
+                "cached_input_tokens": 0,
+                "output_tokens": 40
+            }),
+            observed_model: Some("gemini".into()),
+            requires_group: false,
+        };
+        let mut retained = None;
+        reconcile_agy_detail_evidence(
+            &mut retained,
+            Some(ev.clone()),
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(retained.as_ref() == Some(&ev));
+        assert!(
+            report["native_children"][0]
+                .get("native_response_usage")
+                .is_none()
+        );
+        let render_detail =
+            |src: &Value, n: &crate::navigation::Navigation, r: Option<&AgyDetailUsageEvidence>| {
+                let display = report_for_frame(src, n, r);
+                super::frame(
+                    &display,
+                    n,
+                    (80, 18),
+                    &Default::default(),
+                    false,
+                    Some(&mut DockSplit::default()),
+                    None,
+                    None,
+                )
+                .lines
+                .join("\n")
+            };
+        let detail = render_detail(&report, &nav, retained.as_ref());
+        for label in [
+            "Call Detail",
+            "Last response",
+            "1200 in",
+            "40 out",
+            "0 cache read",
+        ] {
+            assert!(detail.contains(label), "{label}: {detail}");
+        }
+        assert!(!detail.contains("1240"), "{detail}");
+
+        // 2. Next ordinary ambient refresh (incoming = None, raw report still has no
+        //    usage on child #4) preserves retained evidence while D stays open under
+        //    the same Room/Main/pane-birth/Turn/participant.
+        reconcile_agy_detail_evidence(
+            &mut retained,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Unchanged,
+            false,
+        );
+        assert!(retained.as_ref() == Some(&ev));
+        let detail_after_ambient = render_detail(&report, &nav, retained.as_ref());
+        assert!(
+            detail_after_ambient.contains("1200 in"),
+            "{detail_after_ambient}"
+        );
+        assert!(
+            !detail_after_ambient.contains("1240"),
+            "{detail_after_ambient}"
+        );
+
+        let mut group = ev.clone();
+        group.requires_group = true;
+        let mut retained_group = Some(group.clone());
+        let refresh_group = |retained: &mut Option<AgyDetailUsageEvidence>, incoming, frame| {
+            reconcile_agy_detail_evidence(
+                retained,
+                incoming,
+                Some(&current_scope),
+                &report,
+                &nav,
+                &observations,
+                frame,
+                false,
+            );
+        };
+        refresh_group(&mut retained_group, None, AgyDetailFrame::Unchanged);
+        assert!(retained_group.as_ref() == Some(&group));
+        let mut renewed = group;
+        renewed.response["input_tokens"] = 1300.into();
+        refresh_group(
+            &mut retained_group,
+            Some(renewed.clone()),
+            AgyDetailFrame::Observed,
+        );
+        assert!(retained_group.as_ref() == Some(&renewed));
+        assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+
+        // The same row and Turn can survive a revoked membership or ACL change.
+        refresh_group(&mut retained_group, None, AgyDetailFrame::Observed);
+        assert!(retained_group.is_none());
+        assert!(!render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+        refresh_group(&mut retained_group, Some(renewed), AgyDetailFrame::Observed);
+        assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+
+        // 3a. Closing D or moving selection before an in-flight response lands rejects
+        //     incoming evidence (zero bleed).
+        let mut closed_nav = nav.clone();
+        closed_nav.detail = false;
+        let mut bleed_check = None;
+        reconcile_agy_detail_evidence(
+            &mut bleed_check,
+            Some(ev.clone()),
+            Some(&current_scope),
+            &report,
+            &closed_nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(bleed_check.is_none());
+        let mut other_sel_nav = nav.clone();
+        other_sel_nav.selected = 0; // Main row
+        reconcile_agy_detail_evidence(
+            &mut bleed_check,
+            Some(ev.clone()),
+            Some(&current_scope),
+            &report,
+            &other_sel_nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(bleed_check.is_none());
+
+        // 3b. Changed Turn / binding, scope change, or rejected_native drops retained
+        //     evidence immediately so stale counters are redacted.
+        let new_turn_obs = spy.agy_observations(&child, NEW_TURN);
+        let mut stale_turn = retained.clone();
+        reconcile_agy_detail_evidence(
+            &mut stale_turn,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &new_turn_obs,
+            AgyDetailFrame::Unchanged,
+            false,
+        );
+        assert!(stale_turn.is_none());
+        let redacted = render_detail(&report, &nav, stale_turn.as_ref());
+        assert!(!redacted.contains("1200 in"), "{redacted}");
+
+        let mut on_rejected = retained.clone();
+        reconcile_agy_detail_evidence(
+            &mut on_rejected,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Rejected,
+            false,
+        );
+        assert!(on_rejected.is_none());
+
+        let mut on_scope_change = retained.clone();
+        reconcile_agy_detail_evidence(
+            &mut on_scope_change,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            true,
+        );
+        assert!(on_scope_change.is_none());
+
+        // 3c. A newer ambient native_response_usage on child #4 drops retained evidence
+        //     so the newer ambient sample wins.
+        let mut ambient_report = report.clone();
+        ambient_report["native_children"][0]["native_response_usage"] = json!({
+            "scope": "latest_child_response",
+            "response": {
+                "model": "gemini",
+                "input_tokens": 2500,
+                "cached_input_tokens": 10,
+                "output_tokens": 90
+            }
+        });
+        reconcile_agy_detail_evidence(
+            &mut retained,
+            None,
+            Some(&current_scope),
+            &ambient_report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(retained.is_none());
+        let ambient_detail = render_detail(&ambient_report, &nav, retained.as_ref());
+        assert!(ambient_detail.contains("2500 in"), "{ambient_detail}");
+        assert!(!ambient_detail.contains("1200 in"), "{ambient_detail}");
+
+        // InteractiveRefresh::update_with_native dispatches pending agy_detail once
+        // (immediately or on follow_up behind a busy worker), does not re-enqueue it,
+        // and drops it on scope change.
+        struct Collector {
+            rooms: mpsc::Sender<String>,
+            answer: mpsc::Receiver<Result<Value>>,
+        }
+        impl PeerExecutor for Collector {
+            fn execute(
+                &self,
+                _: &oms_panel_core::services::ExecutionRequest,
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                panic!("collector must not execute processes")
+            }
+        }
+        impl Services for Collector {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                args: &[std::ffi::OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                let value = match command {
+                    NativeCommand::Events => json!([{
+                        "attempt_id": MAIN, "tool": "panel-main", "provider": "claude",
+                        "terminal": false, "state": "working",
+                        "refs": {"panel_role": "main", "panel_room_id": ROOM}
+                    }]),
+                    NativeCommand::Room => {
+                        self.rooms
+                            .send(args[2].to_string_lossy().into())
+                            .map_err(Error::new)?;
+                        self.answer
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(Error::new)??
+                    }
+                    _ => panic!("unexpected collector command {command:?}"),
+                };
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(&value).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+
+        let (rooms, requested) = mpsc::channel();
+        let (answer, responses) = mpsc::channel();
+        let worker = BoardRefresh::spawn_with(move || {
+            Ok(Collector {
+                rooms,
+                answer: responses,
+            })
+        })
+        .unwrap();
+        let mut board = InteractiveRefresh {
+            worker,
+            quota: Default::default(),
+            scope: Some(current_scope.clone()),
+            phase: RefreshPhase::Fresh,
+            deferred_refresh: false,
+            agy_group_renewal: None,
+        };
+        let make_seed = || NativeSeed {
+            target: BoardTarget {
+                room: Some(ROOM.into()),
+                caller: None,
+                managed: false,
+            },
+            observations: Observations::default(),
+            footer: MainFooter::default(),
+            agy: None,
+            agy_detail: None,
+            agy_detail_binding: None,
+        };
+        let mut seed = make_seed();
+        seed.agy_detail = Some(req.clone());
+        let native_request = NativeRequest {
+            scope: current_scope.clone(),
+            seed,
+        };
+        assert!(native_request.authorized_agy_detail(&report).is_some());
+        let mut wrong_owner = report.clone();
+        wrong_owner["room_attempts"][MAIN]["provider"] = json!("claude");
+        wrong_owner["room"]["participants"][0]["provider"] = json!("claude");
+        assert!(current_scope.key.matches(&oms_panel_core::state::Snapshot {
+            report: wrong_owner.clone(),
+            status: 0,
+        }));
+        assert!(native_request.authorized_agy_detail(&wrong_owner).is_none());
+        let wait_ready = |board: &mut InteractiveRefresh| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !board.worker.ready() {
+                assert!(Instant::now() < deadline, "timed out waiting for worker");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // 1. Immediate dispatch consumes pending once and does not re-enqueue.
+        let mut pending = Some(req.clone());
+        let (changed, _, _) = board.update_with_native(
+            Ok(current_scope.clone()),
+            true,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(!changed);
+        assert!(pending.is_none());
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROOM
+        );
+        answer.send(Err(Error::new("done"))).unwrap();
+        wait_ready(&mut board);
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            true,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(pending.is_none());
+
+        // 2. A queued wake races with a report whose Room and Events agree with
+        // each other but disagree with the current physical Main provider.
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            true,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROOM
+        );
+        assert!(board.worker.busy());
+        pending = Some(req.clone());
+        let (changed, _, _) = board.update_with_native(
+            Ok(current_scope.clone()),
+            true,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(!changed);
+        assert!(pending.is_some());
+        assert!(board.deferred_refresh);
+        answer.send(Ok(wrong_owner["room"].clone())).unwrap();
+        wait_ready(&mut board);
+        let (changed, completed, _) = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            true,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(!changed);
+        assert!(completed.is_none());
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
+        assert!(pending.is_none());
+        let retrying = board
+            .phase
+            .frame_report(completed, Some(report.clone()), ROOM);
+        assert_eq!(retrying["collection"]["pending"], true);
+        let mut rejected = Some(ev);
+        reconcile_agy_detail_evidence(
+            &mut rejected,
+            None,
+            board.scope.as_ref(),
+            &retrying,
+            &nav,
+            &observations,
+            AgyDetailFrame::Rejected,
+            changed,
+        );
+        assert!(rejected.is_none());
+        assert!(!render_detail(&retrying, &nav, rejected.as_ref()).contains("1200 in"));
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROOM
+        );
+        answer.send(Err(Error::new("done"))).unwrap();
+        wait_ready(&mut board);
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            true,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(pending.is_none());
+
+        board.agy_group_renewal = Some(req.clone());
+        let mut open = make_seed();
+        open.agy_detail_binding = Some(binding.clone());
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            false,
+            Some(open),
+            &mut pending,
+        );
+        assert!(board.agy_group_renewal.as_ref() == Some(&req));
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(
+            board.agy_group_renewal.is_none(),
+            "closed detail must stop renewal"
+        );
+
+        // 3. Dropped on scope change.
+        pending = Some(req);
+        let other_scope = make_scope("room-other");
+        let (changed, _, _) = board.update_with_native(
+            Ok(other_scope),
+            false,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(changed);
+        assert!(pending.is_none());
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "room-other"
+        );
+        answer.send(Err(Error::new("done"))).unwrap();
+        wait_ready(&mut board);
     }
 
     #[test]
@@ -9429,6 +10462,109 @@ fi
         assert!(
             !quota_log.contains("send-keys -t %4 Escape") && !quota_log.contains("UNEXPECTED:")
         );
+
+        // Hold both captures in turn so the targeted result arrives while the
+        // same-scope Board is still waiting for an ordinary refresh.
+        let child_d = "55555555-5555-5555-5555-eeeeeeeeeeee";
+        let participant = |id| crate::native_children::participant_id("antigravity", id);
+        assert!(
+            [child_a, child_b, child_c]
+                .into_iter()
+                .all(|id| participant(id) < participant(child_d))
+        );
+        let mut detail_lead = lead_rows;
+        let child_d_call = detail_lead.len();
+        detail_lead.extend([
+            json!({"step_index":9,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"spawning d","tool_calls":[{"id":"td","name":"invoke_subagent","args":{"Prompt":"count fixture tokens","Role":"Fourth Usage","TypeName":"general"}}]}),
+            json!({"step_index":10,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-18T18:01:02Z","content":format!("Created the following subagent:\n{:#}", json!({"conversationId":child_d,"workspaceUris":[repo_uri]}))}),
+        ]);
+        write_jsonl(lead_id, "transcript.jsonl", &detail_lead);
+        write_jsonl(lead_id, "transcript_full.jsonl", &detail_lead);
+        write_jsonl(
+            child_d,
+            "transcript_full.jsonl",
+            &[
+                json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-18T18:01:03Z","model":"gemini","input_tokens":1200,"cache_read_tokens":0,"output_tokens":40}),
+            ],
+        );
+        let detail_visible = |screen: &[String]| {
+            screen
+                .iter()
+                .any(|line| line.contains("Call Detail · Fourth Usage"))
+        };
+        let has_detail_usage = |screen: &[String]| {
+            screen
+                .iter()
+                .any(|line| line.contains("1200 in") && line.contains("40 out"))
+        };
+        let (detail_counts, detail_log) =
+            run_pty(false, false, &mut |child_in, stream, screen, rx| {
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "fourth child on fresh Board",
+                    &mut |s| s.iter().any(|line| line.contains("Fourth Usage")),
+                );
+                child_in.write_all(b"/Fourth Usage\r\x1b[B").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "filter fourth child", &mut |s| {
+                    s.iter().any(|line| line.contains("Filter /Fourth Usage"))
+                });
+
+                std::fs::write(&stall_capture, "detail").unwrap();
+                child_in.write_all(b"D").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "selected detail and targeted read",
+                    &mut |s| detail_visible(s) && entered("detail"),
+                );
+                assert!(!has_detail_usage(screen));
+                repeat_wakes(stream, screen, rx);
+                std::fs::write(&stall_capture, "detail-follow-up").unwrap();
+                wait_for(stream, screen, rx, "ordinary refresh held", &mut |_| {
+                    entered("detail-follow-up")
+                });
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "targeted usage during follow-up",
+                    &mut |s| detail_visible(s) && has_detail_usage(s),
+                );
+
+                detail_lead[child_d_call]["tool_calls"][0]["args"]["Role"] =
+                    json!("Fourth Usage Refreshed");
+                write_jsonl(lead_id, "transcript.jsonl", &detail_lead);
+                write_jsonl(lead_id, "transcript_full.jsonl", &detail_lead);
+                std::fs::remove_file(&stall_capture).unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "usage in fresh ordinary frame",
+                    &mut |s| {
+                        has_detail_usage(s)
+                            && s.iter()
+                                .any(|line| line.contains("Call Detail · Fourth Usage Refreshed"))
+                    },
+                );
+                child_in.write_all(b"\x1b").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "detail closed and usage hidden",
+                    &mut |s| !detail_visible(s) && !has_detail_usage(s),
+                );
+            });
+        assert!(!detail_log.contains("UNEXPECTED:"), "{detail_log}");
+        assert_eq!(detail_counts[2], 3 * detail_counts[1] + 1);
+        assert_eq!(detail_counts[3], 0);
 
         let _ = holder.kill();
         let _ = holder.wait();
