@@ -107,6 +107,7 @@ const VALUES: &[&str] = &[
     "continue",
     "verify",
     "task-id",
+    "native-result",
     "from-task",
     "label",
     "alias",
@@ -637,15 +638,21 @@ impl Options {
                 "orchestrator",
             ],
         )?;
+        if self.has("native-result") {
+            require(
+                self.has("orchestrator") && self.has("task-id"),
+                "--native-result requires --orchestrator codex and --task-id",
+            )?;
+        }
         if self.has("task-id") && self.has("orchestrator") {
             require(
                 self.get("orchestrator") == Some("codex")
-                    && self.has("task")
+                    && (self.has("task") != self.has("native-result"))
                     && !self.has("lead")
                     && !self.has("model")
                     && !self.has("reasoning-effort")
                     && !self.has("spread-accounts"),
-                "bound --task-id assignments currently require an existing ordinary Codex lead and --task",
+                "bound --task-id operations require an existing ordinary Codex lead and either --task or --native-result",
             )?;
         }
         if self.has("count") {
@@ -826,6 +833,7 @@ pub fn usage() -> String {
     text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--account ID] [--model MODEL] [--reasoning-effort EFFORT]\nModel and effort apply to new sessions only. The native CLI validates availability.\nAssign an existing provider: --orchestrator PROVIDER [--account ID] --task TEXT\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
     text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
     text.push_str("Bind a canonical task: --orchestrator codex --task-id ID --task TEXT\nReuses the exact claim and durable intent; an unknown send is never resent automatically.\n\n");
+    text.push_str("Retain a native report: --orchestrator codex --task-id ID --native-result FILE\nImports digest-bound findings or candidate evidence; does not confirm consumption, completion or acceptance.\n\n");
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
@@ -883,6 +891,38 @@ mod tests {
         ];
         assert!(parse(&bound).is_ok());
         assert!(parse(&[bound.as_slice(), &["--account", "work"]].concat()).is_ok());
+        let returned = [
+            "--orchestrator",
+            "codex",
+            "--task-id",
+            "task-one",
+            "--native-result",
+            "return.json",
+        ];
+        assert!(parse(&returned).is_ok());
+        assert!(parse(&[returned.as_slice(), &["--account", "work"]].concat()).is_ok());
+        for args in [
+            vec!["--native-result", "return.json"],
+            vec![
+                "--results",
+                "--task-id",
+                "task-one",
+                "--native-result",
+                "return.json",
+            ],
+            vec!["--orchestrator", "codex", "--native-result", "return.json"],
+            vec![
+                "--orchestrator",
+                "claude",
+                "--task-id",
+                "task-one",
+                "--native-result",
+                "return.json",
+            ],
+            [returned.as_slice(), &["--task", "send again"]].concat(),
+        ] {
+            assert!(parse(&args).is_err(), "accepted {args:?}");
+        }
         for args in [
             &["--orchestrator", "codex", "--task-id", "task-one"][..],
             &[
@@ -910,8 +950,10 @@ mod tests {
             &["--reasoning-effort", "high"],
         ] {
             assert!(parse(&[bound.as_slice(), extra].concat()).is_err());
+            assert!(parse(&[returned.as_slice(), extra].concat()).is_err());
         }
         assert!(usage().contains("--orchestrator codex --task-id ID --task TEXT"));
+        assert!(usage().contains("--orchestrator codex --task-id ID --native-result FILE"));
     }
 
     #[test]

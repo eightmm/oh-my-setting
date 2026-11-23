@@ -249,6 +249,205 @@ fn result(attempt: &str, binding: &str, message: &str, status: &str, repeated: b
         "write_isolation": "unmanaged", "child_cleanup": "unsupported"})
 }
 
+/// Importing a report never sends native input or settles the native execution.
+pub(super) fn register_result(
+    panel: &Panel<'_>,
+    options: &Options,
+    host: &dyn AccountHost,
+    attempts: &AttemptCache,
+    tx: &Transaction<'_>,
+) -> Result<Value> {
+    require(
+        panel.leads.contains_key("codex"),
+        "native result requires the original ordinary Codex lead",
+    )?;
+    let capture = oms_panel_core::native_results::Capture::read(
+        panel.repo,
+        Path::new(&options.required("native-result")?),
+    )?;
+    let artifact = format!(
+        ".oms/lifecycle/attempts/{}/native-assignment.json",
+        capture.attempt()
+    );
+    let raw = tx.read(Path::new(&artifact), MAX_BINDING, false)?;
+    require(
+        oms_panel_core::digest(&raw) == capture.binding_digest(),
+        "native result assignment digest changed",
+    )?;
+    let packet: Value = serde_json::from_slice(&raw).map_err(Error::new)?;
+    let operation = current_operation(panel, capture.attempt())?;
+    require(
+        packet["schema"] == 1
+            && packet["kind"] == "oms-native-assignment"
+            && packet["provider"] == "codex"
+            && packet["attempt_id"] == capture.attempt()
+            && packet["parent_attempt_id"] == panel.attempt
+            && packet["room"] == panel.room
+            && packet["task"]["id"] == options.required("task-id")?
+            && operation["tool"] == "panel-native-assignment"
+            && operation["provider"] == "codex"
+            && operation["parent_attempt_id"] == panel.attempt
+            && operation["task_id"] == packet["task"]["id"]
+            && operation["refs"]["native_assignment_schema"] == "1"
+            && operation["refs"]["native_binding_sha256"] == capture.binding_digest()
+            && operation["refs"]["plan_id"] == packet["task"]["plan_id"]
+            && operation["refs"]["lease_id"] == packet["task"]["lease_id"]
+            && operation["refs"]["panel_room_id"] == panel.room,
+        "native result does not belong to this task, Main, lease or Room",
+    )?;
+    let transport = match text(&operation["refs"], "native_transport") {
+        "submitted" => "submitted",
+        "sending" => "sending",
+        "unknown" => "unknown",
+        _ => return Err(Error::new("native result requires a retained send intent")),
+    };
+    let mut intent = packet.clone();
+    intent
+        .as_object_mut()
+        .ok_or_else(|| Error::new("invalid native result binding"))?
+        .remove("attempt_id");
+    let intent_digest = oms_panel_core::digest(&serde_json::to_vec(&intent).map_err(Error::new)?);
+    require(
+        operation["refs"]["native_intent_sha256"] == intent_digest,
+        "native result intent digest changed",
+    )?;
+    let binding = Binding {
+        task: packet["task"].clone(),
+        checkout: packet["checkout"].clone(),
+        attempt: capture.attempt().into(),
+        intent_digest,
+        digest: capture.binding_digest().into(),
+        transport,
+    };
+    let revalidate = || -> Result<()> {
+        panel.require_codex_assignment_main(panel.repo, attempts)?;
+        panel.execute_with_host_cached(
+            "codex",
+            options.get("account"),
+            None,
+            LeadLaunch::default(),
+            host,
+            attempts,
+        )?;
+        let custody = panel.codex_assignment_custody(host)?;
+        let pane =
+            |p: &PaneIdentity| json!({"id":p.id,"window":p.window,"pid":p.pid,"birth":p.birth});
+        let (_, _, verification) = binding_summary(custody.binding.as_ref());
+        require(
+            packet["session"] == serde_json::to_value(&panel.session_proof).map_err(Error::new)?
+                && packet["main_pane"] == pane(&custody.main)
+                && packet["lead_pane"] == pane(&custody.lead)
+                && packet["account"]
+                    == serde_json::to_value(&custody.binding).map_err(Error::new)?
+                && packet["account_verification"]
+                    == serde_json::to_value(verification).map_err(Error::new)?,
+            "native result session generation or account changed",
+        )?;
+        binding.revalidate(panel)?;
+        tx.check()
+    };
+    revalidate()?;
+    capture.validate_scope(&packet)?;
+    let previous = oms_panel_core::native_results::read(&Store::open(panel.repo)?, &operation)?;
+    require(
+        previous
+            .as_ref()
+            .map_or(capture.previous_digest().is_empty(), |previous| {
+                previous["artifact_sha256"] == capture.previous_digest()
+                    || previous["input_sha256"] == capture.input_digest()
+            }),
+        "native result predecessor changed; retain and review the current report",
+    )?;
+    let retained = capture.retain(tx, &packet, &artifact)?;
+    let digest = text(&retained, "sha256");
+    let prior = text(&operation["refs"], "native_result_sha256");
+    require(
+        prior == digest || prior == capture.previous_digest(),
+        "native result predecessor changed; retain and review the current report",
+    )?;
+    revalidate()?;
+    let previous_operation = operation_value(&operation)?;
+    let previous_refs = previous_operation.get("refs");
+    let event = events::new_event(
+        capture.attempt(),
+        0usize.into(),
+        "attempt.usage",
+        obj([
+            (
+                "actor",
+                obj([
+                    ("kind", "owner".into()),
+                    ("name", "panel-native-result".into()),
+                ]),
+            ),
+            ("idempotency_key", format!("native-result-{digest}").into()),
+            (
+                "refs",
+                operation_value(&json!({"native_result_schema":"1",
+            "native_result_path":retained["path"],"native_result_sha256":digest}))?,
+            ),
+        ]),
+    )
+    .map_err(Error::new)?;
+    let mut append_authorized = false;
+    let appended = events::append_lifecycle_checked(panel.repo, event, panel.stop, |_, current| {
+        let current = current.ok_or_else(|| "native result assignment disappeared".to_owned())?;
+        let refs = current.get("refs");
+        if current.get("terminal").truth()
+            || ["tool", "provider", "parent_attempt_id", "task_id"]
+                .iter()
+                .any(|key| current.get(key) != previous_operation.get(key))
+            || refs.get("native_binding_sha256").py() != binding.digest
+            || refs.get("native_intent_sha256").py() != binding.intent_digest
+            || refs.get("native_transport").py() != transport
+            || [
+                "native_assignment_schema",
+                "plan_id",
+                "lease_id",
+                "panel_room_id",
+                "native_result_schema",
+                "native_result_path",
+                "native_result_sha256",
+            ]
+            .iter()
+            .any(|key| refs.get(key) != previous_refs.get(key))
+        {
+            return Err("native result assignment or predecessor changed".into());
+        }
+        append_authorized = true;
+        Ok(())
+    });
+    appended.map_err(|error| Error {
+        publication_uncertain: append_authorized,
+        ..Error::new(error)
+    })?;
+    let confirm = || -> Result<()> {
+        revalidate()?;
+        let current = current_operation(panel, capture.attempt())?;
+        require(
+            current["refs"]["native_result_schema"] == "1"
+                && current["refs"]["native_result_path"] == retained["path"]
+                && current["refs"]["native_result_sha256"] == digest,
+            "native result publication reference changed",
+        )
+    };
+    confirm().map_err(|e| Error {
+        publication_uncertain: true,
+        message: format!(
+            "native result may be recorded; reconcile its retained reference: {}",
+            e.message
+        ),
+        ..e
+    })?;
+    Ok(
+        json!({"schema":1,"status":"reported","attempt_id":capture.attempt(),"result":retained,
+        "reused":prior == digest,"transport":transport,"consumption":"unconfirmed",
+        "task_completion":"unconfirmed","write_isolation":"unmanaged","child_cleanup":"unsupported",
+        "effective_permissions":"unknown",
+        "acceptance_eligible":false}),
+    )
+}
+
 pub(super) fn run(
     panel: &Panel<'_>,
     options: &Options,

@@ -5502,6 +5502,28 @@ pub fn results(report: &Value, columns: usize) -> String {
                 ),
                 columns,
             ));
+            let report = &entry["report"];
+            if report.is_object() {
+                lines.extend(wrap(
+                    &format!(
+                        "    Native report {} · {} · verification {} · acceptance ineligible",
+                        text(report, "status"),
+                        text(report, "result_kind"),
+                        text(report, "verification_state")
+                    ),
+                    columns,
+                ));
+                for key in ["summary", "issue"] {
+                    if let Some(value) = report[key].as_str().filter(|v| !v.is_empty()) {
+                        lines.extend(wrap(value, columns));
+                    }
+                }
+                for missing in rows(&report["missing_evidence"]) {
+                    if let Some(missing) = missing.as_str() {
+                        lines.extend(wrap(&format!("    Missing: {missing}"), columns));
+                    }
+                }
+            }
         }
         lines.push(String::new());
     }
@@ -10731,12 +10753,24 @@ mod tests {
             )
         );
         assert!(!output.contains("Input receipt is not"));
-        let narrow = results(&json!({"rows":[native]}), 30);
+        let narrow = results(&json!({"rows":[native.clone()]}), 30);
         assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
         assert!(
             narrow.replace('\n', "").contains("decision pending"),
             "{narrow}"
         );
+        let mut reported = native;
+        reported["native_assignment"]["report"] = json!({"status":"reported","result_kind":"candidate",
+            "verification_state":"reported","summary":"Owner retained a candidate",
+            "missing_evidence":["native completion and child cleanup are unconfirmed"]});
+        let output = results(&json!({"rows":[reported.clone()]}), 140);
+        assert!(output.contains(
+            "Native report reported · candidate · verification reported · acceptance ineligible"
+        ));
+        assert!(output.contains("decision pending"));
+        assert!(output.contains("Missing: native completion and child cleanup are unconfirmed"));
+        let narrow = results(&json!({"rows":[reported]}), 30);
+        assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
     }
 
     #[test]

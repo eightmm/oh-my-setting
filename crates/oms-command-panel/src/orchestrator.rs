@@ -5322,7 +5322,10 @@ fn run_with_host(
     } else {
         let attempts_cache = AttemptCache::default();
         let attempts = panel.require_main_with_cache(options.get("owner"), &attempts_cache)?;
-        if !panel.leads.contains_key(provider) && !options.has("task") {
+        if !panel.leads.contains_key(provider)
+            && !options.has("task")
+            && !options.has("native-result")
+        {
             let main = crate::rows(&attempts)
                 .iter()
                 .find(|row| row["attempt_id"] == panel.attempt)
@@ -5330,7 +5333,9 @@ fn run_with_host(
             launch.permissions = Some(lead_permissions(main)?);
         }
         tx.check()?;
-        if options.has("task-id") {
+        if options.has("native-result") {
+            native_assignment::register_result(&panel, options, host, &attempts_cache, &tx)?
+        } else if options.has("task-id") {
             native_assignment::run(&panel, options, host, &attempts_cache, &tx)?
         } else if options.has("spread-accounts")
             && !panel.leads.contains_key(provider)
@@ -11571,7 +11576,11 @@ mod tests {
                     "--title",
                     "Fixture",
                     "--allowed",
-                    "src",
+                    if task == "native-one" {
+                        "src/answer.rs"
+                    } else {
+                        "src"
+                    },
                     "--verify",
                     "true",
                 ]);
@@ -11817,6 +11826,389 @@ mod tests {
             assert_eq!(opaque_retry["status"], "unknown");
             assert_eq!(opaque_retry["attempt_id"], opaque["attempt_id"]);
             assert_eq!(opaque_retry["reused"], true);
+            assert!(spy.mutating_calls().is_empty());
+
+            // Results use the same public owner surface and exact assignment;
+            // reporting cannot send input, settle children or accept a task.
+            let source_path = tmp.0.join("native-source.txt");
+            let patch_path = tmp.0.join("native-candidate.patch");
+            let verifier_path = tmp.0.join("native-verification.txt");
+            let input_path = tmp.0.join("native-return.json");
+            let source = b"Native report: inspected the assigned source.\n";
+            let patch = b"diff --git a/src/answer.rs b/src/answer.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/answer.rs\n@@ -0,0 +1 @@\n+pub const ANSWER: u8 = 42;\n";
+            let verifier = b"Reported verifier output: checks passed, exit 0.\n";
+            std::fs::write(&source_path, source).unwrap();
+            std::fs::write(&patch_path, patch).unwrap();
+            std::fs::write(&verifier_path, verifier).unwrap();
+            let mut manifest = json!({"schema":1,"attempt_id":first["attempt_id"],
+                "binding_sha256":oms_panel_core::digest(&std::fs::read(repo.join(text(&first,"binding"))).unwrap()),
+                "kind":"findings","summary":"Inspected source",
+                "source":{"path":source_path,"sha256":oms_panel_core::digest(source)}});
+            let import = |id: &str, manifest: &Value, host: &FakeHost| -> Result<Value> {
+                std::fs::write(&input_path, serde_json::to_vec(manifest).unwrap()).unwrap();
+                let options = Options::parse(&commands::strings(&[
+                    "--orchestrator",
+                    "codex",
+                    "--room",
+                    ROOM,
+                    "--task-id",
+                    id,
+                    "--native-result",
+                    input_path.to_str().unwrap(),
+                ]))
+                .unwrap();
+                let output = run_with_host(&repo, "codex", &options, &spy, &spy.stop, host)?;
+                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+                serde_json::from_slice(&output.1).map_err(Error::new)
+            };
+            let events_path = repo.join(".oms/lifecycle/events.jsonl");
+            let before_report = std::fs::read(&events_path).unwrap();
+            // A process can stop after retaining snapshots and before publishing
+            // a lifecycle reference. The next invocation reuses the same bytes.
+            std::fs::write(&input_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let store = Store::open(&repo).unwrap();
+            let capture =
+                oms_panel_core::native_results::Capture::read(&repo, &input_path).unwrap();
+            let retained = {
+                let tx = store
+                    .transaction("native-result-fixture", Duration::from_secs(3))
+                    .unwrap();
+                capture
+                    .retain(&tx, &binding, text(&first, "binding"))
+                    .unwrap()
+            };
+            assert_eq!(std::fs::read(&events_path).unwrap(), before_report);
+            let report_path = repo.join(text(&retained, "path"));
+            let retained_before = std::fs::read(&report_path).unwrap();
+            let reported = import("native-one", &manifest, &host).unwrap();
+            assert_eq!(reported["result"], retained);
+            assert_eq!(reported["status"], "reported");
+            assert_eq!(reported["consumption"], "unconfirmed");
+            assert_eq!(reported["task_completion"], "unconfirmed");
+            assert_eq!(reported["child_cleanup"], "unsupported");
+            assert_eq!(reported["acceptance_eligible"], false);
+            assert_eq!(std::fs::read(&report_path).unwrap(), retained_before);
+            let after_report = std::fs::read(&events_path).unwrap();
+            let retry = import("native-one", &manifest, &host).unwrap();
+            assert_eq!(retry["reused"], true);
+            assert_eq!(retry["result"], reported["result"]);
+            assert_eq!(std::fs::read(&events_path).unwrap(), after_report);
+            let view = || {
+                oms_panel_core::results::results(&repo, Some("native-one"), &spy, &spy.stop)
+                    .unwrap()
+            };
+            let findings = view();
+            assert_eq!(
+                findings["rows"][0]["native_assignment"]["report"]["result_kind"],
+                "findings"
+            );
+            assert_eq!(
+                findings["rows"][0]["native_assignment"]["report"]["verification_state"],
+                "unreported"
+            );
+            assert_eq!(
+                findings["rows"][0]["native_assignment"]["report"]["patch"],
+                Value::Null
+            );
+
+            // A later candidate retains its own patch and verifier references;
+            // reported exit-zero text never promotes the managed verification gate.
+            let findings_manifest = manifest.clone();
+            manifest["kind"] = "candidate".into();
+            manifest["summary"] = "Candidate ready for owner inspection".into();
+            manifest["previous_sha256"] = reported["result"]["sha256"].clone();
+            manifest["patch"] = json!({"path":patch_path,"sha256":oms_panel_core::digest(patch)});
+            manifest["verification"] =
+                json!([{"path":verifier_path,"sha256":oms_panel_core::digest(verifier)}]);
+            let candidate = import("native-one", &manifest, &host).unwrap();
+            assert_ne!(candidate["result"]["sha256"], reported["result"]["sha256"]);
+            let after_candidate = std::fs::read(&events_path).unwrap();
+            let task_view = view();
+            let row = &task_view["rows"][0];
+            let report = &row["native_assignment"]["report"];
+            assert_eq!(report["status"], "reported");
+            assert_eq!(report["origin"], "native-codex");
+            assert_eq!(report["producer"], "owner-import");
+            assert_eq!(report["verification_state"], "reported");
+            assert_eq!(
+                report["verification"][0]["sha256"],
+                oms_panel_core::digest(verifier)
+            );
+            assert_eq!(report["custody"]["checkout"], binding["checkout"]);
+            assert_eq!(report["parent_attempt_id"], MAIN);
+            assert_eq!(report["lease_id"], binding["task"]["lease_id"]);
+            assert_eq!(row["acceptance"], false);
+            assert_eq!(row["admitted"], false);
+            assert_eq!(row["stages"]["verify"]["state"], "not_run");
+            assert_eq!(row["stages"]["review"]["state"], "not_run");
+            assert!(crate::rows(&row["calls"]).is_empty());
+            assert!(text(row, "next_action").starts_with("inspect native report"));
+            let refusal = oms_panel_core::results::accept_native(
+                &repo,
+                &oms_panel_core::results::AcceptRequest {
+                    owner: "codex".into(),
+                    task_id: "native-one".into(),
+                    main_attempt_id: MAIN.into(),
+                    message: "Inspect native candidate".into(),
+                    verify: "true".into(),
+                    execution_repo: repo.clone(),
+                    expected_patch_sha256: Some(oms_panel_core::digest(patch)),
+                    allow_verifier_change: false,
+                    allow_floor_change: None,
+                },
+                &spy,
+                &spy.stop,
+            )
+            .unwrap_err();
+            assert!(
+                refusal.message.contains("live or unconfirmed attempts"),
+                "{}",
+                refusal.message
+            );
+            let operation = commands::query(
+                &spy,
+                NativeCommand::Events,
+                &repo,
+                &["show", "--attempt", text(&first, "attempt_id"), "--json"],
+                &spy.stop,
+            )
+            .unwrap();
+            for field in [
+                "parent_attempt_id",
+                "task_id",
+                "plan_id",
+                "lease_id",
+                "panel_room_id",
+                "native_binding_sha256",
+            ] {
+                let mut foreign = operation.clone();
+                if ["parent_attempt_id", "task_id"].contains(&field) {
+                    foreign[field] = "foreign".into();
+                } else {
+                    foreign["refs"][field] = "foreign".into();
+                }
+                assert!(
+                    oms_panel_core::native_results::read(&store, &foreign).is_err(),
+                    "accepted foreign {field}"
+                );
+            }
+            let mut forbidden = binding.clone();
+            forbidden["task"]["forbidden_paths"] = json!(["src/answer.rs"]);
+            assert!(
+                oms_panel_core::native_results::Capture::read(&repo, &input_path)
+                    .unwrap()
+                    .validate_scope(&forbidden)
+                    .is_err()
+            );
+            for (mode, expected) in [
+                (
+                    crate::reader::View::Raw,
+                    "Native report: inspected the assigned source.",
+                ),
+                (crate::reader::View::Diff, "+pub const ANSWER: u8 = 42;"),
+                (crate::reader::View::Files, "src/answer.rs +1 -0"),
+                (crate::reader::View::Info, "native-codex"),
+            ] {
+                let mut reader = crate::reader::Reader::default();
+                reader.view = mode;
+                assert!(
+                    reader
+                        .render(&repo, &task_view, 120)
+                        .unwrap()
+                        .join("\n")
+                        .contains(expected)
+                );
+            }
+            let task: Value =
+                serde_json::from_slice(&plan(&["show", "--id", "native-one"])).unwrap();
+            assert_eq!(task["state"], "claimed");
+            assert!(spy.mutating_calls().is_empty());
+
+            // The old revision cannot overwrite a later report, and bytes or
+            // caller assertions cannot substitute for the original lineage.
+            assert!(
+                import("native-one", &findings_manifest, &host)
+                    .unwrap_err()
+                    .message
+                    .contains("predecessor")
+            );
+            assert!(import("native-two", &manifest, &host).is_err());
+            for field in [
+                "binding_sha256",
+                "source",
+                "patch",
+                "verification",
+                "kind",
+                "consumption",
+            ] {
+                let mut invalid = manifest.clone();
+                match field {
+                    "source" | "patch" => invalid[field]["sha256"] = "0".repeat(64).into(),
+                    "verification" => invalid[field][0]["sha256"] = "0".repeat(64).into(),
+                    "kind" => invalid[field] = "findings".into(),
+                    "consumption" => invalid[field] = "confirmed".into(),
+                    _ => invalid[field] = "0".repeat(64).into(),
+                }
+                assert!(
+                    import("native-one", &invalid, &host).is_err(),
+                    "accepted {field}"
+                );
+            }
+            for target in ["outside/answer.rs", "src"] {
+                let mut outside = manifest.clone();
+                let outside_patch = std::str::from_utf8(patch)
+                    .unwrap()
+                    .replace("src/answer.rs", target);
+                std::fs::write(&patch_path, &outside_patch).unwrap();
+                outside["patch"]["sha256"] =
+                    oms_panel_core::digest(outside_patch.as_bytes()).into();
+                assert!(
+                    import("native-one", &outside, &host)
+                        .unwrap_err()
+                        .message
+                        .contains("scope")
+                );
+            }
+            std::fs::write(&patch_path, patch).unwrap();
+            let secret = concat!("gh", "p_12345678901234567890abcd");
+            let escaped = secret
+                .chars()
+                .map(|c| format!("\\u{:04x}", c as u32))
+                .collect::<String>();
+            let mut sensitive = manifest.clone();
+            sensitive["summary"] = secret.into();
+            std::fs::write(
+                &input_path,
+                serde_json::to_string(&sensitive)
+                    .unwrap()
+                    .replace(secret, &escaped),
+            )
+            .unwrap();
+            assert!(
+                oms_panel_core::native_results::Capture::read(&repo, &input_path)
+                    .err()
+                    .unwrap()
+                    .message
+                    .contains("scrubber")
+            );
+            assert_eq!(std::fs::read(&events_path).unwrap(), after_candidate);
+
+            // Readers fail closed independently for each retained artifact.
+            for path in [
+                report["artifact"].as_str().unwrap(),
+                text(&report["input"], "path"),
+                text(&report["source"], "path"),
+                text(&report["patch"], "path"),
+                text(&report["verification"][0], "path"),
+            ] {
+                let path = repo.join(path);
+                let old = std::fs::read(&path).unwrap();
+                std::fs::write(&path, b"changed evidence").unwrap();
+                let corrupt = view();
+                assert_eq!(
+                    corrupt["rows"][0]["native_assignment"]["report"]["status"],
+                    "unavailable"
+                );
+                assert_eq!(corrupt["rows"][0]["acceptance"], false);
+                std::fs::write(&path, old).unwrap();
+            }
+            let mut moved_host = host.clone();
+            moved_host.accounts = Some(make_accounts(vec![(
+                "codex",
+                vec![("acct-a", private_dir(&tmp.0.join("other-account")))],
+            )]));
+            assert!(import("native-one", &manifest, &moved_host).is_err());
+            let mut reused_host = host.clone();
+            reused_host
+                .owners
+                .insert(2001, owner_entry(2001, "reused-lead", uid));
+            assert!(import("native-one", &manifest, &reused_host).is_err());
+            spy.session_reply.replace(Some(out(format!(
+                "$1\t{}\tchanged-socket\t.\n{}\n",
+                spy.server_pid,
+                repo.display()
+            ))));
+            assert!(import("native-one", &manifest, &host).is_err());
+            git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "new base",
+            ]);
+            assert!(
+                import("native-one", &manifest, &host)
+                    .unwrap_err()
+                    .message
+                    .contains("base")
+            );
+            git(&["reset", "--soft", text(&binding["checkout"], "base_sha")]);
+            assert_eq!(std::fs::read(&events_path).unwrap(), after_candidate);
+            assert!(spy.mutating_calls().is_empty());
+
+            // Unknown submission stays unknown even after an owner attaches a
+            // report. No new input or synthetic completion is introduced.
+            let cancelled: Value = serde_json::from_slice(&cancelled.1).unwrap();
+            let mut cancelled_manifest = findings_manifest.clone();
+            cancelled_manifest["attempt_id"] = cancelled["attempt_id"].clone();
+            cancelled_manifest["binding_sha256"] = oms_panel_core::digest(
+                &std::fs::read(repo.join(text(&cancelled, "binding"))).unwrap(),
+            )
+            .into();
+            assert!(
+                import("native-four", &cancelled_manifest, &host)
+                    .unwrap_err()
+                    .message
+                    .contains("cancelled")
+            );
+            let unknown_binding_path = repo.join(text(&unknown, "binding"));
+            let mut unknown_manifest = findings_manifest.clone();
+            unknown_manifest["attempt_id"] = unknown["attempt_id"].clone();
+            unknown_manifest["binding_sha256"] =
+                oms_panel_core::digest(&std::fs::read(unknown_binding_path).unwrap()).into();
+            let unknown_before = commands::query(
+                &spy,
+                NativeCommand::Events,
+                &repo,
+                &["show", "--attempt", text(&unknown, "attempt_id"), "--json"],
+                &spy.stop,
+            )
+            .unwrap();
+            assert!(matches!(
+                unknown_before["refs"]["native_transport"].as_str(),
+                Some("sending" | "unknown")
+            ));
+            let unknown_report = import("native-two", &unknown_manifest, &host).unwrap();
+            assert_eq!(
+                unknown_report["transport"],
+                unknown_before["refs"]["native_transport"]
+            );
+            assert_eq!(unknown_report["consumption"], "unconfirmed");
+            let after_unknown = std::fs::read(&events_path).unwrap();
+            assert_eq!(
+                import("native-two", &unknown_manifest, &host).unwrap()["reused"],
+                true
+            );
+            assert_eq!(std::fs::read(&events_path).unwrap(), after_unknown);
+            let unknown_view =
+                oms_panel_core::results::results(&repo, Some("native-two"), &spy, &spy.stop)
+                    .unwrap();
+            assert!(
+                text(&unknown_view["rows"][0], "next_action")
+                    .starts_with("inspect and reconcile unconfirmed")
+            );
+            plan(&["release", "--id", "native-one"]);
+            plan(&["claim", "--id", "native-one", "--provider", "codex"]);
+            assert!(
+                import("native-one", &manifest, &host)
+                    .unwrap_err()
+                    .message
+                    .contains("lease")
+            );
+            assert_eq!(std::fs::read(&events_path).unwrap(), after_unknown);
             assert!(spy.mutating_calls().is_empty());
         }
 
