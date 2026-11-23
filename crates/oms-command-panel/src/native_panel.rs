@@ -7062,7 +7062,8 @@ exec /bin/sleep 30"#,
             }
         };
         let rejected = TempRepo::new();
-        let managed = super::session_candidates(&rejected.0)[0].clone();
+        let managed = super::session_candidates(&rejected.0)[1].clone();
+        assert_ne!(managed, session);
         let control = socket
             .command()
             .args([
@@ -7079,7 +7080,11 @@ exec /bin/sleep 30"#,
             ])
             .output()
             .unwrap();
-        assert!(control.status.success());
+        assert!(
+            control.status.success(),
+            "{}",
+            String::from_utf8_lossy(&control.stderr)
+        );
         for argv in [
             [
                 "set-option",
