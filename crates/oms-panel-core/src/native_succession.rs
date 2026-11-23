@@ -478,6 +478,7 @@ pub fn prove_successor(
     require(
         room_view["id"] == room
             && room_view["closed"] == false
+            && room_view.get("successor") == Some(&Value::Null)
             && array(&room_view["participants"])
                 .iter()
                 .filter(|row| row["joined"] == true && row["role"] == "main")
@@ -488,6 +489,7 @@ pub fn prove_successor(
                     && row["joined"] == true
                     && row["role"] == "main"
                     && row["provider"] == main["provider"]
+                    && (row["parent"].is_null() || row["parent"] == "")
             }),
         "native successor is not the exact current Room Main",
     )

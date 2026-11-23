@@ -967,7 +967,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "notes" => return crate::notes::execute(c, o),
         "blame-session" => return crate::attribution::blame(c, o),
         "conflicts" => return conflicts(c, o),
-        "batch-preview" => return crate::batch_preview::execute(c, o),
+        "batch-preview" | "batch-check" => return crate::batch_preview::execute(c, o),
         "" | "status" => {}
         _ => return Err(Error::new(2, "unknown land action")),
     }

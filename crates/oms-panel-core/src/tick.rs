@@ -5281,7 +5281,7 @@ mod tests {
         }
         rig.fake
             .room_override
-            .replace(Some(json!({"id":ROOM,"closed":false,
+            .replace(Some(json!({"id":ROOM,"closed":false,"successor":null,
             "participants":[{"participant":MEMBER,"joined":true,"role":"main","provider":"claude"}],
             "swaps":[{"participant":MEMBER,"attempt":old,"from":"claude","to":"claude",
                 "harness":"claude","model":"fixture-successor"}]})));
@@ -5399,6 +5399,26 @@ mod tests {
             .remove("native_succession_sha256");
         assert!(wake(&rig, false).contains("native succession evidence unavailable"));
         rig.fake.children.borrow_mut()[0] = row.clone();
+        let active_room = rig.fake.room_override.borrow().clone().unwrap();
+        for invalid in [
+            json!({"successor":"room-fedcba654321"}),
+            json!({"closed":true}),
+            json!({"participants":[{"participant":MEMBER,"joined":true,
+                "role":"main","provider":"claude","parent":old}]}),
+        ] {
+            let mut invalid_room = active_room.clone();
+            invalid_room
+                .as_object_mut()
+                .unwrap()
+                .extend(invalid.as_object().unwrap().clone());
+            rig.fake.room_override.replace(Some(invalid_room));
+            assert!(wake(&rig, false).contains("exact current Room Main"));
+        }
+        let mut incomplete = active_room.clone();
+        incomplete.as_object_mut().unwrap().remove("successor");
+        rig.fake.room_override.replace(Some(incomplete));
+        assert!(wake(&rig, false).contains("exact current Room Main"));
+        rig.fake.room_override.replace(Some(active_room));
         assert_eq!(rig.fake.sent.borrow().len(), sends);
         // A settled-only adoption only asks Main to retire the assignment. The
         // old input is never reopened, and its historical parent/claim stay fixed.

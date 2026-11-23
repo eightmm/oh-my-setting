@@ -473,7 +473,7 @@ fn run_with_source_writer(
                                     .then(|| target.sample(repo, services, interrupted).ok())
                                     .flatten()
                             },
-                            |scope, target| start_main_switch(repo, scope, target),
+                            |scope, target| start_main_switch(repo, source, scope, target),
                         ) {
                             changed = true;
                             break;
@@ -1328,11 +1328,12 @@ impl MainSwitch {
 
 fn start_main_switch(
     repo: &Path,
+    source: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
 ) -> Result<Receiver<Result<()>>> {
     let services = oms_panel_core::SubcommandServices::sibling()?;
-    let request = main_switch_request(&services.executable, repo, scope, target)?;
+    let request = main_switch_request(&services.executable, source, repo, scope, target)?;
     let (completed, result) = mpsc::channel();
     // The canonical host owns lifecycle reconciliation once submitted. Closing
     // this display neither retries the transition nor sends a second request.
@@ -1366,6 +1367,7 @@ fn start_main_switch(
 
 fn main_switch_request(
     executable: &Path,
+    source: &Path,
     repo: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
@@ -1375,11 +1377,18 @@ fn main_switch_request(
         .as_ref()
         .ok_or_else(|| Error::new("No current Main verified"))?;
     crate::require(
-        executable.is_absolute() && executable.file_name().is_some_and(|name| name == "oms"),
+        executable.is_absolute()
+            && rustix::fs::access(executable, rustix::fs::Access::EXEC_OK).is_ok(),
         "Canonical OMS dispatcher unavailable",
     )?;
+    let (source, revision) = crate::native_panel::staged_dispatch_args(source, executable)
+        .ok_or_else(|| Error::new("Canonical staged OMS dispatcher unavailable"))?;
     let mut argv = vec![
         executable.as_os_str().into(),
+        "--oms-dispatch".into(),
+        source.into(),
+        revision.into(),
+        "--".into(),
         "panel".into(),
         "--repo".into(),
         repo.as_os_str().into(),
@@ -5729,8 +5738,17 @@ mod tests {
     #[test]
     fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
         use super::*;
+        use crate::orchestrator::account_binding::test_support::TempDir;
         use input::Key;
+        use std::os::unix::fs::PermissionsExt;
         let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let staged = TempDir::new("board-main-switch");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let payload = staged.0.join("target/oms-native").join(revision);
+        std::fs::create_dir_all(&payload).unwrap();
+        let executable = payload.join("oms");
+        std::fs::write(&executable, b"fixture executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let scope = BoardScope {
             key: RefreshKey::new(&repo, Some("room-one"), Some("attempt-old"))
                 .unwrap()
@@ -6110,8 +6128,24 @@ mod tests {
             || Some(scope.clone()),
             |expected, target| {
                 assert_eq!(expected, &scope);
-                let req = main_switch_request(Path::new("/fixture/oms"), &repo, expected, target)?;
-                let opts = Options::parse(&req.argv[2..])?;
+                assert!(
+                    main_switch_request(&executable, &staged.0, &repo, expected, target).is_err()
+                );
+                std::fs::write(payload.join("manifest.json"), b"{}").unwrap();
+                assert!(main_switch_request(&executable, &repo, &repo, expected, target).is_err());
+                let req = main_switch_request(&executable, &staged.0, &repo, expected, target)?;
+                assert_eq!(
+                    req.argv[..6],
+                    [
+                        executable.as_os_str().to_owned(),
+                        "--oms-dispatch".into(),
+                        staged.0.as_os_str().to_owned(),
+                        revision.into(),
+                        "--".into(),
+                        "panel".into(),
+                    ]
+                );
+                let opts = Options::parse(&req.argv[6..])?;
                 assert_eq!(opts.get("room"), Some("room-one"));
                 assert_eq!(opts.get("swap-main"), Some("agy"));
                 assert_eq!(opts.get("model"), Some("gemini-4-carbon-high"));

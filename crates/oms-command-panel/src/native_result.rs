@@ -114,17 +114,14 @@ pub(super) fn guard_lead(
                 && old["lease_id"] == operation["refs"]["lease_id"]
                 && old["lease_epoch"] == binding["task"]["lease_epoch"]
                 && old["provider"] == binding["task"]["provider"]
-                && old["claimed_by_participant"]
-                    == binding
-                        .get("parent_participant")
-                        .unwrap_or(&binding["parent_attempt_id"])
-                        .clone()
+                && binding
+                    .get("parent_participant")
+                    .unwrap_or(&binding["parent_attempt_id"])
+                    == &old["claimed_by_participant"]
                 && settled(&old)
                 && native_succession::selected(panel, operation),
             &unresolved,
         )?;
-        let checked = native_succession::assignment(panel, operation)?;
-        native_succession::authorize(panel, operation, &checked)?;
         fresh_main(panel, &AttemptCache::default())?;
         tx.check()?;
         retire(panel, operation, text(&old, "state"))?;
@@ -134,8 +131,7 @@ pub(super) fn guard_lead(
 
 fn retire(panel: &Panel<'_>, operation: &Value, plan_state: &str) -> Result<()> {
     let attempt = text(operation, "attempt_id");
-    let assignment = native_succession::assignment(panel, operation)?;
-    native_succession::authorize(panel, operation, &assignment)?;
+    let parent = native_succession::retirement_parent(panel, operation)?;
     let room = commands::query(
         panel.services,
         NativeCommand::Room,
@@ -151,7 +147,7 @@ fn retire(panel: &Panel<'_>, operation: &Value, plan_state: &str) -> Result<()> 
         .iter()
         .find(|p| {
             p["participant"] == attempt
-                && p["parent"] == assignment.parent_participant()
+                && p["parent"] == parent
                 && p["provider"] == "codex"
                 && p["role"] == "worker"
                 && p["joined"].is_boolean()
@@ -576,9 +572,7 @@ fn retire_unsent(
     require(
         operation["tool"] == "panel-native-assignment"
             && operation["provider"] == "codex"
-            && operation["parent_attempt_id"] == panel.attempt
-            && refs["panel_room_id"] == panel.room
-            && refs["panel_owner"] == panel.owner
+            && native_succession::original_custodian(panel, &operation)
             && refs["native_assignment_schema"] == "1"
             && refs["native_return_schema"] == "1"
             && refs["native_intent_sha256"] == intent,

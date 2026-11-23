@@ -79,6 +79,11 @@ The crate reexports native completion/decision/retirement APIs, task packet and
 consumer APIs, task verification observations/fingerprints, and work-inspection
 projections instead of creating alternate authorities for those records.
 
+Exact-tree commits from `goal-drive` and `autopilot` require repository-local
+identity configured with `git config --local user.name ...` and
+`git config --local user.email ...`. The native Plan Git environment ignores
+global/system configuration and inherited Git identity overrides.
+
 ## Discussion before decomposition
 
 `plan-from-spec --collaboration auto` runs the existing Codex/Claude/Antigravity

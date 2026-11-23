@@ -367,6 +367,18 @@ fn evidence(ctx: &Context<'_>, path: &str) -> Result<Vec<u8>> {
 fn completed_landing(ctx: &Context<'_>, id: &str) -> Result<Value> {
     let plan = ctx.plan()?;
     let snapshot = plan.load()?;
+    let rows = ctx.rows(".oms/landings.jsonl")?;
+    completed_landing_from_snapshot(ctx, &snapshot, id, rows.iter().rev())
+}
+/// The same proof serves commit publication and read-only goal progress. A
+/// caller inspecting several tasks keeps their canonical snapshot and indexes
+/// the bounded landing ledger once, without accepting projected task fields.
+pub(crate) fn completed_landing_from_snapshot<'a>(
+    ctx: &Context<'_>,
+    snapshot: &oms_command_plan::Snapshot,
+    id: &str,
+    rows: impl IntoIterator<Item = &'a Value>,
+) -> Result<Value> {
     let task = snapshot.task(id)?;
     require(
         task.text("state") == "done",
@@ -375,10 +387,8 @@ fn completed_landing(ctx: &Context<'_>, id: &str) -> Result<Value> {
     let receipt = oms_command_plan::json::receipt_digest(task)?;
     let patch_hash = value::hash(evidence(ctx, task.text("patch"))?);
     let plan_id = value::from_plan(snapshot.plan.get("plan_id"))?;
-    let row = ctx
-        .rows(".oms/landings.jsonl")?
+    let row = rows
         .into_iter()
-        .rev()
         .find(|row| {
             row["event"] == "complete"
                 && value::text(row, "task") == id
@@ -389,6 +399,7 @@ fn completed_landing(ctx: &Context<'_>, id: &str) -> Result<Value> {
                 && value::text(row, "plan_done_receipt_sha") == receipt
                 && value::text(row, "patch_sha") == patch_hash
         })
+        .cloned()
         .ok_or_else(|| Error::new(3, "no exact completed landing receipt"))?;
     require(
         value::commit(value::text(&row, "base_sha")),
