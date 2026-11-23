@@ -142,6 +142,7 @@ fn stable_task(task: &Value) -> Result<Value> {
         "landing",
         "landed_commit",
         "panel_accept",
+        "review_evidence",
         "completion_kind",
         "completion_receipt",
         "completion_verified",
@@ -789,6 +790,7 @@ mod tests {
             ("artifact", json!(".oms/artifacts/review.json")),
             ("patch", json!(".oms/artifacts/candidate.patch")),
             ("review_lease_id", task["lease_id"].clone()),
+            ("review_evidence", json!({"schema":1})),
             (
                 "cancellation",
                 json!({"reason":"owner cancelled the registered task"}),

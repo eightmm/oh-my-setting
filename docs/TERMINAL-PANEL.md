@@ -2433,6 +2433,11 @@ actual verification and completion. Report commands and claimed checks are never
 executed. A native candidate remains external patch evidence rather than managed
 delegate provenance, and report ingestion/review alone grants no acceptance.
 
+The Plan review freezes both retained evidence digests. Admission and the final
+Plan land/finish fences reject a changed report or patch, while landing can move
+the exact patch bytes into its existing frozen store. Reconciliation cannot adopt
+an older path-only review as an exact native review.
+
 After genuine canonical Plan completion or cancellation, repeating exact-result
 `--native-reconcile ... --decision reviewed` retires the assignment lifecycle and
 Room reservation. The reusable Lead session remains open; this administrative

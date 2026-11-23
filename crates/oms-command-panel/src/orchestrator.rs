@@ -12034,7 +12034,10 @@ mod tests {
                         &host,
                     )
                 };
-                let retain_findings = |assignment_result: &Value, task_id: &str| -> Result<Value> {
+                let retain_return = |assignment_result: &Value,
+                                     task_id: &str,
+                                     candidate: bool|
+                 -> Result<Value> {
                     let raw = std::fs::read(repo.join(text(assignment_result, "binding"))).unwrap();
                     let assignment =
                         oms_panel_core::native_contract::CheckedAssignment::parse(&raw)
@@ -12042,11 +12045,25 @@ mod tests {
                             .unwrap();
                     let mut source = assignment.report_template();
                     source["summary"] = "Observed findings only".into();
+                    let candidate_path = ".oms/artifacts/return-candidate.patch";
+                    let patch = b"diff --git a/src/cancel.rs b/src/cancel.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/cancel.rs\n@@ -0,0 +1 @@\n+candidate\n";
+                    if candidate {
+                        std::fs::create_dir_all(repo.join(".oms/artifacts")).unwrap();
+                        std::fs::write(repo.join(candidate_path), patch).unwrap();
+                        source["summary"] = "Returned candidate for owner review".into();
+                        source["changed_paths"] = json!(["src/cancel.rs"]);
+                        source["candidate_patch"] = candidate_path.into();
+                        source["evidence"] = json!([{"path":candidate_path,"sha256":oms_panel_core::digest(patch),"bytes":patch.len()}]);
+                    }
                     let source_bytes = serde_json::to_vec(&source).unwrap();
                     let source_path = tmp.0.join("transport-return.json");
                     std::fs::write(&source_path, &source_bytes).unwrap();
-                    let manifest = json!({"schema":1,"attempt_id":assignment.attempt_id(),"binding_sha256":assignment.sha256(),
+                    let mut manifest = json!({"schema":1,"attempt_id":assignment.attempt_id(),"binding_sha256":assignment.sha256(),
                         "kind":"findings","summary":source["summary"],"source":{"path":source_path,"sha256":oms_panel_core::digest(&source_bytes)}});
+                    if candidate {
+                        manifest["kind"] = "candidate".into();
+                        manifest["patch"] = json!({"path":repo.join(candidate_path),"sha256":oms_panel_core::digest(patch)});
+                    }
                     let path = tmp.0.join("transport-manifest.json");
                     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
                     let args = commands::strings(&[
@@ -12727,6 +12744,19 @@ mod tests {
                     let reviewed_patch = text(&retained["patch"], "path").to_owned();
                     assert_eq!(reviewed["patch"], reviewed_patch);
                     assert_eq!(std::fs::read(repo.join(&reviewed_patch)).unwrap(), patch);
+                    assert_eq!(
+                        reviewed["review_evidence"]["artifact"]["sha256"],
+                        candidate_sha
+                    );
+                    assert_eq!(
+                        reviewed["review_evidence"]["patch"]["sha256"],
+                        retained["patch"]["sha256"]
+                    );
+                    spy.task_snapshot_override.replace(Some(json!({
+                        "id":"native-one", "review_evidence":null,
+                    })));
+                    assert!(decision(&candidate_sha, "reviewed").is_err());
+                    spy.task_snapshot_override.replace(None);
                     // A crash after canonical Review before the resolution is repairable
                     // with the same frozen report/lease/artifact and no second Review.
                     let reconciled = decision(&candidate_sha, "reviewed").unwrap();
@@ -12739,6 +12769,11 @@ mod tests {
                         native_assignment::current_operation(&spy.load(), attempt).unwrap();
                     assert_eq!(operation["terminal"], false);
                     assert_eq!(operation["refs"]["native_resolution"], "reviewed");
+                    spy.task_snapshot_override.replace(Some(json!({
+                        "id":"native-one", "state":"claimed", "review_evidence":null,
+                    })));
+                    assert!(decision(&candidate_sha, "reviewed").is_err());
+                    spy.task_snapshot_override.replace(None);
                     assert!(
                         send("native-two", "review is not completion")
                             .unwrap_err()
@@ -12972,7 +13007,7 @@ mod tests {
                         next_action(),
                         "native input submission is unconfirmed; do not resend"
                     );
-                    let reported = retain_findings(&unknown, "native-two").unwrap();
+                    let reported = retain_return(&unknown, "native-two", false).unwrap();
                     assert_eq!(reported["consumption"], "unconfirmed");
                     assert!(matches!(
                         reported["transport"].as_str(),
@@ -12986,7 +13021,7 @@ mod tests {
                     );
                     let before = std::fs::read(repo.join(".oms/lifecycle/events.jsonl")).unwrap();
                     assert_eq!(
-                        retain_findings(&unknown, "native-two").unwrap()["reused"],
+                        retain_return(&unknown, "native-two", false).unwrap()["reused"],
                         true
                     );
                     assert_eq!(
@@ -13211,7 +13246,7 @@ mod tests {
                     assert_eq!(cancelled_retry.0, 75);
                     assert!(spy.mutating_calls().is_empty());
                     let cancelled: Value = serde_json::from_slice(&cancelled.1).unwrap();
-                    assert!(retain_findings(&cancelled, "native-four").is_err());
+                    assert!(retain_return(&cancelled, "native-four", false).is_err());
                     assert!(spy.mutating_calls().is_empty());
                 }
                 if scenario == 3 {
@@ -13298,7 +13333,7 @@ mod tests {
                     );
                     assert!(spy.mutating_calls().is_empty());
                     let stale: Value = serde_json::from_slice(&stale.1).unwrap();
-                    assert!(retain_findings(&stale, "native-three").is_err());
+                    assert!(retain_return(&stale, "native-three", false).is_err());
                     assert!(spy.mutating_calls().is_empty());
                 }
                 if scenario == 5 {
@@ -13340,7 +13375,7 @@ mod tests {
                 if scenario == 6 {
                     let first = send("native-one", "Cancellation boundary").unwrap();
                     let first: Value = serde_json::from_slice(&first.1).unwrap();
-                    let returned = retain_findings(&first, "native-one").unwrap();
+                    let returned = retain_return(&first, "native-one", true).unwrap();
                     let attempt = text(&first, "attempt_id");
                     let sha = text(&returned["result"], "sha256");
                     let options = Options::parse(&commands::strings(&[
@@ -13354,6 +13389,10 @@ mod tests {
                         ROOM,
                     ]))
                     .unwrap();
+                    run_with_host(&repo, "codex", &options, &spy, &spy.stop, &host).unwrap();
+                    let reviewed: Value =
+                        serde_json::from_slice(&plan(&["show", "--id", "native-one"])).unwrap();
+                    assert_eq!(reviewed["review_evidence"]["schema"], 1);
                     // Independent operation cancellation can precede canonical
                     // settlement. Retirement must retain that terminal state and
                     // still record its intent before releasing Room membership.
@@ -13372,15 +13411,58 @@ mod tests {
                         &spy.stop,
                     );
                     assert_eq!(cancelled.0, 0, "{}", String::from_utf8_lossy(&cancelled.2));
+                    let lease = text(&reviewed, "lease_id");
+                    plan(&[
+                        "block",
+                        "--id",
+                        "native-one",
+                        "--lease-id",
+                        lease,
+                        "--reason",
+                        "owner cancellation",
+                    ]);
+                    let blocked: Value =
+                        serde_json::from_slice(&plan(&["evidence-snapshot", "--id", "native-one"]))
+                            .unwrap();
+                    assert_eq!(blocked["review_evidence"], reviewed["review_evidence"]);
+                    let decision_path = ".oms/artifacts/native-cancel-decision.md";
+                    let decision = b"Owner cancelled the reviewed candidate\n";
+                    std::fs::write(repo.join(decision_path), decision).unwrap();
+                    let plan_sha = oms_panel_core::digest(
+                        &std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+                    );
+                    plan(&[
+                        "cancel",
+                        "--id",
+                        "native-one",
+                        "--operator-consent",
+                        "cancel",
+                        "--expected-state",
+                        "blocked",
+                        "--expected-lease-id",
+                        lease,
+                        "--expected-plan-sha256",
+                        &plan_sha,
+                        "--expected-task-sha256",
+                        text(&blocked, "task_sha256"),
+                        "--decision-artifact",
+                        decision_path,
+                        "--expected-decision-artifact-sha256",
+                        &oms_panel_core::digest(decision),
+                        "--reason",
+                        "owner cancellation",
+                    ]);
+                    let settled: Value =
+                        serde_json::from_slice(&plan(&["evidence-snapshot", "--id", "native-one"]))
+                            .unwrap();
+                    assert_eq!(settled["state"], "cancelled");
+                    assert_eq!(settled["review_evidence"], reviewed["review_evidence"]);
                     spy.task_snapshot_override
-                        .replace(Some(json!({"id":"native-one","state":"cancelled",
-                        "cancellation":{"kind":"operator-cancellation"},"lease_epoch":2})));
+                        .replace(Some(json!({"id":"native-one","lease_epoch":2})));
                     assert!(
                         run_with_host(&repo, "codex", &options, &spy, &spy.stop, &host).is_err()
                     );
-                    spy.task_snapshot_override
-                        .replace(Some(json!({"id":"native-one","state":"cancelled",
-                        "cancellation":{"kind":"operator-cancellation"}})));
+                    spy.task_snapshot_override.replace(None);
                     spy.task_transition.replace(Some((
                         "room-leave-recorded",
                         Box::new(|spy| spy.stop.store(true, Ordering::Release)),
@@ -13609,7 +13691,7 @@ mod tests {
                         oms_panel_core::digest(&bytes)
                     );
                     assert_eq!(operation["refs"]["native_transport"], "submitted");
-                    let returned = retain_findings(&recovered, "native-one").unwrap();
+                    let returned = retain_return(&recovered, "native-one", false).unwrap();
                     assert!(
                         returned["result"]["sha256"].as_str().is_some(),
                         "{returned}"
