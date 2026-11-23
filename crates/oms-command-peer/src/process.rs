@@ -400,6 +400,11 @@ impl TeamLaunchBinding<'_> {
     }
 }
 pub trait Executor: Sync {
+    /// Native Plan mutation services supplied only by the owning host. The
+    /// read-only peer projections never implement this delegation authority.
+    fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
+        None
+    }
     /// Advisory source-checked context from the existing journal/memory owners.
     /// This read cannot dispatch work or grant acceptance/resume authority.
     fn experience_context(

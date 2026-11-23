@@ -1354,6 +1354,348 @@ fn run(repo: &Repo, source: &Path, tool: &str, values: &[&str]) -> Output {
 }
 
 #[test]
+fn plan_delegate_uses_exact_issued_lease_and_native_verified_result() {
+    provider_isolated(
+        "plan_delegate_uses_exact_issued_lease_and_native_verified_result",
+        "private",
+        || {
+            use oms_command_peer::process::{PhysicalAttempt, PhysicalContract, RegisterPhysical};
+            use oms_command_plan::{Action, Context as PlanContext, Plan, Request, json};
+            const SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+            struct Host {
+                repo: PathBuf,
+                mode: &'static str,
+                calls: AtomicU64,
+            }
+            impl oms_command_plan::Services for Host {}
+            impl Host {
+                fn plan(&self, request: Request) -> json::Value {
+                    let context =
+                        PlanContext::from_environment_at(&request, &self.repo, &self.repo, None)
+                            .unwrap();
+                    let plan = Plan::open(context, self, &STOP).unwrap();
+                    let output = plan.execute(&request).unwrap();
+                    if output.stdout.first() == Some(&b'{') {
+                        json::parse(&output.stdout).unwrap()
+                    } else {
+                        json::Value::Null
+                    }
+                }
+                fn replace(&self) {
+                    let old = self.plan(Request::new(Action::Show).with("id", "t1"));
+                    self.plan(
+                        Request::new(Action::Release)
+                            .with("id", "t1")
+                            .with("lease-id", old.text("lease_id")),
+                    );
+                    self.plan(
+                        Request::new(Action::Claim)
+                            .with("id", "t1")
+                            .with("provider", "claude")
+                            .flag("json"),
+                    );
+                }
+            }
+            impl Executor for Host {
+                fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
+                    Some(self)
+                }
+                fn with_physical_contract(
+                    &self,
+                    _: &PhysicalAttempt<'_>,
+                    _: std::time::Instant,
+                    _: &AtomicBool,
+                    register: RegisterPhysical<'_>,
+                ) -> oms_command_peer::Result<()> {
+                    if self.mode == "replace-before-send" {
+                        self.replace();
+                    }
+                    if self.mode == "head-before-send" {
+                        assert!(
+                            Command::new("git")
+                                .arg("-C")
+                                .arg(&self.repo)
+                                .args([
+                                    "-c",
+                                    "user.name=Fixture",
+                                    "-c",
+                                    "user.email=fixture@example.invalid",
+                                    "commit",
+                                    "--allow-empty",
+                                    "-qm",
+                                    "concurrent head"
+                                ])
+                                .status()
+                                .unwrap()
+                                .success()
+                        );
+                    }
+                    register(PhysicalContract::default()).map(|_| ())
+                }
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if matches!(request.argv[0].to_str(), Some("git" | "bash")) {
+                        return Native.execute(request, stop);
+                    }
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        request.environment.iter().all(|(key, _)| !key
+                            .to_string_lossy()
+                            .starts_with("OMS_DELEGATE_PLAN_"))
+                    );
+                    let prompt = request
+                        .input
+                        .as_ref()
+                        .map(|raw| String::from_utf8_lossy(raw).into_owned())
+                        .unwrap_or_else(|| {
+                            request
+                                .argv
+                                .iter()
+                                .map(|part| part.to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        });
+                    assert!(prompt.contains("Required verification:"));
+                    assert!(prompt.contains("Forbidden paths: denied.txt"));
+                    fs::write(
+                        request.cwd.join("tracked.txt"),
+                        if self.mode == "repair" {
+                            "repaired\n"
+                        } else {
+                            "changed\n"
+                        },
+                    )
+                    .unwrap();
+                    if self.mode == "forbidden" {
+                        fs::write(request.cwd.join("denied.txt"), "forbidden edit\n").unwrap();
+                    }
+                    if self.mode == "replace-on-return" {
+                        self.replace();
+                    }
+                    Ok(Completed {
+                        code: if self.mode == "failure" { 7 } else if self.mode == "cancel" { 130 } else { 0 },
+                        stdout: b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"implemented the frozen task\"}\n".to_vec(),
+                        stderr: vec![], complete: self.mode != "cancel", cleanup_complete: Some(true),
+                        owned_cleanup: None, elapsed: Duration::ZERO,
+                    })
+                }
+            }
+            for mode in [
+                "ok",
+                "foreign-provider",
+                "foreign-model",
+                "read-role",
+                "forbidden",
+                "replace-before-send",
+                "head-before-send",
+                "replace-on-return",
+                "failure",
+                "cancel",
+                "repair",
+            ] {
+                let repo = provider_repo();
+                repo.write("denied.txt", "unchanged\n");
+                repo.write(".gitignore", ".oms/\n");
+                repo.git(&["add", "denied.txt", ".gitignore"]);
+                repo.git(&[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "scope",
+                ]);
+                let host = Host {
+                    repo: repo.0.clone(),
+                    mode,
+                    calls: AtomicU64::new(0),
+                };
+                host.plan(Request::new(Action::Init).with("goal", "native Plan delegate"));
+                let mut task_request = Request::new(Action::Add)
+                    .with("id", "t1")
+                    .with("title", "update tracked.txt")
+                    .with("allowed", "tracked.txt,denied.txt")
+                    .with("forbidden", "denied.txt")
+                    .with("verify", "test -s tracked.txt")
+                    .with(
+                        "assignment",
+                        "{\"provider\":\"claude\",\"model\":\"fixture\"}",
+                    );
+                if mode == "read-role" {
+                    task_request = task_request.with("role", "researcher");
+                }
+                host.plan(task_request);
+                let mut issued = host.plan(
+                    Request::new(Action::Claim)
+                        .with("id", "t1")
+                        .with("provider", "claude")
+                        .flag("json"),
+                );
+                let mut review_artifact = None;
+                if mode == "repair" {
+                    repo.write(".oms/artifacts/old.md", "prior real review\n");
+                    repo.write(".oms/artifacts/old.patch", "prior patch\n");
+                    host.plan(
+                        Request::new(Action::Review)
+                            .with("id", "t1")
+                            .with("lease-id", issued.text("lease_id"))
+                            .with("artifact", ".oms/artifacts/old.md")
+                            .with("patch", ".oms/artifacts/old.patch"),
+                    );
+                    host.plan(
+                        Request::new(Action::Repair)
+                            .with("id", "t1")
+                            .with("lease-id", issued.text("lease_id"))
+                            .with("artifact", ".oms/artifacts/old.md"),
+                    );
+                    issued = host.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1"));
+                    review_artifact = Some(".oms/artifacts/old.md");
+                }
+                let context = PlanContext::from_environment_at(
+                    &Request::new(Action::Status),
+                    &repo.0,
+                    &repo.0,
+                    None,
+                )
+                .unwrap();
+                let plan = Plan::open(context, &host, &STOP).unwrap();
+                let binding = json::object([
+                    ("schema", json::number(1)),
+                    ("plan_id", issued.get("plan_id").clone()),
+                    ("task_id", issued.get("id").clone()),
+                    ("task_sha256", issued.get("task_sha256").clone()),
+                    ("lease_id", issued.get("lease_id").clone()),
+                    ("lease_epoch", issued.get("lease_epoch").clone()),
+                    (
+                        "base_sha",
+                        json::string(plan.git().text(&["rev-parse", "HEAD"]).unwrap()),
+                    ),
+                ]);
+                let binding = String::from_utf8(json::canonical(&binding).unwrap()).unwrap();
+                let mut call = vec![
+                    "--to".to_string(),
+                    if mode == "foreign-provider" {
+                        "codex"
+                    } else {
+                        "claude"
+                    }
+                    .into(),
+                    "--model".into(),
+                    if mode == "foreign-model" {
+                        "other-model"
+                    } else {
+                        "fixture"
+                    }
+                    .into(),
+                    "--plan-task".into(),
+                    "t1".into(),
+                    "--plan-binding".into(),
+                    binding,
+                ];
+                if let Some(path) = review_artifact {
+                    call.extend([
+                        "--terminalize-resumed-repair".into(),
+                        "--review-artifact".into(),
+                        path.into(),
+                    ]);
+                }
+                let output = oms_command_peer::run_with_executor(
+                    "peer-delegate",
+                    &call.iter().map(OsString::from).collect::<Vec<_>>(),
+                    &repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    &host,
+                );
+                let task = host.plan(Request::new(Action::Show).with("id", "t1"));
+                let message = format!(
+                    "{mode}: {}{}",
+                    String::from_utf8_lossy(&output.1),
+                    String::from_utf8_lossy(&output.2)
+                );
+                if matches!(mode, "ok" | "repair") {
+                    assert_eq!(output.0, 0, "{message}");
+                    assert_eq!(task.text("state"), "review", "{message}");
+                    assert_eq!(task.text("review_lease_id"), issued.text("lease_id"));
+                    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(
+                        fs::read_to_string(repo.0.join("tracked.txt")).unwrap(),
+                        "baseline\n",
+                        "owner checkout must remain unchanged"
+                    );
+                    let rows = oms_command_peer::storage::rows(
+                        &fs::read(repo.0.join(".oms/artifacts/index.jsonl")).unwrap(),
+                    )
+                    .unwrap();
+                    let row = rows
+                        .iter()
+                        .find(|row| row.get("kind").text() == Some("delegate"))
+                        .unwrap();
+                    assert_eq!(
+                        row.get("plan_binding").get("lease_id").text(),
+                        Some(issued.text("lease_id"))
+                    );
+                    assert_eq!(row.get("task_id").text(), Some("t1"));
+                    for (path, digest) in
+                        [("artifact", "artifact_sha256"), ("patch", "patch_sha256")]
+                    {
+                        assert_eq!(
+                            row.get(digest).text().unwrap(),
+                            json::sha(
+                                fs::read(repo.0.join(row.get(path).text().unwrap())).unwrap()
+                            )
+                        );
+                    }
+                    if mode == "repair" {
+                        assert!(task.get("repair_count").is_int(1));
+                    }
+                } else {
+                    assert_ne!(output.0, 0, "{message}");
+                    assert_ne!(task.text("state"), "review", "{message}");
+                    assert_eq!(
+                        host.calls.load(Ordering::SeqCst),
+                        u64::from(!matches!(
+                            mode,
+                            "foreign-provider"
+                                | "foreign-model"
+                                | "read-role"
+                                | "replace-before-send"
+                                | "head-before-send"
+                        )),
+                        "{message}"
+                    );
+                    if mode == "replace-on-return" {
+                        assert_ne!(task.text("lease_id"), issued.text("lease_id"));
+                        assert!(
+                            fs::read_to_string(repo.0.join(".oms/plan/late-results.jsonl"))
+                                .unwrap()
+                                .contains("stale_delegate_binding")
+                        );
+                    }
+                }
+                let before_replay = host.calls.load(Ordering::SeqCst);
+                let replay = oms_command_peer::run_with_executor(
+                    "peer-delegate",
+                    &call.iter().map(OsString::from).collect::<Vec<_>>(),
+                    &repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    &host,
+                );
+                assert_ne!(
+                    replay.0, 0,
+                    "replaying the old issued binding cannot resend: {mode}"
+                );
+                assert_eq!(host.calls.load(Ordering::SeqCst), before_replay);
+            }
+        },
+    );
+}
+#[test]
 fn provider_adapter_discovery_requires_marker() {
     for layout in ["override", "xdg", "home"] {
         provider_isolated("provider_adapter_discovery_requires_marker", layout, || {

@@ -166,6 +166,9 @@ impl Plan<'_> {
             Show | EvidenceSnapshot => {
                 let t = s.task(req.value("id")?)?.clone();
                 let mut v = self.view(s, &t, false)?;
+                if req.action == EvidenceSnapshot {
+                    self.verify_review_evidence(&t)?;
+                }
                 if matches!(s.plan.get("project_contract"), Value::Object(_)) {
                     v.set("project_contract", s.plan.get("project_contract").clone())?;
                 }
@@ -339,8 +342,8 @@ impl Plan<'_> {
             self.save(s)?;
         }
         let mut r = if req.has("json") {
-            let mut view = t.clone();
-            view.set("claim_expired", Value::Bool(self.expired(s, &t, false)?))?;
+            let mut view = self.view(s, &t, true)?;
+            view.set("plan_id", s.plan.get("plan_id").clone())?;
             Response::json(&view)?
         } else {
             Response::text(self.brief(s, &t)?)

@@ -136,12 +136,13 @@ fn pick(
         let claimed = ctx.action(
             &Request::new(Action::Claim)
                 .with("id", id)
-                .with("provider", provider),
+                .with("provider", provider)
+                .flag("json"),
         );
-        if claimed.is_ok_and(|c| c.code == 0) {
-            let shown = ctx.action(&Request::new(Action::Show).with("id", id))?;
-            require(shown.code == 0, "cannot read claimed task")?;
-            return Ok(Pick::Task(value::parse(&shown.stdout)?));
+        if let Ok(issued) = claimed
+            && issued.code == 0
+        {
+            return Ok(Pick::Task(value::parse(&issued.stdout)?));
         }
     }
     Ok(Pick::Idle)

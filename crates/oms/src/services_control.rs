@@ -3484,6 +3484,162 @@ mod tests {
     }
 
     #[test]
+    fn goal_commit_reads_only_certified_managed_landing_patches() {
+        use oms_command_plan::{Action, Context, Plan, Request, json};
+        use std::os::unix::fs::MetadataExt;
+
+        let repo = Tmp::repo(&[(".gitignore", ".oms/\n"), ("a.txt", "before\n")]);
+        git(repo.path(), &["config", "user.name", "t"]);
+        git(repo.path(), &["config", "user.email", "t@example.invalid"]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let control = services(&stop, repo.path(), Vec::new());
+        let context = Context::from_environment_at(
+            &Request::new(Action::Status),
+            repo.path(),
+            repo.path(),
+            None,
+        )
+        .unwrap();
+        let plan = Plan::open(context, &control, &stop).unwrap();
+        plan.execute(&Request::new(Action::Init).with("goal", "commit the exact landed patch"))
+            .unwrap();
+        plan.execute(
+            &Request::new(Action::Add)
+                .with("id", "t1")
+                .with("title", "implement the assigned change")
+                .with("allowed", "a.txt")
+                .with("verify", "true"),
+        )
+        .unwrap();
+        let issued = plan
+            .execute(
+                &Request::new(Action::Claim)
+                    .with("id", "t1")
+                    .with("provider", "claude")
+                    .flag("json"),
+            )
+            .unwrap();
+        let issued = json::parse(&issued.stdout).unwrap();
+        let lease = issued.text("lease_id");
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("a.txt"), "after\n").unwrap();
+        let patch = format!("{}\n", git(repo.path(), &["diff", "--binary"]));
+        git(repo.path(), &["checkout", "--", "a.txt"]);
+        let source = repo.path().join(".oms/source.patch");
+        let report = repo.path().join(".oms/report.md");
+        std::fs::write(&source, &patch).unwrap();
+        std::fs::write(&report, "The assigned change passed its check.\n").unwrap();
+        let digest = json::sha(patch.as_bytes());
+        let landing = "land-20261123T000000Z-0123456789abcdef";
+        let frozen = repo
+            .path()
+            .join(format!(".oms/landing-patches/{landing}.patch"));
+        let capture = {
+            let mut producer = oms_reference::producer::Producer::open(repo.path(), &stop).unwrap();
+            let capture = producer
+                .allocate(&source, landing, &digest, repo.path(), &stop)
+                .unwrap();
+            producer.publish(&capture, &frozen, &stop).unwrap();
+            capture
+        };
+        let _capture = Tmp(capture.parent().unwrap().to_owned());
+        assert_eq!(std::fs::metadata(&frozen).unwrap().nlink(), 2);
+        // The general Plan store must continue refusing multiply linked files.
+        let ordinary = oms_command_plan::storage::Store::open(repo.path()).unwrap();
+        assert!(
+            ordinary
+                .read(&frozen, 16 * 1024 * 1024)
+                .unwrap_err()
+                .message
+                .contains("unsafe plan ownership, permissions or links")
+        );
+        plan.execute(
+            &Request::new(Action::Review)
+                .with("id", "t1")
+                .with("lease-id", lease)
+                .with("artifact", report.as_os_str())
+                .with("patch", source.as_os_str()),
+        )
+        .unwrap();
+        plan.execute(
+            &Request::new(Action::Land)
+                .with("id", "t1")
+                .with("lease-id", lease)
+                .with("expected-review-patch", source.as_os_str())
+                .with("expected-review-patch-sha256", &digest)
+                .with("expected-review-verify", "true")
+                .with("expected-review-executor-id", "")
+                .with("expected-review-executor-soul-sha256", "")
+                .with("expected-review-lease-id", lease),
+        )
+        .unwrap();
+        let snapshot = plan.load().unwrap();
+        let landing_receipt = json::receipt_digest(snapshot.task("t1").unwrap()).unwrap();
+        plan.execute(
+            &Request::new(Action::Finish)
+                .with("id", "t1")
+                .with("lease-id", lease)
+                .with("expected-landing-receipt-sha256", landing_receipt)
+                .with("patch", frozen.as_os_str()),
+        )
+        .unwrap();
+        let snapshot = plan.load().unwrap();
+        let complete = serde_json::json!({"schema":1,"event":"complete","landing_id":landing,
+            "task":"t1","worktree":repo.path(),"plan_id":snapshot.plan.text("plan_id"),
+            "lease":lease,"plan_done_receipt_sha":json::receipt_digest(snapshot.task("t1").unwrap()).unwrap(),
+            "patch_sha":digest,"base_sha":base,"patch":frozen});
+        ordinary
+            .append(
+                ".oms/landings.jsonl",
+                &json::parse(&serde_json::to_vec(&complete).unwrap()).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(repo.path().join("a.txt"), "after\n").unwrap();
+        let run = || {
+            oms_command_autonomy::run_with_services(
+                "goal-drive",
+                &["--commit-task".into(), "t1".into()],
+                repo.path(),
+                &stop,
+                &control,
+            )
+        };
+        let (code, out, err) = run();
+        assert_eq!(
+            code,
+            0,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        assert!(String::from_utf8_lossy(&out).contains("committed task=t1 commit="));
+        let committed = git(repo.path(), &["rev-parse", "HEAD"]);
+        assert_ne!(committed, base);
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD^"]), base);
+        assert!(git(repo.path(), &["status", "--porcelain"]).is_empty());
+
+        // A real publication's anchor identity alone is insufficient after its
+        // bytes change. Re-entry must neither commit nor accept those bytes.
+        std::fs::write(&frozen, "changed capture\n").unwrap();
+        let (code, _, err) = run();
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert!(String::from_utf8_lossy(&err).contains("native generation anchor changed"));
+        std::fs::write(&frozen, &patch).unwrap();
+
+        // Matching bytes with two links do not create a native certificate.
+        let retained = frozen.with_extension("retained");
+        std::fs::rename(&frozen, &retained).unwrap();
+        let foreign = repo.path().join(".oms/foreign.patch");
+        std::fs::write(&foreign, &patch).unwrap();
+        std::fs::hard_link(&foreign, &frozen).unwrap();
+        assert_eq!(std::fs::metadata(&frozen).unwrap().nlink(), 2);
+        let (code, _, err) = run();
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert!(String::from_utf8_lossy(&err).contains("landing publication replaced"));
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), committed);
+    }
+
+    #[test]
     fn plan_and_autonomy_resolve_explicit_and_policy_routes() {
         let root = Tmp::repo(&[("a", "x")]);
         let stop = Arc::new(AtomicBool::new(false));

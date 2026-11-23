@@ -113,6 +113,7 @@ const VALUES: &[&str] = &[
     "native-adopt",
     "assignment-sha256",
     "result-sha256",
+    "intent-sha256",
     "decision",
     "expected-previous-result-sha256",
     "after-native-result",
@@ -668,7 +669,7 @@ impl Options {
             )?;
         }
         self.needs(&["result-sha256"], &["native-reconcile", "native-adopt"])?;
-        self.needs(&["decision"], &["native-reconcile"])?;
+        self.needs(&["intent-sha256", "decision"], &["native-reconcile"])?;
         self.needs(&["assignment-sha256"], &["native-adopt"])?;
         if self.has("native-adopt") {
             self.required("assignment-sha256")?;
@@ -677,9 +678,21 @@ impl Options {
         self.needs(&["expected-previous-result-sha256"], &["native-result"])?;
         self.needs(&["after-native-result", "unbound"], &["orchestrator"])?;
         if self.has("native-reconcile") {
-            self.required("result-sha256")?;
-            self.required("decision")?;
-            self.choice("decision", &["request-revision", "blocked", "reviewed"])?;
+            let decision = self.required("decision")?;
+            self.choice(
+                "decision",
+                &["request-revision", "blocked", "reviewed", "retire-unsent"],
+            )?;
+            let (required, excluded) = if decision == "retire-unsent" {
+                ("intent-sha256", "result-sha256")
+            } else {
+                ("result-sha256", "intent-sha256")
+            };
+            self.required(required)?;
+            require(
+                !self.has(excluded),
+                "use --intent-sha256 for retire-unsent and --result-sha256 for result decisions",
+            )?;
             crate::identifier(&self.required("native-reconcile")?)?;
         }
         if self.has("after-native-result") {
@@ -699,6 +712,7 @@ impl Options {
         for key in [
             "assignment-sha256",
             "result-sha256",
+            "intent-sha256",
             "expected-previous-result-sha256",
             "after-native-result",
         ] {
@@ -708,7 +722,7 @@ impl Options {
                         && sha
                             .bytes()
                             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
-                    "native result digests must be lowercase SHA-256",
+                    "native digests must be lowercase SHA-256",
                 )?;
             }
         }
@@ -891,7 +905,7 @@ pub fn usage() -> String {
     text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
     text.push_str("Bind a canonical task: --orchestrator codex --task-id ID --task TEXT\nReuses the exact claim and durable intent; an unknown send is never resent automatically.\n\n");
     text.push_str("Retain a native report: --orchestrator codex --task-id ID --native-result FILE\nImports digest-bound findings or candidate evidence; does not confirm consumption, completion or acceptance.\n\n");
-    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical work uses managed --dispatch ROLE --task-id ID until bound native adapters exist.\n\n");
+    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nRetire a verified-unsent first intent: --native-reconcile ATTEMPT --intent-sha256 SHA --decision retire-unsent\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical work uses managed --dispatch ROLE --task-id ID until bound native adapters exist.\n\n");
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("After a canonical Main swap: --native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]\nResults supplies the exact adoption command. Omit result SHA only when no current result exists.\nAdoption preserves the frozen claim, attempt, account and round; it never resends input or grants acceptance.\nSettled tasks permit retirement-only adoption even after the checkout advances.\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
@@ -1055,8 +1069,47 @@ mod tests {
                 .is_ok()
             );
         }
+        let retire = [
+            "--native-reconcile",
+            "attempt-one",
+            "--intent-sha256",
+            &sha,
+            "--decision",
+            "retire-unsent",
+            "--room",
+            "room-valid",
+            "--owner",
+            "codex",
+        ];
+        assert!(parse(&retire).is_ok());
+        assert!(parse(&[retire.as_slice(), &["--result-sha256", &sha]].concat()).is_err());
+        assert!(parse(&[retire.as_slice(), bound.as_slice()].concat()).is_err());
         for args in [
             &["--native-reconcile", "attempt-one"][..],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--intent-sha256",
+                "bad",
+                "--decision",
+                "retire-unsent",
+            ],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--result-sha256",
+                &sha,
+                "--decision",
+                "retire-unsent",
+            ],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--intent-sha256",
+                &sha,
+                "--decision",
+                "reviewed",
+            ],
             &[
                 "--native-reconcile",
                 "attempt-one",

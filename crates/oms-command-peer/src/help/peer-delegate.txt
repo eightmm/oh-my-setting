@@ -11,7 +11,8 @@ Options:
   --prompt TEXT        Short task brief.
   --role NAME          Prepend a reusable strategy profile (agent-role.sh:
                        repo, global, then bundled fallback) to the worker brief.
-                       Overrides a plan task's role field. A bundled role the
+                       A bound Plan delegation preserves its frozen role.
+                       A bundled role the
                        contract marks read_only launches with --read-only
                        access unless --apply, --interactive or
                        OMS_DELEGATE_ROLE_WRITE=1 is given.
@@ -96,20 +97,21 @@ Options:
   --resume-session ID  Continue this provider session (claude, codex) in the
                        new worktree; its id is recorded as refs.native_session.
   --observe-plan-binding JSON
-                       Panel-only marker observation, revalidated under locks.
-                       Excludes --plan-task and grants no child plan rights.
-  --plan-task ID       Couple this delegation to an agent-plan.sh task: on
-                       worker/verify failure (or an outbound-gate block) the
-                       claim is released back to ready; on success the task
-                       moves to review with the artifact and patch (or to done
-                       when --apply landed the patch). Implies --task-id ID.
-                       Without --prompt/--brief-file the task's stored brief
-                       becomes the worker prompt, and without --verify the
-                       task's verify command becomes the contract.
+                       Reserved observer integration; currently refused.
+  --plan-task ID --plan-binding JSON
+                       Native plan-run supplies schema-1 issued plan/task
+                       digest, lease/epoch and HEAD. The owning Plan adapter
+                       checks the exact snapshot before Start, every provider
+                       attempt and Review. Frozen prompt, verifier, positive
+                       and forbidden scope cannot be overridden. Successful
+                       native artifact/patch index evidence enters Review;
+                       landing and completion stay with the calling owner.
+                       Missing adapter/binding and stale/expired leases refuse.
   --terminalize-resumed-repair
                        Internal plan-run contract: this is the one permitted
-                       same-lease landing repair. On failure, atomically block
-                       that exact plan lease instead of releasing it to ready.
+                       same-lease landing repair, bound to repair_count=1 and
+                       the recorded review artifact. The calling plan-run
+                       owner terminalizes a known failure; unknown stays held.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --context-manifest   Compile a bounded context bundle from the detached HEAD
