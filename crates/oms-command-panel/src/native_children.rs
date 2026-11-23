@@ -1824,6 +1824,7 @@ fn agy_oversized(brain: &Path, file: &Path) -> bool {
 fn agy_custody_rows(
     custody: &crate::agy_lead_custody::AgyLeadCustody,
     anchor: Option<&str>,
+    tail_limit: usize,
 ) -> Option<(Vec<Value>, usize)> {
     let dir = custody
         .app_root
@@ -1842,13 +1843,13 @@ fn agy_custody_rows(
     }
     // The byte preceding the suffix lets a record at the exact LF boundary survive.
     let size = u64::try_from(before.st_size).ok()?;
-    let len = size.min(MAX_TRANSCRIPT as u64 + 1);
+    let len = size.min(tail_limit as u64 + 1);
     let offset = size - len;
     let mut file = File::from(fd);
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut bytes = vec![0; len as usize];
     file.read_exact(&mut bytes).ok()?;
-    let rows = agy_recent_turn(&bytes, size > MAX_TRANSCRIPT as u64, anchor)?;
+    let rows = agy_recent_turn(&bytes, size > tail_limit as u64, anchor)?;
     note_legacy_custody_call(1);
     if crate::agy_lead_custody::agy_lead_custody(custody.pid, &custody.birth, &custody.repo)
         .as_ref()
@@ -1868,6 +1869,30 @@ fn agy_custody_rows(
         return None;
     }
     Some(rows)
+}
+
+pub(crate) fn agy_submitted_user_turn(
+    pid: u32,
+    birth: &str,
+    repo: &Path,
+    turn: &str,
+    expected: &str,
+) -> bool {
+    const SEND_TAIL_LIMIT: usize = 64 * 1024;
+    crate::agy_lead_custody::agy_lead_custody(pid, birth, repo)
+        .and_then(|custody| agy_custody_rows(&custody, None, SEND_TAIL_LIMIT))
+        .is_some_and(|(rows, start)| {
+            // agy_recent_turn first validates the latest explicit user row and its wrapper.
+            agy_user_request(&rows[start - 1]).is_some_and(|(body, _)| {
+                body == expected && body.lines().next().and_then(codex_turn) == Some(turn)
+            })
+        })
+}
+
+fn agy_user_request(row: &Value) -> Option<(&str, &str)> {
+    text(row, "content")
+        .strip_prefix("<USER_REQUEST>\n")?
+        .split_once("\n</USER_REQUEST>")
 }
 
 fn agy_display_request_suffix(suffix: &str) -> bool {
@@ -1917,9 +1942,7 @@ fn agy_recent_turn(
     let user = |row: &Value| row["type"] == "USER_INPUT" || row["source"] == "USER_EXPLICIT";
     let current = rows.iter().rposition(user)?;
     let input = &rows[current];
-    let (body, suffix) = text(input, "content")
-        .strip_prefix("<USER_REQUEST>\n")?
-        .split_once("\n</USER_REQUEST>")?;
+    let (body, suffix) = agy_user_request(input)?;
     let first = body.lines().next()?;
     let turn = codex_turn(first)?;
     if input["type"] != "USER_INPUT"
@@ -2046,7 +2069,7 @@ fn agy(
             if anchor.is_some() {
                 *parent = AgyParent::Bounded;
             }
-            let (rows, start) = agy_custody_rows(&custody, anchor)?;
+            let (rows, start) = agy_custody_rows(&custody, anchor, MAX_TRANSCRIPT)?;
             bounded = Some((start, custody));
             note_legacy_parent_read(1);
             rows
@@ -5970,10 +5993,104 @@ mod tests {
             );
 
             let current = std::fs::read(&transcript).unwrap();
+            let birth = oms_panel_core::terminals::process(lead_pid).unwrap().birth;
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                "01234567890123456789",
+                &prompt_line
+            ));
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                "0",
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+
+            let mut quoted: Vec<Value> = current
+                .strip_suffix(b"\n")
+                .unwrap()
+                .split(|&b| b == b'\n')
+                .take(2)
+                .map(|line| serde_json::from_slice(line).unwrap())
+                .collect();
+            // This raw model response could match the visible user-row pattern exactly.
+            quoted[1] = json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE",
+                "status":"DONE","content":format!("> {prompt_line}")});
+            let model_quote = quoted
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&transcript, &model_quote).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+
+            let header_only = format!("{TASK_PREFIX} Turn {TURN}. You own this provider's work.");
+            quoted[1] = json!({"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT",
+                "status":"DONE","content":format!("<USER_REQUEST>\n{header_only}\n</USER_REQUEST>")});
+            let short_request = quoted
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&transcript, &short_request).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &header_only
+            ));
+
+            const GEOMETRY_TURN: &str = "014589abcde2345678fa";
+            crate::orchestrator::tests::check_ordinary_agy_delivery_geometry(
+                GEOMETRY_TURN,
+                |body| {
+                    assert!(!agy_submitted_user_turn(
+                        lead_pid,
+                        &birth,
+                        &repo,
+                        GEOMETRY_TURN,
+                        body
+                    ));
+                    let request = json!({"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT",
+                        "status":"DONE","content":format!("<USER_REQUEST>\n{body}\n</USER_REQUEST>")});
+                    std::fs::write(&transcript, format!("{}\n{request}\n", quoted[0])).unwrap();
+                },
+                |body| agy_submitted_user_turn(lead_pid, &birth, &repo, GEOMETRY_TURN, body),
+            );
+
             let mut long = vec![b'x'; MAX_TRANSCRIPT];
             long.push(b'\n');
             long.extend_from_slice(&current);
             std::fs::write(&transcript, &long).unwrap();
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
             reset_agy_legacy_reads();
             let recent = observe("antigravity", lead_pid, &repo, &terminal, &mut cached);
             assert_eq!(
@@ -6001,6 +6118,13 @@ mod tests {
             let mut incomplete = long.clone();
             incomplete.extend_from_slice(b"{\"type\":\"USER_INPUT\"");
             std::fs::write(&transcript, incomplete).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
             assert!(
                 observe("antigravity", lead_pid, &repo, &terminal, &mut cached)
                     .rows

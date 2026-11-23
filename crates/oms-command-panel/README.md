@@ -200,15 +200,70 @@ dispatching under a new claim or Main. Confirm the native job's state in its
 provider session even when its OMS lifecycle record is terminal.
 
 `submitted` means the exact Turn appeared in a submitted user message. Provider
-consumption and task completion remain `unconfirmed`; the canonical task is
-still claimed and the lifecycle transport attempt stays nonterminal until its
-owner settles it. There is no synthetic Room receipt, verifier result or task
-acceptance or automatic claim heartbeat. Result capture/review uses its existing
-owners and is not automated by this bridge. Native session IDs and native child cancellation/resume are not
-supported here. Cwd and base identity are evidence, not write isolation:
-`write_isolation` is `unmanaged` and `child_cleanup` is `unsupported`. This first
-bound path supports the ordinary Codex Lead; Claude, AGY and alternate Codex
-Leads continue to use the existing unbound conversation path.
+consumption and completion remain `unconfirmed` by transport or return claims.
+New bound assignments freeze an explicit task scope, parent verifier and declared
+role, plus canonical requirement IDs when present. The default declared role is
+`worker`; it grants no capabilities. Task ID/title is the fallback deliverable only
+when the task has no registered requirement IDs. This checks coverage of the
+registered contract, not whether all user prose or task semantics were satisfied.
+
+`oms panel --results --task-id TASK --json` exposes a typed source template, the
+existing capture manifest template, deterministic input paths and a structured
+next action. Fill the source and manifest, then import with
+`--orchestrator codex --task-id TASK --native-result MANIFEST`. The existing capture
+owner retains immutable source, candidate and verification bytes. Reports claim
+`reported`, `blocked` or `needs-decision`; reported checks never become verifier or
+acceptance receipts. Legacy prose reports remain readable as advisory evidence.
+
+Main reviews the exact returned `result.sha256` with
+`--native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed`.
+After requesting revision, `--orchestrator codex --task-id TASK --task TEXT
+--after-native-result SHA` sends another immutable round under the same claim.
+Replacing a typed report within a round instead requires both the manifest's
+`previous_sha256` and `--expected-previous-result-sha256 SHA`; identical replay and
+the first report need no replacement flag. These public digests identify the
+retained result artifact, not its source file.
+
+After a canonical Main swap, Results offers
+`--native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]`.
+The new Main explicitly adopts the exact current assignment and, if present, its
+retained result. Omitting the result digest asserts that no current result exists.
+The producer proves the ordered Room swap lineage, outgoing wrapper/native process
+absence, and fresh successor Main custody. An immutable successor record preserves
+the original task claimant, lease, attempt, round and account binding. The stable
+Room participant is distinct from the new Main attempt; no claim or budget is reset.
+The original Codex Lead/account proof is rechecked through its original private
+anchor, without changing accounts or reentering provider input. Supported Main
+provider swaps retain this ordinary Codex Lead boundary.
+
+Import, reconciliation, report revision and another round work after adoption.
+Unknown input remains unknown and is not replayed. A canonically done/cancelled task
+instead permits retirement-only adoption: the original checkout may have advanced,
+but this mode cannot reopen execution. The next task obtains its own ordinary
+claim and freshly checked checkout after the prior reservation is retired.
+Existing tick reminders follow the checked successor, revalidate its current
+session and process, and include the new Main attempt in their dedupe identity.
+A cue delivered before the swap therefore does not hide unconsumed work from the
+successor; it still spends the same daily wake quota. Retirement-only custody
+produces an administrative retirement reminder, never an import or execution decision.
+
+A reviewed candidate can enter canonical Plan review with the exact lease and
+captured patch. Existing `patch-admit`/`patch-land --plan-task` verification and
+genuine Plan finish still own acceptance. After canonical completion or
+cancellation, exact-result reconciliation retires the assignment's lifecycle and
+Room reservation while preserving the reusable Lead session. There is no automatic
+claim heartbeat, native child cancellation/resume, or cleanup proof;
+`write_isolation` remains `unmanaged` and `child_cleanup` remains `unsupported`.
+
+This bound path supports the ordinary Codex Lead. Other native providers and the
+alternate Codex Lead use managed `--dispatch ROLE --task-id TASK` for canonical
+work. Explicit `--unbound --task TEXT` is conversation without task credit. Main
+chooses import, review and the next round; the existing bounded tick wake can send
+a reminder into Main's native session, without importing, reconciling or dispatching
+the Lead automatically. The
+existing approved goal-drive/autopilot contracts remain the owners of bounded
+automatic execution. See the [native return workflow](../../docs/TERMINAL-PANEL.md#retain-a-bound-native-report)
+for the two input layers and evidence limits.
 
 Click a Codex, Claude or AGY native child row, or select it and press Enter.
 The Board opens available recent replies after verifying the Room, Main,

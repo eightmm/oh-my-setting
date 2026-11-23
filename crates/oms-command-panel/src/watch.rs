@@ -473,7 +473,7 @@ fn run_with_source_writer(
                                     .then(|| target.sample(repo, services, interrupted).ok())
                                     .flatten()
                             },
-                            |scope, target| start_main_switch(repo, scope, target),
+                            |scope, target| start_main_switch(repo, source, scope, target),
                         ) {
                             changed = true;
                             break;
@@ -1192,16 +1192,54 @@ impl MainSwitch {
             && attempt["terminal"] == false
             && attempt["state"] == "working"
             && oms_panel_core::state::main_participant(attempt) == main.member;
-        if current && legacy_main_switch_source(report, main, attempt) {
+        if !current {
+            let live_state = (attempt["attempt_id"] == main.attempt
+                && attempt["provider"] == main.owner
+                && attempt["terminal"] == false
+                && oms_panel_core::state::main_participant(attempt) == main.member)
+                .then(|| attempt["state"].as_str())
+                .flatten()
+                .filter(|state| {
+                    *state != "working" && oms_panel_core::state::LIVE_STATES.contains(state)
+                });
+            if let Some(state) = live_state {
+                return Err(Error::new(format!(
+                    "Current Main is {state}; wait until it is working to switch"
+                )));
+            }
+            return Err(Error::new(
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ));
+        }
+        if legacy_main_switch_source(report, main, attempt) {
             return Err(Error::new(
                 "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
             ));
         }
-        crate::require(
-            current && attempt["refs"]["panel_host"] == "tmux",
-            "Current Main is unavailable for a managed switch",
-        )?;
+        match attempt["refs"]["panel_host"].as_str() {
+            Some("tmux") => {}
+            Some("inline") => {
+                return Err(Error::new(
+                    "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+                ));
+            }
+        }
+        if attempt["refs"]["panel_native_scheduling"] == "campaign" {
+            return Err(Error::new(
+                "Main swap is unavailable during a managed campaign",
+            ));
+        }
         let current = attempt["refs"]["panel_harness"].as_str();
+        if current == Some("agy") && main.owner == "antigravity" {
+            return Err(Error::new(
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ));
+        }
         crate::native_panel::check_outgoing_main_swap_harness(current)?;
         let current = current.unwrap_or_default();
         let targets = targets(current)?;
@@ -1290,11 +1328,12 @@ impl MainSwitch {
 
 fn start_main_switch(
     repo: &Path,
+    source: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
 ) -> Result<Receiver<Result<()>>> {
     let services = oms_panel_core::SubcommandServices::sibling()?;
-    let request = main_switch_request(&services.executable, repo, scope, target)?;
+    let request = main_switch_request(&services.executable, source, repo, scope, target)?;
     let (completed, result) = mpsc::channel();
     // The canonical host owns lifecycle reconciliation once submitted. Closing
     // this display neither retries the transition nor sends a second request.
@@ -1328,6 +1367,7 @@ fn start_main_switch(
 
 fn main_switch_request(
     executable: &Path,
+    source: &Path,
     repo: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
@@ -1337,11 +1377,18 @@ fn main_switch_request(
         .as_ref()
         .ok_or_else(|| Error::new("No current Main verified"))?;
     crate::require(
-        executable.is_absolute() && executable.file_name().is_some_and(|name| name == "oms"),
+        executable.is_absolute()
+            && rustix::fs::access(executable, rustix::fs::Access::EXEC_OK).is_ok(),
         "Canonical OMS dispatcher unavailable",
     )?;
+    let (source, revision) = crate::native_panel::staged_dispatch_args(source, executable)
+        .ok_or_else(|| Error::new("Canonical staged OMS dispatcher unavailable"))?;
     let mut argv = vec![
         executable.as_os_str().into(),
+        "--oms-dispatch".into(),
+        source.into(),
+        revision.into(),
+        "--".into(),
         "panel".into(),
         "--repo".into(),
         repo.as_os_str().into(),
@@ -1835,12 +1882,13 @@ pub(crate) struct NativeReading {
     agy: Option<AgyDockCheck>,
 }
 
-const NATIVE_FIELDS: [&str; 11] = [
+const NATIVE_FIELDS: [&str; 12] = [
     "native_children",
     "native_dock",
     "provider_sessions",
     "provider_models",
     "provider_activity",
+    "provider_delivery",
     "provider_accounts",
     "provider_status",
     "claude_local_weekly",
@@ -1941,6 +1989,7 @@ impl NativeRequest {
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshPhase {
     Pending,
+    RetryingAfterFailure,
     Fresh,
     Failed(String),
 }
@@ -1964,6 +2013,10 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 }
 
 impl RefreshPhase {
+    fn pending(&self) -> bool {
+        matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
     fn frame_report(
         &self,
         snapshot: Option<Snapshot>,
@@ -1971,7 +2024,7 @@ impl RefreshPhase {
         room: &str,
     ) -> Value {
         // Render hides a failed read's AGY roster; pending must not relabel it.
-        if *self == Self::Pending
+        if self.pending()
             && let Some(previous) = previous.as_mut().filter(|report| stale_report(report))
             && let Some(activity) = previous
                 .get_mut("provider_activity")
@@ -1985,7 +2038,7 @@ impl RefreshPhase {
             let mut current = snapshot.report;
             // A display-only result has no pane reads of its own. Retain the
             // same-scope observations so its native rows keep their identity.
-            if *self == Self::Pending {
+            if self.pending() {
                 let mut previous = match previous {
                     Some(Value::Object(previous)) => previous,
                     _ => Default::default(),
@@ -1994,6 +2047,7 @@ impl RefreshPhase {
                     "provider_sessions",
                     "provider_models",
                     "provider_activity",
+                    "provider_delivery",
                     "provider_accounts",
                     "provider_status",
                     "native_children",
@@ -2018,9 +2072,17 @@ impl RefreshPhase {
     }
 
     fn report(&self, mut report: Value) -> Value {
+        // A pending frame can carry a proof only from the current scope.
+        // Erase known failures before relabeling a held report as pending.
+        if stale_report(&report)
+            || matches!(self, Self::RetryingAfterFailure | Self::Failed(_))
+            || report.get("board_write_slots").is_none()
+        {
+            report["board_write_slots"] = Value::Null;
+        }
         match self {
             Self::Fresh => {}
-            Self::Pending => {
+            Self::Pending | Self::RetryingAfterFailure => {
                 // The visible data describes the last successful read. The
                 // pending flag and private phase prevent acting on it.
                 report["collection"] = json!({"ok":true,"pending":true});
@@ -2184,6 +2246,7 @@ impl InteractiveRefresh {
         }
         let result = ready.then(|| self.worker.poll(&scope.key)).flatten();
         let follow_up = !self.worker.busy() && std::mem::take(&mut self.deferred_refresh);
+        let replied = result.is_some();
         let completed = result.and_then(|result| match result {
             Ok(snapshot)
                 if snapshot.status == 0
@@ -2239,6 +2302,9 @@ impl InteractiveRefresh {
                 }
             }
             self.request(&scope, seed);
+            if replied && completed.is_none() && self.phase == RefreshPhase::Pending {
+                self.phase = RefreshPhase::RetryingAfterFailure;
+            }
         }
         self.scope = Some(scope);
         (changed, completed, native)
@@ -5306,7 +5372,7 @@ mod tests {
     fn carried_board_report_drops_private_claude_weekly() {
         use super::{RefreshPhase, clear_private_weekly, clear_rejected_native, idle_report};
         use oms_panel_core::state::Snapshot;
-        use serde_json::json;
+        use serde_json::{Value, json};
 
         let mut previous = idle_report("room-fixture");
         previous["provider_status"] = json!({"codex":{"weekly_used":14}});
@@ -5315,6 +5381,8 @@ mod tests {
         previous["claude_local_weekly"] = json!({"weekly_used":14});
         previous["codex_weekly_account"] = json!("acct-b");
         previous["agy_footer_weekly"] = json!({"remaining":"99%"});
+        let slots = json!({"used":10,"limit":10,"active":0,"awaiting":8,"unconfirmed":2});
+        previous["board_write_slots"] = slots.clone();
         previous["provider_activity"] =
             json!({"antigravity":{"children":[{"role":"Worker","title":"Draft notes"}]}});
 
@@ -5369,6 +5437,15 @@ mod tests {
             );
             assert!(roster(&pending(sampled, None)).is_null());
         }
+        // Only a healthy same-scope held frame keeps its write slot evidence.
+        let held = pending(false, Some(previous.clone()));
+        assert_eq!(held["board_write_slots"], slots);
+        assert_eq!(pending(false, Some(held))["board_write_slots"], slots);
+        assert_eq!(pending(false, None)["board_write_slots"], Value::Null);
+        assert_eq!(
+            pending(true, Some(previous.clone()))["board_write_slots"],
+            Value::Null
+        );
         // A failed or stale frame hides its roster; pending must not relabel it.
         let failed = RefreshPhase::Failed("boom".into()).frame_report(
             None,
@@ -5377,11 +5454,15 @@ mod tests {
         );
         let mut stale = previous.clone();
         stale["capacity_stale"] = true.into();
+        assert_eq!(failed["board_write_slots"], Value::Null);
         for unhealthy in [failed.clone(), stale] {
             for sampled in [false, true] {
                 let replay = pending(sampled, Some(unhealthy.clone()));
                 assert!(roster(&replay).is_null(), "pending replayed failed roster");
-                assert!(roster(&pending(sampled, Some(replay))).is_null());
+                assert_eq!(replay["board_write_slots"], Value::Null);
+                let next = pending(sampled, Some(replay));
+                assert!(roster(&next).is_null());
+                assert_eq!(next["board_write_slots"], Value::Null);
             }
         }
         let mut sampled = idle_report("room-fixture");
@@ -5659,8 +5740,17 @@ mod tests {
     #[test]
     fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
         use super::*;
+        use crate::orchestrator::account_binding::test_support::TempDir;
         use input::Key;
+        use std::os::unix::fs::PermissionsExt;
         let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let staged = TempDir::new("board-main-switch");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let payload = staged.0.join("target/oms-native").join(revision);
+        std::fs::create_dir_all(&payload).unwrap();
+        let executable = payload.join("oms");
+        std::fs::write(&executable, b"fixture executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let scope = BoardScope {
             key: RefreshKey::new(&repo, Some("room-one"), Some("attempt-old"))
                 .unwrap()
@@ -5854,11 +5944,11 @@ mod tests {
             .unwrap();
         refs.remove("panel_host");
         refs.remove("panel_room_participant");
-        let blocked = |report: &Value| {
+        let blocked = |case_scope: &BoardScope, report: &Value| {
             let mut flow = MainSwitch::default();
             let mut nav = navigation::Navigation::default();
             let error = flow
-                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                .open_with(Some(case_scope), report, &mut nav, |_| {
                     panic!("unavailable Main must not resolve targets")
                 })
                 .unwrap_err();
@@ -5867,49 +5957,91 @@ mod tests {
             error.message
         };
         assert_eq!(
-            blocked(&legacy),
+            blocked(&legacy_scope, &legacy),
             "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
         );
-        for (path, value) in [
-            ("/collection/pending", json!(true)),
-            ("/room/closed", json!(true)),
+        for (path, value, expected) in [
+            (
+                "/collection/pending",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room/closed",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
             (
                 "/room_attempts/attempt-old/attempt_id",
                 json!("foreign-attempt"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_room_id",
                 json!("room-foreign"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_wrapper_pid",
                 json!("52"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_host",
                 json!("inline"),
+                "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
             ),
-            ("/room_attempts/attempt-old/state", json!("done")),
-            ("/room/participants/1/joined", json!(false)),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("done"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ),
+            (
+                "/room/participants/1/joined",
+                json!(false),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
         ] {
             let mut refused = legacy.clone();
             let (parent, key) = path.rsplit_once('/').unwrap();
             refused.pointer_mut(parent).unwrap()[key] = value;
-            assert_eq!(
-                blocked(&refused),
-                "Current Main is unavailable for a managed switch",
-                "{path}"
-            );
+            assert_eq!(blocked(&legacy_scope, &refused), expected, "{path}");
+        }
+        for (path, value, expected) in [
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("external"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("blocked"),
+                "Current Main is blocked; wait until it is working to switch",
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_native_scheduling",
+                json!("campaign"),
+                "Main swap is unavailable during a managed campaign",
+            ),
+        ] {
+            let mut refused = report.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(blocked(&scope, &refused), expected, "{path}");
         }
         let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
             .unwrap_err()
             .message;
-        for (owner, harness) in [
-            ("claude", Some("claude")),
-            ("antigravity", Some("agy")),
-            ("codex", Some("pi")),
-            ("codex", Some("unknown")),
-            ("codex", None),
+        for (owner, harness, expected) in [
+            ("claude", Some("claude"), expected_refusal.as_str()),
+            (
+                "antigravity",
+                Some("agy"),
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ),
+            ("codex", Some("pi"), expected_refusal.as_str()),
+            ("codex", Some("unknown"), expected_refusal.as_str()),
+            ("codex", None, expected_refusal.as_str()),
         ] {
             let mut case_scope = scope.clone();
             case_scope.main.as_mut().unwrap().owner = owner.into();
@@ -5934,7 +6066,7 @@ mod tests {
                     panic!("unsupported outgoing harness must not resolve targets")
                 })
                 .unwrap_err();
-            assert_eq!(error.message, expected_refusal);
+            assert_eq!(error.message, expected);
             assert!(nav.main_switch.is_none());
             assert!(flow.selection.is_none());
             assert!(flow.running.is_none());
@@ -5998,8 +6130,24 @@ mod tests {
             || Some(scope.clone()),
             |expected, target| {
                 assert_eq!(expected, &scope);
-                let req = main_switch_request(Path::new("/fixture/oms"), &repo, expected, target)?;
-                let opts = Options::parse(&req.argv[2..])?;
+                assert!(
+                    main_switch_request(&executable, &staged.0, &repo, expected, target).is_err()
+                );
+                std::fs::write(payload.join("manifest.json"), b"{}").unwrap();
+                assert!(main_switch_request(&executable, &repo, &repo, expected, target).is_err());
+                let req = main_switch_request(&executable, &staged.0, &repo, expected, target)?;
+                assert_eq!(
+                    req.argv[..6],
+                    [
+                        executable.as_os_str().to_owned(),
+                        "--oms-dispatch".into(),
+                        staged.0.as_os_str().to_owned(),
+                        revision.into(),
+                        "--".into(),
+                        "panel".into(),
+                    ]
+                );
+                let opts = Options::parse(&req.argv[6..])?;
                 assert_eq!(opts.get("room"), Some("room-one"));
                 assert_eq!(opts.get("swap-main"), Some("agy"));
                 assert_eq!(opts.get("model"), Some("gemini-4-carbon-high"));
@@ -6491,6 +6639,7 @@ mod tests {
         let pending = board.phase.report(idle_report(ROOM));
         assert_eq!(pending["collection"]["pending"], true);
         assert!(render::calls(&pending).is_empty());
+        assert_eq!(pending["board_write_slots"], Value::Null);
         let report_room = json!({"id":ROOM,"closed":false,"participants":[
             {"participant":MAIN,"role":"main","provider":"codex","joined":true},
             {"participant":"call-worker","role":"worker","joined":true,"state":"working"}
@@ -6574,8 +6723,10 @@ mod tests {
             requested.recv_timeout(Duration::from_secs(5)).unwrap(),
             ROOM
         );
-        let held = board.phase.report(fresh.clone());
+        let held = board.phase.frame_report(None, Some(fresh.clone()), ROOM);
         assert!(!render::calls(&held).is_empty());
+        assert_eq!(fresh["board_write_slots"]["used"], 0);
+        assert_eq!(held["board_write_slots"], fresh["board_write_slots"]);
         assert!(board.chat_cache().is_none());
         assert!(!settle_chat_dock(&mut dock, &observations, &held));
         let paint = |report: &Value, nav: &navigation::Navigation, dock: Option<&mut ChatDock>| {
@@ -6618,6 +6769,7 @@ mod tests {
             let painted = paint(&retained, &nav, dock.as_mut());
             displayed.push((label, painted.contains(label)));
             assert_eq!(retained["native_children"][0]["participant"], native);
+            assert_eq!(retained["board_write_slots"], fresh["board_write_slots"]);
             assert_eq!(retained["provider_accounts"]["codex"]["account"], "backup");
             assert_eq!(retained["provider_status"]["codex"]["weekly_used"], 14);
             assert!(!painted.contains("Refreshing Board"));
@@ -6649,12 +6801,10 @@ mod tests {
         ready(&mut board);
         let (_, failed) = board.update(Ok(scope(ROOM)), true, true);
         assert!(failed.is_none());
-        assert_eq!(board.phase, RefreshPhase::Pending);
-        let painted = paint(
-            &board.phase.frame_report(failed, Some(retained), ROOM),
-            &nav,
-            dock.as_mut(),
-        );
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
+        let retrying = board.phase.frame_report(failed, Some(retained), ROOM);
+        assert_eq!(retrying["board_write_slots"], Value::Null);
+        let painted = paint(&retrying, &nav, dock.as_mut());
         assert!(painted.contains("Second wake result"));
         assert!(!painted.contains("refresh failed"));
         assert_eq!(
@@ -6752,8 +6902,9 @@ mod tests {
         let (changed, replacement) = board.update(Ok(scope(new_room)), false, false);
         assert!(changed && replacement.is_none());
         assert!(board.chat_cache().is_none());
-        let cold = board.phase.report(idle_report(new_room));
+        let cold = board.phase.frame_report(replacement, None, new_room);
         assert_eq!(cold["room"]["id"], new_room);
+        assert_eq!(cold["board_write_slots"], Value::Null);
         assert!(render::calls(&cold).is_empty());
     }
 
