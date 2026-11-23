@@ -3,11 +3,20 @@ use crate::{
     receipt::Paths,
     runtime::{self as r, Result},
 };
-use oms_safe_fs::{Policy, Root};
+use rustix::{
+    fs::{self as rfs, AtFlags, FileType, Mode, OFlags, Stat},
+    io::Errno,
+};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    fs,
+    io::Read,
+    path::{Component, Path},
+};
 
-const TRACE: &str = ".oms/hooks/codex-trace.jsonl";
+const TRACE: &str = "codex-trace.jsonl";
 const TRACE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -173,68 +182,114 @@ fn trace_summary(raw: &[u8], expected: &Value) -> Value {
         "active_session":"unknown", "provider_loading":"unverified"})
 }
 
-fn read_trace(repo: &Path) -> Option<Vec<u8>> {
-    // This is a checkout sidecar, not an account registry. An ordinary shared
-    // ancestor such as sticky /tmp must not hide valid private local evidence.
-    // Keep the local directory/leaf policy and recheck it around the existing
-    // bounded, owned, single-link, no-follow repository reader.
-    let uid = rustix::process::getuid().as_raw();
-    let snapshot = || {
-        let metadata = [
-            fs::symlink_metadata(repo).ok()?,
-            fs::symlink_metadata(repo.join(".oms")).ok()?,
-            fs::symlink_metadata(repo.join(".oms/hooks")).ok()?,
-            fs::symlink_metadata(repo.join(TRACE)).ok()?,
-        ];
-        if metadata[..3].iter().any(|info| {
-            !info.is_dir() || ![0, uid].contains(&info.uid()) || info.mode() & 0o022 != 0
-        }) || !metadata[3].is_file()
-            || metadata[3].uid() != uid
-            || metadata[3].nlink() != 1
-            || metadata[3].mode() & 0o7077 != 0
-        {
-            return None;
+fn same_node(before: &Stat, after: &Stat) -> bool {
+    before.st_dev == after.st_dev
+        && before.st_ino == after.st_ino
+        && before.st_uid == after.st_uid
+        && before.st_mode == after.st_mode
+}
+
+fn read_trace(repo: &Path) -> std::result::Result<Vec<u8>, Errno> {
+    // Walk physical names without following links, then protect the project
+    // subtree. A private project can live below a shared sticky temp directory.
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = rfs::open("/", flags, Mode::empty())?;
+    let root_stat = rfs::fstat(&root)?;
+    let mut chain = vec![(root, root_stat, OsStr::new(""))];
+    let path = repo.join(".oms/hooks");
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            let dir = rfs::openat(&chain.last().unwrap().0, name, flags, Mode::empty())?;
+            let stat = rfs::fstat(&dir)?;
+            chain.push((dir, stat, name));
         }
-        Some(metadata.map(|info| {
-            (
-                info.dev(),
-                info.ino(),
-                info.uid(),
-                info.mode(),
-                info.nlink(),
-            )
-        }))
+    }
+    let uid = rustix::process::geteuid().as_raw();
+    let (parent, stat, _) = chain.last().unwrap();
+    if stat.st_uid != uid
+        || chain.iter().rev().enumerate().any(|(depth, (_, stat, _))| {
+            let sticky_ancestor = depth >= 3 && stat.st_mode & 0o1000 != 0;
+            (stat.st_uid != uid && stat.st_uid != 0)
+                || (stat.st_mode & 0o022 != 0 && !sticky_ancestor)
+        })
+    {
+        return Err(Errno::ACCESS);
+    }
+    let named = rfs::statat(parent, TRACE, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(named.st_mode) != FileType::RegularFile
+        || named.st_uid != uid
+        || named.st_mode & 0o7077 != 0
+        || named.st_nlink != 1
+    {
+        return Err(Errno::ACCESS);
+    }
+    let size = usize::try_from(named.st_size).map_err(|_| Errno::FBIG)?;
+    if size > TRACE_LIMIT {
+        return Err(Errno::FBIG);
+    }
+    let stable = |stat: &Stat| {
+        same_node(&named, stat)
+            && stat.st_nlink == 1
+            && stat.st_size == named.st_size
+            && stat.st_mtime == named.st_mtime
+            && stat.st_mtime_nsec == named.st_mtime_nsec
+            && stat.st_ctime == named.st_ctime
+            && stat.st_ctime_nsec == named.st_ctime_nsec
     };
-    let before = snapshot()?;
-    let raw = Root::open(repo)
-        .ok()?
-        .read(TRACE, TRACE_LIMIT, Policy::manifest())
-        .ok()?;
-    (snapshot()? == before).then_some(raw)
+    let fd = rfs::openat(
+        parent,
+        TRACE,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
+        Mode::empty(),
+    )
+    .map_err(|_| Errno::AGAIN)?;
+    if !stable(&rfs::fstat(&fd)?) {
+        return Err(Errno::AGAIN);
+    }
+    let file = fs::File::from(fd);
+    let mut bytes = Vec::new();
+    (&file)
+        .take(TRACE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Errno::IO)?;
+    if bytes.len() != size
+        || !stable(&rfs::fstat(&file)?)
+        || !stable(
+            &rfs::statat(parent, TRACE, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| Errno::AGAIN)?,
+        )
+    {
+        return Err(Errno::AGAIN);
+    }
+    for pair in chain.windows(2) {
+        let (_, initial, name) = &pair[1];
+        let named =
+            rfs::statat(&pair[0].0, *name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| Errno::AGAIN)?;
+        if !same_node(initial, &named) {
+            return Err(Errno::AGAIN);
+        }
+    }
+    Ok(bytes)
 }
 
 fn trace(paths: &Paths, expected: &Value) -> Value {
-    // Match the callback writer's command-checkout selection, including subdirectories.
-    let repo = paths
-        .cwd
-        .ancestors()
-        .find(|path| {
-            fs::symlink_metadata(path.join(".git"))
-                .is_ok_and(|meta| meta.is_file() || meta.is_dir())
-        })
-        .unwrap_or(&paths.cwd);
-    let missing = || {
-        json!({"status":"missing", "diagnosis":"no_callback_evidence",
-        "coverage":"unknown", "active_session":"unknown", "provider_loading":"unverified"})
-    };
-    if matches!(fs::symlink_metadata(repo.join(TRACE)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-    {
-        return missing();
-    }
-    let raw = read_trace(repo);
+    // Match the callback writer's physical checkout selection, including subdirectories.
+    let raw = fs::canonicalize(&paths.cwd)
+        .map_err(|_| Errno::IO)
+        .and_then(|cwd| {
+            let repo = cwd
+                .ancestors()
+                .find(|path| {
+                    fs::symlink_metadata(path.join(".git"))
+                        .is_ok_and(|meta| meta.is_file() || meta.is_dir())
+                })
+                .unwrap_or(&cwd);
+            read_trace(repo)
+        });
     match raw {
-        Some(raw) => trace_summary(&raw, expected),
-        None => json!({"status":"unavailable", "diagnosis":"trace_unavailable",
+        Ok(raw) => trace_summary(&raw, expected),
+        Err(Errno::NOENT) => json!({"status":"missing", "diagnosis":"no_callback_evidence",
+            "coverage":"unknown", "active_session":"unknown", "provider_loading":"unverified"}),
+        Err(_) => json!({"status":"unavailable", "diagnosis":"trace_unavailable",
             "coverage":"unknown", "active_session":"unknown", "provider_loading":"unverified"}),
     }
 }

@@ -3063,7 +3063,12 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     );
 
     let trace = source.join(".oms/hooks/codex-trace.jsonl");
-    fs::create_dir_all(trace.parent().unwrap()).unwrap();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(trace.parent().unwrap())
+        .unwrap();
+    fs::set_permissions(source.join(".oms"), fs::Permissions::from_mode(0o700)).unwrap();
     let mut rows = Vec::new();
     for (id, handler, phase, outcome) in [
         (1, "resume-hook", "exit", Some("returned")),
@@ -3103,13 +3108,17 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     let parent_permissions = fs::metadata(root).unwrap().permissions();
     fs::set_permissions(root, fs::Permissions::from_mode(0o1777)).unwrap();
     let observed = diagnostic(&report());
+    fs::set_permissions(root, fs::Permissions::from_mode(0o777)).unwrap();
+    let unprotected_ancestor = diagnostic(&report());
     fs::set_permissions(root, parent_permissions).unwrap();
+    assert_eq!(unprotected_ancestor["trace"]["status"], "unavailable");
     let after = fs::metadata(&trace).unwrap();
     assert_eq!(
         (before.ino(), before.mtime(), before.mtime_nsec()),
         (after.ino(), after.mtime(), after.mtime_nsec())
     );
     assert_eq!(fs::read(&trace).unwrap(), raw.as_bytes());
+    assert_eq!(observed["trace"]["status"], "read");
     assert_eq!(observed["trace"]["attempts"], 6);
     assert_eq!(
         observed["trace"]["counts"],
@@ -3141,6 +3150,12 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     fs::set_permissions(hooks_directory, fs::Permissions::from_mode(0o777)).unwrap();
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
     fs::set_permissions(hooks_directory, hooks_permissions).unwrap();
+    let moved_hooks = hooks_directory.with_file_name("other-hooks");
+    fs::rename(hooks_directory, &moved_hooks).unwrap();
+    symlink(&moved_hooks, hooks_directory).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::remove_file(hooks_directory).unwrap();
+    fs::rename(moved_hooks, hooks_directory).unwrap();
     let checkout_permissions = fs::metadata(source).unwrap().permissions();
     fs::set_permissions(source, fs::Permissions::from_mode(0o777)).unwrap();
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
@@ -3156,6 +3171,7 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
     fs::remove_file(&trace).unwrap();
     fs::write(&trace, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
     fs::remove_file(&trace).unwrap();
     fs::remove_file(&settings).unwrap();
