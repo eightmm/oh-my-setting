@@ -69,7 +69,7 @@ EOF
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
   expected_ci_record() {
-    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' "$1" "$2" "$3"
+    printf 'mode=%s\nnative=%s\ndocs_only=%s\n' "$1" "$2" "$3"
   }
   oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/README.md"
