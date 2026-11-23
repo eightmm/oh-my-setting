@@ -721,7 +721,7 @@ fn provider_native_transports_match_shell_contract() {
             for (provider, bin, pattern) in cases {
                 for exact in [false, true] {
                     let native_model = ["deepseek", "vibe", "openhands"].contains(&provider);
-                    let model = if exact && !native_model {
+                    let model = if exact {
                         "fixture-model"
                     } else {
                         "provider-default"
@@ -735,6 +735,23 @@ fn provider_native_transports_match_shell_contract() {
                         "inspect λ\nnext line".as_bytes(),
                         &probe,
                     );
+                    if exact && native_model {
+                        assert_eq!(output.0, 1, "{provider}");
+                        let artifact = String::from_utf8_lossy(&output.1)
+                            .lines()
+                            .find(|line| Path::new(line).is_file())
+                            .map(PathBuf::from)
+                            .expect("failed seat artifact");
+                        assert!(
+                            fs::read_to_string(artifact)
+                                .unwrap()
+                                .contains("no documented per-invocation model override"),
+                            "{provider}: {}",
+                            message(&output)
+                        );
+                        assert!(probe.calls.lock().unwrap().is_empty());
+                        continue;
+                    }
                     if [
                         "muse",
                         "kimi",
