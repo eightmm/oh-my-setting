@@ -5093,7 +5093,8 @@ done
 
     #[test]
     fn failure_and_verify_observations_use_native_ledgers() {
-        let repo = Tmp::repo(&[("a", "x")]);
+        // In-worktree state: the ledger is a tracked file of the task repo.
+        let repo = Tmp::repo(&[("a", "x"), (".oms/failures.jsonl", "")]);
         let stop = Arc::new(AtomicBool::new(false));
         let control = services(&stop, repo.path(), Vec::new());
         let mut task = control.task();
@@ -5146,6 +5147,40 @@ done
         )
         .unwrap();
         assert!(observed.lines.starts_with(b"env: "));
+        // A real verify resolves its tracked ledger row after the receipt;
+        // that append is not source drift, while a source edit still is.
+        let run = |task: &mut ControlTask<'_>, args: &[&str]| {
+            let (code, out, err) =
+                oms_command_task::run_with_services(&osv(args), repo.path(), &stop, task);
+            (code, [out, err].concat())
+        };
+        let (code, log) = run(
+            &mut task,
+            &["init", "--goal", "ledger", "--verify", "test ! -e broken"],
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&log));
+        std::fs::write(repo.path().join("broken"), "").unwrap();
+        assert_eq!(run(&mut task, &["verify"]).0, 1);
+        std::fs::remove_file(repo.path().join("broken")).unwrap();
+        let (code, log) = run(&mut task, &["verify"]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&log));
+        let ledger = std::fs::read_to_string(repo.path().join(".oms/failures.jsonl")).unwrap();
+        let rows: Vec<_> = ledger.lines().filter(|l| l.contains("broken")).collect();
+        assert_eq!(rows.len(), 1, "{ledger}");
+        assert!(ledger.lines().last().unwrap().contains("\"resolved\""));
+        assert_eq!(
+            git(repo.path(), &["diff", "--name-only"]),
+            ".oms/failures.jsonl"
+        );
+        let status =
+            |task: &mut ControlTask<'_>| String::from_utf8(run(task, &["status"]).1).unwrap();
+        assert!(status(&mut task).contains("verification: fresh"));
+        std::fs::write(repo.path().join("a"), "y").unwrap();
+        assert!(status(&mut task).contains("verification: stale"));
+        // Restore the source and finish this task before the independent lineage scenario.
+        std::fs::write(repo.path().join("a"), "x").unwrap();
+        let (code, log) = run(&mut task, &["close"]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&log));
 
         // Same command, different tasks and a failure appended after selection:
         // only failures observed for this exact task before rerun may be linked.

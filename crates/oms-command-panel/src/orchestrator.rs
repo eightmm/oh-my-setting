@@ -5441,6 +5441,14 @@ fn claude_sighting<P: PartialEq>(
             .filter(|row| row["participant"] == participant);
         if let (Some(usage), Some(row), None) = (&child.usage, painted.next(), painted.next()) {
             row["native_response_usage"] = claude_usage_field(usage);
+            if let Some(model) = usage
+                .response
+                .as_ref()
+                .and_then(|response| response.observed_model.as_deref())
+                .and_then(crate::native_children::observed_model)
+            {
+                row["observed_model"] = json!(model);
+            }
             // Only the proven spawn and delivered-notice clocks; never from `state`.
             for (key, at) in [
                 ("started_at", &usage.spawned_at),
@@ -5533,6 +5541,12 @@ fn agy_usage_sighting(
         if let (true, Some(row), None) =
             (painted.contains(&participant), named.next(), named.next())
         {
+            if let Some(model) = value["model"]
+                .as_str()
+                .and_then(crate::native_children::observed_model)
+            {
+                row["observed_model"] = json!(model);
+            }
             row["native_response_usage"] =
                 json!({"scope": "latest_child_response", "response": value});
         }
@@ -6208,6 +6222,7 @@ mod tests {
                 id: "msg_1".into(),
                 at: "2026-11-22T01:00:00Z".into(),
                 usage,
+                observed_model: Some("claude-opus-5-5".into()),
             }),
             spawned_at: Some("2026-11-22T00:59:00Z".into()),
             delivered_at: None,
@@ -6235,6 +6250,24 @@ mod tests {
             "spawned_at": "2026-11-22T00:59:00Z", "delivered_at": null});
         assert_eq!(rows[1]["native_response_usage"], field);
         assert!(rows[0].get("native_response_usage").is_none());
+        // The exact reply model is its own row key, never inside the usage object.
+        assert_eq!(rows[1]["observed_model"], "claude-opus-5-5");
+        assert!(rows[0].get("observed_model").is_none());
+        assert!(field["response"].get("observed_model").is_none());
+        let mut unseen = read([1, 2, 3, 4]);
+        unseen.response.as_mut().unwrap().observed_model = None;
+        let no_model = Some((
+            turn.to_owned(),
+            vec![ClaudeChild {
+                usage: Some(unseen),
+                ..child(turn, "done")
+            }],
+        ));
+        let (rows_nm, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), no_model);
+        assert!(
+            rows_nm[1].get("observed_model").is_none()
+                && rows_nm[1].get("native_response_usage").is_some()
+        );
         // Row clocks come from the proven spawn and delivered notice, never the state.
         let clocks = |row: &serde_json::Value| {
             (row.get("started_at").cloned(), row.get("ended_at").cloned())
@@ -6246,9 +6279,10 @@ mod tests {
         let own = json!({"participant": bound[0].0, "state": "working"});
         let (rows, _) = claude_sighting(vec![own.clone()], &"pane", Some(&"pane"), single());
         assert!(rows.len() == 1 && rows[0]["native_response_usage"] == field);
-        // Two rows of one participant stay bound, but neither gets usage.
+        // Two rows of one participant stay bound, but neither gets usage or a model.
         let (rows, bound) = claude_sighting(vec![own.clone(); 2], &"pane", Some(&"pane"), single());
         assert!(rows == vec![own.clone(); 2] && bound.len() == 1);
+        assert!(rows.iter().all(|row| row.get("observed_model").is_none()));
         // Usage withheld (over the tail budget or unproven) leaves the field absent;
         // a total past u64 is unknown, the clocks stay.
         let with = |usage| {
@@ -6260,6 +6294,7 @@ mod tests {
         assert!(
             rows.len() == 2 && rows[1].get("native_response_usage").is_none() && bound.len() == 1
         );
+        assert!(rows[1].get("observed_model").is_none());
         assert_eq!(clocks(&rows[1]), (None, None));
         let clocked = |state, delivered: Option<&str>| {
             let mut usage = read([1, 2, 3, 4]);
@@ -13321,6 +13356,7 @@ mod tests {
             let (got, offered, proofs) = sample(rows.clone(), turn, turn, true);
             assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
             assert_eq!(got[0]["native_response_usage"], field(2));
+            assert_eq!(got[0]["observed_model"], "gemini");
             assert!(
                 got[0]["native_response_usage"]["response"]
                     .get("total_tokens")
@@ -13343,6 +13379,12 @@ mod tests {
             assert_eq!(offered, vec![set(&[&b])]);
             assert!(got[0] == rows[0] && got[1] == rows[1] && got[3] == rows[3]);
             assert_eq!(got[2]["native_response_usage"], field(2));
+            assert_eq!(got[2]["observed_model"], "gemini");
+            assert!(
+                got.iter()
+                    .enumerate()
+                    .all(|(i, r)| i == 2 || r.get("observed_model").is_none())
+            );
 
             // More than three eligible: only the first three in participant order.
             let mut order = [&a, &b, &c, &d];
@@ -13370,6 +13412,26 @@ mod tests {
             let mut none = rows.clone();
             agy_usage_sighting(&mut none, turn, |_| None, || unreachable!());
             assert_eq!(none, rows);
+            assert!(none[0].get("observed_model").is_none());
+
+            // A model the shared validator rejects is omitted; the usage is unchanged.
+            for bad in ["<synthetic>", "\u{1b}[31mgemini", " gemini"] {
+                let mut invalid = usage(2);
+                invalid["model"] = json!(bad);
+                let scan = BTreeMap::from([(b.clone(), invalid.clone())]);
+                let mut rows = vec![row(&b)];
+                agy_usage_sighting(
+                    &mut rows,
+                    turn,
+                    |_| Some((turn.to_owned(), scan.clone())),
+                    || true,
+                );
+                assert!(rows[0].get("observed_model").is_none(), "{bad:?}");
+                assert_eq!(
+                    rows[0]["native_response_usage"],
+                    json!({"scope": "latest_child_response", "response": invalid})
+                );
+            }
 
             // No eligible row or no shown Turn: neither the scan nor the fence runs.
             for (rows, shown) in [
