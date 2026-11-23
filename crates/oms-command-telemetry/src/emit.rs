@@ -118,6 +118,18 @@ fn lifetime(r: &V, out: &mut String) {
             display(&u["cleanup_unknown_calls"])
         )
         .unwrap();
+        if let Some(storage) = u.get("storage") {
+            writeln!(
+                out,
+                "usage storage: retained-bytes={} receipt-rows={} limit-bytes={} remaining-bytes={} update={}",
+                display(&storage["retained_bytes"]),
+                display(&storage["receipt_rows"]),
+                display(&storage["max_bytes"]),
+                display(&storage["remaining_bytes"]),
+                display(&storage["update_mode"])
+            )
+            .unwrap();
+        }
     }
 }
 fn reported(total: &V, reports: &V, calls: &V) -> String {
