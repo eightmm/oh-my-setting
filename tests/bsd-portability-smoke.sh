@@ -3,11 +3,11 @@ set -euo pipefail
 
 # Tools whose behavior depends on the userland, exercised end to end.
 #
-# These lived as inline steps in the macOS CI job, which meant they could not
-# be run locally and vanished silently when that job was reworked. They cover
+# These lived as inline steps in a macOS CI job, which is gone. They cover
 # the one class of breakage a Linux-only gate cannot see: sed, awk, date, sort,
 # and stat differ between GNU and BSD, and every script below leans on them.
-# Run here on every platform, and on macOS in CI, where the difference is real.
+# The focused suite runs this on the host userland (GNU in Linux CI); only a
+# run on a BSD/macOS host exercises the BSD difference.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=tests/lib/smoke-env.sh

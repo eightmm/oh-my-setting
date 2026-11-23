@@ -1554,9 +1554,21 @@ is scanned before projection, and unsafe sources are withheld while independent
 sources remain available. Output lines carry source tags. Each collection can
 contribute up to six whole records within a 2,048-byte per-row budget. The
 renderer scans the final draft before printing or writing and respects
-`--max-bytes` (512-65536, default 4096), counting omitted records and draft lines.
+`--max-bytes` (512-65536, default 4096), counting omitted content records.
 Recorded claims require fresh verification before action. `--output` creates a
 new file and refuses to overwrite one. The draft conveys advisory context.
+Each section retains compact coverage flags outside the removable content rows:
+`p` for producer selection loss, `r` for renderer selection or excerpt loss,
+`w` for withheld sources, `u` for unavailable sources, `e` for a successfully
+observed empty section, and `-` for no observed loss. Several flags can coexist;
+they survive the minimum 512-byte budget. A withheld or unavailable task packet
+marks both Goal and Decisions. The footer counts omitted whole records once
+across producer selection and rendering; an abbreviated goal sets `r` without
+counting its retained row as omitted. A closed packet's excluded decisions are
+policy, not truncation. Removing synthetic gap or empty-source notes does not
+count the same underlying records again or turn known empty data into loss.
+These flags describe delivery coverage, not whether the
+recorded claims are true or freshly verified.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
@@ -3359,10 +3371,44 @@ checks the selected jobs and their planned skips.
 
 macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
 userland compatibility), but macOS runners are no longer part of GitHub Actions
-CI; verify macOS/BSD-sensitive changes locally with
-`tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
+CI. `tests/bsd-portability-smoke.sh` (wired into `scripts/check.sh`) exercises
+userland-sensitive tools on the host's own userland, which is GNU in CI, so it
+does not prove macOS/BSD behaviour there.
 
-Require it in branch protection before enabling a local quick push hook; having a
+`oms ci-status attention [branch] [--limit N] [--json]` reads scheduled and manual
+workflow runs separately, so a newer PR or push run cannot hide a maintenance
+failure. Without a branch it uses the GitHub origin's default branch. It requests
+at most 20 runs per event by default (1–100), then reports the newest run and
+attempt for each observed workflow. Each line includes the event, workflow ID,
+outcome, run URL and the run's last-update time. An incomplete history window is
+labelled `bounded`; it may omit workflows that have not run recently. The JSON
+form is schema 1, kind
+`oms-ci-attention`, with repository, branch, observation time and observations.
+
+Exit 0 means only the selected latest observations succeeded; it establishes
+neither complete workflow coverage, recent scheduled execution, nor a healthy
+default-branch HEAD. Read each run's timestamp to assess its age. Exit 1 means a
+completed failure was observed; exit 2 takes precedence when any outcome is
+pending or unknown. Missing runs, unreadable responses and skipped or unrecognized
+outcomes remain unknown. A newer successful
+run or attempt replaces that workflow's earlier failure; a queued run is pending.
+This explicit GET-only command reads no job logs, writes no ledger, changes no
+checkout and never dispatches, retries or grants landing/install evidence. It is
+not polled by ordinary Board refresh or session startup. `attention` reports
+the workflow events that exist; it does not imply macOS CI is running.
+
+Before restoring a macOS CI lane, resolve the native Team channel investigation
+[#327](https://github.com/eightmm/oh-my-setting/issues/327) and concurrent input
+queue investigation [#343](https://github.com/eightmm/oh-my-setting/issues/343)
+with controlled fixtures and evidence from a macOS host. Check the BSD smoke,
+native Rust tests and install lifecycle on the proposed commit; Linux success
+alone does not establish those results. Reintroduce the lane in a separate,
+reviewed workflow change that states its trigger and runner cost, updates the
+selected-job gate contract, and preserves exact-SHA installation proof. A
+successful portability smoke is useful evidence but does not close the native
+concurrency investigations by itself.
+
+Require `gate` in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
 that on request: it reads the branch's protection and active rulesets (GET only; the
 default is the repository's default branch) and reports whether `gate` is a required

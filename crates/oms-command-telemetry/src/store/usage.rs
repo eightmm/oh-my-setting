@@ -128,6 +128,11 @@ pub struct Projection {
     pub calls: Vec<AccountedCall>,
 }
 
+pub(crate) struct StorageStats {
+    pub retained_bytes: usize,
+    pub receipt_rows: usize,
+}
+
 /// Provider-native token counts attributable to one physical call. Components
 /// may overlap. The total uses a reported value when available and otherwise
 /// requires enough compatible components to calculate it.
@@ -674,11 +679,21 @@ fn current(rows: &[Receipt]) -> Result<Vec<Receipt>, StoreError> {
 /// Read a strict, complete snapshot. Missing history means no tracked calls,
 /// never an assertion that the provider has billed nothing outside OMS.
 pub fn load(repo: &Path) -> Result<Projection, StoreError> {
-    let mut projection = project(&receipts(&read_index(
-        repo,
-        Some(Path::new(RECEIPTS)),
-        true,
-    )?)?)?;
+    load_with_storage(repo).map(|(projection, _)| projection)
+}
+
+/// Storage counts and usage describe the same validated snapshot, including
+/// superseded revisions. They do not require another read of the ledger.
+pub(crate) fn load_with_storage(repo: &Path) -> Result<(Projection, StorageStats), StoreError> {
+    let (mut projection, storage) = {
+        let bytes = read_index(repo, Some(Path::new(RECEIPTS)), true)?;
+        let rows = receipts(&bytes)?;
+        let storage = StorageStats {
+            retained_bytes: bytes.len(),
+            receipt_rows: rows.len(),
+        };
+        (project(&rows)?, storage)
+    };
     // Optional evidence: a missing, oversized, torn or unreadable supplement
     // leaves core usage intact and reasoning unknown.
     if let Ok(found) = read_reasoning(repo).and_then(|bytes| reasoning_index(&bytes)) {
@@ -686,7 +701,7 @@ pub fn load(repo: &Path) -> Result<Projection, StoreError> {
             call.reasoning_tokens = proven_reasoning(&call.receipt, &found);
         }
     }
-    Ok(projection)
+    Ok((projection, storage))
 }
 
 /// The supplement is small by contract; reads and rewrites enforce it before
