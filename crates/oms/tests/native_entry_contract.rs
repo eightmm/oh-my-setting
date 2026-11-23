@@ -3695,7 +3695,7 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         "--title",
         "T",
         "--allowed",
-        "a.txt",
+        "a.txt,tests/review-binding.txt",
         "--verify",
         "true",
     ]);
@@ -3703,7 +3703,10 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
     let task: serde_json::Value =
         serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
     let reviewed_patch = ".oms/p/exact.patch";
-    let reviewed = std::fs::read(l.repo.join(".oms/p/p.patch")).unwrap();
+    let mut reviewed = std::fs::read(l.repo.join(".oms/p/p.patch")).unwrap();
+    // Red checks execute only for test-file hunks. Keep one in the exact
+    // candidate so the later advisory command really mutates the report.
+    reviewed.extend_from_slice(b"diff --git a/tests/review-binding.txt b/tests/review-binding.txt\nnew file mode 100644\n--- /dev/null\n+++ b/tests/review-binding.txt\n@@ -0,0 +1 @@\n+bound\n");
     let report = std::fs::read(l.repo.join(".oms/p/r.md")).unwrap();
     std::fs::write(l.repo.join(reviewed_patch), &reviewed).unwrap();
     l.ok(&[
@@ -3783,12 +3786,22 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         "--red-check",
         &mutate_report,
     ]);
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join(".oms/p/r.md")).unwrap(),
+        "changed during advisory verification\n",
+        "advisory command did not run: {out}{err}"
+    );
     assert_eq!(code, 2, "{out}{err}");
     assert!(err.contains("reviewed artifact bytes changed"), "{err}");
     assert_eq!(
         std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap(),
         before
     );
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
+        "a\n"
+    );
+    assert!(!l.repo.join("tests/review-binding.txt").exists());
     std::fs::write(l.repo.join(".oms/p/r.md"), &report).unwrap();
     let (code, out, err) = l.oms(&[
         "patch-admit",
@@ -3809,6 +3822,10 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         oms_command_plan::json::sha(&reviewed)
     );
     assert_ne!(done["patch"], reviewed_patch);
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join("tests/review-binding.txt")).unwrap(),
+        "bound\n"
+    );
     assert_eq!(
         std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
         "a\nb\n"
