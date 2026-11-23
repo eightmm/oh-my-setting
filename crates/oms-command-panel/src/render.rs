@@ -2313,6 +2313,7 @@ fn frame_with_capacity(
                 &report["provider_models"],
                 &report["provider_accounts"],
                 &report["provider_activity"],
+                &report["provider_delivery"],
                 !stale && report["collection"]["pending"] != true,
                 roster,
                 roster_limit,
@@ -3100,6 +3101,7 @@ fn render_provider_rows(
     models: &Value,
     accounts: &Value,
     activity: &Value,
+    delivery: &Value,
     current: bool,
     agy_roster: &[Value],
     agy_roster_limit: usize,
@@ -3195,6 +3197,20 @@ fn render_provider_rows(
             None if members.is_empty() => "no visible work".to_owned(),
             None => format!("{} recorded", members.len()),
         };
+        let delivered = (connected && current)
+            .then(|| crate::orchestrator::PROVIDERS.get(group))
+            .flatten()
+            .and_then(|provider| match text(delivery, provider) {
+                "draft_retained" => Some("draft last seen"),
+                "input_cleared_unverified" => Some("input cleared · unverified"),
+                "turn_observed" => Some("turn observed"),
+                "unverified" => Some("send unverified"),
+                _ => None,
+            });
+        if let Some(label) = delivered {
+            summary.push_str(" · ");
+            summary.push_str(label);
+        }
         let awaiting = if default_overview(nav) {
             all.iter()
                 .filter(|call| {
@@ -3263,10 +3279,10 @@ fn render_provider_rows(
             title.push_str(" · @");
             title.push_str(alias);
         }
-        let tag = [&detail, &summary]
+        let tag = [detail.as_str(), summary.as_str()]
             .into_iter()
-            .find(|tag| width(&title) + width(tag) + 8 <= columns)
-            .map(String::as_str);
+            .chain(delivered)
+            .find(|tag| width(&title) + width(tag) + 8 <= columns);
         let header = card_top_styled(&title, tag, columns, colored, provider_style(group));
         lines.push(if lines.len() > provider_start {
             header.replacen('╭', "├", 1).replacen('╮', "┤", 1)
@@ -5995,6 +6011,32 @@ mod tests {
         }
         let ordinary = frame(&report, &navigation::Navigation::default(), 100, 30, &read);
         assert!(ordinary.iter().all(|line| !line.contains("Write slots")));
+    }
+
+    #[test]
+    fn ordinary_lead_delivery_board_keeps_activity_separate() {
+        let mut report = json!({
+            "collection":{"ok":true},
+            "provider_sessions":["claude", "antigravity"],
+            "provider_activity":{"claude":"idle", "antigravity":"working"},
+            "provider_delivery":{"claude":"input_cleared_unverified","antigravity":"turn_observed"},
+        });
+        let read = BTreeMap::new();
+        let nav = navigation::Navigation::default();
+        let visible = |r: &Value| frame(r, &nav, 110, 24, &read).join("\n");
+        let view = visible(&report);
+        assert!(view.contains("idle · input cleared · unverified"), "{view}");
+        assert!(view.contains("working · turn observed"), "{view}");
+
+        report["provider_delivery"]["claude"] = json!("draft_retained");
+        assert!(visible(&report).contains("idle · draft last seen"));
+
+        report["collection"]["pending"] = json!(true);
+        let held = visible(&report);
+        assert!(!held.contains("draft last seen") && !held.contains("turn observed"));
+        report["collection"]["pending"] = json!(false);
+        report["provider_sessions"] = json!(["antigravity"]);
+        assert!(!visible(&report).contains("draft last seen"));
     }
 
     #[test]

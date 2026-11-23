@@ -1475,6 +1475,18 @@ The detail shows callback age and reset. An observation with missing proof or
 an elapsed window leaves Weekly unavailable. This reading stays outside
 account ranking.
 
+For an open Claude or Antigravity lead, use `--orchestrator PROVIDER --task TEXT`
+from the current Main. OMS sends Enter once when it can verify the complete draft
+in the provider composer. A narrow pane, cropped composer or wrap that hides text
+can leave a draft without submitting it. Inspect the provider pane. If Enter was
+withheld, review and submit the draft directly in that pane. If Enter may have
+reached the provider, check the existing conversation before sending again.
+
+A cleared composer reports unverified delivery unless OMS has provider evidence.
+For Antigravity on supported Linux hosts, OMS can confirm the full request from
+the current lead's native conversation even if its user header wraps or scrolls
+out of view. Delivery confirmation is separate from task completion.
+
 From the current Main of an unmanaged room, open one separate Codex lead with
 `oms panel --orchestrator codex --lead alternate --account ID`. The primary Codex
 lead must already have a verified account binding. OMS rechecks both configured
