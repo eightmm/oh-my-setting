@@ -6,6 +6,10 @@
 필드와 API 이름도 설계상의 이름이다. 현재 사용할 수 있는 명령이나 설정으로
 해석하지 않는다. 이 변경은 runtime 코드, dependency, provider 기본 경로를 바꾸지 않는다.
 
+1–9절은 위 조사 시점의 설계 기록이다. [10절](#10-2026-11-21-하네스-강화의-현재-경계)은
+2026-11-21에 현재 source와 협업 PR을 다시 대조한 보강이다. 기존 RF/REL/DR/VW owner에
+실행 품질·연속성·검증 과제를 연결하며, 별도 구현 PR과 남은 제안을 구분한다.
+
 남은 과제는 세 가지다. 기존 supervisor 위의 선택적 ACP 연결, 실제 실행 중
 증거에 근거한 tool-loop/stall 관측, 호출별 context 출처와 동일 과제의 짝 비교다.
 별도 PR에서 다루는 feedback 수집·repair와 사용량 영수증·예산,
@@ -313,3 +317,130 @@ fixture가 필요하다. 현재 수집 PR이나 Apptainer 구현을 이 설계 �
 외부 소스는 위 commit에 고정했고, protocol 웹 문서는 조사일의 v1을 읽었다. SDK의
 전체 buffering 한계, 실제 ACP provider 상호운용성과 paired task 결과는 후속 구현·평가에서
 확인해야 한다.
+
+## 10. 2026-11-21 하네스 강화의 현재 경계
+
+### 목표와 협업 범위
+
+확인 기준은 main `1dfa9a491dbdb8917d2bec19f4c1eafce72a6404`다.
+[Claude의 #313](https://github.com/eightmm/oh-my-setting/pull/313)은 head
+`3f07b7b7ddbdd3865a975e6302782a785d7259dd`의 명세를 읽었다. Provider capability,
+custom adapter session, ACP, guard/sandbox 범위와 council 등의 연결 작업을 다룬다.
+그 명세는 [Agent harness 패킷](AGENT-HARNESS-WORK-PACKETS.md)으로 같은 문서 묶음에 있다.
+아래 보강은 그 경계와 함께 **완료를 믿을 근거, 다음 세션이 잃은 정보,
+다시 쓸 수 있는 복구 경험, 하네스의 실제 효과**를 다룬다. AH 패킷의 구현을
+전제하지 않으며 그 provider writer를 함께 수정하지 않는다.
+
+팀을 운영하는 Overall Main은 계획·배정·검토·결정을 맡고 repository 편집은 Lead나
+worker에게 배정한다([#321](https://github.com/eightmm/oh-my-setting/pull/321)). 팀이 없는
+solo session은 직접 작업한다. 2026-11-23 main에서는 Claude Code panel Main의 파일 편집
+도구만 관리 저장소와 linked worktree 안에서 runtime guard가 거절한다(`f214abad`; panel 시작 시
+`OMS_MAIN_WRITE_GUARD=0`이면 꺼짐). Bash를 통한 변경과 Claude Code가 아닌 Main의 편집은
+계속 prompt 계약이다.
+필요한 Lead와 worker를 선택하되 Planner, Lead, reviewer를
+모든 작업의 필수 단계로 만들지 않는다. Provider native tool loop와 compaction을 보존하고,
+기존 [작업 큐](ORCHESTRATOR-WORK-QUEUE.md)의 owner·채택 조건을 따른다.
+아래 표는 새 작업 큐나 신규 ID 체계가 아니라 기존 작업의 구체화다.
+
+### 현재 구현과 남은 공백
+
+| 기존 기능 / source | 이번에 확인한 경계 | 처리할 위치 |
+|---|---|---|
+| [Task verify](../crates/oms-command-task/src/lib.rs), [native failure observer](../crates/oms/src/services_control.rs) | Exit 0의 failure resolve가 최종 verification receipt 수락보다 먼저 호출된다. 최종 task/contract/repository/CAS 거절이 있어도 advisory failure가 해제될 수 있다. | 아래 별도 correctness PR; DR-03의 검증 근거를 보존하는 선행 수정 |
+| [Runtime benchmark](../crates/oms-runtime/src/benchmark.rs) | 양쪽 basis가 같은 결측값이면 numeric delta를 허용한다. 기록이 없는 manual/skill 합계 0도 차이로 계산한다. | 아래 별도 correctness PR; RF-06의 기존 비교 경계 |
+| [Session handoff](../crates/oms-command-autonomy/src/handoff.rs), [decision selection](../crates/oms-command-autonomy/src/advisory.rs) | 전체 `truncated` 수는 있으나 어느 section이 빠졌는지 남지 않는다. Unavailable/withheld 설명 자체가 byte trimming에서 빠질 수 있고 decision/goal 선별 손실도 모두 표현하지 않는다. | REL-01의 consumer coverage 후속 |
+| [Attempt failure projection](../crates/oms-command-attempt-bundle/src/bundle.rs) | 시간 구간으로 failure를 모으며 다른 작업의 failure일 수 있음을 이미 표시한다. [FailureObservation](../crates/oms-command-task/src/services.rs)에는 task/attempt/accepted receipt identity가 없다. | [DR-03/04](MEMORY-CONSOLIDATION.md)의 출처 연결·재사용 적격성 |
+| [Native state adapter](../crates/oms/src/services_control.rs), [state projection](../crates/oms-command-state/src/state_projection.rs) | Native state 계열의 canonical runtime envelope 연결은 이미 존재한다. Producer 실패는 degraded이며 library-only fallback과 구분된다. | [Feature scope](FEATURE-SCOPE.md)의 오래된 설명을 이 변경에서 정정; 새 envelope 연결 작업 없음 |
+| [Recipe resume](../crates/oms-command-state/src/recipe.rs), [experiment](../crates/oms-runtime/src/experiment.rs) | Plan·command·environment 등 기존 실행 identity와 연구 계약이 있다. 일반 checkpoint engine이나 별도 실험 대장이 필요한 근거는 확인하지 않았다. | 기존 receipt·run ledger·선택형 contract의 caller별 보강 |
+
+### 먼저 분리한 구현 PR
+
+두 수정은 위 기준 source에서 회귀를 재현한 별도 변경이다. 이 문서 PR은 해당 Rust
+변경을 포함하지 않는다. PR 생성·리뷰·CI·병합 상태는 실제 PR과 head의 근거로 확인하며,
+명세 작성이나 local fixture 통과를 병합·배포 완료로 표시하지 않는다.
+2026-11-23 기준 #314와 #315는 open이며 main `051fd3ea`에 두 수정이 없다. 위 표의 두
+correctness 공백은 main에서 계속 열려 있다. 통합 branch로 옮긴 사본도 main 병합 전에는
+완료로 세지 않는다.
+
+| 변경 | 구현 경계 | 합격 기준 / 남은 한계 |
+|---|---|---|
+| [#314 Benchmark 비교의 unknown 보존](https://github.com/eightmm/oh-my-setting/pull/314) | 현재 producer basis만 허용하고 기존 sample count와 unknown metric 목록으로 미측정을 구분한다. 원본 값과 비교 거절 이유를 보존한다. | Missing/malformed/unsupported basis, zero sample, candidate-only skill을 null delta로 처리. 실제 관측 0과 양의 sample 수 차이는 유지. 같은 task·환경·duration source라는 보장은 추가하지 않는다. |
+| [#315 최종 verify 수락 뒤 failure resolve](https://github.com/eightmm/oh-my-setting/pull/315) | 기존 두 단계 finalize 중 성공 receipt 수락을 exit-0 observer보다 앞에 둔다. Nonzero·skip·advisory 오류 계약은 유지한다. | Task rotation, Verify 변경, repo 변경, 최종 CAS 실패 시 resolve가 호출되지 않는다. 정상 pass의 observer는 이미 저장된 receipt를 읽는다. Resolve는 여전히 command 단위이며 cross-domain transaction이나 정확한 recovery lineage는 아니다. |
+
+### 후속 작업의 목적·범위·검증
+
+P0/P1/P2는 이 보강 안의 진행 순서이며 기존 작업 큐 전체의 우선순위를 다시 정하지 않는다.
+각 구현은 착수 시 실제 main과 기존 PR의 상태를 재확인한다.
+
+| 축 / 기존 owner | 목적과 다음 구현 범위 | 우선순위·의존성 | 검증 기준과 다음 작업 |
+|---|---|---|---|
+| 완료 판정 / task·DR-03 | 성공한 명령, 수락된 receipt, 실제 acceptance/publication을 구분한다. 위 verify 순서 수정을 먼저 검토한다. | P0; 현재 task reference/CAS와 native observer | 회귀 fixture와 해당 crate 검사. 이후 recovery identity를 붙일 때 이 순서를 보존한다. |
+| 결과 비교 / RF-06 | 미측정·0·관측 차이를 구분한 뒤 실제 선택 문제에 한해 동일 과제 비교를 연결한다. | P0 비교 수정; P2 paired protocol은 기존 RF-06 착수 조건 유지 | 같은 task/base/verifier와 실패·결측 포함 결과. 다음 판단은 review/분업/context policy 중 한 요소가 품질·시간·수정량에 주는 효과다. 측정 없는 자동 routing이나 상시 평가를 켜지 않는다. |
+| 인수인계 / REL-01 | 다음 세션이 읽지 못한 source와 renderer 손실을 section별로 알 수 있게 한다. | P1; 기존 handoff renderer와 canonical peer fixture | 최소 512-byte budget, unavailable/withheld/truncated/empty를 구분. 먼저 아래 bounded 표시 계약을 구현한다. RF-05 전체 attribution이 선행 조건은 아니다. |
+| 복구 경험 / DR-03/04 | 검증된 복구 절차는 failure→action→accepted verification을 정확한 identity로 연결한다. 실패·미결 경험은 불확실성을 유지해 보존한다. | P1; 위 verify 수정, 기존 DR 출처·review·supersede 계약 | 동시 task의 failure를 복구 성공으로 잘못 묶지 않는다. 다음 단계는 기존 failure row와 attempt projection의 optional correlation 계약을 좁혀 정하는 것이다. |
+| 환경·검증 해석 / VW-04·REL-02 | 실제 수행·생략·timeout·환경 제약과 model/작업 실패를 분리한다. | P1, 기존 VW/REL 변경에 흡수; 별도 telemetry 선행 없음 | 기존 gate/receipt에 이미 있는 SHA·실행 범위·exit·선택 사유부터 사용. 다음 변경에서 요청한 검사와 실행한 검사의 차이 및 근거 없는 분류를 명시한다. 새 CI job·전체 재실행·무조건 retry 없음. |
+| 작업별 성과 계약 / 기존 task·recipe·experiment | 코드 외 연구·실험에서도 산출물과 성공 기준을 먼저 정한다. | P2; 실제 반복 workflow와 기존 verifier/산출물 owner | 코드 작업은 tree와 검사 결과, 조사 작업은 주장·출처·미확인점, ML 작업은 dataset/split/seed/metric/artifact를 해당 contract에서 확인한다. 하나의 실제 workflow부터 기존 template/recipe로 적용하고 global 규칙으로 강제하지 않는다. |
+
+### REL-01: handoff coverage의 좁은 다음 변경
+
+기존 일곱 heading과 전체 truncation footer를 유지하며, 남기는 content row의 source
+tag를 보존한다. 표시할 것은 source별 내용의 진실성이나 검증 완료가 아니라
+**관측된 전달 손실**이다.
+
+- 각 section에 producer omission, renderer omission, withheld, unavailable의 독립 상태를
+  남긴다. 이 metadata를 일반 row와 분리해 최종 budget trimming에서 함께 제거하지 않는다.
+- Task packet이 withheld/unavailable이면 Goal과 Decisions 양쪽에 반영한다. 정상적으로
+  빈 목록인 경우와 읽지 못한 경우를 구분하고, 닫힌 task의 정책상 제외를 임의 누락으로 세지 않는다.
+- [Task-packet decision selector](../crates/oms-command-autonomy/src/advisory.rs)의 newest-six /
+  4096-byte 제한, Goal excerpt, row 크기·개수 제한, 최종 byte 제한을 모두 점검한다.
+  기존 전역 count와 section 상태가 같은 한 건을 중복 집계하지 않도록 owner를 정한다.
+- 최소 512-byte 출력에서도 metadata·heading·footer를 남기고 secret/private source는 계속
+  withheld한다. 짧은 flag와 legend는 가능한 표현 후보이며 공개 JSON/schema를 새로 만들지 않는다.
+- 기존 [peer handoff fixture](../crates/oms-command-peer/tests/peer_contract.rs)의 complete,
+  unavailable, interrupted, malformed, sensitive, line/read-budget 사례를 확장한다. 정상 빈
+  결과와 모든 content row가 잘린 결과를 구분하고, gap 없음이 fresh verification을 뜻하지 않음을 검사한다.
+
+이 문서는 표시 형식을 구현하거나 512-byte 시험을 실행하지 않았다. 구현 PR에서 실제
+최악 길이·UTF-8 경계·비밀 제거·native consumer를 확인한다.
+
+### DR-03/04: 실패 경험은 exact 연결부터
+
+기존 fail-ledger와 attempt bundle에 실제 producer가 가진 optional task/attempt/receipt
+correlation을 연결하는 범위를 먼저 설계한다. 기록에 없는 ID를 시간 근접성으로 만들어
+넣지 않는다. Legacy row는 읽을 수 있어야 하며 시간 구간의 후보 연결은 계속 불확실하다.
+Command-level resolve의 범위를 silently 바꾸지 않고 별도 호환성·concurrent-task 사례를 검토한다.
+
+검증된 복구 절차로 재사용하려면 failure, 수행한 action, 수락된 검증 근거가 정확한
+identity로 이어져야 한다. 실패·미결·효과 없는 조치도 기존 불확실성을 유지해 보존한다.
+과거의 성공은 새 repo tree·환경·계약에서의 성공을 보장하지 않는다. 기존 memory provenance와
+review eligibility, hygiene, supersede/retire를 사용하며 skill 후보도 기존 skill-forge로
+넘긴다. 새 memory DB, 자동 repair loop, 과거 검증에 의한 현재 task 승인 권한은 만들지 않는다.
+
+### RF-06: 효과를 확인하며 하네스 단순화
+
+기존 관측 snapshot은 문제를 찾고 실험 대상을 정하는 자료다. 비교값이 계산된다는 사실이
+동일 조건이나 인과적 개선을 보장하지 않는다. 특히 현재 duration은 provider sample이
+없으면 lifecycle-event sample을 사용하며 그 선택이 snapshot basis에서 분리되지 않는다.
+
+반복되는 실제 선택 문제가 생기면 7절의 pair protocol을 적용한다. 예를 들어 같은 builder
+assignment에 독립 reviewer를 추가하는 효과를 비교할 때, 양쪽의 필수 검증은 유지하고
+같은 task/base/verifier·환경·예산에서 추가 review만 변경한다. 품질·실패·사람의 수정량·시간과
+알려진 사용량을 함께 보며 실패 arm을 빼지 않는다.
+효과를 입증하지 못한 강제 분업·반복 review·context 주입은 줄이는 후보로 검토한다.
+현재 model/effort의 가용한 조합을 사용하며 vendor 이름이나 고정 tier만으로 경로를 정하지 않는다.
+이 보강에서는 유료 model/API 평가나 GPU/원격 작업을 실행하지 않았다.
+
+### 공식 자료에서 가져온 판단 근거
+
+아래 원문을 2026-11-21에 읽었다. 외부 결과는 OMS 성능 개선의 실측치가 아니며,
+새 기능의 필요성은 위 현재 source/caller에서 따로 확인한다.
+
+| 자료 | 확인한 내용 | OMS에 적용할 판단 |
+|---|---|---|
+| Anthropic, [Demystifying evals for AI agents](https://www.anthropic.com/research/demystifying-evals-for-ai-agents), 2026-01-09 | Transcript의 주장과 실제 환경의 outcome, grader와 실행 환경을 구분한다. | Agent의 완료 보고와 실제 수락된 verification을 구분하고 작업별 성공 기준을 둔다. |
+| Anthropic, [Harness design for long-running apps](https://www.anthropic.com/research/harness-design-long-running-apps), 2026-03-24 | 구성요소를 하나씩 제거하며 효과를 확인했고 model 변화 후 sprint 구조를 제거했다. Evaluator의 효과는 작업 난도와 model 능력에 따라 달랐다. | 단일·다중 agent와 review를 고정 계층으로 만들지 않고 같은 조건의 품질·비용 근거로 선택한다. |
+| Anthropic, [Quantifying infrastructure noise in agentic coding evals](https://www.anthropic.com/research/infrastructure-noise), 2026-02-05 | 자원·제한·환경 차이가 agent 평가 결과에 영향을 주며 설정과 enforcement를 보고해야 한다. | 환경 불명·timeout·실행하지 않은 검사를 model 실패나 통과로 대체하지 않는다. 외부 실험의 수치를 OMS 개선율로 옮기지 않는다. |
+
+문서 보강의 검사는 상대 reference와 diff/source scrubber 검사로 한정한다. 별도 구현
+PR의 실제 시험 결과는 그 PR에 기록한다. 후속 기능, 실제 provider 동작, 성과 개선,
+병합·배포 상태는 이 문서만으로 완료 처리하지 않는다.

@@ -152,11 +152,32 @@ code and, with `--json`, reports `partial`: `core=updated`, `tools=failed`. Core
 installed, and its consumed preparation cannot trigger a duplicate apply.
 Scheduled updates also preserve this distinction in their status record.
 
+After successful tool refresh, `doctor --integrations` checks the integrations
+recorded in the install receipt: Claude hook surfaces, Codex plugin inventory and
+generated cache, Antigravity plugin ownership, and managed MCP launch
+registrations. It reuses the existing parsers and bounded plugin inventory; it
+does not run model inference or launch arbitrary MCP servers. Passing establishes
+configuration/inventory consistency, not live hook delivery, served-model
+identity, or MCP runtime availability (`runtime=not_probed`).
+
+`--json` includes `integrations` (`passed`, `failed`, `cancelled`, or `skipped`),
+`integrations_skip_reason`, and allowlisted `diagnostics` containing `phase`,
+`tool`, and `exit`. A null tool means the host could not establish a launched
+command. Integration failure or cancellation keeps `core=updated` and
+`tools=updated`, reports `partial`, and retains its nonzero exit code. It does not
+roll back the committed core receipt or claim to restore vendor binaries.
+`--no-doctor` skips both the earlier doctor gate and this integration check;
+`--no-tools` and rollback skip refresh and its integration check. A failed refresh
+skips integration verification. The distinct skip reasons are `no_doctor`,
+`no_tools`, `rollback`, and `refresh_failed`.
+
 `oms auto-update status [--json]` reports the latest scheduled check or apply and
 keeps the last apply result separately. The optional `last_apply_run`,
 `last_apply_status`, `last_apply_local`, `last_apply_remote` and
 `last_apply_upstream` fields record that attempt's time, outcome, commits and
-selected ref. A later check may report `up_to_date` while the last apply remains
+selected ref. `last_apply_diagnostic` retains the typed phase/tool/exit of a
+post-commit failure; raw provider output and private paths are withheld. A later
+successful apply clears this diagnostic. A later check may report `up_to_date` while the last apply remains
 `partial` or `failed`: fetching the current commit does not retry provider tools.
 `auto-update attention` continues to report that failure until a later apply
 replaces the result or a newer installation supersedes it. A deferred check

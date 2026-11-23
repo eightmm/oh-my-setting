@@ -35,7 +35,36 @@ pub(crate) struct ClaudeChild {
     pub(crate) title: String,
     /// "done" only on the lead's own exact completion notice, else "unknown".
     pub(crate) state: &'static str,
+    /// `None` is withheld: not read for this sample, or the read proved nothing.
+    pub(crate) usage: Option<ClaudeChildUsage>,
 }
+
+/// What the Board may show of one child: its newest response and the lead's
+/// own clocks. A `None` field is unknown; nothing here measures a duration.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ClaudeChildUsage {
+    pub(crate) response: Option<ClaudeResponse>,
+    /// Clock of the lead's `Agent` call row.
+    pub(crate) spawned_at: Option<String>,
+    /// Clock of the lead's exact completion notice.
+    pub(crate) delivered_at: Option<String>,
+}
+
+/// One response of the child itself: its `message.id`, the clock of its last
+/// row and its own counters in `USAGE_KEYS` order, never cumulative.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ClaudeResponse {
+    pub(crate) id: String,
+    pub(crate) at: String,
+    pub(crate) usage: [u64; 4],
+}
+
+pub(crate) const USAGE_KEYS: [&str; 4] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+];
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn claude_current_children(
@@ -54,12 +83,20 @@ pub(crate) fn claude_child_chat(
     None
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn claude_board_children(
+    _pid: u32,
+    _repo: &std::path::Path,
+) -> Option<(String, Vec<ClaudeChild>)> {
+    None
+}
+
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{claude_child_chat, claude_current_children};
+pub(crate) use linux::{claude_board_children, claude_child_chat, claude_current_children};
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{ClaudeChild, ClaudeChildLocator};
+    use super::{ClaudeChild, ClaudeChildLocator, ClaudeChildUsage, ClaudeResponse, USAGE_KEYS};
     use crate::claude_lead_usage::linux::{
         DIR, FILE, config_root, environ, open_dir, start_time, unchanged,
     };
@@ -81,6 +118,9 @@ mod linux {
     pub(super) const LEAD_WINDOW: u64 = 4 * 1024 * 1024;
     pub(super) const CHILD_WINDOW: u64 = 1024 * 1024;
     pub(super) const LINE_LIMIT: usize = 256 * 1024;
+    /// Child tails a Board sample may read for usage, newest spawns first: at
+    /// most `USAGE_TAILS * (CHILD_WINDOW + 1)` bytes beyond the lead's window.
+    pub(super) const USAGE_TAILS: usize = 2;
 
     #[cfg(test)]
     // Counts child metadata reads, so tests can prove the roster bound.
@@ -102,11 +142,48 @@ mod linux {
     ) -> Option<(String, Vec<ClaudeChild>)> {
         proven(pid, |birth| {
             let config = lead_config(pid)?;
-            let scan = scan(&Lead::new(pid, birth, &config), repo, None)?;
-            scan.confirm()?;
-            Ok((scan.turn, scan.children))
+            current(&Lead::new(pid, birth, &config), repo, 0, || {})
         })
         .ok()
+    }
+
+    /// The same children, with usage read for at most `USAGE_TAILS` of them.
+    pub(crate) fn claude_board_children(
+        pid: u32,
+        repo: &Path,
+    ) -> Option<(String, Vec<ClaudeChild>)> {
+        proven(pid, |birth| {
+            let config = lead_config(pid)?;
+            current(&Lead::new(pid, birth, &config), repo, USAGE_TAILS, || {})
+        })
+        .ok()
+    }
+
+    /// A failed usage read withholds that child's usage, never its row.
+    /// `between` runs after the usage reads and before their recheck (a test seam).
+    pub(super) fn current(
+        lead: &Lead,
+        repo: &Path,
+        tails: usize,
+        between: impl FnOnce(),
+    ) -> Stage<(String, Vec<ClaudeChild>)> {
+        let mut scan = scan(lead, repo, None)?;
+        scan.confirm()?;
+        let skip = scan.children.len().saturating_sub(tails);
+        let read: Vec<_> = scan
+            .children
+            .iter()
+            .enumerate()
+            .map(|(at, child)| (at >= skip).then(|| usage(&scan, &child.locator).ok())?)
+            .collect();
+        between();
+        // The usage reads widened the window, so the scan must still hold after them.
+        if read.iter().any(Option::is_some) && scan.confirm().is_ok() {
+            for (child, usage) in scan.children.iter_mut().zip(read) {
+                child.usage = usage;
+            }
+        }
+        Ok((scan.turn, scan.children))
     }
 
     pub(crate) fn claude_child_chat(
@@ -396,9 +473,38 @@ mod linux {
         Ok(key)
     }
 
+    /// A row's `timestamp` when it parses as RFC 3339, kept as recorded.
+    fn stamp(entry: &Value) -> Option<(&str, chrono::DateTime<chrono::FixedOffset>)> {
+        let raw = entry["timestamp"].as_str()?;
+        Some((raw, chrono::DateTime::parse_from_rfc3339(raw).ok()?))
+    }
+
+    /// Lead-observed spawn and completion clocks of one child; `None` is unknown.
+    type Clocks = (Option<String>, Option<String>);
+
+    /// The spawn is the `Agent` call's row; the completion is the exact notice
+    /// that makes the state "done", known only when every such notice comes
+    /// after the call and names one instant no earlier than a known spawn.
+    fn clocks(call: Option<&Value>, called: usize, done: &[(usize, &Value)]) -> Clocks {
+        let spawned = call.and_then(stamp);
+        let mut ends = done.iter().map(|&(at, entry)| {
+            stamp(entry)
+                .filter(|(_, end)| at > called && spawned.is_none_or(|(_, start)| *end >= start))
+        });
+        let first = ends.next().flatten();
+        let completed =
+            first.filter(|(_, end)| ends.all(|other| other.is_some_and(|(_, e)| e == *end)));
+        (
+            spawned.map(|(raw, _)| raw.to_owned()),
+            completed.map(|(raw, _)| raw.to_owned()),
+        )
+    }
+
     pub(super) struct Scan {
         pub(super) turn: String,
         pub(super) children: Vec<ClaudeChild>,
+        /// agentId -> clocks, for exactly the children above.
+        clocks: BTreeMap<String, Clocks>,
         transcript: (File, Stat),
         sessions: Dir,
         record_name: String,
@@ -555,16 +661,19 @@ mod linux {
         found.sort_by_key(|&(answered, ..)| std::cmp::Reverse(answered));
         found.truncate(CLAUDE_ROSTER_LIMIT);
         found.sort_by_key(|&(_, called, agent, ..)| (called, agent));
-        let notices: Vec<&str> = current
+        // (lead index, entry, content) of this Turn's task notifications.
+        let notices: Vec<(usize, &Value, &str)> = current
             .iter()
-            .flatten()
-            .filter(|entry| {
+            .enumerate()
+            .filter_map(|(offset, entry)| Some((start + offset, entry.as_ref()?)))
+            .filter(|(_, entry)| {
                 entry["type"] == "user" && entry["origin"]["kind"] == "task-notification"
             })
-            .filter_map(|entry| entry["message"]["content"].as_str())
+            .filter_map(|(at, entry)| Some((at, entry, entry["message"]["content"].as_str()?)))
             .collect();
 
         let mut children = Vec::new();
+        let mut times = BTreeMap::new();
         let subagents = if found.is_empty() {
             None
         } else {
@@ -575,7 +684,7 @@ mod linux {
             )
         };
         if let Some(dir) = &subagents {
-            for (_, _, agent, tool, prompt, title) in found {
+            for (_, called, agent, tool, prompt, title) in found {
                 #[cfg(test)]
                 META_READS.with(|n| n.set(n.get() + 1));
                 // A child whose metadata cannot be proven is left out, not shown.
@@ -598,6 +707,13 @@ mod linux {
                 ) else {
                     continue;
                 };
+                let done: Vec<_> = notices
+                    .iter()
+                    .filter(|(_, _, notice)| claude_completion(notice, agent, tool))
+                    .map(|&(at, entry, _)| (at, entry))
+                    .collect();
+                let call = entries[called].as_ref();
+                times.insert(agent.to_owned(), clocks(call, called, &done));
                 children.push(ClaudeChild {
                     locator: ClaudeChildLocator {
                         pid: lead.pid,
@@ -611,17 +727,15 @@ mod linux {
                         child: (stat.st_dev, stat.st_ino),
                     },
                     title: title.chars().take(80).collect(),
-                    state: if notices.iter().any(|n| claude_completion(n, agent, tool)) {
-                        "done"
-                    } else {
-                        "unknown"
-                    },
+                    state: if done.is_empty() { "unknown" } else { "done" },
+                    usage: None,
                 });
             }
         }
         Ok(Scan {
             turn: turn.to_owned(),
             children,
+            clocks: times,
             transcript,
             sessions,
             record_name,
@@ -649,6 +763,30 @@ mod linux {
             scan.children.iter().any(|child| child.locator == *expected),
             "locator",
         )?;
+        let (history, _) = read_child(&scan, expected, between)?;
+        scan.confirm()?;
+        chat_tail(&history).ok_or("no-reply")
+    }
+
+    /// One child's usage from its own tail and the scan's lead clocks; the
+    /// caller confirms the scan after it.
+    fn usage(scan: &Scan, expected: &ClaudeChildLocator) -> Stage<ClaudeChildUsage> {
+        let (_, response) = read_child(scan, expected, || {})?;
+        let (spawned_at, delivered_at) =
+            scan.clocks.get(&expected.agent).cloned().ok_or("locator")?;
+        Ok(ClaudeChildUsage {
+            response,
+            spawned_at,
+            delivered_at,
+        })
+    }
+
+    /// The child transcript the scan proved, read once within `CHILD_WINDOW`.
+    fn read_child(
+        scan: &Scan,
+        expected: &ClaudeChildLocator,
+        between: impl FnOnce(),
+    ) -> Stage<(String, Option<ClaudeResponse>)> {
         let dir = scan.subagents.as_ref().ok_or("locator")?;
         let (file, stat) = dir.file(
             &format!("agent-{}.jsonl", expected.agent),
@@ -660,24 +798,81 @@ mod linux {
             "child-replaced",
         )?;
         let (body, recent) = read_tail(&file, &stat, CHILD_WINDOW, "child-read")?;
-        let history = replies(&body, recent, expected)?;
+        let found = replies(&body, recent, expected)?;
         between();
         gate(
             fs::fstat(&file).is_ok_and(|now| unchanged(&stat, &now)),
             "child-changed",
         )?;
-        scan.confirm()?;
-        chat_tail(&history).ok_or("no-reply")
+        Ok(found)
+    }
+
+    /// Counters and timestamp of one row; `None` marks a row without four
+    /// non-negative integer counters or an RFC 3339 timestamp.
+    type Claim<'a> = Option<([u64; 4], &'a str)>;
+
+    /// One assistant row's claim about the response its `message.id` names.
+    fn claim(entry: &Value) -> Option<(&str, Claim<'_>)> {
+        let id = entry["message"]["id"].as_str().filter(|id| {
+            (1..=128).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })?;
+        let usage = &entry["message"]["usage"];
+        let mut counts = [0; 4];
+        for (count, key) in counts.iter_mut().zip(USAGE_KEYS) {
+            match usage[key].as_u64() {
+                Some(value) => *count = value,
+                None => return Some((id, None)),
+            }
+        }
+        Some((id, stamp(entry).map(|(raw, _)| (counts, raw))))
+    }
+
+    /// Rows of one `message.id` seen within the segment.
+    struct Group {
+        last: usize,
+        usage: Option<[u64; 4]>,
+        at: String,
+        malformed: bool,
+        conflict: bool,
+    }
+
+    /// Streaming rows repeat one response's id and counters, so they count once,
+    /// timed by its last row. Only the response of the newest assistant row
+    /// counts: a bad id, clock or counter there, or differing counters under
+    /// its id, leave it unknown rather than letting an older response pose as latest.
+    fn latest(groups: BTreeMap<String, Group>, newest: Option<usize>) -> Option<ClaudeResponse> {
+        let (id, group) = groups
+            .into_iter()
+            .find(|(_, group)| Some(group.last) == newest)?;
+        (!group.malformed && !group.conflict).then_some(ClaudeResponse {
+            id,
+            at: group.at,
+            usage: group.usage?,
+        })
     }
 
     /// The child's own text and handback replies after the single spawn-prompt
     /// entry, up to the next message it received; both kinds keep file order.
     /// Any other string user entry, including a coordinator wrapper, ends the segment.
-    fn replies(body: &[u8], recent: bool, expected: &ClaudeChildLocator) -> Stage<String> {
+    /// Usage comes from the segment's assistant rows only: a later response
+    /// answers another message, so it is never this spawn's latest.
+    fn replies(
+        body: &[u8],
+        recent: bool,
+        expected: &ClaudeChildLocator,
+    ) -> Stage<(String, Option<ClaudeResponse>)> {
         let mut matched = false;
         let mut collecting = false;
         let mut history = Vec::new();
-        for entry in records(body, recent, "child-partial")? {
+        let mut groups = BTreeMap::<String, Group>::new();
+        let mut newest = None;
+        for (position, entry) in records(body, recent, "child-partial")?
+            .into_iter()
+            .enumerate()
+        {
             let entry = entry.ok_or("child-line")?;
             let kind = text(&entry, "type");
             if kind != "user" && kind != "assistant" {
@@ -712,6 +907,25 @@ mod linux {
             if !collecting {
                 continue;
             }
+            newest = Some(position);
+            if let Some((id, row)) = claim(&entry) {
+                let group = groups.entry(id.to_owned()).or_insert(Group {
+                    last: position,
+                    usage: None,
+                    at: String::new(),
+                    malformed: false,
+                    conflict: false,
+                });
+                group.last = position;
+                match row {
+                    None => group.malformed = true,
+                    Some((usage, at)) => {
+                        group.conflict |= group.usage.is_some_and(|seen| seen != usage);
+                        group.usage = Some(usage);
+                        at.clone_into(&mut group.at);
+                    }
+                }
+            }
             for block in rows(content) {
                 let reply = match (text(block, "type"), text(block, "name")) {
                     ("text", _) => block["text"].as_str(),
@@ -724,19 +938,23 @@ mod linux {
             }
         }
         gate(matched, "no-boundary")?;
-        Ok(history.join("\n\n"))
+        Ok((history.join("\n\n"), latest(groups, newest)))
     }
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::linux::{
-        CHILD_WINDOW, LEAD_WINDOW, LINE_LIMIT, Lead, META_READS, Stage, chat, managed_turn, proven,
-        scan,
+        CHILD_WINDOW, LEAD_WINDOW, LINE_LIMIT, Lead, META_READS, Stage, USAGE_TAILS, chat, current,
+        managed_turn, proven, scan,
     };
-    use super::{ClaudeChild, ClaudeChildLocator, claude_child_chat, claude_current_children};
+    use super::{
+        ClaudeChild, ClaudeChildLocator, claude_board_children, claude_child_chat,
+        claude_current_children,
+    };
     use crate::claude_lead_usage::linux::start_time;
     use crate::native_children::TASK_PREFIX;
+    use crate::orchestrator::claude_usage_field;
     use oms_panel_core::digest;
     use serde_json::{Value, json};
     use std::fs;
@@ -821,6 +1039,21 @@ mod tests {
         let mut entry = assistant(blocks);
         entry["agentId"] = json!(agent);
         entry["isSidechain"] = json!(true);
+        entry
+    }
+
+    /// A response row as Claude Code records it: id, clock and usage counters.
+    fn billed(mut entry: Value, id: &str, at: &str, usage: [i64; 4]) -> Value {
+        let [input, output, creation, read] = usage;
+        entry["message"]["id"] = json!(id);
+        entry["message"]["usage"] = json!({"input_tokens": input, "output_tokens": output,
+            "cache_creation_input_tokens": creation, "cache_read_input_tokens": read,
+            "service_tier": "standard"});
+        stamped(entry, at)
+    }
+
+    fn stamped(mut entry: Value, at: &str) -> Value {
+        entry["timestamp"] = json!(at);
         entry
     }
 
@@ -997,6 +1230,15 @@ mod tests {
 
         fn chat(&self, expected: &ClaudeChildLocator) -> Stage<String> {
             chat(&self.lead(), &self.repo, TURN, expected, || {})
+        }
+
+        /// The Board's usage field for `expected`, through the Board's own read.
+        fn telemetry(&self, expected: &ClaudeChildLocator) -> Stage<Value> {
+            let (_, children) = current(&self.lead(), &self.repo, USAGE_TAILS, || {})?;
+            let child = children.into_iter().find(|c| c.locator == *expected);
+            Ok(claude_usage_field(
+                &child.ok_or("locator")?.usage.ok_or("withheld")?,
+            ))
         }
     }
 
@@ -1336,6 +1578,11 @@ mod tests {
                 "{label}: {:?}",
                 got.err()
             );
+            // Usage rides the same proof and rows: whatever refuses the chat withholds it.
+            assert!(
+                fixture.telemetry(&locator).is_ok() == got.is_ok(),
+                "{label} usage"
+            );
         }
     }
 
@@ -1658,6 +1905,14 @@ mod tests {
     fn a_synthesized_row_is_unknown_until_the_exact_completion_notice() {
         use crate::orchestrator::merge_claude_rows;
         let mut fixture = Fixture::new("state");
+        let (spawn, end) = ("2026-11-22T01:00:00.000Z", "2026-11-22T01:05:00.000Z");
+        fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
+        fixture.save();
+        let locator = fixture.locator(AGENT);
+        let clocks = |f: &Fixture| {
+            let told = f.telemetry(&locator).unwrap();
+            (told["spawned_at"].clone(), told["delivered_at"].clone())
+        };
         let state = |f: &Fixture| {
             let children = f.rows(None).unwrap();
             assert!(children.len() == 1);
@@ -1667,15 +1922,18 @@ mod tests {
             children[0].state
         };
         assert_eq!(state(&fixture), "unknown");
+        // No done notice: the completion is unknown, never guessed.
+        assert_eq!(clocks(&fixture), (json!(spawn), Value::Null));
         let cases = [
             notice(AGENT, "toolu_other", "completed"),
             notice(OLD_AGENT, TOOL, "completed"),
             notice(AGENT, TOOL, "running"),
         ];
         for wrong in cases {
-            fixture.lead.push(wrong);
+            fixture.lead.push(stamped(wrong, end));
             fixture.save();
             assert_eq!(state(&fixture), "unknown");
+            assert_eq!(clocks(&fixture), (json!(spawn), Value::Null));
             fixture.lead.pop();
         }
         // Tags quoted inside another child's summary or result are not a header.
@@ -1708,6 +1966,39 @@ mod tests {
         fixture.lead.push(notice(AGENT, TOOL, "completed"));
         fixture.save();
         assert_eq!(state(&fixture), "done");
+        // Done without a clock on the notice: done, completion still unknown.
+        assert_eq!(clocks(&fixture), (json!(spawn), Value::Null));
+        let done = fixture.lead.len() - 1;
+        let exact = stamped(notice(AGENT, TOOL, "completed"), end);
+        for (label, at, want) in [
+            ("exact", end, json!(end)),
+            ("before-spawn", "2026-11-22T00:59:59.999Z", Value::Null),
+            ("not-rfc3339", "2026-11-22 01:05", Value::Null),
+            ("garbage", "not a clock", Value::Null),
+        ] {
+            fixture.lead[done] = stamped(exact.clone(), at);
+            fixture.save();
+            assert_eq!(state(&fixture), "done", "{label}");
+            assert_eq!(clocks(&fixture), (json!(spawn), want), "{label}");
+        }
+        fixture.lead[done] = exact.clone();
+        // A second exact notice must name the same instant, whatever its spelling.
+        for (other, want) in [
+            ("2026-11-22T10:05:00+09:00", json!(end)),
+            ("2026-11-22T01:06:00.000Z", Value::Null),
+        ] {
+            fixture.lead.push(stamped(exact.clone(), other));
+            fixture.save();
+            assert_eq!(clocks(&fixture), (json!(spawn), want), "{other}");
+            fixture.lead.pop();
+        }
+        // An unparsable spawn is unknown; the exact notice after the call still counts.
+        fixture.lead[5] = stamped(fixture.lead[5].clone(), "yesterday");
+        fixture.save();
+        assert_eq!(clocks(&fixture), (Value::Null, json!(end)));
+        fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
+        fixture.lead[done] = notice(AGENT, TOOL, "completed");
+        fixture.save();
         // The legacy header without an output file still counts.
         fixture.lead.pop();
         fixture.lead.push(raw_notice(&format!(
@@ -1806,6 +2097,23 @@ mod tests {
         let agents: Vec<_> = children.iter().map(|c| c.locator.agent.clone()).collect();
         assert_eq!(agents, [id(0), id(1), id(2)]);
         assert!(children.iter().all(|c| c.state == "unknown"));
+        // Usage is read for the USAGE_TAILS newest spawns only; the oldest keeps its row.
+        let board = |tails| {
+            current(&fixture.lead(), &fixture.repo, tails, || {})
+                .unwrap()
+                .1
+        };
+        let read = |tails| {
+            board(tails)
+                .iter()
+                .map(|c| c.usage.is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            (USAGE_TAILS, read(USAGE_TAILS)),
+            (2, vec![false, true, true])
+        );
+        assert_eq!(read(0), [false; 3]);
 
         // A failed proof is not refilled from an older child.
         fs::remove_file(fixture.meta_path(&id(1))).unwrap();
@@ -1881,6 +2189,7 @@ mod tests {
         let (turn, children) = current(&fixture).unwrap();
         assert!(turn == NEWER && children.is_empty());
         assert!(fixture.chat(&stale).err() == Some("stale-turn"));
+        assert!(fixture.telemetry(&stale).err() == Some("locator"));
 
         fixture.lead.retain(|entry| managed_turn(entry).is_none());
         fixture.save();
@@ -1899,6 +2208,174 @@ mod tests {
         let locator = fixture.locator(AGENT);
         let shown = fixture.chat(&locator).unwrap();
         assert!(shown.contains("[oms-redacted:github-token]") && !shown.contains(&sample));
+    }
+
+    #[test]
+    fn child_usage_is_the_newest_response_of_the_child_only_or_unknown() {
+        const T1: &str = "2026-11-22T01:01:00.000Z";
+        const T2: &str = "2026-11-22T01:02:00.000Z";
+        const T3: &str = "2026-11-22T01:03:00.000Z";
+        let mut fixture = Fixture::new("telemetry");
+        let locator = fixture.locator(AGENT);
+        let latest = |f: &Fixture| f.telemetry(&locator).unwrap()["response"].clone();
+        let response = |id: &str, at: &str, n: [u64; 4]| {
+            json!({"message_id": id, "timestamp": at, "input_tokens": n[0],
+                   "output_tokens": n[1], "cache_creation_input_tokens": n[2],
+                   "cache_read_input_tokens": n[3], "total_tokens": n.iter().sum::<u64>()})
+        };
+        // Rows without usage, and nothing from the lead: every field is unknown.
+        assert_eq!(
+            fixture.telemetry(&locator).unwrap(),
+            json!({"scope": "latest_child_response", "response": null,
+                   "spawned_at": null, "delivered_at": null})
+        );
+        // A billed row before the spawn prompt belongs to no response of this spawn.
+        fixture.child.insert(
+            0,
+            billed(child_reply(AGENT, json!([])), "msg_z", T3, [9, 9, 9, 9]),
+        );
+        fixture.save();
+        assert_eq!(latest(&fixture), Value::Null);
+        fixture.child.remove(0);
+
+        fixture.child[1] = billed(fixture.child[1].clone(), "msg_a", T1, [10, 2, 3, 4]);
+        fixture.child[3] = billed(fixture.child[3].clone(), "msg_b", T2, [11, 5, 6, 7]);
+        fixture.save();
+        let newest = response("msg_b", T2, [11, 5, 6, 7]);
+        assert_eq!(latest(&fixture), newest);
+        assert!(fixture.chat(&locator).as_deref() == Ok(OWN));
+
+        // A streaming duplicate of the newest response counts once, timed by its last row.
+        let tool = json!([{"type": "tool_use", "name": "Read", "id": "toolu_more", "input": {}}]);
+        let repeat = |n: [i64; 4]| billed(child_reply(AGENT, tool.clone()), "msg_b", T3, n);
+        fixture.child.push(repeat([11, 5, 6, 7]));
+        fixture.save();
+        assert_eq!(latest(&fixture), response("msg_b", T3, [11, 5, 6, 7]));
+        assert!(fixture.chat(&locator).as_deref() == Ok(OWN));
+
+        // The same id with other counters is conflicting: unknown, not the older msg_a.
+        *fixture.child.last_mut().unwrap() = repeat([11, 6, 6, 7]);
+        fixture.save();
+        assert_eq!(latest(&fixture), Value::Null);
+        fixture.child.pop();
+
+        // A newest row that does not prove itself makes the latest unknown,
+        // never the older valid msg_b.
+        let reply = || child_reply(AGENT, tool.clone());
+        let without = |path: &[&str]| {
+            let mut row = billed(reply(), "msg_c", T3, [1, 1, 1, 1]);
+            let (key, parents) = path.split_last().unwrap();
+            let parent = parents.iter().fold(&mut row, |row, part| &mut row[*part]);
+            parent.as_object_mut().unwrap().remove(*key);
+            row
+        };
+        let field = |key: &str, value: Value| {
+            let mut row = billed(reply(), "msg_c", T3, [1, 1, 1, 1]);
+            row["message"]["usage"][key] = value;
+            row
+        };
+        let unknown = [
+            (
+                "not-rfc3339",
+                billed(reply(), "msg_c", "2026-11-22 01:03:00", [1, 1, 1, 1]),
+            ),
+            ("unparsable", billed(reply(), "msg_c", "soon", [1, 1, 1, 1])),
+            ("unclocked", without(&["timestamp"])),
+            (
+                "missing",
+                without(&["message", "usage", "cache_read_input_tokens"]),
+            ),
+            ("no-usage", without(&["message", "usage"])),
+            ("negative", billed(reply(), "msg_c", T3, [1, -1, 1, 1])),
+            ("float", field("input_tokens", json!(1.5))),
+            ("string", field("output_tokens", json!("1"))),
+            ("null", field("cache_creation_input_tokens", Value::Null)),
+            ("no-id", without(&["message", "id"])),
+            ("odd-id", billed(reply(), "msg c/../x", T3, [1, 1, 1, 1])),
+        ];
+        // Every case runs before the verdict, so a fallback names all it hit.
+        let mut fell_back = Vec::new();
+        for (label, row) in unknown {
+            fixture.child.push(row);
+            fixture.save();
+            if latest(&fixture) != Value::Null {
+                fell_back.push(label);
+            }
+            // A later valid response is the latest again.
+            fixture
+                .child
+                .push(billed(reply(), "msg_d", T3, [2, 2, 2, 2]));
+            fixture.save();
+            assert_eq!(
+                latest(&fixture),
+                response("msg_d", T3, [2, 2, 2, 2]),
+                "{label}"
+            );
+            fixture.child.truncate(fixture.child.len() - 2);
+        }
+        assert!(fell_back.is_empty(), "fell back: {fell_back:?}");
+        // Rows other than the child's assistant replies are no response at all.
+        let others = [
+            (
+                "user-row",
+                billed(
+                    child_user(
+                        AGENT,
+                        json!([{"type": "tool_result", "tool_use_id": "toolu_more",
+                                "content": "r"}]),
+                    ),
+                    "msg_c",
+                    T3,
+                    [1, 1, 1, 1],
+                ),
+            ),
+            (
+                "progress-row",
+                billed(
+                    json!({"type": "progress", "sessionId": SESSION, "message": {}}),
+                    "msg_c",
+                    T3,
+                    [1, 1, 1, 1],
+                ),
+            ),
+        ];
+        for (label, row) in others {
+            fixture.child.push(row);
+            fixture.save();
+            assert_eq!(latest(&fixture), newest, "{label}");
+            fixture.child.pop();
+        }
+        // A later message the child received ends the segment: neither a valid
+        // nor a malformed response to it touches the latest.
+        fixture.child.push(child_user(AGENT, json!(FOLLOW)));
+        for row in [
+            billed(reply(), "msg_f", T3, [3, 3, 3, 3]),
+            billed(reply(), "msg_g", "soon", [3, 3, 3, 3]),
+        ] {
+            fixture.child.push(row);
+            fixture.save();
+            assert_eq!(latest(&fixture), newest);
+            assert!(fixture.chat(&locator).as_deref() == Ok(OWN));
+        }
+        fixture.child.truncate(fixture.child.len() - 3);
+        // One malformed row spoils its whole response, before or after a valid twin.
+        let twin = billed(reply(), "msg_c", T3, [1, 1, 1, 1]);
+        let spoiled = billed(reply(), "msg_c", "soon", [1, 1, 1, 1]);
+        for pair in [[twin.clone(), spoiled.clone()], [spoiled, twin]] {
+            fixture.child.extend(pair);
+            fixture.save();
+            assert_eq!(latest(&fixture), Value::Null);
+            fixture.child.truncate(fixture.child.len() - 2);
+        }
+        // The total is the checked sum of the four counters; overflow is unknown.
+        for (input, want) in [(u64::MAX - 3, json!(u64::MAX)), (u64::MAX - 2, Value::Null)] {
+            let mut row = billed(reply(), "msg_e", T3, [1, 1, 1, 1]);
+            row["message"]["usage"]["input_tokens"] = json!(input);
+            fixture.child.push(row);
+            fixture.save();
+            assert_eq!(latest(&fixture)["total_tokens"], want, "{input}");
+            fixture.child.pop();
+        }
     }
 
     #[test]
@@ -1933,6 +2410,32 @@ mod tests {
             child_reply(AGENT, json!([{"type": "text", "text": "later"}])),
         );
         fixture.save();
+        assert!(fixture.chat(&locator).as_deref() == Ok("first reply"));
+        // Usage ends with the segment: a valid response past it answers the later
+        // message, so the latest is the segment's own newest response or unknown.
+        let at = "2026-11-22T01:00:00Z";
+        let response = |f: &Fixture| f.telemetry(&locator).unwrap()["response"].clone();
+        let last = fixture.child.pop().unwrap();
+        fixture
+            .child
+            .push(billed(last, "msg_later", at, [1, 2, 3, 4]));
+        fixture.save();
+        assert_eq!(response(&fixture), Value::Null);
+        let first = fixture.child[3].clone();
+        fixture.child[3] = billed(first.clone(), "msg_first", at, [5, 6, 7, 8]);
+        fixture.save();
+        assert!(response(&fixture)["message_id"] == "msg_first");
+        // A malformed response past the segment does not spoil the segment's latest.
+        fixture
+            .child
+            .push(billed(first.clone(), "msg_bad", "soon", [1, 1, 1, 1]));
+        fixture.save();
+        assert!(response(&fixture)["message_id"] == "msg_first");
+        assert!(fixture.chat(&locator).as_deref() == Ok("first reply"));
+        // An invalid newest row within the segment stays unknown, never the later one.
+        fixture.child[3] = billed(first, "msg_first", "soon", [5, 6, 7, 8]);
+        fixture.save();
+        assert_eq!(response(&fixture), Value::Null);
         assert!(fixture.chat(&locator).as_deref() == Ok("first reply"));
     }
 
@@ -2029,6 +2532,22 @@ mod tests {
                 got.err()
             );
         }
+        // After the Board's usage reads, a lead change or session switch withholds
+        // usage only: the rows were proven before those reads.
+        let fixture = Fixture::new("rewrite-board");
+        let board = |between: &dyn Fn()| {
+            current(&fixture.lead(), &fixture.repo, USAGE_TAILS, between)
+                .unwrap()
+                .1
+        };
+        assert!(board(&|| {})[0].usage.is_some());
+        let cases: [&dyn Fn(); 2] = [&|| append(&fixture.lead_path(), &lead_reply), &|| {
+            fs::write(fixture.record_path(), switched.to_string()).unwrap()
+        }];
+        for (case, between) in cases.into_iter().enumerate() {
+            let children = board(between);
+            assert!(children.len() == 1 && children[0].usage.is_none(), "{case}");
+        }
         // The re-walk also proves type, owner/mode and link count of what it reached.
         let fixture = Fixture::new("rewalk-attributes");
         let locator = fixture.locator(AGENT);
@@ -2057,6 +2576,9 @@ mod tests {
     #[test]
     fn tail_windows_bound_both_transcripts() {
         let mut fixture = Fixture::new("windows");
+        let spawn = "2026-11-22T01:00:00Z";
+        fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
+        fixture.child[3] = billed(fixture.child[3].clone(), "msg_w", spawn, [1, 2, 3, 4]);
         let filler = |n: usize| padded(json!({"type": "progress", "sessionId": SESSION}), n);
         // Unreadable lines before the Turn and a mid-record window start are tolerated.
         let mut lead = vec![padded(assistant(json!([])), LINE_LIMIT)];
@@ -2067,12 +2589,17 @@ mod tests {
         assert!(fs::metadata(fixture.lead_path()).unwrap().len() > LEAD_WINDOW);
         let locator = fixture.locator(AGENT);
         assert!(fixture.chat(&locator).as_deref() == Ok(OWN));
+        // Usage reads only the same windows: the spawn row lies inside the lead's.
+        let told = fixture.telemetry(&locator).unwrap();
+        assert!(told["spawned_at"] == spawn && told["response"]["message_id"] == "msg_w");
         // A boundary that left the child window is not guessed.
         let mut child = fixture.child.clone();
         child.extend((0..(CHILD_WINDOW as usize / 65_536 + 2)).map(|_| filler(65_536)));
         fixture.child = child;
         fixture.save();
         assert!(fixture.chat(&locator).err() == Some("no-boundary"));
+        // The child keeps its row; only its usage is withheld.
+        assert!(fixture.telemetry(&locator).err() == Some("withheld"));
     }
 
     #[test]
@@ -2124,6 +2651,7 @@ mod tests {
         };
         assert!(claude_current_children(u32::MAX, &fixture.repo).is_none());
         assert!(claude_child_chat(&fixture.repo, TURN, &locator).is_none());
+        assert!(claude_board_children(u32::MAX, &fixture.repo).is_none());
     }
 
     #[test]

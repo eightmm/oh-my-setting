@@ -4,10 +4,9 @@ use crate::storage::{MAX_PATCH, Store};
 use crate::{Result, error, require};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -15,7 +14,7 @@ pub struct Git<'a> {
     pub repo: &'a Path,
     pub interrupted: &'a AtomicBool,
     pub group_resolver: Option<crate::services::GroupResolver>,
-    /// An outer transaction's absolute proof deadline. None keeps legacy queries.
+    /// An outer transaction's absolute proof deadline. None keeps the 30s default.
     pub deadline: Option<Instant>,
     pub group_snapshot: Option<std::sync::Arc<crate::storage::GroupProofSnapshot>>,
 }
@@ -60,73 +59,16 @@ impl Git<'_> {
         for (k, v) in environment {
             cmd.env(k, v);
         }
-        if let Some(deadline) = self.deadline {
-            return self.output_before(cmd, input, limit, deadline);
-        }
-        cmd.stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-        let mut child = cmd
-            .spawn()
-            .map_err(|_| error("local Git proof unavailable"))?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| error("Git output unavailable"))?;
-        let stdin = child.stdin.take();
-        let start = Instant::now();
-        std::thread::scope(|scope| {
-            let output = scope.spawn(move || {
-                let mut out = Vec::new();
-                stdout
-                    .by_ref()
-                    .take(limit as u64 + 1)
-                    .read_to_end(&mut out)
-                    .map_err(|_| error("Git capture unavailable"))?;
-                require(out.len() <= limit, "Git output exceeds bound")?;
-                Ok::<_, crate::Error>(out)
-            });
-            let writer = scope.spawn(move || {
-                if let Some(mut pipe) = stdin {
-                    pipe.write_all(input.unwrap_or_default())
-                        .map_err(|_| error("Git input unavailable"))?;
-                }
-                Ok::<_, crate::Error>(())
-            });
-            let status = loop {
-                if self.interrupted.load(Ordering::Relaxed)
-                    || start.elapsed() > Duration::from_secs(30)
-                {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break Err(error("local Git proof interrupted or timed out"));
-                }
-                match child.try_wait() {
-                    Ok(Some(s)) => break Ok(s),
-                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                    Err(_) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break Err(error("local Git proof unavailable"));
-                    }
-                }
-            };
-            let data = output.join().map_err(|_| error("Git reader failed"))?;
-            let written = writer.join().map_err(|_| error("Git writer failed"))?;
-            let status = status?;
-            written?;
-            Ok(GitOutput {
-                code: status.code().unwrap_or(128),
-                stdout: data?,
-            })
-        })
+        let deadline = self
+            .deadline
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+        self.output_before(cmd, input, limit, deadline)
     }
     fn proof_error(&self, message: &str) -> crate::Error {
         if self.interrupted.load(Ordering::Acquire) {
+            if self.deadline.is_none() {
+                return error("local Git proof interrupted or timed out");
+            }
             return crate::Error {
                 code: 130,
                 message: "local Git proof interrupted".into(),
@@ -150,16 +92,33 @@ impl Git<'_> {
         limit: usize,
         deadline: Instant,
     ) -> Result<GitOutput> {
-        use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
+        use oms_supervisor::process::{
+            DuplexOptions, Progress, Reactor, Request, Scope, StopReason, Streams,
+        };
         if self.interrupted.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(self.proof_error("local Git proof unavailable"));
+            return Err(self.proof_error("local Git proof interrupted or timed out"));
         }
         let mut request = Request::new(
             std::iter::once(command.get_program().to_owned())
                 .chain(command.get_args().map(OsStr::to_owned))
                 .collect(),
         );
-        request.stdin = input.map(<[u8]>::to_vec);
+        // The default query contract rejects a short stdin write. Fixed stdin
+        // permits prefix consumption; duplex retains the required write proof.
+        let strict_input = input.filter(|_| self.deadline.is_none());
+        if let Some(input) = strict_input {
+            request.duplex = Some(DuplexOptions {
+                max_frame_bytes: input.len().max(1),
+                max_input_bytes: input.len().max(1),
+                max_input_frames: 1,
+                max_output_bytes: 65536,
+                max_output_events: 8,
+                max_read_bytes_per_turn: 65536,
+                max_write_bytes_per_turn: 65536,
+            });
+        } else {
+            request.stdin = input.map(<[u8]>::to_vec);
+        }
         request.environment = command
             .get_envs()
             .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
@@ -184,6 +143,16 @@ impl Git<'_> {
         let job = reactor
             .start(request)
             .map_err(|_| self.proof_error("local Git proof unavailable"))?;
+        if let Some(input) = strict_input {
+            if !input.is_empty() {
+                reactor
+                    .send(job, input)
+                    .map_err(|_| self.proof_error("Git input unavailable"))?;
+            }
+            reactor
+                .close_input(job)
+                .map_err(|_| self.proof_error("Git input unavailable"))?;
+        }
         let mut cancelled = false;
         loop {
             if self.interrupted.load(Ordering::Acquire) && !cancelled {
@@ -192,6 +161,15 @@ impl Git<'_> {
                     .map_err(|_| self.proof_error("local Git cancellation unavailable"))?;
                 cancelled = true;
             }
+            if strict_input.is_some() {
+                // The bounded capture owns the result; discard incremental
+                // events so its independent duplex queue cannot stall drainage.
+                while reactor
+                    .receive(job)
+                    .map_err(|_| self.proof_error("Git capture unavailable"))?
+                    .is_some()
+                {}
+            }
             match reactor
                 .poll(job, Duration::from_millis(10))
                 .map_err(|_| self.proof_error("local Git supervision unavailable"))?
@@ -199,9 +177,19 @@ impl Git<'_> {
                 Progress::Pending(_) => {}
                 Progress::Complete(result) => {
                     if self.interrupted.load(Ordering::Acquire) || Instant::now() >= deadline {
-                        return Err(self.proof_error("local Git proof unavailable"));
+                        return Err(self.proof_error("local Git proof interrupted or timed out"));
                     }
                     require(!result.stdout.limited, "Git output exceeds bound")?;
+                    if let Some(input) = strict_input {
+                        require(
+                            result.duplex.as_ref().is_some_and(|duplex| {
+                                duplex.status.input_drained
+                                    && !duplex.status.input_broken_pipe
+                                    && duplex.status.input_written_bytes == input.len() as u64
+                            }),
+                            "Git input unavailable",
+                        )?;
+                    }
                     require(
                         result.stop.is_none()
                             && result.stdout.eof
@@ -211,7 +199,13 @@ impl Git<'_> {
                         "local Git proof incomplete",
                     )?;
                     return Ok(GitOutput {
-                        code: result.exit.map_or(128, |exit| exit.shell_code()),
+                        code: result.exit.map_or(128, |exit| {
+                            if self.deadline.is_some() {
+                                exit.shell_code()
+                            } else {
+                                exit.code.unwrap_or(128)
+                            }
+                        }),
                         stdout: result.stdout.bytes,
                     });
                 }

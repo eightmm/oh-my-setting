@@ -16,7 +16,8 @@
     {"id": "stop", "label": "stop / cancel"},
     {"id": "approval", "label": "relay an approval / permission request to the person"},
     {"id": "usage", "label": "report usage (context %, quota windows, tokens)"},
-    {"id": "handoff", "label": "session handoff digest"}
+    {"id": "handoff", "label": "session handoff digest"},
+    {"id": "tool_guard", "label": "hook/guard coverage: installed writer and callback logic across pre-tool, post-tool and observational hooks (not live enforcement)"}
   ],
   "profiles": {
     "exec-only": {
@@ -37,7 +38,8 @@
       },
       "approval": {"status": "unsupported", "verified": "fixture", "note": "Headless transport; permission mode is fixed per call, without an approval relay."},
       "usage": {"status": "unsupported", "verified": "fixture", "note": "No measurement parser for this provider; canonical call receipts retain unknown usage, never zero."},
-      "handoff": {"status": "unsupported", "verified": "fixture", "note": "Native session-handoff capture reads Claude, Codex and Antigravity sources only."}
+      "handoff": {"status": "unsupported", "verified": "fixture", "note": "Native session-handoff capture reads Claude, Codex and Antigravity sources only."},
+      "tool_guard": {"status": "unsupported", "verified": "fixture", "note": "No native hook or guard writer exists for the delegated exec-only transport."}
     }
   },
   "providers": {
@@ -84,7 +86,13 @@
         "test": ["crates/oms-command-peer/src/usage.rs::provider_envelopes_keep_cumulative_and_estimated_cost_semantics", "crates/oms-command-peer/src/providers.rs::physical_provider_calls_record_fallback_and_timeout_usage"],
         "limit": "Canonical per-call token counts and provider-client cost estimates from result envelopes; this evidence does not establish live quota or context reporting."
       },
-      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Claude digest output."}
+      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Claude digest output."},
+      "tool_guard": {
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-lifecycle/src/integrations.rs::expected", "crates/oms-command-lifecycle/src/integrations.rs::hooks", "crates/oms-command-hooks/src/guards.rs::command", "crates/oms-command-hooks/src/guards.rs::git_move", "crates/oms-command-hooks/src/guards.rs::main_write"],
+        "test": ["crates/oms-command-lifecycle/tests/native_lifecycle.rs::native_configuration_and_services", "crates/oms-command-hooks/src/guards.rs::merge_and_pull_on_a_protected_branch_need_the_landing_gate", "crates/oms-command-hooks/tests/host_adapter.rs::main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only"],
+        "limit": "Settings writer registers PreToolUse command and git-move guards on Bash, a PreToolUse Main write guard on Edit|Write|MultiEdit|NotebookEdit (refusing a Claude panel Overall Main inside its managed repository, linked worktrees and submodules; Bash edits and other providers remain unchanged), PostToolUse/PostToolUseFailure hooks (fail-ledger on Bash, syntax guard on Edit|Write|MultiEdit; the tool has already run, so these only surface stderr) and observational hooks (UserPromptSubmit, Stop, SessionStart/End, PreCompact, Notification). Per the Claude hooks docs, a PreToolUse hook denies the call by exit 2 or permissionDecision deny; the guard functions return a refusal verdict for supplied payloads and fail open on unparseable input. That is distinct from hook execution failure (cannot start, timeout, exit other than 0 or 2, invalid output), which by default lets the action proceed and blocks only with onFailure=block; OMS writes onFailure=block only when its capability probe or OMS_GUARD_FAIL_CLOSED allows. Fixtures establish no live callback delivery or runtime enforcement."
+      }
     },
     "codex": {
       "launch_main": {
@@ -124,7 +132,13 @@
         "test": ["crates/oms-command-peer/src/usage.rs::provider_envelopes_keep_cumulative_and_estimated_cost_semantics"],
         "limit": "Canonical thread-cumulative tokens from native envelopes; resumed sessions without a measured baseline keep unknown per-call usage, and absent cost remains unknown. Live quota/context coverage is not established here."
       },
-      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Codex digest output."}
+      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Codex digest output."},
+      "tool_guard": {
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-lifecycle/src/plugins.rs::native_codex", "crates/oms-command-lifecycle/src/plugins.rs::apply_codex"],
+        "test": ["crates/oms-command-lifecycle/tests/native_lifecycle.rs::native_configuration_and_services"],
+        "limit": "The Codex plugin hooks.json registers no PreToolUse guard: only a PostToolUse syntax guard on apply_patch and a Stop turn guard, so shell commands are not pre-checked. Fixtures verify the written file, not live Codex hook delivery."
+      }
     },
     "antigravity": {
       "launch_main": {
@@ -150,7 +164,13 @@
       },
       "approval": {"status": "unknown", "verified": "fixture", "note": "Current native fixtures do not establish an Antigravity permission-notification relay."},
       "usage": {"status": "unsupported", "verified": "fixture", "note": "Native output decoding extracts answer text without usage measurements; canonical receipts retain unknowns, and there is no native panel quota/context reader."},
-      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native prompts-only handoff capture is implemented, but current native fixtures do not establish its digest output; assistant output is unavailable from that source."}
+      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native prompts-only handoff capture is implemented, but current native fixtures do not establish its digest output; assistant output is unavailable from that source."},
+      "tool_guard": {
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-lifecycle/src/plugins.rs::apply", "crates/oms-command-lifecycle/src/agy_hook.rs::run"],
+        "test": ["crates/oms-command-lifecycle/tests/native_lifecycle.rs::agy_surface_probe_exercises_tool_hooks", "crates/oms-command-lifecycle/tests/native_lifecycle.rs::agy_native_calls_reach_panel_attempts"],
+        "limit": "The Antigravity plugin writer adds PreToolUse/PostToolUse only for subagent and workflow tool names and only after the surface probe (or explicit opt-in) certifies tool hooks; the callback tracks panel attempts and registers no shell-command guard. Fixtures use fake binaries; no live delivery or blocking is established."
+      }
     },
     "pi": {
       "launch_main": {
@@ -180,7 +200,8 @@
       },
       "approval": {"status": "unsupported", "verified": "fixture", "note": "Workers use --no-approve; the Pi hook bridge does not forward permission events."},
       "usage": {"status": "unsupported", "verified": "fixture", "note": "Native output decoding extracts answer text without usage measurements; canonical receipts retain unknowns, and there is no native panel quota/context reader."},
-      "handoff": {"status": "unsupported", "verified": "fixture", "note": "Native session-handoff capture has no Pi digest."}
+      "handoff": {"status": "unsupported", "verified": "fixture", "note": "Native session-handoff capture has no Pi digest."},
+      "tool_guard": {"status": "unsupported", "verified": "fixture", "note": "Pi hook events only refresh panel presence (pi_hook); native code registers no pre-tool guard for Pi."}
     },
     "cursor": {"profile": "exec-only"},
     "grok": {"profile": "exec-only"},

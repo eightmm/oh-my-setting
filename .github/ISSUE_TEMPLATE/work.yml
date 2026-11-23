@@ -1,0 +1,49 @@
+name: Work item
+description: A bounded change with acceptance criteria and a verification plan.
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome this work delivers, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is in and out of scope.
+      value: |
+        In:
+        Out:
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A checklist; each item is observable and checkable.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Commands or checks expected to prove the criteria, and any that may be skipped.
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk and authority
+      description: Destructive, external, publication, cost or compatibility concerns, and who must approve them.
+    validations:
+      required: false
+  - type: textarea
+    id: related
+    attributes:
+      label: Related
+      description: Related issues or pull requests, e.g. #12 or owner/repo#34.
+    validations:
+      required: false

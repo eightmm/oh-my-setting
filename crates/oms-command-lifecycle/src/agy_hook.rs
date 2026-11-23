@@ -9,7 +9,42 @@ use oms_command_operations::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::{io::Read, path::Path, sync::atomic::AtomicBool};
+use std::{
+    io::Read,
+    path::Path,
+    sync::{OnceLock, atomic::AtomicBool},
+};
+
+const OVERALL_MAIN_RELAY_PREFIX: &str =
+    "Task from Overall Main. Work within this task and report the result here.";
+
+fn automated_prompt(prompt: &str) -> bool {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b|Another Claude session sent a message:|Your claude\.ai usage limit has reset\b)",
+        )
+        .expect("valid automated prompt regex")
+    })
+    .is_match(prompt)
+}
+
+fn intake_eligible(payload: &Value) -> bool {
+    if std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|s| !s.is_empty() && s != "0") {
+        return false;
+    }
+    let Some(input) = payload["lastUserInput"].as_str() else {
+        return false;
+    };
+    let trimmed = input.trim();
+    if trimmed.is_empty()
+        || !trimmed.chars().any(char::is_alphanumeric)
+        || trimmed.starts_with(OVERALL_MAIN_RELAY_PREFIX)
+    {
+        return false;
+    }
+    !automated_prompt(trimmed)
+}
 
 fn sha256_hex(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))
@@ -680,7 +715,17 @@ pub(crate) fn run(
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or("nosession");
-    let adapted = json!({"cwd":repo,"session_id":session,"turn_id":format!("{session}:{count}"),"hook_event_name":if first{"PreInvocation"}else{"Stop"},"model":payload["modelName"].as_str().unwrap_or(""),"prompt":""});
+    let mut adapted = json!({
+        "cwd": repo,
+        "session_id": session,
+        "turn_id": format!("{session}:{count}"),
+        "hook_event_name": if first { "PreInvocation" } else { "Stop" },
+        "model": payload["modelName"].as_str().unwrap_or(""),
+        "prompt": "",
+    });
+    if first && intake_eligible(&payload) {
+        adapted["intake_eligible"] = Value::Bool(true);
+    }
     let input = r::bytes(&adapted)?;
     let mut diagnostics = Vec::new();
     if first {

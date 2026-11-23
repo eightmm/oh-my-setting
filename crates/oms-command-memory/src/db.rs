@@ -360,6 +360,8 @@ pub(crate) struct Query<'a> {
     pub drop_scoped: bool,
     pub context_only: bool,
     pub handoffs: Option<&'a Path>,
+    /// GitHub project mode sources; injected provider context keeps it off.
+    pub github: bool,
 }
 pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Output> {
     let _g = store::lock(&s.database, flag)?;
@@ -501,6 +503,12 @@ pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Outp
     let mut count = chosen.len();
     if let Some(dir) = opt.handoffs.filter(|_| opt.recall) {
         let (extra, n) = handoffs(dir, opt.query, opt.json)?;
+        out.extend(extra);
+        count += n;
+    }
+    if opt.github && opt.recall {
+        drop(_g);
+        let (extra, n) = crate::github::recall(s, opt.query, opt.json, flag)?;
         out.extend(extra);
         count += n;
     }

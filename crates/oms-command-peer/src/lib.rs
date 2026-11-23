@@ -17,6 +17,7 @@ mod context_pack;
 mod delegate;
 pub use delegate::buffer_interactive_stdout;
 mod digest;
+pub mod dispatch_context;
 mod manifest;
 mod ml_context;
 mod native;

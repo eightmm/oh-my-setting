@@ -34,6 +34,7 @@ members = [
     "crates/oms-contract-markdown",
     "crates/oms-experiment",
     "crates/oms-failure",
+    "crates/oms-github",
     "crates/oms-graph",
     "crates/oms-graph-python",
     "crates/oms-graph-resolve",

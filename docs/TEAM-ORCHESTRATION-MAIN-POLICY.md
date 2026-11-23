@@ -39,7 +39,10 @@ admission·acceptance·publication 판단과 사용자 보고다. 예외는 사�
 사용자에게 blocker를 보고한다. Provider Lead는 한 배정의 팀리더로서 native child에게 실질
 작업을 맡기고 자기 범위의 통합·작은 unblocking 수정만 직접 한다. 계층별 책임표는
 [coordination layers](../custom-skills/oms-agent-harness/references/coordination-layers.md)에 있다.
-이 정책은 프롬프트·스킬 계약이며 Main pane의 직접 수정을 runtime이 거절하지는 않는다.
+Claude Code Main에서는 [Main write guard](COMPONENTS.md#main-write-guard)가 관리 대상 저장소와
+그 linked worktree 안의 Edit/Write 계열 호출을 거절한다. Bash를 통한 변경과 Codex·AGY Main은
+여전히 프롬프트·스킬 계약에만 의존한다. 사용자가 Main에게 직접 변경을 지시한 경우에는 사용자가
+자기 셸에서 수정하거나 `OMS_MAIN_WRITE_GUARD=0`으로 패널을 시작한다.
 
 실제 claim, slot/budget reservation, dependency readiness, process wait/cancel,
 receipt 기록, evidence freshness와 승인 검사는 Rust runtime이 담당한다.
