@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `docs/examples/agent-adapter-conformance.sh` is a reference check of the
+  one-shot custom adapter contract: adapter name, bounded `--version`/`--help`
+  probes and, with `--run`, read and write calls in a throwaway repository
+  (exit, stdout answer, no leftover process group, unchanged prompt, no commit,
+  no `.oms`, clean worktree on read). `--self-test` checks it against stubs.
 - `oms connect-services --account antigravity:ID --home PATH` registers a
   local Antigravity ADC profile home (`--verify`, `--remove`; `--repair` is
   refused). Records live in `provider-accounts.antigravity.json` and
