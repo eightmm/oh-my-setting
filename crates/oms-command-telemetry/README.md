@@ -370,3 +370,14 @@ is explicitly independent of index retention, N and date filters. Known totals,
 unknown coverage, unsettled calls, conflicts and provider estimate counts stay
 separate. Legacy artifact metrics remain the advisory retained-window view;
 they are not imported as authoritative lifetime receipts.
+
+`lifetime_provider_usage.storage` reports `retained_bytes`, `receipt_rows`,
+`max_bytes`, `remaining_bytes` and `update_mode` from that same validated receipt
+snapshot; ungrouped text prints a `usage storage:` line. Rows include superseded
+revisions and legacy receipts. The 256 MiB ceiling and available bytes describe
+the receipt file, excluding the optional reasoning supplement; they do not
+predict how many more calls fit or measure device I/O. Each changed update still
+uses `full-ledger-atomic-replacement`. Reports read no provider transcripts and
+neither prune nor rewrite usage history. Missing receipts keep the existing
+absence of a lifetime summary; unsafe or malformed history refuses the report
+instead of becoming zero-sized history.

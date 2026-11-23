@@ -297,7 +297,7 @@ pub(crate) fn usage(tool: &str) -> Option<&'static str> {
             "Usage: oms draft-pr prepare --base BRANCH --verify COMMAND [--repo PATH] [--remote NAME] [--expected-head SHA] [--expected-tree SHA] [--expected-base-sha SHA] [--expected-spec-sha256 H] [--review-evidence TEXT]\n       oms draft-pr <publish|comments|merged> --intent FILE [--repo PATH]\n"
         }
         "ci-status" => {
-            "Usage: oms ci-status [status|record|tick|history|flaky|protection|triage|suggest|feedback] [branch] [--limit N] [--sha COMMIT] [--json] [--refresh]\n       feedback [--json] reads durable untrusted PR/CI observations; record/tick refresh them.\n"
+            "Usage: oms ci-status [status|record|tick|history|flaky|protection|triage|suggest|feedback|attention] [branch] [--limit N] [--sha COMMIT] [--json] [--refresh]\n       feedback [--json] reads durable untrusted PR/CI observations; record/tick refresh them.\n       attention [branch] [--limit 1..100] [--json] reads recent scheduled/manual runs (default branch unless selected); never records or dispatches.\n"
         }
         "report" => {
             "Usage: oms report <bug|feature> [--from-failure FINGERPRINT] [--title TEXT] [--message TEXT] [--dry-run] [--yes]\n"

@@ -1142,6 +1142,17 @@ fn verify(
     // Preserve the existing two receipt legs: the outcome is first recorded
     // active; only the successful CAS adds fresh state and command receipts.
     finalize(task, services, &id, &note, None)?;
+    if result.exit == 0 {
+        let fingerprint = git::state_fingerprint(&task.repo, task.interrupted)?;
+        finalize(
+            task,
+            services,
+            &id,
+            &note,
+            Some((&fingerprint, &git::command_hash(&command))),
+        )?;
+    }
+    // Resolve advisory failures only after the successful receipt is accepted.
     let summary = failure_summary(&result.tail);
     match services.observe_failure(FailureObservation {
         repo: &task.repo,
@@ -1185,14 +1196,6 @@ fn verify(
         )?;
         return Ok(result.exit);
     }
-    let fingerprint = git::state_fingerprint(&task.repo, task.interrupted)?;
-    finalize(
-        task,
-        services,
-        &id,
-        &note,
-        Some((&fingerprint, &git::command_hash(&command))),
-    )?;
     task.journal(
         services,
         &task.store.path,

@@ -1982,6 +1982,51 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
         support::field(lifetime, "cost_microusd"),
         &oms_context::Json::Number("0".into())
     );
+    let retained = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let metadata = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
+    let storage = support::field(lifetime, "storage");
+    for (field, expected) in [
+        ("retained_bytes", retained.len()),
+        ("receipt_rows", 5),
+        ("max_bytes", oms_command_telemetry::store::MAX_INDEX_BYTES),
+        (
+            "remaining_bytes",
+            oms_command_telemetry::store::MAX_INDEX_BYTES - retained.len(),
+        ),
+    ] {
+        assert_eq!(
+            support::field(storage, field),
+            &oms_context::Json::Number(expected.to_string())
+        );
+    }
+    assert_eq!(
+        support::text(support::field(storage, "update_mode")),
+        "full-ledger-atomic-replacement"
+    );
+    let filtered = root.call(&["--by", "role", "--since", "2027-01-01", "--json"]);
+    assert_eq!(filtered.0, 0);
+    let filtered = oms_context::parse_json(&filtered.1).unwrap();
+    assert_eq!(
+        support::field(
+            support::field(&filtered, "lifetime_provider_usage"),
+            "storage"
+        ),
+        storage,
+        "artifact windows do not hide retained receipt revisions"
+    );
+    let human = root.call(&[]);
+    assert_eq!(human.0, 0);
+    assert!(String::from_utf8_lossy(&human.1).contains(&format!(
+        "usage storage: retained-bytes={} receipt-rows=5",
+        retained.len()
+    )));
+    let after = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
+    assert_eq!(after.ino(), metadata.ino());
+    assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+    assert_eq!(
+        std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(),
+        retained
+    );
 }
 #[test]
 fn cumulative_resume_has_a_baseline_and_separate_account_session_identity() {
@@ -2758,6 +2803,12 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
     ] {
         root.write(usage::RECEIPTS, &malformed);
         assert!(usage::load(&root.0).is_err());
+        let report = root.call(&["--json"]);
+        assert_ne!(report.0, 0);
+        assert!(
+            report.1.is_empty(),
+            "invalid history has no capacity estimate"
+        );
         assert!(usage::begin(&root.0, identity("call_new"), None, &stop).is_err());
         assert!(
             usage::record(

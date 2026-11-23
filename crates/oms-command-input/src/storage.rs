@@ -12,6 +12,22 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+// Keep failure context in a fixed vocabulary: never include paths, payloads,
+// subprocess output or platform-specific error strings in outward diagnostics.
+macro_rules! stage {
+    ($name:literal) => {
+        concat!(
+            "invalid, unavailable, or unsafe local input state (stage=",
+            $name,
+            ")"
+        )
+    };
+}
+fn context<T>(result: Result<T>, stage: &'static str) -> Result<T> {
+    result.map_err(|error| if error == UNSAFE { stage } else { error })
+}
+const GIT_FAILED: &str = stage!("git-exit");
+
 const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -162,7 +178,15 @@ pub fn bounded_git(
         .arg(repo)
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0");
-    run_bounded(command, limit, interrupted, 5, UNSAFE, UNSAFE, UNSAFE)
+    run_bounded(
+        command,
+        limit,
+        interrupted,
+        5,
+        stage!("git-start"),
+        stage!("git-output-bound"),
+        GIT_FAILED,
+    )
 }
 /// Run one fixed read-only program in its own process group under byte and time bounds.
 pub fn run_bounded(
@@ -181,18 +205,22 @@ pub fn run_bounded(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| unavailable)?;
-    let group = Pid::from_raw(child.id() as i32).ok_or(UNSAFE)?;
+    let group = Pid::from_raw(child.id() as i32).ok_or(stage!("capture-process-identity"))?;
     let mut owned = GitChild { child, group };
-    let pipe = owned.child.stdout.take().ok_or(UNSAFE)?;
-    let flags = fs::fcntl_getfl(&pipe).map_err(|_| UNSAFE)?;
-    fs::fcntl_setfl(&pipe, flags | OFlags::NONBLOCK).map_err(|_| UNSAFE)?;
+    let pipe = owned
+        .child
+        .stdout
+        .take()
+        .ok_or(stage!("capture-output-setup"))?;
+    let flags = fs::fcntl_getfl(&pipe).map_err(|_| stage!("capture-output-setup"))?;
+    fs::fcntl_setfl(&pipe, flags | OFlags::NONBLOCK).map_err(|_| stage!("capture-output-setup"))?;
     let mut reader = pipe;
     let mut output = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let progress = || {
         checkpoint(interrupted)?;
         if Instant::now() >= deadline {
-            Err("local capture timed out")
+            Err("local capture timed out (stage=capture-deadline)")
         } else {
             Ok(())
         }
@@ -211,7 +239,7 @@ pub fn run_bounded(
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock
                     || error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return Err(UNSAFE),
+            Err(_) => return Err(stage!("capture-output-read")),
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -229,25 +257,39 @@ pub fn run_bounded(
                 };
             }
             Ok(_) | Err(rustix::io::Errno::INTR) => {}
-            Err(_) => return Err(UNSAFE),
+            Err(_) => return Err(stage!("capture-exit-wait")),
         }
         std::thread::sleep(Duration::from_millis(2));
     }
 }
 
 fn inputs(repo: &Path, create: bool) -> Result<Directory> {
-    Directory::root(repo)?
-        // The shared ancestor may serve other OMS components; only a newly
-        // created ancestor or the requested private leaf gets private modes.
-        .open_child(OsStr::new(".oms"), create, false)?
-        .child(OsStr::new("inputs"), create)
+    context(
+        (|| {
+            Directory::root(repo)?
+                // The shared ancestor may serve other OMS components; only a newly
+                // created ancestor or the requested private leaf gets private modes.
+                .open_child(OsStr::new(".oms"), create, false)?
+                .child(OsStr::new("inputs"), create)
+        })(),
+        stage!("input-directory"),
+    )
 }
 fn ensure_ignored(repo: &Path, interrupted: &AtomicBool) -> Result<Directory> {
     let inputs = inputs(repo, true)?;
-    if !inputs.exists(OsStr::new(".gitignore"))? {
-        let name = format!(".ignore-{}", random_id()?);
+    if !context(
+        inputs.exists(OsStr::new(".gitignore")),
+        stage!("ignore-inspection"),
+    )? {
+        let name = format!(
+            ".ignore-{}",
+            context(random_id(), stage!("ignore-temporary-name"))?
+        );
         let written = (|| {
-            inputs.write_new(&name, b"*\n", interrupted)?;
+            context(
+                inputs.write_new(&name, b"*\n", interrupted),
+                stage!("ignore-temporary-write"),
+            )?;
             // linkat publishes without replacement; another writer may win.
             match fs::linkat(
                 &inputs.fd,
@@ -257,14 +299,14 @@ fn ensure_ignored(repo: &Path, interrupted: &AtomicBool) -> Result<Directory> {
                 AtFlags::empty(),
             ) {
                 Ok(()) | Err(rustix::io::Errno::EXIST) => Ok(()),
-                Err(_) => Err(UNSAFE),
+                Err(_) => Err(stage!("ignore-publication")),
             }
         })();
         let _ = fs::unlinkat(&inputs.fd, &name, AtFlags::empty());
         written?;
     }
-    inputs.verify()?;
-    fs::fsync(&inputs.fd).map_err(|_| UNSAFE)?;
+    context(inputs.verify(), stage!("ignore-directory-revalidation"))?;
+    fs::fsync(&inputs.fd).map_err(|_| stage!("ignore-directory-sync"))?;
     bounded_git(
         repo,
         &[
@@ -276,7 +318,13 @@ fn ensure_ignored(repo: &Path, interrupted: &AtomicBool) -> Result<Directory> {
         1,
         interrupted,
     )
-    .map_err(|_| "private inputs must be ignored by Git")?;
+    .map_err(|error| {
+        if error == GIT_FAILED {
+            "private inputs must be ignored by Git (stage=ignore-check)"
+        } else {
+            error
+        }
+    })?;
     Ok(inputs)
 }
 fn prepare_private(repo: &Path, interrupted: &AtomicBool) -> Result<(Directory, String)> {
@@ -420,12 +468,12 @@ pub fn lock(repo: &Path, interrupted: &AtomicBool) -> Result<Lock> {
         OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o600),
     )
-    .map_err(|_| UNSAFE)?;
-    let info = fs::fstat(&fd).map_err(|_| UNSAFE)?;
+    .map_err(|_| stage!("queue-lock-open"))?;
+    let info = fs::fstat(&fd).map_err(|_| stage!("queue-lock-inspection"))?;
     if FileType::from_raw_mode(info.st_mode) != FileType::RegularFile
         || info.st_uid != rustix::process::getuid().as_raw()
     {
-        return Err(UNSAFE);
+        return Err(stage!("queue-lock-identity"));
     }
     let deadline = Instant::now() + Duration::from_secs(LOCK_SECONDS);
     loop {
@@ -433,7 +481,7 @@ pub fn lock(repo: &Path, interrupted: &AtomicBool) -> Result<Lock> {
         match fs::flock(&fd, fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => return Ok(Lock(fd)),
             Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => {}
-            Err(_) => return Err(UNSAFE),
+            Err(_) => return Err(stage!("queue-lock-acquire")),
         }
         if Instant::now() >= deadline {
             return Err(crate::LOCK_TIMEOUT);
@@ -444,13 +492,20 @@ pub fn lock(repo: &Path, interrupted: &AtomicBool) -> Result<Lock> {
 /// Fsync a private temporary, then rename it over `queue.json`; readers see the old or new file.
 pub fn write_queue(repo: &Path, bytes: &[u8], interrupted: &AtomicBool) -> Result<()> {
     let inputs = ensure_ignored(repo, interrupted)?;
-    let temporary = format!(".{QUEUE}.{}", random_id()?);
+    let temporary = format!(
+        ".{QUEUE}.{}",
+        context(random_id(), stage!("queue-temporary-name"))?
+    );
     let written = (|| {
-        inputs.write_new(&temporary, bytes, interrupted)?;
-        inputs.verify()?;
+        context(
+            inputs.write_new(&temporary, bytes, interrupted),
+            stage!("queue-temporary-write"),
+        )?;
+        context(inputs.verify(), stage!("queue-directory-revalidation"))?;
         checkpoint(interrupted)?;
-        fs::renameat(&inputs.fd, &temporary, &inputs.fd, QUEUE).map_err(|_| UNSAFE)?;
-        fs::fsync(&inputs.fd).map_err(|_| UNSAFE)
+        fs::renameat(&inputs.fd, &temporary, &inputs.fd, QUEUE)
+            .map_err(|_| stage!("queue-publication"))?;
+        fs::fsync(&inputs.fd).map_err(|_| stage!("queue-directory-sync"))
     })();
     if written.is_err() {
         let _ = fs::unlinkat(&inputs.fd, &temporary, AtFlags::empty());
@@ -509,5 +564,19 @@ mod tests {
         let result = create(&path, &interrupted, |_| deep, b"paragraph");
         assert!(result.is_err());
         assert!(attachment_names(&path).unwrap().is_empty());
+        // A publication refusal cleans its own temporary and identifies the
+        // commit boundary; it does not remove the conflicting existing object.
+        let inputs = path.join(".oms/inputs");
+        std::fs::create_dir(inputs.join(QUEUE)).unwrap();
+        let result = write_queue(&path, b"private-queue-marker", &interrupted);
+        assert_eq!(result, Err(stage!("queue-publication")));
+        assert!(inputs.join(QUEUE).is_dir());
+        assert!(!std::fs::read_dir(inputs).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".queue.json.")
+        }));
     }
 }
