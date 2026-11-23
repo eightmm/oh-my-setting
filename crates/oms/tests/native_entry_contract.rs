@@ -3602,6 +3602,9 @@ impl Landing {
             f,
         };
         landing.git(&["init", "-q"]);
+        // Native Plan proofs deliberately ignore global Git configuration.
+        landing.git(&["config", "--local", "user.name", "t"]);
+        landing.git(&["config", "--local", "user.email", "t@example.invalid"]);
         std::fs::write(landing.repo.join("a.txt"), "a\n").unwrap();
         std::fs::write(landing.repo.join(".git/info/exclude"), ".oms/\n").unwrap();
         landing.git(&["add", "a.txt"]);
