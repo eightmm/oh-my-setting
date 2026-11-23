@@ -8,6 +8,27 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `docs/examples/agent-adapter-conformance.sh` is a reference check of the
+  one-shot custom adapter contract: adapter name, bounded `--version`/`--help`
+  probes and, with `--run`, read and write calls in a throwaway repository
+  (exit, stdout answer, no leftover process group, unchanged prompt, no commit,
+  no `.oms`, clean worktree on read). `--self-test` checks it against stubs.
+- `oms connect-services --account antigravity:ID --home PATH` registers a
+  local Antigravity ADC profile home (`--verify`, `--remove`; `--repair` is
+  refused). Records live in `provider-accounts.antigravity.json` and
+  `antigravity-account-receipts.json` under the shared account lock; the held
+  home and profile are re-checked before writing, profile bytes are never read,
+  and empty or malformed metadata or a row missing its receipt is refused.
+  Runtime routing still never selects these accounts; login and the served
+  identity remain unverified.
+- A Main write guard for Claude Code. A panel Overall Main's `Edit`, `Write`,
+  `MultiEdit` and `NotebookEdit` calls are refused inside the repository it
+  manages and its linked worktrees, with the dispatch routes named. Provider
+  Leads, workers, solo sessions and other paths are unchanged; Bash changes and
+  Codex/Antigravity Mains are not judged. `OMS_MAIN_WRITE_GUARD=0` at panel
+  start turns it off, and the panel passes that switch to its Main. A Main
+  writes `--brief-file` briefs to session scratch or `TMPDIR`, since a brief
+  inside the checkout is refused too. The Claude hook schema moves to 13.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with
@@ -526,6 +547,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A panel Overall Main now manages only. Its startup contract and the
+  `oms-panel-orchestrator` skill no longer allow "integration and unblocking"
+  edits: every repository change goes to a worker or Provider Lead, fixes
+  return to their writer with `--continue`, conflicts go to an `integrator`,
+  and Main edits only on the user's explicit instruction, recorded in the Room.
+  The Provider Lead contract names it a team lead for one assignment and lists
+  what returns to Main. `coordination-layers.md` holds the Main, Lead and
+  Worker duty table. This is a prompt and skill contract; the Claude Code Main
+  write guard under Added refuses edit-tool calls, and nothing else is enforced
+  at runtime. Solo sessions without a team still work locally.
 - Managed tool upgrades resolve current upstream releases instead of a checked-in
   `tools.lock.json`: Node follows the newest LTS, uv/gh use their latest stable
   GitHub release, npm tools follow `latest`, and Antigravity uses its current-host

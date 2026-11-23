@@ -83,6 +83,22 @@ pub(crate) fn agy_locator_still_current_fenced(
     unsupported_locator_current_fenced(post_fence)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn agy_current_children_with_usage(
+    _pid: u32,
+    _birth: &str,
+    _repo: &Path,
+    _expected_turn: Option<&str>,
+    _painted: &std::collections::BTreeSet<String>,
+    _include_usage: bool,
+) -> Option<(
+    String,
+    Vec<AgyChildChatLocator>,
+    std::collections::BTreeMap<String, serde_json::Value>,
+)> {
+    None
+}
+
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use linux::{
     agy_child_chat_fenced, agy_child_read_counts, agy_current_children, agy_locator_still_current,
@@ -90,14 +106,19 @@ pub(crate) use linux::{
     total_agy_child_reads,
 };
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{agy_locator_still_current_fenced, agy_open_selected_child_fenced};
+#[allow(unused_imports)]
+pub(crate) use linux::{
+    agy_current_children_with_usage, agy_locator_still_current_fenced,
+    agy_open_selected_child_fenced,
+};
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{AgyChatOpen, AgyChildChatLocator, AgySelectedChild};
     use crate::agy_child_records::{
-        CHILD_BYTE_BUDGET, LEAD_BYTE_BUDGET, extract_child_chat,
-        extract_selected_child_chat_and_setup, format_selected_child_reader, scan_lead_turn,
+        CHILD_BYTE_BUDGET, LEAD_BYTE_BUDGET, USAGE_SUFFIX_BUDGET, extract_child_chat,
+        extract_selected_child_chat_and_setup, format_selected_child_reader,
+        latest_child_response_usage, scan_lead_turn,
     };
     use crate::agy_lead_custody::{AgyLeadCustody, agy_lead_custody};
     use crate::claude_lead_usage::linux::{DIR, FILE, open_dir, unchanged};
@@ -183,6 +204,7 @@ mod linux {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
+    #[cfg(test)]
     pub(crate) fn agy_current_children(
         pid: u32,
         birth: &str,
@@ -779,6 +801,45 @@ mod linux {
         Ok(body)
     }
 
+    pub(super) fn read_child_suffix(file: &File, stat: &Stat) -> Stage<(Vec<u8>, bool)> {
+        let size = u64::try_from(stat.st_size).map_err(|_| "child-read")?;
+        gate(size > 0, "child-budget")?;
+        let len = size.min(USAGE_SUFFIX_BUDGET as u64);
+        #[cfg(test)]
+        CHILD_BODY_READS.with(|n| n.set(n.get() + 1));
+        let mut reader = file;
+        reader
+            .seek(SeekFrom::Start(size - len))
+            .map_err(|_| "child-read")?;
+        let mut body = Vec::with_capacity(len as usize);
+        reader
+            .take(len)
+            .read_to_end(&mut body)
+            .map_err(|_| "child-read")?;
+        gate(
+            body.len() == len as usize && fs::fstat(file).is_ok_and(|now| unchanged(stat, &now)),
+            "child-changed",
+        )?;
+        Ok((body, size > len))
+    }
+
+    pub(crate) fn agy_current_children_with_usage(
+        pid: u32,
+        birth: &str,
+        repo: &Path,
+        expected_turn: Option<&str>,
+        painted: &BTreeSet<String>,
+        include_usage: bool,
+    ) -> Option<(
+        String,
+        Vec<AgyChildChatLocator>,
+        BTreeMap<String, serde_json::Value>,
+    )> {
+        agy_current_children_usage_stage(pid, birth, repo, expected_turn, painted, include_usage)
+            .ok()
+    }
+
+    #[cfg(test)]
     pub(super) fn agy_current_children_stage(
         pid: u32,
         birth: &str,
@@ -786,6 +847,22 @@ mod linux {
         expected_turn: Option<&str>,
         painted: &BTreeSet<String>,
     ) -> Stage<(String, Vec<AgyChildChatLocator>)> {
+        agy_current_children_usage_stage(pid, birth, repo, expected_turn, painted, false)
+            .map(|(turn, locators, _)| (turn, locators))
+    }
+
+    fn agy_current_children_usage_stage(
+        pid: u32,
+        birth: &str,
+        repo: &Path,
+        expected_turn: Option<&str>,
+        painted: &BTreeSet<String>,
+        include_usage: bool,
+    ) -> Stage<(
+        String,
+        Vec<AgyChildChatLocator>,
+        BTreeMap<String, serde_json::Value>,
+    )> {
         gate(!painted.is_empty(), "no-painted")?;
         let (uid, owner) = verify_process(pid, birth)?;
         let custody = checked_lead_custody(pid, birth, repo).ok_or("custody")?;
@@ -821,6 +898,7 @@ mod linux {
 
         let lead_min_size = u64::try_from(lead_stat.st_size).map_err(|_| "lead-read")?;
         let mut locators = Vec::new();
+        let mut held_usage = Vec::new();
         for rec in scan.children {
             let participant = participant_id("antigravity", &rec.child_id);
             if !painted.contains(&participant)
@@ -829,7 +907,7 @@ mod linux {
                 continue;
             }
             let snap = app_dir.trail.borrow().0.len();
-            let Ok((_, child_stat)) = open_transcript(
+            let Ok((child_file, child_stat)) = open_transcript(
                 &brain_dir,
                 &rec.child_id,
                 CHILD_BYTE_BUDGET as u64,
@@ -843,6 +921,12 @@ mod linux {
                 app_dir.trail.borrow_mut().0.truncate(snap);
                 continue;
             };
+            if include_usage
+                && let Ok((bytes, recent)) = read_child_suffix(&child_file, &child_stat)
+                && let Some(value) = latest_child_response_usage(&bytes, recent)
+            {
+                held_usage.push((participant, value, child_file, child_stat));
+            }
             locators.push(AgyChildChatLocator {
                 pid,
                 birth: owner.birth.clone(),
@@ -869,7 +953,16 @@ mod linux {
             Some(&strict_ws),
         )?;
 
-        Ok((scan.turn, locators))
+        let usage = held_usage
+            .into_iter()
+            .filter_map(|(participant, value, file, stat)| {
+                fs::fstat(&file)
+                    .ok()
+                    .filter(|now| unchanged(&stat, now) && strict(now, uid) && now.st_nlink == 1)
+                    .map(|_| (participant, value))
+            })
+            .collect();
+        Ok((scan.turn, locators, usage))
     }
 
     pub(super) fn agy_child_chat_fenced_stage(
@@ -1039,11 +1132,11 @@ mod tests {
     };
     use super::{
         AgyChatOpen, AgyChildChatLocator, AgySelectedChild, agy_child_chat_fenced,
-        agy_child_read_counts, agy_current_children, agy_locator_still_current,
-        agy_locator_still_current_fenced, agy_open_selected_child_fenced, reset_all_agy_counters,
-        reset_test_counters, test_counters,
+        agy_child_read_counts, agy_current_children, agy_current_children_with_usage,
+        agy_locator_still_current, agy_locator_still_current_fenced,
+        agy_open_selected_child_fenced, reset_all_agy_counters, reset_test_counters, test_counters,
     };
-    use crate::agy_child_records::{CHILD_BYTE_BUDGET, LEAD_BYTE_BUDGET};
+    use crate::agy_child_records::{CHILD_BYTE_BUDGET, LEAD_BYTE_BUDGET, USAGE_SUFFIX_BUDGET};
     use crate::native_children::{TASK_PREFIX, participant_id};
     use oms_panel_core::{Value, terminals};
     use serde_json::json;
@@ -2107,6 +2200,92 @@ mod tests {
             }),
             AgyChatOpen::Unavailable
         ));
+    }
+
+    #[test]
+    fn response_usage_suffix_read_is_bounded() {
+        let fixture = Fixture::new("usage-suffix");
+        let path = fixture.base.join("suffix.jsonl");
+        let bytes = vec![b'x'; USAGE_SUFFIX_BUDGET * 3];
+        write_private(&path, &bytes);
+        let file = fs::File::open(path).unwrap();
+        let stat = rustix::fs::fstat(&file).unwrap();
+        let (tail, recent) = super::linux::read_child_suffix(&file, &stat).unwrap();
+        assert!(recent);
+        assert_eq!(tail.len(), USAGE_SUFFIX_BUDGET);
+        assert_eq!(tail, bytes[bytes.len() - USAGE_SUFFIX_BUDGET..]);
+    }
+
+    #[test]
+    fn roster_usage_reads_only_proven_painted_children() {
+        let mut fixture = Fixture::new("roster-usage");
+        let (pid, birth, painted) = fixture.seed_standard();
+        let child = fixture.transcript_path(CHILD_A);
+        let mut body = Vec::new();
+        body.extend_from_slice(&to_jsonl(&[json!({"type":"PLANNER_RESPONSE", "source":"MODEL", "status":"DONE", "step_index":99, "created_at":"2026-11-22T00:00:00Z", "model":"gemini", "input_tokens":5, "cache_read_tokens":2, "output_tokens":1})]));
+        write_private(&child, &body);
+        write_private(
+            &fixture.transcript_path(CHILD_B),
+            b"unselected invalid data\n",
+        );
+        reset_test_counters();
+        let (turn, locators, usage) = agy_current_children_with_usage(
+            pid,
+            &birth,
+            &fixture.repo,
+            Some(TURN_CUR),
+            &painted,
+            true,
+        )
+        .unwrap();
+        assert_eq!(turn, TURN_CUR);
+        assert_eq!(locators.len(), 1);
+        assert_eq!(usage.len(), 1);
+        assert_eq!(
+            usage[&participant_id("antigravity", CHILD_A)]["input_tokens"],
+            5
+        );
+        assert_eq!(test_counters().1, 1);
+        assert_eq!(test_counters().2, 1);
+        reset_test_counters();
+        assert!(
+            agy_current_children_with_usage(
+                pid,
+                &birth,
+                &fixture.repo,
+                Some(TURN_OLD),
+                &painted,
+                true
+            )
+            .is_none()
+        );
+        assert_eq!(test_counters().2, 0);
+        reset_test_counters();
+        let (_, _, usage) = agy_current_children_with_usage(
+            pid,
+            &birth,
+            &fixture.repo,
+            Some(TURN_CUR),
+            &painted,
+            false,
+        )
+        .unwrap();
+        assert!(usage.is_empty());
+        assert_eq!(test_counters().1, 1);
+        assert_eq!(test_counters().2, 0);
+        fs::remove_file(child).unwrap();
+        reset_test_counters();
+        let (_, locators, usage) = agy_current_children_with_usage(
+            pid,
+            &birth,
+            &fixture.repo,
+            Some(TURN_CUR),
+            &painted,
+            true,
+        )
+        .unwrap();
+        assert!(locators.is_empty() && usage.is_empty());
+        assert_eq!(test_counters().2, 0);
     }
 
     #[test]

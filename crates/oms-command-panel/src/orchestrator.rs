@@ -450,7 +450,7 @@ pub(crate) struct ObservationGeneration {
     claude_quota_mark: Option<String>,
     main_account_ready: Option<bool>,
     main_account: Option<ObservationAccount>,
-    lead_accounts: [Option<ObservationAccount>; 2],
+    lead_accounts: [Option<ObservationAccount>; 3],
 }
 
 #[derive(PartialEq, Eq)]
@@ -484,6 +484,13 @@ impl ObservationAccount {
 }
 
 impl ObservationGeneration {
+    /// Whether `pane`, sampled from a fresh pane census, still shows this generation.
+    fn fences(&self, pane: &ChatPane, provider: &str) -> bool {
+        self.session == pane.session
+            && self.main == pane.main
+            && self.leads.get(provider) == Some(&pane.lead)
+    }
+
     pub(crate) fn processes_current(&self) -> bool {
         let host = SystemAccountHost;
         host.process_owner(self.session.server_pid)
@@ -892,7 +899,11 @@ impl<'a> Panel<'a> {
             Some((pane, identity)) => account("orchestrator", provider, pane, identity),
             None => Ok(None),
         };
-        let lead_accounts = [lead_account("codex")?, lead_account("claude")?];
+        let lead_accounts = [
+            lead_account("codex")?,
+            lead_account("claude")?,
+            lead_account("antigravity")?,
+        ];
         Ok(ObservationGeneration {
             session: self.session_proof.clone(),
             main,
@@ -905,14 +916,21 @@ impl<'a> Panel<'a> {
         })
     }
 
-    pub(crate) fn observe_passively(&self, readings: &mut Observations, report: &mut Value) {
+    /// The Board's read: `expected` is the generation its render fence will
+    /// require, so a provider pane that already left it gets no usage reads.
+    pub(crate) fn observe_passively(
+        &self,
+        readings: &mut Observations,
+        report: &mut Value,
+        expected: &ObservationGeneration,
+    ) {
         self.observe_reading(
             readings,
             report,
             true,
             &SystemAccountHost,
             crate::claude_lead_usage::bound_claude_lead_weekly,
-            false,
+            Some(expected),
         );
     }
 
@@ -944,7 +962,7 @@ impl<'a> Panel<'a> {
         host: &dyn AccountHost,
         claude_reader: impl Fn(&Owner, &str, f64) -> Option<LeadReading>,
     ) {
-        self.observe_reading(readings, report, chat_current, host, claude_reader, true);
+        self.observe_reading(readings, report, chat_current, host, claude_reader, None);
     }
 
     fn observe_reading(
@@ -954,7 +972,8 @@ impl<'a> Panel<'a> {
         chat_current: bool,
         host: &dyn AccountHost,
         claude_reader: impl Fn(&Owner, &str, f64) -> Option<LeadReading>,
-        dismiss_quota: bool,
+        // Present only for the Board's passive read, which never sends keys.
+        expected: Option<&ObservationGeneration>,
     ) {
         let quota_sources =
             commands::take_codex_quota_receipt(self.repo, self.room, &self.attempt, report);
@@ -966,8 +985,10 @@ impl<'a> Panel<'a> {
         if let Some(fields) = report.as_object_mut() {
             fields.remove("claude_local_weekly");
             fields.remove("codex_weekly_account");
+            fields.remove("agy_footer_weekly");
         }
         let mut children = Vec::new();
+        let census = std::cell::OnceCell::new();
         let mut bound_codex = None;
         readings.clear_chats();
         let mut codex_chat_pane = self
@@ -1009,13 +1030,14 @@ impl<'a> Panel<'a> {
             if let Ok(screen) = self.tmux(&["capture-pane", "-p", "-t", &pane.id]) {
                 let activity = crate::provider_activity::native_activity(provider, &screen);
                 let detail = activity.and_then(crate::provider_activity::NativeActivity::detail);
-                let same_pane_process = (provider == "antigravity" || detail.is_some())
-                    && !sample.identity.birth.is_empty()
-                    && host.process_owner(pane.pid).is_ok_and(|identity| {
-                        identity.pid == pane.pid
-                            && identity.uid == host.uid()
-                            && identity.birth == sample.identity.birth
-                    });
+                let same_pane_process =
+                    (provider == "antigravity" || provider == "claude" || detail.is_some())
+                        && !sample.identity.birth.is_empty()
+                        && host.process_owner(pane.pid).is_ok_and(|identity| {
+                            identity.pid == pane.pid
+                                && identity.uid == host.uid()
+                                && identity.birth == sample.identity.birth
+                        });
                 if activity.is_some() {
                     report["provider_activity"][provider] =
                         detail.filter(|_| same_pane_process).map_or_else(
@@ -1031,6 +1053,25 @@ impl<'a> Panel<'a> {
                             *activity = json!({"state":"working"});
                         }
                         activity["children"] = json!(children);
+                    }
+                    let report_current = !self.stop.load(Ordering::Acquire)
+                        && report["capacity_stale"] != true
+                        && report
+                            .get("collection")
+                            .is_none_or(|c| c["ok"] == true && c["pending"] != true);
+                    let same_account = report_current
+                        && self.binding_with_birth(
+                            "orchestrator",
+                            "antigravity",
+                            pane,
+                            &sample.identity.birth,
+                            host,
+                        ) == binding;
+                    if same_account
+                        && let Some(remaining) =
+                            crate::provider_activity::agy_footer_weekly(&screen)
+                    {
+                        report["agy_footer_weekly"] = json!({"remaining": remaining});
                     }
                 }
                 let model = (provider == "codex")
@@ -1050,7 +1091,7 @@ impl<'a> Panel<'a> {
                         .take()
                         .filter(|started| started.elapsed() < Duration::from_secs(15));
                     if let Some(started) = pending {
-                        if !dismiss_quota {
+                        if expected.is_some() {
                             sample.dismiss_pending_usage = Some(started);
                         } else if !pane.active
                             && self.reload().is_ok_and(|fresh| {
@@ -1086,7 +1127,8 @@ impl<'a> Panel<'a> {
                 } else if PROVIDERS.contains(&provider.as_str()) {
                     let chat_pane = (provider == "claude" && chat_current)
                         .then(|| self.chat_pane_with_host(provider, host).ok())
-                        .flatten();
+                        .flatten()
+                        .filter(|_| self.still_observes(expected, &census, provider, host));
                     let recent = match provider.as_str() {
                         "antigravity" => self.capture_recent(&pane.id).unwrap_or(screen),
                         _ => screen,
@@ -1102,9 +1144,7 @@ impl<'a> Panel<'a> {
                         let mut located = Vec::new();
                         let sighting = (provider == "claude" && chat_pane.is_some())
                             .then(|| {
-                                crate::claude_child_chat::claude_current_children(
-                                    pane.pid, self.repo,
-                                )
+                                crate::claude_child_chat::claude_board_children(pane.pid, self.repo)
                             })
                             .flatten();
                         let second = chat_pane
@@ -1137,6 +1177,20 @@ impl<'a> Panel<'a> {
                                 ));
                             }
                         }
+                        let roster_current = same_pane_process
+                            && !self.stop.load(Ordering::Acquire)
+                            && report["capacity_stale"] != true
+                            && report
+                                .get("collection")
+                                .is_none_or(|c| c["ok"] == true && c["pending"] != true)
+                            && self.still_observes(expected, &census, provider, host);
+                        project_claude_pane_roster(
+                            roster_current,
+                            &recent,
+                            activity.is_some(),
+                            &mut observed.rows,
+                            &mut report["provider_activity"],
+                        );
                     } else if provider == "antigravity"
                         && chat_current
                         && !observed.rows.is_empty()
@@ -1144,6 +1198,7 @@ impl<'a> Panel<'a> {
                         && !self.stop.load(Ordering::Acquire)
                         && let Some(shown_turn) = crate::native_children::agy_current_turn(&recent)
                         && let Ok(pane) = self.chat_pane_with_host("antigravity", host)
+                        && self.still_observes(expected, &census, provider, host)
                         && !self.stop.load(Ordering::Acquire)
                     {
                         let bound = agy_sighting(
@@ -1151,6 +1206,27 @@ impl<'a> Panel<'a> {
                             shown_turn,
                             pane.lead.pid,
                             &pane.lead.birth,
+                        );
+                        agy_usage_sighting(
+                            &mut observed.rows,
+                            shown_turn,
+                            |painted| {
+                                crate::agy_child_chat::agy_current_children_with_usage(
+                                    pane.lead.pid,
+                                    &pane.lead.birth,
+                                    &pane.repo,
+                                    Some(shown_turn),
+                                    painted,
+                                    true,
+                                )
+                                .map(|(turn, _, usage)| (turn, usage))
+                            },
+                            || {
+                                !self.stop.load(Ordering::Acquire)
+                                    && self
+                                        .chat_pane_with_host("antigravity", host)
+                                        .is_ok_and(|again| again == pane)
+                            },
                         );
                         readings
                             .chats
@@ -1658,6 +1734,28 @@ impl<'a> Panel<'a> {
             return host;
         }
         &SystemAccountHost
+    }
+
+    /// A frame whose provider pane moved during this read (say while its
+    /// capture stalled) fails the render fence, so its transcript usage and
+    /// chat bindings are skipped. The fresh census (two tmux calls) runs at most
+    /// once per read, right before the first fenced usage read, and serves both
+    /// providers; a pane that moves after it changes during the read, which the
+    /// Board's final render fence still rejects.
+    fn still_observes(
+        &self,
+        expected: Option<&ObservationGeneration>,
+        census: &std::cell::OnceCell<Option<Self>>,
+        provider: &str,
+        host: &dyn AccountHost,
+    ) -> bool {
+        expected.is_none_or(|generation| {
+            census
+                .get_or_init(|| self.reload().ok())
+                .as_ref()
+                .and_then(|fresh| fresh.chat_pane_with_host(provider, host).ok())
+                .is_some_and(|pane| generation.fences(&pane, provider))
+        })
     }
 
     fn chat_pane_with_host(&self, provider: &str, host: &dyn AccountHost) -> Result<ChatPane> {
@@ -3305,12 +3403,17 @@ impl<'a> Panel<'a> {
                     .map(|proof| assignment_locator(&proof.repo, self.room))
                     .transpose()?
                     .unwrap_or_default();
+                let role_contract = if provider == "codex" {
+                    ALTERNATE_STARTUP_PROMPT
+                } else {
+                    STARTUP_PROMPT.trim()
+                };
+                let prompt = format!(
+                    "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {role_contract}{locator} Task: {task}"
+                );
                 self.send(
                     provider,
-                    &format!(
-                        "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {}{locator} Task: {task}",
-                        STARTUP_PROMPT.trim()
-                    ),
+                    &prompt,
                     Proof::Turn(turn),
                     assignment.as_ref().map(|proof| (proof, host, attempts)),
                 )?;
@@ -3390,6 +3493,12 @@ impl<'a> Panel<'a> {
         assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
         bound: Option<&native_assignment::Binding>,
     ) -> Result<()> {
+        if provider == "codex" && bound.is_none() && matches!(proof, Proof::Turn(_)) {
+            require(
+                prompt.chars().count() <= CODEX_VISIBLE_PASTE_CHARS,
+                "Codex assignment is too long to verify in the composer",
+            )?;
+        }
         self.require_provider_input(provider)?;
         let lead = self
             .leads
@@ -3852,6 +3961,16 @@ fn paste_and_submit(
             return Err(uncertain(
             "task paste was not observed; Enter was not sent and a draft may remain — inspect the provider input before resending".into(),
         ));
+        }
+        if provider == "codex"
+            && matches!(proof, Proof::Turn(_))
+            && previous
+                .as_deref()
+                .is_some_and(codex_opaque_paste_placeholder)
+        {
+            return Err(uncertain(
+                "Enter was withheld after pasting; Codex collapsed the draft into an opaque placeholder — inspect the provider input before resending".into(),
+            ));
         }
         fence().map_err(|error| {
             uncertain(format!(
@@ -4486,6 +4605,72 @@ fn codex_input_state(capture: &str) -> Option<bool> {
     Some(oms_panel_core::tick::screen_input_empty(input).0)
 }
 
+fn is_pasted_content_token(text: &str) -> bool {
+    let Some(body) = text.strip_prefix("[Pasted Content ") else {
+        return false;
+    };
+    let Some(digits) = body
+        .strip_suffix(" chars]")
+        .or_else(|| body.strip_suffix(" char]"))
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn codex_opaque_paste_placeholder(capture: &str) -> bool {
+    if codex_input_state(capture) != Some(false) {
+        return false;
+    }
+    let input = codex_chrome(capture, CodexChromeUse::Composer).map_or(capture, |(area, _)| area);
+    let plain = CHAT_SGR.replace_all(input, "");
+    let mut lines = plain.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    let Some(rest) = first.strip_prefix(PROMPT_MARKERS) else {
+        return false;
+    };
+    let trimmed = rest.trim_matches([' ', '\u{a0}']);
+    let head = trimmed
+        .strip_suffix(['│', '┃', '|'])
+        .unwrap_or(trimmed)
+        .trim_matches([' ', '\u{a0}']);
+    if !head.starts_with('[') {
+        return false;
+    }
+    let mut parts = vec![head];
+    const RULES: &str = "─━═╌┄╭╮╰╯┌┐└┘├┤┬┴┼";
+    for raw_line in lines {
+        let line = raw_line.trim_matches(' ');
+        if line.is_empty() {
+            continue;
+        }
+        if line
+            .chars()
+            .all(|c| RULES.contains(c) || "│┃| ".contains(c))
+            && line.chars().any(|c| RULES.contains(c))
+        {
+            break;
+        }
+        let cell = line
+            .strip_prefix(['│', '┃', '|'])
+            .unwrap_or(line)
+            .trim_matches([' ', '\u{a0}']);
+        let cell = cell
+            .strip_suffix(['│', '┃', '|'])
+            .unwrap_or(cell)
+            .trim_matches([' ', '\u{a0}']);
+        if !cell.is_empty() {
+            if parts.len() == 4 {
+                return false;
+            }
+            parts.push(cell);
+        }
+    }
+    is_pasted_content_token(&parts.join(" ")) || is_pasted_content_token(&parts.concat())
+}
+
 fn codex_chrome_row<'a>(
     rows: &mut impl Iterator<Item = &'a str>,
 ) -> Option<(&'a str, Cow<'a, str>)> {
@@ -4878,7 +5063,8 @@ fn strip_native_answers(rows: &mut [Value]) {
 /// painted from its spawn description; a collector row for it always wins.
 /// The Claude sighting's rows and locators, trusted only when the second exact
 /// pane proof equals the first and every child names the scan's own Turn.
-/// Otherwise nothing from the sighting is painted or bound.
+/// Otherwise nothing from the sighting is painted or bound. Usage and the proven
+/// `started_at`/`ended_at` clocks go only on a child's single painted row.
 fn claude_sighting<P: PartialEq>(
     mut rows: Vec<Value>,
     first: &P,
@@ -4892,21 +5078,53 @@ fn claude_sighting<P: PartialEq>(
         return (rows, Vec::new());
     }
     merge_claude_rows(&mut rows, &children);
+    for child in &children {
+        let participant = crate::native_children::participant_id("claude", &child.locator.agent);
+        let mut painted = rows
+            .iter_mut()
+            .filter(|row| row["participant"] == participant);
+        if let (Some(usage), Some(row), None) = (&child.usage, painted.next(), painted.next()) {
+            row["native_response_usage"] = claude_usage_field(usage);
+            // Only the proven spawn and delivered-notice clocks; never from `state`.
+            for (key, at) in [
+                ("started_at", &usage.spawned_at),
+                ("ended_at", &usage.delivered_at),
+            ] {
+                if let Some(at) = at {
+                    row[key] = json!(at);
+                }
+            }
+        }
+    }
     let bound = painted_claude_children(children, &rows).collect();
     (rows, bound)
 }
 
-/// Bind unique painted `"antigravity"` `native_child` rows ONLY to the proven lead
-/// process/pane/Turn without inspecting private AGY transcripts on foreground refresh.
-pub(crate) fn agy_sighting(
-    rows: &[Value],
-    shown_turn: &str,
-    pid: u32,
-    birth: &str,
-) -> Vec<(String, NativeLocator)> {
-    if shown_turn.is_empty() || pid == 0 || birth.is_empty() {
-        return Vec::new();
-    }
+/// A Board row's `native_response_usage`: one response's own counters, never
+/// cumulative, the lead's or context occupancy; clocks as the lead recorded them.
+pub(crate) fn claude_usage_field(usage: &crate::claude_child_chat::ClaudeChildUsage) -> Value {
+    let response = usage.response.as_ref().and_then(|response| {
+        let total = response
+            .usage
+            .iter()
+            .try_fold(0u64, |sum, &n| sum.checked_add(n))?;
+        let mut fields = json!({"message_id": response.id, "timestamp": response.at,
+                                "total_tokens": total});
+        for (key, count) in crate::claude_child_chat::USAGE_KEYS
+            .iter()
+            .zip(response.usage)
+        {
+            fields[*key] = json!(count);
+        }
+        Some(fields)
+    });
+    json!({"scope": "latest_child_response", "response": response,
+           "spawned_at": usage.spawned_at, "delivered_at": usage.delivered_at})
+}
+
+/// Participants of `"antigravity"` `native_child` rows painted exactly once, in
+/// participant order.
+fn unique_agy_rows(rows: &[Value]) -> impl Iterator<Item = &str> {
     let mut row_counts = BTreeMap::<&str, usize>::new();
     for row in rows {
         if row["native_child"] == true
@@ -4919,8 +5137,65 @@ pub(crate) fn agy_sighting(
     }
     row_counts
         .into_iter()
-        .filter(|&(_, count)| count == 1)
-        .map(|(participant, _)| {
+        .filter_map(|(participant, count)| (count == 1).then_some(participant))
+}
+
+/// Unique painted AGY rows whose child transcript one sample may read for usage.
+const AGY_USAGE_ROWS: usize = 3;
+
+/// Attach `native_response_usage` = `{"scope": "latest_child_response",
+/// "response": <the AGY reader's latest-response object, counters verbatim>}`
+/// to an AGY child's only row of any kind; AGY reports no total and none is
+/// summed. Only the first [`AGY_USAGE_ROWS`] such participants in participant
+/// order are offered to the single `scan`;
+/// nothing is attached unless it names the shown Turn and `prove_again`
+/// re-proves the same lead pane afterwards. With no such row, neither runs.
+fn agy_usage_sighting(
+    rows: &mut [Value],
+    shown_turn: &str,
+    scan: impl FnOnce(&BTreeSet<String>) -> Option<(String, BTreeMap<String, Value>)>,
+    prove_again: impl FnOnce() -> bool,
+) {
+    let painted: BTreeSet<String> = unique_agy_rows(rows)
+        .filter(|&p| rows.iter().filter(|row| row["participant"] == p).count() == 1)
+        .take(AGY_USAGE_ROWS)
+        .map(str::to_owned)
+        .collect();
+    if shown_turn.is_empty() || painted.is_empty() {
+        return;
+    }
+    let Some((turn, usage)) = scan(&painted) else {
+        return;
+    };
+    if turn != shown_turn || usage.is_empty() || !prove_again() {
+        return;
+    }
+    for (participant, value) in usage {
+        let mut named = rows
+            .iter_mut()
+            .filter(|row| row["participant"] == participant.as_str());
+        if let (true, Some(row), None) =
+            (painted.contains(&participant), named.next(), named.next())
+        {
+            row["native_response_usage"] =
+                json!({"scope": "latest_child_response", "response": value});
+        }
+    }
+}
+
+/// Bind unique painted `"antigravity"` `native_child` rows ONLY to the proven lead
+/// process/pane/Turn; this binding itself never reads private AGY transcripts.
+pub(crate) fn agy_sighting(
+    rows: &[Value],
+    shown_turn: &str,
+    pid: u32,
+    birth: &str,
+) -> Vec<(String, NativeLocator)> {
+    if shown_turn.is_empty() || pid == 0 || birth.is_empty() {
+        return Vec::new();
+    }
+    unique_agy_rows(rows)
+        .map(|participant| {
             (
                 participant.to_owned(),
                 NativeLocator::Antigravity(crate::agy_child_chat::AgySelectedChild {
@@ -4945,6 +5220,44 @@ pub(crate) fn merge_claude_rows(
                 &child.locator.agent,
                 &child.title,
                 child.state,
+            ));
+        }
+    }
+}
+
+/// Project display-only Claude background-agent summary rows from an owned pane
+/// footer after `claude_sighting`. Keeps one row per distinct slug, deduplicates
+/// against authority-backed rows only on proven participant identity, and never
+/// binds `readings.chats` or grants detail transcript access.
+fn project_claude_pane_roster(
+    same_pane_process: bool,
+    screen: &str,
+    activity_present: bool,
+    rows: &mut Vec<Value>,
+    provider_activity: &mut Value,
+) {
+    if !same_pane_process {
+        return;
+    }
+    let roster = crate::provider_activity::claude_roster(screen);
+    if !activity_present && roster.iter().any(|row| row.state == "working") {
+        provider_activity["claude"] = json!("working");
+    }
+    let existing = rows.len();
+    let mut seen_slugs = BTreeSet::new();
+    for roster_row in &roster {
+        if !seen_slugs.insert(roster_row.slug.as_str()) {
+            continue;
+        }
+        let participant = crate::native_children::participant_id("claude", &roster_row.slug);
+        let duplicate = rows[..existing]
+            .iter()
+            .any(|row| row["participant"].as_str() == Some(participant.as_str()));
+        if !duplicate {
+            rows.push(crate::native_children::claude_child_row(
+                &roster_row.slug,
+                &roster_row.title,
+                roster_row.state,
             ));
         }
     }
@@ -5278,7 +5591,8 @@ mod tests {
     const CODEX_DISPLAY_STATUS: &str = "\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts";
     const CODEX_EMPTY: &str =
         "\x1b[1m›\x1b[0m\x1b[48;5;235m \x1b[2mAsk Codex to do anything\x1b[0m\x1b[48;5;235m\n";
-    const CODEX_DRAFT: &str = "\x1b[1m›\x1b[0m [Pasted Content 1234 chars]\n";
+    const CODEX_DRAFT: &str = "\x1b[1m›\x1b[0m Task from Overall Main. Work.\n";
+    const CODEX_OPAQUE_PASTE: &str = "\x1b[1m›\x1b[0m [Pasted Content 1234 chars]\n";
     const TURN_ID: &str = concat!("abcde01234", "56789abcde");
     const OLD_TURN_ID: &str = concat!("0123456789", "fedcba9876");
 
@@ -5478,6 +5792,7 @@ mod tests {
                 locator,
                 title: "t".into(),
                 state: "unknown",
+                usage: None,
             }
         };
         let (painted, hidden) = (child("a1b2c3d4e5f60718"), child("f0e1d2c3b4a59687"));
@@ -5498,14 +5813,24 @@ mod tests {
     #[test]
     fn claude_sighting_is_trusted_only_under_one_pane_and_one_turn() {
         use super::claude_sighting;
-        use crate::claude_child_chat::ClaudeChild;
+        use crate::claude_child_chat::{ClaudeChild, ClaudeChildUsage, ClaudeResponse};
         use serde_json::json;
         let spy = super::codex_chat_fixture::BoardSpy::new("claude-sighting");
         let turn = super::codex_chat_fixture::TURN;
+        let read = |usage| ClaudeChildUsage {
+            response: Some(ClaudeResponse {
+                id: "msg_1".into(),
+                at: "2026-11-22T01:00:00Z".into(),
+                usage,
+            }),
+            spawned_at: Some("2026-11-22T00:59:00Z".into()),
+            delivered_at: None,
+        };
         let child = |turn: &str, state| ClaudeChild {
             locator: spy.claude_locator(turn),
             title: "t".into(),
             state,
+            usage: Some(read([1, 2, 3, 4])),
         };
         let collector = vec![json!({"participant": "native-claude-other", "state": "working"})];
         let scan = |other: &str| {
@@ -5518,6 +5843,58 @@ mod tests {
 
         let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), single());
         assert!(rows.len() == 2 && rows[1]["state"] == "done" && bound.len() == 1);
+        let field = json!({"scope": "latest_child_response", "response": {"message_id": "msg_1",
+            "timestamp": "2026-11-22T01:00:00Z", "input_tokens": 1, "output_tokens": 2,
+            "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4, "total_tokens": 10},
+            "spawned_at": "2026-11-22T00:59:00Z", "delivered_at": null});
+        assert_eq!(rows[1]["native_response_usage"], field);
+        assert!(rows[0].get("native_response_usage").is_none());
+        // Row clocks come from the proven spawn and delivered notice, never the state.
+        let clocks = |row: &serde_json::Value| {
+            (row.get("started_at").cloned(), row.get("ended_at").cloned())
+        };
+        let spawned = json!("2026-11-22T00:59:00Z");
+        assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), None));
+        assert_eq!(clocks(&rows[0]), (None, None));
+        // A collector row is the child's single row and carries it the same way.
+        let own = json!({"participant": bound[0].0, "state": "working"});
+        let (rows, _) = claude_sighting(vec![own.clone()], &"pane", Some(&"pane"), single());
+        assert!(rows.len() == 1 && rows[0]["native_response_usage"] == field);
+        // Two rows of one participant stay bound, but neither gets usage.
+        let (rows, bound) = claude_sighting(vec![own.clone(); 2], &"pane", Some(&"pane"), single());
+        assert!(rows == vec![own.clone(); 2] && bound.len() == 1);
+        // Usage withheld (over the tail budget or unproven) leaves the field absent;
+        // a total past u64 is unknown, the clocks stay.
+        let with = |usage| {
+            let mut child = child(turn, "done");
+            child.usage = usage;
+            Some((turn.to_owned(), vec![child]))
+        };
+        let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), with(None));
+        assert!(
+            rows.len() == 2 && rows[1].get("native_response_usage").is_none() && bound.len() == 1
+        );
+        assert_eq!(clocks(&rows[1]), (None, None));
+        let clocked = |state, delivered: Option<&str>| {
+            let mut usage = read([1, 2, 3, 4]);
+            usage.delivered_at = delivered.map(str::to_owned);
+            with(Some(usage)).map(|(turn, mut children)| {
+                children[0].state = state;
+                (turn, children)
+            })
+        };
+        let delivered = json!("2026-11-22T01:02:00Z");
+        let done = clocked("done", Some("2026-11-22T01:02:00Z"));
+        let (rows, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), done);
+        assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), Some(delivered)));
+        let running = clocked("working", None);
+        let (rows, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), running);
+        assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), None));
+        let over = with(Some(read([u64::MAX, 1, 0, 0])));
+        let (rows, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), over);
+        let mut unknown = field.clone();
+        unknown["response"] = serde_json::Value::Null;
+        assert_eq!(rows[1]["native_response_usage"], unknown);
         // A second proof that differs or is missing drops rows and locators.
         for second in [Some(&"moved"), None] {
             let (rows, bound) = claude_sighting(collector.clone(), &"pane", second, single());
@@ -5533,6 +5910,84 @@ mod tests {
         assert!(rows == collector && bound.is_empty());
         let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), None);
         assert!(rows == collector && bound.is_empty());
+    }
+
+    #[test]
+    fn claude_pane_roster_projects_owned_summary_rows_without_chat_binding() {
+        use super::{claude_sighting, project_claude_pane_roster};
+        use crate::claude_child_chat::ClaudeChild;
+        use serde_json::json;
+
+        let ruler = "─".repeat(80);
+        let same_title_screen = format!(
+            "prior\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents\n\n  ● main\n  ◯ worker-a  Audit panel  9m 49s · ↓ 218.9k tokens\n  ◯ worker-b  Audit panel  idle\n  ◯ worker-a  Audit panel  9m 50s · ↓ 219.0k tokens\n"
+        );
+        let spy = super::codex_chat_fixture::BoardSpy::new("claude-pane-roster");
+        let turn = super::codex_chat_fixture::TURN;
+        let transcript_child = ClaudeChild {
+            locator: spy.claude_locator(turn),
+            title: "Audit panel".into(),
+            state: "working",
+            usage: None,
+        };
+
+        // 1. Two distinct live slugs with the same title both project with distinct
+        // participant IDs; duplicate slug in roster collapses; an authority-backed row
+        // with only a matching title (different participant ID) does not suppress them;
+        // transcript sighting keeps sole authority over chat bindings.
+        let (mut rows, bound) = claude_sighting(
+            Vec::new(),
+            &"pane",
+            Some(&"pane"),
+            Some((turn.to_owned(), vec![transcript_child])),
+        );
+        let mut activity = json!({});
+        project_claude_pane_roster(true, &same_title_screen, false, &mut rows, &mut activity);
+        let worker_a = crate::native_children::participant_id("claude", "worker-a");
+        let worker_b = crate::native_children::participant_id("claude", "worker-b");
+        assert_ne!(worker_a, worker_b);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["title"], "Audit panel");
+        assert_eq!(rows[1]["participant"], worker_a);
+        assert_eq!(rows[1]["title"], "Audit panel");
+        assert_eq!(rows[1]["state"], "working");
+        assert_eq!(rows[2]["participant"], worker_b);
+        assert_eq!(rows[2]["title"], "Audit panel");
+        assert_eq!(rows[2]["state"], "unknown");
+        assert_eq!(activity["claude"], "working");
+        assert_eq!(bound.len(), 1);
+        assert_ne!(bound[0].0, worker_a);
+        assert_ne!(bound[0].0, worker_b);
+
+        // 2. Authority-backed row with matching proven participant ID is deduplicated,
+        // and liveness is omitted when all roster rows are idle.
+        let idle_only = format!(
+            "prior\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent\n\n  ● main\n  ◯ builder-gh-templates  Build issue and PR templates  idle\n"
+        );
+        let builder_participant =
+            crate::native_children::participant_id("claude", "builder-gh-templates");
+        let mut dedup_rows = vec![json!({
+            "participant": builder_participant,
+            "title": "Other title",
+            "state": "done"
+        })];
+        let mut idle_activity = json!({});
+        project_claude_pane_roster(true, &idle_only, false, &mut dedup_rows, &mut idle_activity);
+        assert_eq!(dedup_rows.len(), 1);
+        assert!(idle_activity.get("claude").is_none());
+
+        // 3. Unowned or fenced-out pane projects nothing and sets no activity.
+        let mut unowned_rows = Vec::new();
+        let mut unowned_activity = json!({});
+        project_claude_pane_roster(
+            false,
+            &same_title_screen,
+            false,
+            &mut unowned_rows,
+            &mut unowned_activity,
+        );
+        assert!(unowned_rows.is_empty());
+        assert!(unowned_activity.get("claude").is_none());
     }
 
     #[test]
@@ -5614,6 +6069,30 @@ mod tests {
             fake.sent("delete-buffer"),
             [&vec!["delete-buffer".to_owned(), "-b".into(), name.clone()]]
         );
+
+        for placeholder in [
+            CODEX_OPAQUE_PASTE,
+            "\x1b[1m›\x1b[0m [Pasted Content 1560 chars]\n",
+            "\x1b[1m›\x1b[0m [Pasted Content\n  1560 chars]\n",
+        ] {
+            let mut fake = FakePane::new(&[placeholder, placeholder, CODEX_EMPTY]);
+            let (result, sleeps) = task(&mut fake);
+            let error = result.unwrap_err();
+            assert!(error.publication_uncertain);
+            assert!(error.message.contains("Enter was withheld after pasting"));
+            assert_eq!(sleeps, 1);
+            assert_eq!(fake.enters(), 0);
+            assert_eq!(fake.sent("paste-buffer").len(), 1);
+        }
+
+        let visible_long = format!(
+            "\x1b[1m›\x1b[0m Task from Overall Main. [Pasted Content 1560 chars] {}\n",
+            "x".repeat(1500)
+        );
+        let mut fake = FakePane::new(&[&visible_long, &visible_long, CODEX_EMPTY]);
+        let (result, _) = submit(&mut fake, &"x".repeat(1560), Proof::Turn(TURN_ID), 2);
+        result.unwrap();
+        assert_eq!(fake.enters(), 1);
     }
 
     #[test]
@@ -6288,7 +6767,7 @@ mod tests {
         use super::super::*;
         use super::{
             AGY_QUOTA_MISORDERED, AGY_QUOTA_VIEWPORT, CODEX_DISPLAY_STATUS, CODEX_DRAFT,
-            CODEX_EMPTY, CODEX_STATUS, TURN_ID,
+            CODEX_EMPTY, CODEX_OPAQUE_PASTE, CODEX_STATUS, TURN_ID,
         };
         use crate::orchestrator::account_binding::test_support::{FakeHost, TempDir, private_dir};
         use oms_panel_core::native::reference::process::Owner;
@@ -7398,6 +7877,163 @@ mod tests {
         }
 
         #[test]
+        fn agy_footer_weekly_requires_owned_process_and_preserves_usage() {
+            let tmp = TempDir::new("agy-footer-weekly");
+            let repo = private_dir(&tmp.0.join("repo"));
+            let spy = SpyPanel::new(repo.clone());
+            spy.leads.borrow_mut().push(FakeLead {
+                window: "@4".into(),
+                pane_id: "%4".into(),
+                pid: 2001,
+                active: false,
+                provider: "antigravity".into(),
+            });
+            let mut host = FakeHost::new(private_dir(&tmp.0.join("state")));
+            host.owners.insert(
+                2001,
+                Owner {
+                    pid: 2001,
+                    uid: host.uid,
+                    birth: "agy-birth-1".into(),
+                },
+            );
+            let panel = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
+            let mut readings = Observations::default();
+            let rule = "────────────────────────";
+            let footer_screen = |weekly: &str| {
+                format!(
+                    "prior\n{rule}\n>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | {weekly} | main\n"
+                )
+            };
+            let sample =
+                |screen: &str, report: &mut Value, readings: &mut Observations, h: &FakeHost| {
+                    spy.screens.borrow_mut().insert("%4".into(), screen.into());
+                    panel.observe_with_host(readings, report, false, h);
+                };
+
+            // Owned live AGY pane with intact OMS footer projects agy_footer_weekly only.
+            let mut report = json!({"collection": {"ok": true}});
+            sample(
+                &footer_screen("Gemini weekly 99% left"),
+                &mut report,
+                &mut readings,
+                &host,
+            );
+            assert_eq!(report["agy_footer_weekly"], json!({"remaining": "99%"}));
+            assert!(
+                report["provider_status"]["antigravity"]
+                    .get("weekly_used")
+                    .is_none()
+            );
+
+            // Bounded <1% and >99% survive intact without becoming weekly_used.
+            for expected in ["<1%", ">99%"] {
+                let mut bounded = json!({"collection": {"ok": true}});
+                sample(
+                    &footer_screen(&format!("Gemini weekly {expected} left")),
+                    &mut bounded,
+                    &mut readings,
+                    &host,
+                );
+                assert_eq!(bounded["agy_footer_weekly"], json!({"remaining": expected}));
+                assert!(
+                    bounded["provider_status"]["antigravity"]
+                        .get("weekly_used")
+                        .is_none()
+                );
+            }
+
+            // Holds, pending, failed collection, and nonfinal/malformed footers clear display.
+            for held in [
+                json!({"collection": {"ok": true, "pending": true}, "agy_footer_weekly": {"remaining": "99%"}}),
+                json!({"collection": {"ok": false}, "agy_footer_weekly": {"remaining": "99%"}}),
+                json!({"collection": {"ok": true}, "capacity_stale": true, "agy_footer_weekly": {"remaining": "99%"}}),
+            ] {
+                let mut held = held;
+                sample(
+                    &footer_screen("Gemini weekly 99% left"),
+                    &mut held,
+                    &mut readings,
+                    &host,
+                );
+                assert!(held.get("agy_footer_weekly").is_none());
+            }
+            let mut bad_footer =
+                json!({"collection": {"ok": true}, "agy_footer_weekly": {"remaining": "99%"}});
+            sample(
+                &format!("{}trailing\n", footer_screen("Gemini weekly 99% left")),
+                &mut bad_footer,
+                &mut readings,
+                &host,
+            );
+            assert!(bad_footer.get("agy_footer_weekly").is_none());
+
+            // Unowned / foreign process clears agy_footer_weekly.
+            host.owners.insert(
+                2001,
+                Owner {
+                    pid: 2001,
+                    uid: host.uid + 1,
+                    birth: "1".into(),
+                },
+            );
+            let mut foreign =
+                json!({"collection": {"ok": true}, "agy_footer_weekly": {"remaining": "99%"}});
+            sample(
+                &footer_screen("Gemini weekly 99% left"),
+                &mut foreign,
+                &mut readings,
+                &host,
+            );
+            assert!(foreign.get("agy_footer_weekly").is_none());
+
+            // Restore ownership; verified /usage preserves its value and timestamp alongside footer.
+            host.owners.insert(
+                2001,
+                Owner {
+                    pid: 2001,
+                    uid: host.uid,
+                    birth: "agy-birth-1".into(),
+                },
+            );
+            let current_usage = AGY_QUOTA_VIEWPORT.replacen("100.00%", "94.62%", 1);
+            let mut usage_report = json!({"collection": {"ok": true}});
+            sample(&current_usage, &mut usage_report, &mut readings, &host);
+            let observed =
+                usage_report["provider_status"]["antigravity"]["weekly_native_observed_at"]
+                    .as_f64()
+                    .unwrap();
+            let mut both = json!({"collection": {"ok": true}});
+            sample(
+                &footer_screen("Gemini weekly 99% left"),
+                &mut both,
+                &mut readings,
+                &host,
+            );
+            assert_eq!(
+                both["provider_status"]["antigravity"]["weekly_native_observed_at"],
+                json!(observed)
+            );
+            assert!(
+                (both["provider_status"]["antigravity"]["weekly_used"]
+                    .as_f64()
+                    .unwrap()
+                    - 5.38)
+                    .abs()
+                    < 0.001
+            );
+            assert_eq!(both["agy_footer_weekly"], json!({"remaining": "99%"}));
+            assert!(
+                crate::render::weekly_usage_detail(&both, observed)
+                    .contains("Source AGY Gemini quota · Reset unreported")
+            );
+            assert!(
+                crate::render::weekly_usage_detail(&both, observed + 601.0)
+                    .contains("Source AGY native footer · Age unknown · Reset unknown")
+            );
+        }
+
+        #[test]
         fn admitted_native_claude_spread_uses_one_projection_and_never_ambient_quota() {
             use crate::orchestrator::account_binding::test_support::sample_accounts;
             const CASE: &str = "OMS_NATIVE_SPREAD_FIXTURE";
@@ -8235,7 +8871,7 @@ mod tests {
             assert!(composer.exact_draft(&prompt));
             composer.screen = composer.screen.replacen("Assign \n", "Assign\n", 1);
             assert!(!composer.exact_draft(&prompt));
-            composer.screen = format!("{CODEX_DRAFT}{CODEX_STATUS}");
+            composer.screen = format!("{CODEX_OPAQUE_PASTE}{CODEX_STATUS}");
             composer.cursor_y = 0;
             assert!(!composer.exact_draft(&prompt));
             composer.screen = format!("› \x1b[7mAssign\x1b[0m{CODEX_STATUS}");
@@ -9253,7 +9889,7 @@ mod tests {
                 assert!(spy.mutating_calls().is_empty());
             }
 
-            // Matching --account acct-a succeeds ("connected") and submits --task with STARTUP_PROMPT.
+            // Matching --account acct-a succeeds ("connected") and submits --task with ALTERNATE_STARTUP_PROMPT.
             let connected = spy
                 .load()
                 .execute_with_host("codex", Some("acct-a"), None, &host)
@@ -9301,7 +9937,10 @@ mod tests {
             assert_eq!(submitted["account_verification"], "verified");
             let buffers = spy.calls_named("set-buffer");
             assert_eq!(buffers.len(), 1);
-            assert!(buffers[0][5].contains(STARTUP_PROMPT.trim()));
+            assert!(buffers[0][5].contains(". You own this provider's work. "));
+            assert!(buffers[0][5].contains(ALTERNATE_STARTUP_PROMPT));
+            assert!(!buffers[0][5].contains(STARTUP_PROMPT.trim()));
+            assert!(buffers[0][5].chars().count() <= CODEX_VISIBLE_PASTE_CHARS);
             assert!(buffers[0][5].contains(&format!(
                 "oms room show --repo '{}' --id '{ROOM}' --exact --json",
                 spy.repo.display()
@@ -9523,6 +10162,334 @@ mod tests {
             assert_eq!(untagged_conn["account_verification"], "unverified");
         }
 
+        fn primary_codex_fixture(tag: &str) -> (TempDir, SpyPanel, FakeHost, PathBuf) {
+            let tmp = TempDir::new(tag);
+            let repo = private_dir(&tmp.0.join("repo"));
+            let state = private_dir(&tmp.0.join("state"));
+            let codex_a = private_dir(&tmp.0.join("codex-a"));
+            let uid = rustix::process::getuid().as_raw();
+            let mut host = FakeHost::new(state);
+            host.accounts = Some(make_accounts(vec![(
+                "codex",
+                vec![("acct-a", codex_a.clone())],
+            )]));
+            let spy = SpyPanel::new(repo);
+            host.owners
+                .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
+            host.owners.insert(2001, owner_entry(2001, "p2001", uid));
+            spy.allow_board_queries.set(true);
+            spy.real_events.set(true);
+            write_synthetic_ledger(&spy.repo, 0);
+            spy.load()
+                .execute_with_host("codex", Some("acct-a"), None, &host)
+                .unwrap();
+            spy.calls.borrow_mut().clear();
+            spy.room_queries.borrow_mut().clear();
+            spy.event_lists.set(0);
+            spy.assignment_events.set(0);
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            (tmp, spy, host, codex_a)
+        }
+
+        #[test]
+        fn codex_primary_task_uses_alternate_prompt_under_cap_and_preserves_guards() {
+            let (_tmp, spy, host, codex_a) = primary_codex_fixture("orch-primary-codex-short");
+            let task = "inspect crate";
+            let submitted = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(task), &host)
+                .unwrap();
+            assert_eq!(submitted["status"], "submitted");
+            assert_eq!(submitted["account"], "acct-a");
+            assert_eq!(submitted["account_pinned"], true);
+            assert_eq!(submitted["account_verification"], "verified");
+            let buffers = spy.calls_named("set-buffer");
+            assert_eq!(buffers.len(), 1);
+            let prompt = &buffers[0][5];
+            let locator = assignment_locator(&spy.repo, ROOM).unwrap();
+            let turn = prompt
+                .split_once(" Turn ")
+                .unwrap()
+                .1
+                .split_once(". ")
+                .unwrap()
+                .0;
+            assert_eq!(turn.len(), 20);
+            assert_eq!(
+                prompt,
+                &format!(
+                    "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {ALTERNATE_STARTUP_PROMPT}{locator} Task: {task}"
+                )
+            );
+            assert!(!prompt.contains(STARTUP_PROMPT.trim()));
+            assert!(prompt.chars().count() < CODEX_VISIBLE_PASTE_CHARS);
+
+            // Account mismatch refuses before Room/events checks and before any tmux write.
+            spy.calls.borrow_mut().clear();
+            spy.room_queries.borrow_mut().clear();
+            spy.event_lists.set(0);
+            let mut other_host = host.clone();
+            let codex_b = private_dir(&spy.repo.parent().unwrap().join("codex-b"));
+            other_host.accounts = Some(make_accounts(vec![(
+                "codex",
+                vec![("acct-a", codex_a), ("acct-b", codex_b)],
+            )]));
+            assert!(
+                spy.load()
+                    .execute_with_host("codex", Some("acct-b"), Some(task), &other_host)
+                    .is_err()
+            );
+            assert!(spy.room_queries.borrow().is_empty());
+            assert_eq!(spy.event_lists.get(), 0);
+            assert!(spy.mutating_calls().is_empty());
+
+            // Room guard fires in fence(true) with 0 mutating tmux calls.
+            spy.calls.borrow_mut().clear();
+            spy.room_successor.set(Some("room-successor"));
+            let room_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(task), &host)
+                .unwrap_err();
+            assert!(room_err.message.contains("Main membership"));
+            assert!(spy.mutating_calls().is_empty());
+            spy.room_successor.set(None);
+
+            // Non-live Main attempt guard fires in fence(true) with 0 mutating tmux calls.
+            spy.calls.borrow_mut().clear();
+            append_lifecycle_row(&spy.repo, &main_failed_row(4, 1));
+            let main_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(task), &host)
+                .unwrap_err();
+            assert!(main_err.message.contains("live Main attempt"));
+            assert!(spy.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn codex_primary_over_cap_task_refuses_with_zero_tmux_mutations() {
+            let (_tmp, spy, host, _codex_a) = primary_codex_fixture("orch-primary-codex-cap");
+            let locator = assignment_locator(&spy.repo, ROOM).unwrap();
+            let base_len = format!(
+                "Task from Overall Main. Work within this task and report the result here. Turn {}. You own this provider's work. {ALTERNATE_STARTUP_PROMPT}{locator} Task: ",
+                "0".repeat(20)
+            )
+            .chars()
+            .count();
+            let max_task = "x".repeat(CODEX_VISIBLE_PASTE_CHARS - base_len);
+            let ok = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(&max_task), &host)
+                .unwrap();
+            assert_eq!(ok["status"], "submitted");
+            assert_eq!(
+                spy.calls_named("set-buffer")[0][5].chars().count(),
+                CODEX_VISIBLE_PASTE_CHARS
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert_eq!(spy.calls_named("send-keys").len(), 1);
+
+            spy.calls.borrow_mut().clear();
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            let over_task = "x".repeat(CODEX_VISIBLE_PASTE_CHARS - base_len + 1);
+            let err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(&over_task), &host)
+                .unwrap_err();
+            assert_eq!(
+                err.message,
+                "Codex assignment is too long to verify in the composer"
+            );
+            assert!(!err.publication_uncertain);
+            assert!(spy.mutating_calls().is_empty());
+            assert!(spy.calls_named("capture-pane").is_empty());
+            assert!(spy.calls_named("set-buffer").is_empty());
+            assert!(spy.calls_named("paste-buffer").is_empty());
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            // Direct unbound Proof::Turn send_checked also refuses > CODEX_VISIBLE_PASTE_CHARS before input probe.
+            let over_prompt = "x".repeat(CODEX_VISIBLE_PASTE_CHARS + 1);
+            let direct_err = spy
+                .load()
+                .send("codex", &over_prompt, Proof::Turn(TURN_ID), None)
+                .unwrap_err();
+            assert_eq!(
+                direct_err.message,
+                "Codex assignment is too long to verify in the composer"
+            );
+            assert!(spy.mutating_calls().is_empty());
+            assert!(spy.calls_named("capture-pane").is_empty());
+        }
+
+        #[test]
+        fn codex_collapsed_paste_placeholder_rejects_input_and_withholds_enter() {
+            let collapsed_composer = "\x1b[1m›\x1b[0m [Pasted Content 1560 chars]\n";
+            let collapsed_screen = format!("{collapsed_composer}{CODEX_STATUS}");
+            assert_eq!(
+                super::super::codex_input_state(&collapsed_screen),
+                Some(false)
+            );
+            assert!(!input_ready("codex", &collapsed_screen));
+
+            // Existing collapsed placeholder in primary composer rejects submission with 0 mutations.
+            let (_tmp, spy, host, _codex_a) = primary_codex_fixture("orch-collapsed-paste");
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), collapsed_screen.clone());
+            let pre_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some("short task"), &host)
+                .unwrap_err();
+            assert!(pre_err.message.contains("busy or a draft is present"));
+            assert!(spy.mutating_calls().is_empty());
+
+            spy.cursor_x.set(31);
+            assert!(
+                spy.load()
+                    .execute_with_host("codex", Some("acct-a"), Some("short task"), &host)
+                    .is_err()
+            );
+            assert!(spy.mutating_calls().is_empty());
+
+            // Ordinary Proof::Turn post-paste collapsed placeholder withholds Enter.
+            spy.calls.borrow_mut().clear();
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            let primary_collapsed = format!("{collapsed_composer}{CODEX_STATUS}");
+            spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(move |spy| {
+                    spy.cursor_x.set(31);
+                    spy.screens
+                        .borrow_mut()
+                        .insert("%4".into(), primary_collapsed);
+                }),
+            )));
+            let primary_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some("short task"), &host)
+                .unwrap_err();
+            assert!(primary_err.publication_uncertain);
+            assert!(
+                primary_err
+                    .message
+                    .contains("Enter was withheld after pasting")
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            // Alternate Codex composer rejects collapsed placeholder and paste_and_submit withholds Enter.
+            let composer = super::super::CodexComposer {
+                command: "codex".into(),
+                cursor_x: 31,
+                cursor_y: 0,
+                screen: collapsed_screen.clone(),
+            };
+            assert!(!composer.ready());
+            assert!(!composer.exact_draft("short task"));
+
+            let (_alt_tmp, alt_spy, alt_host, caller, _home) = alternate_fixture();
+            write_synthetic_ledger(&alt_spy.repo, 0);
+            alt_spy.real_events.set(true);
+            let store = Store::open(&alt_spy.repo).unwrap();
+            let tx = store
+                .transaction("panel-provider-sessions", Duration::from_secs(3))
+                .unwrap();
+            alt_spy
+                .load()
+                .launch_codex_alternate(&caller, "second", LeadLaunch::default(), &alt_host, &tx)
+                .unwrap();
+            reset_alternate_assignment(&alt_spy);
+            alt_spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(move |spy| {
+                    spy.screens
+                        .borrow_mut()
+                        .insert("%5".into(), collapsed_screen);
+                    spy.alternate_task_cursor.set((31, 0));
+                }),
+            )));
+            let err = alt_spy
+                .load()
+                .assign_codex_alternate(&caller, "second", "short task", &alt_host, &tx)
+                .unwrap_err();
+            assert!(err.publication_uncertain);
+            assert!(err.message.contains("Enter was withheld after pasting"));
+            assert_eq!(alt_spy.calls_named("paste-buffer").len(), 1);
+            assert!(alt_spy.calls_named("send-keys").is_empty());
+        }
+
+        #[test]
+        fn non_codex_primary_task_keeps_full_startup_prompt() {
+            let tmp = TempDir::new("orch-non-codex-task");
+            let repo = private_dir(&tmp.0.join("repo"));
+            let state = private_dir(&tmp.0.join("state"));
+            let claude_home = private_dir(&tmp.0.join("claude-home"));
+            let uid = rustix::process::getuid().as_raw();
+            let mut host = FakeHost::new(state);
+            host.accounts = Some(make_accounts(vec![("claude", vec![("work", claude_home)])]));
+            host.owners.insert(2001, owner_entry(2001, "p2001", uid));
+            let spy = SpyPanel::new(repo);
+            host.owners
+                .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
+            spy.load()
+                .execute_with_host("claude", Some("work"), None, &host)
+                .unwrap();
+            spy.leads.borrow_mut().push(FakeLead {
+                window: "@5".into(),
+                pane_id: "%5".into(),
+                pid: 2002,
+                active: false,
+                provider: "antigravity".into(),
+            });
+
+            let claude_empty = "❯\u{a0}\x1b[2mTry something\x1b[0m\n────\n";
+            let agy_empty = "\x1b[38;5;111m>\x1b[39m \x1b[38;5;109mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\x1b[39m\n────\n";
+
+            for (provider, pane, screen, account, task_text) in [
+                (
+                    "claude",
+                    "%4",
+                    claude_empty,
+                    Some("work"),
+                    "delegate claude work",
+                ),
+                ("antigravity", "%5", agy_empty, None, "delegate agy work"),
+            ] {
+                spy.calls.borrow_mut().clear();
+                spy.cursor_x.set(2);
+                spy.screens.borrow_mut().insert(pane.into(), screen.into());
+                spy.task_transition.replace(Some((
+                    "send-keys",
+                    Box::new(move |spy| {
+                        spy.screens.borrow_mut().insert(pane.into(), screen.into());
+                    }),
+                )));
+                let out = spy
+                    .load()
+                    .execute_with_host(provider, account, Some(task_text), &host)
+                    .unwrap();
+                assert_eq!(out["status"], "submitted");
+                let buffers = spy.calls_named("set-buffer");
+                assert_eq!(buffers.len(), 1);
+                let prompt = &buffers[0][5];
+                assert!(prompt.contains(STARTUP_PROMPT.trim()));
+                assert!(prompt.chars().count() > CODEX_VISIBLE_PASTE_CHARS);
+                assert!(!prompt.contains(ALTERNATE_STARTUP_PROMPT));
+                assert!(!prompt.contains("Read-only Room locator"));
+                assert!(prompt.contains(". You own this provider's work. "));
+                assert!(prompt.ends_with(&format!("Task: {task_text}")));
+            }
+        }
+
         #[test]
         fn canonical_native_assignment_preserves_claim_and_never_replays_unknown_input() {
             const CASE: &str = "OMS_TEST_NATIVE_ASSIGNMENT";
@@ -9613,6 +10580,7 @@ mod tests {
                 "native-three",
                 "native-four",
                 "native-five",
+                "native-six",
             ] {
                 plan(&[
                     "add",
@@ -9668,6 +10636,16 @@ mod tests {
             let first: Value = serde_json::from_slice(&first.1).unwrap();
             assert_eq!(first["status"], "submitted");
             assert_eq!(first["consumption"], "unconfirmed");
+            assert!(
+                spy.calls_named("set-buffer")[0][5].chars().count() <= CODEX_VISIBLE_PASTE_CHARS
+            );
+            // Only registered public verbs may appear in the copyable reader line.
+            let pasted = spy.calls_named("set-buffer")[0][5].clone();
+            assert!(
+                pasted
+                    .contains("oms agent-plan --repo \"$R\" evidence-snapshot --id 'native-one';")
+            );
+            assert!(!pasted.contains("oms plan "));
             assert_eq!(spy.calls_named("send-keys").len(), 1);
             let binding: Value = serde_json::from_slice(
                 &std::fs::read(repo.join(first["binding"].as_str().unwrap())).unwrap(),
@@ -9823,6 +10801,41 @@ mod tests {
             let read: Value = serde_json::from_slice(&read).unwrap();
             assert_eq!(read["state"], "claimed");
             assert_eq!(read["lease_epoch"], 1);
+
+            // Bound Proof::Turn withholds Enter on an opaque placeholder after paste and never resends.
+            spy.calls.borrow_mut().clear();
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(|spy| {
+                    spy.cursor_x.set(31);
+                    spy.screens
+                        .borrow_mut()
+                        .insert("%4".into(), format!("{CODEX_OPAQUE_PASTE}{CODEX_STATUS}"));
+                }),
+            )));
+            let opaque = send("native-six", "sixth assignment").unwrap();
+            assert_eq!(opaque.0, 75);
+            let opaque: Value = serde_json::from_slice(&opaque.1).unwrap();
+            assert_eq!(opaque["status"], "unknown");
+            assert!(
+                opaque["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("Enter was withheld after pasting"))
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+            spy.calls.borrow_mut().clear();
+            let opaque_retry = send("native-six", "sixth assignment").unwrap();
+            assert_eq!(opaque_retry.0, 75);
+            let opaque_retry: Value = serde_json::from_slice(&opaque_retry.1).unwrap();
+            assert_eq!(opaque_retry["status"], "unknown");
+            assert_eq!(opaque_retry["attempt_id"], opaque["attempt_id"]);
+            assert_eq!(opaque_retry["reused"], true);
+            assert!(spy.mutating_calls().is_empty());
         }
 
         #[test]
@@ -10216,6 +11229,24 @@ mod tests {
                     .created()
                     .is_ok_and(|birth| birth > std::time::UNIX_EPOCH)
             );
+            // The Board's read fences Claude's child sighting with one fresh pane
+            // census (AGY paints no children here); other reads take none.
+            let generation = spy.load().observation_generation_with_host(&host).unwrap();
+            let censuses = [None, Some(&generation)].map(|expected| {
+                let panel = spy.load();
+                spy.calls.borrow_mut().clear();
+                panel.observe_reading(
+                    &mut obs.clone(),
+                    &mut accepted_codex_scope(),
+                    true,
+                    &host,
+                    |_, _, _| None,
+                    expected,
+                );
+                spy.calls_named("list-panes").len()
+            });
+            assert_eq!(censuses, [0, 1]);
+
             // Verify ChatPane captures bound_account and detects binding change.
             let pane_a = spy.load().chat_pane_with_host("codex", &host).unwrap();
             assert_eq!(
@@ -11260,6 +12291,116 @@ mod tests {
         }
 
         #[test]
+        fn agy_usage_attaches_one_fenced_scan_to_unique_painted_rows_only() {
+            use std::collections::BTreeSet;
+            let turn = super::super::codex_chat_fixture::TURN;
+            let ids = [
+                "11111111-1111-1111-1111-aaaaaaaaaaaa",
+                "22222222-2222-2222-2222-bbbbbbbbbbbb",
+                "33333333-3333-3333-3333-cccccccccccc",
+                "44444444-4444-4444-4444-dddddddddddd",
+            ];
+            let [a, b, c, d] =
+                ids.map(|id| crate::native_children::participant_id("antigravity", id));
+            let row = |participant: &str| json!({"participant": participant, "native_child": true, "provider": "antigravity"});
+            let usage = |n: u64| {
+                json!({"model": "gemini", "created_at": "2026-11-22T00:00:00Z",
+                       "input_tokens": n, "cached_input_tokens": 0, "output_tokens": 1})
+            };
+            let all: BTreeMap<String, Value> = [&a, &b, &c, &d]
+                .into_iter()
+                .zip(1..)
+                .map(|(p, n)| (p.clone(), usage(n)))
+                .collect();
+            let field = |n: u64| json!({"scope": "latest_child_response", "response": usage(n)});
+            // One sample: the rows after it, the set offered to its scans, and proofs run.
+            let sample = |mut rows: Vec<Value>, shown: &str, scan_turn: &str, proof: bool| {
+                let (offered, proofs) = (RefCell::new(Vec::new()), Cell::new(0));
+                agy_usage_sighting(
+                    &mut rows,
+                    shown,
+                    |painted: &BTreeSet<String>| {
+                        offered.borrow_mut().push(painted.clone());
+                        Some((scan_turn.to_owned(), all.clone()))
+                    },
+                    || {
+                        proofs.set(proofs.get() + 1);
+                        proof
+                    },
+                );
+                (rows, offered.into_inner(), proofs.get())
+            };
+            let set = |ps: &[&String]| ps.iter().map(|p| (*p).clone()).collect::<BTreeSet<_>>();
+            let unrelated = json!({"participant": "native-claude-x", "state": "working"});
+
+            // Exact participant only; the helper's object goes on as `response`
+            // verbatim, with no total computed from its counters.
+            let rows = vec![row(&b), unrelated.clone()];
+            let (got, offered, proofs) = sample(rows.clone(), turn, turn, true);
+            assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
+            assert_eq!(got[0]["native_response_usage"], field(2));
+            assert!(
+                got[0]["native_response_usage"]["response"]
+                    .get("total_tokens")
+                    .is_none()
+            );
+            assert_eq!(got[1], unrelated);
+            // Repeating the same sample gives the same rows with one scan each.
+            assert_eq!(sample(rows, turn, turn, true).0, got);
+
+            // A participant on two rows (painted twice, or also named by another row)
+            // is never offered or attached, even if the scan returns it.
+            let rows = vec![
+                row(&a),
+                row(&a),
+                row(&b),
+                row(&c),
+                json!({"participant": c}),
+            ];
+            let (got, offered, _) = sample(rows.clone(), turn, turn, true);
+            assert_eq!(offered, vec![set(&[&b])]);
+            assert!(got[0] == rows[0] && got[1] == rows[1] && got[3] == rows[3]);
+            assert_eq!(got[2]["native_response_usage"], field(2));
+
+            // More than three eligible: only the first three in participant order.
+            let mut order = [&a, &b, &c, &d];
+            order.sort();
+            let rows: Vec<Value> = order.iter().rev().map(|p| row(p)).collect();
+            let (got, offered, _) = sample(rows.clone(), turn, turn, true);
+            assert_eq!(offered, vec![set(&order[..3])]);
+            assert_eq!(got[0], rows[0]);
+            assert!(
+                got[1..]
+                    .iter()
+                    .all(|r| r.get("native_response_usage").is_some())
+            );
+
+            // A scan of another Turn, a failed after-fence, or no scan attaches nothing.
+            let rows = vec![row(&a)];
+            assert_eq!(
+                sample(rows.clone(), turn, "0000000000000000dead", true),
+                (rows.clone(), vec![set(&[&a])], 0)
+            );
+            assert_eq!(
+                sample(rows.clone(), turn, turn, false),
+                (rows.clone(), vec![set(&[&a])], 1)
+            );
+            let mut none = rows.clone();
+            agy_usage_sighting(&mut none, turn, |_| None, || unreachable!());
+            assert_eq!(none, rows);
+
+            // No eligible row or no shown Turn: neither the scan nor the fence runs.
+            for (rows, shown) in [
+                (vec![row(&a), row(&a), unrelated.clone()], turn),
+                (vec![row(&a), json!({"participant": a})], turn),
+                (vec![], turn),
+                (vec![row(&a)], ""),
+            ] {
+                assert_eq!(sample(rows.clone(), shown, turn, true), (rows, vec![], 0));
+            }
+        }
+
+        #[test]
         fn agy_chat_pane_accepts_open_unverified_binding_and_rejects_unpinned_ambient() {
             let tmp = TempDir::new("orch-agy-binding");
             let repo = private_dir(&tmp.0.join("repo"));
@@ -11456,7 +12597,7 @@ mod tests {
             ];
             let child_rows = vec![
                 json!({"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","content":format!("{preamble}<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-18T18:00:00Z sender={lead_id} content={child_prompt}\n</SYSTEM_MESSAGE>")}),
-                json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"OWN_CHILD_DIRECT_REPLY","thinking":"HIDDEN_THINKING"}),
+                json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"OWN_CHILD_DIRECT_REPLY","thinking":"HIDDEN_THINKING","model":"gemini-x","created_at":"2026-11-18T18:00:30Z","input_tokens":7,"cache_read_tokens":3,"output_tokens":2}),
             ];
             let legacy_child_rows = vec![
                 json!({"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","content":format!("{preamble}<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-18T18:00:01Z sender={lead_id} content={legacy_prompt}\n</SYSTEM_MESSAGE>")}),
@@ -11507,8 +12648,8 @@ mod tests {
             let mut obs = Observations::default();
             let mut report = accepted_codex_scope();
 
-            // Cold + warm passive refreshes: ZERO legacy child reads, ZERO strict child reads,
-            // ZERO parent scans, and ONLY 2 capture-pane calls (0 list-panes/reload calls).
+            // Cold + warm accepted refreshes: ZERO legacy child reads, ONE fenced parent scan
+            // with ONE bounded usage-suffix read per sample, and ONLY 2 capture-pane calls.
             let panel = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
             let expected_passive_tmux = vec![
                 vec![
@@ -11533,19 +12674,163 @@ mod tests {
             spy.calls.borrow_mut().clear();
             panel.observe_with_host(&mut obs, &mut report, true, &host);
             assert_eq!(crate::agy_child_chat::legacy_agy_read_index(), (1, 1, 0, 0));
-            assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
-            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
-            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
+            assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 1));
+            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 1);
             assert_eq!(*spy.calls.borrow(), expected_passive_tmux);
+            let accepted = report["native_children"].clone();
 
+            // Rejected sightings (not chat-current, pending scope, stopping) make ZERO
+            // custody checks, scans or child reads and carry no earlier usage forward.
+            for (current, pending, stop) in [
+                (false, false, false),
+                (true, true, false),
+                (true, false, true),
+            ] {
+                let mut rejected = accepted_codex_scope();
+                rejected["collection"]["pending"] = json!(pending);
+                spy.stop.store(stop, Ordering::Release);
+                crate::agy_child_chat::reset_all_agy_counters();
+                panel.observe_with_host(&mut obs, &mut rejected, current, &host);
+                spy.stop.store(false, Ordering::Release);
+                assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+                assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
+                // The child's row is still painted, just without usage.
+                assert!(
+                    stop || rejected["native_children"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["participant"] == participant)
+                );
+                assert!(
+                    !rejected["native_children"]
+                        .to_string()
+                        .contains("native_response_usage")
+                );
+            }
+
+            // The same accepted sample again: the same rows, one scan, no extra reads.
             crate::agy_child_chat::reset_all_agy_counters();
             spy.calls.borrow_mut().clear();
             panel.observe_with_host(&mut obs, &mut report, true, &host);
             assert_eq!(crate::agy_child_chat::legacy_agy_read_index(), (0, 1, 0, 0));
-            assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
-            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
-            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
+            assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 1));
+            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 1);
             assert_eq!(*spy.calls.borrow(), expected_passive_tmux);
+            assert_eq!(report["native_children"], accepted);
+
+            // A Board read expecting the generation the render fence requires:
+            // when the lead already left it (another window), the fresh census
+            // stops the sighting before custody, scans, reads or chat binding; the
+            // matching generation keeps the accepted caps. Each costs one census.
+            spy.leads.borrow_mut()[0].window = "@5".into();
+            let moved = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop)
+                .unwrap()
+                .observation_generation_with_host(&host)
+                .unwrap();
+            spy.leads.borrow_mut()[0].window = "@4".into();
+            let current = panel.observation_generation_with_host(&host).unwrap();
+            let census: Vec<Vec<String>> = [
+                &["tmux", "list-panes", "-s", "-t", "%2", "-F", PANE_FORMAT][..],
+                &[
+                    "tmux",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "$1",
+                    terminals::PROVIDER_SESSION_IDENTITY_FORMAT,
+                    ";",
+                    "show-options",
+                    "-v",
+                    "-t",
+                    "$1",
+                    "@oms_panel_repo",
+                ],
+            ]
+            .map(|call| call.iter().map(|word| (*word).to_owned()).collect())
+            .into();
+            for (expected, counters, accepted_frame) in
+                [(&moved, (0, 0, 0), false), (&current, (2, 1, 1), true)]
+            {
+                let mut fenced_obs = obs.clone();
+                let mut fenced = accepted_codex_scope();
+                crate::agy_child_chat::reset_all_agy_counters();
+                spy.calls.borrow_mut().clear();
+                panel.observe_reading(
+                    &mut fenced_obs,
+                    &mut fenced,
+                    true,
+                    &host,
+                    |_, _, _| None,
+                    Some(expected),
+                );
+                assert_eq!(crate::agy_child_chat::test_counters(), counters);
+                assert_eq!(crate::agy_child_chat::total_agy_child_reads(), counters.2);
+                assert_eq!(
+                    *spy.calls.borrow(),
+                    [expected_passive_tmux.clone(), census.clone()].concat()
+                );
+                assert_eq!(
+                    fenced_obs.chat_binding(&participant).is_some(),
+                    accepted_frame
+                );
+                let rows = &fenced["native_children"];
+                assert!(
+                    rows.as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["participant"] == participant)
+                );
+                assert_eq!(
+                    rows.to_string().contains("native_response_usage"),
+                    accepted_frame
+                );
+                assert!(!accepted_frame || *rows == accepted);
+            }
+
+            // With a Claude lead too, both providers are fenced from one census.
+            let claude_pid = 4_194_305; // above Linux's pid_max, so it reads nothing
+            spy.leads.borrow_mut().push(FakeLead {
+                window: "@5".into(),
+                pane_id: "%5".into(),
+                pid: claude_pid,
+                active: false,
+                provider: "claude".into(),
+            });
+            let uid = rustix::process::getuid().as_raw();
+            host.owners
+                .insert(claude_pid, owner_entry(claude_pid, "claude-birth", uid));
+            let both = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
+            let current = both.observation_generation_with_host(&host).unwrap();
+            let claude_capture: Vec<String> = ["tmux", "capture-pane", "-p", "-t", "%5"]
+                .map(str::to_owned)
+                .into();
+            for (expected, fence) in [(None, vec![]), (Some(&current), census.clone())] {
+                crate::agy_child_chat::reset_all_agy_counters();
+                spy.calls.borrow_mut().clear();
+                both.observe_reading(
+                    &mut obs.clone(),
+                    &mut accepted_codex_scope(),
+                    true,
+                    &host,
+                    |_, _, _| None,
+                    expected,
+                );
+                assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
+                assert_eq!(
+                    *spy.calls.borrow(),
+                    [
+                        expected_passive_tmux.clone(),
+                        fence,
+                        vec![claude_capture.clone()]
+                    ]
+                    .concat()
+                );
+            }
+            spy.leads.borrow_mut().pop();
+            host.owners.remove(&claude_pid);
 
             let rows = report["native_children"].as_array().unwrap();
             assert_eq!(rows.len(), 2);
@@ -11556,12 +12841,19 @@ mod tests {
             assert_eq!(row_strict["provider"], "antigravity");
             assert_eq!(row_strict["state"], "done");
             assert_eq!(row_strict["native_answer"], "PARENT_DELIVERED_SUMMARY");
+            assert_eq!(
+                row_strict["native_response_usage"],
+                json!({"scope": "latest_child_response",
+                       "response": {"model": "gemini-x", "created_at": "2026-11-18T18:00:30Z",
+                       "input_tokens": 7, "cached_input_tokens": 3, "output_tokens": 2}})
+            );
             let row_legacy = rows
                 .iter()
                 .find(|r| r["participant"] == legacy_participant)
                 .unwrap();
             assert_eq!(row_legacy["state"], "unknown");
             assert_eq!(row_legacy["native_answer"], "");
+            assert!(row_legacy.get("native_response_usage").is_none());
             assert!(
                 !row_legacy
                     .to_string()
@@ -11641,7 +12933,8 @@ mod tests {
             assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
             assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
 
-            // If .git becomes 0o775, observe still does (0, 0, 0) + 0 reads, and open_agy_chat returns Unbound (0 reads).
+            // If .git becomes 0o775, observe's one usage scan stops at custody (1, 0, 0) with
+            // 0 reads and no usage, and open_agy_chat returns Unbound (0 reads).
             std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o775))
                 .unwrap();
             let mut fallback_obs = Observations::default();
@@ -11650,8 +12943,13 @@ mod tests {
             Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop)
                 .unwrap()
                 .observe_with_host(&mut fallback_obs, &mut fallback_report, true, &host);
-            assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+            assert_eq!(crate::agy_child_chat::test_counters(), (1, 0, 0));
             assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
+            assert!(
+                !fallback_report["native_children"]
+                    .to_string()
+                    .contains("native_response_usage")
+            );
             let fallback_binding = fallback_obs.chat_binding(&participant).unwrap().clone();
             crate::agy_child_chat::reset_all_agy_counters();
             assert!(matches!(

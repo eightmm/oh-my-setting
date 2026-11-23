@@ -2813,7 +2813,8 @@ HUDs. When supported by the CLI, OMS sets the Opus 5.5 per-model
 `modelSettings.<model>.autoCompactWindow` to 300000 and removes equal values;
 as with effort, an identical user value is treated as OMS-owned on removal.
 Model routing stays explicit in
-delegate/run commands; direct edits do not pay for a separate policy hook.
+delegate/run commands. Direct edits pay for one pre-edit hook, the
+[Main write guard](#main-write-guard), which returns at once outside a panel Main.
 
 
 #### Destructive command guard
@@ -2873,7 +2874,7 @@ refuses the same session again, the refusal line adds `This is refusal N of
 this rule in this session: stop and ask the owner instead of rewording the
 command.` (no blocking or ending; the count reads the log, so a removed log
 restarts it). A script's inside is still unseen. `bash scripts/command-guard-hook.sh --audit [N]` prints the
-newest N rows (default 50) counted by verdict and rule. The log records what
+newest N rows (default 50) counted by verdict and rule; `--audit --hours H` (1-720) counts the rows of the last H UTC hours instead, by verdict category only, and reports unusable timestamps and whether the 1000-row cap makes the window possibly incomplete or unknown (the cutoff is inclusive, so an oldest row exactly at it is not proof of coverage). The log records what
 the guard saw and is not a boundary: any process of the same user, an OMS
 worker included, can write or remove the file.
 
@@ -2912,6 +2913,38 @@ Codex and Antigravity remain uncovered. No Codex or Antigravity CLI was
 available to confirm a pre-tool hook contract, `codex execpolicy` rules or
 Antigravity `command(...)` deny rules, so nothing is generated for them.
 
+
+#### Main write guard
+
+A panel Overall Main manages only
+([Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)). This accident-prevention
+hook gates the four Claude native file-edit tools: a PreToolUse hook on
+`Edit`, `Write`, `MultiEdit` and `NotebookEdit` refuses such a call from the
+panel Main when its target is inside the repository the panel manages
+(`OMS_ROOM_REPO`, else the session's directory) or one of that repository's
+linked worktrees. The refusal names the routes: `oms panel --dispatch ROLE
+--access write`, `--continue TASK_ID` for a fix and `--dispatch integrator` for
+a conflict. Files outside that repository and sessions without a panel are not checked.
+Dispatched workers (which carry `OMS_PANEL_DISPATCH=1`) and delegated children
+(`OMS_HARNESS_CHILD=1` or `OMS_HARNESS_DELEGATE_DEPTH`, which include Provider
+Leads and managed workers) are allowed. Unmanaged native subagents
+spawned directly by a Claude panel Main inherit Main's environment without those
+markers and are likewise refused. A brief for `--brief-file` is an outside file:
+Main writes it to session scratch or `TMPDIR`, not into the checkout.
+
+The guard judges the edit tool's target path. It covers files in the managed
+repository and in its linked worktrees, and it also covers submodules inside
+them. When the tool payload cannot be parsed, the call passes and the guard
+prints one stderr diagnostic line. Changes made through Bash are not judged
+by this guard. Shell access stays governed by the provider's own shell
+permissions. The guard runs under Claude Code only, as the command guard
+does. A Codex or Antigravity Main relies on its startup contract.
+
+The switch belongs to the person: `OMS_MAIN_WRITE_GUARD=0` in the environment
+`oms panel` was started from turns the guard off for that Main. When the user
+tells a running Main to make one change itself, the user makes it in their own
+shell or restarts the panel with the switch; the Room records the instruction
+either way.
 
 #### Hook ownership and audits
 
@@ -3075,6 +3108,11 @@ supported or partial cell names its implementation and test, and
 test references without running providers. The
 [native lifecycle fixture](../crates/oms-command-lifecycle/tests/native_lifecycle.rs)
 exercises this check.
+A custom adapter author can check the one-shot contract directly with the
+[reference conformance script](examples/agent-adapter-conformance.sh): name,
+executable and bounded probes by default, and with `--run` a read call (plus
+`--write`) in a throwaway repository. It calls the adapter, not OMS, records
+nothing, and a pass is not sandbox, live-provider or admission evidence.
 
 
 #### Optional hints and budgets
@@ -3275,6 +3313,7 @@ documentation references without its CI orchestration, installation or CLI-help 
 that probe once before installing: only a proven answer (exit 0) installs the quick
 hook; absent (1) and unknown (2) refuse with the probe's line and leave the existing
 hook untouched.
+`--repo PATH` targets another OMS source worktree root. It converges that root's hooks, or withdraws them with `--remove`. The root must hold `scripts/check.sh` to install. `--check-protection` then probes that target. The default hook stays full.
 
 
 ### CI selection and execution

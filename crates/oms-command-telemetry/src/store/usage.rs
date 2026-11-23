@@ -5,8 +5,12 @@
 use super::*;
 use crate::value::{encode, obj};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub const RECEIPTS: &str = ".oms/usage/receipts.jsonl";
+/// Optional supplemental counters keyed by exact receipt identity. The strict
+/// receipt schema and bytes never depend on this file.
+pub const REASONING: &str = ".oms/usage/reasoning.jsonl";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Identity {
@@ -113,6 +117,9 @@ pub struct AccountedCall {
     pub tokens: Option<u64>,
     pub cost_microusd: Option<u64>,
     pub conflict: bool,
+    /// Provider-reported reasoning tokens proven for this exact final receipt.
+    /// Absent means unknown, never zero.
+    pub reasoning_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -131,6 +138,8 @@ pub struct AttributedUsage {
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    /// Reported only for an exact standalone call; reasoning may overlap output.
+    pub reasoning_tokens: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,7 +219,10 @@ impl Projection {
                         observed,
                         cumulative.baseline_unknown,
                     ),
-                None => observed.map(AttributedUsage::standalone),
+                None => observed.map(|observed| AttributedUsage {
+                    reasoning_tokens: call.reasoning_tokens,
+                    ..AttributedUsage::standalone(observed)
+                }),
             };
             // An unbound call can still advance or break a known session's
             // baseline. Only the exact attempt receives the derived usage.
@@ -239,6 +251,7 @@ impl AttributedUsage {
             cache_read_tokens: usage.cache_read_tokens,
             cache_write_tokens: usage.cache_write_tokens,
             total_tokens,
+            reasoning_tokens: None,
         }
     }
     fn between(usage: &Usage, previous: &Usage) -> Result<Self, ()> {
@@ -315,6 +328,11 @@ fn identifier(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
+fn sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
 fn validate(receipt: &Receipt) -> Result<(), StoreError> {
     let id = &receipt.identity;
     if receipt.ordinal == 0
@@ -338,12 +356,10 @@ fn validate(receipt: &Receipt) -> Result<(), StoreError> {
             .cumulative
             .as_ref()
             .is_some_and(|s| !identifier(&s.session_id))
-        || receipt.source_sha256.as_deref().is_some_and(|s| {
-            s.len() != 64
-                || !s
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        })
+        || receipt
+            .source_sha256
+            .as_deref()
+            .is_some_and(|s| !sha256_hex(s))
     {
         return Err(invalid("invalid usage receipt identity"));
     }
@@ -658,11 +674,216 @@ fn current(rows: &[Receipt]) -> Result<Vec<Receipt>, StoreError> {
 /// Read a strict, complete snapshot. Missing history means no tracked calls,
 /// never an assertion that the provider has billed nothing outside OMS.
 pub fn load(repo: &Path) -> Result<Projection, StoreError> {
-    project(&receipts(&read_index(
+    let mut projection = project(&receipts(&read_index(
         repo,
         Some(Path::new(RECEIPTS)),
         true,
-    )?)?)
+    )?)?)?;
+    // Optional evidence: a missing, oversized, torn or unreadable supplement
+    // leaves core usage intact and reasoning unknown.
+    if let Ok(found) = read_reasoning(repo).and_then(|bytes| reasoning_index(&bytes)) {
+        for call in &mut projection.calls {
+            call.reasoning_tokens = proven_reasoning(&call.receipt, &found);
+        }
+    }
+    Ok(projection)
+}
+
+/// The supplement is small by contract; reads and rewrites enforce it before
+/// any large allocation.
+pub const MAX_REASONING_BYTES: usize = 1024 * 1024;
+/// Optional evidence never waits longer than this for its lock.
+const REASONING_LOCK_WAIT: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Reasoning {
+    call_id: String,
+    attempt_id: String,
+    revision: u64,
+    source_sha256: String,
+    tokens: u64,
+}
+/// One entry per (call id, revision); `None` marks a conflicting duplicate.
+type ReasoningIndex = BTreeMap<(String, u64), Option<Reasoning>>;
+/// A final standalone receipt with an attempt and source digest is the only
+/// identity a supplement may describe.
+fn eligible(receipt: &Receipt) -> Option<(&str, &str)> {
+    (receipt.phase == Phase::Final && receipt.cumulative.is_none())
+        .then(|| {
+            Some((
+                receipt.identity.attempt_id.as_deref()?,
+                receipt.source_sha256.as_deref()?,
+            ))
+        })
+        .flatten()
+}
+fn proven_reasoning(receipt: &Receipt, found: &ReasoningIndex) -> Option<u64> {
+    let (attempt, digest) = eligible(receipt)?;
+    let r = found
+        .get(&(receipt.identity.call_id.clone(), receipt.revision))?
+        .as_ref()?;
+    (r.attempt_id == attempt && r.source_sha256 == digest).then_some(r.tokens)
+}
+fn encode_reasoning(r: &Reasoning) -> Result<Vec<u8>, StoreError> {
+    encode(
+        &obj!("schema":1, "kind":"provider-reasoning", "call_id":r.call_id.clone(),
+        "attempt_id":r.attempt_id.clone(), "revision":number(r.revision),
+        "source_sha256":r.source_sha256.clone(), "reasoning_tokens":number(r.tokens)),
+    )
+    .map_err(|_| invalid("cannot encode reasoning evidence"))
+}
+fn decode_reasoning(line: &[u8]) -> Result<Reasoning, StoreError> {
+    let v = row(line)?;
+    oms_context::parse_json(line)
+        .map_err(|_| invalid("invalid or duplicate reasoning evidence JSON"))?;
+    keys(
+        &v,
+        &[
+            "schema",
+            "kind",
+            "call_id",
+            "attempt_id",
+            "revision",
+            "source_sha256",
+            "reasoning_tokens",
+        ],
+    )?;
+    if v["schema"] != V::from(1) || v["kind"].text() != Some("provider-reasoning") {
+        return Err(invalid("unsupported reasoning evidence schema"));
+    }
+    let found = Reasoning {
+        call_id: string(&v["call_id"])?,
+        attempt_id: string(&v["attempt_id"])?,
+        revision: uint(&v["revision"])?,
+        source_sha256: string(&v["source_sha256"])?,
+        tokens: uint(&v["reasoning_tokens"])?,
+    };
+    if !identifier(&found.call_id)
+        || !identifier(&found.attempt_id)
+        || found.revision == 0
+        || !sha256_hex(&found.source_sha256)
+    {
+        return Err(invalid("invalid reasoning evidence identity"));
+    }
+    Ok(found)
+}
+fn reasoning_rows(bytes: &[u8]) -> Result<Vec<Reasoning>, StoreError> {
+    if bytes.len() > MAX_REASONING_BYTES {
+        return Err(invalid("reasoning evidence exceeds its size cap"));
+    }
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(invalid("partial final JSONL row"));
+    }
+    bytes
+        .split_inclusive(|b| *b == b'\n')
+        .map(decode_reasoning)
+        .collect()
+}
+/// Index before any identity matching: identical repeats are idempotent, any
+/// other row for the same call and revision proves nothing.
+fn reasoning_index(bytes: &[u8]) -> Result<ReasoningIndex, StoreError> {
+    let mut index = ReasoningIndex::new();
+    for r in reasoning_rows(bytes)? {
+        match index.entry((r.call_id.clone(), r.revision)) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(Some(r));
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if slot.get().as_ref() != Some(&r) {
+                    *slot.get_mut() = None;
+                }
+            }
+        }
+    }
+    Ok(index)
+}
+fn read_reasoning(repo: &Path) -> Result<Vec<u8>, StoreError> {
+    let root = Root::open(repo)?;
+    let target = canonical_index(repo, Some(Path::new(REASONING)), false, false)?;
+    let body = root.read_no_follow(
+        &target,
+        ByteReadOptions {
+            missing_ok: true,
+            max_bytes: MAX_REASONING_BYTES,
+        },
+    )?;
+    super::paths::validate(&root, &target, false)?;
+    lines(&body)?;
+    Ok(body)
+}
+
+/// Idempotently append provider-reported reasoning tokens for one exact, already
+/// recorded final receipt. The receipt ledger is neither read under this lock
+/// nor modified. The lock wait is short and cancellation-aware: contention,
+/// an oversized or conflicting supplement leaves reasoning unknown, and a
+/// repeat of the same settlement retries.
+pub fn record_reasoning(
+    repo: &Path,
+    receipt: &Receipt,
+    tokens: u64,
+    interrupted: &AtomicBool,
+) -> Result<bool, StoreError> {
+    validate(receipt)?;
+    let (attempt, digest) = eligible(receipt).ok_or(invalid(
+        "reasoning evidence needs a final standalone receipt with attempt and source digest",
+    ))?;
+    let recorded = current(&receipts(&read_index(
+        repo,
+        Some(Path::new(RECEIPTS)),
+        false,
+    )?)?)?;
+    if !recorded.iter().any(|r| r == receipt) {
+        return Err(invalid("reasoning evidence has no matching usage receipt"));
+    }
+    let found = Reasoning {
+        call_id: receipt.identity.call_id.clone(),
+        attempt_id: attempt.to_owned(),
+        revision: receipt.revision,
+        source_sha256: digest.to_owned(),
+        tokens,
+    };
+    let encoded = encode_reasoning(&found)?;
+    let root = Root::open(repo)?;
+    let target = canonical_index(repo, Some(Path::new(REASONING)), false, false)?;
+    let _guard = lock_file_before(&target, interrupted, Instant::now() + REASONING_LOCK_WAIT)?;
+    super::paths::validate(&root, &target, true)?;
+    let mut added = false;
+    root.atomic_mutate(
+        &target,
+        MutationOptions {
+            read: ByteReadOptions {
+                missing_ok: true,
+                max_bytes: MAX_REASONING_BYTES,
+            },
+            create_parent: true,
+            max_output: MAX_REASONING_BYTES,
+            ..MutationOptions::default()
+        },
+        |old| {
+            cancelled(interrupted)?;
+            super::paths::validate(&root, &target, false)?;
+            let rows = reasoning_rows(old)?;
+            let mut same = rows
+                .iter()
+                .filter(|r| r.call_id == found.call_id && r.revision == found.revision)
+                .peekable();
+            if same.peek().is_some() {
+                // Any differing row, even beside a matching one, is a conflict.
+                return if same.all(|r| *r == found) {
+                    Ok(old.to_vec())
+                } else {
+                    Err(invalid("conflicting reasoning evidence"))
+                };
+            }
+            let mut new = old.to_vec();
+            new.extend_from_slice(&encoded);
+            lines(&new)?;
+            cancelled(interrupted)?;
+            added = true;
+            Ok(new)
+        },
+    )?;
+    Ok(added)
 }
 type SessionIdentity = (String, Option<String>, String);
 type MeasuredTotals = (Option<u64>, Option<u64>);
@@ -699,6 +920,7 @@ fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
             tokens,
             cost_microusd: cost,
             conflict,
+            reasoning_tokens: None,
         });
     }
     Ok(Projection { calls })

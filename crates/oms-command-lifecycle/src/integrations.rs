@@ -25,6 +25,12 @@ pub(crate) fn expected(paths: &Paths) -> Result<Value> {
         ("PreToolUse", "git-move-guard-hook", Some("Bash"), Some(5)),
         ("PreToolUse", "command-guard-hook", Some("Bash"), Some(5)),
         (
+            "PreToolUse",
+            "main-write-guard-hook",
+            Some("Edit|Write|MultiEdit|NotebookEdit"),
+            Some(5),
+        ),
+        (
             "PostToolUse",
             "syntax-guard-hook",
             Some("Edit|Write|MultiEdit"),
@@ -51,7 +57,7 @@ pub(crate) fn expected(paths: &Paths) -> Result<Value> {
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({"schema":1,"hooks_schema":12,"root":paths.source,"surfaces":rows}))
+    Ok(json!({"schema":1,"hooks_schema":13,"root":paths.source,"surfaces":rows}))
 }
 pub(crate) fn native_command(paths: &Paths, verb: &str) -> Result<String> {
     Ok(format!(
@@ -652,6 +658,92 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
     }
     Ok(())
 }
+/// The validated hook directory, or `None` when removal has nothing to undo.
+/// An explicit `--repo` selects another OMS source worktree; the receipt owner stays canonical.
+fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Option<PathBuf>> {
+    // The mutation helper suppresses hooks with core.hooksPath=/dev/null;
+    // a read-only path query must retain Git's configured hook directory.
+    let explicit = options.has("--repo");
+    // Only legacy implicit withdrawal may no-op; an explicit target must be proved.
+    let remove = options.has("--remove") && !explicit;
+    let Some(git) = r::find("git", &paths.cwd) else {
+        return if remove {
+            Ok(None)
+        } else {
+            r::fail("git is required")
+        };
+    };
+    let output = if explicit {
+        r::command(
+            git,
+            &[
+                "rev-parse".into(),
+                "--show-toplevel".into(),
+                "--git-common-dir".into(),
+                "--git-path".into(),
+                "hooks".into(),
+            ],
+            &paths.cwd,
+            None,
+            flag,
+            std::time::Duration::from_secs(30),
+        )?
+    } else {
+        r::command(
+            git,
+            &["rev-parse".into(), "--git-path".into(), "hooks".into()],
+            &paths.source,
+            None,
+            flag,
+            std::time::Duration::from_secs(30),
+        )?
+    };
+    if output.0 != 0 {
+        return if remove {
+            Ok(None)
+        } else {
+            r::fail("cannot resolve Git hook directory")
+        };
+    }
+    let raw = String::from_utf8(output.1)
+        .map_err(|_| r::Error(2, "Git hook directory is not UTF-8".into()))?;
+    if !explicit {
+        let dir = PathBuf::from(raw.trim_end_matches(['\r', '\n']));
+        return Ok(Some(if dir.is_absolute() {
+            dir
+        } else {
+            paths.source.join(dir)
+        }));
+    }
+    let base = &paths.cwd;
+    let lines = raw
+        .split('\n')
+        .map(|l| l.trim_end_matches('\r'))
+        .collect::<Vec<_>>();
+    let [top, common, hooks_path, ""] = lines.as_slice() else {
+        return r::fail("cannot resolve Git hook directory");
+    };
+    let resolve = |p: &str| {
+        let p = PathBuf::from(p);
+        r::physical(&if p.is_absolute() { p } else { base.join(p) })
+    };
+    let dir = resolve(hooks_path)?;
+    let top = resolve(top)?;
+    if top != *base
+        || !top.join("Cargo.toml").is_file()
+        || !top.join("crates/oms/Cargo.toml").is_file()
+    {
+        return r::fail("--repo must be the root of an OMS source worktree");
+    }
+    if !options.has("--remove") && !top.join("scripts/check.sh").is_file() {
+        return r::fail("--repo must contain scripts/check.sh");
+    }
+    // A shared or global core.hooksPath would write beyond this repository.
+    if !dir.starts_with(resolve(common)?) && !dir.starts_with(&top) {
+        return r::fail("Git hook directory is outside the selected repository");
+    }
+    Ok(Some(dir))
+}
 fn git_hook(
     paths: &Paths,
     options: &Options,
@@ -661,46 +753,20 @@ fn git_hook(
     if options.has("--check-protection") && !options.hook_protected {
         return r::fail("CI gate requirement was not proven; quick hook unchanged");
     }
-    // The mutation helper suppresses hooks with core.hooksPath=/dev/null;
-    // a read-only path query must retain Git's configured hook directory.
     let remove = options.has("--remove");
-    let Some(git) = r::find("git", &paths.cwd) else {
-        // Withdrawal has nothing to undo without git; install cannot proceed.
-        return if remove {
-            Ok(())
-        } else {
-            r::fail("git is required")
-        };
+    let Some(dir) = hook_dir(paths, options, flag)? else {
+        return Ok(());
     };
-    let output = r::command(
-        git,
-        &["rev-parse".into(), "--git-path".into(), "hooks".into()],
-        &paths.source,
-        None,
-        flag,
-        std::time::Duration::from_secs(30),
-    )?;
-    if output.0 != 0 {
-        return if remove {
-            Ok(())
-        } else {
-            r::fail("cannot resolve Git hook directory")
-        };
-    }
-    let raw = String::from_utf8(output.1)
-        .map_err(|_| r::Error(2, "Git hook directory is not UTF-8".into()))?;
-    let dir = PathBuf::from(raw.trim_end_matches(['\r', '\n']));
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        paths.source.join(dir)
-    };
+    // Byte-exact hook written by scripts/install-hooks.sh at e0b92359; any edit stays unmanaged.
+    const OLD_PUSH: &str = "#!/usr/bin/env bash\n# Installed by scripts/install-hooks.sh — runs the repo gate before every push.\n# Bypass for an emergency with: git push --no-verify\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/check.sh\"\n";
     let owned = |name: &str, header: &str, legacy: &str| -> Result<(PathBuf, bool)> {
         let target = dir.join(name);
         let ours = !r::exists(&target) || {
             let old = r::read(&target, r::LIMIT)?;
             let text = String::from_utf8_lossy(&old);
-            text.starts_with(header) || !legacy.is_empty() && text.contains(legacy)
+            text.starts_with(header)
+                || !legacy.is_empty() && text.contains(legacy)
+                || name == "pre-push" && text == OLD_PUSH
         };
         Ok((target, ours))
     };
@@ -893,7 +959,14 @@ pub(crate) fn run(
     };
     let mut prepared = prepared;
     if options.has("--check-protection") {
-        let out = services.hook_protection(&paths.source, flag);
+        // An explicit target must prove its own protection, after validation and before mutation.
+        let target = if options.tool == "install-hooks" && options.has("--repo") {
+            hook_dir(paths, options, flag)?;
+            &paths.cwd
+        } else {
+            &paths.source
+        };
+        let out = services.hook_protection(target, flag);
         if out.0 != 0 {
             return Err(r::Error(
                 1,

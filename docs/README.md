@@ -41,7 +41,9 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Consolidation work packets](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | Ten scoped follow-ups with reusable APIs, callers and canonical fixtures |
 | [Tool context review](TOOL-CONTEXT-REVIEW.md) | November 19 source review, implemented CC-04 output reader and native discovery boundaries |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
+| [Harness gap ranking](HARNESS-GAP-RANKING.md) | Ranked candidate gaps against other harnesses, orchestrators and collaboration tools, with their relation to existing scope decisions |
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
+| [Agent harness work packets](AGENT-HARNESS-WORK-PACKETS.md) | Design-only AH-01–13: capability tiers, session adapter contract, conformance tests, guard and sandbox coverage, council seats and collaboration surfaces for arbitrary agents |
 | [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 

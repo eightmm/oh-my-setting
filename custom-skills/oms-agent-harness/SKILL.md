@@ -12,7 +12,9 @@ OMS is an agent-side control plane.
 Overall Main owns scope, admission, verification, commit, push, release, and
 synthesis across providers. An explicitly authorized Provider Lead can coordinate
 native subagents within that scope and the host's permissions. Leaf Workers
-return evidence and patches without recursively delegating.
+return evidence and patches without recursively delegating. While a team runs,
+Main manages and edits nothing: see
+[coordination-layers.md](references/coordination-layers.md).
 Operate OMS internally. Users give goals, constraints, and authority.
 Never ask users to copy commands, digests, `.oms` paths, or recovery procedures.
 Ask only for material decisions or new authority.
@@ -36,6 +38,7 @@ approvals, commit intents, or publication intents.
 | Context | Use `oms graph project context --task "..."` when relationships or change impact are unclear; reuse a current pack. Direct search suffices for known local scope. Outline a large file with `oms graph project api PATH` before reading it whole. `oms runtime context --target PATH` supplies bounded source bytes. |
 | Delegation | When authorized: `oms panel --dispatch ROLE`, `oms peer-delegate --to NAME` (one write). For multi-slice terminal panel control-tower work use `oms-panel-orchestrator`. Load [roles.md](references/roles.md), [model-routing.md](references/model-routing.md), [delegation-artifacts.md](references/delegation-artifacts.md) as needed. |
 | Verification and landing | Run local checks directly. For creating a project verification skill, see [verification skill guidance](references/verification-skill.md). `oms peer-review --gate` is for authorized peer review, not every edit. `patch-land` admits/applies worker patches; `oms land` gates/pushes/updates a committed worktree when authorized. |
+| Request tracking | Capture each actionable user deliverable cumulatively before substantive work: exact scope, dependencies, completion criterion and receipt. Reuse Room notes and `oms agent-plan ready` (plus the plan's show view when present). Recheck pending items on every new message and resume; answer status questions without altering the list. Use native leads or bounded dispatch only when authorized; a solo session keeps it as internal work state plus a durable record. Store summaries, never raw user text or transcripts; the record grants no publication or extra permission. |
 | Continuity | Journal for history, agent-memory for stable facts, session-handoff for local sessions, runtime capsule for sanitized transfer. See [state-memory.md](references/state-memory.md). |
 | Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows and the advisory-verb table use [runtime-core.md](references/runtime-core.md). |
 
@@ -82,6 +85,7 @@ projections, not authority.
 - Graphs: [graphs.md](references/graphs.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
 - Worker roles: [roles.md](references/roles.md)
+- Main, Lead and Worker duties: [coordination-layers.md](references/coordination-layers.md)
 - Consultation: [cross-agent-consultation.md](references/cross-agent-consultation.md)
 - Review/release gates: [review-gates.md](references/review-gates.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)

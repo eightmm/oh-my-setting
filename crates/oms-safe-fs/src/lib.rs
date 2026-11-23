@@ -197,6 +197,15 @@ fn valid_file(s: &Stat, p: Policy) -> bool {
         && (!p.single_link || s.st_nlink == 1)
         && p.owner.is_none_or(|uid| uid == s.st_uid)
 }
+fn safe_registry_dir(s: &Stat) -> bool {
+    FileType::from_raw_mode(s.st_mode) == FileType::Directory
+        && (s.st_uid == 0 || s.st_uid == rustix::process::getuid().as_raw())
+        && s.st_mode & 0o022 == 0
+}
+fn same_registry_dir(a: &Stat, b: &Stat) -> bool {
+    safe_registry_dir(b) && identity(a, b) && a.st_uid == b.st_uid && a.st_mode == b.st_mode
+}
+
 fn size_matches(stat: &Stat, count: usize) -> bool {
     u64::try_from(stat.st_size).ok() == u64::try_from(count).ok()
 }
@@ -206,6 +215,7 @@ pub struct Root {
     path: PathBuf,
     fd: OwnedFd,
     initial: Stat,
+    private_ancestry: Option<Vec<(OwnedFd, Stat, std::ffi::OsString)>>,
 }
 impl Root {
     /// Resolves the repository path physically, as the legacy inspector does.
@@ -219,7 +229,113 @@ impl Root {
         })?;
         let fd = fs::open(&path, directory_flags(), Mode::empty()).map_err(map_open)?;
         let initial = fs::fstat(&fd).map_err(|_| Error::Unreadable)?;
-        Ok(Self { path, fd, initial })
+        Ok(Self {
+            path,
+            fd,
+            initial,
+            private_ancestry: None,
+        })
+    }
+
+    /// Open an absolute account-registry root without following any component.
+    /// Every directory must be owned by root or the real UID and must not be
+    /// group- or world-writable. Byte operations additionally require private,
+    /// current-UID, single-link regular leaves in `read_no_follow` and
+    /// `atomic_mutate`; other read APIs retain their existing policies.
+    /// This detects observed changes,
+    /// not attacks by root or the same UID. Platform aliases such as macOS
+    /// `/var` -> `/private/var` must be supplied in their physical spelling;
+    /// symlink aliases are rejected, including aliases in ancestors.
+    pub fn open_private_registry(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let raw = path.as_os_str().as_bytes();
+        if !path.is_absolute() || raw.contains(&0) || raw.starts_with(b"//") {
+            return Err(Error::InvalidPath);
+        }
+        let parts: Vec<_> = raw[1..].split(|b| *b == b'/').collect();
+        if parts
+            .iter()
+            .any(|p| p.is_empty() || *p == b"." || *p == b"..")
+        {
+            return Err(Error::InvalidPath);
+        }
+        let root = fs::open("/", directory_flags(), Mode::empty()).map_err(map_open)?;
+        let stat = fs::fstat(&root).map_err(map_open)?;
+        if !safe_registry_dir(&stat) {
+            return Err(Error::Unsafe);
+        }
+        let mut ancestry = vec![(root, stat, std::ffi::OsString::new())];
+        for part in parts {
+            let name = OsStr::from_bytes(part);
+            let parent = &ancestry.last().unwrap().0;
+            let named = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(map_open)?;
+            if !safe_registry_dir(&named) {
+                return Err(Error::Unsafe);
+            }
+            let fd =
+                fs::openat(parent, name, directory_flags(), Mode::empty()).map_err(map_open)?;
+            let opened = fs::fstat(&fd).map_err(map_open)?;
+            if !same_registry_dir(&named, &opened) {
+                return Err(Error::Changed);
+            }
+            ancestry.push((fd, opened, name.to_owned()));
+        }
+        let fd = fs::openat(
+            &ancestry.last().unwrap().0,
+            ".",
+            directory_flags(),
+            Mode::empty(),
+        )
+        .map_err(map_open)?;
+        let initial = fs::fstat(&fd).map_err(map_open)?;
+        let result = Self {
+            path: path.to_path_buf(),
+            fd,
+            initial,
+            private_ancestry: Some(ancestry),
+        };
+        result.revalidate_private().map_err(|_| Error::Changed)?;
+        Ok(result)
+    }
+
+    fn revalidate_private(&self) -> Result<(), ()> {
+        let Some(chain) = &self.private_ancestry else {
+            return Ok(());
+        };
+        for (i, (fd, initial, name)) in chain.iter().enumerate() {
+            let opened = fs::fstat(fd).map_err(|_| ())?;
+            let named = if i == 0 {
+                let root = fs::open("/", directory_flags(), Mode::empty()).map_err(|_| ())?;
+                fs::fstat(root).map_err(|_| ())?
+            } else {
+                fs::statat(&chain[i - 1].0, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| ())?
+            };
+            if !same_registry_dir(initial, &opened) || !same_registry_dir(initial, &named) {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Metadata through the held descriptors only, never by reopening a name.
+    /// A private-registry root first re-checks every held ancestor descriptor
+    /// and its no-follow name against what `open_private_registry` validated
+    /// (`Changed` on any difference); a root from [`Self::open`] has no held
+    /// ancestry to re-check. Returns the held root's current metadata and the
+    /// no-follow metadata of the single-component `entry` beneath it, `None`
+    /// only for ENOENT. The entry is never opened or read.
+    pub fn pinned_metadata(&self, entry: &OsStr) -> Result<(Stat, Option<Stat>), Error> {
+        let name = entry.as_bytes();
+        if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
+            return Err(Error::InvalidPath);
+        }
+        self.revalidate_private().map_err(|()| Error::Changed)?;
+        let held = fs::fstat(&self.fd).map_err(|_| Error::Unreadable)?;
+        match fs::statat(&self.fd, entry, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok((held, Some(stat))),
+            Err(rustix::io::Errno::NOENT) => Ok((held, None)),
+            Err(error) => Err(map_open(error)),
+        }
     }
 
     /// Physical spelling captured when this root was opened; it may later be replaced.

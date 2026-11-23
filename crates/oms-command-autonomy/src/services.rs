@@ -105,6 +105,21 @@ pub trait Services: oms_command_plan::Services + Sync {
             "native bounded GitHub GET service unavailable",
         ))
     }
+    /// One-shot read-only GitHub GET listing open issues carrying one explicit
+    /// label. Never mutates remote state, polls, or follows pagination links.
+    fn list_issues(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        _label: &str,
+        _limit: u64,
+        _interrupted: &AtomicBool,
+    ) -> Result<Vec<u8>> {
+        Err(Error::new(
+            2,
+            "native bounded GitHub GET service unavailable",
+        ))
+    }
     /// Resolve an explicitly reviewed feedback identity through the native
     /// landing observer and fresh exact-head GitHub GETs. This is evidence,
     /// never a grant to dispatch or change a task's scope.
@@ -304,6 +319,44 @@ impl oms_command_plan::Services for LocalServices<'_> {
         })
     }
 }
+/// Validate and percent-encode the read-only GitHub GET endpoint for listing
+/// open issues carrying one explicit label.
+pub fn issues_list_endpoint(owner: &str, repo: &str, label: &str, limit: u64) -> Result<String> {
+    crate::require(
+        regex::Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+            .unwrap()
+            .is_match(owner)
+            && regex::Regex::new(r"^[A-Za-z0-9_.-]{1,100}$")
+                .unwrap()
+                .is_match(repo)
+            && ![".", ".."].contains(&repo),
+        "--github must be OWNER/REPO",
+    )?;
+    crate::require(
+        !label.is_empty()
+            && label.len() <= 50
+            && label.trim() == label
+            && value::clean_text(label)
+            && regex::Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9._:/ -]{0,48}[A-Za-z0-9])?$")
+                .unwrap()
+                .is_match(label),
+        "--label must be 1-50 safe characters (letters, digits, '.', '_', '-', ':', '/', space)",
+    )?;
+    crate::require((1..=20).contains(&limit), "--limit must be 1..20")?;
+    let mut encoded = String::with_capacity(label.len());
+    for byte in label.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    Ok(format!(
+        "repos/{owner}/{repo}/issues?state=open&labels={encoded}&per_page={limit}"
+    ))
+}
+
 impl Services for LocalServices<'_> {
     fn read_issue(&self, endpoint: &str, interrupted: &AtomicBool) -> Result<Vec<u8>> {
         crate::require(
@@ -327,6 +380,39 @@ impl Services for LocalServices<'_> {
         ];
         let (code, raw, _, _) =
             supervise(request, Duration::from_secs(20), 512 * 1024, interrupted)?;
+        crate::require(
+            code == 0,
+            "GitHub source unavailable or exceeded its bounded GET",
+        )?;
+        Ok(raw)
+    }
+    fn list_issues(
+        &self,
+        owner: &str,
+        repo: &str,
+        label: &str,
+        limit: u64,
+        interrupted: &AtomicBool,
+    ) -> Result<Vec<u8>> {
+        let endpoint = issues_list_endpoint(owner, repo, label, limit)?;
+        let mut request = Request::new(vec![
+            "gh".into(),
+            "api".into(),
+            "--hostname".into(),
+            "github.com".into(),
+            "--method".into(),
+            "GET".into(),
+            endpoint.into(),
+        ]);
+        request.environment = vec![
+            ("GH_PROMPT_DISABLED".into(), "1".into()),
+            ("GH_PAGER".into(), "cat".into()),
+        ];
+        let (code, raw, _, _) =
+            supervise(request, Duration::from_secs(20), 512 * 1024, interrupted)?;
+        if code == 130 {
+            return Err(Error::new(130, "interrupted"));
+        }
         crate::require(
             code == 0,
             "GitHub source unavailable or exceeded its bounded GET",

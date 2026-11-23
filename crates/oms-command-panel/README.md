@@ -144,9 +144,11 @@ requested account must match its verified launch binding.
 The managed Main can open provider orchestrators with
 `oms panel --orchestrator PROVIDER --room ROOM`. Use that command with
 `--task TEXT` to submit a one-line assignment to an idle, connected provider.
-The assignments give the Main and provider orchestrators responsibility for
-review and verification, with substantive implementation delegated to scoped
-workers. Research, review and verification use the provider's read-only
+The Main contract is management only: Main plans, assigns, reviews evidence
+and decides acceptance, and sends every repository edit to a worker or Lead
+unless the user tells it to make a change itself. Provider orchestrators lead
+one assignment each, delegate substantive implementation to scoped workers and
+keep their own edits to integration and unblocking. Research, review and verification use the provider's read-only
 controls where available. Native child records report effective access as
 unverified. Set `OMS_PANEL_MAIN_PERMISSIONS=native` for new Main and
 orchestrator launches to use provider permission settings without OMS adding

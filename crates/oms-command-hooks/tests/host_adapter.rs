@@ -429,6 +429,201 @@ fn syntax_guard_reports_json_errors_without_an_interpreter() {
     assert_eq!((code, out.as_str()), (0, ""));
 }
 
+#[test]
+fn main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only() {
+    const NAME: &str = "main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only";
+    const MAIN: [(&str, &str); 2] = [
+        ("OMS_PANEL_MAIN_ATTEMPT", "att-main-write"),
+        ("OMS_PANEL_SESSION", "oms-main-write"),
+    ];
+    if std::env::var_os("OMS_TEST_CLEAN_CHILD").is_none() {
+        clean_env_child(NAME, &MAIN);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_ROOM_REPO", "repo")]);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_MAIN_WRITE_GUARD", "0")]);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_HARNESS_CHILD", "1")]);
+        clean_env_child(
+            NAME,
+            &[MAIN[0], MAIN[1], ("OMS_HARNESS_DELEGATE_DEPTH", "1")],
+        );
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_PANEL_DISPATCH", "1")]);
+        clean_env_child(NAME, &[]);
+        return;
+    }
+    let set = |name: &str| std::env::var(name).unwrap_or_default();
+    let enforced = !set("OMS_PANEL_SESSION").is_empty()
+        && set("OMS_PANEL_DISPATCH") != "1"
+        && set("OMS_MAIN_WRITE_GUARD") != "0"
+        && set("OMS_HARNESS_CHILD") != "1"
+        && matches!(set("OMS_HARNESS_DELEGATE_DEPTH").as_str(), "" | "0");
+    let tmp = TempDir::new("main-write");
+    let repo = git_repo(&tmp);
+    let git = |dir: &Path, args: &[&str]| {
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+        assert!(
+            Command::new("git")
+                .args(identity)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git")
+                .success()
+        );
+    };
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(
+        &repo,
+        &["worktree", "add", "-q", "../linked", "-b", "linked"],
+    );
+    let submodule = repo.join("sub");
+    fs::create_dir_all(&submodule).unwrap();
+    let module_git = repo.join(".git/modules/sub");
+    fs::create_dir_all(module_git.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            module_git.to_str().unwrap(),
+            submodule.to_str().unwrap(),
+        ],
+    );
+    let sub_dir = repo.join("sub_dir");
+    fs::create_dir_all(&sub_dir).unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let link_dir = outside.join("link_dir");
+    std::os::unix::fs::symlink(&sub_dir, &link_dir).unwrap();
+    let dangling = outside.join("dangling.rs");
+    std::os::unix::fs::symlink(repo.join("does-not-exist.rs"), &dangling).unwrap();
+    let other_repo = tmp.path().join("other");
+    fs::create_dir_all(&other_repo).unwrap();
+    git(&other_repo, &["init", "-q"]);
+
+    let run_raw = |raw: &[u8]| hook(&tmp, "main-write-guard-hook", &[], raw);
+    let run_in = |cwd: &Path, tool: &str, key: &str, path: &Path| {
+        let payload =
+            serde_json::json!({"tool_name":tool,"cwd":cwd,"tool_input":{key:path}}).to_string();
+        run_raw(payload.as_bytes())
+    };
+    let assert_refused_if_enforced = |label: &str, (code, out, err): (i32, String, String)| {
+        if enforced {
+            assert_eq!((code, out.as_str()), (2, ""), "{label}");
+            assert!(
+                err.starts_with("main write guard: ") && err.contains("--dispatch"),
+                "{label}: {err}"
+            );
+        } else {
+            assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "{label}");
+        }
+    };
+
+    for (label, tool, key, path) in [
+        (
+            "Edit absolute",
+            "Edit",
+            "file_path",
+            repo.join("src/new.rs"),
+        ),
+        (
+            "Write relative missing nested",
+            "Write",
+            "file_path",
+            PathBuf::from("nested/missing/new.rs"),
+        ),
+        (
+            "MultiEdit absolute",
+            "MultiEdit",
+            "file_path",
+            repo.join("src/multi.rs"),
+        ),
+        (
+            "NotebookEdit linked worktree",
+            "NotebookEdit",
+            "notebook_path",
+            tmp.path().join("linked/a.ipynb"),
+        ),
+        (
+            "Edit submodule",
+            "Edit",
+            "file_path",
+            submodule.join("lib.rs"),
+        ),
+        (
+            "Write external symlink",
+            "Write",
+            "file_path",
+            link_dir.join("inside.rs"),
+        ),
+        (
+            "Edit external symlink parent traversal",
+            "Edit",
+            "file_path",
+            link_dir.join("../escaped.rs"),
+        ),
+        (
+            "Write dangling external symlink",
+            "Write",
+            "file_path",
+            dangling,
+        ),
+    ] {
+        assert_refused_if_enforced(label, run_in(&repo, tool, key, &path));
+    }
+
+    if !set("OMS_ROOM_REPO").is_empty() {
+        let outside_cwd = std::env::temp_dir();
+        assert_refused_if_enforced(
+            "OMS_ROOM_REPO with outside payload cwd",
+            run_in(&outside_cwd, "Edit", "file_path", &repo.join("src/room.rs")),
+        );
+        assert_eq!(
+            run_in(
+                &outside_cwd,
+                "Write",
+                "file_path",
+                &tmp.path().join("notes.md")
+            ),
+            (0, String::new(), String::new()),
+        );
+    }
+
+    for payload in [
+        serde_json::json!({"tool_name":"Edit","cwd":repo,"tool_input":{"file_path":""}}),
+        serde_json::json!({"tool_name":"Edit","cwd":repo,"tool_input":{}}),
+        serde_json::json!({"tool_name":"Edit","cwd":repo,"tool_input":{"file_path":123}}),
+    ] {
+        assert_eq!(
+            run_raw(payload.to_string().as_bytes()),
+            (0, String::new(), String::new()),
+            "{payload}"
+        );
+    }
+
+    let (code, out, err) = run_raw(b"{");
+    assert_eq!((code, out.as_str()), (0, ""));
+    if enforced {
+        assert!(
+            err.contains("main write guard: cannot evaluate this edit"),
+            "{err}"
+        );
+    } else {
+        assert_eq!(err, "");
+    }
+
+    for (label, path) in [
+        ("outside file", tmp.path().join("notes.md")),
+        ("unrelated git repo", other_repo.join("src/a.rs")),
+    ] {
+        assert_eq!(
+            run_in(&repo, "Write", "file_path", &path),
+            (0, String::new(), String::new()),
+            "{label}"
+        );
+    }
+}
+
 fn harness(tmp: &TempDir, tool: &str, payload: &serde_json::Value) -> (i32, String) {
     let (code, out, _) = hook(tmp, "harness-hook", &[tool], payload.to_string().as_bytes());
     (code, out)
@@ -1055,6 +1250,8 @@ fn harness_hook_pi_panel_hook_prompts_hint_and_tools_stay_silent() {
     let (code, out) = harness(&tmp, "panel-hook", &base("UserPromptSubmit"));
     assert_eq!(code, 0);
     assert!(out.contains("[oms panel]"), "{out}");
+    assert!(out.contains("[oms intake]"), "{out}");
+    assert!(!out.contains("build it"), "{out}");
     let (code, out) = harness(&tmp, "panel-hook", &base("PostToolUse"));
     assert_eq!((code, out.as_str()), (0, ""));
     // malformed and empty input are silent, not errors
@@ -1915,4 +2112,368 @@ fn codex_hud_upgrades_the_legacy_block_and_keeps_custom_status_lines() {
     fs::write(&cfg, custom).unwrap();
     assert!(codex_hud(&tmp, "install", &cfg).contains("preserved user"));
     assert_eq!(fs::read_to_string(&cfg).unwrap(), custom);
+}
+
+#[test]
+fn intake_reminder_is_stateless_and_limited_to_real_requests() {
+    let mode = std::env::var("OMS_TEST_INTAKE_MODE").unwrap_or_default();
+    if mode.is_empty() {
+        let spawn = |case: &str, extra: &[(&str, &str)]| {
+            let mut cmd = Command::new(std::env::current_exe().expect("test exe"));
+            cmd.args([
+                "--exact",
+                "intake_reminder_is_stateless_and_limited_to_real_requests",
+                "--test-threads=1",
+                "--nocapture",
+            ]);
+            for (k, _) in std::env::vars_os() {
+                if k.to_string_lossy().starts_with("OMS_") {
+                    cmd.env_remove(k);
+                }
+            }
+            cmd.env_remove("CLAUDE_CODE_MESSAGING_SOCKET");
+            cmd.env(
+                "CLAUDE_CONFIG_DIR",
+                std::env::temp_dir().join("oms-hooks-no-claude"),
+            );
+            cmd.env("OMS_TEST_INTAKE_MODE", case);
+            cmd.envs(extra.iter().copied());
+            let out = cmd.output().expect("spawn intake child");
+            assert!(
+                out.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        spawn("normal", &[]);
+        spawn("router_off", &[("OMS_SKILL_ROUTER_OFF", "1")]);
+        spawn(
+            "child",
+            &[
+                ("OMS_HARNESS_CHILD", "1"),
+                ("OMS_PANEL_MAIN_ATTEMPT", "att_test"),
+                ("OMS_PANEL_SESSION", "oms-test"),
+                ("OMS_ROOM_ID", "room-test"),
+                ("OMS_ROOM_PARTICIPANT", "part-test"),
+            ],
+        );
+        spawn(
+            "delegate",
+            &[
+                ("OMS_HARNESS_DELEGATE_DEPTH", "1"),
+                ("OMS_PANEL_MAIN_ATTEMPT", "att_test"),
+                ("OMS_PANEL_SESSION", "oms-test"),
+                ("OMS_ROOM_ID", "room-test"),
+                ("OMS_ROOM_PARTICIPANT", "part-test"),
+            ],
+        );
+        return;
+    }
+    let tmp = TempDir::new(&format!("intake-{mode}"));
+    let repo = git_repo(&tmp);
+    if matches!(mode.as_str(), "child" | "delegate" | "router_off") {
+        let prompt_payload = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": repo,
+            "session_id": "s",
+            "prompt": "continue work",
+        });
+        let pre_payload = serde_json::json!({
+            "hook_event_name": "PreInvocation",
+            "cwd": repo,
+            "session_id": "s",
+            "prompt": "",
+            "intake_eligible": true,
+        });
+        let direct = hook(
+            &tmp,
+            "skill-router",
+            &[],
+            prompt_payload.to_string().as_bytes(),
+        )
+        .1;
+        let codex = harness(&tmp, "skill-router", &prompt_payload);
+        let pre = hook(
+            &tmp,
+            "skill-router",
+            &[],
+            pre_payload.to_string().as_bytes(),
+        )
+        .1;
+        if mode == "delegate" {
+            assert!(
+                direct.contains("[oms panel]") && !direct.contains("[oms intake]"),
+                "{direct}"
+            );
+            assert_eq!(codex.0, 0);
+            assert!(
+                codex.1.contains("[oms panel]") && !codex.1.contains("[oms intake]"),
+                "{}",
+                codex.1
+            );
+            assert!(!pre.contains("[oms intake]"), "{pre}");
+            let panel = harness(&tmp, "panel-hook", &prompt_payload);
+            assert_eq!(panel.0, 0);
+            assert!(
+                panel.1.contains("[oms panel]") && !panel.1.contains("[oms intake]"),
+                "{}",
+                panel.1
+            );
+        } else {
+            assert_eq!(direct, "");
+            assert_eq!(codex, (0, String::new()));
+            assert_eq!(pre, "");
+            if mode == "child" {
+                assert_eq!(
+                    harness(&tmp, "panel-hook", &prompt_payload),
+                    (0, String::new())
+                );
+            }
+            assert!(!repo.join(".oms").exists(), "unadopted repo gains no state");
+        }
+        return;
+    }
+    let run = |prompt: &str, id: &str| {
+        let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":id,"prompt":prompt});
+        hook(&tmp, "skill-router", &[], payload.to_string().as_bytes()).1
+    };
+    for prompt in [
+        "이어서",
+        "고쳐",
+        "고쳐줘",
+        "/goal ship it",
+        "<doc>fix the parser</doc>",
+    ] {
+        let out = run(prompt, "s");
+        assert!(
+            out.contains("[oms intake]")
+                && out.contains("role, scope, and checks")
+                && out.contains("existing task list")
+                && out.contains("initializes no state"),
+            "{prompt}: {out}"
+        );
+        assert!(
+            !out.contains(prompt),
+            "raw prompt must never be echoed: {prompt}: {out}"
+        );
+        assert_eq!(run(prompt, "s"), out, "stateless: repeats identically");
+        let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"s","prompt":prompt});
+        let (code, codex_out) = harness(&tmp, "skill-router", &payload);
+        assert_eq!(code, 0);
+        let doc: serde_json::Value = serde_json::from_str(&codex_out).expect("codex json");
+        assert_eq!(
+            doc["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let ctx = doc["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("");
+        assert!(ctx.contains("[oms intake]"), "{prompt}: {ctx}");
+        assert!(!ctx.contains(prompt), "{prompt}: {ctx}");
+    }
+    for prompt in [
+        "",
+        "   ",
+        "?",
+        "<task-notification>done</task-notification>",
+        "[SYSTEM NOTIFICATION] wake",
+        "Another Claude session sent a message: ping",
+        "Your claude.ai usage limit has reset.",
+        "Task from Overall Main. Work within this task and report the result here. x",
+    ] {
+        assert!(!run(prompt, "s").contains("[oms intake]"), "{prompt}");
+    }
+    let legacy_pre = serde_json::json!({"hook_event_name":"PreInvocation","cwd":repo,"session_id":"s","prompt":""});
+    assert!(
+        !hook(&tmp, "skill-router", &[], legacy_pre.to_string().as_bytes())
+            .1
+            .contains("[oms intake]")
+    );
+    let false_pre = serde_json::json!({"hook_event_name":"PreInvocation","cwd":repo,"session_id":"s","prompt":"","intake_eligible":false});
+    assert!(
+        !hook(&tmp, "skill-router", &[], false_pre.to_string().as_bytes())
+            .1
+            .contains("[oms intake]")
+    );
+    let eligible_pre = serde_json::json!({"hook_event_name":"PreInvocation","cwd":repo,"session_id":"s","prompt":"","intake_eligible":true});
+    let pre_out = hook(
+        &tmp,
+        "skill-router",
+        &[],
+        eligible_pre.to_string().as_bytes(),
+    )
+    .1;
+    assert!(pre_out.contains("[oms intake]"), "{pre_out}");
+    assert!(!repo.join(".oms").exists(), "unadopted repo gains no state");
+}
+
+#[test]
+fn command_guard_audit_reports_rules_timestamps_and_the_legacy_footer() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    struct OwnedDir(PathBuf);
+    impl Drop for OwnedDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let name = "command_guard_audit_reports_rules_timestamps_and_the_legacy_footer";
+    if std::env::var_os("OMS_TEST_CLEAN_CHILD").is_none() {
+        let mut nonce = [0u8; 16];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut nonce))
+            .expect("read random suffix");
+        let suffix: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+        let state = std::env::temp_dir().join(format!("oms-hooks-audit-{suffix}"));
+        assert!(!clean_env_child(
+            name,
+            &[("XDG_STATE_HOME", state.to_str().expect("utf8 state path"))],
+        ));
+        return;
+    }
+    // The child exclusively allocates its private XDG_STATE_HOME, so the user's real audit log is never read.
+    let state_path = PathBuf::from(std::env::var_os("XDG_STATE_HOME").expect("state home"));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state_path)
+        .expect("create exclusive state root");
+    let state = OwnedDir(state_path);
+    let dir = state.0.join("oh-my-setting");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .expect("create state dir");
+    let rows = concat!(
+        r#"{"ts":"2026-11-23T11:00:00Z","verdict":"refused","rule":"git-clean","command":"git","sha256":"abcdef"}"#,
+        "\n",
+        r#"{"ts":"2026-11-23T10:00:00Z","verdict":"noted","rule":"transfer","command":"scp","sha256":"012345"}"#,
+        "\n"
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join("command-guard.jsonl"))
+        .expect("create audit log")
+        .write_all(rows.as_bytes())
+        .expect("write audit log");
+    let (code, stdout, _) = run_hook(
+        "command-guard-hook",
+        &argv(&["--audit"]),
+        b"",
+        &state.0,
+        &state.0,
+        &AtomicBool::new(false),
+    );
+    let out = String::from_utf8_lossy(&stdout);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("command guard: newest 2 row(s): 1 refused, 0 bypassed"));
+    assert!(
+        out.contains("refused   git-clean") && out.contains("transfer"),
+        "{out}"
+    );
+    assert!(out.contains("2026-11-23T11:00:00Z"), "{out}");
+    assert!(
+        out.ends_with("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn pre_push_gate_runs_in_the_pushed_worktree_not_the_install_source() {
+    let tmp = TempDir::new("prepush");
+    let mk = |name: &str, body: &str| {
+        let repo = tmp.path().join(name);
+        fs::create_dir_all(repo.join("scripts")).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repo.join("scripts/check.sh"), body).unwrap();
+        repo
+    };
+    let source = mk(
+        "source",
+        "touch \"$(dirname \"$0\")/../touched\"; echo SOURCE-GATE\n",
+    );
+    let work = mk("work", "echo WORK-GATE \"$@\"; exit 7\n");
+    let nogate = mk("nogate", "");
+    fs::remove_file(nogate.join("scripts/check.sh")).unwrap();
+    let sub = work.join("scripts");
+    let run = |cwd: &Path, args: &[&str], stdin: &[u8]| {
+        let (c, o, e) = run_hook(
+            "pre-push-check",
+            &argv(args),
+            stdin,
+            cwd,
+            &source,
+            &AtomicBool::new(false),
+        );
+        (
+            c,
+            String::from_utf8_lossy(&o).into_owned(),
+            String::from_utf8_lossy(&e).into_owned(),
+        )
+    };
+    let (code, out, _) = run(&sub, &["--full"], b"");
+    assert_eq!((code, out.trim()), (7, "WORK-GATE"));
+    assert!(!source.join("touched").exists());
+    let line = format!(
+        "refs/heads/x {} refs/heads/x {}\n",
+        "a".repeat(40),
+        "b".repeat(40)
+    );
+    for args in [&["--full"][..], &["--full", "origin"][..]] {
+        let (code, _, err) = run(&nogate, args, line.as_bytes());
+        assert_ne!(code, 0, "{err}");
+        assert!(err.contains("gate unproved"), "{err}");
+    }
+    let (code, _, err) = run(&nogate, &["--full"], b"");
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("gate unproved"));
+    let fake = tmp.path().join("fake");
+    fs::create_dir_all(fake.join("scripts")).unwrap();
+    fs::write(fake.join(".git"), "not a gitfile\n").unwrap();
+    fs::write(
+        fake.join("scripts/check.sh"),
+        "touch \"$(dirname \"$0\")/../ran\"\n",
+    )
+    .unwrap();
+    for (args, stdin) in [
+        (&["--full"][..], &b""[..]),
+        (&["--full"][..], line.as_bytes()),
+        (&["origin"][..], line.as_bytes()),
+    ] {
+        let (code, _, err) = run(&fake, args, stdin);
+        assert_ne!(code, 0, "{err}");
+        assert!(err.contains("gate unproved"), "{err}");
+        assert!(!fake.join("ran").exists());
+    }
+    let tag = format!(
+        "refs/tags/t {} refs/tags/t {}\n",
+        "a".repeat(40),
+        "0".repeat(40)
+    );
+    let (code, out, _) = run(&fake, &["origin"], tag.as_bytes());
+    assert_ne!(code, 0, "{out}");
+    assert!(!out.contains("gate skipped"));
+    let (code, out, _) = run(
+        &nogate,
+        &["origin"],
+        format!(
+            "(delete) {} refs/heads/x {}\n",
+            "0".repeat(40),
+            "a".repeat(40)
+        )
+        .as_bytes(),
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("deletion-only"));
 }

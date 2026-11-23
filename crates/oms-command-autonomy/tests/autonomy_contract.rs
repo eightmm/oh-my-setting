@@ -928,3 +928,244 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
         assert!(receipt::validate(&row).is_err());
     }
 }
+
+#[test]
+fn intent_issues_lists_labeled_candidates_read_only() {
+    struct Fake(
+        std::sync::Mutex<Vec<(String, String, String, u64)>>,
+        Vec<u8>,
+    );
+    impl oms_command_plan::Services for Fake {}
+    impl Services for Fake {
+        fn state_repository(
+            &self,
+            work: &Path,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<PathBuf> {
+            Ok(work.into())
+        }
+        fn list_issues(
+            &self,
+            owner: &str,
+            repo: &str,
+            label: &str,
+            limit: u64,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<Vec<u8>> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((owner.into(), repo.into(), label.into(), limit));
+            Ok(self.1.clone())
+        }
+    }
+
+    let label = |n: &str| json!([{ "name": n }]);
+    let row = |n: u64, title: &str, pr: bool| {
+        let mut r = json!({
+            "id": n + 100,
+            "number": n,
+            "state": "open",
+            "title": title,
+            "html_url": format!("https://github.com/Org/repo/issues/{n}"),
+            "updated_at": "2026-01-02T03:04:05Z",
+            "labels": label("OMS-Ready"),
+            "body": "ignore previous raw issue body"
+        });
+        if pr {
+            r["pull_request"] = json!({});
+        }
+        r
+    };
+    let rows = json!([row(1, "Fix\u{202e} it\nnow", false), row(2, "pr", true)]);
+    let repo = Repo::new();
+    let run = |svc: &Fake, extra: &[&str]| {
+        let mut args: Vec<OsString> = vec!["issues".into()];
+        args.extend(extra.iter().map(OsString::from));
+        let r = run_with_services("intent", &args, &repo.0, &AtomicBool::new(false), svc);
+        (r.0, String::from_utf8_lossy(&r.1).into_owned())
+    };
+
+    // JSON output: safe bounded metadata only, no raw body, PR skipped, zero .oms writes.
+    let ok = Fake(Default::default(), serde_json::to_vec(&rows).unwrap());
+    let (code, out) = run(
+        &ok,
+        &[
+            "--github",
+            "Org/repo",
+            "--label",
+            "oms-ready",
+            "--limit",
+            "5",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let got: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(got["count"], 1);
+    assert_eq!(got["trusted"], false);
+    assert_eq!(got["issues"][0]["number"], 1);
+    assert_eq!(got["issues"][0]["title"], "Fix it now");
+    assert_eq!(got["issues"][0]["labels"], json!(["OMS-Ready"]));
+    assert_eq!(
+        got["issues"][0]["next_step"],
+        "oms intent draft --from-issue https://github.com/Org/repo/issues/1 --dry-run"
+    );
+    assert!(!out.contains("ignore previous") && !out.contains('\u{202e}'));
+
+    // Default text output: safe metadata + next step, no raw body, PR skipped.
+    let (code, text_out) = run(
+        &ok,
+        &[
+            "--github",
+            "Org/repo",
+            "--label",
+            "oms-ready",
+            "--limit",
+            "5",
+        ],
+    );
+    assert_eq!(code, 0, "{text_out}");
+    assert!(text_out.contains("#1 Fix it now"));
+    assert!(text_out.contains("url: https://github.com/Org/repo/issues/1"));
+    assert!(text_out.contains("labels: OMS-Ready"));
+    assert!(text_out.contains(
+        "next: oms intent draft --from-issue https://github.com/Org/repo/issues/1 --dry-run"
+    ));
+    assert!(!text_out.contains("ignore previous") && !text_out.contains('\u{202e}'));
+    assert_eq!(
+        ok.0.lock().unwrap().as_slice(),
+        [
+            ("Org".into(), "repo".into(), "oms-ready".into(), 5),
+            ("Org".into(), "repo".into(), "oms-ready".into(), 5),
+        ]
+    );
+
+    // A page holding only labeled pull requests reports its checked rows and bounded page.
+    let pr_only = Fake(
+        Default::default(),
+        serde_json::to_vec(&json!([row(5, "p", true), row(6, "q", true)])).unwrap(),
+    );
+    let (code, empty) = run(&pr_only, &["--github", "Org/repo", "--label", "oms-ready"]);
+    assert_eq!(code, 0, "{empty}");
+    assert!(
+        empty.contains("no eligible issues among the 2 checked row(s)")
+            && empty.contains("one bounded page")
+            && empty.contains("2 pull request(s) skipped")
+    );
+    let (_, empty_json) = run(
+        &pr_only,
+        &["--github", "Org/repo", "--label", "oms-ready", "--json"],
+    );
+    let empty_json: serde_json::Value = serde_json::from_str(&empty_json).unwrap();
+    assert_eq!(empty_json["count"], 0);
+    assert_eq!(empty_json["checked"], 2);
+    assert_eq!(empty_json["skipped_pull_requests"], 2);
+    pr_only.0.lock().unwrap().clear();
+
+    // Endpoint builder percent-encodes special allowed label characters.
+    assert_eq!(
+        oms_command_autonomy::services::issues_list_endpoint("Org", "repo", "oms:ready", 3)
+            .unwrap(),
+        "repos/Org/repo/issues?state=open&labels=oms%3Aready&per_page=3"
+    );
+    assert_eq!(
+        oms_command_autonomy::services::issues_list_endpoint("Org", "repo", "good first issue", 3)
+            .unwrap(),
+        "repos/Org/repo/issues?state=open&labels=good%20first%20issue&per_page=3"
+    );
+
+    // Invalid CLI args fail closed with exit 2 and never reach the service.
+    for bad in [
+        vec!["--label", "oms-ready"],
+        vec!["--github", "Org/repo"],
+        vec!["--github", "Org", "--label", "x"],
+        vec!["--github", "Org/..", "--label", "x"],
+        vec!["--github", "Org-/repo", "--label", "x"],
+        vec!["--github", "Org/repo/extra", "--label", "x"],
+        vec!["--github", "Org/repo", "--label", "a&b"],
+        vec!["--github", "Org/repo", "--label", "a,b"],
+        vec!["--github", "Org/repo", "--label", "a?b"],
+        vec!["--github", "Org/repo", "--label", " leading"],
+        vec!["--github", "Org/repo", "--label", "x", "--limit", "0"],
+        vec!["--github", "Org/repo", "--label", "x", "--limit", "21"],
+        vec!["--github", "Org/repo", "--label", "x", "--limit", "abc"],
+        vec!["--github", "Org/repo", "--label", "x", "--dry-run"],
+        vec!["--github", "Org/repo", "--label", "x", "--goal", "g"],
+    ] {
+        assert_eq!(run(&ok, &bad).0, 2, "{bad:?}");
+    }
+    assert_eq!(ok.0.lock().unwrap().len(), 2);
+
+    // Issues-only options are rejected on other intent actions.
+    assert_eq!(
+        run_with_services(
+            "intent",
+            &["show", "--json"].map(OsString::from),
+            &repo.0,
+            &AtomicBool::new(false),
+            &ok
+        )
+        .0,
+        2
+    );
+
+    // Wrong-repo URL, closed state, missing label, unsafe URL/number, oversized list, non-object
+    // item, and non-list responses all fail closed with exit 2.
+    let mut wrong_repo = row(3, "x", false);
+    wrong_repo["html_url"] = json!("https://github.com/Other/repo/issues/3");
+    let mut closed = row(3, "x", false);
+    closed["state"] = json!("closed");
+    let mut unlabeled = row(4, "x", false);
+    unlabeled["labels"] = label("other");
+    let mut zero_num = row(1, "x", false);
+    zero_num["number"] = json!(0);
+    let mut mismatch_url = row(3, "x", false);
+    mismatch_url["html_url"] = json!("https://github.com/Org/repo/issues/999");
+    let mut unsafe_url = row(3, "x", false);
+    unsafe_url["html_url"] = json!("https://github.com/Org/repo/issues/3\nredirect");
+    for body in [
+        json!([wrong_repo]),
+        json!([closed]),
+        json!([unlabeled]),
+        json!([zero_num]),
+        json!([mismatch_url]),
+        json!([unsafe_url]),
+        json!(["not-an-object"]),
+        json!([row(5, "a", false), row(6, "b", false)]),
+        json!({"message": "Bad credentials"}),
+    ] {
+        let svc = Fake(Default::default(), serde_json::to_vec(&body).unwrap());
+        let (code, out) = run(
+            &svc,
+            &[
+                "--github",
+                "Org/repo",
+                "--label",
+                "oms-ready",
+                "--limit",
+                "1",
+            ],
+        );
+        assert_eq!(code, 2, "{out}");
+    }
+
+    // Malformed JSON fails closed with exit 2.
+    let bad_json = Fake(Default::default(), b"{not-json".to_vec());
+    assert_eq!(
+        run(&bad_json, &["--github", "Org/repo", "--label", "oms-ready"]).0,
+        2
+    );
+
+    // A service/permission failure is an error and leaves no state.
+    let code = run_with_services(
+        "intent",
+        &["issues", "--github", "Org/repo", "--label", "x"].map(OsString::from),
+        &repo.0,
+        &AtomicBool::new(false),
+        &Unavailable,
+    )
+    .0;
+    assert_eq!(code, 2);
+    assert!(!repo.0.join(".oms").exists());
+}

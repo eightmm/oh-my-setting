@@ -28,7 +28,21 @@ Room에서 Codex Lead를 열 수 있다.
 Main은 사용자의 목표 해석, scope/acceptance 확정, task 분해, 자원 배분 방침,
 충돌 해결, 예외 판단과 최종 설명에 집중한다. 기존
 [orchestrator skill](../custom-skills/oms-panel-orchestrator/SKILL.md)의 역할 분리를 따른다.
-Worker에 배정한 경로를 Main이 동시에 직접 수정하지 않는다.
+
+2026-11-22 정책: 팀을 운영하는 Main은 **관리 전용**이다. Main은 결정하고 Worker가 만든다.
+Main은 저장소 파일을 수정하지 않으며 코드·테스트·문서·설정 변경은 크기와 무관하게
+Worker나 Lead에게 배정한다. 실패한 검사와 리뷰 지적은 원래 작성자에게 `--continue`로,
+충돌과 slice 사이 연결 수정은 `integrator`에게, 넓은 소스 조사는 `researcher`에게 보낸다.
+Main이 직접 하는 일은 OMS 명령 실행, 반환된 증거와 결정적 diff 확인, 결정적 검증 명령 실행,
+admission·acceptance·publication 판단과 사용자 보고다. 예외는 사용자가 해당 변경을 Main이
+직접 하라고 지시한 경우뿐이며 Room에 기록한다. Worker를 시작할 수 없으면 직접 처리하지 않고
+사용자에게 blocker를 보고한다. Provider Lead는 한 배정의 팀리더로서 native child에게 실질
+작업을 맡기고 자기 범위의 통합·작은 unblocking 수정만 직접 한다. 계층별 책임표는
+[coordination layers](../custom-skills/oms-agent-harness/references/coordination-layers.md)에 있다.
+Claude Code Main에서는 [Main write guard](COMPONENTS.md#main-write-guard)가 관리 대상 저장소와
+그 linked worktree 안의 Edit/Write 계열 호출을 거절한다. Bash를 통한 변경과 Codex·AGY Main은
+여전히 프롬프트·스킬 계약에만 의존한다. 사용자가 Main에게 직접 변경을 지시한 경우에는 사용자가
+자기 셸에서 수정하거나 `OMS_MAIN_WRITE_GUARD=0`으로 패널을 시작한다.
 
 실제 claim, slot/budget reservation, dependency readiness, process wait/cancel,
 receipt 기록, evidence freshness와 승인 검사는 Rust runtime이 담당한다.

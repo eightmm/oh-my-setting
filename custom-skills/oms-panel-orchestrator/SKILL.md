@@ -11,10 +11,21 @@ description: >
 # Panel Orchestrator
 
 The user chooses the sole Overall Main from the installed panel launch
-options. Main scopes and assigns the work, reviews evidence, verifies the
-integrated result and owns acceptance. It limits direct edits to necessary
-integration and unblocking. Commit, push, install or publish only with explicit
-user authority.
+options. Main manages: it scopes, splits and assigns the work, reviews
+evidence, verifies the integrated result and owns acceptance. Workers produce;
+Main edits nothing in the repository. Commit, push, install or publish only
+with explicit user authority.
+
+## Manage, do not build
+
+- Every repository change goes to a writer or a Lead, however small. Fixes
+  return to their writer with `--continue TASK_ID`, conflicts to
+  `--dispatch integrator --access write`, wide reading to `researcher`.
+- Main runs OMS and deterministic verify commands and reads results.
+- Main edits only on the user's explicit instruction for that change, recorded
+  in the Room. If no worker can start, report the blocker and wait.
+- Duties:
+  [coordination-layers.md](../oms-agent-harness/references/coordination-layers.md).
 
 ## Choose the execution path
 
@@ -23,15 +34,14 @@ user authority.
   (`codex`, `claude`, or `antigravity`). Use the same command with
   `--task "ASSIGNMENT"` to send the role, scope and completion checks to the
   connected, idle session.
-- Leads assign independent work to native children when the provider supports it,
-  with disjoint paths, checks and least permissions. They wait for results,
-  review evidence and verify their integrated scope. Limit direct Lead edits
-  to necessary integration and unblocking. Leaf children return work to their
-  parent without delegating further.
+- A Lead leads one assignment: it assigns independent work to native children
+  when the provider supports it, with disjoint paths, checks and least
+  permissions, waits, reviews evidence and verifies its integrated scope. Lead
+  edits stay small (integration, unblocking); scope, provider and permission
+  questions return to Main. Leaf children return work without delegating.
 - Use managed dispatch below for a bounded leaf task or when a native Lead is
-  unavailable, including inline and Herdr sessions. Main retains admission
-  and publication authority. Verify native returns against the task before
-  accepting them. See the
+  unavailable, including inline and Herdr sessions. Verify native returns
+  against the task before accepting them. See the
   [delegation contract](../oms-agent-harness/references/delegation-artifacts.md)
   for recovery and evidence.
 

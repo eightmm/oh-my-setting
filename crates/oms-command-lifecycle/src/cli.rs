@@ -141,7 +141,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
         ),
         "install-hooks" => (
             &["--quick", "--check-protection", "--remove", "--dry-run"],
-            &[],
+            &["--repo"],
         ),
         "install-claude-hooks" => (
             &["--remove", "--print-expected", "--dry-run"],

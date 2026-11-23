@@ -130,7 +130,10 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             .all(|v| descends(v, array(&attempts), &parents)),
         "task includes attempts owned by another main",
     )?;
+    const MAX_FINALIZE_BLOCKERS: usize = 4;
     let mut launch_attempts = None;
+    let mut blockers = Vec::new();
+    let mut more = false;
     for attempt in &related {
         if attempt["terminal"] == true
             || (attempt["state"] == "review"
@@ -144,9 +147,16 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
         {
             continue;
         }
+        if blockers.len() == MAX_FINALIZE_BLOCKERS {
+            more = true;
+            break;
+        }
         let id = attempt["attempt_id"]
             .as_str()
-            .filter(|id| crate::native::operations::projection::id(id))
+            .filter(|id| {
+                crate::native::operations::projection::id(id)
+                    && crate::outbound(id.as_bytes()).is_ok()
+            })
             .unwrap_or("unreported");
         let scope = if attempt["task_id"] == request.task_id {
             "task"
@@ -160,8 +170,15 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             }
             _ => Cow::Borrowed("lifecycle state unknown"),
         };
+        blockers.push(format!("{scope} attempt {id}, {reason}"));
+    }
+    if !blockers.is_empty() {
+        if more {
+            blockers.push("more remain".into());
+        }
         return Err(Error::new(format!(
-            "task has live or unconfirmed attempts ({scope} attempt {id}, {reason})"
+            "task has live or unconfirmed attempts ({})",
+            blockers.join(" · ")
         )));
     }
     let store = Store::open(repo)?;
@@ -1287,6 +1304,44 @@ pub fn results_page(
         {
             projected["round_delta"] = delta;
         }
+        if request.task_id.is_some() {
+            // Input transport is the only recorded fact. No canonical writer
+            // acknowledges consumption, and acceptance is the Main's decision.
+            projected["native_assignment"] = metadata_attempts
+                .iter()
+                .rfind(|v| {
+                    v["tool"] == "panel-native-assignment"
+                        && v["refs"]["native_assignment_schema"] == "1"
+                })
+                .map_or(Value::Null, |v| {
+                    let recorded = v["refs"]["native_transport"].as_str();
+                    let valid = recorded
+                        .filter(|t| ["intent", "sending", "submitted", "unknown"].contains(t));
+                    let label = match valid {
+                        Some("intent") => "Intent recorded",
+                        Some("submitted") => "Submitted",
+                        _ => "Submission unconfirmed",
+                    };
+                    let mut entry = serde_json::json!({"attempt_id":v["attempt_id"],"transport":valid.unwrap_or("unknown"),"transport_label":label,"process_state":v["state"],"consumption":"unconfirmed","acceptance":outcome});
+                    if valid.is_none() {
+                        entry["transport_issue"] = "invalid transport state".into();
+                    }
+                    entry
+                });
+            // Only an undecided task without a failure moves its next step to the
+            // recorded transport; nothing here resends or retries.
+            let next = match projected["native_assignment"]["transport"].as_str() {
+                Some("intent") => Some("review unsent native assignment intent"),
+                Some("submitted") => Some("await native assignment result evidence"),
+                Some(_) => Some("inspect and reconcile unconfirmed native send before any retry"),
+                None => None,
+            };
+            if let Some(next) = next
+                && projected["representative_state"] == "pending"
+            {
+                projected["next_action"] = next.into();
+            }
+        }
         output.push(projected);
     }
     let missing_task = request.task_id.is_some() && output.is_empty();
@@ -1971,7 +2026,10 @@ mod tests {
         ) -> Result<CommandOutput> {
             let value = match command {
                 NativeCommand::Events => {
-                    assert_eq!(args, &["list", "--json"]);
+                    assert!(
+                        args == ["list", "--json"] || args == ["list", "--json", "--limit", "300"],
+                        "{args:?}"
+                    );
                     let mut attempts = vec![json!({
                         "attempt_id": MAIN, "tool": "panel-main", "provider": "codex",
                         "state": "working", "terminal": false, "refs": {
@@ -2072,7 +2130,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_names_only_the_first_proven_blocker_without_writing() {
+    fn finalization_names_bounded_proven_blockers_without_writing() {
         let repo = crate::git::Scratch::new().unwrap();
         let request = finalization_request(&repo.0);
         let ack_path = repo.0.join(format!(
@@ -2088,17 +2146,52 @@ mod tests {
         }))
         .unwrap();
         std::fs::write(&ack_path, &ack).unwrap();
-        let refusal = |attempts, expected| {
-            assert_eq!(
-                finalize_snapshot(
-                    &repo.0,
-                    &request,
-                    &ClaimedTask(attempts),
-                    &AtomicBool::new(false)
-                )
-                .unwrap_err(),
-                Error::new(expected)
-            );
+        let plan_file = repo.0.join(".oms/plan/tasks.json");
+        std::fs::create_dir_all(plan_file.parent().unwrap()).unwrap();
+        let plan = json!({
+            "plan_id": format!("plan_{}", "1".repeat(32)),
+            "tasks": {(TASK): {
+                "id": TASK, "state": "running", "provider": "codex", "owner": MAIN,
+                "claimed_by_participant": MAIN, "lease_id": format!("lease_{}", "2".repeat(32))
+            }}
+        });
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        std::fs::write(&plan_file, &plan_bytes).unwrap();
+        fn snapshot_tree(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    snapshot_tree(root, &path, out);
+                } else {
+                    out.push((
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let snapshot = || {
+            let mut files = Vec::new();
+            snapshot_tree(&repo.0, &repo.0, &mut files);
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            files
+        };
+        let initial_snapshot = snapshot();
+        let refusal = |attempts, expected: String| {
+            let err = finalize_snapshot(
+                &repo.0,
+                &request,
+                &ClaimedTask(attempts),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::new(expected));
+            err
         };
         let read = worker(WORKER, "read", "working");
         let review_id = "call-finalization:review";
@@ -2107,15 +2200,15 @@ mod tests {
         let later = worker("call-later", "write", "running");
         let done = worker("call-done", "write", "done");
         refusal(
-            vec![done, read.clone(), later],
+            vec![done.clone(), read.clone(), later.clone()],
             format!(
-                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working)"
+                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working · task attempt call-later, lifecycle state running)"
             ),
         );
         // A zero exit with complete output and cleanup in the public process
         // acknowledgement cannot substitute for protected whole-tree evidence.
         refusal(
-            vec![review],
+            vec![review.clone()],
             format!(
                 "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup)"
             ),
@@ -2123,11 +2216,58 @@ mod tests {
         let mut taskless = worker(WORKER, "write", "waiting_approval");
         taskless["task_id"] = Value::Null;
         refusal(
-            vec![taskless],
+            vec![taskless.clone()],
             format!(
                 "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
             ),
         );
+        let taskless_review_id = "call-taskless-review";
+        let mut taskless_review = worker(taskless_review_id, "write", "review");
+        taskless_review["task_id"] = "".into();
+        taskless_review["refs"]["panel_room_participant"] = WORKER.into();
+        refusal(
+            vec![
+                done.clone(),
+                review.clone(),
+                taskless_review.clone(),
+                taskless.clone(),
+            ],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        let exact_cap_err = refusal(
+            vec![
+                done.clone(),
+                read.clone(),
+                review.clone(),
+                taskless_review.clone(),
+                taskless.clone(),
+            ],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working · task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        assert!(!exact_cap_err.message.contains("more remain"));
+        let mut fifth = worker("call-fifth", "write", "blocked");
+        fifth["task_id"] = Value::Null;
+        let sixth = worker("call-sixth", "write", "verifying");
+        let overflow_err = refusal(
+            vec![
+                done,
+                review,
+                taskless_review,
+                read.clone(),
+                later,
+                fifth,
+                sixth,
+            ],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · task attempt {WORKER}, lifecycle state working · task attempt call-later, lifecycle state running · more remain)"
+            ),
+        );
+        assert!(!overflow_err.message.contains("call-fifth"));
+        assert!(!overflow_err.message.contains("call-sixth"));
         let mut foreign = worker("call-foreign", "write", "working");
         foreign["parent_attempt_id"] = "foreign-main".into();
         refusal(
@@ -2136,22 +2276,236 @@ mod tests {
         );
         refusal(
             vec![worker("/untrusted/attempt", "read", "/untrusted/state")],
-            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state unknown)".to_owned(),
+            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state unknown)"
+                .to_owned(),
         );
+        let secret_id = concat!("gh", "p_12345678901234567890abcd");
+        assert!(crate::native::operations::projection::id(secret_id));
+        let secret_err = refusal(
+            vec![worker(secret_id, "read", "working")],
+            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state working)"
+                .to_owned(),
+        );
+        assert!(crate::outbound(secret_err.message.as_bytes()).is_ok());
+        assert_eq!(std::fs::read(&plan_file).unwrap(), plan_bytes);
         assert_eq!(std::fs::read(&ack_path).unwrap(), ack);
-        assert_eq!(std::fs::read_dir(&repo.0).unwrap().count(), 1);
-        assert_eq!(std::fs::read_dir(repo.0.join(".oms")).unwrap().count(), 1);
-        assert_eq!(
-            std::fs::read_dir(repo.0.join(".oms/artifacts"))
-                .unwrap()
-                .count(),
-            1
+        assert!(!repo.0.join(".oms/artifacts/panel-results").exists());
+        assert!(!repo.0.join(".oms/lifecycle").exists());
+        assert_eq!(snapshot(), initial_snapshot);
+    }
+
+    fn native(attempt: &str, task: &str, transport: Value) -> Value {
+        json!({
+            "attempt_id": attempt, "tool": "panel-native-assignment", "provider": "codex",
+            "parent_attempt_id": MAIN, "task_id": task, "state": "working", "terminal": false,
+            "refs": {"native_assignment_schema": "1", "plan_id": format!("plan_{}", "1".repeat(32)),
+                "lease_id": format!("lease_{}", "2".repeat(32)), "panel_room_id": ROOM,
+                "native_transport": transport, "native_room_message": format!("msg-{attempt}"),
+                "native_binding_sha256": "3".repeat(64)}
+        })
+    }
+
+    fn index(repo: &Path, rows: &[Value]) {
+        let raw = rows
+            .iter()
+            .flat_map(|v| [serde_json::to_vec(v).unwrap(), b"\n".to_vec()])
+            .flatten()
+            .collect::<Vec<_>>();
+        Store::open(repo)
+            .unwrap()
+            .lock_at(Path::new("lock"), Duration::from_secs(3))
+            .unwrap()
+            .write(
+                Path::new(".oms/artifacts/index.jsonl"),
+                &raw,
+                false,
+                MAX_RESULT,
+            )
+            .unwrap();
+    }
+
+    fn task_view(repo: &Path, task: Option<&str>, attempts: Vec<Value>) -> Value {
+        let request = ResultsRequest {
+            task_id: task.map(str::to_owned),
+            ..Default::default()
+        };
+        results_page(
+            repo,
+            &request,
+            &ClaimedTask(attempts),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_assignment_result_reports_latest_transport_only() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let unsent = "review unsent native assignment intent";
+        let awaiting = "await native assignment result evidence";
+        let reconcile = "inspect and reconcile unconfirmed native send before any retry";
+        for (recorded, transport, label, next) in [
+            (json!("intent"), "intent", "Intent recorded", unsent),
+            (
+                json!("sending"),
+                "sending",
+                "Submission unconfirmed",
+                reconcile,
+            ),
+            (json!("submitted"), "submitted", "Submitted", awaiting),
+            (
+                json!("unknown"),
+                "unknown",
+                "Submission unconfirmed",
+                reconcile,
+            ),
+            (
+                json!("consumed"),
+                "unknown",
+                "Submission unconfirmed",
+                reconcile,
+            ),
+            (json!(7), "unknown", "Submission unconfirmed", reconcile),
+            (Value::Null, "unknown", "Submission unconfirmed", reconcile),
+        ] {
+            let mut newer_schema = native("native-v2", TASK, "submitted".into());
+            newer_schema["refs"]["native_assignment_schema"] = "2".into();
+            let attempts = vec![
+                native("native-old", TASK, "submitted".into()),
+                native("native-new", TASK, recorded.clone()),
+                newer_schema,
+            ];
+            let row = &task_view(&repo.0, Some(TASK), attempts)["rows"][0];
+            let issue = (transport == "unknown" && recorded != "unknown")
+                .then_some("invalid transport state");
+            let mut expected = json!({"attempt_id": "native-new", "transport": transport,
+                "transport_label": label, "process_state": "working",
+                "consumption": "unconfirmed", "acceptance": "pending"});
+            if let Some(issue) = issue {
+                expected["transport_issue"] = issue.into();
+            }
+            assert_eq!(row["native_assignment"], expected, "{recorded}");
+            assert_eq!(row["outcome"], Value::Null);
+            assert_eq!(row["representative_state"], "pending");
+            assert_eq!(row["next_action"], next, "{recorded}");
+        }
+        // An independent terminal failure keeps its own state and action.
+        let mut failed = native("native-new", TASK, "unknown".into());
+        failed["state"] = "failed".into();
+        let row = &task_view(&repo.0, Some(TASK), vec![failed])["rows"][0];
+        assert_eq!(row["representative_state"], "failed");
+        assert_eq!(row["next_action"], "inspect failure and retry");
+        // Without a native assignment the undecided task still awaits Main.
+        let row = &task_view(
+            &repo.0,
+            Some(TASK),
+            vec![worker("call-x", "read", "working")],
+        )["rows"][0];
+        assert_eq!(row["native_assignment"], Value::Null);
+        assert_eq!(row["next_action"], "record main decision");
+    }
+
+    #[test]
+    fn native_assignment_result_never_confirms_consumption_from_bound_evidence() {
+        let repo = crate::git::Scratch::new().unwrap();
+        index(
+            &repo.0,
+            &[
+                json!({"schema": 1, "kind": "note", "ts": "2026-01-01T00:00:00Z",
+                "task_id": TASK, "attempt_id": "native-a"}),
+            ],
         );
-        assert_eq!(
-            std::fs::read_dir(ack_path.parent().unwrap())
+        for transport in ["intent", "submitted"] {
+            let mut child = worker("call-child", "read", "working");
+            child["parent_attempt_id"] = "native-a".into();
+            let attempts = vec![native("native-a", TASK, transport.into()), child];
+            let entry = &task_view(&repo.0, Some(TASK), attempts)["rows"][0]["native_assignment"];
+            assert_eq!(entry["attempt_id"], "native-a");
+            assert_eq!(entry["transport"], transport);
+            assert_eq!(entry["consumption"], "unconfirmed", "{entry}");
+            assert_eq!(entry["acceptance"], "pending");
+        }
+    }
+
+    #[test]
+    fn native_assignment_result_mirrors_finalized_decision_not_transport() {
+        for outcome in ["accepted", "rejected"] {
+            let repo = crate::git::Scratch::new().unwrap();
+            let revision = "4".repeat(24);
+            let summary = "Reviewed native assignment";
+            let body = serde_json::to_vec(&json!({
+                "schema": 1, "kind": "oms-panel-result", "task_id": TASK, "revision": revision,
+                "summary": summary, "summary_sha256": crate::digest(summary.as_bytes()),
+                "outcome": outcome, "main_attempt_id": MAIN
+            }))
+            .unwrap();
+            let artifact = format!(".oms/artifacts/panel-results/result-{TASK}-{revision}.json");
+            Store::open(&repo.0)
                 .unwrap()
-                .count(),
-            1
+                .lock_at(Path::new("lock"), Duration::from_secs(3))
+                .unwrap()
+                .write(Path::new(&artifact), &body, false, MAX_RESULT)
+                .unwrap();
+            index(
+                &repo.0,
+                &[
+                    json!({"schema": 1, "kind": "panel-result", "ts": "2026-01-01T00:00:00Z",
+                    "task_id": TASK, "attempt_id": MAIN, "artifact": artifact,
+                    "artifact_sha256": crate::digest(&body)}),
+                ],
+            );
+            let view = task_view(
+                &repo.0,
+                Some(TASK),
+                vec![native("native-a", TASK, "submitted".into())],
+            );
+            let row = &view["rows"][0];
+            assert_eq!(row["outcome"], outcome, "{row}");
+            assert_eq!(
+                row["representative_state"],
+                format!("main_decision {outcome}")
+            );
+            assert_eq!(row["next_action"], "none");
+            assert_eq!(row["stages"]["main_decision"]["state"], outcome);
+            let entry = &row["native_assignment"];
+            assert_eq!(entry["acceptance"], outcome);
+            assert_eq!(entry["transport"], "submitted");
+            assert_eq!(entry["consumption"], "unconfirmed");
+            // A taskless attempt adopted through main_attempt_id is not this task's.
+            let mut adopted = native("native-adopted", TASK, "submitted".into());
+            adopted["task_id"] = Value::Null;
+            let row = &task_view(&repo.0, Some(TASK), vec![adopted])["rows"][0];
+            assert_eq!(row["outcome"], outcome);
+            assert_eq!(row["native_assignment"], Value::Null, "{row}");
+        }
+    }
+
+    #[test]
+    fn native_assignment_result_leaves_other_tasks_and_list_view_unchanged() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let other = "task-other";
+        let mut unrelated = worker(WORKER, "read", "working");
+        unrelated["task_id"] = other.into();
+        let attempts = vec![native("native-a", TASK, "submitted".into()), unrelated];
+        let list = task_view(&repo.0, None, attempts.clone());
+        let rows = array(&list["rows"]);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|v| v.get("native_assignment").is_none()));
+        assert_eq!(
+            crate::digest(&serde_json::to_vec(&list).unwrap()),
+            "a3f4fc67a2a12a7e3002612dc60a492e790e898c1aac846f5f225c13090ba6a7"
         );
+        for task in [TASK, other] {
+            let mut row = task_view(&repo.0, Some(task), attempts.clone())["rows"][0].clone();
+            let native = row.as_object_mut().unwrap().remove("native_assignment");
+            assert_eq!(native.unwrap().is_null(), task == other);
+            let mut expected = rows.iter().find(|v| v["task_id"] == task).unwrap().clone();
+            if task == TASK {
+                // Only the undecided task's next step follows its submitted input.
+                assert_eq!(expected["next_action"], "record main decision");
+                expected["next_action"] = "await native assignment result evidence".into();
+            }
+            assert_eq!(row, expected);
+        }
     }
 }
