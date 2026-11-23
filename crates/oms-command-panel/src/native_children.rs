@@ -1633,7 +1633,6 @@ impl CodexResponseUsage {
 }
 
 struct CodexUsageObservation {
-    offset: usize,
     payload: Value,
     usage: CodexResponseUsage,
     model: Option<String>,
@@ -1672,7 +1671,8 @@ fn codex_history_parts(
     let mut current = None;
     let mut messages = Vec::new();
     let mut observations = BTreeMap::<String, Option<CodexUsageObservation>>::new();
-    for (offset, line) in codex_complete_records(body, recent_only).enumerate() {
+    let mut latest_response = None;
+    for line in codex_complete_records(body, recent_only) {
         let Ok(event) = oms_panel_core::decode(line, MAX_LINE) else {
             current = None;
             // An unreadable complete row can hide a conflicting response record.
@@ -1714,24 +1714,28 @@ fn codex_history_parts(
             {
                 let response_id = text(payload, "response_id");
                 if codex_rollout_identifier(response_id) {
-                    observations
-                        .entry(response_id.to_owned())
-                        .and_modify(|known| {
-                            if known
-                                .as_ref()
-                                .is_some_and(|first| first.payload != *payload)
-                            {
-                                *known = None;
-                            }
-                        })
-                        .or_insert_with(|| {
-                            Some(CodexUsageObservation {
-                                offset,
-                                usage: CodexResponseUsage::parse(payload)?,
+                    if let Some(known) = observations.get_mut(response_id) {
+                        if known
+                            .as_ref()
+                            .is_some_and(|first| first.payload != *payload)
+                        {
+                            *known = None;
+                        }
+                    } else {
+                        // First-seen identities define recency. Replayed records
+                        // cannot restore an older response after a newer one fails.
+                        latest_response = Some(response_id.to_owned());
+                        observations.insert(
+                            response_id.to_owned(),
+                            CodexResponseUsage::parse(payload).map(|usage| CodexUsageObservation {
+                                usage,
                                 payload: payload.clone(),
                                 model: None,
-                            })
-                        });
+                            }),
+                        );
+                    }
+                } else {
+                    latest_response = None;
                 }
             }
             "event_msg"
@@ -1760,26 +1764,23 @@ fn codex_history_parts(
         .filter_map(|(turn, message)| contexts[&turn].then_some(message))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let observation = usage_session.and_then(|_| {
-        observations
-            .into_values()
-            .flatten()
-            .filter(|observation| {
-                contexts
-                    .get(text(&observation.payload, "turn_id"))
-                    .is_none_or(|exact| *exact)
-            })
-            .max_by_key(|observation| observation.offset)
-            .map(|mut observation| {
-                let turn = text(&observation.payload, "turn_id");
-                observation.model = contexts
-                    .get(turn)
-                    .copied()
-                    .filter(|exact| *exact)
-                    .and_then(|_| models.remove(turn).flatten());
-                observation
-            })
-    });
+    let observation = usage_session
+        .and(latest_response)
+        .and_then(|response| observations.remove(&response).flatten())
+        .filter(|observation| {
+            contexts
+                .get(text(&observation.payload, "turn_id"))
+                .is_none_or(|exact| *exact)
+        })
+        .map(|mut observation| {
+            let turn = text(&observation.payload, "turn_id");
+            observation.model = contexts
+                .get(turn)
+                .copied()
+                .filter(|exact| *exact)
+                .and_then(|_| models.remove(turn).flatten());
+            observation
+        });
     (history, observation)
 }
 
@@ -3694,7 +3695,7 @@ mod tests {
                 &[
                     first.clone(),
                     latest.clone(),
-                    first,
+                    first.clone(),
                     parent_usage.clone(),
                     sibling.clone(),
                     wrong_session.clone(),
@@ -3777,6 +3778,42 @@ mod tests {
             fixture.write(fixture.date, CHILD, &rows);
             fixture.projection(TURN).unwrap().rows.remove(0)
         };
+        let mut invalid_latest = latest.clone();
+        invalid_latest["payload"]["usage"]["input_tokens"] = json!(-1);
+        let mut conflicting_latest = latest.clone();
+        conflicting_latest["payload"]["usage"]["total_tokens"] = json!(20);
+        let mut invalid_id = latest.clone();
+        invalid_id["payload"]["response_id"] = json!("two words");
+        let recovered = record("response-three", counters(20, 4, 7, 3, 2, 24));
+        // A later owned response withholds stale counters even when an older
+        // response is still valid; only a new response can restore them.
+        for mut records in [
+            vec![first.clone(), invalid_latest],
+            vec![first.clone(), latest.clone(), conflicting_latest.clone()],
+            vec![
+                first.clone(),
+                latest.clone(),
+                conflicting_latest,
+                first.clone(),
+            ],
+            vec![first.clone(), invalid_id],
+        ] {
+            assert_eq!(output(&child, &records), "Ordinary owned reply");
+            assert!(
+                projected(&child, &records)
+                    .get("native_response_usage")
+                    .is_none()
+            );
+            records.push(recovered.clone());
+            assert_eq!(
+                output(&child, &records),
+                "Ordinary owned reply\n\nCodex recorded response usage · in 20 · out 4 · cache 7/3 · reasoning 2 · total 24"
+            );
+            assert_eq!(
+                projected(&child, &records)["native_response_usage"]["response"]["total_tokens"],
+                24
+            );
+        }
         let valid = projected(&child, &[latest.clone(), latest.clone()]);
         assert_eq!(valid["native_response_usage"]["turn"]["total_tokens"], 280);
         assert_eq!(
