@@ -907,3 +907,165 @@ fn atomic_overlapping_transactions_detect_second_publication() {
     assert_eq!(std::fs::read(f.0.join("file")).unwrap(), b"follower");
     assert_eq!(names(&f.0), [OsString::from("file")]);
 }
+
+#[test]
+fn private_registry_byte_policy_and_mode_races() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.0.join("dir")).unwrap();
+    std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = f.0.join("dir/file");
+    std::fs::write(&file, b"old").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Exercise byte policy independently of host ancestry, which may be unsafe.
+    let mut root = Root::open(&f.0).unwrap();
+    root.private_ancestry = Some(Vec::new());
+    for stage in [Stage::AfterRead, Stage::BeforePublish] {
+        let result = root.mutate_with(
+            Path::new("dir/file"),
+            options(),
+            |_| Ok::<_, Infallible>(b"new".to_vec()),
+            |at| {
+                if at == stage {
+                    std::fs::set_permissions(
+                        f.0.join("dir"),
+                        std::fs::Permissions::from_mode(0o770),
+                    )
+                    .unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(refused(ByteError::Changed)));
+        assert_eq!(std::fs::read(&file).unwrap(), b"old");
+        std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let read = root.read_bytes_with(Path::new("dir/file"), options().read, |stage| {
+        if stage == Stage::AfterRead {
+            std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o770))
+                .unwrap();
+        }
+        Ok(())
+    });
+    assert_eq!(read, Err(ByteError::Changed));
+    std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        root.read_no_follow(Path::new("dir/file"), options().read),
+        Err(ByteError::Unsafe)
+    );
+    assert_eq!(
+        change(&root, Path::new("dir/file"), options(), b"new"),
+        Err(refused(ByteError::Unsafe))
+    );
+    assert_eq!(
+        Root::open(&f.0)
+            .unwrap()
+            .read_no_follow(Path::new("dir/file"), options().read)
+            .unwrap(),
+        b"old"
+    );
+    // Pinned metadata names one entry beneath the held root and never follows it.
+    symlink(f.0.join("dir"), f.0.join("link")).unwrap();
+    let (held, entry) = root.pinned_metadata(OsStr::new("link")).unwrap();
+    assert_eq!(held.st_ino, std::fs::metadata(&f.0).unwrap().ino());
+    assert_eq!(
+        FileType::from_raw_mode(entry.unwrap().st_mode),
+        FileType::Symlink
+    );
+    assert!(
+        root.pinned_metadata(OsStr::new("absent"))
+            .unwrap()
+            .1
+            .is_none()
+    );
+    for bad in ["", ".", "..", "dir/file"] {
+        assert!(matches!(
+            root.pinned_metadata(OsStr::new(bad)),
+            Err(crate::Error::InvalidPath)
+        ));
+    }
+}
+
+#[test]
+fn private_registry_rejects_unsafe_absolute_paths() {
+    let f = Fixture::new();
+    let alias = f.0.join("alias");
+    symlink(&f.0, &alias).unwrap();
+    assert!(Root::open_private_registry(&alias).is_err());
+    assert!(Root::open(&alias).is_ok());
+    assert!(matches!(
+        Root::open_private_registry("/a/../b"),
+        Err(crate::Error::InvalidPath)
+    ));
+    assert!(matches!(
+        Root::open_private_registry("/a//b"),
+        Err(crate::Error::InvalidPath)
+    ));
+}
+
+#[test]
+fn sync_parent_requires_a_safe_existing_leaf_and_reports_fsync_failure() {
+    let f = Fixture::new();
+    let root = Root::open(&f.0).unwrap();
+    let before = names(&f.0);
+    assert_eq!(root.sync_parent(Path::new("file")), Err(ByteError::Missing));
+    assert_eq!(
+        root.sync_parent(Path::new("absent/file")),
+        Err(ByteError::Missing)
+    );
+    assert!(names(&f.0).is_empty());
+    std::fs::create_dir(f.0.join("dir")).unwrap();
+    symlink("file", f.0.join("link")).unwrap();
+    for leaf in ["dir", "link"] {
+        assert_eq!(root.sync_parent(Path::new(leaf)), Err(ByteError::Unsafe));
+    }
+    std::fs::write(f.0.join("file"), b"x").unwrap();
+    assert_eq!(root.sync_parent(Path::new("file")), Ok(()));
+    let failed = root.sync_parent_with(Path::new("file"), |at| {
+        if at == Stage::BeforeDirectorySync {
+            Err(Errno::IO)
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(failed, Err(ByteError::Io(Errno::IO)));
+    assert_eq!(
+        names(&f.0),
+        [
+            OsString::from("dir"),
+            OsString::from("file"),
+            OsString::from("link")
+        ]
+    );
+    assert!(before.is_empty());
+    for action in ["remove", "replace", "parent", "root"] {
+        let f = Fixture::new();
+        let repo = f.0.join("repo");
+        std::fs::create_dir_all(repo.join("dir")).unwrap();
+        let target = repo.join("dir/file");
+        std::fs::write(&target, b"old").unwrap();
+        let root = Root::open(&repo).unwrap();
+        let result = root.sync_parent_with(Path::new("dir/file"), |at| {
+            if at == Stage::BeforeDirectorySync {
+                match action {
+                    "remove" => std::fs::remove_file(&target).unwrap(),
+                    "replace" => {
+                        std::fs::rename(&target, repo.join("old")).unwrap();
+                        std::fs::write(&target, b"new").unwrap();
+                    }
+                    "parent" => {
+                        std::fs::rename(repo.join("dir"), repo.join("moved")).unwrap();
+                        std::fs::create_dir(repo.join("dir")).unwrap();
+                    }
+                    "root" => {
+                        std::fs::rename(&repo, f.0.join("moved")).unwrap();
+                        std::fs::create_dir(&repo).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(ByteError::Changed), "{action}");
+    }
+}

@@ -1,16 +1,29 @@
 use crate::{Output, common::*};
-use std::{ffi::OsString, time::Duration};
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 fn zero(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b == b'0')
+}
+/// A non-bare Git checkout proved by Git itself; metadata under `.git` is not proof.
+fn toplevel(dir: &Path, ctx: &Context<'_>) -> Option<PathBuf> {
+    let top = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"], ctx)?);
+    (top.is_absolute() && fs::canonicalize(&top).ok()? == top).then_some(top)
 }
 fn full(ctx: &Context<'_>, reason: Option<&str>) -> Output {
     gate(ctx, None, None, reason)
 }
 fn gate(ctx: &Context<'_>, base: Option<&str>, head: Option<&str>, reason: Option<&str>) -> Output {
-    let mut argv = vec![
-        OsString::from("bash"),
-        ctx.source.join("scripts/check.sh").into_os_string(),
-    ];
+    let script = ctx.source.join("scripts/check.sh");
+    if toplevel(ctx.source, ctx).as_deref() != Some(ctx.source) || !script.is_file() {
+        return fail(
+            "pre-push: the pushed worktree has no Git root or scripts/check.sh; gate unproved",
+        );
+    }
+    let mut argv = vec![OsString::from("bash"), script.into_os_string()];
     if let (Some(base), Some(head)) = (base, head) {
         argv.extend([
             "--quick".into(),
@@ -62,6 +75,17 @@ pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
     if args.first().is_some_and(|a| a == "--pre-merge") {
         return pre_merge(std::env::var("OMS_LAND_ACTIVE").as_deref() == Ok("1"), ctx);
     }
+    // githooks(5): pre-push runs in the worktree being pushed, not the OMS install source.
+    let proved = toplevel(ctx.cwd, ctx);
+    let work = proved.clone().unwrap_or_else(|| ctx.cwd.to_owned());
+    let ctx = &Context {
+        snapshot: ctx.snapshot,
+        provider: ctx.provider,
+        cwd: ctx.cwd,
+        source: &work,
+        interrupted: ctx.interrupted,
+        host: ctx.host,
+    };
     let full_mode = args.first().is_some_and(|a| a == "--full");
     let index = usize::from(full_mode);
     let remote = args.get(index).and_then(|s| s.to_str()).unwrap_or("origin");
@@ -84,7 +108,7 @@ pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
     } else {
         None
     };
-    let mut tag_only = refs.is_some();
+    let mut tag_only = proved.is_some() && refs.is_some();
     let refs = refs.unwrap_or_default();
     let mut records = 0;
     let mut updates = Vec::new();

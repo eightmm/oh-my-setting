@@ -330,6 +330,62 @@ check_markdown_links() {
     ' "$ROOT/$md")
   done < <(git -C "$ROOT" ls-files -z -- '*.md')
   [ "$broken" -eq 0 ] || fail "found $broken broken relative markdown link(s)"
+  check_backtick_paths
+}
+
+# Convention: an inline `top-dir/.../file.ext` in a root or docs/ Markdown file
+# names a repo-root-relative file and must exist. Out of pattern (skipped):
+# CHANGELOG.md (history), templates/ docs (project-relative paths), code fences,
+# non-crates .rs paths (crate-relative), dotted first segments (except `../`
+# traversal with a checked extension), globs/placeholders/fragments (only
+# [A-Za-z0-9_.-] segments), and other extensions. Any `..` path segment inside a
+# repo-top-dir or `../...` checked-extension reference is rejected as traversal.
+check_backtick_paths() {
+  local tops md ref stale=0
+  tops="$(git -C "$ROOT" ls-files | awk -F/ 'NF > 1 && $1 !~ /^\./ { print $1 }' | sort -u | tr '\n' ' ')"
+  while IFS=$'\t' read -r md ref; do
+    [ -n "$ref" ] || continue
+    case "/$ref/" in
+      */../*)
+        echo "path traversal in backtick path in $md -> $ref" >&2
+        stale=$((stale + 1))
+        continue
+        ;;
+    esac
+    [ -e "$ROOT/$ref" ] && continue
+    echo "stale backtick path in $md -> $ref" >&2
+    stale=$((stale + 1))
+  done < <(git -C "$ROOT" ls-files -z -- '*.md' | while IFS= read -r -d '' md; do
+    case "$md" in
+      CHANGELOG.md) continue ;;
+      */*) case "$md" in docs/*.md) ;; *) continue ;; esac ;;
+    esac
+    [ -f "$ROOT/$md" ] || continue
+    awk -v f="$md" -v tops="$tops" '
+      BEGIN { n = split(tops, a, " "); for (i = 1; i <= n; i++) top[a[i]] = 1 }
+      /^[[:space:]]*(```|~~~)/ { in_fence = !in_fence; next }
+      in_fence { next }
+      {
+        line = $0
+        while (match(line, /`[^`]+`/)) {
+          t = substr(line, RSTART + 1, RLENGTH - 2)
+          line = substr(line, RSTART + RLENGTH)
+          if (t !~ /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)+$/) continue
+          split(t, seg, "/")
+          if (("/" t "/") ~ /\/\.\.\//) {
+            if (seg[1] in top || t ~ /\.(md|sh|json|toml|ya?ml|rs)$/) print f "\t" t
+            continue
+          }
+          if (!(seg[1] in top) || seg[1] == "templates") continue
+          if (seg[1] == "crates") {
+            if (t ~ /\.(md|sh|json|toml|ya?ml|rs)$/) print f "\t" t
+          } else if (t ~ /\.(md|sh|json|toml|ya?ml)$/) {
+            print f "\t" t
+          }
+        }
+      }' "$ROOT/$md"
+  done)
+  [ "$stale" -eq 0 ] || fail "found $stale stale backtick repo path(s)"
 }
 
 if [ "$PLANNING_ONLY" = 1 ]; then

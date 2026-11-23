@@ -7,7 +7,7 @@ use oms_panel_core::services::ExecutionRequest;
 
 const MAX_BINDING: usize = 64 * 1024;
 // Codex leads launch without the provider policy, so the assignment carries it.
-const LEAD_DUTIES: &str = "Main accepts and publishes. Give native children explicit roles, disjoint scopes and checks; research, review, verify read-only; builders edit assigned paths; children never delegate, commit, push, land, install or publish; you only integrate.";
+const LEAD_DUTIES: &str = "Main accepts and publishes. Give native children roles, disjoint scopes and checks; research, review, verify read-only; builders edit assigned paths; children never delegate, commit, push, land, install or publish; you only integrate.";
 
 /// Codex shows a larger paste as an opaque placeholder that its composer proof
 /// cannot read, so the whole prompt must fit the visible limit untruncated.
@@ -24,7 +24,7 @@ fn assignment_prompt(
         .ok_or_else(|| Error::new("repository cannot be represented in a Room locator"))?;
     // One shell variable keeps the state repository pinned without repeating it.
     let fixed = format!(
-        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} Read `R={}; oms plan --repo \"$R\" evidence-snapshot --id {}; oms room show --repo \"$R\" --id {} --exact --json`. Match plan {}, lease {}, Room message {message}; obey its paths, acceptance and verifier; report evidence, unverified child access and this binding; receipt is not acceptance. Task: ",
+        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} Read `R={}; oms agent-plan --repo \"$R\" evidence-snapshot --id {}; oms room show --repo \"$R\" --id {} --exact --json`. Match plan {}, lease {}, Room message {message}; obey its paths, acceptance and verifier; report evidence, unverified child access and this binding; receipt is not acceptance. Task: ",
         crate::native_children::TASK_PREFIX,
         assignment_shell_word(repo),
         assignment_shell_word(text(task, "id")),
@@ -571,7 +571,7 @@ mod tests {
             assert_eq!(
                 String::from_utf8(out.stdout).unwrap(),
                 format!(
-                    "plan|--repo|{repo}|evidence-snapshot|--id|native-one|\nroom|show|--repo|{repo}|--id|room-eeeeeeeeeeee|--exact|--json|\n"
+                    "agent-plan|--repo|{repo}|evidence-snapshot|--id|native-one|\nroom|show|--repo|{repo}|--id|room-eeeeeeeeeeee|--exact|--json|\n"
                 )
             );
         }

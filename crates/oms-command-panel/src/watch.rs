@@ -109,6 +109,7 @@ fn run_with_source_writer(
     let mut provider_rows = [None; 3];
     let mut worker_rows = std::collections::BTreeMap::new();
     let mut weekly_hit = None;
+    let mut main_switch_hit = None;
     let mut weekly = WeeklyUsage::default();
     let mut chat: Option<ChatDock> = None;
     let mut split = DockSplit::default();
@@ -311,6 +312,7 @@ fn run_with_source_writer(
             selection_changed = SelectionFence::Native;
             nav.detail = false;
         }
+        settle_main_dock(&mut chat, &report);
         let owner = board
             .as_ref()
             .and_then(|board| board.scope.as_ref())
@@ -363,6 +365,7 @@ fn run_with_source_writer(
             provider_rows = frame.provider_rows;
             worker_rows = frame.worker_rows;
             weekly_hit = frame.weekly_usage;
+            main_switch_hit = frame.main_switch;
             draw(
                 output,
                 &frame.lines,
@@ -635,13 +638,14 @@ fn run_with_source_writer(
                     }
                     if let Some(id) = painted_hit {
                         if let Some(call) = select_painted_call(
+                            &report,
                             &calls,
                             id,
                             &mut nav,
                             &mut selection_changed,
                             row_authority,
                         ) {
-                            match worker_dock(repo, call, services, interrupted) {
+                            match row_dock(repo, &report, call, services, interrupted) {
                                 Ok(dock) => {
                                     chat = Some(dock);
                                 }
@@ -663,15 +667,15 @@ fn run_with_source_writer(
                         &read,
                     );
                     let action = if let input::Key::Click(x, y) = key {
-                        if crate::layout::dimensions() == last_size
-                            && x > 0
-                            && usize::from(x) <= last_size.0
-                        {
-                            provider_at_row(&provider_rows, y)
-                                .map_or(navigation::Action::None, navigation::Action::Provider)
-                        } else {
-                            navigation::Action::None
-                        }
+                        click_action(
+                            x,
+                            y,
+                            last_size,
+                            crate::layout::dimensions(),
+                            nav.editing,
+                            main_switch_hit,
+                            &provider_rows,
+                        )
                     } else if !action_scope_current && direct_detail {
                         deny_row_action(&mut nav);
                         navigation::Action::None
@@ -724,12 +728,7 @@ fn run_with_source_writer(
                         navigation::Action::Quit => return Ok((0, vec![], vec![])),
                         navigation::Action::Refresh => refresh = true,
                         navigation::Action::Council => {
-                            let council = render::calls(&report)
-                                .into_iter()
-                                .filter(|call| call["tool"] == "panel-council")
-                                .max_by(|a, b| {
-                                    crate::text(a, "updated_at").cmp(crate::text(b, "updated_at"))
-                                });
+                            let council = latest_council(&report);
                             if let Some(council) = council {
                                 match worker_dock(repo, &council, services, interrupted) {
                                     Ok(dock) => chat = Some(dock),
@@ -769,12 +768,17 @@ fn run_with_source_writer(
                                     nav.notice = Some(e.message);
                                 }
                                 read = attention::load(repo, &room);
-                                if action == navigation::Action::Open && call["role"] != "main" {
-                                    nav.detail = false;
-                                    match worker_dock(repo, call, services, interrupted) {
-                                        Ok(dock) => chat = Some(dock),
-                                        Err(err) => nav.notice = Some(err.message),
-                                    }
+                                if action == navigation::Action::Open
+                                    && open_row_dock(
+                                        repo,
+                                        &report,
+                                        call,
+                                        &mut nav,
+                                        &mut chat,
+                                        services,
+                                        interrupted,
+                                    )
+                                {
                                     continue;
                                 }
                                 let task = crate::text(call, "task_id");
@@ -873,6 +877,7 @@ fn run_with_source_writer(
                         }
                         navigation::Action::None => {}
                     }
+                    card_replaces_main_dock(&nav, &mut chat);
                 }
                 // Opening an owned native transcript uses the shorter revalidation
                 // cadence even when this frame began with the event-backed deadline.
@@ -921,6 +926,7 @@ fn run_with_source_writer(
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
                     weekly_hit = frame.weekly_usage;
+                    main_switch_hit = frame.main_switch;
                     draw(
                         output,
                         &frame.lines,
@@ -950,6 +956,7 @@ fn run_with_source_writer(
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
                     weekly_hit = frame.weekly_usage;
+                    main_switch_hit = frame.main_switch;
                     draw(
                         output,
                         &frame.lines,
@@ -984,6 +991,7 @@ fn run_with_source_writer(
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
                     weekly_hit = frame.weekly_usage;
+                    main_switch_hit = frame.main_switch;
                     draw(
                         output,
                         &frame.lines,
@@ -1104,6 +1112,18 @@ impl MainSwitch {
         nav: &mut navigation::Navigation,
     ) -> Result<()> {
         crate::parent_only()?;
+        self.open_with(scope, report, nav, |current| {
+            crate::native_panel::main_switch_targets(source, current)
+        })
+    }
+
+    fn open_with(
+        &mut self,
+        scope: Option<&BoardScope>,
+        report: &Value,
+        nav: &mut navigation::Navigation,
+        targets: impl FnOnce(&str) -> Result<Vec<crate::native_panel::MainSwitchTarget>>,
+    ) -> Result<()> {
         crate::require(
             self.running.is_none(),
             "A Main switch is already in progress",
@@ -1124,10 +1144,10 @@ impl MainSwitch {
                 && oms_panel_core::state::main_participant(attempt) == main.member,
             "Current Main is unavailable for a managed switch",
         )?;
-        let current = attempt["refs"]["panel_harness"]
-            .as_str()
-            .unwrap_or_default();
-        let targets = crate::native_panel::main_switch_targets(source, current)?;
+        let current = attempt["refs"]["panel_harness"].as_str();
+        crate::native_panel::check_outgoing_main_swap_harness(current)?;
+        let current = current.unwrap_or_default();
+        let targets = targets(current)?;
         nav.main_switch = Some(navigation::MainSwitchMenu {
             current: current.into(),
             choices: targets
@@ -1655,7 +1675,7 @@ impl NativeRequest {
         let mut footer = self.seed.footer.clone();
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
-        panel.observe_passively(&mut observations, report);
+        panel.observe_passively(&mut observations, report, &generation);
         report["native_dock"] = json!(panel.docked());
         footer.project(Some(&self.scope), true, report, Instant::now(), |scope| {
             target.read_footer(repo, services, stop, scope)
@@ -1701,6 +1721,10 @@ enum RefreshPhase {
     Failed(String),
 }
 
+fn stale_report(report: &Value) -> bool {
+    report["collection"]["ok"] != true || report["capacity_stale"] == true
+}
+
 fn clear_private_weekly(report: &mut Value) {
     if let Some(fields) = report.as_object_mut() {
         fields.remove("claude_local_weekly");
@@ -1719,9 +1743,20 @@ impl RefreshPhase {
     fn frame_report(
         &self,
         snapshot: Option<Snapshot>,
-        previous: Option<Value>,
+        mut previous: Option<Value>,
         room: &str,
     ) -> Value {
+        // Render hides a failed read's AGY roster; pending must not relabel it.
+        if *self == Self::Pending
+            && let Some(previous) = previous.as_mut().filter(|report| stale_report(report))
+            && let Some(activity) = previous
+                .get_mut("provider_activity")
+                .and_then(Value::as_object_mut)
+        {
+            for provider in activity.values_mut().filter_map(Value::as_object_mut) {
+                provider.remove("children");
+            }
+        }
         let mut report = if let Some(snapshot) = snapshot {
             let mut current = snapshot.report;
             // A display-only result has no pane reads of its own. Retain the
@@ -2092,6 +2127,24 @@ fn provider_at_row(rows: &[Option<usize>; 3], y: u16) -> Option<usize> {
     rows.iter().position(|value| *value == Some(row))
 }
 
+fn click_action(
+    x: u16,
+    y: u16,
+    last_size: (usize, usize),
+    current_size: (usize, usize),
+    editing: bool,
+    main_switch: Option<render::ActionZone>,
+    provider_rows: &[Option<usize>; 3],
+) -> navigation::Action {
+    if current_size != last_size || x == 0 || usize::from(x) > last_size.0 {
+        return navigation::Action::None;
+    }
+    if !editing && main_switch.is_some_and(|zone| zone.contains(x, y)) {
+        return navigation::Action::SwitchMain;
+    }
+    provider_at_row(provider_rows, y).map_or(navigation::Action::None, navigation::Action::Provider)
+}
+
 const CLOSE_NATIVE: &str = "[ Return ]";
 
 fn close_native_key(key: &input::Key, (columns, height): (usize, usize)) -> bool {
@@ -2124,6 +2177,8 @@ struct ChatDock {
     back: usize,
     chat: Option<(String, crate::orchestrator::ChatBinding)>,
     agy_locator: Option<crate::agy_child_chat::AgyChildChatLocator>,
+    /// The pinned Overall Main identity this summary reads; workers carry none.
+    main: Option<(String, String)>,
 }
 
 struct WeeklyPaint {
@@ -2140,7 +2195,7 @@ enum WeeklyPhase {
 
 impl WeeklyPhase {
     fn from_report(report: &Value, snapshot_ok: bool) -> Self {
-        if report["collection"]["ok"] != true || report["capacity_stale"] == true {
+        if stale_report(report) {
             Self::Unavailable
         } else if report["collection"]["pending"] == true {
             Self::Pending
@@ -2240,6 +2295,7 @@ impl WeeklyUsage {
                 back: usize::MAX,
                 chat: None,
                 agy_locator: None,
+                main: None,
             });
             self.repaint = true;
         }
@@ -2438,6 +2494,7 @@ fn route_chat_open(
 }
 
 fn select_painted_call<'a>(
+    report: &Value,
     calls: &'a [Value],
     id: &(String, String),
     nav: &mut navigation::Navigation,
@@ -2452,13 +2509,17 @@ fn select_painted_call<'a>(
     nav.detail = false;
     if !row_authority {
         deny_row_action(nav);
-    } else if call["role"] == "main" {
-        *fence = SelectionFence::None;
-        nav.detail = true;
-    } else {
-        return Some(call);
+        return None;
     }
-    None
+    if call["role"] == "main" {
+        *fence = SelectionFence::None;
+        // Only the pinned Overall Main opens its summary dock.
+        nav.detail = !render::is_overall_main(report, call);
+        if nav.detail {
+            return None;
+        }
+    }
+    Some(call)
 }
 
 fn chat_dock(
@@ -2475,6 +2536,7 @@ fn chat_dock(
         back: 0,
         chat: Some((participant.into(), binding.clone())),
         agy_locator: None,
+        main: None,
     })
 }
 
@@ -2504,6 +2566,7 @@ fn open_agy_chat_dock(
             back: 0,
             chat: Some((participant.into(), binding.clone())),
             agy_locator: Some(locator),
+            main: None,
         }),
         crate::agy_child_chat::AgyChatOpen::Unbound => fallback(),
         crate::agy_child_chat::AgyChatOpen::Unavailable => None,
@@ -2596,6 +2659,14 @@ fn idle_chat_dock(
 }
 
 fn chat_title(call: &Value) -> String {
+    if call["tool"] == "panel-council" {
+        let label = crate::text(&call["refs"], "panel_label").trim();
+        return if label.is_empty() {
+            "Council".into()
+        } else {
+            label.into()
+        };
+    }
     let title = crate::text(call, "title").trim();
     let title = if title.is_empty() {
         crate::text(call, "participant")
@@ -2603,6 +2674,104 @@ fn chat_title(call: &Value) -> String {
         title
     };
     format!("{title} · {}", crate::text(call, "role"))
+}
+
+fn latest_council(report: &Value) -> Option<Value> {
+    let room = crate::text(&report["room"], "id");
+    if room.is_empty() {
+        return None;
+    }
+    report["room_attempts"]
+        .as_object()?
+        .values()
+        .filter(|row| {
+            let refs = &row["refs"];
+            let rooms = [
+                crate::text(refs, "panel_room_id"),
+                crate::text(refs, "panel_room"),
+            ];
+            row["tool"] == "panel-council"
+                && rooms.contains(&room)
+                && rooms.iter().all(|id| id.is_empty() || *id == room)
+        })
+        .max_by(|a, b| {
+            let a_stamp = oms_panel_core::metrics::stamp(&a["updated_at"]);
+            let b_stamp = oms_panel_core::metrics::stamp(&b["updated_at"]);
+            a_stamp
+                .partial_cmp(&b_stamp)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| crate::text(a, "updated_at").cmp(crate::text(b, "updated_at")))
+        })
+        .cloned()
+}
+
+/// The reader dock for a picked Board row: the Overall Main gets its Board
+/// summary in two lines, so the four-row default dock shows all of it.
+fn row_dock(
+    repo: &Path,
+    report: &Value,
+    call: &Value,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<ChatDock> {
+    if !render::is_overall_main(report, call) {
+        return worker_dock(repo, call, services, stop);
+    }
+    Ok(ChatDock {
+        title: "Overall Main".into(),
+        history: render::main_summary_lines(call).join("\n"),
+        back: 0,
+        chat: None,
+        agy_locator: None,
+        main: Some(call_identity(call)),
+    })
+}
+
+/// Enter on a worker or the pinned Main swaps any card for that row's dock.
+fn open_row_dock(
+    repo: &Path,
+    report: &Value,
+    call: &Value,
+    nav: &mut navigation::Navigation,
+    chat: &mut Option<ChatDock>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> bool {
+    if call["role"] == "main" && !render::is_overall_main(report, call) {
+        return false;
+    }
+    nav.detail = false;
+    match row_dock(repo, report, call, services, stop) {
+        Ok(dock) => *chat = Some(dock),
+        Err(err) => nav.notice = Some(err.message),
+    }
+    true
+}
+
+/// A key that leaves a card open (D, or `f` without a results page) closes
+/// an open Main summary, so the card's one Escape returns to the Board.
+/// Worker docks stay.
+fn card_replaces_main_dock(nav: &navigation::Navigation, chat: &mut Option<ChatDock>) {
+    if nav.detail && chat.as_ref().is_some_and(|dock| dock.main.is_some()) {
+        *chat = None;
+    }
+}
+
+/// Each painted report, pending ones included, rereads an open Main summary
+/// from the pinned Main's row, and closes it once another participant or
+/// attempt holds that seat.
+fn settle_main_dock(chat: &mut Option<ChatDock>, report: &Value) {
+    let Some(id) = chat.as_ref().and_then(|dock| dock.main.as_ref()) else {
+        return;
+    };
+    match render::pinned_main(report).filter(|main| call_identity(main) == *id) {
+        Some(main) => {
+            if let Some(dock) = chat {
+                dock.history = render::main_summary_lines(&main).join("\n");
+            }
+        }
+        None => *chat = None,
+    }
 }
 
 fn worker_dock(
@@ -2645,7 +2814,12 @@ fn worker_dock(
     }
     let has_parent_summary = !history.trim().is_empty();
     if !has_parent_summary {
-        history = "No result recorded for this worker yet".into();
+        history = if call["tool"] == "panel-council" {
+            "No council positions recorded"
+        } else {
+            "No result recorded for this worker yet"
+        }
+        .into();
     }
     let wrap_summary = call["native_child"] == true
         && (call["provider"] == "claude"
@@ -2664,6 +2838,7 @@ fn worker_dock(
         back: 0,
         chat: None,
         agy_locator: None,
+        main: None,
     })
 }
 
@@ -2836,6 +3011,7 @@ fn frame(
             back: 0,
             chat: None,
             agy_locator: None,
+            main: None,
         });
         let lines = if height >= 3 {
             let mut lines = dock_lines(
@@ -2844,6 +3020,7 @@ fn frame(
                 colored,
                 placeholder.as_mut().unwrap_or(weekly),
                 true,
+                None,
             );
             let hint = match (phase, nav.notice.as_deref()) {
                 (WeeklyPhase::Unavailable, _) => "u Retry Board · Esc Close",
@@ -2870,9 +3047,23 @@ fn frame(
             provider_rows: [None; 3],
             worker_rows: Default::default(),
             weekly_usage: None,
+            main_switch: None,
         };
     }
-    let (nav, board_height) = board_viewport(report, nav, height, dock_rows);
+    let (mut nav, board_height) = board_viewport(report, nav, height, dock_rows);
+    let main = chat
+        .as_ref()
+        .and_then(|dock| dock.main.as_ref())
+        .and_then(|id| render::pinned_main(report).filter(|main| call_identity(main) == *id));
+    // A Main summary the reader dock cannot paint reads as the Main detail
+    // card while the pinned Main, the first visible row, stays selected.
+    let chat = match chat {
+        Some(_) if dock_rows == Some(0) && nav.selected == 0 && main.is_some() => {
+            nav.to_mut().detail = true;
+            None
+        }
+        chat => chat,
+    };
     let nav = nav.as_ref();
     let interactive = dock_rows.is_some();
     let mut board = render::board_frame(
@@ -2909,6 +3100,7 @@ fn frame(
             colored,
             chat,
             false,
+            main.as_ref(),
         ));
     }
     board
@@ -2965,6 +3157,7 @@ fn dock_lines(
     colored: bool,
     chat: &mut ChatDock,
     weekly: bool,
+    main: Option<&Value>,
 ) -> Vec<String> {
     let boxed = weekly && columns >= 44 && dock >= 4;
     let inner = if boxed { columns - 4 } else { columns };
@@ -2973,7 +3166,18 @@ fn dock_lines(
     } else {
         dock.saturating_sub(2)
     };
-    let history = history_rows(&chat.history, inner.max(1), colored);
+    // A Main summary is rebuilt for this paint's width and page, so no fact
+    // wraps past the identity row that the default tail view must show.
+    let history = match (&chat.main, main) {
+        (Some(_), Some(main)) => render::main_bounded_lines(main, inner, page),
+        (Some(_), None) => chat
+            .history
+            .lines()
+            .map(|line| render::clip(line, inner))
+            .take(page)
+            .collect(),
+        (None, _) => history_rows(&chat.history, inner.max(1), colored),
+    };
     let latest = history.len().saturating_sub(page);
     chat.back = chat.back.min(latest);
     let title = if weekly {
@@ -3238,6 +3442,35 @@ mod tests {
         items.iter().map(|v| v.to_string()).collect()
     }
     #[test]
+    fn council_shortcut_selects_latest_attempt_in_current_room_despite_main_collision() {
+        let mut report = serde_json::json!({
+            "room":{"id":"room-one","participants":[{"participant":"main","role":"main","provider":"codex"}]},
+            "room_attempts":{
+                "old":{"tool":"panel-council","updated_at":"2026-01-01T00:00:00Z","refs":{"panel_room_id":"room-one","panel_room_participant":"main","panel_thread":"old"}},
+                "new":{"tool":"panel-council","updated_at":"2026-01-02T00:00:00Z","refs":{"panel_room_id":"room-one","panel_room_participant":"main","panel_thread":"new"}},
+                "other":{"tool":"panel-council","updated_at":"2026-01-03T00:00:00Z","refs":{"panel_room_id":"room-two","panel_room_participant":"main","panel_thread":"other"}},
+                "conflict":{"tool":"panel-council","updated_at":"2026-01-04T00:00:00Z","refs":{"panel_room_id":"room-one","panel_room":"room-two","panel_thread":"conflict"}},
+                "wrong":{"tool":"panel-main","updated_at":"2026-01-05T00:00:00Z","refs":{"panel_room_id":"room-one","panel_thread":"wrong"}}
+            }
+        });
+        assert_eq!(
+            super::latest_council(&report).unwrap()["refs"]["panel_thread"],
+            "new"
+        );
+        report["room"]["id"] = serde_json::json!("room-two");
+        assert_eq!(
+            super::latest_council(&report).unwrap()["refs"]["panel_thread"],
+            "other"
+        );
+        report["room"]["id"] = serde_json::json!("missing");
+        assert!(super::latest_council(&report).is_none());
+    }
+    #[test]
+    fn council_title_uses_lifecycle_label() {
+        let call = serde_json::json!({"tool":"panel-council","refs":{"panel_label":"Council fixture title"}});
+        assert_eq!(super::chat_title(&call), "Council fixture title");
+    }
+    #[test]
     fn council_box_rejects_a_log_with_a_different_thread_identity() {
         let log = br#"{"thread":"panel-council-example","role":"answer","agent":"claude","text":"One recorded position"}"#;
         assert_eq!(
@@ -3267,6 +3500,7 @@ mod tests {
             back: 0,
             chat: None,
             agy_locator: None,
+            main: None,
         };
         let report = serde_json::json!({
             "collection": {"ok": true},
@@ -3350,6 +3584,7 @@ mod tests {
             back: 0,
             chat: None,
             agy_locator: None,
+            main: None,
         };
         for (report, nav, size, show_reader) in [
             (
@@ -3736,6 +3971,7 @@ mod tests {
             notice: Some(format!("First {}Second notice", "a".repeat(72))),
             ..Default::default()
         };
+        let spy = crate::orchestrator::codex_chat_fixture::BoardSpy::new("main-dock");
         for height in [12, 13] {
             let size = (80, height);
             let board = frame(
@@ -3785,22 +4021,414 @@ mod tests {
                 crate::navigation::Action::Open
             );
             assert!(focus.detail);
-            let picked =
-                super::select_painted_call(&calls, worker_hit, &mut focus, &mut fence, true);
+            let picked = super::select_painted_call(
+                &report, &calls, worker_hit, &mut focus, &mut fence, true,
+            );
             assert_eq!(picked.map(super::call_identity), Some(worker_hit.clone()));
             assert!(!focus.detail);
             fence = super::SelectionFence::Native;
             assert!(
-                super::select_painted_call(&calls, main_hit, &mut focus, &mut fence, false)
-                    .is_none()
+                super::select_painted_call(
+                    &report, &calls, main_hit, &mut focus, &mut fence, false
+                )
+                .is_none()
             );
             assert!(!focus.detail);
-            assert!(
-                super::select_painted_call(&calls, main_hit, &mut focus, &mut fence, true)
-                    .is_none()
-            );
-            assert!(focus.detail && fence == super::SelectionFence::None);
+            let main =
+                super::select_painted_call(&report, &calls, main_hit, &mut focus, &mut fence, true)
+                    .expect("an authorized Main click opens the reader dock");
+            assert!(!focus.detail && fence == super::SelectionFence::None);
             assert_eq!(super::call_identity(&calls[focus.selected]), *main_hit);
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let worker = &calls[1];
+            let dock = |report: &serde_json::Value, call: &serde_json::Value| {
+                super::row_dock(std::path::Path::new("."), report, call, &spy, &stop).unwrap()
+            };
+            let worker_view =
+                super::worker_dock(std::path::Path::new("."), worker, &spy, &stop).unwrap();
+            let row_view = dock(&report, worker);
+            assert_eq!(
+                (&row_view.title, &row_view.history),
+                (&worker_view.title, &worker_view.history)
+            );
+            assert_eq!(
+                dock(&report, main).history,
+                "Provider unavailable · Model unavailable · working · Tokens unavailable\n\
+                 Work unavailable · Task unavailable"
+            );
+            let mut summary = report.clone();
+            for (key, value) in [
+                ("provider", "claude"),
+                ("model", "opus"),
+                ("title", "Own goal"),
+            ] {
+                summary["room"]["participants"][0][key] = json!(value);
+            }
+            let summary_calls = render::visible(&summary, &focus);
+            for rows in [13, 24] {
+                let docked = frame(
+                    &summary,
+                    &focus,
+                    (80, rows),
+                    &Default::default(),
+                    false,
+                    Some(&mut DockSplit::default()),
+                    Some(&mut dock(&summary, &summary_calls[0])),
+                    None,
+                );
+                let at = docked
+                    .lines
+                    .iter()
+                    .position(|line| line.starts_with("↕ Overall Main"))
+                    .expect("Main summary in the reader dock");
+                assert_eq!(
+                    docked.lines[at + 1..at + 3]
+                        .iter()
+                        .map(|line| line.trim_end())
+                        .collect::<Vec<_>>(),
+                    [
+                        "Claude · opus · working · Tokens unavailable",
+                        "Work Own goal · Task unavailable"
+                    ],
+                    "{:?}",
+                    docked.lines
+                );
+                assert!(
+                    docked
+                        .lines
+                        .iter()
+                        .all(|line| !line.contains("Call Detail"))
+                );
+                assert!(
+                    rows < 24
+                        || docked.worker_rows.iter().any(|(row, (id, _))| {
+                            id == "call-worker"
+                                && *row < at
+                                && docked.lines[*row].contains("Review terminal")
+                        }),
+                    "{:?}",
+                    docked.lines
+                );
+            }
+            // Under 11 rows the reader dock gets none; an open Main summary
+            // reads as the Main card and the selection stays on Main.
+            let short_split = DockSplit::default();
+            assert_eq!((short_split.rows(10), short_split.rows(11)), (0, 4));
+            let shown = |rows: usize, selected: usize, call: Option<&serde_json::Value>| {
+                let mut split = DockSplit::default();
+                let lines = frame(
+                    &summary,
+                    &crate::navigation::Navigation {
+                        selected,
+                        ..focus.clone()
+                    },
+                    (80, rows),
+                    &Default::default(),
+                    false,
+                    Some(&mut split),
+                    call.map(|call| dock(&summary, call)).as_mut(),
+                    None,
+                )
+                .lines;
+                assert_eq!(split.painted_rows, 0);
+                lines
+            };
+            for rows in [8, 10] {
+                let card = shown(rows, focus.selected, Some(&summary_calls[0]));
+                let at = card
+                    .iter()
+                    .position(|line| line.contains("Overall Main") && line.contains("Esc back"))
+                    .unwrap_or_else(|| panic!("{rows} rows: {card:?}"));
+                assert_eq!(
+                    card[at + 1..at + 3]
+                        .iter()
+                        .map(|line| line.trim_matches(['│', ' ']))
+                        .collect::<Vec<_>>(),
+                    [
+                        "Claude · opus · working · Tokens unavailable",
+                        "Work Own goal · Task unavailable"
+                    ],
+                    "{card:?}"
+                );
+                assert!(
+                    card.iter()
+                        .all(|line| !line.starts_with('↕') && !line.contains("Call Detail"))
+                );
+                assert_eq!(
+                    super::call_identity(&summary_calls[focus.selected]),
+                    *main_hit
+                );
+                assert!(!focus.detail && fence == super::SelectionFence::None);
+                let mut refused = (focus.clone(), super::SelectionFence::Changed);
+                for open in [false, true] {
+                    let action = super::apply_selection_key(
+                        &mut refused.0,
+                        &mut refused.1,
+                        &Key::Enter,
+                        summary_calls.len(),
+                        1,
+                    );
+                    assert_eq!(action == crate::navigation::Action::Open, open);
+                }
+                assert_eq!(
+                    super::call_identity(&summary_calls[refused.0.selected]),
+                    *main_hit
+                );
+                // Escape closes the dock to this Board; a worker dock that
+                // cannot paint leaves it unchanged, as does moving off Main.
+                let board = shown(rows, focus.selected, None);
+                assert!(board.iter().all(|line| !line.contains("Esc back")));
+                assert_eq!(shown(rows, focus.selected, Some(worker)), board);
+                assert_eq!(
+                    shown(rows, 1, Some(&summary_calls[0])),
+                    shown(rows, 1, None)
+                );
+            }
+            // A long Work title clips instead of wrapping: the short card and
+            // the reader dock keep identity, a labeled Work and Task in frame.
+            let mut long = summary.clone();
+            long["room"]["participants"][0]["title"] = json!("Overall Main goal ".repeat(12));
+            long["room"]["participants"][0]["task_id"] = json!("t-main-42");
+            let long_calls = render::visible(&long, &focus);
+            let labeled_work = |facts: &str| {
+                facts.split(['\n', '·']).any(|piece| {
+                    let piece = piece.trim_matches(['│', ' ']);
+                    piece.starts_with("Work Ov") && piece.ends_with('…')
+                })
+            };
+            for rows in [8, 9, 10, 11, 13, 24] {
+                for columns in [40, 50, 60, 80] {
+                    let mut split = DockSplit::default();
+                    let card = frame(
+                        &long,
+                        &focus,
+                        (columns, rows),
+                        &Default::default(),
+                        false,
+                        Some(&mut split),
+                        Some(&mut dock(&long, &long_calls[0])),
+                        None,
+                    )
+                    .lines;
+                    let at = card
+                        .iter()
+                        .position(|line| {
+                            line.starts_with("↕ Overall Main")
+                                || line.contains("Overall Main") && line.contains("Esc back")
+                        })
+                        .unwrap_or_else(|| panic!("{columns}x{rows}: {card:?}"));
+                    assert_eq!(rows > 10, split.painted_rows > 0, "{columns}x{rows}");
+                    let end = card.len() - 1;
+                    let facts = card[at + 1..end].join("\n");
+                    let identity = if rows > 10 { &card[at + 1] } else { &facts };
+                    for fact in ["Claude", "opus", "working"] {
+                        assert!(identity.contains(fact), "{columns}x{rows} {fact}: {card:?}");
+                    }
+                    for fact in ["Tokens unavailable", "Task t-main-42"] {
+                        assert!(facts.contains(fact), "{columns}x{rows} {fact}: {card:?}");
+                    }
+                    assert!(labeled_work(&facts), "{columns}x{rows}: {card:?}");
+                    assert!(card.len() <= rows, "{columns}x{rows}: {card:?}");
+                    assert!(
+                        card.iter().all(|line| render::width(line) <= columns),
+                        "{columns}x{rows}: {card:?}"
+                    );
+                }
+            }
+            // The dock rebuilds the summary at each painted width, so a
+            // narrow repaint shows identity and restores the wide frame.
+            let mut open = dock(&long, &long_calls[0]);
+            let resized = [80, 40, 80].map(|columns| {
+                let lines = frame(
+                    &long,
+                    &focus,
+                    (columns, 13),
+                    &Default::default(),
+                    false,
+                    Some(&mut DockSplit::default()),
+                    Some(&mut open),
+                    None,
+                )
+                .lines;
+                let at = lines
+                    .iter()
+                    .position(|line| line.starts_with("↕ Overall Main"))
+                    .unwrap();
+                assert!(lines[at + 1].starts_with("Claude · opus · working"));
+                assert!(labeled_work(&lines[at + 1..].join("\n")), "{lines:?}");
+                assert!(lines.len() <= 13 && open.back == 0);
+                assert!(lines.iter().all(|line| render::width(line) <= columns));
+                lines
+            });
+            assert_eq!(resized[0], resized[2]);
+            assert_ne!(resized[0], resized[1]);
+            // Worker docks still wrap their history rather than clip it.
+            let mut answer = worker.clone();
+            answer["native_answer"] = json!("Worker answer ".repeat(8));
+            let mut worker_open =
+                super::worker_dock(std::path::Path::new("."), &answer, &spy, &stop).unwrap();
+            let painted = frame(
+                &report,
+                &focus,
+                (40, 13),
+                &Default::default(),
+                false,
+                Some(&mut DockSplit::default()),
+                Some(&mut worker_open),
+                None,
+            )
+            .lines;
+            let wrapped = super::history_rows(&worker_open.history, 40, false);
+            assert!(wrapped.len() > 2);
+            assert_eq!(
+                painted[painted.len() - 3..painted.len() - 1],
+                wrapped[wrapped.len() - 2..]
+            );
+            // A refresh, pending or not, rereads an open Main summary; a
+            // replaced or vanished Main closes it. Worker docks stay as they are.
+            let pending = |report: &serde_json::Value| {
+                let mut pending = report.clone();
+                pending["collection"]["pending"] = json!(true);
+                pending
+            };
+            for next in [summary.clone(), pending(&summary)] {
+                let mut open = Some(dock(&report, main));
+                super::settle_main_dock(&mut open, &next);
+                assert_eq!(
+                    open.map(|dock| dock.history),
+                    Some(
+                        "Claude · opus · working · Tokens unavailable\n\
+                         Work Own goal · Task unavailable"
+                            .to_owned()
+                    )
+                );
+            }
+            let mut replaced = summary.clone();
+            replaced["room"]["participants"][0]["participant"] = json!("next-main");
+            let mut vanished = summary.clone();
+            vanished["room"]["participants"][0]["role"] = json!("worker");
+            for next in [&replaced, &pending(&replaced), &vanished] {
+                let mut stale = Some(dock(&summary, &summary_calls[0]));
+                super::settle_main_dock(&mut stale, next);
+                assert!(stale.is_none());
+                let mut kept = Some(dock(&summary, worker));
+                super::settle_main_dock(&mut kept, next);
+                assert_eq!(
+                    kept.map(|dock| (dock.title, dock.history)),
+                    Some((worker_view.title.clone(), worker_view.history.clone()))
+                );
+            }
+            let unopened = frame(
+                &summary,
+                &focus,
+                (80, 24),
+                &Default::default(),
+                false,
+                Some(&mut DockSplit::default()),
+                None,
+                None,
+            );
+            assert!(unopened.lines.iter().all(|line| !line.starts_with('↕')));
+            // D over an open Main dock leaves the card as the one surface, so
+            // one Escape (the loop's dock-first close needs a dock) returns to
+            // the plain Board on Main; Enter on the card swaps it back for the
+            // dock. A refused D keeps the dock; worker docks stay.
+            let paint = |nav: &crate::navigation::Navigation,
+                         chat: &mut Option<super::ChatDock>| {
+                let mut split = DockSplit::default();
+                let lines = frame(
+                    &summary,
+                    nav,
+                    (80, 24),
+                    &Default::default(),
+                    false,
+                    Some(&mut split),
+                    chat.as_mut(),
+                    None,
+                )
+                .lines;
+                let cards = lines
+                    .iter()
+                    .filter(|line| line.contains("Esc back"))
+                    .count();
+                let docks = lines.iter().filter(|line| line.starts_with('↕')).count();
+                assert!(cards + docks <= 1, "{lines:?}");
+                lines
+            };
+            let detail_key = |nav: &mut crate::navigation::Navigation,
+                              fence: &mut super::SelectionFence,
+                              chat: &mut Option<super::ChatDock>| {
+                super::apply_selection_key(nav, fence, &Key::Char('D'), summary_calls.len(), 1);
+                super::card_replaces_main_dock(nav, chat);
+            };
+            let main_dock = || Some(dock(&summary, &summary_calls[0]));
+            let mut refused = (focus.clone(), super::SelectionFence::Changed, main_dock());
+            detail_key(&mut refused.0, &mut refused.1, &mut refused.2);
+            assert!(!refused.0.detail && refused.2.is_some_and(|dock| dock.main.is_some()));
+            let (mut card, mut fence, mut chat) =
+                (focus.clone(), super::SelectionFence::None, main_dock());
+            assert!(
+                paint(&card, &mut chat)
+                    .iter()
+                    .any(|line| line.starts_with("↕ Overall Main"))
+            );
+            detail_key(&mut card, &mut fence, &mut chat);
+            assert!(card.detail && chat.is_none());
+            assert!(
+                paint(&card, &mut chat)
+                    .iter()
+                    .any(|line| line.contains("Esc back"))
+            );
+            super::apply_selection_key(&mut card, &mut fence, &Key::Escape, summary_calls.len(), 1);
+            assert_eq!(paint(&card, &mut chat), unopened.lines);
+            assert_eq!(
+                super::call_identity(&summary_calls[card.selected]),
+                *main_hit
+            );
+            detail_key(&mut card, &mut fence, &mut chat);
+            assert_eq!(
+                super::apply_selection_key(
+                    &mut card,
+                    &mut fence,
+                    &Key::Enter,
+                    summary_calls.len(),
+                    1
+                ),
+                crate::navigation::Action::Open
+            );
+            let at = std::path::Path::new(".");
+            assert!(super::open_row_dock(
+                at,
+                &summary,
+                &summary_calls[0],
+                &mut card,
+                &mut chat,
+                &spy,
+                &stop
+            ));
+            assert!(!card.detail && chat.as_ref().is_some_and(|dock| dock.main.is_some()));
+            assert!(
+                paint(&card, &mut chat)
+                    .iter()
+                    .any(|line| line.starts_with("↕ Overall Main"))
+            );
+            let mut kept = (
+                focus.clone(),
+                super::SelectionFence::None,
+                Some(dock(&summary, worker)),
+            );
+            kept.0.selected = 1;
+            detail_key(&mut kept.0, &mut kept.1, &mut kept.2);
+            assert!(kept.0.detail);
+            assert_eq!(
+                kept.2.map(|dock| dock.title),
+                Some(worker_view.title.clone())
+            );
+            // A Main dock a short Board hides behind a worker card closes too.
+            let mut hidden = (kept.0.clone(), super::SelectionFence::None, main_dock());
+            hidden.0.detail = false;
+            detail_key(&mut hidden.0, &mut hidden.1, &mut hidden.2);
+            assert!(hidden.0.detail && hidden.2.is_none());
 
             let hit = board.weekly_usage.expect("Weekly fits on the full Board");
             assert!(
@@ -4216,6 +4844,7 @@ mod tests {
             back: 0,
             chat: None,
             agy_locator: None,
+            main: None,
         };
         let mut split = DockSplit::default();
         for size @ (columns, height) in [(38, 12), (80, 17), (80, 23), (140, 90)] {
@@ -4398,6 +5027,7 @@ mod tests {
                 back: 0,
                 chat: None,
                 agy_locator: None,
+                main: None,
             });
             assert!(route_chat_open(
                 &key,
@@ -4461,6 +5091,8 @@ mod tests {
         previous["claude_local_weekly"] = json!({"weekly_used":14});
         previous["codex_weekly_account"] = json!("acct-b");
         previous["agy_footer_weekly"] = json!({"remaining":"99%"});
+        previous["provider_activity"] =
+            json!({"antigravity":{"children":[{"role":"Worker","title":"Draft notes"}]}});
 
         let pending_snap = Snapshot {
             status: 0,
@@ -4492,6 +5124,54 @@ mod tests {
             assert_eq!(report["provider_status"]["codex"]["weekly_used"], 14);
             assert_eq!(report["provider_accounts"]["codex"]["account"], "acct-b");
         }
+        // Only the same scope's last healthy read carries the AGY roster into a
+        // pending frame; a scope change clears `previous` before this projection.
+        let pending = |sampled: bool, previous: Option<serde_json::Value>| {
+            let snapshot = sampled.then(|| Snapshot {
+                status: 0,
+                report: idle_report("room-fixture"),
+            });
+            RefreshPhase::Pending.frame_report(snapshot, previous, "room-fixture")
+        };
+        let roster = |report: &serde_json::Value| {
+            report["provider_activity"]["antigravity"]["children"].clone()
+        };
+        for sampled in [false, true] {
+            let carried = pending(sampled, Some(previous.clone()));
+            assert_eq!(roster(&carried)[0]["title"], "Draft notes");
+            assert_eq!(
+                roster(&pending(sampled, Some(carried)))[0]["title"],
+                "Draft notes"
+            );
+            assert!(roster(&pending(sampled, None)).is_null());
+        }
+        // A failed or stale frame hides its roster; pending must not relabel it.
+        let failed = RefreshPhase::Failed("boom".into()).frame_report(
+            None,
+            Some(previous.clone()),
+            "room-fixture",
+        );
+        let mut stale = previous.clone();
+        stale["capacity_stale"] = true.into();
+        for unhealthy in [failed.clone(), stale] {
+            for sampled in [false, true] {
+                let replay = pending(sampled, Some(unhealthy.clone()));
+                assert!(roster(&replay).is_null(), "pending replayed failed roster");
+                assert!(roster(&pending(sampled, Some(replay))).is_null());
+            }
+        }
+        let mut sampled = idle_report("room-fixture");
+        sampled["provider_activity"] =
+            json!({"antigravity":{"children":[{"role":"Researcher","title":"Fresh notes"}]}});
+        let fresh = RefreshPhase::Fresh.frame_report(
+            Some(Snapshot {
+                status: 0,
+                report: sampled,
+            }),
+            Some(failed),
+            "room-fixture",
+        );
+        assert_eq!(roster(&fresh)[0]["title"], "Fresh notes");
         // The follow-up remains pending after this same-scope result contradicts
         // the previously proved account. Its carried quota must disappear.
         let mut contradicted = RefreshPhase::Pending.frame_report(
@@ -4505,6 +5185,7 @@ mod tests {
         clear_rejected_native(&mut contradicted);
         assert_eq!(contradicted["collection"]["pending"], true);
         for key in [
+            "provider_activity",
             "provider_status",
             "provider_accounts",
             "codex_weekly_account",
@@ -4578,12 +5259,228 @@ mod tests {
         let refuse = |_: &BoardScope, _: &crate::native_panel::MainSwitchTarget| {
             panic!("cancelled or stale switch reached the dispatcher")
         };
+        let report = json!({
+            "project_name": "proj",
+            "generated_at": 1_700_000_037,
+            "collection": {"ok": true},
+            "room": {
+                "id": "room-one",
+                "main": "main-member",
+                "participants": [
+                    {"participant": "earlier", "role": "main", "provider": "claude", "model": "opus", "state": "working", "created_at": "1"},
+                    {"participant": "main-member", "attempt": "attempt-old", "role": "main", "provider": "codex", "model": "gpt-x", "state": "working", "joined": true}
+                ]
+            },
+            "room_attempts": {
+                "attempt-old": {
+                    "attempt_id": "attempt-old",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "working",
+                    "terminal": false,
+                    "refs": {
+                        "panel_host": "tmux",
+                        "panel_harness": "codex",
+                        "panel_room_id": "room-one",
+                        "panel_room_participant": "main-member",
+                        "panel_role": "main"
+                    }
+                }
+            }
+        });
+        let read = std::collections::BTreeMap::new();
+        let mut board_nav = navigation::Navigation::default();
+        let board = frame(
+            &report,
+            &board_nav,
+            (100, 20),
+            &read,
+            false,
+            None,
+            None,
+            None,
+        );
+        let zone = board
+            .main_switch
+            .expect("Switch Main hit zone on Board with pinned Main");
+        let click_x = zone.start as u16;
+        let click_y = (zone.row + 1) as u16;
+        let action = click_action(
+            click_x,
+            click_y,
+            (100, 20),
+            (100, 20),
+            false,
+            board.main_switch,
+            &board.provider_rows,
+        );
+        assert_eq!(action, navigation::Action::SwitchMain);
+        assert_eq!(
+            allow_board_action(&mut board_nav, action, true, true),
+            navigation::Action::SwitchMain
+        );
+        assert_eq!(
+            allow_board_action(&mut board_nav, action, true, false),
+            navigation::Action::None
+        );
+        assert_eq!(
+            click_action(
+                click_x,
+                click_y,
+                (100, 20),
+                (100, 20),
+                true,
+                board.main_switch,
+                &board.provider_rows,
+            ),
+            navigation::Action::None
+        );
+        let rows = render::visible(&report, &navigation::Navigation::default());
+        let earlier = rows
+            .iter()
+            .position(|call| crate::text(call, "participant") == "earlier")
+            .unwrap();
+        let detail_nav = navigation::Navigation {
+            detail: true,
+            selected: earlier,
+            ..Default::default()
+        };
+        let detail_board = frame(
+            &report,
+            &detail_nav,
+            (100, 20),
+            &read,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(detail_board.main_switch.is_none());
+        assert_eq!(
+            click_action(
+                click_x,
+                click_y,
+                (100, 20),
+                (100, 20),
+                false,
+                detail_board.main_switch,
+                &detail_board.provider_rows,
+            ),
+            navigation::Action::None
+        );
+        let mut dock_split = DockSplit::default();
+        let mut dock = ChatDock {
+            title: "Worker".into(),
+            history: "body".into(),
+            back: 0,
+            chat: None,
+            agy_locator: None,
+            main: None,
+        };
+        let docked_board = frame(
+            &report,
+            &navigation::Navigation::default(),
+            (100, 14),
+            &read,
+            false,
+            Some(&mut dock_split),
+            Some(&mut dock),
+            None,
+        );
+        assert!(docked_board.main_switch.is_none());
+        assert_eq!(
+            click_action(
+                click_x,
+                click_y,
+                (100, 14),
+                (100, 14),
+                false,
+                docked_board.main_switch,
+                &docked_board.provider_rows,
+            ),
+            navigation::Action::None
+        );
+        let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
+            .unwrap_err()
+            .message;
+        for (owner, harness) in [
+            ("claude", Some("claude")),
+            ("antigravity", Some("agy")),
+            ("codex", Some("pi")),
+            ("codex", Some("unknown")),
+            ("codex", None),
+        ] {
+            let mut case_scope = scope.clone();
+            case_scope.main.as_mut().unwrap().owner = owner.into();
+            let mut case_report = report.clone();
+            let attempt = case_report["room_attempts"]["attempt-old"]
+                .as_object_mut()
+                .unwrap();
+            attempt.insert("provider".into(), json!(owner));
+            let refs = attempt["refs"].as_object_mut().unwrap();
+            match harness {
+                Some(value) => {
+                    refs.insert("panel_harness".into(), json!(value));
+                }
+                None => {
+                    refs.remove("panel_harness");
+                }
+            }
+            let mut flow = MainSwitch::default();
+            let mut nav = navigation::Navigation::default();
+            let error = flow
+                .open_with(Some(&case_scope), &case_report, &mut nav, |_| {
+                    panic!("unsupported outgoing harness must not resolve targets")
+                })
+                .unwrap_err();
+            assert_eq!(error.message, expected_refusal);
+            assert!(nav.main_switch.is_none());
+            assert!(flow.selection.is_none());
+            assert!(flow.running.is_none());
+            assert!(!flow.key(
+                &Key::Char('1'),
+                &mut nav,
+                || Some(case_scope.clone()),
+                refuse
+            ));
+            assert!(!flow.key(
+                &Key::Char('y'),
+                &mut nav,
+                || Some(case_scope.clone()),
+                refuse
+            ));
+        }
+        let mut opened_flow = MainSwitch::default();
+        let mut opened_nav = navigation::Navigation {
+            notice: Some("stale".into()),
+            ..Default::default()
+        };
+        opened_flow
+            .open_with(Some(&scope), &report, &mut opened_nav, |current| {
+                assert_eq!(current, "codex");
+                Ok(vec![crate::native_panel::MainSwitchTarget {
+                    harness: "agy",
+                    model: "gemini-4-carbon-high".into(),
+                }])
+            })
+            .unwrap();
+        assert_eq!(opened_nav.main_switch.as_ref().unwrap().current, "codex");
+        assert!(opened_nav.notice.is_none());
+        assert!(opened_flow.selection.is_some());
         let (mut flow, mut nav) = make_menu();
+        let modal = frame(&report, &nav, (100, 20), &read, false, None, None, None);
+        assert!(modal.main_switch.is_none());
+        assert!(flow.running.is_none());
+        assert!(!flow.key(&Key::Click(2, 2), &mut nav, || None, refuse));
+        assert!(nav.main_switch.as_ref().unwrap().selected.is_none());
         assert!(!flow.key(&Key::Char('y'), &mut nav, || None, refuse));
         assert!(flow.key(&Key::Char('1'), &mut nav, || None, refuse));
+        assert!(!flow.key(&Key::Click(2, 3), &mut nav, || Some(scope.clone()), refuse));
+        assert!(flow.running.is_none() && nav.main_switch.is_some());
         let frame = render::main_switch_frame(nav.main_switch.as_ref().unwrap(), 31, 6);
         assert!(frame.lines.iter().any(|line| line.contains("Y Confirm")));
         assert!(frame.worker_rows.is_empty());
+        assert!(frame.main_switch.is_none());
         assert!(flow.key(&Key::Escape, &mut nav, || None, refuse));
         assert!(flow.selection.is_none() && nav.main_switch.is_none());
         let (mut flow, mut nav) = make_menu();
@@ -5616,6 +6513,7 @@ mod tests {
                 observations.chat_binding(&native).unwrap().clone(),
             )),
             agy_locator: None,
+            main: None,
         };
         assert!(private_chat_hidden(
             &serde_json::json!({"collection": {"pending": true}}),
@@ -5641,6 +6539,7 @@ mod tests {
             back: 0,
             chat: Some((native.into(), binding.clone())),
             agy_locator: None,
+            main: None,
         });
         let report = serde_json::json!({"collection": {"ok": true}});
         // Same pane, next observation: a manual message hid the Turn, so no binding.
@@ -5667,6 +6566,7 @@ mod tests {
             back: 0,
             chat: None,
             agy_locator: None,
+            main: None,
         });
         assert!(!settle_chat_dock(
             &mut summary,
@@ -5918,6 +6818,44 @@ mod tests {
         );
         assert!(!nav.detail);
         assert_eq!(nav.filter, "D");
+
+        // D on Main reads the Main summary, not the generic receipt chrome.
+        nav.editing = false;
+        nav.filter.clear();
+        nav.selected = 0;
+        assert_eq!(calls[0]["role"], "main");
+        selection = super::SelectionFence::Changed;
+        super::apply_selection_key(&mut nav, &mut selection, &key, calls.len(), 1);
+        assert!(!nav.detail);
+        super::apply_selection_key(&mut nav, &mut selection, &key, calls.len(), 1);
+        assert!(nav.detail);
+        let detail = super::frame(
+            &report,
+            &nav,
+            (80, 24),
+            &Default::default(),
+            false,
+            Some(&mut DockSplit::default()),
+            None,
+            None,
+        )
+        .lines
+        .join("\n");
+        assert!(!detail.contains("Call Detail"), "{detail}");
+        for pair in [
+            ["Overall Main", "Esc back"],
+            ["Provider", "Codex"],
+            ["State", "working"],
+        ] {
+            assert!(
+                detail
+                    .lines()
+                    .any(|line| pair.iter().all(|part| line.contains(part))),
+                "{pair:?}: {detail}"
+            );
+        }
+        super::apply_selection_key(&mut nav, &mut selection, &Key::Escape, 1, 1);
+        assert!(!nav.detail);
     }
 
     #[test]
@@ -6183,6 +7121,7 @@ mod tests {
                 observations.chat_binding(&native).unwrap().clone(),
             )),
             agy_locator: None,
+            main: None,
         };
         assert!(private_chat_hidden(
             &serde_json::json!({"collection": {"pending": true}}),
@@ -6305,6 +7244,7 @@ mod tests {
             back: 0,
             chat: Some(("native-codex-child".into(), codex_binding.clone())),
             agy_locator: None,
+            main: None,
         });
         assert!(!settle_live_chat_dock_with(
             &mut codex_dock,
@@ -6345,6 +7285,7 @@ mod tests {
             back: 0,
             chat: Some((agy_child.clone(), agy_child_binding)),
             agy_locator: Some(dummy_locator),
+            main: None,
         });
         assert!(!settle_live_chat_dock_with(
             &mut agy_dock,
@@ -6553,6 +7494,33 @@ mod tests {
                     "--json",
                 ],
             );
+            const THREAD: &str = "panel-council-0123456789abcdef01234567";
+            run_cmd(
+                NativeCommand::Events,
+                &[
+                    "start",
+                    "--provider",
+                    "codex",
+                    "--tool",
+                    "panel-council",
+                    "--ref",
+                    &format!("panel_room_id={room_id}"),
+                    "--ref",
+                    &format!("panel_room_participant={attempt_id}"),
+                    "--ref",
+                    "panel_label=Council fixture title",
+                    "--ref",
+                    &format!("panel_thread={THREAD}"),
+                ],
+            );
+            let threads = repo.join(".oms/threads");
+            std::fs::create_dir_all(&threads).unwrap();
+            std::fs::set_permissions(&threads, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let log = threads.join(format!("{THREAD}.jsonl"));
+            std::fs::write(&log, format!(
+                "{{\"thread\":\"{THREAD}\",\"role\":\"answer\",\"agent\":\"claude\",\"text\":\"COUNCIL_POSITION_ONE\"}}\n{{\"thread\":\"{THREAD}\",\"role\":\"answer\",\"agent\":\"codex\",\"text\":\"COUNCIL_POSITION_TWO\"}}\n"
+            )).unwrap();
+            std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
             let seed_out = PathBuf::from(std::env::var_os("OMS_TEST_SEED_OUT").unwrap());
             std::fs::write(&seed_out, format!("{room_id}\n{attempt_id}\n")).unwrap();
             return;
@@ -7221,11 +8189,28 @@ sys.exit(proc.wait())
         let _ = std::fs::remove_file(&log);
 
         // Run 1: cold Main status, input-only redraw, a quiet 5s tick, worker reply wake
-        // and explicit refresh. Without a row open, no child transcript is read.
+        // and explicit refresh. Without a row open, child transcripts get only the
+        // bounded per-refresh usage suffix reads asserted below.
         let (pre_click_counters, pre_click_tmux_log) = run_pty(
             false,
             false,
             &mut |child_in, stream, screen, rx| {
+                wait_for(stream, screen, rx, "council fixture board", &mut |s| {
+                    s.iter()
+                        .any(|line| line.contains("Overall Main") && line.contains("working"))
+                });
+                child_in.write_all(b"c").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "council positions", &mut |s| {
+                    s.iter().any(|line| line.contains("Council fixture title"))
+                        && s.iter().any(|line| line.contains("COUNCIL_POSITION_ONE"))
+                        && s.iter().any(|line| line.contains("COUNCIL_POSITION_TWO"))
+                });
+                child_in.write_all(b"\x1b").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "council close", &mut |s| {
+                    s.iter().all(|line| !line.contains("COUNCIL_POSITION_ONE"))
+                });
                 wait_for(stream, screen, rx, "refresh-only initial board", &mut |s| {
                     s[0].contains("OMS · repo")
                         && s.iter()
@@ -7381,11 +8366,6 @@ sys.exit(proc.wait())
             pre_leg_cand,
             pre_leg_child,
         ] = pre_click_counters;
-        assert_eq!(
-            (pre_custody, pre_scans, pre_strict_reads, pre_legacy_reads),
-            (0, 0, 0, 0),
-            "passive foreground refreshes before Click must do 0 strict custody checks, 0 scans, 0 strict/legacy child reads"
-        );
         let run1_captures_p = pre_click_tmux_log
             .lines()
             .filter(|l| *l == "capture-pane -p -t %4")
@@ -7401,6 +8381,30 @@ sys.exit(proc.wait())
             (1, run1_captures_p, 0, 0),
             "expected cold-only custody check (1) and exact 1 parent read per observe, 0 candidates, 0 child reads; log:\n{pre_click_tmux_log}"
         );
+        // Usage is a bounded per-refresh scan: each accepted Board refresh does
+        // 2 strict custody checks, 1 parent scan and one suffix read per unique
+        // painted child, capped at orchestrator's AGY_USAGE_ROWS (3). Run 1
+        // accepts every observe (cold, reply wake, `u`), one lead capture each.
+        let accepted = run1_captures_p;
+        let painted = lead_rows
+            .iter()
+            .filter_map(|row| {
+                let body = row["content"]
+                    .as_str()?
+                    .strip_prefix("Created the following subagent:\n")?;
+                let created: Value = serde_json::from_str(body).ok()?;
+                created["conversationId"].as_str().map(str::to_owned)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            .min(3);
+        assert_eq!(
+            (pre_custody, pre_scans, pre_strict_reads, pre_legacy_reads),
+            (2 * accepted, accepted, painted * accepted, 0),
+            "before Click, each of {accepted} accepted refreshes does 2 strict custody checks, 1 usage scan and \
+             1 bounded suffix read per {painted} painted child (never a whole transcript); no legacy reads"
+        );
+        assert!(pre_strict_reads <= 3 * accepted);
 
         // Run 2: Click -> Escape -> Enter -> Inode-swap close -> Re-click -> Live Turn-change close -> 0775 Unbound fallback & Silent Legacy Unavailable.
         let (run2_counters, tmux_log) =
@@ -7616,23 +8620,37 @@ sys.exit(proc.wait())
             leg_child,
         ] = run2_counters;
         // Verify 0 real tmux calls & exact persisted child read counters:
-        // legacy_child=0, strict_reads=3 (Click #1 + Enter #2 + Click #3),
+        // legacy_child=0, strict_reads = 3 dock opens (Click #1 + Enter #2 + Click #3)
+        // plus one usage suffix read per painted child on each usage refresh,
         // leg_cand=2 (ONLY the 2 lead transcript checks when Turn switched to NEW_TURN),
-        // and protected rechecks incremented custody >= 7, scans >= 3 with 0 child reads.
+        // and protected rechecks (custody >= 7, scans >= 3) on top of usage scans.
         assert!(!tmux_log.is_empty());
         assert!(!tmux_log.contains("UNEXPECTED:"));
         assert!(tmux_log.contains("list-panes -t %2"));
         assert!(tmux_log.contains("capture-pane -p -J -S -100 -t %4"));
+        let observes = tmux_log
+            .lines()
+            .filter(|l| *l == "capture-pane -p -t %4")
+            .count();
+        // Every observe but the NEW_TURN drift (absent from the lead transcript)
+        // and the 0775 legacy refresh is a usage refresh; those two read nothing.
+        let usage_refreshes = observes - 2;
+        let dock_reads = 3;
         assert!(
-            custody >= 7 && scans >= 3,
-            "custody={custody} scans={scans}"
+            custody >= 7 + 2 * usage_refreshes && scans >= 3 + usage_refreshes,
+            "custody={custody} scans={scans} usage_refreshes={usage_refreshes}"
         );
         assert_eq!(
             (legacy_reads, strict_reads, leg_cand, leg_child),
-            (0, 3, 2, 0),
-            "expected exact (legacy_reads=0, strict_reads=3, leg_cand=2, leg_child=0); custody={custody} scans={scans}"
+            (0, dock_reads + painted * usage_refreshes, 2, 0),
+            "expected legacy_reads=0, strict_reads = {dock_reads} dock opens + {painted} painted children x \
+             {usage_refreshes} usage refreshes ({observes} observes less Turn drift and 0775), leg_cand=2, \
+             leg_child=0; custody={custody} scans={scans}"
         );
-        assert_eq!(legacy_reads + strict_reads, 3);
+        assert_eq!(
+            legacy_reads + strict_reads,
+            dock_reads + painted * usage_refreshes
+        );
 
         std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o700))
             .unwrap();
@@ -7661,7 +8679,7 @@ sys.exit(proc.wait())
                     });
                 }
             };
-        let (_, stalled_log) = run_pty(false, true, &mut |child_in, stream, screen, rx| {
+        let (stalled, stalled_log) = run_pty(false, true, &mut |child_in, stream, screen, rx| {
             wait_for(
                 stream,
                 screen,
@@ -7695,6 +8713,33 @@ sys.exit(proc.wait())
             assert!(!stream.contains("Discarded pane model"));
         });
         assert!(!stalled_log.contains("UNEXPECTED:"));
+        // Every accepted refresh keeps Run 1's usage cost. The window-move frame
+        // reads its recent screen, then its fresh pane census fails the expected
+        // generation, so it adds no custody check, scan or read; the follow-up
+        // stays held in its first capture until quit.
+        let stalled_count = |line: &str| stalled_log.lines().filter(|l| *l == line).count();
+        let stalled_accepted = stalled_count("capture-pane -p -t %4") - 2;
+        assert_eq!(
+            stalled_count("capture-pane -p -J -S -100 -t %4"),
+            stalled_accepted + 1
+        );
+        // Each finished refresh loads, takes its one census, then reloads to
+        // fence the render; the held follow-up has only loaded.
+        let censuses = stalled_log
+            .lines()
+            .filter(|l| l.starts_with("list-panes -s -t %2 -F "))
+            .count();
+        assert_eq!(censuses, 3 * (stalled_accepted + 1) + 1);
+        assert_eq!(
+            stalled[..4],
+            [
+                2 * stalled_accepted,
+                stalled_accepted,
+                painted * stalled_accepted,
+                0
+            ],
+            "{stalled_accepted} accepted refreshes each read usage; the moved-pane frame reads none"
+        );
 
         set_model("First same-scope observation");
         let (_, repeated_log) = run_pty(true, true, &mut |child_in, stream, screen, rx| {

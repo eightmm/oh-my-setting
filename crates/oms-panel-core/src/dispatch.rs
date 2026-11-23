@@ -732,6 +732,30 @@ fn publish_stop_proof(
     )
 }
 
+// Room validates labels against its 120-character plain-text projection.
+fn room_label(label: &str) -> bool {
+    use unicode_general_category::{GeneralCategory as G, get_general_category};
+    label.chars().count() <= 120
+        && !label.starts_with(' ')
+        && !label.ends_with(' ')
+        && !label.contains("  ")
+        && label.chars().all(|c| {
+            !matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}')
+                && (!c.is_whitespace() || c == ' ')
+                && !matches!(
+                    get_general_category(c),
+                    G::LineSeparator
+                        | G::ParagraphSeparator
+                        | G::Control
+                        | G::Format
+                        | G::PrivateUse
+                        | G::Surrogate
+                        | G::Unassigned
+                )
+                && (get_general_category(c) != G::SpaceSeparator || c == ' ')
+        })
+}
+
 pub fn dispatch(
     repo: &Path,
     request: &DispatchRequest,
@@ -1007,6 +1031,9 @@ pub fn dispatch(
             "--task-id",
             &request.task_id,
         ]);
+        if let Some(label) = request.label.as_deref().filter(|label| room_label(label)) {
+            join.push(format!("--label={label}").into());
+        }
         for scope in &scopes {
             join.extend(["--owns".into(), scope.into()]);
         }
@@ -1793,6 +1820,7 @@ mod tests {
             mode: &'static str,
             calls: Cell<usize>,
             published: RefCell<Vec<u8>>,
+            join: RefCell<Vec<OsString>>,
         }
         impl PeerExecutor for Host {
             fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
@@ -1804,12 +1832,24 @@ mod tests {
                 &self,
                 command: NativeCommand,
                 _: &Path,
-                _: &[OsString],
+                args: &[OsString],
                 _: &AtomicBool,
             ) -> Result<CommandOutput> {
-                assert_eq!(command, NativeCommand::Events);
+                let stdout = match command {
+                    NativeCommand::Events if self.mode.starts_with("label") => serde_json::to_vec(&json!([{
+                        "tool":"panel-main", "provider":"antigravity", "terminal":false,
+                        "attempt_id":"att_main_1", "refs":{"panel_room_id":"room-1", "panel_room_participant":"main-a"}
+                    }])).unwrap(),
+                    NativeCommand::Events => b"[]".to_vec(),
+                    NativeCommand::Room if args[0] == "show" => b"{\"participants\":[]}".to_vec(),
+                    NativeCommand::Room if args[0] == "join" => {
+                        *self.join.borrow_mut() = args.to_vec();
+                        vec![]
+                    }
+                    _ => panic!("unexpected command"),
+                };
                 Ok(CommandOutput {
-                    stdout: b"[]".to_vec(),
+                    stdout,
                     cleanup_complete: true,
                     output_complete: true,
                     ..Default::default()
@@ -1834,6 +1874,20 @@ mod tests {
                     .next()
                     .unwrap()
                     .clone();
+                if self.mode.starts_with("label") {
+                    let participant = request
+                        .environment
+                        .iter()
+                        .find(|(key, _)| key == "OMS_ROOM_PARTICIPANT")
+                        .unwrap();
+                    let admitted = request
+                        .environment
+                        .iter()
+                        .find(|(key, _)| key == "OMS_ROOM_ADMITTED_PARTICIPANT")
+                        .unwrap();
+                    assert_eq!(participant.1, OsString::from(&member));
+                    assert_eq!(admitted.1, OsString::from(&member));
+                }
                 match self.mode {
                     "missing" => {
                         registry["calls"].as_object_mut().unwrap().remove(&member);
@@ -1853,7 +1907,8 @@ mod tests {
                             json!({"state":"unknown","route":{"access":"write"}});
                     }
                     "cancel" => interrupted.store(true, std::sync::atomic::Ordering::Release),
-                    "error" | "policy" => {}
+                    "error" | "policy" | "label" | "label_none" | "label_long"
+                    | "label_unicode" | "label_unplain" | "label_dash" | "label_option" => {}
                     _ => unreachable!(),
                 }
                 tx.write_json(path, &registry, false, 4 * 1024 * 1024)?;
@@ -1873,8 +1928,23 @@ mod tests {
             }
         }
         for mode in [
-            "missing", "null", "array", "schema", "route", "snapshot", "metadata", "cancel",
-            "error", "policy",
+            "missing",
+            "null",
+            "array",
+            "schema",
+            "route",
+            "snapshot",
+            "metadata",
+            "cancel",
+            "error",
+            "policy",
+            "label",
+            "label_none",
+            "label_long",
+            "label_unicode",
+            "label_unplain",
+            "label_dash",
+            "label_option",
         ] {
             let root = std::env::temp_dir().join(format!(
                 "oms-dispatch-settlement-{}",
@@ -1894,6 +1964,18 @@ mod tests {
             request.verify = None;
             request.scopes.clear();
             request.room = None;
+            if mode.starts_with("label") {
+                request.room = Some("room-1".into());
+                request.label = match mode {
+                    "label" => Some("Fix dispatch labels".into()),
+                    "label_long" => Some("x".repeat(121)),
+                    "label_unicode" => Some("한".repeat(120)),
+                    "label_unplain" => Some("two  spaces".into()),
+                    "label_dash" => Some("-fix auth".into()),
+                    "label_option" => Some("--json".into()),
+                    _ => None,
+                };
+            }
             if mode == "policy" {
                 request.route = crate::routing::allocate(
                     &crate::routing::Policy::bundled().unwrap(),
@@ -1917,13 +1999,40 @@ mod tests {
                 mode,
                 calls: Cell::new(0),
                 published: RefCell::new(vec![]),
+                join: RefCell::new(vec![]),
             };
             let result = dispatch(&root.0, &request, &host, &AtomicBool::new(false));
-            assert_eq!(host.calls.get(), 1);
+            assert_eq!(host.calls.get(), 1, "{mode}: {result:?}");
             let path = root
                 .0
                 .join(".oms/artifacts/panel-dispatch/reservations.json");
-            if matches!(mode, "metadata" | "cancel" | "policy") {
+            if mode.starts_with("label") {
+                let join = host.join.borrow();
+                let value = |flag: &str| {
+                    join.windows(2)
+                        .find(|pair| pair[0] == flag)
+                        .map(|pair| pair[1].to_string_lossy().into_owned())
+                };
+                let member = result.as_ref().unwrap()["member"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                assert_eq!(value("--participant"), Some(member));
+                assert_eq!(value("--task-id"), Some("t1".into()));
+                assert_eq!(value("--parent"), Some("main-a".into()));
+                assert_eq!(
+                    join.iter()
+                        .filter_map(|arg| arg.to_str().and_then(|arg| arg.strip_prefix("--label=")))
+                        .collect::<Vec<_>>(),
+                    match mode {
+                        "label" | "label_unicode" | "label_dash" | "label_option" =>
+                            vec![request.label.as_deref().unwrap()],
+                        _ => vec![],
+                    }
+                );
+                assert!(!join.iter().any(|arg| arg == "--label" || arg == "--json"));
+            }
+            if matches!(mode, "metadata" | "cancel" | "policy") || mode.starts_with("label") {
                 let receipt = result.unwrap();
                 let registry: Value =
                     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -1957,7 +2066,7 @@ mod tests {
                     assert_eq!(receipt["exit"], 130);
                     continue;
                 }
-                if mode == "policy" {
+                if mode == "policy" || mode.starts_with("label") {
                     continue;
                 }
                 assert_eq!(registry["opaque"]["retain"], "foreign metadata");
@@ -1977,6 +2086,19 @@ mod tests {
                 );
                 assert_eq!(std::fs::read(path).unwrap(), *host.published.borrow());
             }
+        }
+        for label in ["bad\nlabel".to_owned(), "x".repeat(481)] {
+            let mut request = sample_request("att_main_1");
+            request.label = Some(label);
+            let host = Host {
+                mode: "label",
+                calls: Cell::new(0),
+                published: RefCell::new(vec![]),
+                join: RefCell::new(vec![]),
+            };
+            assert!(dispatch(Path::new("."), &request, &host, &AtomicBool::new(false)).is_err());
+            assert_eq!(host.calls.get(), 0);
+            assert!(host.join.borrow().is_empty());
         }
     }
 
