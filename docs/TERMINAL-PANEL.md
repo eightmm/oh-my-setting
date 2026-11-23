@@ -1248,10 +1248,27 @@ source shows no evidence that they need the same namespace, so that stays unveri
 Codex, Claude, and Pi accounts all support isolated registration, routing,
 selection, `oms doctor` health checks, `--repair`, `--remove`, and uninstall
 link cleanup through `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
-`PI_CODING_AGENT_DIR` (with Pi linking `AGENTS.md` and `skills`). Antigravity's
-independent OAuth namespace remains unproved, so `antigravity:ID` fails closed
-(`provider account isolation is unproved`). Changing HOME or supplying an API
-key does not establish an independent entitled Antigravity account.
+`PI_CODING_AGENT_DIR` (with Pi linking `AGENTS.md` and `skills`).
+
+Antigravity supports only local profile bookkeeping:
+`oms connect-services --account antigravity:ID --home PATH` (optionally
+`--first|--last`), `--verify` and `--remove`; `--repair` is refused. The home must be
+an existing absolute physical directory owned by you with mode `0700`, whose
+ancestors are user- or root-owned and not group/world-writable; it must not be a
+Codex, Claude or Pi main home, sit inside a repository, or be shared with any other
+provider account or pending receipt. Registration records the id and home in
+`provider-accounts.antigravity.json` and the home's stat identity in
+`antigravity-account-receipts.json`, under the shared account lock, and re-checks the
+held home and its `application_default_credentials.json` entry before writing. It
+never reads that profile's bytes, never runs login, and reports `ADC profile present`
+or `pending`. `--verify` re-checks only the recorded home identity and the profile's
+local structure (owner-only regular file with one link). `--remove` deletes only the
+two records and keeps the home and profile. Empty or malformed account metadata, and
+registry rows without their receipt, are refused with nothing changed. These are
+local checks only: runtime routing does not select or pin these accounts, and login,
+the served identity and an independent entitled Antigravity account remain
+unverified (`login and served identity unverified`). Changing HOME or supplying an
+API key does not establish one either.
 
 For Claude, use `oms connect-services --account claude:work`, optionally with
 `--home PATH`, `--first|--last`, `--repair`, `--remove` or `--verify`. The default
@@ -1737,7 +1754,11 @@ review, summarize) prints the first row of
 the kind, a risk (`low`, `medium`, `high`) and a size (`small`, `medium`, `large`),
 with its tier, effort and reason; `--json` prints the same. Give `--diff RANGE` to
 measure risk (the review gate's risk-path selectors) and size (lines and files,
-bucket limits in the file), or give both `--risk` and `--size`. It launches nothing and
+bucket limits in the file), or give both `--risk` and `--size`. An optional `categories` map in that file adds
+one-word names (`typo`, `bugfix`, `refactor`) that resolve to a kind plus default risk and
+size, so `--recommend typo` works alone; explicit `--risk`/`--size` or a measured `--diff`
+always override those defaults, and the output shows the category and which axes defaulted.
+Unknown or invalid categories fail before any route is computed. It launches nothing and
 keeps an explicit `--model`, `--reasoning-effort` or `--workload` you pass. With
 `--failed N` (N of 2 or more) it adds a suggestion: raise effort one step, and once
 effort is already `high`, raise the tier; `deep` is the ceiling because frontier is

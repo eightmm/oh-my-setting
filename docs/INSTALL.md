@@ -14,8 +14,10 @@ native selection fields do not prove credential origin. Native status may
 initialize metadata in its selected root; registration, doctor and update never
 run status. Claude state stays separate from legacy Codex and Pi files, and
 old versions cannot manage them or protect against arbitrary home collisions.
-Antigravity OAuth account isolation remains unproved and fails closed
-(`provider account isolation is unproved`).
+Antigravity accounts support only local ADC profile registration, `--verify`
+and `--remove` (`antigravity:ID --home PATH`); runtime routing never selects
+them, and login, the served identity and OAuth account isolation remain
+unverified (see [provider accounts](TERMINAL-PANEL.md#provider-accounts)).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash

@@ -896,6 +896,27 @@ fn merged_dependencies_scheduling_and_late_results() {
     let (code, out, err) = run(&["ready"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.is_empty(), "shared resource should block b: {out}");
+    // `ready` reports scheduling inputs; claimed `a` still filters `b`.
+    for (id, extra) in [
+        ("c", &["--role", "builder", "--resources", "cpu,mem"][..]),
+        ("d", &[]),
+    ] {
+        let mut add = vec!["add", "--id", id, "--title", id, "--allowed", id];
+        add.extend_from_slice(extra);
+        assert_eq!(run(&add).0, 0);
+    }
+    let (code, out, err) = run(&["ready", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let ready = oms_command_plan::json::parse(out.as_bytes()).unwrap();
+    let rows = ready.get("tasks").array().unwrap();
+    assert_eq!(rows.len(), 2, "{out}");
+    assert_eq!(rows[0].text("role"), "builder", "{out}");
+    assert_eq!(rows[0].get("resources").strings().unwrap(), ["cpu", "mem"]);
+    assert_eq!(rows[1].text("role"), "", "{out}");
+    assert!(
+        rows[1].get("resources").strings().unwrap().is_empty(),
+        "{out}"
+    );
     let (code, _, err) = run(&["review", "--id", "a"]);
     assert_eq!(code, 0, "{err}");
     let (code, out, err) = run(&["ready", "--json", "--max-review-backlog", "1"]);
