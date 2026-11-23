@@ -164,16 +164,20 @@ before each physical provider invocation; a crash can therefore leave an
 unresolved liability without needing a completed artifact.
 
 Usage schema 3 and physical-call schema 4 add optional `account_scope_sha256`
-evidence to the immutable call identity. The headless producer records the
-selected named account's private home generation, not credentials or a billing
-identity. A changed or missing proof breaks cumulative token/cost baselines;
-missing proof cannot downgrade to an older alias-only baseline. Incomplete
-cumulative observations cannot anchor a following call. Schemas 1/2 usage and
-1/2/3 physical calls remain readable, and producers without this evidence retain
-their existing encoding. Mixed histories are validated as a whole. Older
-binaries refuse the new schemas, so upgrade every reader of the shared state
-before scoped calls run. Binary rollback must retain a compatible reader for
-that history; do not delete scope fields or history to bypass the version barrier.
+evidence to the immutable call identity. This evidence describes private
+account-home continuity. The reader accepts usage schemas 1–3 and physical-call
+schemas 1–4, validates mixed histories as a whole and preserves existing
+scope evidence on replay and settlement. A changed or missing proof breaks
+cumulative token and cost attribution.
+
+During the reader rollout, new headless calls retain the existing encoding and
+validate the selected account home in memory. A named call's independently
+measured usage is still recorded. Counters from a resumed cumulative session
+remain unknown because the legacy receipt cannot prove continuity of its
+account home. Terminal and cleanup evidence remains available. Keep this
+encoding until all readers of the shared state support scoped receipts, including
+any pinned Main or MCP processes. Rollback on already-scoped history requires a
+compatible reader and preserves the original scope and history.
 
 `store::budget` projects those receipts with canonical logical operations and
 outstanding physical intents. A matching call/operation identity is counted

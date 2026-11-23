@@ -2267,9 +2267,6 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                     &usage_repo,
                     route,
                     account.as_deref(),
-                    account_home
-                        .as_ref()
-                        .and_then(|home| home.sha256.as_deref()),
                     write,
                     &extra_env,
                     context.interrupted,

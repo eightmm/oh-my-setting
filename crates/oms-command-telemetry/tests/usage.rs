@@ -770,6 +770,32 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
         registered_campaign.campaign_manifest_sha256.as_ref(),
         Some(&campaign)
     );
+    let before_legacy = std::fs::read(scoped.0.join(usage::RECEIPTS)).unwrap();
+    let legacy = identity("call_legacy_after_scoped");
+    let Registration::New(legacy_receipt) =
+        physical::begin(&scoped.0, legacy.clone(), None, false, &stop, deadline()).unwrap()
+    else {
+        panic!("fresh legacy registration");
+    };
+    assert!(
+        usage::record(
+            &scoped.0,
+            &observe(legacy_receipt, 1, 2, Cost::Unknown),
+            &stop,
+        )
+        .unwrap()
+    );
+    assert!(
+        std::fs::read(scoped.0.join(usage::RECEIPTS))
+            .unwrap()
+            .starts_with(&before_legacy)
+    );
+    let mixed = usage::load(&scoped.0).unwrap();
+    assert_eq!(mixed.calls[0].receipt, receipt);
+    assert_eq!(mixed.calls.last().unwrap().receipt.identity, legacy);
+    let intents = physical::load(&scoped.0, &stop).unwrap();
+    assert!(intents.iter().any(|intent| intent.identity == request));
+    assert!(intents.iter().any(|intent| intent.identity == legacy));
 }
 #[test]
 fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {

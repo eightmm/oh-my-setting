@@ -3742,15 +3742,12 @@ fn provider_accounts_select_pin_overflow_and_validate() {
 }
 
 #[test]
-fn provider_usage_follows_bound_account_home_generation() {
-    // The canonical account fixture previously exercised selection with no
-    // provider counters. This covers the actual headless producer -> intent ->
-    // durable receipt -> per-attempt/ledger projection across registrations.
+fn provider_reader_rollout_keeps_legacy_intents_and_usage() {
     account_isolated(
-        "provider_usage_follows_bound_account_home_generation",
+        "provider_reader_rollout_keeps_legacy_intents_and_usage",
         &[("OMS_RESUME_SESSION".into(), "continuity-thread".into())],
         |home| {
-            use oms_command_telemetry::store::{physical, usage};
+            use oms_command_telemetry::store::{dispatch, physical, usage};
             let repo = account_repo();
             let config = home.join(".config/oh-my-setting/provider-accounts.json");
             let original = home.join("acc/codex-work");
@@ -3786,12 +3783,14 @@ fn provider_usage_follows_bound_account_home_generation() {
                     ],
                 )
             };
-            let assert_latest = |expected, phase| {
+            let assert_latest = || {
                 let projected = usage::load(&repo.0).unwrap();
                 let call = projected.calls.last().unwrap();
                 assert_eq!(call.receipt.identity.account.as_deref(), Some("work"));
-                assert_eq!(call.receipt.phase, phase);
-                assert_eq!(call.tokens, expected);
+                assert_eq!(call.receipt.identity.account_scope_sha256, None);
+                assert_eq!(call.receipt.phase, usage::Phase::Unknown);
+                assert_eq!(call.receipt.usage, usage::Usage::default());
+                assert_eq!(call.tokens, None);
                 let attempt = call.receipt.identity.attempt_id.as_deref().unwrap();
                 assert_eq!(
                     projected
@@ -3801,7 +3800,7 @@ fn provider_usage_follows_bound_account_home_generation() {
                         .unwrap()
                         .usage
                         .total_tokens,
-                    expected
+                    None
                 );
                 let intents = physical::load(&repo.0, &STOP).unwrap();
                 assert_eq!(
@@ -3812,7 +3811,20 @@ fn provider_usage_follows_bound_account_home_generation() {
                         .identity,
                     call.receipt.identity
                 );
-                call.receipt.identity.account_scope_sha256.clone()
+                let registry =
+                    V::parse(&fs::read(repo.0.join(dispatch::REGISTRY)).unwrap()).unwrap();
+                let raw_call = registry
+                    .get("physical")
+                    .get("calls")
+                    .get(&call.receipt.identity.call_id);
+                assert_eq!(raw_call.get("schema"), &V::Num("1".into()));
+                assert!(
+                    raw_call
+                        .get("request")
+                        .get("identity")
+                        .get("account_scope_sha256")
+                        == &V::Null
+                );
             };
             fs::set_permissions(&original, fs::Permissions::from_mode(0o770)).unwrap();
             let invalid = invoke(90);
@@ -3838,25 +3850,12 @@ fn provider_usage_follows_bound_account_home_generation() {
             };
             let first = invoke(100);
             assert_eq!(first.0, 0, "{}", message(&first));
-            if fs::metadata(&original).unwrap().created().is_err() {
-                assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
-                let next = invoke(120);
-                assert_eq!(next.0, 0, "{}", message(&next));
-                assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
-                replace_during_call(140, "same");
-                assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
-                return;
-            }
-            let first_scope = assert_latest(None, usage::Phase::Final).unwrap();
-            assert_eq!(first_scope.len(), 64);
+            assert_latest();
             // Ordinary contents change; the directory generation remains stable.
             fs::write(original.join("fixture-config"), "updated\n").unwrap();
             let second = invoke(130);
             assert_eq!(second.0, 0, "{}", message(&second));
-            assert_eq!(
-                assert_latest(Some(30), usage::Phase::Final).as_ref(),
-                Some(&first_scope)
-            );
+            assert_latest();
             let registered = fs::read_to_string(&config).unwrap();
             fs::write(
                 &config,
@@ -3865,35 +3864,24 @@ fn provider_usage_follows_bound_account_home_generation() {
             .unwrap();
             let changed = invoke(500);
             assert_eq!(changed.0, 0, "{}", message(&changed));
-            let changed_scope = assert_latest(None, usage::Phase::Final).unwrap();
-            assert_ne!(changed_scope, first_scope);
+            assert_latest();
             let continued = invoke(540);
             assert_eq!(continued.0, 0, "{}", message(&continued));
-            assert_eq!(
-                assert_latest(Some(40), usage::Phase::Final).as_ref(),
-                Some(&changed_scope)
-            );
+            assert_latest();
             // Identical canonical spelling is insufficient after replacement.
             fs::rename(&replacement, home.join("acc/codex-replacement-old")).unwrap();
             fs::create_dir(&replacement).unwrap();
             fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
             let replaced = invoke(600);
             assert_eq!(replaced.0, 0, "{}", message(&replaced));
-            let replaced_scope = assert_latest(None, usage::Phase::Final).unwrap();
-            assert_ne!(replaced_scope, changed_scope);
+            assert_latest();
             let continued = invoke(650);
             assert_eq!(continued.0, 0, "{}", message(&continued));
-            assert_eq!(
-                assert_latest(Some(50), usage::Phase::Final).as_ref(),
-                Some(&replaced_scope)
-            );
+            assert_latest();
             // A replacement can report another thread. Keep the exact intent's
             // unknown liability and cleanup even with a capacity-looking error.
             replace_during_call(700, "foreign");
-            assert_eq!(
-                assert_latest(None, usage::Phase::Unknown).as_ref(),
-                Some(&replaced_scope)
-            );
+            assert_latest();
             let projection = usage::load(&repo.0).unwrap();
             let receipt = &projection.calls.last().unwrap().receipt;
             assert_eq!(
@@ -3905,16 +3893,73 @@ fn provider_usage_follows_bound_account_home_generation() {
             assert_eq!(receipt.cleanup_complete, Some(true));
             let after = invoke(730);
             assert_eq!(after.0, 0, "{}", message(&after));
-            assert_latest(None, usage::Phase::Final).unwrap();
+            assert_latest();
             let continued = invoke(750);
             assert_eq!(continued.0, 0, "{}", message(&continued));
-            assert_latest(Some(20), usage::Phase::Final).unwrap();
+            assert_latest();
             let raw = fs::read_to_string(repo.0.join(usage::RECEIPTS)).unwrap();
             assert!(
                 !raw.contains(&home.display().to_string()),
                 "home paths must not enter the ledger"
             );
+            for line in raw.lines() {
+                let row = V::parse(line.as_bytes()).unwrap();
+                assert_eq!(row.get("schema"), &V::Num("2".into()));
+                assert!(!line.contains("account_scope_sha256"));
+            }
             assert_eq!(usage::load(&repo.0).unwrap().calls.len(), 9);
+        },
+    );
+}
+
+#[test]
+fn provider_reader_rollout_retains_independent_named_usage() {
+    account_isolated(
+        "provider_reader_rollout_retains_independent_named_usage",
+        &[],
+        |home| {
+            use oms_command_telemetry::store::usage;
+            let repo = account_repo();
+            let codex_home = home.join("acc/codex-work");
+            if fs::metadata(codex_home).unwrap().created().is_err() {
+                // These positive controls require the same private generation proof as production.
+                return;
+            }
+            for (provider, script) in [
+                (
+                    "codex",
+                    concat!(
+                        "#!/bin/sh\n",
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"thread.started\",\"thread_id\":\"fresh-thread\"}' ",
+                        "'{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' ",
+                        "'{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"cached_input_tokens\":0,\"total_tokens\":13}}'\n",
+                    ),
+                ),
+                (
+                    "claude",
+                    concat!(
+                        "#!/bin/sh\n",
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n",
+                    ),
+                ),
+            ] {
+                fs::write(home.join("bin").join(provider), script).unwrap();
+                let out = account_delegate(&repo, &["--to", provider, "--account", "work"]);
+                assert_eq!(out.0, 0, "{}", message(&out));
+                let ledger = usage::load(&repo.0).unwrap();
+                let call = ledger.calls.last().unwrap();
+                assert_eq!(call.receipt.identity.provider, provider);
+                assert_eq!(call.receipt.identity.account.as_deref(), Some("work"));
+                assert_eq!(call.receipt.identity.account_scope_sha256, None);
+                assert_eq!(call.receipt.phase, usage::Phase::Final);
+                assert_eq!(call.tokens, Some(13));
+                assert_eq!(
+                    call.receipt.cumulative.as_ref().map(|s| s.baseline_unknown),
+                    (provider == "codex").then_some(false)
+                );
+            }
         },
     );
 }
