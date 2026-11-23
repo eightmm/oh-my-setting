@@ -2531,6 +2531,9 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
     let account_two = ("codex", Some("two"), "one");
     let account_three = ("codex", Some("three"), "one");
     let renamed = ("codex", Some("renamed"), "one");
+    let unproved_alias = ("codex", Some("unproved"), "one");
+    let legacy_one = ("codex", Some("legacy_one"), "legacy");
+    let legacy_two = ("codex", Some("legacy_two"), "legacy");
     let other_provider = ("agy", Some("one"), "one");
     let other_session = ("codex", Some("one"), "two");
     let cases = [
@@ -2566,21 +2569,50 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
             130,
             Some(35),
         ),
+        ("named_home_unproved", unproved_alias, false, 140, None),
+        ("first_after_unproved", account_one, false, 150, None),
+        ("after_rebaseline", account_one, false, 155, Some(5)),
+        ("unproved_other_home", account_two, false, 112, None),
+        ("known_other_home", account_two, false, 120, Some(8)),
+        ("pending_unproved_home", unproved_alias, false, 0, None),
+        ("first_after_pending", account_one, false, 160, None),
+        ("second_while_pending", account_one, false, 170, None),
+        (
+            "other_provider_after_gap",
+            other_provider,
+            false,
+            128,
+            Some(3),
+        ),
+        (
+            "other_session_after_gap",
+            other_session,
+            false,
+            137,
+            Some(7),
+        ),
+        ("legacy_one_fresh", legacy_one, true, 20, Some(20)),
+        ("legacy_two_fresh", legacy_two, true, 21, Some(21)),
+        ("legacy_one_resume", legacy_one, false, 28, Some(8)),
     ];
-    for (call, (provider, account, session), fresh, total, _) in cases {
+    let publish = |call: &str,
+                   (provider, account, session): (&str, Option<&str>, &str),
+                   fresh: bool,
+                   total: u64| {
         let receipt = usage::begin(
             &root.0,
             Identity {
                 provider: provider.into(),
                 account: account.map(str::to_owned),
-                account_scope_sha256: account.map(|alias| {
-                    match alias {
+                account_scope_sha256: account.and_then(|alias| {
+                    let marker = match alias {
                         "one" | "renamed" => "a",
                         "two" => "b",
                         "three" => "c",
+                        "unproved" | "legacy_one" | "legacy_two" => return None,
                         _ => unreachable!("unexpected fixture account"),
-                    }
-                    .repeat(64)
+                    };
+                    Some(marker.repeat(64))
                 }),
                 ..bound_identity(call)
             },
@@ -2591,12 +2623,21 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
             &stop,
         )
         .unwrap();
-        usage::record(
-            &root.0,
-            &observe(receipt, 1, total, Cost::Reported(total * 10)),
-            &stop,
-        )
-        .unwrap();
+        if call == "pending_unproved_home" {
+            return Some(receipt);
+        }
+        let mut receipt = observe(receipt, 1, total, Cost::Reported(total * 10));
+        if call == "named_home_unproved" {
+            receipt.phase = Phase::Unknown;
+        }
+        usage::record(&root.0, &receipt, &stop).unwrap();
+        None
+    };
+    let mut unsettled = None;
+    for (call, scope, fresh, total, _) in cases {
+        if let Some(receipt) = publish(call, scope, fresh, total) {
+            unsettled = Some(receipt);
+        }
     }
     let projection = usage::load(&root.0).unwrap();
     let calls = projection.attributed_calls();
@@ -2619,6 +2660,44 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
                 call.receipt.identity.call_id
             );
         }
+    }
+
+    let mut settled = unsettled.unwrap();
+    let mut partial = settled.clone();
+    partial.revision = 2;
+    partial.phase = Phase::Partial;
+    usage::record(&root.0, &partial, &stop).unwrap();
+    let mut stale = settled.clone();
+    stale.revision = 1;
+    stale.phase = Phase::Unknown;
+    usage::record(&root.0, &stale, &stop).unwrap();
+    publish("first_after_stale_terminal", account_one, false, 173);
+    publish("second_after_stale_terminal", account_one, false, 176);
+
+    settled.revision = 3;
+    settled.phase = Phase::Unknown;
+    usage::record(&root.0, &settled, &stop).unwrap();
+    publish("first_after_settlement", account_one, false, 180);
+    publish("after_settlement_rebaseline", account_one, false, 185);
+    let projection = usage::load(&root.0).unwrap();
+    let board = projection.attributed_calls();
+    for (id, expected) in [
+        ("first_after_pending", None),
+        ("second_while_pending", None),
+        ("first_after_stale_terminal", None),
+        ("second_after_stale_terminal", None),
+        ("first_after_settlement", None),
+        ("after_settlement_rebaseline", Some(5)),
+    ] {
+        let call = projection
+            .calls
+            .iter()
+            .find(|call| call.receipt.identity.call_id == id)
+            .unwrap();
+        let attributed = board.iter().find(|call| call.call_id == id).unwrap();
+        assert_eq!(call.tokens, expected, "ledger: {id}");
+        assert_eq!(call.cost_microusd, expected.map(|n| n * 10), "cost: {id}");
+        assert_eq!(attributed.usage.total_tokens, expected, "Board: {id}");
     }
 
     let session = Cumulative {
