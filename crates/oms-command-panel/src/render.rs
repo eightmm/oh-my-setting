@@ -610,6 +610,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
     }
     let participants = rows(&room["participants"]);
     let has_participants = !participants.is_empty();
+    let current_main = current_room_main_custodian(report, room, room_id);
     let mut output = Vec::new();
     let mut seen = BTreeSet::new();
     let mut cached_agy_model: Option<Option<String>> = None;
@@ -796,7 +797,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
         }
         if matched.is_none()
             && call["role"] != "main"
-            && !classify_room_only_call(report, room, room_id, member, &mut call, now)
+            && !classify_room_only_call(report, room, room_id, member, &mut call, now, current_main)
         {
             continue;
         }
@@ -1122,6 +1123,68 @@ fn member_matches_attempt(room_id: &str, room: &Value, member: &Value, row: &Val
             && room_main_id(room) == participant)
 }
 
+fn current_room_main_custodian<'a>(
+    report: &'a Value,
+    room: &'a Value,
+    room_id: &str,
+) -> Option<(&'a str, &'a str)> {
+    if room_id.is_empty() || room["closed"] == true || !room["successor"].is_null() {
+        return None;
+    }
+    let owner = room_main_id(room);
+    if owner.is_empty() {
+        return None;
+    }
+    let mut main_members = rows(&room["participants"]).iter().filter(|member| {
+        member["role"] == "main" && member["participant"] == owner && member["joined"] == true
+    });
+    let main_member = main_members.next()?;
+    if main_members.next().is_some() {
+        return None;
+    }
+    let member_attempt = text(main_member, "attempt");
+    let main_attempt = if !member_attempt.is_empty() {
+        member_attempt
+    } else {
+        let mut found: Option<&str> = None;
+        for row in report["room_attempts"].as_object()?.values() {
+            let aid = text(row, "attempt_id");
+            if aid.is_empty()
+                || row["tool"] != "panel-main"
+                || row["terminal"] != false
+                || !oms_panel_core::state::LIVE_STATES.contains(&text(row, "state"))
+                || !event_room_matches(room_id, &row["refs"])
+                || oms_panel_core::state::main_participant(row) != owner
+            {
+                continue;
+            }
+            match found {
+                None => found = Some(aid),
+                Some(prev) if prev == aid => {}
+                Some(_) => return None,
+            }
+        }
+        found?
+    };
+    let attempt = &report["room_attempts"][main_attempt];
+    if attempt["attempt_id"] != main_attempt
+        || attempt["tool"] != "panel-main"
+        || attempt["terminal"] != false
+        || !oms_panel_core::state::LIVE_STATES.contains(&text(attempt, "state"))
+        || attempt["provider"] != main_member["provider"]
+        || !event_room_matches(room_id, &attempt["refs"])
+        || !(oms_panel_core::state::main_participant(attempt) == owner
+            || (text(&attempt["refs"], "panel_room_participant").is_empty()
+                && member_attempt == main_attempt))
+        || rows(&room["swaps"])
+            .iter()
+            .any(|swap| swap["participant"] == owner && swap["attempt"] == main_attempt)
+    {
+        return None;
+    }
+    Some((owner, main_attempt))
+}
+
 /// Enrich and classify a non-main Room member lacking a matched lifecycle attempt
 /// without fabricating live execution state, tokens, or elapsed time.
 fn classify_room_only_call(
@@ -1131,6 +1194,7 @@ fn classify_room_only_call(
     member: &Value,
     call: &mut Value,
     now: f64,
+    current_main: Option<(&str, &str)>,
 ) -> bool {
     let participant = text(member, "participant");
     let dispatch = (!room_id.is_empty() && !participant.is_empty())
@@ -1168,50 +1232,80 @@ fn classify_room_only_call(
     let dispatch_state = dispatch.map_or("", |d| text(d, "state"));
     let dispatch_access = dispatch.map_or("", |d| text(&d["route"], "access"));
     let dispatch_exit = dispatch.and_then(|d| d["exit"].as_i64());
+    let stale_dispatch_custodian = dispatch.is_some_and(|d| {
+        current_main.is_none_or(|(owner, main_attempt)| {
+            text(d, "main_attempt") != main_attempt || text(d, "main") != owner
+        })
+    });
+    let raw_state = text(call, "state").to_owned();
+    let has_open_question = !participant.is_empty()
+        && rows(&room["open_questions"])
+            .iter()
+            .any(|q| q["sender"] == participant || q["recipient"] == participant);
+    let stamp = oms_panel_core::metrics::stamp(&call["created_at"]);
     let clear_queued = |call: &mut Value| {
         if call["state"] == "queued" {
             call["state"] = json!("");
         }
     };
     if member["joined"] == false {
-        if has_call_result
+        let base_left_history = has_call_result
             || matches!(dispatch_state, "settled" | "awaiting")
-            || oms_panel_core::state::TERMINAL_STATES.contains(&text(call, "state"))
-        {
-            call["room_only_history"] = true.into();
-            clear_queued(call);
-            return true;
-        }
-        if text(call, "state").is_empty() {
+            || oms_panel_core::state::TERMINAL_STATES.contains(&raw_state.as_str());
+        if !base_left_history && raw_state.is_empty() {
             return false;
         }
-    } else if has_call_result
+        if base_left_history {
+            clear_queued(call);
+        }
+        call["room_only_history"] = true.into();
+        return true;
+    }
+
+    // Step A: preserve exact baseline raw "queued" normalization for --sessions parity.
+    let base_history = has_call_result
         || dispatch_state == "settled"
         || finalized_done
         || (dispatch_state == "awaiting"
-            && (dispatch_access != "write" || dispatch_exit != Some(0)))
-    {
-        call["room_only_history"] = true.into();
+            && (dispatch_access != "write" || dispatch_exit != Some(0)));
+    if base_history {
         clear_queued(call);
-    } else if matches!(text(call, "state"), "" | "queued") {
-        let stamp = oms_panel_core::metrics::stamp(&call["created_at"]);
-        let fresh_300 = stamp.is_none_or(|ts| ts <= now + 5.0 && now - ts < 300.0);
-        let actionable = (dispatch_state == "awaiting"
+    } else if matches!(raw_state.as_str(), "" | "queued") {
+        let base_fresh_300 = stamp.is_none_or(|ts| ts <= now + 5.0 && now - ts < 300.0);
+        let base_actionable = (dispatch_state == "awaiting"
             && dispatch_access == "write"
             && dispatch_exit == Some(0)
             && !finalized_done
-            && fresh_300)
-            || (matches!(dispatch_state, "reserved" | "running" | "unknown") && fresh_300)
-            || (!participant.is_empty()
-                && rows(&room["open_questions"])
-                    .iter()
-                    .any(|q| q["sender"] == participant || q["recipient"] == participant))
-            || (text(call, "state").is_empty()
+            && base_fresh_300)
+            || (matches!(dispatch_state, "reserved" | "running" | "unknown") && base_fresh_300)
+            || has_open_question
+            || (raw_state.is_empty()
                 && stamp.is_some_and(|ts| ts <= now + 5.0 && now - ts < 120.0))
-            || (call["state"] == "queued" && fresh_300);
-        if !actionable {
-            call["room_only_stale"] = true.into();
+            || (raw_state == "queued" && base_fresh_300);
+        if !base_actionable {
             clear_queued(call);
+        }
+    }
+
+    // Step B: compute Board-only display flags without mutating call["state"].
+    if base_history || stale_dispatch_custodian {
+        call["room_only_history"] = true.into();
+    } else if matches!(raw_state.as_str(), "" | "queued" | "unknown") {
+        let fresh_300 = stamp.is_some_and(|ts| ts <= now + 5.0 && now - ts < 300.0);
+        let room_open = room["closed"] != true && room["successor"].is_null();
+        let board_actionable = (current_main.is_some()
+            && ((dispatch_state == "awaiting"
+                && dispatch_access == "write"
+                && dispatch_exit == Some(0)
+                && !finalized_done
+                && fresh_300)
+                || (matches!(dispatch_state, "reserved" | "running" | "unknown") && fresh_300)
+                || (raw_state.is_empty()
+                    && stamp.is_some_and(|ts| ts <= now + 5.0 && now - ts < 120.0))
+                || (raw_state == "queued" && fresh_300)))
+            || (room_open && has_open_question);
+        if !board_actionable {
+            call["room_only_stale"] = true.into();
         }
     }
     true
@@ -1765,7 +1859,11 @@ fn default_overview(nav: &navigation::Navigation) -> bool {
 }
 
 fn awaiting_review(call: &Value) -> bool {
-    call["state"] == "review" && !call["returned_at"].is_string() && call["completed_task"] != true
+    call["state"] == "review"
+        && !call["returned_at"].is_string()
+        && call["completed_task"] != true
+        && call["room_only_history"] != true
+        && call["room_only_stale"] != true
 }
 
 fn fold_inactive(nav: &navigation::Navigation, call: &Value) -> bool {
@@ -1813,18 +1911,20 @@ fn visible_from<'a>(
         .filter(|v| navigation::matches_words(v, &words))
         .filter(|v| {
             !nav.attention_only
-                || awaiting_review(v)
-                || v["lifecycle_stale"] == true
-                || [
-                    "waiting_input",
-                    "waiting_approval",
-                    "blocked",
-                    "orphaned",
-                    "failed",
-                    "timed_out",
-                    "abandoned",
-                ]
-                .contains(&text(v, "state"))
+                || (v["room_only_history"] != true
+                    && v["room_only_stale"] != true
+                    && (awaiting_review(v)
+                        || v["lifecycle_stale"] == true
+                        || [
+                            "waiting_input",
+                            "waiting_approval",
+                            "blocked",
+                            "orphaned",
+                            "failed",
+                            "timed_out",
+                            "abandoned",
+                        ]
+                        .contains(&text(v, "state"))))
         })
         .collect();
     if nav.view == View::Auto {
@@ -11864,6 +11964,645 @@ mod tests {
         assert!(compact.contains("— tok"), "{compact}");
         assert!(!compact.contains("[⟳ run]"), "{compact}");
         assert!(!compact.contains("Left unbacked"), "{compact}");
+
+        let mut mixed_participants = vec![json!({
+            "participant": "main-1",
+            "attempt": "att-main",
+            "role": "main",
+            "provider": "codex",
+            "model": "gpt-6.1-sol",
+            "joined": true,
+            "joined_at": now - 60
+        })];
+        let mut mixed_dispatches = serde_json::Map::new();
+        for (idx, provider) in ["codex", "claude", "antigravity"].into_iter().enumerate() {
+            mixed_participants.extend([
+                json!({
+                    "participant": format!("left-wait-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "waiting_input",
+                    "joined": false,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("left-unk-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "unknown",
+                    "joined": false,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("left-queued-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": false,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("undated-queued-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": true
+                }),
+                json!({
+                    "participant": format!("undated-unk-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "unknown",
+                    "joined": true
+                }),
+                json!({
+                    "participant": format!("undated-disp-res-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "joined": true
+                }),
+                json!({
+                    "participant": format!("undated-disp-unk-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "joined": true
+                }),
+                json!({
+                    "participant": format!("term-main-disp-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("old-work-main-disp-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("missing-custodian-disp-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("swapped-disp-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("live-queued-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "queued",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("live-wait-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "waiting_input",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("live-approval-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "waiting_approval",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("live-blocked-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "blocked",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+                json!({
+                    "participant": format!("live-review-{idx}"),
+                    "role": "worker",
+                    "provider": provider,
+                    "state": "review",
+                    "joined": true,
+                    "joined_at": now - 30
+                }),
+            ]);
+            mixed_dispatches.insert(
+                format!("undated-disp-res-{idx}"),
+                json!({
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
+                    "state": "reserved"
+                }),
+            );
+            mixed_dispatches.insert(
+                format!("undated-disp-unk-{idx}"),
+                json!({
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
+                    "state": "unknown"
+                }),
+            );
+            mixed_dispatches.insert(
+                format!("term-main-disp-{idx}"),
+                json!({
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-old-main",
+                    "state": "running",
+                    "created_at": now - 30
+                }),
+            );
+            mixed_dispatches.insert(
+                format!("old-work-main-disp-{idx}"),
+                json!({
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-old-working",
+                    "state": "running",
+                    "created_at": now - 30
+                }),
+            );
+            mixed_dispatches.insert(
+                format!("missing-custodian-disp-{idx}"),
+                json!({
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "state": "reserved",
+                    "created_at": now - 30
+                }),
+            );
+            mixed_dispatches.insert(
+                format!("swapped-disp-{idx}"),
+                json!({
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-swapped-main",
+                    "state": "running",
+                    "created_at": now - 30
+                }),
+            );
+        }
+        mixed_participants.extend([
+            json!({
+                "participant": "left-review",
+                "role": "worker",
+                "provider": "codex",
+                "state": "review",
+                "joined": false,
+                "joined_at": now - 30
+            }),
+            json!({
+                "participant": "live-disp",
+                "role": "worker",
+                "provider": "codex",
+                "joined": true
+            }),
+            json!({
+                "participant": "ancient-queued",
+                "role": "worker",
+                "provider": "codex",
+                "state": "queued",
+                "joined": true,
+                "joined_at": now - 600
+            }),
+        ]);
+        mixed_dispatches.insert(
+            "live-disp".to_owned(),
+            json!({
+                "room": "room-demo",
+                "main": "main-1",
+                "main_attempt": "att-main",
+                "state": "reserved",
+                "created_at": now - 30
+            }),
+        );
+        let mixed_report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-demo",
+                "owner": "main-1",
+                "participants": mixed_participants,
+                "swaps": [
+                    {"participant": "main-1", "attempt": "att-swapped-main"}
+                ]
+            },
+            "room_attempts": {
+                "att-main": {
+                    "attempt_id": "att-main",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "working",
+                    "terminal": false,
+                    "created_at": now - 60,
+                    "refs": {"panel_room_id": "room-demo", "panel_role": "main"}
+                },
+                "att-old-main": {
+                    "attempt_id": "att-old-main",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "done",
+                    "terminal": true,
+                    "created_at": now - 900,
+                    "updated_at": now - 600,
+                    "refs": {"panel_room_id": "room-demo", "panel_role": "main"}
+                },
+                "att-old-working": {
+                    "attempt_id": "att-old-working",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "working",
+                    "terminal": false,
+                    "created_at": now - 900,
+                    "refs": {
+                        "panel_room_id": "room-demo",
+                        "panel_role": "main",
+                        "panel_room_participant": "main-1"
+                    }
+                },
+                "att-swapped-main": {
+                    "attempt_id": "att-swapped-main",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "working",
+                    "terminal": false,
+                    "created_at": now - 400,
+                    "refs": {
+                        "panel_room_id": "room-demo",
+                        "panel_role": "main",
+                        "panel_room_participant": "main-1"
+                    }
+                }
+            },
+            "room_dispatches": mixed_dispatches
+        });
+        let mixed_calls = calls(&mixed_report);
+        let auto_visible = visible(&mixed_report, &overview_nav);
+        let attn_nav = navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        let attn_visible = visible(&mixed_report, &attn_nav);
+        let compact_visible = visible(&mixed_report, &compact_nav);
+        let has_id = |list: &[Value], id: &str| list.iter().any(|r| r["participant"] == id);
+
+        for idx in 0..3 {
+            for prefix in [
+                "left-wait",
+                "left-unk",
+                "left-queued",
+                "term-main-disp",
+                "old-work-main-disp",
+                "missing-custodian-disp",
+                "swapped-disp",
+            ] {
+                let id = format!("{prefix}-{idx}");
+                let row = mixed_calls
+                    .iter()
+                    .find(|r| r["participant"] == id)
+                    .expect("history placeholder row");
+                assert_eq!(row["room_only_history"], true, "{id}: {row}");
+                assert!(!has_id(&auto_visible, &id), "{id} leaked into View::Auto");
+                assert!(
+                    !has_id(&attn_visible, &id),
+                    "{id} leaked into attention_only"
+                );
+                assert!(
+                    has_id(&compact_visible, &id),
+                    "{id} missing from View::Compact"
+                );
+            }
+            for prefix in [
+                "left-queued",
+                "undated-queued",
+                "term-main-disp",
+                "old-work-main-disp",
+                "missing-custodian-disp",
+                "swapped-disp",
+            ] {
+                let id = format!("{prefix}-{idx}");
+                let row = mixed_calls
+                    .iter()
+                    .find(|r| r["participant"] == id)
+                    .expect("queued retention row");
+                assert_eq!(
+                    text(row, "state"),
+                    "queued",
+                    "{id} lost raw queued state: {row}"
+                );
+                assert!(
+                    has_id(&compact_visible, &id),
+                    "{id} missing from View::Compact"
+                );
+            }
+            for prefix in [
+                "undated-queued",
+                "undated-unk",
+                "undated-disp-res",
+                "undated-disp-unk",
+            ] {
+                let id = format!("{prefix}-{idx}");
+                let row = mixed_calls
+                    .iter()
+                    .find(|r| r["participant"] == id)
+                    .expect("stale undated placeholder row");
+                assert_eq!(row["room_only_stale"], true, "{id}: {row}");
+                assert_ne!(text(row, "state"), "done", "{id} fabricated done: {row}");
+                assert!(!has_id(&auto_visible, &id), "{id} leaked into View::Auto");
+                assert!(
+                    !has_id(&attn_visible, &id),
+                    "{id} leaked into attention_only"
+                );
+                assert!(
+                    has_id(&compact_visible, &id),
+                    "{id} missing from View::Compact"
+                );
+            }
+            let queued_id = format!("live-queued-{idx}");
+            assert!(
+                has_id(&auto_visible, &queued_id),
+                "{queued_id} should stay visible in View::Auto"
+            );
+            for prefix in ["live-wait", "live-approval", "live-blocked", "live-review"] {
+                let id = format!("{prefix}-{idx}");
+                assert!(
+                    has_id(&auto_visible, &id),
+                    "{id} should stay visible in View::Auto"
+                );
+                assert!(
+                    has_id(&attn_visible, &id),
+                    "{id} should stay visible in attention_only"
+                );
+            }
+        }
+
+        let left_review = mixed_calls
+            .iter()
+            .find(|r| r["participant"] == "left-review")
+            .expect("left-review row");
+        assert_eq!(left_review["room_only_history"], true, "{left_review}");
+        assert_eq!(text(left_review, "state"), "review", "{left_review}");
+        assert!(
+            !has_id(&auto_visible, "left-review"),
+            "left-review leaked into View::Auto"
+        );
+        assert!(
+            !has_id(&attn_visible, "left-review"),
+            "left-review leaked into attention_only"
+        );
+        assert!(
+            has_id(&compact_visible, "left-review"),
+            "left-review missing from View::Compact"
+        );
+        assert!(
+            has_id(&auto_visible, "live-disp"),
+            "live-disp on active Main should stay visible in View::Auto"
+        );
+
+        let mixed_attention = crate::attention::items(&mixed_report, &read);
+        let attention_ids: BTreeSet<&str> = mixed_attention
+            .iter()
+            .map(|item| item.row_id.1.as_str())
+            .collect();
+        assert_eq!(mixed_attention.len(), 12, "{mixed_attention:?}");
+        for forbidden in [
+            "left-wait-0",
+            "left-wait-1",
+            "left-wait-2",
+            "left-queued-0",
+            "left-review",
+            "term-main-disp-0",
+            "term-main-disp-1",
+            "term-main-disp-2",
+            "old-work-main-disp-0",
+            "missing-custodian-disp-0",
+            "swapped-disp-0",
+            "undated-queued-0",
+            "undated-unk-0",
+            "undated-disp-res-0",
+            "undated-disp-unk-0",
+        ] {
+            assert!(
+                !attention_ids.contains(forbidden),
+                "{forbidden} leaked into attention::items: {attention_ids:?}"
+            );
+        }
+        let mixed_overview = frame(&mixed_report, &overview_nav, 140, 30, &read).join("\n");
+        let mixed_header = mixed_overview.lines().next().unwrap_or("");
+        assert!(
+            mixed_header.contains("3 review · 12 attention"),
+            "{mixed_header}"
+        );
+
+        let mut no_main_report = mixed_report.clone();
+        no_main_report["room_attempts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("att-main");
+        let no_main_calls = calls(&no_main_report);
+        let no_main_auto = visible(&no_main_report, &overview_nav);
+        let no_main_disp = no_main_calls
+            .iter()
+            .find(|r| r["participant"] == "live-disp")
+            .unwrap();
+        assert_eq!(no_main_disp["room_only_history"], true, "{no_main_disp}");
+        assert!(!has_id(&no_main_auto, "live-disp"));
+        let no_main_queued = no_main_calls
+            .iter()
+            .find(|r| r["participant"] == "live-queued-0")
+            .unwrap();
+        assert_eq!(no_main_queued["room_only_stale"], true, "{no_main_queued}");
+        assert_eq!(text(no_main_queued, "state"), "queued", "{no_main_queued}");
+        let no_main_ancient = no_main_calls
+            .iter()
+            .find(|r| r["participant"] == "ancient-queued")
+            .unwrap();
+        assert_eq!(
+            no_main_ancient["room_only_stale"], true,
+            "{no_main_ancient}"
+        );
+        assert_eq!(text(no_main_ancient, "state"), "", "{no_main_ancient}");
+
+        for (field, value) in [("closed", json!(true)), ("successor", json!("room-next"))] {
+            let mut sealed_report = mixed_report.clone();
+            sealed_report["room"][field] = value;
+            let sealed_calls = calls(&sealed_report);
+            let sealed_auto = visible(&sealed_report, &overview_nav);
+            let sealed_disp = sealed_calls
+                .iter()
+                .find(|r| r["participant"] == "live-disp")
+                .unwrap();
+            assert_eq!(
+                sealed_disp["room_only_history"], true,
+                "{field}: {sealed_disp}"
+            );
+            assert!(!has_id(&sealed_auto, "live-disp"), "{field}");
+            let sealed_queued = sealed_calls
+                .iter()
+                .find(|r| r["participant"] == "live-queued-0")
+                .unwrap();
+            assert_eq!(
+                sealed_queued["room_only_stale"], true,
+                "{field}: {sealed_queued}"
+            );
+            assert_eq!(
+                text(sealed_queued, "state"),
+                "queued",
+                "{field}: {sealed_queued}"
+            );
+            let sealed_ancient = sealed_calls
+                .iter()
+                .find(|r| r["participant"] == "ancient-queued")
+                .unwrap();
+            assert_eq!(
+                sealed_ancient["room_only_stale"], true,
+                "{field}: {sealed_ancient}"
+            );
+            assert_eq!(
+                text(sealed_ancient, "state"),
+                "",
+                "{field}: {sealed_ancient}"
+            );
+        }
+
+        let main_attempt_row = json!({
+            "attempt_id": "att-main",
+            "tool": "panel-main",
+            "provider": "codex",
+            "state": "working",
+            "terminal": false,
+            "created_at": now - 60,
+            "refs": {
+                "panel_room_id": "room-demo",
+                "panel_role": "main",
+                "panel_room_participant": "main-1"
+            }
+        });
+        let alias_report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-demo",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "joined": true,
+                        "joined_at": now - 60
+                    },
+                    {
+                        "participant": "live-disp",
+                        "role": "worker",
+                        "provider": "codex",
+                        "joined": true
+                    },
+                    {
+                        "participant": "prev-disp",
+                        "role": "worker",
+                        "provider": "claude",
+                        "state": "queued",
+                        "joined": true,
+                        "joined_at": now - 30
+                    }
+                ]
+            },
+            "room_attempts": {
+                "att-main": main_attempt_row,
+                "main-1": main_attempt_row,
+                "att-old-main": {
+                    "attempt_id": "att-old-main",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "done",
+                    "terminal": true,
+                    "created_at": now - 900,
+                    "updated_at": now - 600,
+                    "refs": {
+                        "panel_room_id": "room-demo",
+                        "panel_role": "main",
+                        "panel_room_participant": "main-1"
+                    }
+                }
+            },
+            "room_dispatches": {
+                "live-disp": {
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
+                    "state": "reserved",
+                    "created_at": now - 30
+                },
+                "prev-disp": {
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-old-main",
+                    "state": "running",
+                    "created_at": now - 30
+                }
+            }
+        });
+        assert_eq!(
+            current_room_main_custodian(&alias_report, &alias_report["room"], "room-demo"),
+            Some(("main-1", "att-main"))
+        );
+        let alias_auto = visible(&alias_report, &overview_nav);
+        assert!(has_id(&alias_auto, "live-disp"));
+        assert!(!has_id(&alias_auto, "prev-disp"));
+        let alias_prev = calls(&alias_report)
+            .into_iter()
+            .find(|r| r["participant"] == "prev-disp")
+            .unwrap();
+        assert_eq!(alias_prev["room_only_history"], true, "{alias_prev}");
+        assert_eq!(text(&alias_prev, "state"), "queued", "{alias_prev}");
+
+        let mut ambiguous_alias = alias_report.clone();
+        ambiguous_alias["room_attempts"]
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "att-other-live".to_owned(),
+                json!({
+                    "attempt_id": "att-other-live",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "working",
+                    "terminal": false,
+                    "created_at": now - 30,
+                    "refs": {
+                        "panel_room_id": "room-demo",
+                        "panel_role": "main",
+                        "panel_room_participant": "main-1"
+                    }
+                }),
+            );
+        assert_eq!(
+            current_room_main_custodian(&ambiguous_alias, &ambiguous_alias["room"], "room-demo"),
+            None
+        );
+        assert!(!has_id(
+            &visible(&ambiguous_alias, &overview_nav),
+            "live-disp"
+        ));
     }
 
     #[test]
@@ -11959,6 +12698,8 @@ mod tests {
             "room_dispatches": {
                 "call-reserved": {
                     "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
                     "state": "reserved",
                     "task_id": "t-res",
                     "created_at": now - 200,
@@ -11971,6 +12712,8 @@ mod tests {
                 },
                 "call-dispatched": {
                     "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
                     "state": "running",
                     "task_id": "t-run",
                     "created_at": now - 200,
@@ -11983,6 +12726,8 @@ mod tests {
                 },
                 "call-awaiting": {
                     "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
                     "state": "awaiting",
                     "exit": 0,
                     "task_id": "t-await",
