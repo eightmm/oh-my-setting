@@ -150,7 +150,7 @@ fn gate(root: &Path, git: &Git<'_>) -> Result<(Slug, Option<Slug>)> {
 }
 
 /// The packet's `github_issue` header row, revalidated against origin.
-fn task_issue(root: &Path, origin: &Slug) -> Result<Option<String>> {
+fn task_issue(root: &Path, origin: &Slug) -> Result<Option<IssueRef>> {
     let raw = read(root, PACKET_REL, STATE_MAX)?;
     let text = String::from_utf8_lossy(&raw);
     let Some(value) = text
@@ -161,12 +161,12 @@ fn task_issue(root: &Path, origin: &Slug) -> Result<Option<String>> {
         return Ok(None);
     };
     IssueRef::parse(value.trim(), origin)
-        .map(|r| Some(r.to_string()))
+        .map(Some)
         .map_err(|_| Error::new(2, "task packet github_issue is not an origin reference"))
 }
 
 /// `(task id, canonical issue ref)` for plan tasks that carry `issue`.
-fn plan_issues(root: &Path, origin: &Slug) -> Result<Vec<(String, String)>> {
+fn plan_issues(root: &Path, origin: &Slug) -> Result<Vec<(String, IssueRef)>> {
     let raw = read(root, PLAN_REL, PLAN_MAX)?;
     if raw.is_empty() {
         return Ok(vec![]);
@@ -191,7 +191,7 @@ fn plan_issues(root: &Path, origin: &Slug) -> Result<Vec<(String, String)>> {
                     format!("plan task {id} carries an invalid issue reference"),
                 )
             })?;
-        out.push((id, issue.to_string()));
+        out.push((id, issue));
     }
     Ok(out)
 }
@@ -226,30 +226,48 @@ fn status(
         errors.push(e.clone());
     }
     let cache = read(state, CACHE_REL, STATE_MAX * 2)?;
-    let entry = |reference: &str| {
-        let (row, f) = cached(&cache, reference, Kind::Issue);
+    let entry = |reference: IssueRef| {
+        let (row, f) = cached(&cache, &reference.to_string(), Kind::Issue);
         let freshness = match f {
             Freshness::Fresh => "fresh",
             Freshness::Stale => "stale",
             Freshness::Unavailable => "unavailable",
         };
-        (reference.to_owned(), freshness, row)
+        (reference, freshness, row)
     };
     let mut linked = vec![];
     if let Ok(origin) = &origin {
         match task_issue(root, origin) {
-            Ok(Some(r)) => linked.push((None, entry(&r))),
+            Ok(Some(r)) => linked.push((None, entry(r))),
             Ok(None) => {}
             Err(e) => errors.push(e.message),
         }
         match plan_issues(state, origin) {
-            Ok(rows) => linked.extend(rows.into_iter().map(|(id, r)| (Some(id), entry(&r)))),
+            Ok(rows) => linked.extend(rows.into_iter().map(|(id, r)| (Some(id), entry(r)))),
             Err(e) => errors.push(e.message),
         }
     }
     let code = i32::from(!errors.is_empty());
     let slug = |s: &Slug| V::from(s.to_string());
     let active = matches!(mode, Ok(Some(_)));
+    // Use only validated local origin data. These destinations convey no live availability.
+    let repository_url = origin
+        .as_ref()
+        .ok()
+        .filter(|_| active)
+        .map(|s| format!("{WEB}{s}"));
+    let destinations = [
+        ("repository", "repository", ""),
+        ("issues", "issues", "/issues"),
+        ("pull_requests", "pull requests", "/pulls"),
+        ("actions", "actions", "/actions"),
+        ("wiki", "wiki", "/wiki"),
+    ];
+    let issue_url = |issue: &IssueRef| {
+        repository_url
+            .as_ref()
+            .map(|url| format!("{url}/issues/{}", issue.number))
+    };
     let declared = declared.as_ref().ok().and_then(Option::as_ref);
     // Only a tracked-only declaration is ever inactive (see `active`).
     let inactive = (matches!(mode, Ok(None)) && declared.is_some())
@@ -264,7 +282,8 @@ fn status(
                         if task.is_some() { "plan" } else { "task" }.into(),
                     ),
                     ("task", task.clone().map_or(V::Null, V::from)),
-                    ("reference", r.clone().into()),
+                    ("reference", r.to_string().into()),
+                    ("url", issue_url(r).map_or(V::Null, V::from)),
                     ("freshness", (*f).into()),
                     (
                         "state",
@@ -286,6 +305,12 @@ fn status(
             ("project_active", V::Bool(active)),
             ("project_inactive_reason", inactive.map_or(V::Null, V::from)),
             ("origin", origin.as_ref().map_or(V::Null, slug)),
+            (
+                "navigation",
+                repository_url.as_ref().map_or(V::Null, |url| {
+                    obj(destinations.map(|(key, _, suffix)| (key, format!("{url}{suffix}").into())))
+                }),
+            ),
             ("linked", V::Arr(rows)),
             (
                 "errors",
@@ -312,6 +337,11 @@ fn status(
             Ok(s) => text.push_str(&format!("origin: {s}\n")),
             Err(e) => text.push_str(&format!("origin: none ({e})\n")),
         }
+        if let Some(url) = &repository_url {
+            for (_, label, suffix) in destinations {
+                text.push_str(&format!("{label}: {url}{suffix}\n"));
+            }
+        }
         for (task, (r, f, row)) in &linked {
             let source = task
                 .as_ref()
@@ -319,6 +349,9 @@ fn status(
             text.push_str(&format!("{source}: {r} [{f}]"));
             if let Some(row) = row {
                 text.push_str(&format!(" {} {}", row.state, row.title));
+            }
+            if let Some(url) = issue_url(r) {
+                text.push_str(&format!(" {url}"));
             }
             text.push('\n');
         }
@@ -619,12 +652,14 @@ fn refresh(
     }
     if o.has("linked") {
         require(mode.is_some(), format!("--linked: {DECLARE}"))?;
-        let mut linked: Vec<String> = task_issue(root, &origin)?.into_iter().collect();
-        linked.extend(plan_issues(state, &origin)?.into_iter().map(|(_, r)| r));
-        for r in linked {
-            let r = IssueRef::parse(&r, &origin).map_err(|e| Error::new(2, e.message))?;
-            targets.push((Kind::Issue, r.number));
-        }
+        let packet = task_issue(root, &origin)?;
+        let planned = plan_issues(state, &origin)?;
+        targets.extend(
+            packet
+                .into_iter()
+                .chain(planned.into_iter().map(|(_, issue)| issue))
+                .map(|issue| (Kind::Issue, issue.number)),
+        );
     }
     targets.sort_by_key(|(k, n)| (k.name(), *n));
     targets.dedup_by_key(|(k, n)| (k.name(), *n));
