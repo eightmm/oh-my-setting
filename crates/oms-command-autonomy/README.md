@@ -188,15 +188,12 @@ done task or creates a repair task from an external instruction.
 
 ## Static selectors and installation previews
 
-Selector validation reads suite definitions as data. When
-`tests/operator/runner.py` is present, its static `SECTIONS` manifest retains
-its existing section and case behavior, including refusal of shell cases.
-Only an absent registry enables the shell fallback: inline
+Selector validation reads suite definitions as data. Inline
 `# OPERATOR_SECTION_BEGIN` sections and `tests/operator/*.sh` section files
 supply names, with underscores normalized to hyphens. Shell case names come
 from `# BEGIN ` markers, removing sentence and parenthetical annotations.
-Unknown sections and cases refuse; unsafe or non-UTF-8 registry/case files
-remain errors. No target suite or Python interpreter is executed.
+Unknown sections and cases refuse, as do unsafe or non-UTF-8 shell case files.
+Selector validation does not execute the target suite.
 
 `install-plan --install` and `--update` retain the `STEP: STATUS: detail`
 format. The `native-runtime` step reports readiness as `not-previewed`;
@@ -206,10 +203,10 @@ neither downloads an interpreter nor writes installation state.
 ## Verification
 
 The integration suite covers ownership/help and parse errors for all six
-families, interruption, selectors with and without the legacy registry,
-continuation digest binding, install/update previews and native callback argv,
-contract parsing, proposal JSON/digests, frozen receipt validation and budgets,
-and unavailable service refusal. Run it with:
+families, interruption, native shell selectors, continuation digest binding,
+install/update previews, native callback argv, contract parsing, proposal
+JSON/digests, frozen receipt validation and budgets, and unavailable service
+refusal. Run it with:
 
 ```text
 cargo +1.99.1 test --manifest-path Cargo.toml -p oms-command-autonomy --test autonomy_contract --locked --offline
