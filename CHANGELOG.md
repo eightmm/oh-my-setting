@@ -561,6 +561,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The panel watch PTY test no longer needs Python. Its fake tmux is a shell
+  script and the test makes the PTY in Rust; the child takes it as controlling
+  terminal itself. The source-distribution suite now refuses an OMS test or
+  script that runs the retired interpreter.
 - CI is now Linux-only: removed the `macos-latest` Rust and install lifecycle
   jobs (and macOS-only workflow steps) from `.github/workflows/test.yml`,
   keeping `lint`, `rust (ubuntu-24.04)`, `focused`,

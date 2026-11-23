@@ -158,8 +158,8 @@ Linux jobs의 runner label은 `ubuntu-24.04`와 `ubuntu-latest`이므로 동일 
 
 `stage()`는 elapsed seconds를 출력하고 로그를 삭제하며, 종료 trap은 check runtime을 삭제한다.
 `timings`와 `timings-dir`은 만들어지지만 현재 gate에서 기록하는 producer가 없다.
-`COMPONENTS.md`의 `gate_timings.py`, `ci-query.py`, GitHub slowest-stage summary 설명은
-현재 Python-free tree/workflow와 맞지 않는다. 해당 Python helper는 복원하지 않는다.
+`COMPONENTS.md`에 있던 retired timing report, CI query helper, GitHub slowest-stage summary 설명은
+현재 tree/workflow와 맞지 않아 제거했다. 해당 helper는 복원하지 않는다.
 
 이미 [Rust `helpers::gate_timings`](../crates/oms-command-landing/src/helpers.rs)가
 stage/test/TSV 형태를 읽고, [output-digest](../crates/oms-command-peer/README.md)와

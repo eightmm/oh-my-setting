@@ -7,6 +7,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+pub mod policy;
+
 pub const HEADER: &str = "path\tkind\tunits\n";
 pub const BASELINE: &str = "crates/oms-migrate/tests/python-inventory.tsv";
 pub type Inventory = BTreeMap<String, Entry>;

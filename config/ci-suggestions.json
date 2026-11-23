@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "Rules for `oms ci-status suggest`. Data only: each rule says which recorded fact it reads (record, fields), what to show (event, say), the command a person may run (action; {branch} {sha} {packet} {reviewed_tree} {merged_tree} are filled in) and, optionally, how long the fact may wait (age_from names a timestamp field; escalate_after_s and escalate_to are the line and who to tell). The condition each rule tests is code in scripts/lib/ci_suggest.py, keyed by id. A test checks every field named here exists in a real or fixture record, so a renamed field fails there instead of silently silencing a rule. Nothing here is run by OMS.",
+  "note": "Rules for `oms ci-status suggest`. Data only: each rule says which recorded fact it reads (record, fields), what to show (event, say), the command a person may run (action; {branch} {sha} {packet} {reviewed_tree} {merged_tree} are filled in) and, optionally, how long the fact may wait (age_from names a timestamp field; escalate_after_s and escalate_to are the line and who to tell). The condition each rule tests is code in crates/oms-command-landing/src/suggestions.rs, keyed by id. A test checks every field named here exists in a real or fixture record, so a renamed field fails there instead of silently silencing a rule. Nothing here is run by OMS.",
   "records": {
     "ci": ".oms/ci.jsonl row written by `ci-status record`",
     "comments": ".oms/artifacts/pr-comments/pr<N>-*.json packet written by `draft-pr comments`",

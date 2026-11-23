@@ -279,7 +279,7 @@ the unpatched source. The gate rejects candidate changes by the verifier.
 Automatic review uses routine for patches containing only `.md` or `.rst` files under
 `docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and
 `CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns
-also use deep (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins,
+also use deep (`FRONTIER_PATTERNS` in the [recommend module](../crates/oms-command-panel/src/recommend.rs): plugins,
 hooks, install/uninstall, land and patch scripts, workflows, rules,
 permission/settings/policy files). Patch admission reports `security: ADVISE` with risk
 paths and auditor guidance, or `SKIP` when none are found; this advisory does not change
@@ -480,7 +480,7 @@ bridge and requires Pi 0.80.4 or newer (the bridge waits for `agent_settled`)
 and the Codex CLI and `oms` launcher on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
 context/quota reading, but [`pi-oms-extension.mjs`](../crates/oms-command-providers-skills/assets/pi-oms-extension.mjs)
-forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
+forwards Pi activity to `oms harness-hook` and delivers room mail through its hook context.
 At Pi's exit prompt, `r` starts a fresh Pi main; it does not resume Pi history. The launch uses Pi's documented
 [`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
 to preserve its base instructions and pass the OMS room and sole-main contract.
@@ -1762,8 +1762,8 @@ Unknown or invalid categories fail before any route is computed. It launches not
 keeps an explicit `--model`, `--reasoning-effort` or `--workload` you pass. With
 `--failed N` (N of 2 or more) it adds a suggestion: raise effort one step, and once
 effort is already `high`, raise the tier; `deep` is the ceiling because frontier is
-reserved for security audits. The table is checked by `python3 scripts/lib/route_rules.py`
-(unknown keys, unreachable rows, missing default row); the thresholds are starting
+reserved for security audits. The table is checked when it loads, in the
+[recommend module](../crates/oms-command-panel/src/recommend.rs) (unknown keys, unreachable rows, missing default row); the thresholds are starting
 points, not measured. Run work you can verify at low effort and re-run only the failures higher.
 
 
@@ -2862,8 +2862,8 @@ The footer shows at most three hints chosen by the selection (a main: `Enter Cha
 that work in that view, with `v Expand` or `v Collapse` following the board's state, `x Transcript`
 on a call, `[ ]` on the Log tab, paging keys and `Ctrl+L`; a hint that fits no row is dropped whole and
 the list ends in `…` when any were dropped. A key with no binding in the board shows `Key not bound here;
-? lists the keys`. The control menu's `[k]` groups and the result reader's key row come from tables in
-`panel_keymap.py` (the reader drops whole hints, lowest priority first, at narrow widths). Notices
+? lists the keys`. The control menu's `[k]` groups and the result reader's key row come from the panel's
+key tables (the reader drops whole hints, lowest priority first, at narrow widths). Notices
 disappear on the next input or after ten seconds.
 
 `a` in the watcher asks an advisor for the selected main (or the shown one). In tmux it

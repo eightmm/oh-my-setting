@@ -1,55 +1,50 @@
 # oh-my-setting Project Rules
 
-- The install-wide policy source is `rules/global-AGENTS.md`; read it when the
-  current agent has not already loaded the installed global rules.
-- Keep language/ML/data/HPC policy in templates/contracts, not in the global
-  rules every session loads.
-- This repository maintains a native Rust harness shared by Codex, Claude Code,
-  and Antigravity, with Bash installation and verification entrypoints.
-  Preserve behavior across all three providers.
-- Supported hosts are Linux (Ubuntu 20.04 floor), WSL2 and macOS; native
-  Windows is retired and refused. Require Bash 5.0+ and keep scripts compatible
-  with GNU/BSD userlands for the documented core lifecycle; resolve paths with
-  `pwd -P` before comparing them: one directory has more than one spelling.
-- Artifacts this repo publishes into shared namespaces carry the oms
-  marker: skills and output styles are `oms-*`, MCP tools `oms_*`, work
-  branches `oms/*`, and `skill-forge add` refuses new unprefixed project
-  skills. Stored skills under legacy names stay readable. Exempt:
-  provider-mandated names (plugin directory layouts) and repo-internal
-  files referenced by path (`roles/`, `prompts/`, `config/`).
-- The single PATH entry is `oms`, so its subcommands already sit inside
-  the marker: name them `oms <verb>`, never `oms oms-<verb>`. One spelling
-  per verb — the dispatcher holds no aliases. Public verbs are described in
-  the native registry and dispatched to their owning command crate.
-- Preserve regression coverage when changing scripts or install contracts.
-  Extend the canonical test or fixture first; add one only for a path no test
-  exercises, and say which. Tests grew faster than code (ratio 0.54 to 0.70 in
-  two months): a commit that adds tests looks for one it supersedes.
-- Keep install, update, repair, and uninstall ownership transitions reversible.
-- During development, run affected checks; do not run a full gate for every
-  edit or local commit. For committed ranges use `scripts/check.sh --affected`
-  with `--changed-from BASE --changed-to HEAD`: docs use reference checks
-  only, alone or beside code; critical/uncertain changes
-  (`scripts/lib/critical-paths.sh`: lifecycle, hooks/guards, scrubber,
-  permission policy, selector, workflows, core Rust crates) use full coverage,
-  and `OMS_AFFECTED_FULL=1` forces it. Skill/template/role prose uses its
-  bounded contract suite (`skill-manifest`); executable templates stay broad.
-- Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
-  and pushes only while HEAD and the tracked tree remain unchanged, without a
-  duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`.
-  On GitHub it pushes a work branch, opens a PR and stops at `awaiting-merge`
-  after CI; `--merge`, only when the user asked to merge, merges and installs.
-  Installation needs successful CI for that same SHA (after a squash merge: an
-  identical tree on an unchanged base) plus full proof (`gate`
-  + `lint` + `focused` + `native (ubuntu-latest, copy)`, with optional
-  `rust (ubuntu-24.04)`).
-- CI is Linux-only and scopes PRs and main pushes alike using pure-Rust jobs
-  (Linux lint, Rust fmt/clippy/tests on Ubuntu, pure-Bash focused E2E suites,
-  and a Linux copy-install lifecycle test) with pinned Rust `1.99.1`. macOS
-  remains a supported runtime and install host with GNU/BSD-compatible scripts
-  (no macOS CI; `tests/bsd-portability-smoke.sh` runs on the host userland).
-  Only plan-authorized skips pass the stable gate. CI remains authoritative.
-- Every tracked file passes the outbound scrubber
-  (`scrubber_passes_tracked_repository_sources`): in fixtures, split key-shaped
-  strings and literal home paths across quotes, and avoid identifiers that read
-  as a credential assignment.
+## Entrypoints
+- `rules/global-AGENTS.md`: install-wide policy; read it unless already loaded.
+- `templates/`: language/ML/data/HPC policy and contracts, not global rules.
+- `crates/oms/src/registry.rs`: public verbs; owners in `crates/oms-command-*`.
+- `install.sh`: installer; `tests/install-lifecycle-smoke.sh`: lifecycle E2E.
+- `scripts/check.sh`: affected/full gate; `scripts/lib/critical-paths.sh`.
+- `.github/workflows/test.yml`: hosted CI (Linux-only).
+- `crates/oms-scrub/tests/scan_contract.rs`: outbound scrubber contract.
+- `docs/README.md`: docs map; `docs/COMPONENTS.md`: command catalog.
+- `crates/oms-command-panel`: terminal panel; `crates/oms-panel-core`: non-TUI core.
+- `./verify [--seed]`: single root verifier; four named stages, smoke JSON on stdout.
+
+## Rules
+- A native Rust harness shared by Codex, Claude Code and Antigravity, with Bash
+  install and verification entrypoints: preserve behavior across all three.
+- Hosts: Linux (Ubuntu 20.04 floor), WSL2 and macOS run the runtime and
+  installer; native Windows is refused. Require Bash 5.0+, keep the documented
+  core lifecycle GNU/BSD-compatible, and compare paths after `pwd -P`.
+- Shared-namespace artifacts carry the oms marker: skills and output styles
+  `oms-*`, MCP tools `oms_*`, work branches `oms/*`; `skill-forge add` refuses
+  new unprefixed project skills; legacy stored names stay readable. Exempt:
+  provider-mandated names (plugin layouts), files referenced by path (`roles/`,
+  `config/`). `oms` is the single PATH entry: verbs are `oms <verb>`, never
+  `oms oms-<verb>`, one spelling each; the dispatcher holds no aliases.
+- Changing scripts or install contracts preserves regression coverage: extend
+  the canonical test or fixture first; add one only for an unexercised path,
+  and say which. A commit adding tests looks for one it supersedes. A recurring
+  defect gets one regression test or one enforced check rule, not more prose.
+- Keep install, update, repair and uninstall ownership transitions reversible.
+- While editing, run affected checks, not a full gate per edit or commit:
+  `scripts/check.sh --affected --changed-from BASE --changed-to HEAD`. Docs get
+  reference checks only; critical/uncertain paths (critical-paths.sh: lifecycle,
+  hooks/guards, scrubber, permission policy, selector, workflows, core Rust
+  crates) and `OMS_AFFECTED_FULL=1` get full coverage. Skill/template/role prose
+  uses its bounded `skill-manifest` suite; executable templates stay broad.
+- Before reporting completion, run the root `./verify`.
+- `oms land` pins HEAD and tracked files and avoids a duplicate hook gate.
+  Its default is `check.sh --affected --ci-parity`. Resume the exact receipt
+  to reuse the gate. GitHub PRs stop at `awaiting-merge`. Use `--merge` only
+  when the user asks. Install needs same-SHA full CI proof (`gate`, `lint`,
+  `focused`, `native (ubuntu-latest, copy)`, optional `rust (ubuntu-24.04)`).
+  Squash installation requires an identical tree on an unchanged base.
+- Hosted CI is Linux-only for PRs and main pushes, with Rust `1.99.1`. Only
+  plan-authorized skips pass the stable gate. macOS remains an optional
+  runtime and installation host.
+- Every tracked file passes `scrubber_passes_tracked_repository_sources`: in
+  fixtures split key-shaped strings and home paths across quotes; avoid
+  identifiers that read as a credential assignment.

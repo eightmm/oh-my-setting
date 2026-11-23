@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: verify needs Bash 5+" >&2; exit 1; }
+set -euo pipefail
+umask 022
+
+# Canonical fail-fast 4-phase repository verification entrypoint.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$ROOT"
+
+SEED=20261123
+usage() {
+  cat <<'EOF'
+usage: ./verify [--seed N] [-h|--help]
+
+Run the fail-fast 4-phase verification pipeline:
+  1. type              cargo +1.99.1 check --workspace --all-targets --locked
+  2. architecture_lint bash scripts/check.sh --lint-only
+  3. unit_integration  cargo +1.99.1 test --workspace --locked
+  4. core_e2e          cargo +1.99.1 test --locked -p oms --test verify_smoke verify_core_e2e -- --exact --nocapture
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --seed) [ "$#" -ge 2 ] || { echo "error: --seed requires an unsigned integer" >&2; exit 2; }; SEED="$2"; shift 2 ;;
+    --seed=*) SEED="${1#--seed=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+case "$SEED" in ''|*[!0-9]*) echo "error: --seed must be an unsigned integer: $SEED" >&2; exit 2 ;; esac
+
+# Sanitize inherited OMS/provider/Git redirect state while preserving toolchain caches.
+unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH OMS_AGENT OMS_ROOM \
+  OMS_ROOM_ID OMS_ROOM_REPO OMS_ROOM_PARTICIPANT OMS_TASK_ID OMS_ATTEMPT_ID \
+  OMS_STATE_REPO OMS_BUILD_CACHE_RETENTION_HOURS OMS_VERIFY_REPORT OMS_VERIFY_SEED \
+  CODEX_THREAD_ID CODEX_SANDBOX CLAUDECODE CLAUDE_CODE_ENTRYPOINT \
+  ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY \
+  GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE
+
+CARGO_FLAGS=(--locked)
+if [ "${OMS_VERIFY_OFFLINE:-0}" = "1" ] || [ "${CARGO_NET_OFFLINE:-}" = "true" ]; then
+  CARGO_FLAGS+=(--offline)
+fi
+
+VERIFY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-verify.XXXXXX")"
+chmod 700 "$VERIFY_TMP"
+trap 'rm -rf "$VERIFY_TMP"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+run_stage() {
+  local stage="$1" rc=0
+  shift
+  "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'verify: stage=%s status=failed exit=%s\n' "$stage" "$rc" >&2
+    exit "$rc"
+  fi
+  printf 'verify: stage=%s status=ok\n' "$stage"
+}
+
+run_stage type cargo +1.99.1 check --workspace --all-targets "${CARGO_FLAGS[@]}"
+run_stage architecture_lint bash "$ROOT/scripts/check.sh" --lint-only
+run_stage unit_integration cargo +1.99.1 test --workspace "${CARGO_FLAGS[@]}"
+
+REPORT="$VERIFY_TMP/core-e2e-report.json"
+e2e_rc=0
+OMS_VERIFY_REPORT="$REPORT" OMS_VERIFY_SEED="$SEED" \
+  cargo +1.99.1 test "${CARGO_FLAGS[@]}" -p oms --test verify_smoke verify_core_e2e -- --exact --nocapture || e2e_rc=$?
+if [ "$e2e_rc" -ne 0 ]; then
+  printf 'verify: stage=core_e2e status=failed exit=%s\n' "$e2e_rc" >&2
+  exit "$e2e_rc"
+fi
+if [ ! -s "$REPORT" ]; then
+  printf 'verify: stage=core_e2e status=failed exit=1 error=empty_or_zero_test_smoke_report\n' >&2
+  exit 1
+fi
+cat "$REPORT"
+printf 'verify: stage=core_e2e status=ok\n'
