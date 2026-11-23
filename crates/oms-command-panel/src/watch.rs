@@ -1119,6 +1119,42 @@ struct MainSwitch {
     running: Option<Receiver<Result<()>>>,
 }
 
+fn legacy_main_switch_source(report: &Value, main: &LiveMain, attempt: &Value) -> bool {
+    let room = &report["room"];
+    let refs = &attempt["refs"];
+    if stale_report(report)
+        || report["collection"]["pending"] == true
+        || room["closed"] != false
+        || !room["successor"].is_null()
+        || attempt["attempt_id"] != main.attempt
+        || attempt["tool"] != "panel-main"
+        || refs["panel_role"] != "main"
+        || refs["panel_room_id"] != room["id"]
+        || !oms_command_room::main_owner_matches(crate::text(refs, "panel_harness"), &main.owner)
+        || [
+            "panel_host",
+            "panel_wrapper_pid",
+            "panel_wrapper_identity",
+            "panel_native_pid",
+            "panel_native_identity",
+        ]
+        .iter()
+        .any(|key| !refs[*key].is_null())
+    {
+        return false;
+    }
+    let mut mains = crate::rows(&room["participants"]).iter().filter(|row| {
+        row["participant"] == main.member || (row["role"] == "main" && row["joined"] == true)
+    });
+    mains.next().is_some_and(|row| {
+        row["participant"] == main.member
+            && row["provider"] == main.owner
+            && row["role"] == "main"
+            && row["joined"] == true
+            && (row["parent"].is_null() || row["parent"] == "")
+    }) && mains.next().is_none()
+}
+
 impl MainSwitch {
     fn open(
         &mut self,
@@ -1152,12 +1188,17 @@ impl MainSwitch {
             .as_ref()
             .ok_or_else(|| Error::new("No current Main verified"))?;
         let attempt = &report["room_attempts"][&main.attempt];
+        let current = attempt["provider"] == main.owner
+            && attempt["terminal"] == false
+            && attempt["state"] == "working"
+            && oms_panel_core::state::main_participant(attempt) == main.member;
+        if current && legacy_main_switch_source(report, main, attempt) {
+            return Err(Error::new(
+                "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
+            ));
+        }
         crate::require(
-            attempt["provider"] == main.owner
-                && attempt["refs"]["panel_host"] == "tmux"
-                && attempt["terminal"] == false
-                && attempt["state"] == "working"
-                && oms_panel_core::state::main_participant(attempt) == main.member,
+            current && attempt["refs"]["panel_host"] == "tmux",
             "Current Main is unavailable for a managed switch",
         )?;
         let current = attempt["refs"]["panel_harness"].as_str();
@@ -5667,6 +5708,7 @@ mod tests {
             "collection": {"ok": true},
             "room": {
                 "id": "room-one",
+                "closed": false,
                 "main": "main-member",
                 "participants": [
                     {"participant": "earlier", "role": "main", "provider": "claude", "model": "opus", "state": "working", "created_at": "1"},
@@ -5802,6 +5844,63 @@ mod tests {
             ),
             navigation::Action::None
         );
+        let mut legacy_scope = scope.clone();
+        legacy_scope.main.as_mut().unwrap().member = "attempt-old".into();
+        legacy_scope.key = legacy_scope.key.with_member(Some("attempt-old")).unwrap();
+        let mut legacy = report.clone();
+        legacy["room"]["participants"][1]["participant"] = json!("attempt-old");
+        let refs = legacy["room_attempts"]["attempt-old"]["refs"]
+            .as_object_mut()
+            .unwrap();
+        refs.remove("panel_host");
+        refs.remove("panel_room_participant");
+        let blocked = |report: &Value| {
+            let mut flow = MainSwitch::default();
+            let mut nav = navigation::Navigation::default();
+            let error = flow
+                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                    panic!("unavailable Main must not resolve targets")
+                })
+                .unwrap_err();
+            assert!(nav.main_switch.is_none());
+            assert!(flow.selection.is_none() && flow.running.is_none());
+            error.message
+        };
+        assert_eq!(
+            blocked(&legacy),
+            "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
+        );
+        for (path, value) in [
+            ("/collection/pending", json!(true)),
+            ("/room/closed", json!(true)),
+            (
+                "/room_attempts/attempt-old/attempt_id",
+                json!("foreign-attempt"),
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_room_id",
+                json!("room-foreign"),
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_wrapper_pid",
+                json!("52"),
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("inline"),
+            ),
+            ("/room_attempts/attempt-old/state", json!("done")),
+            ("/room/participants/1/joined", json!(false)),
+        ] {
+            let mut refused = legacy.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(
+                blocked(&refused),
+                "Current Main is unavailable for a managed switch",
+                "{path}"
+            );
+        }
         let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
             .unwrap_err()
             .message;
