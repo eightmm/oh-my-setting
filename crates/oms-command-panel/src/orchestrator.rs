@@ -3530,20 +3530,24 @@ impl<'a> Panel<'a> {
     }
 
     fn require_lead_assignment_main(&self, attempts: &AttemptCache) -> Result<()> {
+        let repo = self.repo.canonicalize().map_err(Error::new)?;
+        self.require_lead_assignment_main_at(attempts, &repo)
+    }
+
+    fn require_lead_assignment_main_at(&self, attempts: &AttemptCache, repo: &Path) -> Result<()> {
         require(
             self.caller == self.main.id
                 && std::env::var_os("OMS_CAMPAIGN_MANIFEST_SHA256").is_none(),
             "native provider scheduling requires the current Main",
         )?;
-        let repo = self.repo.canonicalize().map_err(Error::new)?;
-        let main = attempts.resolve_attempt(&repo, &self.attempt, self.services, self.stop)?;
+        let main = attempts.resolve_attempt(repo, &self.attempt, self.services, self.stop)?;
         require(
             main.is_some_and(|main| {
                 self.is_live_main(&main) && main["refs"]["panel_native_scheduling"] == "unmanaged"
             }),
             "live Main attempt could not be verified for lead assignment",
         )?;
-        self.require_exact_main_membership(&repo)
+        self.require_exact_main_membership(repo)
     }
 
     fn require_exact_main_membership(&self, repo: &Path) -> Result<()> {
@@ -3996,7 +4000,9 @@ impl<'a> Panel<'a> {
                         "provider or Main process generation changed",
                     )?;
                     if let Some(ticket) = ticket {
-                        ticket.verify_room(|| fresh.require_lead_assignment_main(attempts))?;
+                        ticket.verify_room(|repo| {
+                            fresh.require_lead_assignment_main_at(attempts, repo)
+                        })?;
                         ticket.revalidate(&fresh, scope)?;
                     } else {
                         fresh.require_lead_assignment_main(attempts)?;
@@ -12527,9 +12533,10 @@ pub(crate) mod tests {
             let group_writes = oms_safe_fs::Root::open_private_workspace(&repo, |_| true).is_ok();
             let workspace_mode = if group_writes { 0o775 } else { 0o755 };
             set_mode(workspace_mode);
-            let room_log = repo.join(format!(".oms/threads/{ROOM}.jsonl"));
-            private_dir(room_log.parent().unwrap());
+            let oms = private_dir(&repo.join(".oms"));
+            let room_log = private_dir(&oms.join("threads")).join(format!("{ROOM}.jsonl"));
             std::fs::write(&room_log, b"fixture initial Room").unwrap();
+            std::fs::set_permissions(&room_log, std::fs::Permissions::from_mode(0o600)).unwrap();
             let group = oms_command_plan::services::GroupMembership {
                 gid: std::os::unix::fs::MetadataExt::gid(&std::fs::metadata(&repo).unwrap()),
                 explicit_member_uids: vec![],

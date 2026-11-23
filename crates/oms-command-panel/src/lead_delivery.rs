@@ -123,7 +123,7 @@ pub(super) struct AgyTicket<'a> {
     dimensions: (usize, usize),
     server_times: (u64, u64),
     room_log: PathBuf,
-    room_generation: RefCell<Option<PrivateFileGeneration>>,
+    room_generation: RefCell<Option<RoomGeneration>>,
     tx: &'a Transaction<'a>,
 }
 
@@ -227,19 +227,12 @@ impl<'a> AgyTicket<'a> {
         Ok((start, created))
     }
 
-    pub(super) fn verify_room(&self, verify: impl FnOnce() -> Result<()>) -> Result<()> {
-        const INVALID: &str = "AGY task reference Room changed during verification";
-        require_room_repo(
-            self.project.physical_root(),
-            std::env::var_os("OMS_STATE_REPO").as_deref(),
-        )?;
-        let before = PrivateFileGeneration::for_room(&self.room_log)?;
-        verify()?;
-        require(
-            PrivateFileGeneration::for_room(&self.room_log)? == before,
-            INVALID,
-        )?;
-        self.room_generation.replace(Some(before));
+    pub(super) fn verify_room(&self, verify: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+        self.room_generation.replace(None);
+        let state_repo = std::env::var_os("OMS_STATE_REPO");
+        let generation =
+            verify_room_generation(&self.project, &self.room_log, state_repo.as_deref(), verify)?;
+        self.room_generation.replace(Some(generation));
         Ok(())
     }
 
@@ -249,7 +242,12 @@ impl<'a> AgyTicket<'a> {
         draft: &Draft,
         tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
     ) -> Result<bool> {
-        let room = PrivateFileGeneration::for_room(&self.room_log).ok();
+        let room = RoomGeneration::sample(
+            &self.project,
+            &self.room_log,
+            std::env::var_os("OMS_STATE_REPO").as_deref(),
+        )
+        .ok();
         if room.is_none() || room != *self.room_generation.borrow() {
             return Ok(false);
         }
@@ -342,13 +340,24 @@ fn require_room_repo(project: &Path, state_repo: Option<&OsStr>) -> Result<()> {
     require(
         state_repo
             .filter(|path| !path.is_empty())
-            .is_none_or(|state| {
-                Path::new(state)
-                    .canonicalize()
-                    .is_ok_and(|path| path == project)
-            }),
+            .is_none_or(|state| state == project.as_os_str()),
         "AGY task reference requires Room state in the physical project repository",
     )
+}
+
+fn verify_room_generation(
+    project: &Root,
+    path: &Path,
+    state_repo: Option<&OsStr>,
+    verify: impl FnOnce(&Path) -> Result<()>,
+) -> Result<RoomGeneration> {
+    let before = RoomGeneration::sample(project, path, state_repo)?;
+    verify(project.physical_root())?;
+    require(
+        RoomGeneration::sample(project, path, state_repo)? == before,
+        "AGY task reference Room changed during verification",
+    )?;
+    Ok(before)
 }
 
 fn tmux_format_literal(value: &str) -> String {
@@ -443,6 +452,53 @@ fn safe_guard_atom(value: &str) -> bool {
 }
 
 #[derive(PartialEq, Eq)]
+struct RoomGeneration {
+    oms: (rustix::fs::Dev, u64),
+    threads: (u64, u64),
+    log: PrivateFileGeneration,
+}
+
+impl RoomGeneration {
+    fn sample(project: &Root, path: &Path, state_repo: Option<&OsStr>) -> Result<Self> {
+        const INVALID: &str = "AGY task reference Room generation unavailable";
+        require_room_repo(project.physical_root(), state_repo)?;
+        let uid = rustix::process::geteuid().as_raw();
+        let directories = || -> Result<_> {
+            let (_, oms) = project
+                .pinned_metadata(OsStr::new(".oms"))
+                .map_err(|_| Error::new(INVALID))?;
+            let oms = oms
+                .filter(|meta| {
+                    rustix::fs::FileType::from_raw_mode(meta.st_mode)
+                        == rustix::fs::FileType::Directory
+                        && meta.st_uid == uid
+                        && meta.st_mode & 0o022 == 0
+                })
+                .ok_or_else(|| Error::new(INVALID))?;
+            let threads = path.parent().ok_or_else(|| Error::new(INVALID))?;
+            let threads = std::fs::symlink_metadata(threads).map_err(|_| Error::new(INVALID))?;
+            require(
+                threads.is_dir() && threads.uid() == uid && threads.mode() & 0o022 == 0,
+                INVALID,
+            )?;
+            Ok(((oms.st_dev, oms.st_ino), (threads.dev(), threads.ino())))
+        };
+        let (oms, threads) = directories()?;
+        let log = std::fs::symlink_metadata(path).map_err(|_| Error::new(INVALID))?;
+        require(
+            log.is_file() && log.nlink() == 1 && log.uid() == uid && log.mode() & 0o022 == 0,
+            INVALID,
+        )?;
+        require(directories()? == (oms, threads), INVALID)?;
+        Ok(Self {
+            oms,
+            threads,
+            log: PrivateFileGeneration::from_meta(&log),
+        })
+    }
+}
+
+#[derive(PartialEq, Eq)]
 struct PrivateFileGeneration {
     inode: (u64, u64),
     bytes: u64,
@@ -458,13 +514,6 @@ impl PrivateFileGeneration {
             modified: (meta.mtime(), meta.mtime_nsec()),
             changed: (meta.ctime(), meta.ctime_nsec()),
         }
-    }
-
-    fn for_room(path: &Path) -> Result<Self> {
-        const INVALID: &str = "AGY task reference Room generation unavailable";
-        let meta = std::fs::symlink_metadata(path).map_err(|_| Error::new(INVALID))?;
-        require(meta.is_file() && meta.nlink() == 1, INVALID)?;
-        Ok(Self::from_meta(&meta))
     }
 
     fn verified(root: &Root, path: &Path, expected: &[u8]) -> Result<Self> {
@@ -736,16 +785,59 @@ mod tests {
     #[test]
     fn ordinary_agy_ticket_refuses_split_room_state() {
         use super::super::account_binding::test_support::{TempDir, private_dir};
+        use std::os::unix::fs::{PermissionsExt, symlink};
 
         let temp = TempDir::new("agy-state");
         let project = private_dir(&temp.0.join("project"));
         let other = private_dir(&temp.0.join("other"));
         let alias = temp.0.join("alias");
-        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        symlink(&project, &alias).unwrap();
         assert!(require_room_repo(&project, None).is_ok());
-        assert!(require_room_repo(&project, Some(alias.as_os_str())).is_ok());
-        assert!(require_room_repo(&project, Some(other.as_os_str())).is_err());
-        assert!(require_room_repo(&project, Some(temp.0.join("missing").as_os_str())).is_err());
+        assert!(require_room_repo(&project, Some(project.as_os_str())).is_ok());
+        for state in [
+            alias,
+            other,
+            temp.0.join("missing"),
+            project.join("."),
+            temp.0.join("project/../project"),
+            PathBuf::from("project"),
+        ] {
+            assert!(require_room_repo(&project, Some(state.as_os_str())).is_err());
+        }
+
+        let oms = private_dir(&project.join(".oms"));
+        let threads = private_dir(&oms.join("threads"));
+        let room = threads.join("room-fixture.jsonl");
+        std::fs::write(&room, b"room fixture").unwrap();
+        std::fs::set_permissions(&room, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let root = Root::open_private_workspace(&project, |_| false).unwrap();
+        let explicit = Some(project.as_os_str());
+        assert!(
+            verify_room_generation(&root, &room, explicit, |repo| {
+                assert_eq!(repo.as_os_str(), project.as_os_str());
+                Ok(())
+            })
+            .is_ok()
+        );
+        assert!(
+            verify_room_generation(&root, &room, explicit, |_| {
+                std::fs::write(&room, b"changed room fixture").unwrap();
+                Ok(())
+            })
+            .is_err()
+        );
+        let moved = temp.0.join("moved");
+        let inode = std::fs::symlink_metadata(&room).unwrap().ino();
+        assert!(
+            verify_room_generation(&root, &room, explicit, |_| {
+                std::fs::rename(&project, &moved).unwrap();
+                symlink(&moved, &project).unwrap();
+                assert_eq!(std::fs::symlink_metadata(&room).unwrap().ino(), inode);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(RoomGeneration::sample(&root, &room, explicit).is_err());
     }
 
     #[test]
