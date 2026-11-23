@@ -485,39 +485,16 @@ fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
 }
 
 #[test]
-fn selectors_keep_legacy_manifest_parity() {
-    let repo = Repo::new();
-    repo.suite();
-    repo.write("tests/operator/runner.py", "SECTIONS = (\n    (\"native-pty\", 1, \"native_pty.py\"),\n    (\"dispatch-exit\", 2, None),\n    (\"shared-cache\", 3, \"shared-cache.sh\"),\n)\n");
-    repo.write(
-        "tests/operator/native_pty.py",
-        "# BEGIN named case (details)\n# END named case\n",
-    );
-    repo.write("tests/operator/shared-cache.sh", "# BEGIN shell case\n");
-    for args in [
-        "--section native-pty,dispatch-exit",
-        "--section native-pty --case 'named case'",
-        "--section dispatch-exit --case 'inline case'",
-        "--section shell-only",
-    ] {
-        repo.select(args).unwrap();
-    }
-    for args in [
-        "--section missing",
-        "--section native-pty --case missing",
-        "--section shared-cache --case 'shell case'",
-    ] {
-        assert!(repo.select(args).is_err(), "{args}");
-    }
-}
-
-#[test]
-fn selectors_without_runner_accept_shell_sections_and_cases() {
+fn selectors_use_shell_sections_and_cases_with_retired_registry_present() {
     let repo = Repo::new();
     repo.suite();
     repo.write(
         "tests/operator/file_section.sh",
         "# BEGIN file case. Details\n# END file case\n",
+    );
+    repo.write(
+        "tests/operator/runner.py",
+        "SECTIONS = (\n    (\"legacy-only\", 1, \"ignored.py\"),\n)\n",
     );
     repo.write("tests/operator/ignored.py", "# BEGIN ignored\n");
     repo.write("tests/operator/empty.sh", "");
@@ -536,6 +513,7 @@ fn selectors_without_runner_accept_shell_sections_and_cases() {
         repo.select(args).unwrap();
     }
     for args in [
+        "--section legacy-only",
         "--section ignored",
         "--section empty --case missing",
         "--section missing",
@@ -566,20 +544,12 @@ fn selectors_without_operator_directory_accept_inline_cases() {
 }
 
 #[test]
-fn selectors_refuse_unsafe_or_non_utf8_registry_and_case_files() {
+fn selectors_refuse_unsafe_or_non_utf8_shell_case_files() {
     use std::os::unix::fs::symlink;
     let repo = Repo::new();
     repo.suite();
     repo.write("tests/operator/runner.py", [0xff]);
-    assert!(repo.select("--section dispatch-exit").is_err());
-    fs::remove_file(repo.0.join("tests/operator/runner.py")).unwrap();
-    symlink(
-        "../operator-tools-smoke.sh",
-        repo.0.join("tests/operator/runner.py"),
-    )
-    .unwrap();
-    assert!(repo.select("--section dispatch-exit").is_err());
-    fs::remove_file(repo.0.join("tests/operator/runner.py")).unwrap();
+    repo.select("--section dispatch-exit").unwrap();
     symlink(
         "../operator-tools-smoke.sh",
         repo.0.join("tests/operator/unsafe.sh"),

@@ -493,12 +493,11 @@ Run ids match `^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`. Event row:
 ```
 
 `event` ∈ `run_started node_started node_outcome gate_decision route_evaluated run_finished note`.
-`events.append_event` assigns `seq`, refuses a duplicate `idempotency_key`,
-bounds `detail` with `bounded_line`, refuses `sensitive_text`, and writes
-through `oms_runtime.common.append_jsonl` (locked, atomic).
-`events.project(events, spec)` is pure and idempotent: a `node_started`
-without a later `node_outcome` leaves the node `active`; duplicate keys are
-folded once. `projection.json` is a cache of `project()` and never an input.
+The [native event writer](../crates/oms-command-graph/src/execution_events.rs)
+allocates `seq` under the run lock, refuses duplicate `idempotency_key` values,
+checks sensitive text, and bounds `detail` before appending through the Plan store.
+The module's `project` is pure and idempotent. A `node_started` without a later
+`node_outcome` leaves the node `active`. Duplicate keys are folded once. `projection.json` is a cache of `project()` and never an input.
 
 Optional row fields (schema 1, old rows still read): `task_id` and
 `binding` on `node_started`/`node_outcome` (the frozen identity — see
@@ -907,9 +906,9 @@ bounded by
 `byte_estimate` (never called tokens): raw candidate file bytes versus pack
 bytes. With `--base`, a separate change projection marks changed/untracked
 paths and their `EXTRACTED` reverse-dependency impact; inferred or ambiguous
-edges never become impact proof. `--bundle` compiles the selected files through
-`oms_runtime.context.plan_context(explicit=...)` so the existing bounded
-bundle format is reused, not duplicated.
+edges never become impact proof. `--bundle` passes the selected files as
+explicit targets through the [native context compiler adapter](../crates/oms-command-graph/src/project_context.rs).
+It uses the runtime's existing bounded bundle format.
 
 Interactive view (`project_visual.rs`): Project Graph views select a deterministic
 hub neighborhood or the production entries/files in a context pack, then cap

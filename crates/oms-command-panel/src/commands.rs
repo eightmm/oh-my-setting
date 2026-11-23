@@ -674,6 +674,8 @@ pub(crate) fn resolve_repositories(
         || options.has("launch")
         || options.has("spawn-main")
         || options.has("orchestrator")
+        || options.has("native-reconcile")
+        || options.has("native-adopt")
         || options.has("focus-orchestrator")
         || options.has("reopen")
         || options.has("swap-main")
@@ -816,6 +818,10 @@ pub(crate) fn run_mode(
             ..Error::new("repository required")
         })?;
         return crate::native_panel::run(&repo, source, options, services, stop);
+    }
+    if options.has("native-reconcile") || options.has("native-adopt") {
+        let repo = repo_opt.ok_or_else(|| Error::new("repository required"))?;
+        return crate::orchestrator::run(&repo, "codex", options, services, stop);
     }
     if let Some(provider) = options
         .get("orchestrator")

@@ -279,8 +279,12 @@ pub(crate) fn create_exclusive(
 }
 impl Temp {
     pub fn new(prefix: &str) -> Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
         let parent = std::fs::canonicalize(std::env::temp_dir())?;
+        Self::new_in(prefix, &parent)
+    }
+
+    pub(crate) fn new_in(prefix: &str, parent: &Path) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
         for _ in 0..16 {
             let path = parent.join(format!(
                 "{prefix}.{}",

@@ -294,3 +294,66 @@ The review covers the current entrypoint/owner map, seven Team documents, all
 40 follow-up packets and the decisive native callers. It is not a proof that
 every workspace function is redundant or equivalent. No transport or state
 store is removed on the basis of missing usage telemetry.
+
+## Native assignment return contracts
+
+The ordinary Codex bound-task path now shares a checked
+[assignment/return contract](../crates/oms-panel-core/src/native_contract.rs)
+between the sender, existing native result capture and Results projection. New
+assignments require explicit scope and a parent verifier, freeze exact
+Plan/task/lease/epoch/Main/Room/attempt/checkout/base identity, and preserve
+registered requirement IDs. A declared role defaults to `worker` and grants no
+capabilities. Task ID/title is only the fallback when registered IDs are absent;
+inventory coverage does not prove all user prose or task semantics are satisfied.
+
+The [existing capture owner](../crates/oms-panel-core/src/native_results.rs) retains
+the typed source plus every referenced patch/verification snapshot. Strict bounded
+parsing, decoded outbound checks and directional scope validation precede capture.
+Legacy prose reports remain advisory. Same-byte replay is idempotent; a changed
+typed report requires the exact previous retained-result digest at the CLI and
+manifest boundary, with a separate source revision chain. No report command is run
+and no claimed check establishes verification, acceptance or cleanup.
+
+[Main reconciliation](../crates/oms-command-panel/src/native_result.rs) records
+`request-revision`, `blocked` or `reviewed` against an exact retained result.
+Continuation creates an immutable next round under the same claim/attempt. A
+reviewed candidate may enter canonical Plan review, then uses the existing external
+patch admission/landing and genuine completion receipts. Canonical done/cancelled
+tasks permit administrative assignment/Room retirement without closing the Lead
+session or claiming child cleanup.
+
+[Results](../crates/oms-panel-core/src/results.rs) supplies source/manifest templates,
+input paths and structured next actions in task, participant and list views, with at
+most 20 bounded typed metadata reads. Unimported input presence is advisory; the
+existing [tick wake](../crates/oms-panel-core/src/tick.rs) only notifies an eligible
+idle Main. Main still chooses import, reconciliation and continuation; approved
+goal-drive/autopilot remains the existing bounded automatic executor. There is no
+new scheduler, permission default, native session control or completion authority.
+Other native providers use managed task dispatch until their bound adapters exist;
+explicit unbound conversations receive no canonical task credit. The practical
+[two-layer return workflow](TERMINAL-PANEL.md#retain-a-bound-native-report) documents
+the public result digest separately from the source digest and remaining limits.
+
+## Native Main succession
+
+[Explicit adoption](../crates/oms-command-panel/src/native_succession.rs) connects a
+canonical Main swap to an existing typed native assignment. A bounded
+[immutable custody chain](../crates/oms-panel-core/src/native_succession.rs) retains
+the original Plan claimant/lease, assignment attempt, packet/report digests, round
+and account identity. The producer proves the ordered canonical swap target and
+outgoing wrapper/native process absence, then freshly validates successor Main
+and the existing ordinary Codex Lead/account/checkout. Same-Room membership alone
+does not grant authority. The old Main cannot continue mutating the assignment.
+
+Results provides an exact `--native-adopt` action before import, reconciliation,
+revision or continuation by the successor. Same-byte replay is idempotent and a
+new round carries the checked custody digest without rewriting its predecessor.
+Stable Room participant and Main lifecycle attempt are frozen separately for new
+assignments, so the successor can claim a new task after retiring the previous one.
+Canonical done/cancelled work permits retirement-only adoption after checkout
+advance; it supplies no permission to reopen execution or prove child cleanup.
+Adoption adds no claim, input submission, budget reset or acceptance authority.
+The existing tick reminder follows the checked successor with fresh process and
+session proof. Wake deduplication includes the current Main attempt as well as the
+original assignment and input/result digest; daily quota and result identity
+are preserved. Retirement-only custody emits administrative guidance only.

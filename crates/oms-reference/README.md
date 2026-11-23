@@ -68,7 +68,11 @@ Every action below is callable through `actions::{run,run_with_services}` or
 the explicit `reference_action` route. Scope actions require positive native
 controller and owner proofs; other actions do not invent that prerequisite.
 
-| Legacy action | Native implementation | Canonical source |
+Native owners are [action dispatch](src/actions.rs), [publication](src/publication.rs),
+[scope and monitor](src/scope.rs), and [capture and admission](src/capture.rs).
+The final column records the original port references.
+
+| Action | Native implementation | Historical source |
 | --- | --- | --- |
 | `begin` | `publication::begin` | `scripts/lib/landing-reference.py:31` |
 | `begin-owned` | `Protocol::begin_owned` | `scripts/lib/landing-reference.py:115` |
@@ -82,7 +86,7 @@ controller and owner proofs; other actions do not invent that prerequisite.
 | `task` | `CaptureIndex::{validate,validate_write}` | `scripts/lib/landing-reference.py:452` |
 | `admit` | `CaptureIndex::admit` | `scripts/lib/landing-reference.py:585` |
 
-Additional capture anchors are `landing-capture.py:58` (bounded reads),
+Historical capture anchors are `landing-capture.py:58` (bounded reads),
 `:156` (reservations), `:187` (private owner certificate), `:276` (quota),
 `:348` (allocation), `:553` (retained anchors), `:560` (publication),
 `:597` (report/index records), `:660` (terminal admission proof),
@@ -90,7 +94,9 @@ Additional capture anchors are `landing-capture.py:58` (bounded reads),
 index reads) and `:797` (reference spellings). The native quota reader
 validates existing collector release receipts; it grants no deletion right.
 
-Resolver anchors are `scripts/lib/room_repository.py:13,77,104,135,143`,
+The current [state repository resolver](src/repository.rs) retains the ownership
+checks below. Historical resolver anchors are
+`scripts/lib/room_repository.py:13,77,104,135,143`,
 `scripts/lib/agent-memory-common.sh:39`, `scripts/lib/harness-residue.sh:125`
 and `scripts/scratch-worktree.sh:134`. Legacy and suffix-bound worktree
 names are recognized. Marker type, bounded single-link bytes, managed
@@ -180,11 +186,12 @@ peer authority. The permission and generation policy is pure over metadata and
 unit-tested on Linux; the macOS provider itself is compile-checked for both
 Apple targets but not executed in Linux CI.
 
-Binding depends on authenticated panel dispatch grants and goal-batch lineage
-(`panel_results.py:1279,1546`, `autopilot-receipt.py:1710`), whose authenticated
-production composition remains parent-owned. The typed `binding::Context`
-methods expose exactly effective allowed paths, accepted prefix and goal-batch
-prefix. Missing producers refuse a binding for real tasks; only an actually
+Binding depends on authenticated panel dispatch grants and goal-batch lineage.
+The native [landing adapter](../oms/src/services_landing.rs) provides the
+typed [binding context](src/binding.rs). Historical port anchors for these
+inputs were `panel_results.py:1279,1546` and `autopilot-receipt.py:1710`.
+The typed `binding::Context` methods expose effective allowed paths, accepted
+prefix and goal-batch prefix. Missing producers refuse a binding for real tasks; only an actually
 empty task has the canonical empty prefix. Intake then allocates fresh and
 still requires the full native admission witness. This integration boundary
 was confirmed by the parent in `msg-eac66359fe6a42cab4652824ba0df303`.
@@ -211,14 +218,13 @@ were read through EOF. Batch/panel dependencies were outlined and the binding
 call sites inspected; their wider implementations and retirement's dynamic
 decision dependency have not been ported or exhaustively read.
 
-Existing coverage was inspected in `tests/functional-evolution-smoke.sh`
+Historical verification notes from the port cited `tests/functional-evolution-smoke.sh`
 (managed ownership, quota, pins and producer receipts) and
 `tests/scripts-smoke.sh` (readiness fencing, generation changes, contended
-shutdown, foreign readiness and dedupe receipts). These tests remain unchanged.
-The worker phase permits compile/fmt, source/reference checks and outbound
-hygiene only: no test additions, suites, behavior probes/reversal rounds,
-cross-host execution, CI or installation have run. Parent integration and
-independent security review remain required.
+shutdown, foreign readiness and dedupe receipts).
+That worker phase covered compile/fmt, source/reference checks and outbound
+hygiene. Behavioral suites, probes, cross-host execution, CI, installation
+and independent review were outside its evidence.
 
 Deferred checks specific to this continuation: real checked-append refusal
 before idempotent reuse, callback sequence/lock ordering, interruption and
