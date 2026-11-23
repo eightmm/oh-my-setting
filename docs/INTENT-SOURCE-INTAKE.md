@@ -17,6 +17,22 @@ the exact reviewed SHA. The person does not need to copy commands or inspect
 checkboxes. The later candidate still requires the ordinary review and
 `intent adopt` gates; no source is adopted, claimed or dispatched automatically.
 
+## Listing labeled issues
+
+`oms intent issues --github OWNER/REPO --label LABEL [--limit 1..20] [--json]`
+performs one explicit, read-only `gh api --hostname github.com --method GET`
+request for open issues carrying that label (default limit 10, max 20; 20 s and
+512 KiB bounds). It emits sanitized, bounded metadata only (number, canonical
+URL, scrubbed title, labels, `updated_at`, and the explicit
+`oms intent draft --from-issue <url> --dry-run` next step; `trusted: false` in
+`--json`) and never reads or displays raw issue bodies. Scope is always
+explicit: no remote inference, polling, daemon, comments, `.oms/` writes,
+adoption or dispatch. Pull-request objects are skipped and counted
+(`checked`, `skipped_pull_requests` in `--json`); an empty result reports no eligible issues among the checked
+rows of that one bounded page; wrong-repo URLs,
+non-open states, missing labels, unsafe numbers/URLs, malformed JSON and
+oversized lists fail closed with exit 2.
+
 ## Flow and provenance
 
 `--dry-run` returns a schema-1 `oms-intent-source` JSON object: kind, reference,

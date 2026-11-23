@@ -1,6 +1,11 @@
 {
   "schema": 1,
   "size_buckets": {"small": {"max_lines": 30, "max_files": 3}, "medium": {"max_lines": 300, "max_files": 15}},
+  "categories": {
+    "typo": {"kind": "mechanical-edit", "risk": "low", "size": "small"},
+    "bugfix": {"kind": "debug", "risk": "medium", "size": "small"},
+    "refactor": {"kind": "implement", "risk": "medium", "size": "medium"}
+  },
   "rules": [
     {"kind": ["explore", "summarize"], "size": ["small", "medium"], "tier": "light", "effort": "low",
      "reason": "read-only work with a checkable answer: start cheap, raise effort only for the runs that fail"},

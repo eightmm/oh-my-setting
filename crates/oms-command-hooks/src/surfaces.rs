@@ -15,6 +15,7 @@ const SCRIPTS: &[&str] = &[
     "resume-hook.sh",
     "telemetry-hook.sh",
     "git-move-guard-hook.sh",
+    "main-write-guard-hook.sh",
     "panel-direct-work-hook.sh",
     "command-guard-hook.sh",
 ];

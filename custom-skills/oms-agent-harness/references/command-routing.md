@@ -56,7 +56,7 @@ reader; review remains typed.
 | Exactly one ready task in an existing plan | `oms plan-run --to PROVIDER --next` |
 | Reviewed task whose stored patch should continue to landing | `oms plan-run --to PROVIDER --id TASK --land` |
 | Repeated tasks in an already reviewed plan | `oms goal-drive` |
-| Find work from evidence | `oms plan-from-spec --discover`; review tasks and candidate report, then apply with `--expected-proposal-sha256`. Campaign: `oms autopilot propose --discover`. |
+| Find work from evidence | `oms plan-from-spec --discover`; review tasks and candidate report, then apply with `--expected-proposal-sha256`. Campaign: `oms autopilot propose --discover`. In GitHub project mode pass `--issue REF`. |
 | Confirmed `PROJECT.md` through reviewed proposal and bounded drive | `oms autopilot` |
 
 `autopilot -> goal-drive -> plan-run` is an execution hierarchy, not parallel

@@ -19,7 +19,7 @@ The terminal panel is the human entrypoint. The other tools are the agent's
 hands; give your coding agent the goal instead of composing harness commands.
 "#;
 
-pub(crate) const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngoal-drive\ngraph\nharness\nhud\ninbox\ninit\ninput\ninstall-profile\nintent\njob-digest\njournal\nland\nlease\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
+pub(crate) const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngithub\ngoal-drive\ngraph\nharness\nhud\ninbox\ninit\ninput\ninstall-profile\nintent\njob-digest\njournal\nland\nlease\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
 const FRONTDOOR: &str = "# Daily work\npanel\ninbox\nagent-plan\njournal\n# Collaboration and delivery\nconsult\npeer-delegate\npeer-review\nland\n# Setup and maintenance\ninit\nstatus\ndoctor\nupdate\nuninstall";
 
 const DESCRIPTIONS: &[(&str, &str)] = &[
@@ -125,6 +125,10 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "gc",
         "Retention sweep for repo-local .oms state (--dry-run by default).",
+    ),
+    (
+        "github",
+        "Same-repository GitHub issue and PR references: offline status and cache freshness, explicit validated refresh, merged-PR adoption by previewed selection, and one idempotent evidence comment.",
     ),
     (
         "goal-drive",
@@ -375,7 +379,7 @@ mod tests {
     #[test]
     fn embedded_registry_covers_public_and_frontdoor_without_scripts() {
         let names: Vec<_> = PUBLIC.lines().collect();
-        assert_eq!(names.len(), 83);
+        assert_eq!(names.len(), 84);
         for tool in FRONTDOOR.lines().filter(|line| !line.starts_with("# ")) {
             assert!(names.contains(&tool));
         }
@@ -384,7 +388,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(err.is_empty());
         let rendered = std::str::from_utf8(&all).unwrap();
-        assert_eq!(rendered.lines().count(), 83);
+        assert_eq!(rendered.lines().count(), 84);
         for (line, name) in rendered.lines().zip(&names) {
             assert!(line.starts_with(&format!("{name:<26} ")));
             assert!(line.len() > 27);

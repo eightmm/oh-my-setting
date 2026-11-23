@@ -42,6 +42,24 @@ fn scrubbed_child(name: &str) -> bool {
     true
 }
 
+/// Private modes: a group-writable file would need a host account proof.
+fn write_private(path: &Path, body: &[u8]) {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path.parent().unwrap())
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap()
+        .write_all(body)
+        .unwrap();
+}
+
 struct Repo(PathBuf);
 impl Repo {
     fn new() -> Self {
@@ -60,21 +78,7 @@ impl Repo {
         repo
     }
     fn write(&self, path: &str, body: impl AsRef<[u8]>) {
-        let path = self.0.join(path);
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path.parent().unwrap())
-            .unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .unwrap()
-            .write_all(body.as_ref())
-            .unwrap();
+        write_private(&self.0.join(path), body.as_ref());
     }
     fn call(&self, tool: &str, args: &[&str]) -> CommandResult {
         run_with_services(
@@ -794,6 +798,8 @@ fn autopilot_transitions_and_immutable_projection() {
     let before = json!({"stage": "approved", "updated": "old", "contract": {"max_cycles": 1}});
     let mut after = before.clone();
     after["stage"] = "driving".into();
+    after["issue"] = "example-org/example-repo#7".into();
+    after["blocked"] = "github-issue".into();
     assert_eq!(
         receipt::immutable_view(&before),
         receipt::immutable_view(&after)
@@ -927,4 +933,702 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
         row["proposal"]["sha256"] = bad.into();
         assert!(receipt::validate(&row).is_err());
     }
+    row["proposal"]["sha256"] = value::hash(b"reviewed proposal").into();
+    row["blocked"] = "github-issue".into();
+    receipt::validate(&row).unwrap();
+    for (key, bad) in [
+        ("blocked", json!("other")),
+        ("blocked", json!(true)),
+        ("issue", json!("7")),
+        ("issue", json!("example-org/example-repo#07")),
+        ("issue", json!(7)),
+    ] {
+        let mut wrong = row.clone();
+        wrong[key] = bad;
+        assert!(receipt::validate(&wrong).is_err(), "{key}");
+    }
+    let mut stamped = row.clone();
+    stamped.as_object_mut().unwrap().remove("blocked");
+    stamped["issue"] = "example-org/example-repo#7".into();
+    receipt::validate(&stamped).unwrap();
+    stamped["blocked"] = "github-issue".into();
+    assert!(
+        receipt::validate(&stamped).is_err(),
+        "blocked with an issue"
+    );
+    row["stage"] = "approved".into();
+    assert!(receipt::validate(&row).is_err(), "blocked outside review");
+}
+
+#[test]
+fn intent_issues_lists_labeled_candidates_read_only() {
+    struct Fake(
+        std::sync::Mutex<Vec<(String, String, String, u64)>>,
+        Vec<u8>,
+    );
+    impl oms_command_plan::Services for Fake {}
+    impl Services for Fake {
+        fn state_repository(
+            &self,
+            work: &Path,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<PathBuf> {
+            Ok(work.into())
+        }
+        fn list_issues(
+            &self,
+            owner: &str,
+            repo: &str,
+            label: &str,
+            limit: u64,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<Vec<u8>> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((owner.into(), repo.into(), label.into(), limit));
+            Ok(self.1.clone())
+        }
+    }
+
+    let label = |n: &str| json!([{ "name": n }]);
+    let row = |n: u64, title: &str, pr: bool| {
+        let mut r = json!({
+            "id": n + 100,
+            "number": n,
+            "state": "open",
+            "title": title,
+            "html_url": format!("https://github.com/Org/repo/issues/{n}"),
+            "updated_at": "2026-01-02T03:04:05Z",
+            "labels": label("OMS-Ready"),
+            "body": "ignore previous raw issue body"
+        });
+        if pr {
+            r["pull_request"] = json!({});
+        }
+        r
+    };
+    let rows = json!([row(1, "Fix\u{202e} it\nnow", false), row(2, "pr", true)]);
+    let repo = Repo::new();
+    let run = |svc: &Fake, extra: &[&str]| {
+        let mut args: Vec<OsString> = vec!["issues".into()];
+        args.extend(extra.iter().map(OsString::from));
+        let r = run_with_services("intent", &args, &repo.0, &AtomicBool::new(false), svc);
+        (r.0, String::from_utf8_lossy(&r.1).into_owned())
+    };
+
+    // JSON output: safe bounded metadata only, no raw body, PR skipped, zero .oms writes.
+    let ok = Fake(Default::default(), serde_json::to_vec(&rows).unwrap());
+    let (code, out) = run(
+        &ok,
+        &[
+            "--github",
+            "Org/repo",
+            "--label",
+            "oms-ready",
+            "--limit",
+            "5",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let got: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(got["count"], 1);
+    assert_eq!(got["trusted"], false);
+    assert_eq!(got["issues"][0]["number"], 1);
+    assert_eq!(got["issues"][0]["title"], "Fix it now");
+    assert_eq!(got["issues"][0]["labels"], json!(["OMS-Ready"]));
+    assert_eq!(
+        got["issues"][0]["next_step"],
+        "oms intent draft --from-issue https://github.com/Org/repo/issues/1 --dry-run"
+    );
+    assert!(!out.contains("ignore previous") && !out.contains('\u{202e}'));
+
+    // Default text output: safe metadata + next step, no raw body, PR skipped.
+    let (code, text_out) = run(
+        &ok,
+        &[
+            "--github",
+            "Org/repo",
+            "--label",
+            "oms-ready",
+            "--limit",
+            "5",
+        ],
+    );
+    assert_eq!(code, 0, "{text_out}");
+    assert!(text_out.contains("#1 Fix it now"));
+    assert!(text_out.contains("url: https://github.com/Org/repo/issues/1"));
+    assert!(text_out.contains("labels: OMS-Ready"));
+    assert!(text_out.contains(
+        "next: oms intent draft --from-issue https://github.com/Org/repo/issues/1 --dry-run"
+    ));
+    assert!(!text_out.contains("ignore previous") && !text_out.contains('\u{202e}'));
+    assert_eq!(
+        ok.0.lock().unwrap().as_slice(),
+        [
+            ("Org".into(), "repo".into(), "oms-ready".into(), 5),
+            ("Org".into(), "repo".into(), "oms-ready".into(), 5),
+        ]
+    );
+
+    // A page holding only labeled pull requests reports its checked rows and bounded page.
+    let pr_only = Fake(
+        Default::default(),
+        serde_json::to_vec(&json!([row(5, "p", true), row(6, "q", true)])).unwrap(),
+    );
+    let (code, empty) = run(&pr_only, &["--github", "Org/repo", "--label", "oms-ready"]);
+    assert_eq!(code, 0, "{empty}");
+    assert!(
+        empty.contains("no eligible issues among the 2 checked row(s)")
+            && empty.contains("one bounded page")
+            && empty.contains("2 pull request(s) skipped")
+    );
+    let (_, empty_json) = run(
+        &pr_only,
+        &["--github", "Org/repo", "--label", "oms-ready", "--json"],
+    );
+    let empty_json: serde_json::Value = serde_json::from_str(&empty_json).unwrap();
+    assert_eq!(empty_json["count"], 0);
+    assert_eq!(empty_json["checked"], 2);
+    assert_eq!(empty_json["skipped_pull_requests"], 2);
+    pr_only.0.lock().unwrap().clear();
+
+    // Endpoint builder percent-encodes special allowed label characters.
+    assert_eq!(
+        oms_command_autonomy::services::issues_list_endpoint("Org", "repo", "oms:ready", 3)
+            .unwrap(),
+        "repos/Org/repo/issues?state=open&labels=oms%3Aready&per_page=3"
+    );
+    assert_eq!(
+        oms_command_autonomy::services::issues_list_endpoint("Org", "repo", "good first issue", 3)
+            .unwrap(),
+        "repos/Org/repo/issues?state=open&labels=good%20first%20issue&per_page=3"
+    );
+
+    // Invalid CLI args fail closed with exit 2 and never reach the service.
+    for bad in [
+        vec!["--label", "oms-ready"],
+        vec!["--github", "Org/repo"],
+        vec!["--github", "Org", "--label", "x"],
+        vec!["--github", "Org/..", "--label", "x"],
+        vec!["--github", "Org-/repo", "--label", "x"],
+        vec!["--github", "Org/repo/extra", "--label", "x"],
+        vec!["--github", "Org/repo", "--label", "a&b"],
+        vec!["--github", "Org/repo", "--label", "a,b"],
+        vec!["--github", "Org/repo", "--label", "a?b"],
+        vec!["--github", "Org/repo", "--label", " leading"],
+        vec!["--github", "Org/repo", "--label", "x", "--limit", "0"],
+        vec!["--github", "Org/repo", "--label", "x", "--limit", "21"],
+        vec!["--github", "Org/repo", "--label", "x", "--limit", "abc"],
+        vec!["--github", "Org/repo", "--label", "x", "--dry-run"],
+        vec!["--github", "Org/repo", "--label", "x", "--goal", "g"],
+    ] {
+        assert_eq!(run(&ok, &bad).0, 2, "{bad:?}");
+    }
+    assert_eq!(ok.0.lock().unwrap().len(), 2);
+
+    // Issues-only options are rejected on other intent actions.
+    assert_eq!(
+        run_with_services(
+            "intent",
+            &["show", "--json"].map(OsString::from),
+            &repo.0,
+            &AtomicBool::new(false),
+            &ok
+        )
+        .0,
+        2
+    );
+
+    // Wrong-repo URL, closed state, missing label, unsafe URL/number, oversized list, non-object
+    // item, and non-list responses all fail closed with exit 2.
+    let mut wrong_repo = row(3, "x", false);
+    wrong_repo["html_url"] = json!("https://github.com/Other/repo/issues/3");
+    let mut closed = row(3, "x", false);
+    closed["state"] = json!("closed");
+    let mut unlabeled = row(4, "x", false);
+    unlabeled["labels"] = label("other");
+    let mut zero_num = row(1, "x", false);
+    zero_num["number"] = json!(0);
+    let mut mismatch_url = row(3, "x", false);
+    mismatch_url["html_url"] = json!("https://github.com/Org/repo/issues/999");
+    let mut unsafe_url = row(3, "x", false);
+    unsafe_url["html_url"] = json!("https://github.com/Org/repo/issues/3\nredirect");
+    for body in [
+        json!([wrong_repo]),
+        json!([closed]),
+        json!([unlabeled]),
+        json!([zero_num]),
+        json!([mismatch_url]),
+        json!([unsafe_url]),
+        json!(["not-an-object"]),
+        json!([row(5, "a", false), row(6, "b", false)]),
+        json!({"message": "Bad credentials"}),
+    ] {
+        let svc = Fake(Default::default(), serde_json::to_vec(&body).unwrap());
+        let (code, out) = run(
+            &svc,
+            &[
+                "--github",
+                "Org/repo",
+                "--label",
+                "oms-ready",
+                "--limit",
+                "1",
+            ],
+        );
+        assert_eq!(code, 2, "{out}");
+    }
+
+    // Malformed JSON fails closed with exit 2.
+    let bad_json = Fake(Default::default(), b"{not-json".to_vec());
+    assert_eq!(
+        run(&bad_json, &["--github", "Org/repo", "--label", "oms-ready"]).0,
+        2
+    );
+
+    // A service/permission failure is an error and leaves no state.
+    let code = run_with_services(
+        "intent",
+        &["issues", "--github", "Org/repo", "--label", "x"].map(OsString::from),
+        &repo.0,
+        &AtomicBool::new(false),
+        &Unavailable,
+    )
+    .0;
+    assert_eq!(code, 2);
+    assert!(!repo.0.join(".oms").exists());
+}
+
+/// Fakes the planner (`agent-call` writes an `artifact:` answer) and a failing
+/// intent acceptance; every other service stays unavailable.
+struct Planner {
+    repo: PathBuf,
+    answer: std::sync::Mutex<String>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl oms_command_plan::Services for Planner {
+    fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        fn resolve(
+            gid: u32,
+        ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+            let uid = rustix::process::getuid().as_raw();
+            Ok(oms_command_plan::services::GroupMembership {
+                gid,
+                explicit_member_uids: vec![uid],
+                primary_member_uids: vec![uid],
+            })
+        }
+        Some(resolve)
+    }
+    fn supervise(
+        &self,
+        _: &oms_command_plan::services::SupervisedCommand,
+    ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+        Ok(oms_command_plan::services::Execution {
+            exit: 1,
+            runner_exit: 1,
+            timed_out: false,
+            output_limited: false,
+            launch_error: false,
+            supervision_error: false,
+            output: vec![],
+            duration_s: 0,
+        })
+    }
+}
+impl Services for Planner {
+    fn state_repository(
+        &self,
+        work: &Path,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<PathBuf> {
+        Ok(work.to_owned())
+    }
+    fn invoke(
+        &self,
+        call: &Invocation,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<CommandResult> {
+        assert_eq!(call.tool, "agent-call");
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = self.repo.join(format!(".oms/answers/{n}.md"));
+        write_private(&path, self.answer.lock().unwrap().as_bytes());
+        Ok((
+            0,
+            format!("artifact: {}\n", path.display()).into_bytes(),
+            vec![],
+        ))
+    }
+}
+impl Repo {
+    fn git(&self, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    }
+    /// A committed checkout whose tracked `.github/oms-project.md` declares
+    /// example-org/example-repo; `origin` decides whether the mode is active.
+    fn github(origin: &str, spec: Option<&str>) -> Self {
+        let repo = Self::new();
+        repo.write("tests/check.sh", "exit 0\n");
+        repo.write("tests/ok.sh", "exit 0\n");
+        repo.write("src/lib.rs", "pub fn ok() {}\n");
+        repo.write(
+            ".github/oms-project.md",
+            "# OMS project\n\n## Collaboration\n\n- GitHub project: example-org/example-repo\n",
+        );
+        if let Some(spec) = spec {
+            repo.write("PROJECT.md", spec);
+        }
+        repo.write(".git/info/exclude", ".oms/\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "--quiet", "-m", "init"]);
+        repo.git(&["remote", "add", "origin", origin]);
+        repo
+    }
+    fn planner(&self, answer: &str) -> Planner {
+        Planner {
+            repo: self.0.clone(),
+            answer: std::sync::Mutex::new(answer.into()),
+            calls: 0.into(),
+        }
+    }
+}
+const ORIGIN: &str = "git@github.com:example-org/example-repo.git";
+const ISSUE: &str = "example-org/example-repo#7";
+const ANSWER: &str = r#"{"tasks": [{"id": "t1", "title": "one", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []}]}"#;
+
+fn intake(tool: &str, repo: &Repo, services: &Planner, args: &[&str]) -> (i32, String, String) {
+    let (code, out, err) = run_with_services(
+        tool,
+        &args.iter().map(OsString::from).collect::<Vec<_>>(),
+        &repo.0,
+        &AtomicBool::new(false),
+        services,
+    );
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+/// The `(path, sha256)` a proposing or restamping command printed.
+fn printed(out: &str) -> (String, String) {
+    let path = out
+        .lines()
+        .find_map(|l| {
+            ["plan-from-spec: proposed ", "plan-from-spec: restamped "]
+                .iter()
+                .find_map(|p| l.strip_prefix(p))
+                .and_then(|l| l.split_once(" -> "))
+                .map(|(_, p)| p.to_owned())
+        })
+        .unwrap_or_else(|| panic!("no proposal path: {out}"));
+    let sha = out
+        .lines()
+        .find_map(|l| l.strip_prefix("plan-from-spec: proposal sha256: "))
+        .unwrap_or_else(|| panic!("no proposal sha: {out}"))
+        .to_owned();
+    (path, sha)
+}
+fn json_file(path: impl AsRef<Path>) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+fn proposals(repo: &Repo) -> usize {
+    fs::read_dir(repo.0.join(".oms/plan")).map_or(0, |dir| {
+        dir.filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("proposal-")
+        })
+        .count()
+    })
+}
+
+#[test]
+fn github_issue_intake_is_stamped_only_by_the_harness() {
+    if scrubbed_child("github_issue_intake_is_stamped_only_by_the_harness") {
+        return;
+    }
+    let pending = "plan-from-spec: pending: GitHub project mode requires an issue; run: oms plan-from-spec --restamp ";
+
+    // Active mode, no issue: planner issues are refused; the issue-less
+    // proposal is kept, apply refuses without touching it, restamp unblocks.
+    let repo = Repo::github(ORIGIN, Some(SPEC));
+    for answer in [
+        ANSWER.replace(r#""depends": []"#, r#""depends": [], "issue": "7""#),
+        ANSWER.replace(r#"{"tasks""#, r#"{"issue": "7", "tasks""#),
+    ] {
+        let (code, _, err) = intake("plan-from-spec", &repo, &repo.planner(&answer), &[]);
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("planner output must not carry an issue"),
+            "{err}"
+        );
+    }
+    assert_eq!(proposals(&repo), 0);
+    let planner = repo.planner(ANSWER);
+    let (code, out, err) = intake("plan-from-spec", &repo, &planner, &[]);
+    assert_eq!(code, 0, "{err}");
+    let (path, sha) = printed(&out);
+    assert!(
+        out.contains(&format!(
+            "{pending}{path} --expected-proposal-sha256 {sha} --issue REF"
+        )),
+        "{out}"
+    );
+    let kept = fs::read(&path).unwrap();
+    assert!(json_file(&path).get("issue").is_none());
+    let apply = [
+        "--apply",
+        path.as_str(),
+        "--expected-proposal-sha256",
+        sha.as_str(),
+    ];
+    let (code, _, err) = intake("plan-from-spec", &repo, &planner, &apply);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("GitHub project mode requires an issue; run: oms plan-from-spec --restamp"),
+        "{err}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), kept);
+    assert!(!repo.0.join(".oms/plan/tasks.json").exists());
+    for bad in [
+        "other-org/example-repo#7",
+        "0",
+        "https://github.com/example-org/example-repo/issues/7",
+    ] {
+        let args = [
+            "--restamp",
+            path.as_str(),
+            "--expected-proposal-sha256",
+            sha.as_str(),
+            "--issue",
+            bad,
+        ];
+        assert_eq!(
+            intake("plan-from-spec", &repo, &planner, &args).0,
+            2,
+            "{bad}"
+        );
+    }
+    assert_eq!(proposals(&repo), 1);
+    let args = [
+        "--restamp",
+        path.as_str(),
+        "--expected-proposal-sha256",
+        sha.as_str(),
+        "--issue",
+        "#7",
+    ];
+    let (code, out, err) = intake("plan-from-spec", &repo, &planner, &args);
+    assert_eq!(code, 0, "{err}");
+    let (stamped, stamped_sha) = printed(&out);
+    assert_ne!(stamped, path);
+    assert_eq!(fs::read(&path).unwrap(), kept);
+    let proposal = json_file(&stamped);
+    assert_eq!(proposal["issue"], ISSUE);
+    assert_eq!(proposal["tasks"][0]["issue"], ISSUE);
+    let apply = [
+        "--apply",
+        stamped.as_str(),
+        "--expected-proposal-sha256",
+        stamped_sha.as_str(),
+    ];
+    for _ in 0..2 {
+        let (code, _, err) = intake("plan-from-spec", &repo, &planner, &apply);
+        assert_eq!(code, 0, "{err}");
+    }
+    assert_eq!(
+        json_file(repo.0.join(".oms/plan/tasks.json"))["tasks"]["t1"]["issue"],
+        ISSUE
+    );
+
+    // An explicit --issue stamps the proposal and every task.
+    let repo = Repo::github(ORIGIN, Some(SPEC));
+    let planner = repo.planner(ANSWER);
+    let (code, out, err) = intake("plan-from-spec", &repo, &planner, &["--issue", "7"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("pending"), "{out}");
+    let (path, sha) = printed(&out);
+    assert_eq!(json_file(&path)["tasks"][0]["issue"], ISSUE);
+    let apply = [
+        "--apply",
+        path.as_str(),
+        "--expected-proposal-sha256",
+        sha.as_str(),
+    ];
+    let (code, _, err) = intake("plan-from-spec", &repo, &planner, &apply);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        json_file(repo.0.join(".oms/plan/tasks.json"))["tasks"]["t1"]["issue"],
+        ISSUE
+    );
+
+    // A fork inherits only the tracked file: the mode is off, no issue needed.
+    let repo = Repo::github("git@github.com:fork-org/example-repo.git", Some(SPEC));
+    let planner = repo.planner(ANSWER);
+    let (code, out, err) = intake("plan-from-spec", &repo, &planner, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("pending"), "{out}");
+    let (path, sha) = printed(&out);
+    let apply = [
+        "--apply",
+        path.as_str(),
+        "--expected-proposal-sha256",
+        sha.as_str(),
+    ];
+    let (code, _, err) = intake("plan-from-spec", &repo, &planner, &apply);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        json_file(repo.0.join(".oms/plan/tasks.json"))["tasks"]["t1"]
+            .get("issue")
+            .is_none()
+    );
+
+    // An adopted same-repository issue intent carries its issue; a foreign one does not.
+    let candidate = "# Project\n## Status\n- State: draft\n## Project\n- Goal: adopt issue intake\n- Scope: src\n- Non-goals: none\n## Commands\n- Check: bash tests/check.sh\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Acceptance\n- Native checks pass\n";
+    for (owner, carried) in [
+        ("example-org", Some("example-org/example-repo#9")),
+        ("other-org", None),
+    ] {
+        let repo = Repo::github(ORIGIN, None);
+        repo.write(".oms/intents/intent-gh.md", candidate);
+        let provenance = json!({"schema": 1, "kind": "intent-provenance", "id": "intent-gh", "provider": "codex", "goal": "", "ts": "2026-01-01T00:00:00Z", "source": {"schema": 1, "kind": "oms-intent-source", "source": {"kind": "github-issue", "reference": format!("https://github.com/{owner}/example-repo/issues/9")}}});
+        repo.write(
+            ".oms/intents/intent-gh.json",
+            value::pretty(&provenance).unwrap(),
+        );
+        let planner = repo.planner(ANSWER);
+        let (code, _, err) = intake("intent", &repo, &planner, &["adopt", "--id", "intent-gh"]);
+        assert_eq!(code, 0, "{err}");
+        let record = json_file(repo.0.join(".oms/intents/intent-gh.adopt.json"));
+        assert_eq!(
+            record["project_sha256"],
+            value::hash(fs::read(repo.0.join("PROJECT.md")).unwrap())
+        );
+        let (code, out, err) = intake("plan-from-spec", &repo, &planner, &[]);
+        assert_eq!(code, 0, "{err}");
+        let (path, _) = printed(&out);
+        assert_eq!(
+            json_file(&path).get("issue").and_then(|v| v.as_str()),
+            carried,
+            "{owner}"
+        );
+        assert_eq!(out.contains(pending), carried.is_none(), "{out}");
+    }
+}
+
+#[test]
+fn autopilot_blocks_an_issue_less_proposal_until_restamped() {
+    if scrubbed_child("autopilot_blocks_an_issue_less_proposal_until_restamped") {
+        return;
+    }
+    let repo = Repo::github(ORIGIN, Some(SPEC));
+    let planner = repo.planner(ANSWER);
+    let run_file = repo.0.join(".oms/plan/autopilot-run.json");
+    let (code, out, err) = intake("autopilot", &repo, &planner, &["propose"]);
+    assert_eq!(code, 4, "{err}");
+    let (path, sha) = printed(&out);
+    assert!(!out.contains("plan-from-spec: pending:"), "{out}");
+    assert!(out.contains(&format!("autopilot: pending: GitHub project mode requires an issue; run: oms autopilot propose --restamp {path} --expected-proposal-sha256 {sha} --issue REF")), "{out}");
+    let row = json_file(&run_file);
+    assert_eq!(
+        (row["stage"].as_str(), row["blocked"].as_str()),
+        (Some("proposal-review"), Some("github-issue"))
+    );
+    let before = fs::read(&run_file).unwrap();
+    let run = [
+        "run",
+        "--proposal",
+        path.as_str(),
+        "--expected-proposal-sha256",
+        sha.as_str(),
+    ];
+    let (code, _, err) = intake("autopilot", &repo, &planner, &run);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("oms autopilot propose --restamp"), "{err}");
+    assert_eq!(fs::read(&run_file).unwrap(), before);
+    let restamp = |sha: &str| {
+        let args = [
+            "propose",
+            "--restamp",
+            path.as_str(),
+            "--expected-proposal-sha256",
+            sha,
+            "--issue",
+            "7",
+        ];
+        intake("autopilot", &repo, &planner, &args)
+    };
+    assert_eq!(restamp(&"0".repeat(64)).0, 2);
+    assert_eq!(fs::read(&run_file).unwrap(), before);
+    let (code, out, err) = restamp(&sha);
+    assert_eq!(code, 4, "{err}");
+    let after = json_file(&run_file);
+    assert!(after.get("blocked").is_none());
+    assert_eq!(after["issue"], ISSUE);
+    assert_eq!(after["stage"], "proposal-review");
+    assert_ne!(after["proposal"]["sha256"], sha.as_str());
+    assert_eq!(
+        json_file(after["proposal"]["path"].as_str().unwrap())["tasks"][0]["issue"],
+        ISSUE
+    );
+    assert!(
+        out.contains(&format!(
+            "oms autopilot run --proposal {} --expected-proposal-sha256 {}",
+            after["proposal"]["path"].as_str().unwrap(),
+            after["proposal"]["sha256"].as_str().unwrap()
+        )),
+        "{out}"
+    );
+    assert_eq!(
+        receipt::contract_digest(&row),
+        receipt::contract_digest(&after)
+    );
+    assert_eq!(
+        planner.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "restamp is provider-free"
+    );
+
+    // An explicit --issue survives a failed proposal in the receipt.
+    let repo = Repo::github(ORIGIN, Some(SPEC));
+    let refused = ANSWER.replace(r#""depends": []"#, r#""depends": [], "issue": "7""#);
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &repo.planner(&refused),
+        &["propose", "--issue", "7"],
+    );
+    assert_eq!(code, 2, "{err}");
+    let row = json_file(repo.0.join(".oms/plan/autopilot-run.json"));
+    assert_eq!(
+        (row["stage"].as_str(), row["issue"].as_str()),
+        (Some("proposing"), Some(ISSUE))
+    );
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &repo.planner(ANSWER),
+        &["propose", "--issue", "8"],
+    );
+    assert_eq!(code, 2);
+    assert!(err.contains("already binds a different issue"), "{err}");
 }

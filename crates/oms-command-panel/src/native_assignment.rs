@@ -7,7 +7,7 @@ use oms_panel_core::services::ExecutionRequest;
 
 const MAX_BINDING: usize = 64 * 1024;
 // Codex leads launch without the provider policy, so the assignment carries it.
-const LEAD_DUTIES: &str = "Main accepts and publishes. Give native children explicit roles, disjoint scopes and checks; research, review, verify read-only; builders edit assigned paths; children never delegate, commit, push, land, install or publish; you only integrate.";
+const LEAD_DUTIES: &str = "Integrate only; children: roles/disjoint scopes/checks, read-only research/review/verify, builders assigned paths, no delegate/commit/push/land/install/publish; simple: cheaper supported native model, escalate scope/risk, keep explicit user choice/account/isolation/spend.";
 
 /// Codex shows a larger paste as an opaque placeholder that its composer proof
 /// cannot read, so the whole prompt must fit the visible limit untruncated.
@@ -24,7 +24,7 @@ fn assignment_prompt(
         .ok_or_else(|| Error::new("repository cannot be represented in a Room locator"))?;
     // One shell variable keeps the state repository pinned without repeating it.
     let fixed = format!(
-        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} Read `R={}; oms plan --repo \"$R\" evidence-snapshot --id {}; oms room show --repo \"$R\" --id {} --exact --json`. Match plan {}, lease {}, Room message {message}; obey its paths, acceptance and verifier; report evidence, unverified child access and this binding; receipt is not acceptance. Task: ",
+        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} `R={}; oms agent-plan --repo \"$R\" evidence-snapshot --id {}; oms room show --repo \"$R\" --id {} --exact --json`. plan {}, lease {}, Room message {message}; obey paths/accept/verifier; report evidence/unverified/model/unknown/binding; receipt!=accept. Task: ",
         crate::native_children::TASK_PREFIX,
         assignment_shell_word(repo),
         assignment_shell_word(text(task, "id")),
@@ -546,14 +546,33 @@ mod tests {
         ] {
             assert_eq!(prompt.matches(&exact).count(), 1, "{exact}");
         }
+        let lower = prompt.to_ascii_lowercase();
         for duty in [
             "roles",
             "disjoint scopes",
             "checks",
             "read-only",
             "assigned paths",
+            "cheaper supported native model",
+            "explicit user choice",
+            "escalate",
+            "scope",
+            "risk",
+            "account",
+            "isolation",
+            "spend",
+            "model",
+            "unknown",
         ] {
-            assert!(prompt.contains(duty), "{duty}");
+            assert!(lower.contains(duty), "{duty}");
+        }
+        for alias in [
+            "haiku", "sonnet", "opus", "flash", "mini", "gpt-", "gemini-", "claude-", "o3", "o4",
+        ] {
+            assert!(
+                !lower.contains(alias),
+                "bound prompt must not hardcode unauthenticated model alias {alias:?}: {prompt}"
+            );
         }
         // The one copyable reader line must keep unusual repository bytes intact;
         // octal-escaped bytes cost visible characters, hence the shorter brief.
@@ -571,7 +590,7 @@ mod tests {
             assert_eq!(
                 String::from_utf8(out.stdout).unwrap(),
                 format!(
-                    "plan|--repo|{repo}|evidence-snapshot|--id|native-one|\nroom|show|--repo|{repo}|--id|room-eeeeeeeeeeee|--exact|--json|\n"
+                    "agent-plan|--repo|{repo}|evidence-snapshot|--id|native-one|\nroom|show|--repo|{repo}|--id|room-eeeeeeeeeeee|--exact|--json|\n"
                 )
             );
         }
@@ -581,6 +600,7 @@ mod tests {
     fn native_assignment_prompt_rejects_oversized_briefs_without_truncation() {
         let repo = format!("/{}", "r".repeat(27));
         let fixed = build(&repo, "").unwrap().chars().count();
+        assert!(fixed <= 818, "{fixed}");
         let space = CODEX_VISIBLE_PASTE_CHARS - fixed;
         assert!(space >= 170, "{space}");
         // Counted as visible characters, not bytes.
@@ -598,5 +618,34 @@ mod tests {
             .unwrap_err()
             .message;
         assert!(error.contains("binding alone"), "{error}");
+
+        let tight_repo = format!("/{}", "r".repeat(29));
+        let mut tight_task = canonical();
+        tight_task["id"] = json!("tight-native-170");
+        let tight_turn = "c".repeat(20);
+        let tight_message = format!("msg-{}", "d".repeat(32));
+        let tight_fixed = assignment_prompt(
+            Path::new(&tight_repo),
+            "room-eeeeeeeeeeee",
+            &tight_task,
+            &tight_turn,
+            &tight_message,
+            "",
+        )
+        .unwrap()
+        .chars()
+        .count();
+        let tight_space = CODEX_VISIBLE_PASTE_CHARS - tight_fixed;
+        assert!(tight_space >= 174, "{tight_space}");
+        let tight_prompt = assignment_prompt(
+            Path::new(&tight_repo),
+            "room-eeeeeeeeeeee",
+            &tight_task,
+            &tight_turn,
+            &tight_message,
+            &"b".repeat(170),
+        )
+        .unwrap();
+        assert!(tight_prompt.chars().count() <= CODEX_VISIBLE_PASTE_CHARS);
     }
 }

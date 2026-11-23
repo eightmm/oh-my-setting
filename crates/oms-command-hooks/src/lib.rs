@@ -34,6 +34,7 @@ pub const HOOKS: &[&str] = &[
     "command-guard-hook",
     "syntax-guard-hook",
     "git-move-guard-hook",
+    "main-write-guard-hook",
     "fail-ledger-hook",
     "resume-hook",
     "telemetry-hook",
@@ -255,6 +256,7 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
                 for hint in [
                     routing::panel_hint(&v, &repo, ctx),
                     routing::collaboration(&v, &repo, ctx),
+                    routing::intake_reminder(&v).to_owned(),
                 ] {
                     if !hint.is_empty() {
                         text.push_str(&hint);
@@ -318,6 +320,7 @@ fn dispatch(
     match name {
         "command-guard-hook" => guards::command(args, stdin, ctx),
         "git-move-guard-hook" => guards::git_move(stdin, ctx),
+        "main-write-guard-hook" => guards::main_write(stdin, ctx),
         "syntax-guard-hook" => syntax::run(stdin, ctx),
         "codex-hud-config" | "codex-usage-config" => config::run(name, args, ctx),
         "codex-hook-bridge" => bridge::run(args, stdin, ctx),
@@ -457,6 +460,8 @@ mod tests {
         );
         let direct = String::from_utf8(direct).unwrap();
         assert!(direct.starts_with("[oms panel] You are a control-tower main."));
+        assert!(direct.contains("[oms intake]"), "{direct}");
+        assert!(!direct.contains("inspect src/lib.rs"), "{direct}");
         let args = [OsString::from("skill-router")];
         for key in ["hook_event_name", "hookEventName"] {
             let stdout = invoke(

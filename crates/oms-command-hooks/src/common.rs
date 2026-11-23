@@ -182,13 +182,26 @@ pub fn strict_document(raw: &[u8]) -> Result<Value, String> {
     Ok(v)
 }
 pub fn input_error(name: &str) -> Output {
-    if ["command-guard-hook", "git-move-guard-hook"].contains(&name) {
-        let label = if name == "command-guard-hook" {
-            "command guard"
-        } else {
-            "git move guard"
+    if [
+        "command-guard-hook",
+        "git-move-guard-hook",
+        "main-write-guard-hook",
+    ]
+    .contains(&name)
+    {
+        let (label, subject) = match name {
+            "command-guard-hook" => ("command guard", "command"),
+            "git-move-guard-hook" => ("git move guard", "command"),
+            _ => ("main write guard", "edit"),
         };
-        (0, vec![], format!("{label}: cannot evaluate this command (hook input unavailable or oversized); allowing it unchecked.\n").into_bytes())
+        (
+            0,
+            vec![],
+            format!(
+                "{label}: cannot evaluate this {subject} (hook input unavailable or oversized); allowing it unchecked.\n"
+            )
+            .into_bytes(),
+        )
     } else if name == "turn-guard" {
         out(json_line(
             &json!({"systemMessage": "oh-my-setting turn guard: unavailable (unreadable input); this turn was not checked."}),
@@ -220,8 +233,18 @@ pub fn on(name: &str) -> bool {
     let value = env(name);
     value.is_empty() || value == "1"
 }
+pub fn automated_prompt(prompt: &str) -> bool {
+    cached_regex!(
+        r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b|Another Claude session sent a message:|Your claude\.ai usage limit has reset\b)"
+    )
+    .is_match(prompt)
+}
 pub fn child() -> bool {
     env("OMS_HARNESS_CHILD") == "1"
+}
+pub fn delegate_child() -> bool {
+    child()
+        || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| !v.is_empty() && v != "0")
 }
 pub fn panel() -> bool {
     !child()

@@ -84,12 +84,26 @@ Commands:
   graduate --id ID --to AGENTS.md|PROJECT.md
                     Print, as a diff, how the note would read in a checked-in
                     document. Never writes; retire the note after the edit lands.
+                    In GitHub project mode, --to PROJECT.md instead prints a
+                    pull request body section to carry the decision.
   compact           Regenerate summary.md from source memory.
   search PATTERN    Print memory + pins entries matching PATTERN (case-
                     insensitive substring over header and body) from SQLite;
                     --agent filters by the entry's author.
   recall QUERY      Rank memory + pins with local SQLite FTS; --agent filters
                     by author. No model call or embedding download is used.
+                    With `- GitHub project: owner/repo` under `## Collaboration`
+                    in PROJECT.md or the committed .github/oms-project.md (both
+                    must agree), up to 3 commits reachable from HEAD and
+                    3 merged pull requests from .oms/github/cache.jsonl (title
+                    and labels only, untrusted) follow; commit text may carry
+                    merged pull request text (squash merges). Nothing is
+                    fetched, and neither reaches injected provider context. The
+                    slug must name the github.com origin remote. A clone whose
+                    origin is elsewhere (a fork) stays off silently under a
+                    tracked-only declaration; a PROJECT.md declaration that
+                    origin does not name, or any declaration error, turns the
+                    mode off with one warning.
   health            Diagnose source/index consistency without creating,
                     synchronizing, repairing, or otherwise changing either.
   rebuild           Recreate the derived database from the Markdown sources.

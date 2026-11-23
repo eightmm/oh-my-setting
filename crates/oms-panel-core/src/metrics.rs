@@ -20,6 +20,18 @@ pub struct ReceiptTokensCache {
 struct ReceiptGeneration {
     repo: PathBuf,
     chain: Vec<Stat>,
+    /// Optional supplemental evidence refreshes the cache but never gates it.
+    supplement: Supplement,
+}
+
+/// What the generation proves about the optional supplement.
+enum Supplement {
+    /// Proven absent (ENOENT).
+    Missing,
+    /// A bounded, owned, single-link regular file with this identity.
+    Observed(Stat),
+    /// Unsafe, oversized or unreadable: no proof, so never reusable.
+    Unproven,
 }
 
 impl ReceiptGeneration {
@@ -44,29 +56,65 @@ impl ReceiptGeneration {
             return None;
         }
         chain.push(leaf);
+        let supplement = match fs::statat(
+            &fd,
+            Path::new(usage::REASONING).file_name()?,
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Err(rustix::io::Errno::NOENT) => Supplement::Missing,
+            Ok(stat)
+                if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && stat.st_nlink == 1
+                    && stat.st_uid == rustix::process::getuid().as_raw()
+                    && usize::try_from(stat.st_size)
+                        .is_ok_and(|size| size <= usage::MAX_REASONING_BYTES) =>
+            {
+                Supplement::Observed(stat)
+            }
+            _ => Supplement::Unproven,
+        };
         Some(Self {
             repo: repo.to_owned(),
             chain,
+            supplement,
         })
     }
 }
 
-impl PartialEq for ReceiptGeneration {
-    fn eq(&self, other: &Self) -> bool {
+fn same_stat(before: &Stat, after: &Stat) -> bool {
+    before.st_dev == after.st_dev
+        && before.st_ino == after.st_ino
+        && before.st_size == after.st_size
+        && before.st_mtime == after.st_mtime
+        && before.st_mtime_nsec == after.st_mtime_nsec
+        && before.st_ctime == after.st_ctime
+        && before.st_ctime_nsec == after.st_ctime_nsec
+        && before.st_nlink == after.st_nlink
+        && before.st_mode == after.st_mode
+        && before.st_uid == after.st_uid
+}
+
+impl ReceiptGeneration {
+    fn same_core(&self, other: &Self) -> bool {
         self.repo == other.repo
             && self.chain.len() == other.chain.len()
-            && self.chain.iter().zip(&other.chain).all(|(before, after)| {
-                before.st_dev == after.st_dev
-                    && before.st_ino == after.st_ino
-                    && before.st_size == after.st_size
-                    && before.st_mtime == after.st_mtime
-                    && before.st_mtime_nsec == after.st_mtime_nsec
-                    && before.st_ctime == after.st_ctime
-                    && before.st_ctime_nsec == after.st_ctime_nsec
-                    && before.st_nlink == after.st_nlink
-                    && before.st_mode == after.st_mode
-                    && before.st_uid == after.st_uid
-            })
+            && self
+                .chain
+                .iter()
+                .zip(&other.chain)
+                .all(|(before, after)| same_stat(before, after))
+    }
+
+    /// Reuse requires proof about the supplement on both sides.
+    fn reusable(&self, other: &Self) -> bool {
+        self.same_core(other)
+            && match (&self.supplement, &other.supplement) {
+                (Supplement::Missing, Supplement::Missing) => true,
+                (Supplement::Observed(before), Supplement::Observed(after)) => {
+                    same_stat(before, after)
+                }
+                _ => false,
+            }
     }
 }
 
@@ -145,6 +193,7 @@ impl ReceiptComponents {
 struct ReceiptAccount {
     components: ReceiptComponents,
     total: ReceiptSum,
+    reasoning: ReceiptSum,
 }
 
 #[derive(Default)]
@@ -179,8 +228,11 @@ impl ReceiptAttempt {
                             group["total"] =
                                 json!(account.total.complete(account.components.calls));
                             group["reported"]["total"] = json!(account.total.reported);
-                            // This durable receipt version does not record reasoning.
-                            group["reasoning"] = Value::Null;
+                            // Reasoning is optional supplemental evidence; any call
+                            // without it keeps the account's count unknown.
+                            group["reasoning"] =
+                                json!(account.reasoning.complete(account.components.calls));
+                            group["reported"]["reasoning"] = json!(account.reasoning.reported);
                             group
                         })
                         .collect(),
@@ -223,7 +275,7 @@ impl ReceiptTokensCache {
         }
         let before = ReceiptGeneration::read(repo)?;
         let by_attempt = match prior {
-            Some((stamp, by_attempt)) if stamp == before => by_attempt,
+            Some((stamp, by_attempt)) if stamp.reusable(&before) => by_attempt,
             _ => {
                 let mut by_attempt = BTreeMap::<String, ReceiptAttempt>::new();
                 let projection = load(repo).ok()?;
@@ -257,6 +309,7 @@ impl ReceiptTokensCache {
                         .or_default();
                     account.components.observe(call.usage, basis);
                     account.total.observe(call.usage.total_tokens);
+                    account.reasoning.observe(call.usage.reasoning_tokens);
                 }
                 if bound.next().is_some() {
                     return None;
@@ -264,8 +317,18 @@ impl ReceiptTokensCache {
                 by_attempt
             }
         };
-        if stop.load(Ordering::Relaxed) || ReceiptGeneration::read(repo)? != before {
+        if stop.load(Ordering::Relaxed) {
             return None;
+        }
+        let mut before = before;
+        let after = ReceiptGeneration::read(repo)?;
+        if !before.same_core(&after) {
+            return None;
+        }
+        // Core usage is proven stable; a supplement that moved or was never
+        // proven only drops reasoning and forces a reparse next time.
+        if !before.reusable(&after) {
+            before.supplement = Supplement::Unproven;
         }
         Some(&self.entry.insert((before, by_attempt)).1)
     }
@@ -1585,6 +1648,145 @@ mod receipt_token_tests {
         assert!(unknown_basis["input"].is_null());
         assert_eq!(unknown_basis["reported"]["input"], 0);
         assert_eq!(unknown_basis["output"], 4);
+    }
+
+    #[test]
+    fn optional_reasoning_projects_per_launch_account_and_refreshes_cache() {
+        let repo = Repo::new();
+        let stop = AtomicBool::new(false);
+        let mut cache = ReceiptTokensCache::default();
+        let attempt = "attempt-reasoning";
+        let mut receipts = Vec::new();
+        // AGY has no launch aliases; a Codex seat in the same attempt never
+        // receives guessed reasoning.
+        for (call, provider, alias) in [
+            ("one", "antigravity", None),
+            ("two", "antigravity", None),
+            ("three", "codex", Some("seat")),
+        ] {
+            let mut receipt = usage::begin(
+                &repo.0,
+                Identity {
+                    call_id: call.into(),
+                    operation_id: format!("op-{call}"),
+                    provider: provider.into(),
+                    account: alias.map(str::to_owned),
+                    attempt_id: Some(attempt.into()),
+                    ..Identity::default()
+                },
+                None,
+                &stop,
+            )
+            .unwrap();
+            receipt.revision = 1;
+            receipt.phase = Phase::Final;
+            receipt.usage = Usage {
+                input_tokens: Some(4),
+                output_tokens: Some(3),
+                total_tokens: Some(10),
+                ..Usage::default()
+            };
+            receipt.source_sha256 = Some("0f".repeat(32));
+            usage::record(&repo.0, &receipt, &stop).unwrap();
+            receipts.push(receipt);
+        }
+        let account = |cache: &mut ReceiptTokensCache, provider: &str| {
+            let snapshot = cache.for_attempts(&repo.0, [attempt], &stop).unwrap();
+            let [ref account] = snapshot[attempt]["providers"][provider]["launch_accounts"]
+                .as_array()
+                .unwrap()[..]
+            else {
+                panic!("expected one {provider} launch account")
+            };
+            account.clone()
+        };
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["alias"].is_null() && agy["reasoning"].is_null());
+        assert_eq!(agy["reported"]["reasoning"], 0);
+        let core = std::fs::read(repo.0.join(usage::RECEIPTS)).unwrap();
+
+        usage::record_reasoning(&repo.0, &receipts[0], 6, &stop).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["reasoning"].is_null(), "partial coverage stays unknown");
+        assert_eq!(agy["reported"]["reasoning"], 1);
+        usage::record_reasoning(&repo.0, &receipts[1], 0, &stop).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert_eq!(
+            (agy["reasoning"].clone(), agy["total"].clone()),
+            (json!(6), json!(20))
+        );
+        let codex = account(&mut cache, "codex");
+        assert_eq!(codex["alias"], "seat");
+        assert!(codex["reasoning"].is_null());
+        assert_eq!(std::fs::read(repo.0.join(usage::RECEIPTS)).unwrap(), core);
+        assert!(
+            cache
+                .refresh(&repo.0, &stop, |_| panic!("warm cache reparsed receipts"))
+                .is_some()
+        );
+
+        // Capture the valid bytes before any damage; they restore the evidence.
+        let supplement = repo.0.join(usage::REASONING);
+        let good = std::fs::read(&supplement).unwrap();
+        assert!(good.ends_with(b"\n"));
+        // A torn supplement drops reasoning only; core usage remains available.
+        std::fs::write(&supplement, b"{torn").unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["reasoning"].is_null());
+        assert_eq!(agy["total"], 20);
+
+        // A symlinked or unreadable supplement is unproven metadata: core totals
+        // still project and reasoning stays unknown.
+        let target = repo.0.join("supplement-target");
+        std::fs::write(&target, &good).unwrap();
+        std::fs::remove_file(&supplement).unwrap();
+        std::os::unix::fs::symlink(&target, &supplement).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["reasoning"].is_null());
+        assert_eq!(agy["total"], 20);
+        std::fs::remove_file(&supplement).unwrap();
+        std::fs::create_dir(&supplement).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["reasoning"].is_null());
+        assert_eq!(agy["total"], 20);
+        std::fs::remove_dir(&supplement).unwrap();
+
+        // An oversized supplement is unproven, never reused, and drops only
+        // reasoning; unproven state never poisons the warm cache afterwards.
+        std::fs::write(&supplement, vec![b'\n'; usage::MAX_REASONING_BYTES + 1]).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["reasoning"].is_null());
+        assert_eq!(agy["total"], 20);
+        let mut reparsed = false;
+        assert!(
+            cache
+                .refresh(&repo.0, &stop, |repo| {
+                    reparsed = true;
+                    usage::load(repo)
+                })
+                .is_some()
+        );
+        assert!(reparsed, "an unproven supplement is never reused");
+
+        // Restored valid bytes are observed again; then the proven-missing
+        // supplement drops them and warm entries are reusable in both states.
+        std::fs::write(&supplement, &good).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert_eq!(agy["reasoning"], 6);
+        assert!(
+            cache
+                .refresh(&repo.0, &stop, |_| panic!("observed supplement reparsed"))
+                .is_some()
+        );
+        std::fs::remove_file(&supplement).unwrap();
+        let agy = account(&mut cache, "antigravity");
+        assert!(agy["reasoning"].is_null());
+        assert_eq!(agy["reported"]["reasoning"], 0);
+        assert!(
+            cache
+                .refresh(&repo.0, &stop, |_| panic!("missing supplement reparsed"))
+                .is_some()
+        );
     }
 
     #[test]

@@ -83,16 +83,49 @@ pub fn run(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
-    let kind = options.required("recommend")?;
-    require(
-        KINDS.contains(&kind.as_str()),
-        &format!("--recommend must be one of: {}", KINDS.join(", ")),
-    )?;
+    let requested = options.required("recommend")?;
+    let mut table = None;
+    let mut category: Option<Category> = None;
+    let kind = if KINDS.contains(&requested.as_str()) {
+        requested.clone()
+    } else {
+        // Not a built-in kind: only a configured category may resolve it, and
+        // the table is linted before any route is computed.
+        let loaded = load_table(source)?;
+        let problems = lint(&loaded);
+        require(
+            problems.is_empty(),
+            &format!("task routing rules are invalid: {}", problems.join("; ")),
+        )?;
+        let found = loaded["categories"]
+            .get(requested.as_str())
+            .map(|c| Category {
+                name: requested.clone(),
+                kind: c["kind"].as_str().unwrap_or("").to_owned(),
+                risk: c["risk"].as_str().unwrap_or("").to_owned(),
+                size: c["size"].as_str().unwrap_or("").to_owned(),
+            });
+        let Some(found) = found else {
+            let mut allowed: Vec<&str> = KINDS.to_vec();
+            if let Some(map) = loaded["categories"].as_object() {
+                allowed.extend(map.keys().map(String::as_str));
+            }
+            return Err(Error::new(format!(
+                "--recommend must be one of: {}",
+                allowed.join(", ")
+            )));
+        };
+        let kind = found.kind.clone();
+        category = Some(found);
+        table = Some(loaded);
+        kind
+    };
     let has_manual = options.has("risk") || options.has("size");
     let has_diff = options.has("diff");
     require(
-        !(has_manual && has_diff) && (has_diff || (options.has("risk") && options.has("size"))),
-        "--recommend needs --diff RANGE, or both --risk and --size",
+        !(has_manual && has_diff)
+            && (has_diff || category.is_some() || (options.has("risk") && options.has("size"))),
+        "--recommend needs --diff RANGE, or both --risk and --size (a configured category supplies defaults)",
     )?;
     let failed = if options.has("failed") {
         Some(options.integer("failed", 0, 0, usize::MAX)?)
@@ -100,26 +133,42 @@ pub fn run(
         None
     };
 
-    let table = load_table(source)?;
-    let problems = lint(&table);
-    require(
-        problems.is_empty(),
-        &format!("task routing rules are invalid: {}", problems.join("; ")),
-    )?;
+    let table = match table {
+        Some(t) => t,
+        None => {
+            let t = load_table(source)?;
+            let problems = lint(&t);
+            require(
+                problems.is_empty(),
+                &format!("task routing rules are invalid: {}", problems.join("; ")),
+            )?;
+            t
+        }
+    };
 
     let measured = if let Some(range) = options.get("diff") {
         Some(inspect_range(execution, range, &table, services, stop)?)
     } else {
         None
     };
-    let risk = options
-        .get("risk")
-        .or_else(|| measured.as_ref().map(|m| m.risk))
-        .ok_or_else(|| Error::new("--risk missing"))?;
-    let size = options
-        .get("size")
-        .or_else(|| measured.as_ref().map(|m| m.size))
-        .ok_or_else(|| Error::new("--size missing"))?;
+    // Explicit --risk/--size and measured --diff values always win; a category
+    // default only fills an axis nothing else supplied.
+    let mut defaulted = Vec::new();
+    let mut axis = |name: &'static str, fallback: Option<&str>| -> Result<String> {
+        if let Some(v) = options.get(name) {
+            return Ok(v.to_owned());
+        }
+        if let Some(m) = &measured {
+            return Ok(if name == "risk" { m.risk } else { m.size }.to_owned());
+        }
+        defaulted.push(name);
+        fallback
+            .map(str::to_owned)
+            .ok_or_else(|| Error::new(format!("--{name} missing")))
+    };
+    let risk = axis("risk", category.as_ref().map(|c| c.risk.as_str()))?;
+    let size = axis("size", category.as_ref().map(|c| c.size.as_str()))?;
+    let (risk, size) = (risk.as_str(), size.as_str());
 
     let (rule_no, row) = match_rule(&table, &kind, risk, size)?;
     let tier = row["tier"].as_str().unwrap_or("");
@@ -140,6 +189,14 @@ pub fn run(
         "reason": reason,
         "executes": false,
     });
+    if let Some(c) = &category {
+        out["category"] = json!({
+            "name": c.name,
+            "kind": c.kind,
+            "defaults": {"risk": c.risk, "size": c.size},
+            "defaulted": defaulted,
+        });
+    }
     if let Some(m) = &measured {
         out["diff"] = json!({
             "range": options.get("diff").unwrap_or(""),
@@ -186,6 +243,13 @@ pub fn run(
         render_plain(&out, &explicit, failed).into_bytes(),
         vec![],
     ))
+}
+
+struct Category {
+    name: String,
+    kind: String,
+    risk: String,
+    size: String,
 }
 
 struct RangeMetrics {
@@ -237,13 +301,16 @@ pub fn lint(table: &Value) -> Vec<String> {
     let Some(obj) = table.as_object() else {
         return vec!["table must have exactly schema (1), size_buckets and rules".into()];
     };
-    let expected: BTreeSet<&str> = ["schema", "size_buckets", "rules"].into_iter().collect();
+    let mut expected: BTreeSet<&str> = ["schema", "size_buckets", "rules"].into_iter().collect();
+    if obj.contains_key("categories") {
+        expected.insert("categories");
+    }
     if obj.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected
         || obj.get("schema").and_then(Value::as_u64) != Some(1)
     {
         return vec!["table must have exactly schema (1), size_buckets and rules".into()];
     }
-    let mut problems = Vec::new();
+    let mut problems = category_problems(obj.get("categories"));
     let valid_buckets = obj
         .get("size_buckets")
         .and_then(Value::as_object)
@@ -392,6 +459,41 @@ pub fn lint(table: &Value) -> Vec<String> {
             problems.push(format!(
                 "rule {} is unreachable: earlier rows already match everything it matches",
                 index + 1
+            ));
+        }
+    }
+    problems
+}
+
+fn category_problems(categories: Option<&Value>) -> Vec<String> {
+    let Some(value) = categories else {
+        return vec![];
+    };
+    let Some(map) = value.as_object().filter(|m| !m.is_empty()) else {
+        return vec!["categories must be a non-empty object".into()];
+    };
+    let mut problems = Vec::new();
+    for (name, entry) in map {
+        let label = format!("category {name}");
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase()) {
+            problems.push(format!("{label} must be one lowercase word (a-z)"));
+        }
+        if KINDS.contains(&name.as_str()) {
+            problems.push(format!("{label} collides with a built-in kind"));
+        }
+        let ok = entry.as_object().is_some_and(|e| {
+            e.len() == 3
+                && [("kind", KINDS), ("risk", RISKS), ("size", SIZES)]
+                    .iter()
+                    .all(|(k, valid)| {
+                        e.get(*k)
+                            .and_then(Value::as_str)
+                            .is_some_and(|v| valid.contains(&v))
+                    })
+        });
+        if !ok {
+            problems.push(format!(
+                "{label} needs exactly kind, risk and size with valid values"
             ));
         }
     }
@@ -704,6 +806,23 @@ fn render_plain(
         str_field("effort"),
         out["rule"]
     ));
+    if out["category"].is_object() {
+        let c = &out["category"];
+        lines.push(format!(
+            "category {} -> {} (defaulted: {})",
+            c["name"].as_str().unwrap_or(""),
+            c["kind"].as_str().unwrap_or(""),
+            c["defaulted"]
+                .as_array()
+                .map(|a| a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .filter(|j| !j.is_empty())
+                .unwrap_or_else(|| "none".into())
+        ));
+    }
     lines.push(format!("reason: {}", str_field("reason")));
     if !explicit.is_empty() {
         let joined: Vec<String> = explicit
