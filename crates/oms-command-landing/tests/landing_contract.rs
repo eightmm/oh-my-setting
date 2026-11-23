@@ -2410,6 +2410,36 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
     ] {
         assert!(out.contains(needle), "{needle}: {out}");
     }
+    let report = V::parse(out.as_bytes()).unwrap();
+    let navigation = report.get("navigation");
+    for (key, url) in [
+        ("repository", "https://github.com/example-org/example-repo"),
+        (
+            "issues",
+            "https://github.com/example-org/example-repo/issues",
+        ),
+        (
+            "pull_requests",
+            "https://github.com/example-org/example-repo/pulls",
+        ),
+        (
+            "actions",
+            "https://github.com/example-org/example-repo/actions",
+        ),
+        ("wiki", "https://github.com/example-org/example-repo/wiki"),
+    ] {
+        assert_eq!(navigation.get(key).text(), Some(url), "{key}: {out}");
+    }
+    let links = report.get("linked").array();
+    assert_eq!(links.len(), 2);
+    for (row, source) in links.iter().zip(["task", "plan"]) {
+        assert_eq!(row.get("source").text(), Some(source));
+        assert_eq!(
+            row.get("url").text(),
+            Some("https://github.com/example-org/example-repo/issues/3")
+        );
+    }
+    assert!(r.calls().is_empty() && r.cache().is_none());
     let issue = "repos/example-org/example-repo/issues/3";
     let open = r#""state":"open""#;
     for (case, body) in [
@@ -2481,6 +2511,20 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
             && out.contains("plan T1: example-org/example-repo#3 [fresh]"),
         "{out}"
     );
+    for line in [
+        "repository: https://github.com/example-org/example-repo",
+        "issues: https://github.com/example-org/example-repo/issues",
+        "pull requests: https://github.com/example-org/example-repo/pulls",
+        "actions: https://github.com/example-org/example-repo/actions",
+        "wiki: https://github.com/example-org/example-repo/wiki",
+    ] {
+        assert!(out.lines().any(|actual| actual == line), "{out}");
+    }
+    assert_eq!(
+        out.matches("https://github.com/example-org/example-repo/issues/3")
+            .count(),
+        2
+    );
     assert_eq!(r.calls(), before, "status must never invoke gh");
 
     fs::write(
@@ -2493,6 +2537,18 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
     assert!(
         out.contains("error: PROJECT.md declares a different GitHub project"),
         "{out}"
+    );
+    assert!(!out.contains("https://github.com/"), "{out}");
+    let (code, out, _) = r.run(&iso, &["status", "--json"]);
+    assert_eq!(code, 1, "{out}");
+    let report = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(report.get("navigation"), &V::Null);
+    assert!(
+        report
+            .get("linked")
+            .array()
+            .iter()
+            .all(|row| row.get("url") == &V::Null)
     );
     let (code, _, err) = r.run(&iso, &["refresh", "--issue", "3"]);
     assert_eq!(code, 2);
@@ -2525,6 +2581,14 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
     ] {
         assert!(out.contains(needle), "{needle}: {out}");
     }
+    assert_eq!(
+        V::parse(out.as_bytes())
+            .unwrap()
+            .get("navigation")
+            .get("repository")
+            .text(),
+        Some("https://github.com/example-org/example-repo")
+    );
     fs::write(t.repo.join("PROJECT.md"), GH_PROJECT).unwrap();
     let (code, out, _) = t.run(&iso, &["status"]);
     assert_eq!(code, 0, "{out}");
@@ -2543,6 +2607,12 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
             "git@github.com:fork-org/example-repo.git",
         ],
     );
+    fs::create_dir_all(t.repo.join(".oms/task")).unwrap();
+    fs::write(
+        t.repo.join(".oms/task/current.md"),
+        "# Task\n\n- github_issue: #3\n",
+    )
+    .unwrap();
     let (code, out, err) = t.run(&iso, &["status"]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(
@@ -2552,6 +2622,11 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
         ),
         "{out}"
     );
+    assert!(
+        out.contains("task: fork-org/example-repo#3 [unavailable]"),
+        "{out}"
+    );
+    assert!(!out.contains("https://github.com/"), "{out}");
     let (code, out, _) = t.run(&iso, &["status", "--json"]);
     assert_eq!(code, 0, "{out}");
     assert!(
@@ -2559,6 +2634,15 @@ fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
             && out.contains("\"project_inactive_reason\": \"fork\""),
         "{out}"
     );
+    let report = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(report.get("navigation"), &V::Null);
+    let links = report.get("linked").array();
+    assert_eq!(links.len(), 1, "{out}");
+    assert_eq!(
+        links[0].get("reference").text(),
+        Some("fork-org/example-repo#3")
+    );
+    assert_eq!(links[0].get("url"), &V::Null);
     for args in [
         &["refresh", "--linked"][..],
         &["post-evidence", "--issue", "3", "--pull", "7", "--yes"],

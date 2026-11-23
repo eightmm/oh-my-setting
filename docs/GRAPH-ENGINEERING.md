@@ -337,7 +337,8 @@ reachable from that writer. `plan_task: next` on a write node is legal.
 
 `plan_task: "next"` is a *selector* — a rule for choosing a task — not a task.
 The runner resolves it to one concrete id before anything is scheduled, through
-`adapters.plan.peek_next_task` (`agent-plan next --json`, never `--claim`):
+a read-only `agent-plan next --json` request (never `--claim`; see
+[execution_runner.rs](../crates/oms-command-graph/src/execution_runner.rs)):
 the graph selects, `plan-run` claims. The concrete id is written onto the
 `node_started` row as `task_id`, together with `binding: <bind_task>` when
 the node declares one, and only then does `plan-run --id <id>` run. Because
@@ -530,35 +531,10 @@ views. The graph's events retain the execution record.
 
 ## Plan adapter
 
-`adapters/plan.py`:
-
-```python
-task_view(repo, task_id) -> dict                # agent-plan show --id
-peek_next_task(repo) -> dict | None             # agent-plan next --json (read-only; None = nothing actionable)
-scope_of(task_view) -> {"allowed": [...], "forbidden": [...]}
-outcome_from_task(node_spec, task_view, facts) -> (outcome, proof_missing)
-build_command(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, dry_run=False, context_pack="") -> List[str]
-execute(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, timeout=2700, dry_run=False, context_pack="") -> dict
-```
-
-The adapter accepts only a concrete node: a `plan_task` selector or a
-`plan_task_from` reference is refused, and `_plan_argv` refuses `--claim`
-outright. `execute` runs
-`plan-run --repo R --to P --id T [--land] [--repair N] [--context-pack FILE]`,
-then rereads the task. Outcome mapping:
-
-| mode | condition after `plan-run` | outcome |
-|---|---|---|
-| run | exit 0, state `review`, patch present | `completed` |
-| run / land | state `blocked` | `blocked` |
-| run / land | exit 3 (no actionable task) | `blocked` (reason `no-actionable-task`) |
-| land | exit 0, state `done`, `receipt.land.<task>.present` | `completed` |
-| land | exit 75 (landing lock held) | `partial` |
-| any | exit ≠ 0 otherwise | `failed` |
-| any | state `claimed`/`running` (process gone) | `unverified` |
-
-The adapter has, by construction, no code path to `agent-plan land`,
-`finish`, `claim`, or `review`; a regression test asserts the built argv.
+Native plan dispatch is part of the [graph command](../crates/oms-command-graph/README.md)
+and is exercised by the [host adapter fixtures](../crates/oms-command-graph/tests/host_adapter.rs).
+The retired Python `adapters/plan.py` signatures and outcome table remain in the
+[archived guide at 20b775f6](https://github.com/eightmm/oh-my-setting/blob/20b775f6/docs/GRAPH-ENGINEERING.md#plan-adapter).
 
 ## Scheduler
 

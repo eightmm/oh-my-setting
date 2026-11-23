@@ -3562,6 +3562,6 @@ declared mechanical gate.
 
 Claude's `oms-korean` output style declares `keep-coding-instructions: true`:
 its final-reply language guidance retains Claude's native engineering
-instructions. The repository `CLAUDE.md` imports `AGENTS.md`, avoiding a
-second copy of policy. Global rules remain in `rules/global-AGENTS.md`;
-provider system instructions and user-owned settings are not replaced.
+instructions. Shared repository instructions live in `AGENTS.md`. The
+installer links `rules/global-AGENTS.md` to `~/.claude/CLAUDE.md` and preserves
+provider system instructions and user-owned settings.
