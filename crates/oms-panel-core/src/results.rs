@@ -1045,7 +1045,11 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
             && task["lease_id"] == report["lease_id"]
             && task["lease_epoch"] == report["lease_epoch"]
             && task["provider"] == report["owner"]
-            && task["claimed_by_participant"] == report["parent_attempt_id"]
+            && task["claimed_by_participant"]
+                == report
+                    .get("parent_participant")
+                    .unwrap_or(&report["parent_attempt_id"])
+                    .clone()
     });
     let Some(task) = same else {
         report["plan_state"] = "unknown".into();
@@ -1179,6 +1183,73 @@ fn result_participant(operation: &Value, participant: &str) -> bool {
         || (operation["tool"] == "panel-native-assignment"
             && operation["refs"].get("native_return_schema").is_some()
             && operation["attempt_id"] == participant)
+}
+
+fn native_succession_guidance(
+    store: &Store,
+    operation: &Value,
+    report: &mut Value,
+    attempts: &Value,
+) -> Result<Option<Value>> {
+    let succession = crate::native_succession::metadata(store, operation)?;
+    let custodian = succession.as_ref().map_or_else(
+        || text(operation, "parent_attempt_id"),
+        |record| text(record, "main_attempt_id"),
+    );
+    report["custodian_attempt_id"] = custodian.clone().into();
+    report["succession"] = succession.unwrap_or(Value::Null);
+    let mains: Vec<_> = array(attempts)
+        .iter()
+        .filter(|row| {
+            row["tool"] == "panel-main"
+                && row["refs"]["panel_room_id"] == operation["refs"]["panel_room_id"]
+                && row["terminal"] != true
+        })
+        .collect();
+    if mains.len() == 1 && mains[0]["attempt_id"] == custodian {
+        return Ok(None);
+    }
+    // Legacy/offline result views have no current Main. They may still describe
+    // the original contract, but never invent a successor from that absence.
+    if mains.is_empty() {
+        return Ok(None);
+    }
+    let inspect = serde_json::json!({"argv":["oms","panel","--results","--task-id",operation["task_id"],"--json"]});
+    let old = array(attempts)
+        .iter()
+        .find(|row| row["attempt_id"] == custodian);
+    if mains.len() != 1
+        || !old.is_some_and(|old| {
+            old["terminal"] == true
+                && old["state"] == "abandoned"
+                && old["reason_code"] == "main_swapped"
+        })
+        || crate::state::main_participant(mains[0]) != report["parent_participant"]
+    {
+        return Ok(Some(native_action(
+            "inspect",
+            "Native owner succession is unconfirmed; inspect the canonical Main handoff",
+            vec![inspect],
+        )));
+    }
+    let mut argv = serde_json::json!([
+        "oms",
+        "panel",
+        "--native-adopt",
+        operation["attempt_id"],
+        "--assignment-sha256",
+        report["binding_sha256"]
+    ]);
+    if let Some(digest) = report["artifact_sha256"].as_str() {
+        argv.as_array_mut()
+            .unwrap()
+            .extend(["--result-sha256".into(), digest.into()]);
+    }
+    Ok(Some(native_action(
+        "adopt",
+        "A successor Main must explicitly adopt this exact frozen assignment before continuing",
+        vec![serde_json::json!({"argv":argv})],
+    )))
 }
 /// Canonical task rows, paged after participant filtering. Missing or corrupt
 /// evidence is surfaced in `issue`; it cannot manufacture an owner outcome.
@@ -1646,6 +1717,9 @@ pub fn results_page(
                             .unwrap_or(Value::Null)
                         });
                         let next = native_guidance(operation, &mut report, plan)?;
+                        let next =
+                            native_succession_guidance(&store, operation, &mut report, &attempts)?
+                                .unwrap_or(next);
                         Ok((report, next))
                     })
                 };

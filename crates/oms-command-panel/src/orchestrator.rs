@@ -5,6 +5,8 @@ pub(crate) mod account_binding;
 mod native_assignment;
 #[path = "native_result.rs"]
 mod native_result;
+#[path = "native_succession.rs"]
+mod native_succession;
 
 use crate::claude_lead_usage::LeadReading;
 use crate::native_panel::{MAIN_PERMISSIONS_REF, MainPermissions};
@@ -213,6 +215,8 @@ pub struct Panel<'a> {
     owner: String,
     room: &'a str,
     leads: BTreeMap<String, Pane>,
+    retained_codex: Option<Result<RetainedCodex>>,
+    inherited_codex_parent: Option<String>,
     codex_chat_mark: CodexChatMark,
     claude_quota_mark: Option<String>,
     live_providers: BTreeSet<&'static str>,
@@ -220,6 +224,12 @@ pub struct Panel<'a> {
     alternate: Result<Option<Pane>>,
     #[cfg(test)]
     chat_host: Option<&'a dyn AccountHost>,
+}
+
+struct RetainedCodex {
+    pane: Pane,
+    parent: String,
+    chat_mark: CodexChatMark,
 }
 
 // The last field keeps trailing columns intact and carries private launch markers.
@@ -231,6 +241,16 @@ enum CodexChatMark {
     Absent,
     Bound,
     Invalid,
+}
+
+impl CodexChatMark {
+    fn from_census(field: &str) -> Self {
+        match field.split_once('_').map(|(_, mark)| mark) {
+            None | Some("" | "_") => Self::Absent,
+            Some("1" | "1_") => Self::Bound,
+            _ => Self::Invalid,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -709,6 +729,7 @@ impl<'a> Panel<'a> {
         let session = main[0].to_owned();
         let session_proof = terminals::provider_session_proof(services, repo, &session, stop)?;
         let mut leads = BTreeMap::new();
+        let mut retained_codex = None;
         let mut codex_chat_mark = CodexChatMark::Absent;
         let mut claude_quota_mark = None;
         let mut live_providers = BTreeSet::new();
@@ -738,24 +759,37 @@ impl<'a> Panel<'a> {
             };
             live_providers.insert(provider);
             live_codex_panes += usize::from(provider == "codex");
-            if f[10] == room && f[12] == main[7] {
-                require(
-                    leads.insert(provider.into(), pane(f)?).is_none(),
-                    "multiple windows for the provider session",
-                )?;
-                if provider == "codex" {
-                    codex_chat_mark = match f[14].split_once('_').map(|(_, mark)| mark) {
-                        None | Some("" | "_") => CodexChatMark::Absent,
-                        Some("1" | "1_") => CodexChatMark::Bound,
-                        _ => CodexChatMark::Invalid,
-                    };
-                } else if provider == "claude" {
-                    claude_quota_mark = f[14]
-                        .splitn(3, '_')
-                        .nth(2)
-                        .filter(|mark| !mark.is_empty())
-                        .map(str::to_owned);
+            if f[10] != room {
+                continue;
+            }
+            if f[12] != main[7] {
+                if provider == "codex" && valid_attempt(f[12]) {
+                    retained_codex = Some(if retained_codex.is_none() {
+                        pane(f).map(|pane| RetainedCodex {
+                            pane,
+                            parent: f[12].into(),
+                            chat_mark: CodexChatMark::from_census(f[14]),
+                        })
+                    } else {
+                        Err(Error::new(
+                            "multiple retained Codex panes require reconciliation",
+                        ))
+                    });
                 }
+                continue;
+            }
+            require(
+                leads.insert(provider.into(), pane(f)?).is_none(),
+                "multiple windows for the provider session",
+            )?;
+            if provider == "codex" {
+                codex_chat_mark = CodexChatMark::from_census(f[14]);
+            } else if provider == "claude" {
+                claude_quota_mark = f[14]
+                    .splitn(3, '_')
+                    .nth(2)
+                    .filter(|mark| !mark.is_empty())
+                    .map(str::to_owned);
             }
         }
         if let Some(pane_windows) = pane_windows {
@@ -793,6 +827,8 @@ impl<'a> Panel<'a> {
             owner: main[8].into(),
             room,
             leads,
+            retained_codex,
+            inherited_codex_parent: None,
             codex_chat_mark,
             claude_quota_mark,
             live_providers,
@@ -801,6 +837,19 @@ impl<'a> Panel<'a> {
             #[cfg(test)]
             chat_host: None,
         })
+    }
+
+    /// Only an explicit native assignment command may inspect a retained
+    /// candidate under its own Room, contract and live process checks.
+    fn with_native_codex_candidate(mut self) -> Result<Self> {
+        if !self.leads.contains_key("codex")
+            && let Some(candidate) = self.retained_codex.take().transpose()?
+        {
+            self.leads.insert("codex".into(), candidate.pane);
+            self.inherited_codex_parent = Some(candidate.parent);
+            self.codex_chat_mark = candidate.chat_mark;
+        }
+        Ok(self)
     }
 
     pub fn connected(&self) -> Value {
@@ -852,6 +901,11 @@ impl<'a> Panel<'a> {
             return None;
         }
         self.binding_with_birth("orchestrator", provider, pane, &owner.birth, host)
+            .or_else(|| {
+                (provider == "codex" && self.attempt != self.participant)
+                    .then(|| self.codex_assignment_custody(host).ok()?.binding)
+                    .flatten()
+            })
     }
 
     fn observation_state(
@@ -1772,7 +1826,11 @@ impl<'a> Panel<'a> {
             chat_host: self.chat_host,
             ..panel
         };
-        Ok(panel)
+        if self.inherited_codex_parent.is_some() {
+            panel.with_native_codex_candidate()
+        } else {
+            Ok(panel)
+        }
     }
 
     fn capture_recent(&self, pane: &str) -> Result<String> {
@@ -3333,14 +3391,67 @@ impl<'a> Panel<'a> {
     }
 
     fn codex_assignment_custody(&self, host: &dyn AccountHost) -> Result<CodexAssignment> {
+        self.codex_assignment_custody_from(host, None)
+    }
+
+    fn codex_assignment_custody_from(
+        &self,
+        host: &dyn AccountHost,
+        declared: Option<&Value>,
+    ) -> Result<CodexAssignment> {
         let lead = self
             .leads
             .get("codex")
             .ok_or_else(|| Error::new("Codex lead is unavailable"))?;
         let main = PaneIdentity::sample_with_host(&self.main, host, true)?;
         let lead_id = PaneIdentity::sample_with_host(lead, host, true)?;
-        let anchor = self.binding_anchor("codex", lead, &lead_id.birth);
+        let direct = self.binding_anchor("codex", lead, &lead_id.birth);
+        let inherited = if let Some(declared) = declared {
+            Some(declared.clone())
+        } else if self.inherited_codex_parent.is_some()
+            || (self.attempt != self.participant
+                && account_binding::load_verified_binding(host, "orchestrator", &direct).is_none())
+        {
+            let origin = native_succession::account_origin(self, &main, &lead_id)?;
+            require(
+                self.inherited_codex_parent.is_none() || origin.is_some(),
+                "previous Main's Codex Lead requires explicit native adoption",
+            )?;
+            origin
+        } else {
+            None
+        };
+        let inherited = inherited
+            .filter(|value| !value.is_null())
+            .map(serde_json::from_value::<PersistedAccountBinding>)
+            .transpose()
+            .map_err(Error::new)?;
+        let anchor = if let Some(binding) = &inherited {
+            require(
+                binding.session == self.session_proof
+                    && binding.room == self.room
+                    && binding.provider == "codex"
+                    && binding.pane_id == lead_id.id
+                    && binding.pid == lead_id.pid
+                    && binding.birth == lead_id.birth,
+                "inherited native account custody changed",
+            )?;
+            BindingAnchor {
+                main_attempt: &binding.main_attempt,
+                main_owner: &binding.main_owner,
+                session: &binding.session,
+                ..direct
+            }
+        } else {
+            direct
+        };
         let binding = account_binding::load_verified_binding(host, "orchestrator", &anchor);
+        require(
+            inherited
+                .as_ref()
+                .is_none_or(|expected| binding.as_ref() == Some(expected)),
+            "original native account binding is missing or changed",
+        )?;
         let unavailable = || Error::new("Codex assignment account custody could not be verified");
         let root = match (self.codex_chat_mark, binding.as_ref()) {
             (CodexChatMark::Absent, None) => None,
@@ -5382,6 +5493,7 @@ fn run_with_host(
             && !options.has("task")
             && !options.has("native-result")
             && !options.has("native-reconcile")
+            && !options.has("native-adopt")
         {
             let main = crate::rows(&attempts)
                 .iter()
@@ -5390,7 +5502,23 @@ fn run_with_host(
             launch.permissions = Some(lead_permissions(main)?);
         }
         tx.check()?;
-        if options.has("native-reconcile") {
+        let panel = if typed
+            && [
+                "native-adopt",
+                "native-reconcile",
+                "native-result",
+                "task-id",
+            ]
+            .iter()
+            .any(|flag| options.has(flag))
+        {
+            panel.with_native_codex_candidate()?
+        } else {
+            panel
+        };
+        if options.has("native-adopt") {
+            native_succession::adopt(&panel, options, host, &tx)?
+        } else if options.has("native-reconcile") {
             native_result::reconcile(&panel, options, host, &attempts_cache, &tx)?
         } else if options.has("native-result") {
             native_assignment::register_result(&panel, options, host, &attempts_cache, &tx)?
@@ -7478,6 +7606,8 @@ mod tests {
         const ROOM: &str = "room-acct";
         const MAIN: &str = "att_11111111111111111111111111111111";
 
+        include!("native_succession_tests.rs");
+
         struct FakeLead {
             window: String,
             pane_id: String,
@@ -7504,6 +7634,8 @@ mod tests {
             event_lists: Cell<usize>,
             assignment_events: Cell<usize>,
             main_attempt: String,
+            main_participant: String,
+            ordinary_parent: Option<String>,
             main_pane: String,
             main_pid: u32,
             main_owner: Cell<&'static str>,
@@ -7560,6 +7692,8 @@ mod tests {
                     event_lists: Cell::new(0),
                     assignment_events: Cell::new(0),
                     main_attempt: MAIN.into(),
+                    main_participant: MAIN.into(),
+                    ordinary_parent: None,
                     main_pane: "%1".into(),
                     main_pid: pid,
                     main_owner: Cell::new("codex"),
@@ -7719,7 +7853,7 @@ mod tests {
                             self.main_pane,
                             self.main_attempt,
                             self.main_owner.get(),
-                            self.main_attempt,
+                            self.main_participant,
                             self.room,
                             if self.main_account_ready.get() {
                                 "1"
@@ -7732,7 +7866,12 @@ mod tests {
                             let dead = u8::from(self.dead_panes.borrow().contains(&lead.pane_id));
                             let alternate = self.alternate_parents.borrow();
                             let (room, parent) = alternate.get(&lead.pane_id).map_or(
-                                (self.room.as_str(), self.main_attempt.as_str()),
+                                (
+                                    self.room.as_str(),
+                                    self.ordinary_parent
+                                        .as_deref()
+                                        .unwrap_or(&self.main_attempt),
+                                ),
                                 |parent| ("", parent.as_str()),
                             );
                             lines.push(format!(
@@ -8403,7 +8542,7 @@ mod tests {
                             "closed": self.room_closed.get(),
                             "successor": if exact { successor } else { None },
                             "participants": [{
-                                "participant": self.main_attempt,
+                                "participant": self.main_participant,
                                 "role": "main",
                                 "provider": self.main_owner.get(),
                                 "joined": true
@@ -11901,7 +12040,7 @@ mod tests {
             }
             // Each transport failure is an independent live reservation. Reusing
             // one Lead across these unrelated tasks would violate its contract.
-            for scenario in 0..11 {
+            for scenario in 0..12 {
                 let tmp = TempDir::new("orch-native-case");
                 let repo = private_dir(&tmp.0.join("repo"));
                 let git = |args: &[&str]| {
@@ -13509,7 +13648,7 @@ mod tests {
                     );
                     assert!(spy.calls_named("kill-pane").is_empty());
                 }
-                if scenario >= 7 {
+                if (7..=10).contains(&scenario) {
                     // A round-1 crash can leave the packet written (7) or missing
                     // (8 through 10), with no binding record in either case.
                     native_assignment::CRASH_AFTER_BINDING_WRITE.with(|crash| crash.set(true));
@@ -13545,6 +13684,34 @@ mod tests {
                     let path = repo.join(&artifact);
                     let written = std::fs::read(&path).unwrap();
                     let intent = text(&crashed["refs"], "native_intent_sha256");
+                    let mut old_packet: Value = serde_json::from_slice(&written).unwrap();
+                    let old_fields = [
+                        "schema",
+                        "kind",
+                        "task",
+                        "parent_attempt_id",
+                        "room",
+                        "provider",
+                        "session",
+                        "main_pane",
+                        "lead_pane",
+                        "account",
+                        "account_verification",
+                        "checkout",
+                        "room_message_id",
+                        "payload_sha256",
+                        "payload",
+                        "round",
+                        "brief",
+                        "result_contract",
+                    ];
+                    let old = old_packet.as_object_mut().unwrap();
+                    old.shift_remove("attempt_id");
+                    assert!(old.keys().map(String::as_str).eq(old_fields));
+                    assert_eq!(
+                        oms_panel_core::digest(&serde_json::to_vec(&old_packet).unwrap()),
+                        intent
+                    );
                     let events_path = repo.join(".oms/lifecycle/events.jsonl");
                     let before = std::fs::read(&events_path).unwrap();
                     if scenario == 7 {
@@ -13554,6 +13721,17 @@ mod tests {
                             "{}",
                             error.message
                         );
+                        let mut changed: Value = serde_json::from_slice(&written).unwrap();
+                        changed["room_message_id"] = format!("msg-{}", "a".repeat(32)).into();
+                        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+                        let mismatch = send("native-one", "Crash window").unwrap_err();
+                        assert!(
+                            mismatch
+                                .message
+                                .contains("does not match its recorded intent")
+                        );
+                        assert!(spy.mutating_calls().is_empty());
+                        std::fs::write(&path, &written).unwrap();
                         assert_eq!(std::fs::read(&events_path).unwrap(), before);
                     } else {
                         std::fs::remove_file(&path).unwrap();
@@ -13696,6 +13874,139 @@ mod tests {
                         returned["result"]["sha256"].as_str().is_some(),
                         "{returned}"
                     );
+                }
+                if scenario == 11 {
+                    use oms_command_operations as events;
+                    use oms_command_operations::value::V;
+
+                    plan(&["claim", "--id", "native-one", "--provider", "codex"]);
+                    let panel = spy.load();
+                    let task = native_assignment::task(&panel, "native-one").unwrap();
+                    let custody = panel.codex_assignment_custody(&host).unwrap();
+                    let (_, _, verification) = binding_summary(custody.binding.as_ref());
+                    let pane = |p: &PaneIdentity| json!({"id":p.id,"window":p.window,"pid":p.pid,"birth":p.birth});
+                    let brief = "Inspect the legacy assignment";
+                    let payload = format!(
+                        "{} Turn {}. Task: {brief}",
+                        crate::native_children::TASK_PREFIX,
+                        "b".repeat(20)
+                    );
+                    let payload_digest = oms_panel_core::digest(payload.as_bytes());
+                    let mut packet = json!({"schema":1,"kind":"oms-native-assignment",
+                        "provider":"codex","parent_attempt_id":MAIN,"room":ROOM,"task":task,
+                        "session":panel.session_proof,"main_pane":pane(&custody.main),
+                        "lead_pane":pane(&custody.lead),"account":custody.binding,
+                        "account_verification":verification,
+                        "checkout":native_assignment::checkout(&panel, &panel.leads["codex"]).unwrap(),
+                        "room_message_id":format!("msg-{}", "c".repeat(32)),
+                        "payload":payload,"payload_sha256":payload_digest,
+                        "result_contract":"preserve task, lease, and attempt binding"});
+                    let intent = oms_panel_core::digest(&serde_json::to_vec(&packet).unwrap());
+                    let refs = json!({"native_assignment_schema":"1","native_transport":"intent",
+                        "native_intent_sha256":intent,"native_payload_sha256":payload_digest,
+                        "panel_room_id":ROOM,"panel_owner":"codex","panel_native_scheduling":"unmanaged",
+                        "plan_id":task["plan_id"],"lease_id":task["lease_id"]});
+                    let attempt = events::create_attempt(
+                        &repo,
+                        &events::StartRequest {
+                            provider: "codex".into(),
+                            tool: "panel-native-assignment".into(),
+                            task_id: "native-one".into(),
+                            parent_attempt_id: MAIN.into(),
+                            idempotency_key: "native-legacy-fixture".into(),
+                            refs: V::parse(&serde_json::to_vec(&refs).unwrap()).unwrap(),
+                            ..Default::default()
+                        },
+                        &spy.stop,
+                    )
+                    .unwrap();
+                    packet["attempt_id"] = attempt.as_str().into();
+                    let raw = serde_json::to_vec(&packet).unwrap();
+                    let sha = oms_panel_core::digest(&raw);
+                    let name = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
+                    let write = |bytes: &[u8]| {
+                        let store = Store::open(&repo).unwrap();
+                        let tx = store
+                            .transaction("legacy-native-fixture", Duration::from_secs(1))
+                            .unwrap();
+                        tx.write(
+                            Path::new(&name),
+                            bytes,
+                            false,
+                            native_assignment::MAX_BINDING,
+                        )
+                        .unwrap();
+                    };
+                    let mut changed = packet;
+                    changed["payload"] = format!("Changed intent. Task: {brief}").into();
+                    write(&serde_json::to_vec(&changed).unwrap());
+                    assert!(
+                        send("native-one", brief)
+                            .unwrap_err()
+                            .message
+                            .contains("intent digest")
+                    );
+                    assert!(spy.mutating_calls().is_empty());
+                    write(&raw);
+                    let adopt = Options::parse(&commands::strings(&[
+                        "--native-adopt",
+                        &attempt,
+                        "--assignment-sha256",
+                        &sha,
+                        "--room",
+                        ROOM,
+                    ]))
+                    .unwrap();
+                    assert!(
+                        run_with_host(&repo, "codex", &adopt, &spy, &spy.stop, &host)
+                            .unwrap_err()
+                            .message
+                            .contains("requires a typed assignment")
+                    );
+                    assert!(spy.mutating_calls().is_empty());
+                    let assigned = send("native-one", brief).unwrap();
+                    let assigned: Value = serde_json::from_slice(&assigned.1).unwrap();
+                    assert_eq!(assigned["status"], "submitted");
+                    assert_eq!(assigned["binding"], name);
+                    assert_eq!(spy.calls_named("send-keys").len(), 1);
+                    spy.calls.borrow_mut().clear();
+                    let replay = send("native-one", brief).unwrap();
+                    let replay: Value = serde_json::from_slice(&replay.1).unwrap();
+                    assert_eq!(replay["reused"], true);
+                    assert_eq!(replay["attempt_id"], attempt);
+                    assert!(
+                        send("native-one", "Change the original scope")
+                            .unwrap_err()
+                            .message
+                            .contains("brief changed")
+                    );
+                    assert!(
+                        send("native-two", "Try a second assignment")
+                            .unwrap_err()
+                            .message
+                            .contains("unresolved task")
+                    );
+                    assert!(spy.mutating_calls().is_empty());
+                    spy.task_snapshot_override.replace(Some(json!({
+                        "id":"native-one","state":"cancelled","completion_verified":true
+                    })));
+                    let next = send("native-two", "Start the next assignment").unwrap();
+                    let next: Value = serde_json::from_slice(&next.1).unwrap();
+                    assert_eq!(next["status"], "submitted");
+                    let retired = native_assignment::current_operation(&panel, &attempt).unwrap();
+                    assert_eq!(retired["state"], "cancelled");
+                    assert_eq!(retired["refs"]["native_resolution"], "retired");
+                    let room = commands::query(
+                        &spy,
+                        NativeCommand::Room,
+                        &repo,
+                        &["show", "--id", ROOM, "--exact", "--json"],
+                        &spy.stop,
+                    )
+                    .unwrap();
+                    assert!(crate::rows(&room["participants"]).iter().any(|member| {
+                        member["participant"] == attempt && member["joined"] == false
+                    }));
                 }
             }
         }

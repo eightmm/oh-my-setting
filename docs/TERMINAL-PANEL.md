@@ -2461,6 +2461,47 @@ changing the Plan. To assign that task again, explicitly release the exact Plan
 lease and claim a fresh one. Bound, sent and uncertain attempts retain their
 existing reconciliation path.
 
+#### Continue after a Main swap
+
+The successor Main first reads `oms panel --results --task-id TASK --json`. Its
+`adopt` next action supplies the exact current assignment digest and, when present,
+the public retained-result digest:
+
+```bash
+oms panel --repo . --room ROOM --native-adopt ATTEMPT \
+  --assignment-sha256 ASSIGNMENT_SHA256 --result-sha256 RESULT_SHA256
+```
+
+Omit `--result-sha256` only when the current result is absent. Adoption checks the
+ordered canonical Room Main-swap chain and exact target provider/harness/model,
+proves outgoing wrapper and native process generations are absent, and pins the
+fresh Main's session/pane custody. Reusing the same tmux pane is supported; a live,
+unknown or competing old Main is refused. The original ordinary Codex Lead,
+account/home and checkout remain exact. The original account receipt is verified
+through its frozen private anchor rather than reselected for the new Main.
+
+An immutable record is appended under the existing assignment directory. Its
+checked predecessor chain is bounded to 32 transitions. Old packets, report bytes,
+task claimant, lease/epoch, attempt and round stay intact; adoption neither sends
+input nor resets execution or spend identity. Repeating the same adoption is
+idempotent. Import, review, report revision and same-lease continuation then use the
+usual commands above. The Room participant remains stable while Main lifecycle
+attempts change, including when a supported Main provider swap changes the owner.
+
+If the canonical task was already done or cancelled, adoption records retirement
+custody only. It requires the exact frozen task/result and current Main proof, but
+does not claim that the historical Lead or checkout is still live. This permits
+administrative retirement after a legitimate checkout advance and cannot authorize
+new input for that settled task. Retire through exact-result reconciliation, then
+select the next ready task. Native child cleanup remains unconfirmed.
+
+The existing bounded tick reminder uses this checked custodian after adoption and
+freshly verifies its Main process and session. Its dedupe key pins the assignment,
+input/result digest and effective Main attempt, so a cue delivered to the old Main
+does not suppress the new Main's cue for the same unconsumed return. Both cues
+count against the existing daily quota. Retirement-only custody asks for administrative retirement;
+tick does not import a result, select a decision or dispatch another Lead round.
+
 Task, participant and list Results show transport, return claims, Main resolution
 and next action separately. Ordinary typed projection reads at most 20 assignments,
 each with bounded binding/result/source metadata; it does not reopen patch or

@@ -269,8 +269,12 @@ impl CheckedAssignment {
         ident(&packet["room"])?;
         ident(&packet["provider"])?;
         ident(&task["provider"])?;
+        let participant = packet
+            .get("parent_participant")
+            .unwrap_or(&packet["parent_attempt_id"]);
+        ident(participant)?;
         require(
-            packet["parent_attempt_id"] == task["claimed_by_participant"],
+            *participant == task["claimed_by_participant"],
             "native assignment claim owner differs from its parent",
         )?;
         let checkout = &packet["checkout"];
@@ -341,6 +345,14 @@ impl CheckedAssignment {
     }
     pub fn parent_attempt_id(&self) -> &str {
         self.packet["parent_attempt_id"].as_str().unwrap()
+    }
+    /// Main swaps preserve the Room participant while allocating a new lifecycle
+    /// attempt. Legacy packets used the same identity for both.
+    pub fn parent_participant(&self) -> &str {
+        self.packet
+            .get("parent_participant")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| self.parent_attempt_id())
     }
     pub fn room(&self) -> &str {
         self.packet["room"].as_str().unwrap()

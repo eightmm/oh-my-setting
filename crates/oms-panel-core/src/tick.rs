@@ -1346,7 +1346,7 @@ impl Env<'_> {
     /// evidence verification and every owner decision remain explicit operations.
     fn native_return_wake_reason(&self) -> std::result::Result<Option<String>, String> {
         let (session, _) = self.resolve_session();
-        let [_, main, _, _, room] = self.main_window(&session)?;
+        let [window, main, pane, member, room] = self.main_window(&session)?;
         let history = self.main_history(&room)?;
         let owner = history
             .iter()
@@ -1358,10 +1358,13 @@ impl Env<'_> {
             .filter(|row| {
                 row["tool"] == "panel-native-assignment"
                     && row["provider"] == "codex"
-                    && row["terminal"] == false
-                    && row["parent_attempt_id"] == main
                     && row["refs"]["panel_room_id"] == room
-                    && row["refs"]["panel_owner"] == owner
+                    && ((row["terminal"] == false
+                        && row["parent_attempt_id"] == main
+                        && row["refs"]["panel_owner"] == owner
+                        && row["refs"].get("native_succession_schema").is_none())
+                        || (row["refs"]["native_custodian_attempt"] == main
+                            && row["refs"]["native_resolution"] != "retired"))
                     && row["refs"]["native_assignment_schema"] == "1"
                     && row["refs"]["native_return_schema"] == "1"
             })
@@ -1385,7 +1388,75 @@ impl Env<'_> {
                     cut(&e.message, 120)
                 )
             })?;
+            let succession = crate::native_succession::metadata(&store, row).map_err(|e| {
+                format!(
+                    "native succession evidence unavailable: {}",
+                    cut(&e.message, 120)
+                )
+            })?;
+            if let Some(succession) = &succession {
+                if succession["main_attempt_id"] != main
+                    || succession["main_owner"] != owner
+                    || succession["participant"] != member
+                    || succession["room"] != room
+                    || metadata["parent_participant"] != member
+                {
+                    return Err("native successor does not match the current Main and Room".into());
+                }
+                crate::native_succession::prove_successor(
+                    &self.repo,
+                    &history,
+                    metadata["parent_attempt_id"].as_str().unwrap_or_default(),
+                    succession["previous_main_attempt_id"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    &main,
+                    &room,
+                    &member,
+                    self.services,
+                    self.stop,
+                )
+                .map_err(|e| e.message)?;
+                let stamp = self.pane_stamp(&pane)?;
+                let pid = stamp[1]
+                    .parse::<u32>()
+                    .map_err(|_| "native successor pane PID unavailable")?;
+                let process = crate::terminals::process(pid).map_err(|e| e.message)?;
+                let session_id = self
+                    .tmux(&["display-message", "-p", "-t", &pane, "#{session_id}"])?
+                    .ok_or("native successor pane session unavailable")?;
+                let session_proof = crate::terminals::provider_session_proof(
+                    self.services,
+                    &self.repo,
+                    session_id.trim(),
+                    self.stop,
+                )
+                .map_err(|e| e.message)?;
+                if stamp[3] != main
+                    || succession["main_pane"]["id"] != pane
+                    || succession["main_pane"]["window"] != window
+                    || succession["main_pane"]["pid"] != pid
+                    || succession["main_pane"]["birth"] != process.birth
+                    || succession["session"]
+                        != serde_json::to_value(session_proof).map_err(|e| e.to_string())?
+                {
+                    return Err("native successor Main process or session custody changed".into());
+                }
+            }
             let result = metadata["artifact_sha256"].as_str().unwrap_or("");
+            if succession
+                .as_ref()
+                .is_some_and(|s| s["mode"] == "retirement")
+                || (succession.is_some() && refs["native_resolution"] == "retiring")
+            {
+                pending.push(json!({"attempt":row["attempt_id"],"task":row["task_id"],
+                    "round":metadata["round"],"phase":"retirement","sha256":result,
+                    "assignment_sha256":metadata["binding_sha256"],"main":main}));
+                continue;
+            }
+            if row["terminal"] != false {
+                continue;
+            }
             let phase = match (
                 metadata["status"].as_str(),
                 refs["native_resolution"].as_str(),
@@ -1451,7 +1522,8 @@ impl Env<'_> {
                 .or_else(|| phase.map(|phase| (phase, result)))
             {
                 pending.push(json!({"attempt":row["attempt_id"],"task":row["task_id"],
-                    "round":metadata["round"],"phase":phase,"sha256":digest}));
+                    "round":metadata["round"],"phase":phase,"sha256":digest,
+                    "assignment_sha256":metadata["binding_sha256"],"main":main}));
             }
         }
         if pending.is_empty() {
@@ -3110,6 +3182,9 @@ mod tests {
         fail_send_at: Cell<usize>,
         ready: RefCell<String>,
         no_session: Cell<bool>,
+        main_pid: Cell<u32>,
+        main_attempt: RefCell<String>,
+        room_override: RefCell<Option<Value>>,
     }
     impl Fake {
         fn new(repo: &Path) -> Self {
@@ -3129,6 +3204,9 @@ mod tests {
                 fail_send_at: Cell::new(usize::MAX),
                 ready: RefCell::new("t1 ready\nt2 ready\n".into()),
                 no_session: Cell::new(false),
+                main_pid: Cell::new(4242),
+                main_attempt: RefCell::new(ATT.into()),
+                room_override: RefCell::default(),
             }
         }
         /// A live tmux panel main in room-1.
@@ -3159,17 +3237,25 @@ mod tests {
             }
             assert_eq!(a[0], "tmux", "only tmux is executed: {a:?}");
             let repo = self.repo.display().to_string();
+            let main = self.main_attempt.borrow().clone();
             Ok(match a[1].as_str() {
                 "has-session" => Self::out(i32::from(self.no_session.get()), ""),
                 "show-options" => Self::out(0, format!("{repo}\n")),
                 "show-environment" => Self::out(0, format!("OMS_ROOM_ID={ROOM}\n")),
                 "list-windows" if a[5].starts_with("#{window_id}") => {
-                    Self::out(0, format!("@2\t{ATT}\t{PANE}\t{MEMBER}\t{ROOM}\t{repo}\n"))
+                    Self::out(0, format!("@2\t{main}\t{PANE}\t{MEMBER}\t{ROOM}\t{repo}\n"))
                 }
                 "list-windows" => {
                     Self::out(0, format!("{repo}\t{ROOM}\t{MEMBER}\tclaude\t@2\tclaude\n"))
                 }
                 "display-message" if a[5] == "#{pane_in_mode}" => Self::out(0, "0\n"),
+                "display-message" if a[5] == "#{session_id}" => Self::out(0, "$1\n"),
+                "display-message" if a[5] == crate::terminals::PROVIDER_SESSION_IDENTITY_FORMAT => {
+                    Self::out(
+                        0,
+                        format!("$1\t{}\tfixture-socket\t.\n{repo}\n", std::process::id()),
+                    )
+                }
                 "display-message" => {
                     let n = self.stamps.get() + 1;
                     self.stamps.set(n);
@@ -3186,9 +3272,12 @@ mod tests {
                     let attempt = if n == self.change_stamp_at.get() {
                         format!("att_{}", "b".repeat(32))
                     } else {
-                        ATT.to_owned()
+                        main
                     };
-                    Self::out(0, format!("{PANE}\t4242\t0\t{attempt}\t{PANE}\n"))
+                    Self::out(
+                        0,
+                        format!("{PANE}\t{}\t0\t{attempt}\t{PANE}\n", self.main_pid.get()),
+                    )
                 }
                 "capture-pane" => {
                     let n = self.captures.get() + 1;
@@ -3237,7 +3326,7 @@ mod tests {
                     rows.extend(self.children.borrow().iter().cloned());
                     Self::out(0, serde_json::to_string(&rows).unwrap())
                 }
-                (NativeCommand::Room, "show") => Self::out(0, json!({"id": ROOM, "closed": false, "participants": [{"participant": MEMBER, "joined": true, "role": "main", "provider": "claude"}]}).to_string()),
+                (NativeCommand::Room, "show") => Self::out(0, self.room_override.borrow().clone().unwrap_or_else(|| json!({"id": ROOM, "closed": false, "participants": [{"participant": MEMBER, "joined": true, "role": "main", "provider": "claude"}]})).to_string()),
                 (NativeCommand::Plan, "ready") => Self::out(0, self.ready.borrow().clone()),
                 other => panic!("unscripted command {other:?}"),
             })
@@ -3335,7 +3424,7 @@ mod tests {
         fn idle_since(&self, time: &str, seconds_before: i64) {
             self.dir.put(
                 &format!(".oms/hooks/panel-activity/{MEMBER}.json"),
-                &json!({"state": "idle", "attempt": ATT, "since": at(time) - seconds_before})
+                &json!({"state": "idle", "attempt": *self.fake.main_attempt.borrow(), "since": at(time) - seconds_before})
                     .to_string(),
             );
         }
@@ -4884,14 +4973,22 @@ mod tests {
         rig.env(T).wake_main(dry, None)
     }
     fn native_return_fixture(rig: &Rig) -> (Value, Value, String) {
+        native_return_fixture_for(rig, ATT, ATT, "claude")
+    }
+    fn native_return_fixture_for(
+        rig: &Rig,
+        parent: &str,
+        participant: &str,
+        owner: &str,
+    ) -> (Value, Value, String) {
         use crate::native_contract::{CheckedAssignment, execution_contract};
         let attempt = "att_cccccccccccccccccccccccccccccccc";
         let task = json!({"id":"native-task","title":"Inspect the source","role":"researcher",
             "plan_id":format!("plan_{}","a".repeat(32)),"lease_id":format!("lease_{}","b".repeat(32)),
-            "lease_epoch":1,"provider":"claude","claimed_by_participant":ATT,"state":"claimed",
+            "lease_epoch":1,"provider":owner,"claimed_by_participant":participant,"state":"claimed",
             "claim_expired":false,"contract_stale":false,"allowed_paths":["src"],
             "forbidden_paths":[],"verify":"cargo test","covers":["criterion-one"]});
-        let mut packet = json!({"schema":1,"kind":"oms-native-assignment","parent_attempt_id":ATT,
+        let mut packet = json!({"schema":1,"kind":"oms-native-assignment","parent_attempt_id":parent,"parent_participant":participant,
             "provider":"codex","room":ROOM,"round":1,"session":"oms-fixture",
             "main_pane":{"id":PANE,"window":"@2","pid":"4242","birth":"main-birth"},
             "lead_pane":{"id":"%9","window":"@3","pid":"4243","birth":"lead-birth"},
@@ -4916,12 +5013,202 @@ mod tests {
         let path = paths["manifest"].as_str().unwrap().to_owned();
         rig.dir.put(&path, &manifest.to_string());
         let row = json!({"attempt_id":attempt,"tool":"panel-native-assignment","provider":"codex",
-            "parent_attempt_id":ATT,"task_id":"native-task","state":"working","terminal":false,
-            "refs":{"panel_room_id":ROOM,"panel_owner":"claude","plan_id":task["plan_id"],
+            "parent_attempt_id":parent,"task_id":"native-task","state":"working","terminal":false,
+            "refs":{"panel_room_id":ROOM,"panel_owner":owner,"plan_id":task["plan_id"],
                 "lease_id":task["lease_id"],"native_assignment_schema":"1","native_return_schema":"1",
                 "native_transport":"submitted","native_intent_sha256":intent,"native_binding":binding,
                 "native_binding_sha256":assignment.sha256(),"native_round":"1","native_resolution":"awaiting-report"}});
         (row, packet, path)
+    }
+    #[test]
+    fn native_return_wakes_follow_checked_main_succession_without_rebinding_work() {
+        let rig = typed_rig();
+        rig.fake.ready.borrow_mut().clear();
+        let old = "att_dddddddddddddddddddddddddddddddd";
+        let mut outgoing = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let exited = crate::terminals::process(outgoing.id()).unwrap();
+        let live = crate::terminals::process(std::process::id()).unwrap();
+        rig.fake.main_pid.set(live.pid);
+        {
+            let mut history = rig.fake.history.borrow_mut();
+            let refs = &mut history[0]["refs"];
+            refs["panel_owner"] = "claude".into();
+            refs["panel_model"] = "fixture-successor".into();
+            refs["panel_native_scheduling"] = "unmanaged".into();
+            history.push(json!({"attempt_id":old,"tool":"panel-main","provider":"claude",
+                "terminal":true,"state":"abandoned","reason_code":"main_swapped",
+                "refs":{"panel_room_id":ROOM,"panel_room_participant":MEMBER,
+                    "panel_native_scheduling":"unmanaged","panel_wrapper_pid":exited.pid.to_string(),
+                    "panel_wrapper_identity":exited.birth,"panel_native_pid":exited.pid.to_string(),
+                    "panel_native_identity":exited.birth}}));
+        }
+        rig.fake
+            .room_override
+            .replace(Some(json!({"id":ROOM,"closed":false,"successor":null,
+            "participants":[{"participant":MEMBER,"joined":true,"role":"main","provider":"claude"}],
+            "swaps":[{"participant":MEMBER,"attempt":old,"from":"claude","to":"claude",
+                "harness":"claude","model":"fixture-successor"}]})));
+        let (mut row, packet, path) = native_return_fixture_for(&rig, old, MEMBER, "claude");
+        let assignment =
+            crate::native_contract::CheckedAssignment::parse(&serde_json::to_vec(&packet).unwrap())
+                .unwrap()
+                .unwrap();
+        let mut record = json!({"schema":1,"kind":"oms-native-main-succession","mode":"continuation",
+            "attempt_id":assignment.attempt_id(),"parent_attempt_id":old,"room":ROOM,
+            "task_sha256":assignment.task_sha256(),"checkout_sha256":assignment.checkout_sha256(),
+            "assignment":{"path":row["refs"]["native_binding"],"sha256":assignment.sha256(),"round":1},
+            "result_sha256":null,"previous":null,
+            "custody":{"main_attempt_id":ATT,"main_owner":"claude","participant":MEMBER,
+                "session":{"session":"$1","server_pid":live.pid,"server_birth":live.birth,
+                    "socket_digest":crate::digest(b"fixture-socket")},
+                "main_pane":{"id":PANE,"window":"@2","pid":live.pid,"birth":live.birth},
+                "lead_pane":packet["lead_pane"],"account":packet["account"],
+                "account_verification":packet["account_verification"],"checkout":packet["checkout"]}});
+        let write_record = |row: &mut Value, record: &Value| {
+            let bytes = serde_json::to_vec(record).unwrap();
+            let digest = crate::digest(&bytes);
+            let path = format!(
+                ".oms/lifecycle/attempts/{}/native-succession-{digest}.json",
+                assignment.attempt_id()
+            );
+            rig.dir.put(&path, std::str::from_utf8(&bytes).unwrap());
+            row["refs"]["native_succession_schema"] = "1".into();
+            row["refs"]["native_succession_path"] = path.into();
+            row["refs"]["native_succession_sha256"] = digest.into();
+            row["refs"]["native_custodian_attempt"] = ATT.into();
+        };
+        // A cue delivered to the outgoing Main does not consume the successor's
+        // cue for the same still-unimported bytes, but both spend the same quota.
+        let successor_history = rig.fake.history.borrow().clone();
+        let successor_room = rig.fake.room_override.borrow().clone();
+        let mut outgoing_row = successor_history[0].clone();
+        outgoing_row["attempt_id"] = old.into();
+        rig.fake.history.replace(vec![outgoing_row]);
+        let mut old_room = successor_room.clone().unwrap();
+        old_room["swaps"] = json!([]);
+        rig.fake.room_override.replace(Some(old_room));
+        rig.fake.main_attempt.replace(old.into());
+        rig.fake.main_pid.set(exited.pid);
+        rig.idle_since(T, 3600);
+        rig.fake.children.borrow_mut().push(row.clone());
+        let old_cue = wake(&rig, false);
+        assert!(
+            old_cue.starts_with("woke ") && old_cue.contains("native-task (import)"),
+            "{old_cue}"
+        );
+        assert!(wake(&rig, false).contains("already woken today"));
+        let old_key = rig.dir.wakes()[0]["key"].clone();
+        outgoing.kill().unwrap();
+        outgoing.wait().unwrap();
+        rig.fake.history.replace(successor_history);
+        rig.fake.room_override.replace(successor_room);
+        rig.fake.main_attempt.replace(ATT.into());
+        rig.fake.main_pid.set(live.pid);
+        rig.idle_since(T, 3600);
+        write_record(&mut row, &record);
+        rig.fake.children.borrow_mut()[0] = row.clone();
+        let first = wake(&rig, false);
+        assert!(
+            first.starts_with("woke ") && first.contains("native-task (import)"),
+            "{first}"
+        );
+        assert_ne!(rig.dir.wakes()[1]["key"], old_key);
+        assert!(wake(&rig, false).contains("already woken today"));
+        let store = Store::open(&rig.dir.0).unwrap();
+        assert!(crate::native_results::read(&store, &row).unwrap().is_none());
+        let capture = crate::native_results::CaptureInput::read(&rig.dir.0, Path::new(&path))
+            .unwrap()
+            .capture(&rig.dir.0, Some(&assignment))
+            .unwrap();
+        let retained = {
+            let tx = store
+                .transaction("native-succession-fixture", Duration::from_secs(1))
+                .unwrap();
+            capture
+                .retain(
+                    &tx,
+                    &packet,
+                    row["refs"]["native_binding"].as_str().unwrap(),
+                )
+                .unwrap()
+        };
+        row["refs"]["native_result_schema"] = "1".into();
+        row["refs"]["native_result_path"] = retained["path"].clone();
+        row["refs"]["native_result_sha256"] = retained["sha256"].clone();
+        row["refs"]["native_resolution"] = "pending".into();
+        rig.fake.children.borrow_mut()[0] = row.clone();
+        let result = wake(&rig, false);
+        assert!(
+            result.starts_with("woke ") && result.contains("native-task (reconciliation)"),
+            "{result}"
+        );
+        assert!(wake(&rig, false).contains("already woken today"));
+        row["refs"]["native_resolution"] = "request-revision".into();
+        row["refs"]["native_resolution_result_sha256"] = retained["sha256"].clone();
+        rig.fake.children.borrow_mut()[0] = row.clone();
+        assert!(wake(&rig, true).contains("native-task (continuation)"));
+        // A retained record is not live authority. Refuse changed process,
+        // model, membership, chain or partial refs without sending another cue.
+        let sends = rig.fake.sent.borrow().len();
+        rig.fake.main_pid.set(exited.pid);
+        assert!(!wake(&rig, false).starts_with("woke "));
+        rig.fake.main_pid.set(live.pid);
+        rig.fake.history.borrow_mut()[0]["refs"]["panel_model"] = "other".into();
+        assert!(wake(&rig, false).contains("canonical swap target"));
+        rig.fake.history.borrow_mut()[0]["refs"]["panel_model"] = "fixture-successor".into();
+        rig.fake.children.borrow_mut()[0]["refs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_succession_sha256");
+        assert!(wake(&rig, false).contains("native succession evidence unavailable"));
+        rig.fake.children.borrow_mut()[0] = row.clone();
+        let active_room = rig.fake.room_override.borrow().clone().unwrap();
+        for invalid in [
+            json!({"successor":"room-fedcba654321"}),
+            json!({"closed":true}),
+            json!({"participants":[{"participant":MEMBER,"joined":true,
+                "role":"main","provider":"claude","parent":old}]}),
+        ] {
+            let mut invalid_room = active_room.clone();
+            invalid_room
+                .as_object_mut()
+                .unwrap()
+                .extend(invalid.as_object().unwrap().clone());
+            rig.fake.room_override.replace(Some(invalid_room));
+            assert!(wake(&rig, false).contains("exact current Room Main"));
+        }
+        let mut incomplete = active_room.clone();
+        incomplete.as_object_mut().unwrap().remove("successor");
+        rig.fake.room_override.replace(Some(incomplete));
+        assert!(wake(&rig, false).contains("exact current Room Main"));
+        rig.fake.room_override.replace(Some(active_room));
+        assert_eq!(rig.fake.sent.borrow().len(), sends);
+        // A settled-only adoption only asks Main to retire the assignment. The
+        // old input is never reopened, and its historical parent/claim stay fixed.
+        record["mode"] = "retirement".into();
+        record["result_sha256"] = retained["sha256"].clone();
+        write_record(&mut row, &record);
+        row["terminal"] = true.into();
+        row["refs"]["native_resolution"] = "retiring".into();
+        rig.fake.children.borrow_mut()[0] = row.clone();
+        let retiring = wake(&rig, false);
+        assert!(
+            retiring.starts_with("woke ") && retiring.contains("native-task (retirement)"),
+            "{retiring}"
+        );
+        assert!(wake(&rig, false).contains("already woken today"));
+        rig.fake.children.borrow_mut()[0]["refs"]["native_resolution"] = "retired".into();
+        assert!(wake(&rig, true).contains("no ready plan work"));
+        assert_eq!(row["parent_attempt_id"], old);
+        assert_eq!(assignment.parent_participant(), MEMBER);
+        assert_eq!(
+            rig.dir.wakes().len(),
+            4,
+            "one existing wake budget covers all successors and phases"
+        );
     }
     #[test]
     fn native_return_wakes_bind_the_current_owner_and_exact_import_or_result() {
