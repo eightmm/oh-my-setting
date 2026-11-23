@@ -198,5 +198,5 @@ Dry-run은 mutation이 없어야 하며 삭제 후에도 artifact evidence와 �
 | AR-04 | cache 공간 문제 확인; apply는 completion producer 이후 | 공간 inventory와 무변경 정리 계획; 승인된 apply의 경합 보호 |
 
 구현 에이전트는 최신 HEAD를 재확인하고 기존 runtime/SSH canonical test를 먼저 확장한다.
-선택한 코드 경로에 맞는 Rust·Linux/macOS 검증을 실행하며, 새 SSH 서버·GPU·유료 CI matrix는 추가하지 않는다.
+선택한 코드 경로에 맞는 Rust·Linux 검증을 실행하며, 새 SSH 서버·GPU·유료 CI matrix는 추가하지 않는다.
 이번 문서의 검증은 source 대조와 문서 참조 검사이며, 위 기능을 구현·실서버 검증했다고 보고하지 않는다.
