@@ -818,22 +818,27 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
     })
 }
 
-/// Keep the selected directory open through execution. Its stable generation
-/// excludes mutable contents: login/config writes do not change this proof.
-/// As with native Codex home evidence, unavailable birth time stays unknown.
+/// Keep the selected directory open through execution. Birth time is needed
+/// for a persisted generation, while the open directory proves this call's
+/// identity even on filesystems that do not report birth time.
 struct AccountHome {
-    provider: String,
     named: PathBuf,
     physical: PathBuf,
     directory: std::fs::File,
-    sha256: String,
+    sha256: Option<String>,
 }
 impl AccountHome {
-    fn capture(provider: &str, named: &Path) -> Option<Self> {
+    fn capture(provider: &str, named: &Path) -> Result<Self> {
+        let invalid = || {
+            Error::new(
+                75,
+                "selected provider account home is unavailable; no request was sent",
+            )
+        };
         if !owned_private(named) {
-            return None;
+            return Err(invalid());
         }
-        let physical = named.canonicalize().ok()?;
+        let physical = named.canonicalize().map_err(|_| invalid())?;
         let directory = std::fs::File::from(
             rustix::fs::open(
                 &physical,
@@ -843,27 +848,19 @@ impl AccountHome {
                     | rustix::fs::OFlags::CLOEXEC,
                 rustix::fs::Mode::empty(),
             )
-            .ok()?,
+            .map_err(|_| invalid())?,
         );
-        let sha256 = Self::digest(provider, &physical, &directory.metadata().ok()?)?;
+        let metadata = directory.metadata().map_err(|_| invalid())?;
         let proof = Self {
-            provider: provider.into(),
+            sha256: Self::digest(provider, &physical, &metadata),
             named: named.into(),
             physical,
             directory,
-            sha256,
         };
-        proof.current().then_some(proof)
+        proof.current().then_some(proof).ok_or_else(invalid)
     }
 
     fn digest(provider: &str, path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
-        if !metadata.is_dir()
-            || metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.mode() & 0o022 != 0
-            || metadata.ino() == 0
-        {
-            return None;
-        }
         let birth = metadata
             .created()
             .ok()?
@@ -887,21 +884,18 @@ impl AccountHome {
     }
 
     fn current(&self) -> bool {
+        let (Ok(opened), Ok(visible)) = (
+            self.directory.metadata(),
+            std::fs::symlink_metadata(&self.physical),
+        ) else {
+            return false;
+        };
         owned_private(&self.named)
             && self.named.canonicalize().ok().as_ref() == Some(&self.physical)
-            && [
-                &self.directory.metadata(),
-                &std::fs::symlink_metadata(&self.physical),
-            ]
-            .into_iter()
-            .all(|metadata| {
-                metadata
-                    .as_ref()
-                    .ok()
-                    .and_then(|metadata| Self::digest(&self.provider, &self.physical, metadata))
-                    .as_deref()
-                    == Some(self.sha256.as_str())
-            })
+            && owned_private_directory(&opened)
+            && owned_private_directory(&visible)
+            && opened.ino() != 0
+            && (opened.dev(), opened.ino()) == (visible.dev(), visible.ino())
     }
 }
 pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>, Option<String>);
@@ -927,11 +921,14 @@ pub(crate) fn session_environment(provider: &str, location: &Path) -> Result<Ses
     Ok((bound.environment, bound.remove, account))
 }
 fn owned_private(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).ok().is_some_and(|m| {
-        m.file_type().is_dir()
-            && m.uid() == rustix::process::getuid().as_raw()
-            && m.mode() & 0o022 == 0
-    })
+    std::fs::symlink_metadata(path)
+        .as_ref()
+        .is_ok_and(owned_private_directory)
+}
+fn owned_private_directory(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir()
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && metadata.mode() & 0o022 == 0
 }
 
 fn codex_models(home: &Path) -> Option<BTreeSet<String>> {
@@ -2162,23 +2159,28 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         ]);
         environment.extend(transport.environment.clone());
         environment.extend(extra_env.iter().cloned());
-        if let (Some(home), Some(spec)) = (&account_home, isolated(&route.provider))
-            && environment
-                .iter()
-                .rev()
-                .find(|(key, _)| key == spec.env)
-                .is_none_or(|(_, value)| canonical(Path::new(value)) != canonical(home))
-        {
-            return fail("provider account home changed after selection");
-        }
         let named_account = account
             .as_deref()
             .filter(|id| !id.is_empty() && *id != "default");
-        let account_home = named_account.and_then(|_| {
-            account_home
-                .as_deref()
-                .and_then(|home| AccountHome::capture(&route.provider, home))
-        });
+        let account_home = if let (Some(home), Some(spec)) =
+            (&account_home, isolated(&route.provider))
+        {
+            let (_, value) = environment
+                .iter_mut()
+                .rev()
+                .find(|(key, _)| key == spec.env)
+                .filter(|(_, value)| canonical(Path::new(value.as_os_str())) == canonical(home))
+                .ok_or_else(|| Error::new(2, "provider account home changed after selection"))?;
+            let proof = named_account
+                .map(|_| AccountHome::capture(&route.provider, home))
+                .transpose()?;
+            if let Some(proof) = &proof {
+                *value = proof.physical.as_os_str().to_owned();
+            }
+            proof
+        } else {
+            None
+        };
         if let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
             environment.push((
                 "OMS_BASE_SHA".into(),
@@ -2265,7 +2267,9 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                     &usage_repo,
                     route,
                     account.as_deref(),
-                    account_home.as_ref().map(|home| home.sha256.as_str()),
+                    account_home
+                        .as_ref()
+                        .and_then(|home| home.sha256.as_deref()),
                     write,
                     &extra_env,
                     context.interrupted,
@@ -2362,7 +2366,10 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             decode_output(&route.provider, &result.stdout)
         };
         let home_changed = account_home.as_ref().is_some_and(|home| !home.current());
-        let account_observed = named_account.is_none() || account_home.is_some();
+        let account_observed = named_account.is_none()
+            || account_home
+                .as_ref()
+                .is_some_and(|home| home.sha256.is_some());
         let accounting = if home_changed {
             crate::usage::finish_unobserved(
                 &usage_repo,
@@ -4218,6 +4225,29 @@ mod bridge_route_tests {
             resolve_route(source, "antigravity:account=w", "m", "auto", "worker").unwrap_err();
         assert_eq!(err.message, UNPROVED);
     }
+    #[test]
+    fn account_home_revalidates_directory_without_persisted_generation() {
+        isolated_transport(
+            "account_home_revalidates_directory_without_persisted_generation",
+            "custody",
+            |_, home| {
+                fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
+                let mut proof = AccountHome::capture("codex", home).unwrap();
+                proof.sha256 = None;
+                fs::write(home.join("settings"), "ordinary update").unwrap();
+                assert!(proof.current());
+                let displaced = home.with_extension("displaced");
+                fs::rename(home, &displaced).unwrap();
+                fs::create_dir(home).unwrap();
+                fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
+                assert!(!proof.current());
+                fs::remove_dir(home).unwrap();
+                std::os::unix::fs::symlink(displaced, home).unwrap();
+                assert!(AccountHome::capture("codex", home).is_err());
+            },
+        );
+    }
+
     #[test]
     fn sandbox_rw_dirs_cover_every_isolated_account_home() {
         let root = std::env::temp_dir().join(format!("oms-rw-{}", std::process::id()));

@@ -3766,7 +3766,7 @@ fn provider_usage_follows_bound_account_home_generation() {
                 "fi\n",
                 "n=$(cat \"$HOME/usage-total\")\n",
                 "thread=continuity-thread\n",
-                "if [ -f \"$HOME/replace-account-home\" ]; then thread=foreign-thread; fi\n",
+                "if [ -f \"$HOME/replace-account-home\" ] && [ \"$(cat \"$HOME/replace-account-home\")\" = foreign ]; then thread=foreign-thread; fi\n",
                 "printf '{\"type\":\"thread.started\",\"thread_id\":\"%s\"}\\n' \"$thread\"\n",
                 "printf '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\\n'\n",
                 "printf '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":%s,\"output_tokens\":0,\"cached_input_tokens\":0,\"total_tokens\":%s}}\\n' \"$n\" \"$n\"\n",
@@ -3814,12 +3814,36 @@ fn provider_usage_follows_bound_account_home_generation() {
                 );
                 call.receipt.identity.account_scope_sha256.clone()
             };
+            fs::set_permissions(&original, fs::Permissions::from_mode(0o770)).unwrap();
+            let invalid = invoke(90);
+            assert_ne!(invalid.0, 0, "{}", message(&invalid));
+            assert!(account_log(home).is_empty());
+            assert!(physical::load(&repo.0, &STOP).unwrap().is_empty());
+            assert!(usage::load(&repo.0).unwrap().calls.is_empty());
+            fs::set_permissions(&original, fs::Permissions::from_mode(0o700)).unwrap();
+
+            let replace_during_call = |total, reported_session| {
+                let before = account_log(home).len();
+                fs::write(home.join("replace-account-home"), reported_session).unwrap();
+                let interrupted = invoke(total);
+                fs::remove_file(home.join("replace-account-home")).unwrap();
+                assert_ne!(interrupted.0, 0, "{}", message(&interrupted));
+                assert_eq!(account_log(home).len(), before + 1);
+                let output = String::from_utf8_lossy(&interrupted.1);
+                let report = fs::read_to_string(output.lines().next().unwrap()).unwrap();
+                assert!(
+                    report.contains("home changed during invocation"),
+                    "{report}"
+                );
+            };
             let first = invoke(100);
             assert_eq!(first.0, 0, "{}", message(&first));
             if fs::metadata(&original).unwrap().created().is_err() {
                 assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
                 let next = invoke(120);
                 assert_eq!(next.0, 0, "{}", message(&next));
+                assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
+                replace_during_call(140, "same");
                 assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
                 return;
             }
@@ -3865,11 +3889,7 @@ fn provider_usage_follows_bound_account_home_generation() {
             );
             // A replacement can report another thread. Keep the exact intent's
             // unknown liability and cleanup even with a capacity-looking error.
-            let before = account_log(home).len();
-            fs::write(home.join("replace-account-home"), "replace\n").unwrap();
-            let interrupted = invoke(700);
-            assert_ne!(interrupted.0, 0, "{}", message(&interrupted));
-            assert_eq!(account_log(home).len(), before + 1);
+            replace_during_call(700, "foreign");
             assert_eq!(
                 assert_latest(None, usage::Phase::Unknown).as_ref(),
                 Some(&replaced_scope)
@@ -3883,13 +3903,6 @@ fn provider_usage_follows_bound_account_home_generation() {
             assert!(receipt.source_sha256.is_some());
             assert_eq!(receipt.usage, usage::Usage::default());
             assert_eq!(receipt.cleanup_complete, Some(true));
-            let output = String::from_utf8_lossy(&interrupted.1);
-            let report = fs::read_to_string(output.lines().next().unwrap()).unwrap();
-            assert!(
-                report.contains("home changed during invocation"),
-                "{report}"
-            );
-            fs::remove_file(home.join("replace-account-home")).unwrap();
             let after = invoke(730);
             assert_eq!(after.0, 0, "{}", message(&after));
             assert_latest(None, usage::Phase::Final).unwrap();
