@@ -446,9 +446,12 @@ impl oms_command_plan::Services for ControlServices<'_> {
         let child = self
             .run_supervised(spawn, self.interrupted)
             .map_err(plan_error)?;
+        let exit = child.code.clamp(0, 255) as u8;
         Ok(PlanExecution {
-            exit: child.code.clamp(0, 255) as u8,
-            runner_exit: 0,
+            exit,
+            // Plan expects the runner to propagate the observed command status.
+            // Incomplete cleanup or drainage has already returned an error above.
+            runner_exit: exit,
             timed_out: child.timed_out,
             output_limited: child.output_limited,
             launch_error: false,
@@ -3415,20 +3418,69 @@ mod tests {
             (supervised.code, supervised.stdout, supervised.stderr),
             (3, b"out".to_vec(), b"err".to_vec())
         );
-        let plan = oms_command_plan::Services::supervise(
-            &control,
-            &SupervisedCommand {
-                argv: sh("printf plan; exit 0"),
-                cwd: root.path().to_owned(),
-                wall: Duration::from_secs(20),
-                output_limit: 1024,
-                label: "t",
-                remove_environment: Vec::new(),
-                environment: Vec::new(),
-            },
-        )
-        .unwrap();
-        assert_eq!((plan.exit, plan.output.as_slice()), (0, b"plan".as_slice()));
+        for exit in [0, 1, 7] {
+            let plan = oms_command_plan::Services::supervise(
+                &control,
+                &SupervisedCommand {
+                    argv: sh(&format!("printf plan; exit {exit}")),
+                    cwd: root.path().to_owned(),
+                    wall: Duration::from_secs(20),
+                    output_limit: 1024,
+                    label: "t",
+                    remove_environment: Vec::new(),
+                    environment: Vec::new(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (plan.exit, plan.runner_exit, plan.output.as_slice()),
+                (exit, exit, b"plan".as_slice())
+            );
+            assert!(
+                !plan.launch_error
+                    && !plan.supervision_error
+                    && !plan.timed_out
+                    && !plan.output_limited
+            );
+        }
+        // Exercise the actual acceptance consumer too: an ordinary failed
+        // check must remain a failure, so goal-drive can dispatch the first
+        // worker. The Plan supervision-mismatch guard is left intact.
+        let repo = Tmp::repo(&[(".gitignore", ".oms/\n"), ("check.sh", "exit 1\n")]);
+        let plan_call = |args: &[&str]| {
+            oms_command_plan::run_with_services(
+                &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                repo.path(),
+                &stop,
+                &control,
+            )
+        };
+        let (code, out, err) = plan_call(&[
+            "init",
+            "--goal",
+            "make the failing check pass",
+            "--accept",
+            "bash check.sh",
+            "--accept-files",
+            "check.sh",
+        ]);
+        assert_eq!(
+            code,
+            0,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        let (code, out, err) = plan_call(&["accept"]);
+        assert_eq!(
+            code,
+            3,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        assert!(String::from_utf8_lossy(&out).contains("plan-accept: fail (exit 1,"));
+        assert!(!String::from_utf8_lossy(&out).contains("acceptance-supervision-failed"));
     }
 
     #[test]
