@@ -3784,6 +3784,35 @@ fn worker_elapsed(report: &Value, call: &Value, observed: f64) -> Option<String>
         .flatten()
 }
 
+fn valid_checkout_label(observation: &Value) -> Option<String> {
+    let detached = match observation.get("detached") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => return None,
+    };
+    let branch = if detached {
+        match observation.get("branch") {
+            None | Some(Value::Null) => "detached",
+            Some(_) => return None,
+        }
+    } else {
+        observation.get("branch").and_then(Value::as_str)?
+    };
+    let worktree = observation.get("worktree").and_then(Value::as_str)?;
+    if !branch.is_empty()
+        && !worktree.is_empty()
+        && !worktree.contains(['/', '\\'])
+        && !branch.starts_with(['/', '\\'])
+        && !branch.chars().any(char::is_whitespace)
+        && clean(worktree, 4096) == worktree
+        && clean(branch, 4096) == branch
+    {
+        Some(format!("Branch {branch} · Worktree {worktree}"))
+    } else {
+        None
+    }
+}
+
 fn checkout_line(
     report: &Value,
     main: &Value,
@@ -3791,31 +3820,30 @@ fn checkout_line(
     boxed: bool,
     colored: bool,
 ) -> String {
-    let observation = &report["board_checkout"];
     let checkout = if report["collection"]["ok"] == true
-        && report["collection"]["pending"] != true
         && report["capacity_stale"] != true
         && !text(main, "attempt").is_empty()
-        && observation["attempt"] == main["attempt"]
     {
-        let branch = if observation["detached"] == true {
-            "detached"
+        if report["collection"]["pending"] != true {
+            let observation = &report["board_checkout"];
+            (observation["attempt"] == main["attempt"])
+                .then(|| valid_checkout_label(observation))
+                .flatten()
         } else {
-            text(observation, "branch")
-        };
-        let worktree = text(observation, "worktree");
-        if !branch.is_empty()
-            && !worktree.is_empty()
-            && !worktree.contains(['/', '\\'])
-            && !branch.starts_with(['/', '\\'])
-            && !branch.chars().any(char::is_whitespace)
-            && clean(worktree, 4096) == worktree
-            && clean(branch, 4096) == branch
-        {
-            format!("Branch {branch} · Worktree {worktree}")
-        } else {
-            "Checkout unknown".to_owned()
+            // Pending reports never trust raw `board_checkout`; they require an
+            // explicit display-only last-known proof bound to this room and Main.
+            let proof = &report["board_checkout_last_known"];
+            let room_id = text(&report["room"], "id");
+            (proof["display_only"] == true
+                && !room_id.is_empty()
+                && report["room"]["closed"] != true
+                && report["room"]["successor"].is_null()
+                && proof["room"] == report["room"]["id"]
+                && proof["attempt"] == main["attempt"])
+                .then(|| valid_checkout_label(proof))
+                .flatten()
         }
+        .unwrap_or_else(|| "Checkout unknown".to_owned())
     } else {
         "Checkout unknown".to_owned()
     };
@@ -6507,6 +6535,124 @@ mod tests {
         let mut empty = report(Value::Null);
         empty["room"]["participants"][0]["model"] = json!("");
         assert_eq!(model_label(&calls(&empty)[0]), "—");
+    }
+
+    #[test]
+    fn pending_checkout_requires_valid_bound_display_only_proof() {
+        let read = BTreeMap::new();
+        let make_pending = |proof: Option<Value>| {
+            let mut report = json!({
+                "collection": {"ok": true, "pending": true},
+                "room": {
+                    "id": "room-checkout",
+                    "closed": false,
+                    "successor": null,
+                    "owner": "main-1",
+                    "participants": [{
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "attempt": "main-1",
+                        "state": "working",
+                        "joined": true,
+                    }]
+                },
+                "room_attempts": {
+                    "main-1": {
+                        "attempt_id": "main-1",
+                        "tool": "panel-main",
+                        "provider": "codex",
+                        "state": "working",
+                        "created_at": "2026-11-23T05:00:00Z",
+                        "refs": {"panel_room_id": "room-checkout", "panel_role": "main"}
+                    }
+                },
+                "board_checkout": {
+                    "attempt": "main-1",
+                    "branch": "raw-untrusted",
+                    "worktree": "raw-wt",
+                    "detached": false
+                }
+            });
+            if let Some(proof) = proof {
+                report["board_checkout_last_known"] = proof;
+            }
+            report
+        };
+
+        // Raw `board_checkout` without explicit display-only proof is never trusted on pending.
+        let raw_only = frame(&make_pending(None), &Default::default(), 100, 20, &read).join("\n");
+        assert!(
+            raw_only.contains("Checkout unknown") && !raw_only.contains("raw-untrusted"),
+            "{raw_only}"
+        );
+
+        // Valid bound display-only proof preserves the stable label during pending refresh.
+        let valid = make_pending(Some(json!({
+            "room": "room-checkout",
+            "attempt": "main-1",
+            "branch": "oms/review",
+            "worktree": "scratch-r37",
+            "detached": false,
+            "display_only": true
+        })));
+        let rendered = frame(&valid, &Default::default(), 100, 20, &read).join("\n");
+        assert!(
+            rendered.contains("Branch oms/review · Worktree scratch-r37")
+                && !rendered.contains("Main elapsed"),
+            "{rendered}"
+        );
+
+        // Detached valid bound proof also renders cleanly.
+        let detached = make_pending(Some(json!({
+            "room": "room-checkout",
+            "attempt": "main-1",
+            "branch": null,
+            "worktree": "scratch-r37",
+            "detached": true,
+            "display_only": true
+        })));
+        let rendered = frame(&detached, &Default::default(), 100, 20, &read).join("\n");
+        assert!(
+            rendered.contains("Branch detached · Worktree scratch-r37"),
+            "{rendered}"
+        );
+
+        // Wrong room, wrong attempt, missing display_only, or malformed metadata degrade to unknown.
+        for bad in [
+            json!({"room": "other-room", "attempt": "main-1", "branch": "oms/review", "worktree": "scratch-r37", "detached": false, "display_only": true}),
+            json!({"room": "room-checkout", "attempt": "main-2", "branch": "oms/review", "worktree": "scratch-r37", "detached": false, "display_only": true}),
+            json!({"room": "room-checkout", "attempt": "main-1", "branch": "oms/review", "worktree": "scratch-r37", "detached": false, "display_only": false}),
+            json!({"room": "room-checkout", "attempt": "main-1", "branch": "bad branch", "worktree": "scratch-r37", "detached": false, "display_only": true}),
+            json!({"room": "room-checkout", "attempt": "main-1", "branch": "oms/review", "worktree": "../escape", "detached": false, "display_only": true}),
+            json!({"room": "room-checkout", "attempt": "main-1", "branch": "oms/review", "worktree": "scratch-r37", "detached": true, "display_only": true}),
+        ] {
+            let line = frame(
+                &make_pending(Some(bad)),
+                &Default::default(),
+                100,
+                20,
+                &read,
+            )
+            .join("\n");
+            assert!(line.contains("Checkout unknown"), "{line}");
+        }
+
+        // Closed/superseded room or stale/failed collection ignores the display-only proof.
+        let mut stale = valid.clone();
+        stale["capacity_stale"] = json!(true);
+        assert!(
+            frame(&stale, &Default::default(), 100, 20, &read)
+                .join("\n")
+                .contains("Checkout unknown")
+        );
+        let mut closed = valid;
+        closed["room"]["closed"] = json!(true);
+        assert!(
+            frame(&closed, &Default::default(), 100, 20, &read)
+                .join("\n")
+                .contains("Checkout unknown")
+        );
     }
 
     #[test]
