@@ -1864,7 +1864,7 @@ fn queue_add_edit_move_list_show_cancel_and_bounds() {
     assert_eq!(number_of(&f.ok(&["list"]), "revision"), 0);
     fs::write(f.0.join("real.json"), "{}").unwrap();
     symlink(f.0.join("real.json"), &queue).unwrap();
-    f.bad(&["list"]);
+    f.refused(&["list"], "stage=queue-read");
     fs::remove_file(&queue).unwrap();
     // The bound applies to the indented bytes actually written: compact 1 MB, indented over 4 MiB.
     let pad = vec!["1"; 500_000].join(",");
@@ -1912,6 +1912,45 @@ fn concurrent_adds_serialize_on_the_queue_lock() {
         .filter(|e| e.file_name().to_string_lossy().starts_with(".queue.json."))
         .count();
     assert_eq!(leftovers, 0);
+
+    // Faults remain refusals, but identify the failed boundary without printing
+    // queue text, repository paths, or native error strings.
+    let inputs = f.0.join(".oms/inputs");
+    let queue = inputs.join("queue.json");
+    let original = fs::read(&queue).unwrap();
+    let refused_stage = |stage: &str| {
+        let mut args = vec!["add"];
+        args.extend(ROUTE);
+        args.extend(["--text", "private-queue-marker"]);
+        let (code, output, error) = f.with(&args, &[]);
+        assert_eq!((code, output), (2, J::Null));
+        assert!(error.contains(stage), "{error}");
+        assert!(!error.contains("private-queue-marker"));
+        assert!(!error.contains(f.0.to_str().unwrap()));
+    };
+    let lock = inputs.join(".queue.lock");
+    fs::remove_file(&lock).unwrap();
+    symlink(&queue, &lock).unwrap();
+    refused_stage("stage=queue-lock-open");
+    assert_eq!(fs::read(&queue).unwrap(), original);
+    fs::remove_file(&lock).unwrap();
+    let ignore = inputs.join(".gitignore");
+    fs::write(&ignore, "").unwrap();
+    refused_stage("stage=ignore-check");
+    fs::remove_file(&ignore).unwrap();
+    fs::create_dir(&ignore).unwrap();
+    refused_stage("stage=ignore-inspection");
+    fs::remove_dir(&ignore).unwrap();
+    fs::write(&ignore, "*\n").unwrap();
+    let saved = f.0.join(".oms/saved-inputs");
+    fs::rename(&inputs, &saved).unwrap();
+    fs::write(&inputs, "private-directory-marker").unwrap();
+    refused_stage("stage=input-directory");
+    fs::remove_file(&inputs).unwrap();
+    fs::rename(saved, &inputs).unwrap();
+    assert_eq!(fs::read(&queue).unwrap(), original);
+    f.queue("steer", "after diagnostic refusals", &[]);
+    assert_eq!(number_of(&f.state(), "revision"), 7);
 }
 
 #[test]

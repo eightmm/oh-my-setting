@@ -43,9 +43,9 @@
 - CI is Linux-only and scopes PRs and main pushes alike using pure-Rust jobs
   (Linux lint, Rust fmt/clippy/tests on Ubuntu, pure-Bash focused E2E suites,
   and a Linux copy-install lifecycle test) with pinned Rust `1.99.1`. macOS
-  remains a supported runtime and install host (verified locally with
-  `tests/bsd-portability-smoke.sh` and GNU/BSD-compatible scripts). Only
-  plan-authorized skips pass the stable gate. CI remains authoritative.
+  remains a supported runtime and install host with GNU/BSD-compatible scripts
+  (no macOS CI; `tests/bsd-portability-smoke.sh` runs on the host userland).
+  Only plan-authorized skips pass the stable gate. CI remains authoritative.
 - Every tracked file passes the outbound scrubber
   (`scrubber_passes_tracked_repository_sources`): in fixtures, split key-shaped
   strings and literal home paths across quotes, and avoid identifiers that read
