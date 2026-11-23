@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `docs/examples/agent-adapter-conformance.sh` is a reference check of the
+  one-shot custom adapter contract: adapter name, bounded `--version`/`--help`
+  probes and, with `--run`, read and write calls in a throwaway repository
+  (exit, stdout answer, no leftover process group, unchanged prompt, no commit,
+  no `.oms`, clean worktree on read). `--self-test` checks it against stubs.
 - `oms connect-services --account antigravity:ID --home PATH` registers a
   local Antigravity ADC profile home (`--verify`, `--remove`; `--repair` is
   refused). Records live in `provider-accounts.antigravity.json` and
@@ -542,6 +547,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- CI is now Linux-only: removed the `macos-latest` Rust and install lifecycle
+  jobs (and macOS-only workflow steps) from `.github/workflows/test.yml`,
+  keeping `lint`, `rust (ubuntu-24.04)`, `focused`,
+  `native (ubuntu-latest, copy)`, and `gate` intact. macOS remains a supported
+  runtime and installation host, and `tests/bsd-portability-smoke.sh` remains
+  wired in `scripts/check.sh` for GNU/BSD userland verification.
 - A panel Overall Main now manages only. Its startup contract and the
   `oms-panel-orchestrator` skill no longer allow "integration and unblocking"
   edits: every repository change goes to a worker or Provider Lead, fixes
