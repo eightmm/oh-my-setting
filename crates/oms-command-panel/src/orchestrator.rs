@@ -636,6 +636,17 @@ impl Observations {
         self.chats.get(participant)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn agy_first_child_watch(
+        &self,
+    ) -> Option<std::sync::Arc<crate::wakeup::AgyRosterWatch>> {
+        let sample = self.panes.get("antigravity")?;
+        sample
+            .agy_empty_roster_current
+            .then(|| sample.agy_parent.empty_roster_watch())
+            .flatten()
+    }
+
     pub(crate) fn clear_chats(&mut self) {
         self.chats.clear();
     }
@@ -717,6 +728,8 @@ struct Observation {
     dismiss_pending_usage: Option<Instant>,
     agy_parent: crate::native_children::AgyParent,
     agy_roster_scope: Option<(ChatPane, String)>,
+    #[cfg(target_os = "linux")]
+    agy_empty_roster_current: bool,
 }
 
 impl<'a> Panel<'a> {
@@ -1191,6 +1204,10 @@ impl<'a> Panel<'a> {
                     ..Observation::default()
                 };
             }
+            #[cfg(target_os = "linux")]
+            {
+                sample.agy_empty_roster_current = false;
+            }
             let (account_id, account_pinned, verification, bound_digest) = match &binding {
                 Some(b) => (
                     b.account_id.clone(),
@@ -1328,7 +1345,7 @@ impl<'a> Panel<'a> {
                             .then(|| (pane, fresh.participant.clone()))
                         });
                     if sample.agy_roster_scope != agy_roster_scope {
-                        sample.agy_parent.take_roster();
+                        sample.agy_parent.clear_roster_proof();
                         sample.agy_roster_scope = agy_roster_scope;
                     }
                     let mut observed = crate::native_children::observe(
@@ -1339,6 +1356,14 @@ impl<'a> Panel<'a> {
                         &mut sample.agy_parent,
                         sample.agy_roster_scope.is_some(),
                     );
+                    #[cfg(target_os = "linux")]
+                    {
+                        sample.agy_empty_roster_current = sample.agy_roster_scope.is_some()
+                            && observed.rows.is_empty()
+                            && report["provider_activity"][provider]["children"]
+                                .as_array()
+                                .is_none_or(Vec::is_empty);
+                    }
                     if provider == "claude" {
                         let mut located = Vec::new();
                         let sighting = (provider == "claude" && chat_pane.is_some())
