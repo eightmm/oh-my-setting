@@ -6,6 +6,12 @@ use crate::{Result, decision, error, require};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
+/// Automatic planning's fixed council quorum. The producer requests exactly this
+/// and admission pins it, so a retained manifest cannot declare a smaller one.
+pub const AUTO_COUNCIL_PROVIDERS: [&str; 3] = ["codex", "claude", "antigravity"];
+/// Rebuttal rounds the automatic planning council runs after the initial round.
+pub const AUTO_COUNCIL_ROUNDS: u64 = 1;
+
 /// Native observation for one call. Requested model is not served-model proof;
 /// actual/fallback provenance remains in the existing usage receipts.
 pub struct CouncilOutput {
@@ -479,15 +485,18 @@ pub fn validate_proposal(store: &Store, proposal: &Value) -> Result<Option<Valid
         .map_err(|_| error("discussion question is not UTF-8"))?;
     let route = manifest.get("synthesis_route");
     json::keys(route, &["provider", "requested_model"], &[])?;
-    let providers = manifest.get("providers").strings()?;
-    let rounds = integer(manifest.get("rounds"), 1, 3, "discussion rounds")?;
+    require(
+        manifest.get("providers").strings()? == AUTO_COUNCIL_PROVIDERS
+            && integer(manifest.get("rounds"), 1, 3, "discussion rounds")? == AUTO_COUNCIL_ROUNDS,
+        "discussion council differs from the automatic planning quorum",
+    )?;
     let directory = Path::new(path).parent().unwrap();
     validate_council_synthesis(
         &json::canonical(manifest.get("report"))?,
         question_text,
-        &providers,
+        &AUTO_COUNCIL_PROVIDERS,
         (route.text("provider"), route.text("requested_model")),
-        rounds,
+        AUTO_COUNCIL_ROUNDS,
         |name| store.read(directory.join(name), MAX_JSON),
     )
     .map(Some)

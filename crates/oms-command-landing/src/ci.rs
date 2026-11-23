@@ -1,5 +1,5 @@
-//! Exact-commit CI observations. An unreadable lookup is unknown, and an old
-//! green run never certifies an unpushed or different commit.
+//! CI observations. An unreadable lookup is unknown, and an old green run or
+//! maintenance observation never certifies an unpushed or different commit.
 use crate::{
     Context, Error, Output, Result, V,
     cli::Options,
@@ -24,6 +24,9 @@ pub(crate) fn gh(c: &Context<'_>, args: &[&str], timeout: Duration) -> Result<V>
         c.interrupted,
         &[("GH_HOST".into(), "github.com".into())],
     )?;
+    if out.code == 130 {
+        return Err(Error::new(130, "CI lookup interrupted"));
+    }
     require(
         out.code == 0,
         "gh not authenticated, unreachable or unreadable",
@@ -406,7 +409,7 @@ pub fn full_scope(run: &V, sha: &str) -> Result<&'static str> {
         None
     };
     if let Some(required) = matched_required {
-        let optional = regex::Regex::new(r"^(?:python311|native \((?:macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks|rust \((?:ubuntu-24\.04|macos-latest)\))$").unwrap();
+        let optional = regex::Regex::new(r"^(?:python311|native \(windows-latest, auto\)|operator-tools \(affected\)|affected checks|rust \(ubuntu-24\.04\))$").unwrap();
         require(
             names.iter().all(|(name, value)| {
                 required.contains(name)
@@ -436,6 +439,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "triage",
         "suggest",
         "feedback",
+        "attention",
     ];
     let mut words = o.words.clone();
     let action = if words.first().is_some_and(|s| known.contains(&s.as_str())) {
@@ -451,9 +455,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "--sha is only read by triage",
     )?;
     require(
-        (action == "suggest" || action == "feedback" || !o.has("json"))
+        (["suggest", "feedback", "attention"].contains(&action.as_str()) || !o.has("json"))
             && (action == "suggest" || !o.has("refresh")),
-        "--json is only read by suggest/feedback; --refresh is only read by suggest",
+        "--json is only read by suggest/feedback/attention; --refresh is only read by suggest",
     )?;
     let limit = o
         .value("limit", "20")
@@ -470,6 +474,16 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let repo = Git::root(c.cwd, c.interrupted)?;
     let state = c.state(&repo)?;
     let git = Git::new(&repo, c.interrupted);
+    if action == "attention" {
+        require(limit <= 100, "attention --limit must be between 1 and 100")?;
+        return attention(
+            c,
+            &git,
+            words.first().map(String::as_str),
+            limit,
+            o.has("json"),
+        );
+    }
     let branch = words.first().cloned().unwrap_or_else(|| {
         git.text(&["rev-parse", "--abbrev-ref", "HEAD"])
             .unwrap_or_else(|_| "main".into())
@@ -764,6 +778,211 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         },
         stderr,
     })
+}
+/// Maintenance observations never certify the selected checkout or write a CI receipt.
+fn attention(
+    c: &Context<'_>,
+    git: &Git<'_>,
+    selected_branch: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> Result<Output> {
+    let slug = crate::report::github_remote(&git.text(&["remote", "get-url", "origin"])?)?;
+    let branch = match selected_branch {
+        Some(branch) => branch.to_owned(),
+        None => string(&api(c, &format!("repos/{slug}"))?, "default_branch"),
+    };
+    require(
+        !branch.is_empty() && branch.len() <= 255 && !branch.chars().any(char::is_control),
+        "CI attention branch unavailable or invalid",
+    )?;
+    let mut observations = Vec::new();
+    for event in ["schedule", "workflow_dispatch"] {
+        let endpoint = format!(
+            "repos/{slug}/actions/runs?event={event}&branch={}&per_page={limit}",
+            component(&branch)
+        );
+        match api(c, &endpoint)
+            .and_then(|response| attention_rows(&response, &slug, &branch, event, limit))
+        {
+            Ok(rows) => observations.extend(rows),
+            Err(error) if error.code == 130 => return Err(error),
+            Err(_) => observations.push(obj([
+                ("event", event.into()),
+                ("state", "unknown".into()),
+                ("reason", "run lookup unavailable or invalid".into()),
+            ])),
+        }
+    }
+    let code = if observations
+        .iter()
+        .any(|r| ["unknown", "pending"].contains(&string(r, "state").as_str()))
+    {
+        2
+    } else if observations.iter().any(|r| string(r, "state") == "failed") {
+        1
+    } else {
+        0
+    };
+    let report = obj([
+        ("schema", 1usize.into()),
+        ("kind", "oms-ci-attention".into()),
+        ("repo", slug.into()),
+        ("branch", branch.clone().into()),
+        ("observed_at", now().into()),
+        ("observations", V::Arr(observations)),
+    ]);
+    let mut output = if json {
+        Output::json(&report)?
+    } else {
+        Output::text(
+            report
+                .get("observations")
+                .array()
+                .iter()
+                .map(|row| {
+                    let workflow = row.get("workflow_id");
+                    format!(
+                        "ci-status attention [{branch}]: {}{} {} {}{}{}{}\n",
+                        string(row, "event"),
+                        if workflow.integer(true) {
+                            format!(" workflow {}", workflow.py())
+                        } else {
+                            String::new()
+                        },
+                        string(row, "state"),
+                        if row.has("reason") {
+                            string(row, "reason")
+                        } else {
+                            string(row, "conclusion")
+                        },
+                        if row.has("url") {
+                            format!("  {}", string(row, "url"))
+                        } else {
+                            String::new()
+                        },
+                        if row.has("updated_at") {
+                            format!(" updated {}", string(row, "updated_at"))
+                        } else {
+                            String::new()
+                        },
+                        if string(row, "coverage") == "bounded" {
+                            " (bounded window)"
+                        } else {
+                            ""
+                        },
+                    )
+                })
+                .collect::<String>(),
+        )
+    };
+    output.code = code;
+    Ok(output)
+}
+fn attention_rows(
+    response: &V,
+    slug: &str,
+    branch: &str,
+    event: &str,
+    limit: usize,
+) -> Result<Vec<V>> {
+    let rows = response.get("workflow_runs");
+    require(matches!(rows, V::Arr(_)), "unreadable maintenance run list")?;
+    let total = response.get("total_count");
+    require(total.integer(false), "unreadable maintenance run count")?;
+    let total = total
+        .py()
+        .parse::<u64>()
+        .map_err(|_| Error::new(2, "invalid run count"))?;
+    require(
+        rows.array().len() <= limit && total >= rows.array().len() as u64,
+        "invalid maintenance run window",
+    )?;
+    let mut latest: BTreeMap<u64, ((u64, u64), &V)> = BTreeMap::new();
+    for row in rows.array() {
+        let number = |key: &str| -> Result<u64> {
+            require(
+                row.get(key).integer(true),
+                "invalid maintenance run identity",
+            )?;
+            row.get(key)
+                .py()
+                .parse()
+                .map_err(|_| Error::new(2, "invalid maintenance run identity"))
+        };
+        let id = number("id")?;
+        let workflow = number("workflow_id")?;
+        let order = (number("run_number")?, number("run_attempt")?);
+        let sha = string(row, "head_sha");
+        let updated = string(row, "updated_at");
+        require(
+            string(row, "event") == event
+                && string(row, "head_branch") == branch
+                && sha.len() == 40
+                && sha.bytes().all(|b| b.is_ascii_hexdigit())
+                && updated.len() <= 64
+                && chrono::DateTime::parse_from_rfc3339(&updated).is_ok()
+                && string(row, "html_url")
+                    .strip_prefix("https://github.com/")
+                    .and_then(|path| path.strip_suffix(&format!("/actions/runs/{id}")))
+                    .is_some_and(|repository| repository.eq_ignore_ascii_case(slug)),
+            "mismatched maintenance run",
+        )?;
+        match latest.get(&workflow) {
+            Some((old, _)) if *old >= order => {}
+            _ => {
+                latest.insert(workflow, (order, row));
+            }
+        }
+    }
+    let mut observations = Vec::new();
+    for (_, (_, row)) in latest {
+        let status = string(row, "status");
+        let conclusion = string(row, "conclusion");
+        let state = match status.as_str() {
+            "completed" if red(&conclusion) => "failed",
+            "completed" if conclusion == "success" => "clear",
+            "queued" | "in_progress" | "waiting" | "requested" | "pending" => "pending",
+            _ => "unknown",
+        };
+        observations.push(obj([
+            ("event", event.into()),
+            ("state", state.into()),
+            ("workflow_id", row.get("workflow_id").clone()),
+            ("run_id", row.get("id").clone()),
+            ("attempt", row.get("run_attempt").clone()),
+            ("sha", row.get("head_sha").clone()),
+            ("updated_at", row.get("updated_at").clone()),
+            (
+                "coverage",
+                if total > rows.array().len() as u64 {
+                    "bounded"
+                } else {
+                    "complete"
+                }
+                .into(),
+            ),
+            (
+                "conclusion",
+                if state == "unknown" {
+                    "unrecognized outcome".into()
+                } else if state == "pending" {
+                    status.into()
+                } else {
+                    conclusion.into()
+                },
+            ),
+            ("url", row.get("html_url").clone()),
+        ]));
+    }
+    if rows.array().is_empty() {
+        observations.push(obj([
+            ("event", event.into()),
+            ("state", "unknown".into()),
+            ("reason", "no observed runs".into()),
+        ]));
+    }
+    Ok(observations)
 }
 fn protection(c: &Context<'_>, git: &Git<'_>, branch: Option<&str>) -> Result<Output> {
     let slug = crate::report::github_remote(&git.text(&["remote", "get-url", "origin"])?)?;
@@ -1139,14 +1358,17 @@ mod tests {
         let streamlined = [
             ("affected_plan".to_string(), "success"),
             ("lint".into(), "success"),
+            ("rust (ubuntu-24.04)".into(), "success"),
             ("focused".into(), "success"),
             ("native (ubuntu-latest, copy)".into(), "success"),
-            ("native (macos-latest, auto)".into(), "skipped"),
-            ("rust (ubuntu-24.04)".into(), "success"),
-            ("rust (macos-latest)".into(), "success"),
             ("affected checks".into(), "skipped"),
             ("gate".into(), "success"),
         ];
         assert_eq!(scope(&streamlined).unwrap(), "full");
+        for stale in ["native (macos-latest, auto)", "rust (macos-latest)"] {
+            let mut with = streamlined.to_vec();
+            with.push((stale.into(), "skipped"));
+            assert!(scope(&with).is_err(), "{stale}");
+        }
     }
 }

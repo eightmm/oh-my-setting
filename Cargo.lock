@@ -1164,6 +1164,9 @@ dependencies = [
 [[package]]
 name = "oms-migrate"
 version = "0.1.0"
+dependencies = [
+ "oms-toml",
+]
 
 [[package]]
 name = "oms-output"

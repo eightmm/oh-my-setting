@@ -138,7 +138,7 @@ Linux jobs의 runner label은 `ubuntu-24.04`와 `ubuntu-latest`이므로 동일 
 1. Check/OS/image/toolchain/profile/link-mode별 실제 invocation과 coverage 표를 만든다.
 2. 동일 source·binary·환경·fixture 입력임을 관측한 install lifecycle 검사만 한 canonical job에
    귀속한다. 서로 다른 image/profile 또는 확인하지 못한 coverage는 유지한다.
-3. Local full gate는 여전히 해당 coverage를 한 번 수행한다. Native macOS/BSD 검사는 유지한다.
+3. Local full gate는 여전히 해당 coverage를 한 번 수행한다. macOS runner 검사는 없고, BSD smoke는 focused suite에서 호스트 userland로 실행된다.
 4. Native build는 job 안에서 한 번 stage하고 manifest/source SHA/hash로 재사용한다.
 5. Job label·`gate`·`full_scope`·install receipt가 같은 coverage를 해석하도록 함께 바꾼다.
 6. PR와 main의 중복 의심 run은 commit/tree/workflow recipe/event/환경을 비교해 보고만 한다.
@@ -158,8 +158,8 @@ Linux jobs의 runner label은 `ubuntu-24.04`와 `ubuntu-latest`이므로 동일 
 
 `stage()`는 elapsed seconds를 출력하고 로그를 삭제하며, 종료 trap은 check runtime을 삭제한다.
 `timings`와 `timings-dir`은 만들어지지만 현재 gate에서 기록하는 producer가 없다.
-`COMPONENTS.md`의 `gate_timings.py`, `ci-query.py`, GitHub slowest-stage summary 설명은
-현재 Python-free tree/workflow와 맞지 않는다. 해당 Python helper는 복원하지 않는다.
+`COMPONENTS.md`에 있던 retired timing report, CI query helper, GitHub slowest-stage summary 설명은
+현재 tree/workflow와 맞지 않아 제거했다. 해당 helper는 복원하지 않는다.
 
 이미 [Rust `helpers::gate_timings`](../crates/oms-command-landing/src/helpers.rs)가
 stage/test/TSV 형태를 읽고, [output-digest](../crates/oms-command-peer/README.md)와
@@ -207,9 +207,9 @@ timing helper 실행을 위한 native build나 별도 evidence 수집을 다시 
 2. Process ownership/cancel/reap 증거에는 실제 local child를 유지한다. 순수 mock으로 대체하지 않는다.
 3. Provider prompt 변화·fragmented output·late ACK·busy/draft·missing capability는 기존 fixture를 확장한다.
 4. Feature flag/CLI help fixture와 실제 provider account 시험을 구분하고 실제 provider 호출은 하지 않는다.
-5. Linux/macOS 기존 job에서 실제 실행/명시적 capability skip을 기록한다. Stable gate에는
+5. Linux 기존 job에서 실제 실행/명시적 capability skip을 기록한다. Stable gate에는
    계획이 허용한 skip만 반영하고, 필요한 검사를 실행하지 못한 skip을 full proof로 승격하지 않는다.
-6. Ubuntu 20.04 floor·WSL2 지원은 현재 Ubuntu/macOS CI만으로 증명됐다고 쓰지 않는다.
+6. Ubuntu 20.04 floor·WSL2 지원은 현재 Ubuntu CI만으로 증명됐다고(macOS도 CI로 증명되지 않는다) 쓰지 않는다.
    기존 호스트에서 수행할 수 있는 명시적 portability smoke를 정리하되 새 자동 matrix를 추가하지 않는다.
 
 ### 완료 조건

@@ -69,7 +69,7 @@ jobs:
               --changed-from "$DIFF_BASE" --changed-to HEAD \
               --ci-output "$GITHUB_OUTPUT"
           else
-            printf 'mode=full\nnative=true\ndocs_only=false\npython=false\noperator=\n' >> "$GITHUB_OUTPUT"
+            printf 'mode=full\nnative=true\ndocs_only=false\n' >> "$GITHUB_OUTPUT"
           fi
 
   lint:

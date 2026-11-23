@@ -46,6 +46,14 @@ are never replaced. Narrow queue-only ignore rules fail closed. Registry hashes
 use the shared `oms-json` Python-compatible canonical encoding, including accepted
 float/exponent values; the current view producer emits no floating-point fields.
 
+Queue storage failures include fixed `stage=` cues for private-directory setup,
+ignore-file preparation and verification, Git/process capture, lock acquisition,
+queue reads, and atomic publication. These cues contain no paths, queue content,
+subprocess output, or platform error strings. They identify the failed boundary
+without asserting a cause for the intermittent macOS failure tracked in #343.
+Lock timeout and interruption keep their existing control-flow meanings; file
+identity checks, ignore requirements, cleanup, and publication order are unchanged.
+
 Child reads currently fail closed **before reading attachments**. Enabling them
 requires the native equivalent of `queue.authorize_child_attachment`, including
 reciprocal sealed room lineage, the live child enrollment, current sender,

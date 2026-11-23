@@ -509,8 +509,24 @@ fn active_verb(call: &Value) -> Option<&'static str> {
 }
 
 fn call_badge(call: &Value) -> (String, &'static str) {
+    if call["native_assignment_transport"].is_string() {
+        match text(call, "state") {
+            "assigned" => {
+                let label = match text(call, "native_assignment_transport") {
+                    "intent" => "[· intent]",
+                    "submitted" => "[· submitted]",
+                    _ => "[! send unknown]",
+                };
+                return (label.to_owned(), SGR_MUTED);
+            }
+            "done" => return ("[· closed]".to_owned(), SGR_MUTED),
+            _ => {}
+        }
+    }
     if call["returned_at"].is_string() {
         ("[✓ returned]".to_owned(), SGR_SAGE)
+    } else if call["lifecycle_stale"] == true {
+        ("[no events]".to_owned(), SGR_AMBER_BOLD)
     } else if let Some(verb) = active_verb(call) {
         (format!("[⟳ {verb}]"), SGR_CYAN)
     } else {
@@ -600,6 +616,10 @@ pub fn calls(report: &Value) -> Vec<Value> {
     for member in participants {
         let attempt = text(member, "attempt");
         let participant = text(member, "participant");
+        // The exact Room projection owns this operation's lifecycle state.
+        // Recent/active copies and participant aliases cannot revive it.
+        let assignment = &report["room_attempts"][participant];
+        let assignment_parent = native_assignment_parent(report, room, member, assignment);
         let matched = (!attempt.is_empty())
             .then(|| by_attempt.get(attempt).copied())
             .flatten()
@@ -630,6 +650,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
                     .flatten()
                     .filter(|row| member_matches_attempt(room_id, room, member, row))
             });
+        let matched = assignment_parent.map(|_| assignment).or(matched);
         let mut call = normalize(matched.unwrap_or(member), &mut cached_agy_model);
         for key in [
             "participant",
@@ -707,6 +728,42 @@ pub fn calls(report: &Value) -> Vec<Value> {
         {
             call["state"] = member["state"].clone();
         }
+        if let Some(parent) = assignment_parent {
+            let refs = &assignment["refs"];
+            let task_id = text(assignment, "task_id");
+            let plan = &report["plan"];
+            let task = &plan["tasks"][task_id];
+            let title = text(task, "title");
+            if override_title.is_empty() {
+                call["title"] = json!(if plan["plan_id"] == refs["plan_id"]
+                    && task["id"] == task_id
+                    && task["lease_id"] == refs["lease_id"]
+                    && !title.is_empty()
+                {
+                    title
+                } else {
+                    task_id
+                });
+            }
+            call["native_assignment_transport"] = refs["native_transport"].clone();
+            call["display_role"] = json!("assignment");
+            if assignment["terminal"] == false {
+                call["state"] = json!("assigned");
+            }
+            if member["joined"] == false
+                || parent["joined"] == false
+                || room_main_id(room) != text(parent, "participant")
+                || room["closed"] == true
+                || !room["successor"].is_null()
+                || report["room_attempts"][text(member, "parent")]["terminal"] == true
+                || rows(&room["swaps"]).iter().any(|swap| {
+                    swap["attempt"] == parent["participant"]
+                        && swap["participant"] == parent["participant"]
+                })
+            {
+                call["room_only_history"] = json!(true);
+            }
+        }
         let native_tokens = &report["main_token_observation"];
         if let Some(last_observed) = tokens_last_observed
             && let Some(total) = native_tokens["total"].as_u64()
@@ -758,7 +815,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
         }
     }
     for (id, attempt) in by_attempt {
-        if id.is_empty() || seen.contains(&id) {
+        if id.is_empty() || seen.contains(&id) || attempt["tool"] == "panel-native-assignment" {
             continue;
         }
         let pid = text(&attempt["refs"], "panel_room_participant");
@@ -811,6 +868,22 @@ pub fn calls(report: &Value) -> Vec<Value> {
             call["board_elapsed"] = json!(elapsed.as_deref().unwrap_or("—"));
         }
     }
+    let direct: BTreeSet<_> = direct_work(report, &output, overall_main(room, &output))
+        .into_iter()
+        .map(|(participant, attempt)| (participant.to_owned(), attempt.to_owned()))
+        .collect();
+    for call in &mut output {
+        if let Some(fields) = call.as_object_mut() {
+            fields.remove("lifecycle_stale");
+        }
+        if direct.contains(&(
+            text(call, "participant").into(),
+            text(call, "attempt").into(),
+        )) && stale_lifecycle(report, &report["room_attempts"][text(call, "attempt")])
+        {
+            call["lifecycle_stale"] = true.into();
+        }
+    }
     // At most three recently seen Codex children, newest first, stay unfolded.
     if let Some(observed) = oms_panel_core::metrics::stamp(&report["generated_at"]) {
         let mut seen: Vec<_> = output
@@ -848,6 +921,43 @@ pub fn calls(report: &Value) -> Vec<Value> {
     output
 }
 
+fn stale_lifecycle(report: &Value, row: &Value) -> bool {
+    if report["collection"]["ok"] != true
+        || report["collection"]["pending"] == true
+        || report["capacity_stale"] == true
+        || report["room"].get("error").is_some_and(|v| !v.is_null())
+        || row["tool"] == "panel-native-assignment"
+        || row["refs"]["panel_native_scheduling"] == "unmanaged"
+        || ["panel_heartbeat_interval", "panel_heartbeat_ttl"]
+            .iter()
+            .any(|key| row["refs"].get(*key).is_some_and(|v| !v.is_string()))
+        || !matches!(
+            text(row, "state"),
+            "starting" | "working" | "running" | "verifying"
+        )
+    {
+        return false;
+    }
+    let stamp = oms_panel_core::metrics::stamp;
+    let (Some(now), Some(created), Some(updated), Some(heartbeat)) = (
+        stamp(&report["generated_at"]),
+        stamp(&row["created_at"]),
+        stamp(&row["updated_at"]),
+        stamp(&row["last_heartbeat_at"]),
+    ) else {
+        return false;
+    };
+    if !(0.0 <= created && created <= heartbeat && heartbeat <= updated && updated <= now) {
+        return false;
+    }
+    // A usage event is also current lifecycle evidence. Reuse the heartbeat
+    // window without treating it as output progress or changing the receipt.
+    let evidence = json!({
+        "refs": row["refs"], "created_at": row["created_at"], "last_heartbeat_at": row["updated_at"]
+    });
+    oms_panel_core::release::heartbeat_fresh(&evidence, now).is_ok_and(|fresh| !fresh)
+}
+
 fn event_room_matches(room: &str, refs: &Value) -> bool {
     let rooms = [text(refs, "panel_room_id"), text(refs, "panel_room")];
     !room.is_empty() && rooms.contains(&room) && rooms.iter().all(|id| id.is_empty() || *id == room)
@@ -865,9 +975,109 @@ fn prefer_attempt(candidate: &Value, existing: &Value) -> bool {
     live(candidate) || !live(existing)
 }
 
+fn native_assignment_parent<'a>(
+    report: &Value,
+    room: &'a Value,
+    member: &Value,
+    row: &Value,
+) -> Option<&'a Value> {
+    let participant = text(member, "participant");
+    let parent = text(member, "parent");
+    let room_id = text(room, "id");
+    let refs = &row["refs"];
+    let hex = |value: &str, len| {
+        value.len() == len
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let id = |value: &str, prefix| value.strip_prefix(prefix).is_some_and(|hash| hex(hash, 32));
+    if row["tool"] != "panel-native-assignment"
+        || refs["native_assignment_schema"] != "1"
+        || refs["panel_native_scheduling"] != "unmanaged"
+        || !id(participant, "att_")
+        || row["attempt_id"] != participant
+        || (!member["attempt"].is_null() && member["attempt"] != participant)
+        || !member["joined"].is_boolean()
+        || member["seq"].as_u64().is_none()
+        || member["initial_seq"] != member["seq"]
+        || member["role"] != "worker"
+        || member["provider"] != "codex"
+        || row["provider"] != "codex"
+        || !id(parent, "att_")
+        || parent == participant
+        || row["parent_attempt_id"] != parent
+        || text(row, "task_id").is_empty()
+        || (!member["task_id"].is_null() && member["task_id"] != row["task_id"])
+        || [
+            ("panel_room_participant", participant),
+            ("panel_room_parent", parent),
+            ("panel_provider", "codex"),
+            ("panel_role", "worker"),
+            ("panel_room", room_id),
+        ]
+        .into_iter()
+        .any(|(key, expected)| refs.get(key).is_some_and(|value| value != expected))
+        || refs["panel_room_id"] != room_id
+        || !event_room_matches(room_id, refs)
+        || !id(text(refs, "plan_id"), "plan_")
+        || !id(text(refs, "lease_id"), "lease_")
+        || !hex(text(refs, "native_intent_sha256"), 64)
+        || !hex(text(refs, "native_payload_sha256"), 64)
+    {
+        return None;
+    }
+    let terminal = oms_panel_core::state::TERMINAL_STATES.contains(&text(row, "state"));
+    if (terminal && row["terminal"] != true)
+        || (!terminal && (row["terminal"] != false || row["state"] != "queued"))
+    {
+        return None;
+    }
+    match text(refs, "native_transport") {
+        "intent" => {}
+        "sending" | "submitted" | "unknown"
+            if hex(text(refs, "native_binding_sha256"), 64)
+                && id(text(refs, "native_room_message"), "msg-")
+                && refs["native_binding"]
+                    == format!(".oms/lifecycle/attempts/{participant}/native-assignment.json") => {}
+        _ => return None,
+    }
+    let main = &report["room_attempts"][parent];
+    let members = rows(&room["participants"]);
+    let mut parents = members
+        .iter()
+        .filter(|member| member["participant"] == parent);
+    let parent_member = parents.next()?;
+    let provider_matches = parent_member["provider"] == main["provider"]
+        || rows(&room["swaps"]).iter().any(|swap| {
+            swap["attempt"] == parent
+                && swap["participant"] == parent
+                && swap["from"] == main["provider"]
+        });
+    (main["attempt_id"] == parent
+        && main["tool"] == "panel-main"
+        && main["refs"]["panel_role"] == "main"
+        && main["refs"]["panel_native_scheduling"] == "unmanaged"
+        && event_room_matches(room_id, &main["refs"])
+        && oms_panel_core::state::main_participant(main) == parent
+        && !text(main, "provider").is_empty()
+        && refs["panel_owner"] == main["provider"]
+        && provider_matches
+        && parent_member["role"] == "main"
+        && parent_member["joined"].is_boolean()
+        && text(parent_member, "parent").is_empty()
+        && parents.next().is_none()
+        && members
+            .iter()
+            .filter(|member| member["participant"] == participant)
+            .count()
+            == 1)
+        .then_some(parent_member)
+}
+
 fn member_matches_attempt(room_id: &str, room: &Value, member: &Value, row: &Value) -> bool {
     let refs = &row["refs"];
-    if attempt_foreign_to_room(room_id, refs) {
+    if row["tool"] == "panel-native-assignment" || attempt_foreign_to_room(room_id, refs) {
         return false;
     }
     let parent = text(member, "parent");
@@ -1154,7 +1364,7 @@ pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
     let direct = direct_work(report, &all, main);
     main.into_iter()
         .chain(
-            board_rows(visible_from(&all, nav, main, &direct), nav, main)
+            board_rows(visible_from(&all, nav, main, &direct), nav, main, &all)
                 .into_iter()
                 .map(|entry| entry.call),
         )
@@ -1334,8 +1544,34 @@ fn model_label(call: &Value) -> String {
     }
 }
 
+fn child_model_label(call: &Value) -> String {
+    let observed = text(call, "observed_model").trim();
+    let sanitized = clean(observed, 1_048_576);
+    let model = sanitized.trim();
+    if model != observed
+        || [
+            "",
+            "—",
+            "unknown",
+            "unverified",
+            "inherit",
+            "default",
+            "provider-default",
+        ]
+        .iter()
+        .any(|unknown| model.eq_ignore_ascii_case(unknown))
+    {
+        "—".to_owned()
+    } else {
+        formatted_model(model).to_owned()
+    }
+}
+
 /// Detail view: names the provenance instead of a bare marker.
 fn model_detail(call: &Value) -> String {
+    if uses_observed_model(call) {
+        return child_model_label(call);
+    }
     let model = text(call, "model");
     match call["model_state"].as_str() {
         Some("fresh") | None => model.to_owned(),
@@ -1344,6 +1580,16 @@ fn model_detail(call: &Value) -> String {
         Some(_) if model.is_empty() => "unverified".to_owned(),
         Some(_) => format!("{model} · configured, unverified"),
     }
+}
+
+fn uses_observed_model(call: &Value) -> bool {
+    call["native_child"] == true
+        || (call["tool"] != "panel-native-assignment"
+            && !matches!(
+                text(call, "role"),
+                "main" | "lead" | "team_lead" | "orchestrator"
+            )
+            && !text(call, "parent").is_empty())
 }
 
 fn headline_tokens(call: &Value) -> (&Value, &'static str) {
@@ -1568,6 +1814,7 @@ fn visible_from<'a>(
         .filter(|v| {
             !nav.attention_only
                 || awaiting_review(v)
+                || v["lifecycle_stale"] == true
                 || [
                     "waiting_input",
                     "waiting_approval",
@@ -1597,14 +1844,21 @@ fn board_rows<'a>(
     filtered: Vec<&'a Value>,
     nav: &navigation::Navigation,
     main: Option<&'a Value>,
+    all: &'a [Value],
 ) -> Vec<TreeEntry<'a>> {
     if matches!(nav.view, View::Tree | View::Graph) {
         // Keep Main in the tree so children retain their links and folding rules.
         let tree_calls: Vec<_> = main.into_iter().chain(filtered).collect();
-        collect_tree(&tree_calls, nav, nav.view == View::Graph, usize::MAX)
-            .into_iter()
-            .filter(|entry| !main.is_some_and(|main| std::ptr::eq(entry.call, main)))
-            .collect()
+        collect_tree(
+            &tree_calls,
+            all.iter(),
+            nav,
+            nav.view == View::Graph,
+            usize::MAX,
+        )
+        .into_iter()
+        .filter(|entry| !main.is_some_and(|main| std::ptr::eq(entry.call, main)))
+        .collect()
     } else {
         filtered
             .into_iter()
@@ -1773,16 +2027,10 @@ fn frame_with_capacity(
         filtered.iter().filter(|call| awaiting_review(call)).count()
     };
     let filtered_count = filtered.len();
-    let calls = board_rows(filtered, nav, pinned);
+    let calls = board_rows(filtered, nav, pinned, &all);
     let selected_worker = nav.selected.checked_sub(pinned_count);
     let main_selected = pinned.is_some() && nav.selected == 0;
-    let selected_call = if main_selected {
-        pinned
-    } else {
-        selected_worker
-            .and_then(|index| calls.get(index))
-            .map(|entry| entry.call)
-    };
+    let selected_entry = selected_worker.and_then(|index| calls.get(index));
     let attention = attention::items(report, read);
     let view = nav.view.resolved(columns, height);
     let goal = room_goal(report, &all).unwrap_or("");
@@ -1914,7 +2162,7 @@ fn frame_with_capacity(
                 height.saturating_sub(1 + lines.len()),
             ),
             None => render_detail_card(
-                selected_call,
+                selected_entry.map(|entry| entry.call),
                 columns,
                 inner_width,
                 use_cards,
@@ -2053,7 +2301,6 @@ fn frame_with_capacity(
             lines.extend(render_provider_rows(
                 &groups,
                 &all,
-                room_main_id(&report["room"]),
                 &calls,
                 &direct,
                 nav,
@@ -2103,7 +2350,7 @@ fn frame_with_capacity(
                         let selected = Some(index) == selected_worker;
                         register_call(&mut worker_rows, lines.len(), call);
                         let bg = (colored && selected).then_some(SGR_SEL_BG);
-                        lines.push(render_call_row(
+                        lines.push(render_card_row(
                             call,
                             &entry.prefix,
                             "",
@@ -2111,11 +2358,12 @@ fn frame_with_capacity(
                             columns,
                             use_cards,
                             colored,
+                            false,
                         ));
                         if detail_rows {
                             lines.push(card_row_lr(
                                 vec![
-                                    Span::literal("    ↳ ", Some(SGR_MUTED)),
+                                    Span::literal("      ", None),
                                     Span::raw(call_detail_meta(call), inner_width, Some(SGR_MUTED)),
                                 ],
                                 vec![],
@@ -2323,6 +2571,7 @@ fn board_brief<'a>(value: &'a str, role: &str) -> &'a str {
     }
 }
 
+#[cfg(test)]
 fn render_call_row(
     call: &Value,
     prefix: &str,
@@ -2333,11 +2582,10 @@ fn render_call_row(
     colored: bool,
 ) -> String {
     render_card_row(
-        call, prefix, suffix, selected, columns, use_cards, colored, None,
+        call, prefix, suffix, selected, columns, use_cards, colored, false,
     )
 }
 
-/// `role_field` gives a card one role column whatever each row's role.
 #[allow(clippy::too_many_arguments)]
 fn render_card_row(
     call: &Value,
@@ -2347,11 +2595,12 @@ fn render_card_row(
     columns: usize,
     use_cards: bool,
     colored: bool,
-    role_field: Option<usize>,
+    align_roles: bool,
 ) -> String {
     count_row_render();
     let inner = columns - if use_cards { 4 } else { 0 };
     let display = call_display(call);
+    let child = uses_observed_model(call);
     let (glyph, role_sgr) = role_style(display.role);
     let mut role = display.role.chars();
     let role = role.next().map_or_else(
@@ -2399,20 +2648,19 @@ fn render_card_row(
     }
     left.push(Span::raw(&role, 24, Some(role_sgr)));
     if !name.is_empty() || !task.is_empty() {
-        let field = role_field.unwrap_or(
-            if columns >= 72
+        let field = if align_roles
+            || child && columns >= 56
+            || columns >= 72
                 && matches!(
                     role.as_str(),
                     "Builder" | "Researcher" | "Reviewer" | "Verifier" | "Worker"
-                )
-            {
-                width("Researcher")
-            } else if matches!(role.as_str(), "Builder" | "Worker") {
-                width("Builder")
-            } else {
-                0
-            },
-        );
+                ) {
+            width("Researcher")
+        } else if matches!(role.as_str(), "Builder" | "Worker") {
+            width("Builder")
+        } else {
+            0
+        };
         let pad = field.saturating_sub(width(&role)) + 1;
         left.push(Span {
             plain: " ".repeat(pad),
@@ -2440,8 +2688,8 @@ fn render_card_row(
     let (badge, badge_sgr) = call_badge(call);
     let badge_width = width(&badge);
     let mut available = metadata_limit.saturating_sub(spans_width(&right) + 2);
-    // A live operation outranks the placeholder for an unknown total.
-    if badge_width > available && active_verb(call).is_some() {
+    // An operation or stale-event advisory outranks an unknown-total placeholder.
+    if badge_width > available && (active_verb(call).is_some() || call["lifecycle_stale"] == true) {
         let compact = token_span_with(
             call,
             left_budget(inner, prefix_width + label_min),
@@ -2454,6 +2702,10 @@ fn render_card_row(
             right = compact;
             available = room;
         }
+    }
+    if call["lifecycle_stale"] == true && badge_width > available {
+        right.clear();
+        available = left_budget(inner, prefix_width + label_min).saturating_sub(2);
     }
     if badge_width <= available {
         let field = if columns >= 88 && available >= 14 {
@@ -2473,15 +2725,40 @@ fn render_card_row(
             ],
         );
     }
-    let model = clip(&model_label(call), (columns / 4).max(12));
-    let model_budget = metadata_limit.saturating_sub(width(suffix).min(15));
-    if use_cards && model != "model —" && width(&model) + spans_width(&right) + 2 <= model_budget
+    let model_gap = if child && columns < 88 { " " } else { "  " };
+    let model_overhead = spans_width(&right) + model_gap.len();
+    let model_budget = metadata_limit.saturating_sub(width(suffix).min(15) + model_overhead);
+    let model = if child {
+        let preferred = match columns {
+            0..=63 => 1,
+            64..=87 => 4,
+            _ => (columns / 9).min(18),
+        };
+        // Compact rows can spend a few brief cells to keep the model slot.
+        // The token, elapsed and state fields retain their allocated space.
+        let compact = if (44..88).contains(&columns) {
+            left_budget(inner, prefix_width + label_min)
+                .saturating_sub(model_overhead)
+                .min(preferred)
+        } else {
+            0
+        };
+        let field = preferred.min(model_budget.max(compact));
+        let label = clip(&child_model_label(call), field);
+        format!("{label}{}", " ".repeat(field.saturating_sub(width(&label))))
+    } else {
+        clip(&model_label(call), (columns / 4).max(12))
+    };
+    if (child || use_cards)
+        && !model.is_empty()
+        && model != "model —"
+        && (child || width(&model) <= model_budget)
     {
         right.splice(
             0..0,
             [
                 Span::raw(model, columns, Some(provider_style(provider_bucket(call)))),
-                Span::literal("  ", None),
+                Span::literal(model_gap, None),
             ],
         );
     }
@@ -2566,22 +2843,6 @@ fn adapter_alias(call: &Value) -> bool {
             .strip_prefix(provider)
             .and_then(|tool| tool.strip_prefix('-'))
             .is_some_and(|tool| TOOLS.contains(&tool))
-}
-
-fn parent_link(parent: &Value, room_main: &str) -> Option<String> {
-    let overall = if room_main.is_empty() {
-        text(parent, "role") == "main"
-    } else {
-        text(parent, "attempt") == room_main || text(parent, "participant") == room_main
-    };
-    if overall {
-        return None;
-    }
-    if text(parent, "role") == "main" && generated_id(raw_label(parent)) {
-        let title = text(parent, "title");
-        return Some(if title.is_empty() { "Main" } else { title }.to_owned());
-    }
-    Some(call_display(parent).name)
 }
 
 fn call_display(call: &Value) -> CallDisplay<'_> {
@@ -2827,7 +3088,6 @@ fn header_line(
 fn render_provider_rows(
     groups: &[usize],
     all: &[Value],
-    room_main: &str,
     calls: &[TreeEntry<'_>],
     direct: &BTreeSet<(&str, &str)>,
     nav: &navigation::Navigation,
@@ -2867,7 +3127,7 @@ fn render_provider_rows(
             let call = entry.call;
             register_call(worker_rows, base + lines.len(), call);
             let provider = provider_label(text(call, "provider"));
-            lines.push(render_call_row(
+            lines.push(render_card_row(
                 call,
                 "",
                 &format!(" · {provider}"),
@@ -2875,6 +3135,7 @@ fn render_provider_rows(
                 columns,
                 true,
                 colored,
+                false,
             ));
         }
         lines.extend(card_bottom(columns, true, colored));
@@ -3056,17 +3317,7 @@ fn render_provider_rows(
                 })
             })
             .collect();
-        // The AGY card branches every visible row, roster previews and
-        // members alike; the last one closes the branch.
-        let agy_rows = children.len() + on_page.len();
-        let branch = |row: usize| match group {
-            2 if row + 1 < agy_rows => "├─ ",
-            2 => "└─ ",
-            _ => "",
-        };
-        // AGY roles (Worker, Advisor, Researcher) share one name column.
-        let role_field = (group == 2).then(|| width("Researcher"));
-        for (row, child) in children.iter().enumerate() {
+        for child in children {
             let title = text(child, "title");
             let elapsed = text(child, "elapsed");
             let card = json!({
@@ -3075,50 +3326,24 @@ fn render_provider_rows(
                 "board_elapsed": if elapsed.is_empty() { "—" } else { elapsed }
             });
             lines.push(render_card_row(
-                &card,
-                branch(row),
-                "",
-                false,
-                columns,
-                true,
-                colored,
-                role_field,
+                &card, "", "", false, columns, true, colored, true,
             ));
         }
-        for (row, &&(index, call)) in on_page.iter().enumerate() {
+        for &(index, call) in on_page {
             register_call(worker_rows, base + lines.len(), call);
-            let id = text(call, "parent");
-            let parent_label = if id.is_empty() || id == room_main {
-                String::new()
-            } else {
-                let mut parents = all.iter().filter(|parent| {
-                    text(parent, "participant") == id || text(parent, "attempt") == id
-                });
-                parents
-                    .next()
-                    .filter(|parent| {
-                        parents.next().is_none()
-                            && !std::ptr::eq(*parent, call)
-                            && parent["native_child"] != true
-                            && calls.iter().any(|entry| std::ptr::eq(entry.call, *parent))
-                    })
-                    .and_then(|parent| parent_link(parent, room_main))
-                    .map(|parent| format!(" ← {parent}"))
-                    .unwrap_or_default()
-            };
             let projected = (call["native_child"] == true && text(call, "state") != "done")
                 .then(|| agy_matches.get(text(call, "title")).copied())
                 .flatten()
                 .map(|roster_child| project_agy_roster_match(call, roster_child));
             lines.push(render_card_row(
                 projected.as_ref().unwrap_or(call),
-                branch(children.len() + row),
-                &parent_label,
+                "",
+                "",
                 Some(index) == selected_worker,
                 columns,
                 true,
                 colored,
-                role_field,
+                group == 2,
             ));
         }
     }
@@ -3736,6 +3961,9 @@ fn started_age_label(age: f64) -> Option<String> {
 }
 
 fn worker_elapsed(report: &Value, call: &Value, observed: f64) -> Option<String> {
+    if call["native_assignment_transport"].is_string() {
+        return None;
+    }
     use oms_panel_core::metrics::stamp;
     let state = text(call, "state");
     if call["native_child"] == true {
@@ -4519,6 +4747,23 @@ fn render_detail_card(
         None,
         colored,
     ));
+    if call["lifecycle_stale"] == true {
+        for notice in [
+            "No recent lifecycle events".to_owned(),
+            format!("Last recorded state: {}", text(call, "state")),
+        ] {
+            for part in wrap(&notice, inner_width.max(1)) {
+                out.push(card_row_lr(
+                    vec![Span::raw(part, inner_width, Some(SGR_AMBER_BOLD))],
+                    vec![],
+                    columns,
+                    use_cards,
+                    None,
+                    colored,
+                ));
+            }
+        }
+    }
     let (observed, source) = headline_tokens(call);
     let token_width = left_budget(inner_width, width("Tokens"));
     let source_short = if source == "Session incl. cache" {
@@ -4580,6 +4825,15 @@ fn render_detail_card(
         ("Role", text(call, "role")),
         ("Model", model_detail(call).as_str()),
         ("Task", text(call, "task_id")),
+        (
+            "Input",
+            match text(call, "native_assignment_transport") {
+                "intent" => "Intent recorded",
+                "submitted" => "Submitted · consumption unconfirmed",
+                "sending" | "unknown" => "Submission unconfirmed",
+                _ => "",
+            },
+        ),
         ("Parent", text(call, "parent")),
         ("Reason", text(call, "ending")),
         ("Created", text(call, "created_at")),
@@ -4921,7 +5175,7 @@ pub fn tree(
     maximum: usize,
 ) -> Vec<String> {
     let calls: Vec<_> = calls.iter().collect();
-    collect_tree(&calls, nav, graph, maximum)
+    collect_tree(&calls, calls.iter().copied(), nav, graph, maximum)
         .into_iter()
         .map(|entry| {
             let display = call_display(entry.call);
@@ -4952,14 +5206,48 @@ struct TreeEntry<'a> {
 
 fn collect_tree<'a>(
     calls: &[&'a Value],
+    all: impl IntoIterator<Item = &'a Value>,
     nav: &navigation::Navigation,
     graph: bool,
     maximum: usize,
 ) -> Vec<TreeEntry<'a>> {
-    let by_id: BTreeMap<_, _> = calls.iter().map(|&v| (text(v, "participant"), v)).collect();
+    let mut ids = BTreeMap::new();
+    for call in all {
+        for id in [text(call, "participant"), text(call, "attempt")]
+            .into_iter()
+            .filter(|id| !id.is_empty())
+        {
+            ids.entry(id)
+                .and_modify(|owner: &mut Option<&Value>| {
+                    if owner.is_some_and(|owner| !std::ptr::eq(owner, call)) {
+                        *owner = None;
+                    }
+                })
+                .or_insert(Some(call));
+        }
+    }
+    let unique = |id: &str| ids.get(id).copied().flatten();
+    let visible_ids: BTreeSet<_> = calls.iter().map(|call| text(call, "participant")).collect();
+    // Compare exact identities against all rows, including those hidden by a filter.
+    let parent_of = |call: &Value| {
+        let parent = unique(text(call, "parent"))?;
+        let parent_id = text(parent, "participant");
+        (!std::ptr::eq(parent, call)
+            && unique(text(call, "participant")).is_some_and(|node| std::ptr::eq(node, call))
+            && unique(parent_id).is_some_and(|node| std::ptr::eq(node, parent))
+            && visible_ids.contains(parent_id)
+            && (call["native_child"] != true
+                || (!text(call, "provider").is_empty() && call["provider"] == parent["provider"])))
+            .then_some(parent)
+    };
     let mut children: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
     for &call in calls {
-        children.entry(text(call, "parent")).or_default().push(call);
+        if let Some(parent) = parent_of(call) {
+            children
+                .entry(text(parent, "participant"))
+                .or_default()
+                .push(call);
+        }
     }
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -5017,7 +5305,7 @@ fn collect_tree<'a>(
     let roots: Vec<&Value> = calls
         .iter()
         .copied()
-        .filter(|v| !by_id.contains_key(text(v, "parent")))
+        .filter(|v| parent_of(v).is_none())
         .collect();
     let total_roots = roots.len();
     for (idx, call) in roots.into_iter().enumerate() {
@@ -5035,18 +5323,19 @@ fn collect_tree<'a>(
         );
     }
     for &call in calls {
-        let mut parent = text(call, "parent");
         let mut ancestors = BTreeSet::new();
         let mut hidden = false;
-        while let Some(node) = by_id.get(parent) {
-            if !ancestors.insert(parent) {
+        let mut node = call;
+        while let Some(parent) = parent_of(node) {
+            let id = text(parent, "participant");
+            if !ancestors.insert(id) {
                 break;
             }
-            if nav.folded.contains(parent) {
+            if nav.folded.contains(id) {
                 hidden = true;
                 break;
             }
-            parent = text(node, "parent");
+            node = parent;
         }
         if hidden {
             continue;
@@ -5888,14 +6177,15 @@ mod tests {
                 .find(|(_, (member, id))| member == participant && id == attempt)
                 .map(|(&index, _)| &board.lines[index])
                 .unwrap();
-            let gap = if columns >= 72 { "    " } else { " " };
             assert!(
-                row.contains(&format!("Builder{gap}{shown_title}")) && !row.contains('←'),
+                row.contains(&format!("Builder    {shown_title}"))
+                    && !row.contains(['├', '└', '←']),
                 "{row}"
             );
             if columns >= 78 {
-                assert!(row.contains("gpt-6.1-sol  [⟳ run]"), "{row}");
+                assert!(row.contains('—') && row.contains("[⟳ run]"), "{row}");
             }
+            assert!(!row.contains("gpt-6.1-sol"), "{row}");
             assert_eq!(width(row), columns, "{row}");
         }
         let headless_calls = calls(&headless);
@@ -5910,6 +6200,7 @@ mod tests {
                 .lines()
                 .any(|line| line.contains("Role") && line.contains("worker"))
         );
+        assert!(!detail.contains("gpt-6.1-sol"), "{detail}");
         for alias in ["codex-delegate", "call-explicit-identifier"] {
             let mut explicitly_aliased = headless.clone();
             explicitly_aliased["room"]["participants"][0]["alias"] = json!(alias);
@@ -5985,15 +6276,9 @@ mod tests {
             "{output}"
         );
         assert!(row("Review label pass").contains("Reviewer   Review label pass"));
-        assert!(row("Fix parser").contains("Delegate Fix parser"));
+        assert!(row("Fix parser").contains("Delegate   Fix parser"));
         assert!(row("Ada").contains("Build feature"), "{output}");
         let calls = calls(&room);
-        let main_call = calls.iter().find(|call| call["attempt"] == main).unwrap();
-        assert_eq!(parent_link(main_call, ""), None);
-        assert_eq!(
-            parent_link(main_call, "att_other").as_deref(),
-            Some("Own goal")
-        );
         let reviewer = calls.iter().find(|call| call["attempt"] == review).unwrap();
         let detail =
             render_detail_card(Some(reviewer), 200, 196, true, false, usize::MAX).join("\n");
@@ -6179,7 +6464,7 @@ mod tests {
     fn started_only_native_child_shows_age_in_the_shared_time_slot() {
         let report = |extra: Value| {
             let mut report = json!({"generated_at": 10_180, "collection":{"ok":true}, "native_children":[{
-                "participant":"native-claude-a1","native_child":true,"provider":"claude",
+                "participant":"native-claude-a1","alias":"↳","native_child":true,"provider":"claude",
                 "state":"working","title":"Aged child","started_at":10_000
             }]});
             for (key, value) in extra.as_object().unwrap() {
@@ -7432,6 +7717,150 @@ mod tests {
         let items = visible(&report, &nav);
         assert_eq!(text(&items[0], "participant"), "M");
         assert_eq!(text(&items[1], "participant"), "direct");
+        let mut lifecycle = report.clone();
+        let now = 1_800_000_600u64;
+        lifecycle["generated_at"] = now.into();
+        lifecycle["room_attempts"]["direct-attempt"]["created_at"] = (now - 600).into();
+        lifecycle["room_attempts"]["direct-attempt"]["updated_at"] = (now - 300).into();
+        lifecycle["room_attempts"]["direct-attempt"]["last_heartbeat_at"] = (now - 300).into();
+        let stale_ids = |report: &Value| {
+            attention::items(report, &read)
+                .into_iter()
+                .filter(|item| item.cls == "stale")
+                .map(|item| item.row_id.1)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stale_ids(&lifecycle), ["direct"]);
+        let stale = attention::items(&lifecycle, &read);
+        assert_eq!(stale[0].what, "no recent lifecycle events: Direct changes");
+        let marked = BTreeMap::from([(attention::row_key(&stale[0].row_id), "stale".into())]);
+        assert!(!attention::items(&lifecycle, &marked)[0].unread);
+        let attention_nav = navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            visible(&lifecycle, &attention_nav)
+                .iter()
+                .map(|call| text(call, "participant"))
+                .collect::<Vec<_>>(),
+            ["M", "direct"]
+        );
+        for columns in [32, 56, 160] {
+            let board = board_frame(&lifecycle, &attention_nav, columns, 24, &read, false, true);
+            assert!(board.lines.iter().all(|line| width(line) <= columns));
+            let (&hit, _) = board
+                .worker_rows
+                .iter()
+                .find(|(_, (id, _))| id == "direct")
+                .unwrap();
+            assert!(
+                board.lines[hit].contains("[no events]"),
+                "{}",
+                board.lines[hit]
+            );
+            let detail_nav = navigation::Navigation {
+                selected: 1,
+                detail: true,
+                ..attention_nav.clone()
+            };
+            let detail = frame(&lifecycle, &detail_nav, columns, 24, &read);
+            assert!(detail.iter().all(|line| width(line) <= columns));
+            let detail = detail.join("\n");
+            assert!(detail.contains("No recent lifecycle events"), "{detail}");
+            assert!(detail.contains("Last recorded state: working"), "{detail}");
+        }
+        assert!(
+            calls(&lifecycle)
+                .iter()
+                .any(|call| call["participant"] == "direct" && call["state"] == "working")
+        );
+        for (path, value) in [
+            ("generated_at", json!(now - 1)),
+            ("generated_at", Value::Null),
+            ("collection.ok", json!(false)),
+            ("collection.pending", json!(true)),
+            ("capacity_stale", json!(true)),
+            ("room.error", json!("unavailable")),
+            ("room.closed", json!(true)),
+            ("room_attempts.main-live.terminal", json!(true)),
+            (
+                "room_attempts.direct-attempt.parent_attempt_id",
+                json!("main-old"),
+            ),
+            ("room_attempts.direct-attempt.terminal", json!(true)),
+            ("room_attempts.direct-attempt.created_at", json!(now + 1)),
+            ("room_attempts.direct-attempt.updated_at", json!(now + 1)),
+            ("room_attempts.direct-attempt.updated_at", json!(now - 299)),
+            ("room_attempts.direct-attempt.updated_at", Value::Null),
+            ("room_attempts.direct-attempt.updated_at", json!("invalid")),
+            (
+                "room_attempts.direct-attempt.last_heartbeat_at",
+                Value::Null,
+            ),
+            (
+                "room_attempts.direct-attempt.last_heartbeat_at",
+                json!(now + 1),
+            ),
+            (
+                "room_attempts.direct-attempt.tool",
+                json!("panel-native-assignment"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_native_scheduling",
+                json!("unmanaged"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_room_id",
+                json!("room-other"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("600"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("0"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("bad"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("30"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!(300),
+            ),
+        ] {
+            let mut changed = lifecycle.clone();
+            let mut target = &mut changed;
+            for key in path.split('.') {
+                target = &mut target[key];
+            }
+            *target = value.clone();
+            assert!(stale_ids(&changed).is_empty(), "{path}={value}");
+        }
+        for state in [
+            "queued",
+            "review",
+            "done",
+            "waiting_input",
+            "waiting_approval",
+            "blocked",
+        ] {
+            let mut changed = lifecycle.clone();
+            changed["room_attempts"]["direct-attempt"]["state"] = state.into();
+            assert!(stale_ids(&changed).is_empty(), "{state}");
+        }
+        // Persisted snapshots age only at their recorded observation time;
+        // native children cannot supply a stale marker as lifecycle evidence.
+        let mut held = lifecycle.clone();
+        held["generated_at"] = (now - 300).into();
+        held["native_children"][0]["lifecycle_stale"] = true.into();
+        assert!(stale_ids(&held).is_empty());
         nav.selected = 1;
         for (columns, height) in [(160, 34), (56, 20), (32, 12)] {
             let board = board_frame(&report, &nav, columns, height, &read, false, true);
@@ -8009,18 +8438,23 @@ mod tests {
                 .lines
                 .iter()
                 .find(|line| line.contains("Inspect custody"))
-                .unwrap();
+                .unwrap_or_else(|| panic!("{columns}: {:?}", frame.lines));
             let advisor = frame
                 .lines
                 .iter()
                 .find(|line| line.contains("Weigh options"))
                 .unwrap();
-            assert!(researcher.starts_with("│  ├─ ") && advisor.starts_with("│  └─ "));
+            assert!(researcher.starts_with("│   ") && advisor.starts_with("│   "));
             assert!(
                 researcher.contains("[⟳ searching]") && researcher.contains("53m17s"),
                 "{researcher}"
             );
             assert_eq!(researcher.contains("— tok"), columns >= 80, "{researcher}");
+            assert_eq!(
+                researcher.matches('—').count(),
+                usize::from(columns >= 80),
+                "{researcher}"
+            );
             assert!(advisor.contains("A1 · Weigh options"), "{advisor}");
             assert_eq!(
                 width(&researcher[..researcher.find("Inspect custody").unwrap()]),
@@ -8066,8 +8500,7 @@ mod tests {
             assert!(roster_row(&paint_nav(r, nav, 140)).is_none());
         }
 
-        // Every visible AGY row, roster preview or member, takes a branch;
-        // only a real parent adds a label. Other cards keep plain rows.
+        // Roster previews and recorded work use the same flat role column.
         let mut mixed = report.clone();
         mixed["collection"] = json!({"ok":true});
         mixed["provider_activity"]["antigravity"]["children"] = json!([
@@ -8087,23 +8520,18 @@ mod tests {
             let agy: Vec<_> = (heading + 1..frame.lines.len())
                 .take_while(|row| frame.lines[*row].starts_with('│'))
                 .collect();
-            let last = agy.len() - 1;
             for (at, row) in agy.iter().enumerate() {
                 let line = &frame.lines[*row];
-                let branch = if at == last {
-                    "│  └─ "
-                } else {
-                    "│  ├─ "
-                };
-                assert!(line.starts_with(branch), "{columns}: {line}");
+                assert!(
+                    line.starts_with("│   ") && !line.contains(['├', '└', '←']),
+                    "{columns}: {line}"
+                );
                 let member = [None, None, Some("A1"), Some("A2"), Some("A3")][at];
                 assert_eq!(
                     frame.worker_rows.get(row).map(|(id, _)| id.as_str()),
                     member,
                     "{columns}: {line}"
                 );
-                assert_eq!(line.contains("← W1"), at == 2, "{columns}: {line}");
-                assert_eq!(line.contains('←'), at == 2, "{columns}: {line}");
             }
             assert_eq!(agy.len(), 5, "{columns}: {:?}", frame.lines);
             // Every AGY role and name starts in one display column.
@@ -8135,6 +8563,167 @@ mod tests {
                 .find(|line| line.contains("W1 · Top bar"))
                 .unwrap();
             assert!(codex.starts_with("│   ● Worker"), "{codex}");
+        }
+    }
+
+    #[test]
+    fn child_rows_share_model_and_usage_slots_with_scoped_graph_edges() {
+        let child = |provider, id, role, title, model: Option<&str>| {
+            json!({
+                "native_child":true, "provider":provider, "participant":id, "role":role,
+                "state":"working", "parent":format!("{provider}-lead"), "title":title,
+                "model":"legacy-guess", "observed_model":model, "started_at":10_000,
+                "native_response_usage":{"response":{"total_tokens":12_500}}
+            })
+        };
+        let mut report = top_bar_report();
+        report["generated_at"] = json!(10_180);
+        report["provider_sessions"] = json!(["codex", "claude", "antigravity"]);
+        report["provider_models"] =
+            json!({"codex":"ParentSol", "claude":"ParentOpus", "antigravity":"ParentGemini"});
+        report["room"]["participants"].as_array_mut().unwrap().extend([
+            json!({"participant":"claude-lead", "parent":"M", "role":"lead", "provider":"claude", "state":"working", "title":"Lead work", "model":"lead-model"}),
+            json!({"participant":"codex-lead", "parent":"M", "role":"lead", "provider":"codex", "state":"working", "title":"Codex lead"}),
+            json!({"participant":"antigravity-lead", "parent":"M", "role":"lead", "provider":"antigravity", "state":"working", "title":"AGY lead"}),
+            json!({"participant":"other", "parent":"absent", "role":"advisor", "provider":"antigravity", "state":"working", "title":"Other work", "model":"route-guess"}),
+            json!({"participant":"linked", "parent":"claude-lead", "role":"reviewer", "provider":"codex", "state":"working", "title":"Linked", "model":"route-guess"}),
+        ]);
+        report["native_children"] = json!([
+            child("codex", "c", "builder", "C fixture", Some(" Sol ")),
+            child("claude", "l", "reviewer", "L fixture", Some("Opus")),
+            child(
+                "antigravity",
+                "a",
+                "researcher",
+                "A fixture",
+                Some(" \u{1b}[31m Un\u{200b}known\u{1b}[0m")
+            ),
+            json!({"native_child":true, "provider":"claude", "participant":"unlinked",
+                "state":"working", "parent":"absent", "title":"Unlinked fixture",
+                "observed_model":" \u{009b}31mUnknown\u{009b}0m ", "model":"route-guess"}),
+            json!({"native_child":true, "provider":"codex", "participant":"mismatched",
+                "state":"working", "parent":"claude-lead", "title":"Mismatched fixture", "observed_model":"Sol"}),
+        ]);
+        for view in [View::Auto, View::Compact, View::Tree, View::Graph] {
+            let graph = matches!(view, View::Tree | View::Graph);
+            let connector = if view == View::Graph { '→' } else { '─' };
+            let has_branch = |line: &str| {
+                line.contains(&format!("├{connector} ")) || line.contains(&format!("└{connector} "))
+            };
+            for columns in [64, 84, 140] {
+                let nav = navigation::Navigation {
+                    view,
+                    ..Default::default()
+                };
+                let frame = board_frame(&report, &nav, columns, 36, &BTreeMap::new(), false, true);
+                let row = |id: &str| -> &str {
+                    frame
+                        .worker_rows
+                        .iter()
+                        .find_map(|(row, (participant, _))| {
+                            (participant == id).then(|| frame.lines[*row].as_str())
+                        })
+                        .unwrap_or_else(|| panic!("{id} {columns}: {:?}", frame.lines))
+                };
+                let mut slots = vec![];
+                for (id, expected) in [("c", "Sol"), ("l", "Opus"), ("a", "—")] {
+                    let line = row(id);
+                    assert_eq!(has_branch(line), graph, "{view:?} {columns}: {line}");
+                    assert_eq!(width(line), columns);
+                    assert!(
+                        !line.contains("legacy-guess")
+                            && !line.contains("Parent")
+                            && !line.contains("Unknown"),
+                        "{line}"
+                    );
+                    let positions = [expected, "[⟳ run]", "12.5K rsp", "3m ago"].map(|field| {
+                        let at = line
+                            .find(field)
+                            .unwrap_or_else(|| panic!("{view:?} {columns} {field}: {line}"));
+                        width(&line[..at])
+                    });
+                    slots.push(positions);
+                }
+                assert!(
+                    slots.iter().all(|slot| *slot == slots[0]),
+                    "{view:?} {columns}: {slots:?}"
+                );
+                let linked = row("linked");
+                assert!(
+                    has_branch(linked) == graph
+                        && linked.contains('—')
+                        && !linked.contains("route-guess"),
+                    "{linked}"
+                );
+                assert_eq!(
+                    has_branch(row("claude-lead")),
+                    graph,
+                    "{view:?}: {}",
+                    row("claude-lead")
+                );
+                assert!(!has_branch(row("other")), "{}", row("other"));
+                let unlinked = row("unlinked");
+                assert!(
+                    !has_branch(unlinked)
+                        && unlinked.contains('—')
+                        && !unlinked.contains("31m")
+                        && !unlinked.contains("route-guess"),
+                    "{unlinked}"
+                );
+                let mismatched = row("mismatched");
+                assert!(
+                    !has_branch(mismatched) && mismatched.contains("Sol"),
+                    "{mismatched}"
+                );
+            }
+        }
+        for view in [View::Compact, View::Graph] {
+            let mut nav = navigation::Navigation {
+                view,
+                detail: true,
+                ..Default::default()
+            };
+            let visible = visible(&report, &nav);
+            for (id, model) in [
+                ("linked", "—"),
+                ("unlinked", "—"),
+                ("other", "—"),
+                ("a", "—"),
+                ("l", "Opus"),
+                ("claude-lead", "lead-model"),
+            ] {
+                nav.selected = visible
+                    .iter()
+                    .position(|row| row["participant"] == id)
+                    .unwrap();
+                let detail = frame(&report, &nav, 100, 30, &BTreeMap::new());
+                assert!(
+                    detail
+                        .iter()
+                        .any(|line| line.contains("Model") && line.contains(model)),
+                    "{view:?} {id}: {detail:?}"
+                );
+                assert!(
+                    !detail
+                        .iter()
+                        .any(|line| line.contains("route-guess") || line.contains("Unknown")),
+                    "{detail:?}"
+                );
+            }
+        }
+        let mut ambiguous = calls(&report);
+        let duplicate = ambiguous
+            .iter()
+            .find(|call| call["participant"] == "claude-lead")
+            .unwrap()
+            .clone();
+        ambiguous.push(duplicate);
+        for graph in [false, true] {
+            let rows = tree(&ambiguous, &Default::default(), graph, usize::MAX);
+            for title in ["L fixture", "Linked"] {
+                let line = rows.iter().find(|line| line.contains(title)).unwrap();
+                assert!(!line.contains(['├', '└']), "{line}");
+            }
         }
     }
 
@@ -8209,7 +8798,7 @@ mod tests {
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 1, "{:?}", frame.lines);
         let line = &frame.lines[agy[0]];
-        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.starts_with("│   "), "{line}");
         assert!(line.contains("Researcher Inspect custody"), "{line}");
         assert!(line.contains("[⟳ reading]"), "{line}");
         assert!(line.contains("12s"), "{line}");
@@ -8231,14 +8820,9 @@ mod tests {
         let frame = paint(&dup_native);
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 2, "{:?}", frame.lines);
-        for (at, row) in agy.iter().enumerate() {
+        for row in &agy {
             let line = &frame.lines[*row];
-            let branch = if at == 0 {
-                "│  ├─ "
-            } else {
-                "│  └─ "
-            };
-            assert!(line.starts_with(branch), "{line}");
+            assert!(line.starts_with("│   "), "{line}");
             assert!(line.contains("Worker"), "{line}");
             assert!(!line.contains("Researcher"), "{line}");
             assert!(!line.contains("[⟳ reading]"), "{line}");
@@ -8265,7 +8849,7 @@ mod tests {
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 1, "{:?}", frame.lines);
         let line = &frame.lines[agy[0]];
-        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.starts_with("│   "), "{line}");
         assert!(line.contains("Worker"), "{line}");
         assert!(!line.contains("Researcher"), "{line}");
         assert!(!line.contains("[⟳ reading]"), "{line}");
@@ -8299,7 +8883,7 @@ mod tests {
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 1, "{:?}", frame.lines);
         let line = &frame.lines[agy[0]];
-        assert!(line.starts_with("│ ▸└─ "), "{line}");
+        assert!(line.starts_with("│ ▸ "), "{line}");
         assert!(line.contains("Worker"), "{line}");
         assert!(!line.contains("Researcher"), "{line}");
         assert!(!line.contains("[⟳ reading]"), "{line}");
@@ -8314,7 +8898,7 @@ mod tests {
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 1, "{:?}", frame.lines);
         let line = &frame.lines[agy[0]];
-        assert!(line.starts_with("│ ▸└─ "), "{line}");
+        assert!(line.starts_with("│ ▸ "), "{line}");
         assert!(line.contains("Researcher Inspect custody"), "{line}");
         assert!(line.contains("[⟳ reading]"), "{line}");
         assert!(line.contains("12s"), "{line}");
@@ -8333,7 +8917,7 @@ mod tests {
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 1, "{:?}", frame.lines);
         let line = &frame.lines[agy[0]];
-        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.starts_with("│   "), "{line}");
         assert!(line.contains("Worker"), "{line}");
         assert!(line.contains("[✓ exited]"), "{line}");
         assert!(!line.contains("Researcher"), "{line}");
@@ -8355,7 +8939,7 @@ mod tests {
         let agy = agy_card_rows(&frame);
         assert_eq!(agy.len(), 1, "{:?}", frame.lines);
         let line = &frame.lines[agy[0]];
-        assert!(line.starts_with("│  └─ "), "{line}");
+        assert!(line.starts_with("│   "), "{line}");
         assert!(line.contains("Worker"), "{line}");
         assert!(!line.contains("Researcher"), "{line}");
         assert!(!line.contains("[⟳ reading]"), "{line}");
@@ -8365,7 +8949,7 @@ mod tests {
             Some("native-antigravity-1111111111111111")
         );
 
-        // 4. Unmatched roster preview + uniquely matched working child: stable branches and elapsed.
+        // 4. Unmatched roster preview + uniquely matched working child: stable flat rows and elapsed.
         let mut mixed = base();
         mixed["provider_activity"]["antigravity"]["children"] = json!([
             {
@@ -8386,13 +8970,13 @@ mod tests {
         assert_eq!(agy.len(), 2, "{:?}", frame.lines);
         let preview = &frame.lines[agy[0]];
         let matched = &frame.lines[agy[1]];
-        assert!(preview.starts_with("│  ├─ "), "{preview}");
+        assert!(preview.starts_with("│   "), "{preview}");
         assert!(preview.contains("Advisor"), "{preview}");
         assert!(preview.contains("Plan next step"), "{preview}");
         assert!(preview.contains("[⟳ generating]"), "{preview}");
         assert!(preview.contains("45s"), "{preview}");
         assert!(!frame.worker_rows.contains_key(&agy[0]), "{preview}");
-        assert!(matched.starts_with("│  └─ "), "{matched}");
+        assert!(matched.starts_with("│   "), "{matched}");
         assert!(matched.contains("Researcher Inspect custody"), "{matched}");
         assert!(matched.contains("[⟳ reading]"), "{matched}");
         assert!(matched.contains("rsp in 1.2K out 340"), "{matched}");
@@ -8960,7 +9544,7 @@ mod tests {
             for (id, leading, snippet, token) in [
                 (
                     "worker",
-                    if columns >= 72 {
+                    if columns >= 56 {
                         "Builder    아"
                     } else {
                         "Builder 아"
@@ -8976,7 +9560,7 @@ mod tests {
                 ),
                 (
                     "next",
-                    if columns >= 72 {
+                    if columns >= 56 {
                         "Worker     샘"
                     } else {
                         "Worker  샘"
@@ -9047,10 +9631,7 @@ mod tests {
             if columns <= 20 {
                 assert!(worker.contains("Re"), "{worker}");
             }
-            if columns >= 100 {
-                assert!(worker.contains("← Lee"), "{worker}");
-                assert!(!worker.contains("├─") && !worker.contains("└─"), "{worker}");
-            }
+            assert!(!worker.contains(['├', '└', '←']), "{worker}");
             for (plain, styled) in board.lines.iter().zip(&colored.lines) {
                 assert_eq!(*plain, strip_sgr(styled));
                 assert!(width(plain) <= columns);
@@ -10737,6 +11318,222 @@ mod tests {
             narrow.replace('\n', "").contains("decision pending"),
             "{narrow}"
         );
+    }
+
+    #[test]
+    fn native_assignment_board_joins_canonical_membership_once() {
+        use crate::orchestrator::account_binding::test_support::TempDir;
+        use oms_command_operations as events;
+        use oms_command_operations::value::{V, obj};
+        use oms_command_room::{project, value as room_value};
+        use std::sync::atomic::AtomicBool;
+
+        let dir = TempDir::new("native-assignment-board");
+        let stop = AtomicBool::new(false);
+        let room_id = "room-native";
+        let task = "inspect-source";
+        let plan_id = format!("plan_{}", "a".repeat(32));
+        let lease_id = format!("lease_{}", "b".repeat(32));
+        let refs = |value: Value| V::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let main = events::create_attempt(
+            &dir.0,
+            &events::StartRequest {
+                provider: "codex".into(),
+                tool: "panel-main".into(),
+                refs: refs(json!({"panel_room_id":room_id, "panel_role":"main",
+                    "panel_native_scheduling":"unmanaged"})),
+                ..Default::default()
+            },
+            &stop,
+        )
+        .unwrap();
+        let attempt = events::create_attempt(
+            &dir.0,
+            &events::StartRequest {
+                provider: "codex".into(),
+                tool: "panel-native-assignment".into(),
+                task_id: task.into(),
+                parent_attempt_id: main.clone(),
+                refs: refs(json!({"panel_room_id":room_id, "panel_owner":"codex",
+                    "panel_native_scheduling":"unmanaged",
+                    "native_assignment_schema":"1", "plan_id":plan_id, "lease_id":lease_id,
+                    "native_intent_sha256":"c".repeat(64), "native_payload_sha256":"d".repeat(64),
+                    "native_transport":"intent"})),
+                ..Default::default()
+            },
+            &stop,
+        )
+        .unwrap();
+        let receipt = events::new_event(
+            &attempt,
+            0usize.into(),
+            "attempt.usage",
+            obj([
+                ("actor", obj([("kind", "owner".into()), ("name", "test".into())])),
+                ("refs", refs(json!({"native_transport":"submitted",
+                    "native_binding":format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json"),
+                    "native_binding_sha256":"e".repeat(64),
+                    "native_room_message":format!("msg-{}", "f".repeat(32))
+                }))),
+            ]),
+        )
+        .unwrap();
+        events::append_lifecycle(&dir.0, receipt, &stop).unwrap();
+        let (status, out, err) = events::run(
+            events::App::Events,
+            &["list".into(), "--json".into()],
+            &dir.0,
+            &stop,
+        );
+        assert_eq!(status, 0, "{}", String::from_utf8_lossy(&err));
+        let attempts: Value = serde_json::from_slice(&out).unwrap();
+        let find = |id: &str| {
+            rows(&attempts)
+                .iter()
+                .find(|row| row["attempt_id"] == id)
+                .unwrap()
+        };
+
+        let room_rows = [
+            json!({"thread":room_id, "seq":1, "room_event":{"kind":"created","participant":main}}),
+            json!({"thread":room_id, "seq":2, "room_event":{"kind":"join","participant":main,
+                "provider":"codex","role":"main","label":"Main"}}),
+            json!({"thread":room_id, "seq":3, "room_event":{"kind":"join","participant":attempt,
+                "provider":"codex","role":"worker","parent":main,"label":"Native task assignment"}}),
+        ]
+        .map(|event| room_value::parse(&serde_json::to_vec(&event).unwrap(), 4096).unwrap());
+        let room: Value = serde_json::from_slice(
+            &room_value::encode(&project(&room_rows).unwrap(), false, true).unwrap(),
+        )
+        .unwrap();
+        let mut report = json!({
+            "collection":{"ok":true},
+            "room":room,
+            "plan":{"plan_id":plan_id, "tasks":{(task):{
+                "id":task, "lease_id":lease_id, "title":"Inspect assigned source"
+            }}},
+            "room_attempts":{(&main):find(&main), (&attempt):find(&attempt)},
+            "attempts":{"recent":attempts, "active":attempts}
+        });
+        let assignment = |report: &Value| {
+            let rows = calls(report);
+            let mut matches = rows
+                .into_iter()
+                .filter(|row| row["tool"] == "panel-native-assignment");
+            let found = matches.next();
+            assert!(matches.next().is_none(), "{report}");
+            found
+        };
+        let call = assignment(&report).unwrap();
+        assert_eq!(call["attempt"], attempt);
+        assert_eq!(call["parent"], main);
+        assert_eq!(call["task_id"], task);
+        assert_eq!(call["state"], "assigned");
+        assert_ne!(call["native_child"], true);
+        assert_eq!(call_badge(&call).0, "[· submitted]");
+        for view in [View::Auto, View::Compact, View::Detail, View::Graph] {
+            let nav = navigation::Navigation {
+                view,
+                ..Default::default()
+            };
+            assert!(
+                visible(&report, &nav)
+                    .iter()
+                    .any(|row| row["attempt"] == attempt)
+            );
+        }
+        let nav = navigation::Navigation::default();
+        let board = board_frame(&report, &nav, 120, 30, &BTreeMap::new(), false, true);
+        let row = board
+            .worker_rows
+            .iter()
+            .find(|(_, (id, aid))| id == &attempt && aid == &attempt)
+            .unwrap();
+        let line = &board.lines[*row.0];
+        assert!(
+            line.contains("Assignment")
+                && line.contains("Inspect assigned source")
+                && line.contains("submitted")
+                && !line.contains(['├', '└']),
+            "{line}"
+        );
+        let detail = render_detail_card(Some(&call), 120, 116, true, false, usize::MAX).join("\n");
+        assert!(
+            detail.contains(task) && detail.contains("Submitted · consumption unconfirmed"),
+            "{detail}"
+        );
+
+        for (field, wrong) in [
+            ("panel_room_id", json!("room-other")),
+            ("panel_room", json!(true)),
+            ("native_assignment_schema", json!(1)),
+            ("native_binding", json!("tmp/malformed.json")),
+            ("panel_owner", json!("claude")),
+            ("panel_room_participant", json!("another-participant")),
+        ] {
+            let mut bad = report.clone();
+            bad["room_attempts"][&attempt]["refs"][field] = wrong;
+            assert!(assignment(&bad).is_none(), "{field}");
+        }
+        for (field, wrong) in [
+            ("parent_attempt_id", json!("another-main")),
+            ("provider", json!("claude")),
+        ] {
+            let mut bad = report.clone();
+            bad["room_attempts"][&attempt][field] = wrong;
+            assert!(assignment(&bad).is_none(), "{field}");
+        }
+        let mut bad = report.clone();
+        let child = bad["room"]["participants"][1].clone();
+        bad["room"]["participants"]
+            .as_array_mut()
+            .unwrap()
+            .push(child);
+        assert!(assignment(&bad).is_none());
+        bad["room"]["participants"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        assert!(assignment(&bad).is_none());
+        let mut mismatched_parent = report.clone();
+        mismatched_parent["room"]["participants"][0]["provider"] = json!("claude");
+        assert!(assignment(&mismatched_parent).is_none());
+        let mut replaced_parent = mismatched_parent;
+        replaced_parent["room"]["swaps"] =
+            json!([{"attempt":main,"participant":main,"from":"codex","to":"claude"}]);
+        assert!(assignment(&replaced_parent).is_some());
+        assert!(
+            !visible(&replaced_parent, &nav)
+                .iter()
+                .any(|row| row["attempt"] == attempt)
+        );
+        let mut changed_lease = report.clone();
+        changed_lease["plan"]["tasks"][task]["lease_id"] = json!(null);
+        assert_eq!(assignment(&changed_lease).unwrap()["title"], task);
+
+        report["room"]["participants"][1]["joined"] = json!(false);
+        assert!(
+            !visible(&report, &nav)
+                .iter()
+                .any(|row| row["attempt"] == attempt)
+        );
+        assert_eq!(assignment(&report).unwrap()["state"], "assigned");
+        report["room_attempts"][&attempt]["state"] = json!("done");
+        report["room_attempts"][&attempt]["terminal"] = json!(true);
+        let history = visible(
+            &report,
+            &navigation::Navigation {
+                view: View::Compact,
+                ..nav
+            },
+        );
+        let ended = history
+            .iter()
+            .find(|row| row["attempt"] == attempt)
+            .unwrap();
+        assert_eq!(call_badge(ended).0, "[· closed]");
+        assert_eq!(ended["native_assignment_transport"], "submitted");
+        assert_eq!(ended["completed_task"], Value::Null);
     }
 
     #[test]

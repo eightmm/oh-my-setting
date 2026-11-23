@@ -16,6 +16,7 @@
 - Keep routine CI small; no speculative jobs/matrices or duplicate suites.
   Separate expensive checks by affected risk, release or scheduled triggers.
 - Keep generated artifacts, secrets, and private data out of git.
+- Follow the global Git rules: no default-branch commits; publish via `oms land`.
 
 Keep commands, paths, interfaces, protected areas and success criteria in
 `PROJECT.md`, including CI scope/runtime. Past `draft`, fill Commands and

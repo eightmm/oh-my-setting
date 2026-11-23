@@ -73,7 +73,8 @@ necessary; explain any additional worktree and its cleanup first.
 Only when commit/push is authorized, follow the repository's own hook and gate.
 When OMS is installed, use the `oms-agent-harness` skill's `review-gates`
 reference. For deployment, `oms land` owns one full gate for the
-committed tree, push of that SHA, successful CI, then installation update when applicable.
+committed tree, a pull request for that SHA on GitHub and successful CI; merge
+and installation update follow only with `--merge`, when the user asked to merge.
 Do not run `oms update` again after a successful
 landing update. A missing or failed update needs diagnosis, not an assumed pass.
 Keep a reviewed autopilot proposal's base and HEAD unchanged until execution;
