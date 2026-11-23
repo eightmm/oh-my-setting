@@ -291,8 +291,10 @@ pub(crate) fn claude_roster(screen: &str) -> Vec<ClaudeRosterRow> {
     rows.into_iter().take(CLAUDE_ROSTER_LIMIT).collect()
 }
 
+const CLAUDE_ROSTER_ROW_MAX_BYTES: usize = 2048;
+
 fn claude_roster_row(line: &str) -> Option<ClaudeRosterRow> {
-    if line.len() > 256 || line.chars().any(char::is_control) {
+    if line.len() > CLAUDE_ROSTER_ROW_MAX_BYTES || line.chars().any(char::is_control) {
         return None;
     }
     let body = line.strip_prefix("  ◯ ")?;
@@ -307,8 +309,8 @@ fn claude_roster_row(line: &str) -> Option<ClaudeRosterRow> {
         return None;
     }
     let (title_raw, tail) = after_slug.trim_start_matches(' ').rsplit_once("  ")?;
-    let title = title_raw.trim();
-    if title.is_empty() || title.len() > 160 {
+    let title = title_raw.trim_end_matches(' ');
+    if title.trim().is_empty() || title.len() > 160 {
         return None;
     }
     let state = claude_roster_state(tail)?;
@@ -1565,6 +1567,152 @@ Orchestrator (Carbon) (Antigravity ) | ctx 28% | main
             screen.replace("map-gh-project", "bad/slug"),
         ] {
             assert!(super::claude_roster(&bad).is_empty(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn claude_roster_admits_wide_pane_padding_while_enforcing_semantic_bounds() {
+        let ruler = "─".repeat(316);
+        let pad_row = |slug: &str, title: &str, tail: &str, width: usize| -> String {
+            let prefix = format!("  ◯ {slug}  {title}");
+            let pad = width
+                .checked_sub(prefix.chars().count() + tail.chars().count())
+                .expect("wide test row width");
+            assert!(pad >= 2, "expected inter-column space padding");
+            format!("{prefix}{}{tail}", " ".repeat(pad))
+        };
+        let wide_screen = |rows: &[String]| -> String {
+            format!(
+                "prior output\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21% | 7d 82%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← {} agents\n\n  ● main\n{}\n",
+                rows.len(),
+                rows.join("\n"),
+            )
+        };
+
+        let row_active = pad_row(
+            "map-gh-project",
+            "Map GitHub project structure",
+            "9m 49s · ↓ 218.9k tokens",
+            314,
+        );
+        let row_elapsed = pad_row(
+            "verify-wide-pane",
+            "Verify wide roster layout",
+            "1h 2m 3s",
+            314,
+        );
+        let row_idle = pad_row(
+            "builder-gh-templates",
+            "Build issue and PR templates",
+            "idle",
+            314,
+        );
+        for row in [&row_active, &row_elapsed, &row_idle] {
+            assert_eq!(row.chars().count(), 314);
+            assert!(row.len() > 256);
+        }
+
+        let screen = wide_screen(&[row_active.clone(), row_elapsed.clone(), row_idle.clone()]);
+        let expected = vec![
+            super::ClaudeRosterRow {
+                slug: "map-gh-project".into(),
+                title: "Map GitHub project structure".into(),
+                state: "working",
+            },
+            super::ClaudeRosterRow {
+                slug: "verify-wide-pane".into(),
+                title: "Verify wide roster layout".into(),
+                state: "working",
+            },
+            super::ClaudeRosterRow {
+                slug: "builder-gh-templates".into(),
+                title: "Build issue and PR templates".into(),
+                state: "unknown",
+            },
+        ];
+        assert_eq!(super::claude_roster(&screen), expected);
+
+        // SGR-styled wide row still parses cleanly.
+        let sgr_screen = wide_screen(&[
+            format!("\x1b[2m{row_active}\x1b[0m"),
+            row_elapsed.clone(),
+            row_idle.clone(),
+        ]);
+        assert_eq!(super::claude_roster(&sgr_screen), expected);
+
+        // Exact semantic upper bounds (64-byte slug + 160-byte title + wide ASCII padding) pass.
+        let max_slug = "a".repeat(64);
+        let max_title = "t".repeat(160);
+        let boundary_row = format!(
+            "  ◯ {max_slug}  {max_title}{}9m 49s · ↓ 12.3k tokens",
+            " ".repeat(100)
+        );
+        assert!(boundary_row.len() > 314);
+        assert_eq!(
+            super::claude_roster(&wide_screen(&[boundary_row])),
+            vec![super::ClaudeRosterRow {
+                slug: max_slug,
+                title: max_title,
+                state: "working",
+            }]
+        );
+
+        // Overlong semantic fields, non-ASCII padding, raw-line overflow, control chars,
+        // and untrusted/malformed rows in wide panes must all fail closed.
+        let overlong_slug = pad_row(&"s".repeat(65), "Valid title", "idle", 314);
+        let overlong_title = pad_row("valid-slug", &"t".repeat(161), "idle", 314);
+        let nbsp_padded = format!(
+            "  ◯ valid-slug  Valid title{}  idle",
+            "\u{00a0}".repeat(161)
+        );
+        let overlong_tokens = pad_row(
+            "valid-slug",
+            "Valid title",
+            "9m 49s · ↓ 1234567890123k tokens",
+            314,
+        );
+        let trailing_usage = pad_row(
+            "valid-slug",
+            "Valid title",
+            "9m 49s · ↓ 218.9k tokens extra",
+            314,
+        );
+        let bad_status = pad_row("valid-slug", "Valid title", "completed", 314);
+        let overlong_raw = format!("  ◯ valid-slug  Valid title{}idle", " ".repeat(2050));
+        let with_bel = row_active.replacen("    ", " \x07  ", 1);
+        let with_tab = row_active.replacen("    ", " \t  ", 1);
+        let with_esc = row_active.replacen("    ", " \x1b]0;spoof\x07 ", 1);
+
+        for bad_row in [
+            overlong_slug,
+            overlong_title,
+            nbsp_padded,
+            overlong_tokens,
+            trailing_usage,
+            bad_status,
+            overlong_raw,
+            with_bel,
+            with_tab,
+            with_esc,
+        ] {
+            // Single bad row fails closed.
+            assert!(
+                super::claude_roster(&wide_screen(std::slice::from_ref(&bad_row))).is_empty(),
+                "{bad_row:?}"
+            );
+            // Mixed with valid wide rows also fails closed (entire roster rejected).
+            assert!(super::claude_roster(&wide_screen(&[row_active.clone(), bad_row])).is_empty());
+        }
+
+        // Untrusted wide rows outside valid prompt/footer binding fail closed.
+        for untrusted in [
+            format!("{screen}New output after footer\n"),
+            format!(
+                "{row_active}\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n{CLAUDE_MODE}\n"
+            ),
+            screen.replace("  ● main\n", ""),
+        ] {
+            assert!(super::claude_roster(&untrusted).is_empty(), "{untrusted:?}");
         }
     }
 }
