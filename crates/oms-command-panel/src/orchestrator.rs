@@ -28,6 +28,18 @@ enum LeadAccount<'a> {
     Spread(&'a Value),
 }
 
+struct LeadExecution<'a> {
+    host: &'a dyn AccountHost,
+    attempts: &'a AttemptCache,
+    transaction: Option<&'a Transaction<'a>>,
+}
+
+#[derive(Clone, Copy)]
+enum AssignmentEvidence<'a> {
+    Bound(&'a native_assignment::Binding),
+    Primary(&'a Transaction<'a>),
+}
+
 #[derive(Clone, Copy, Default)]
 struct LeadLaunch<'a> {
     model: Option<&'a str>,
@@ -3515,8 +3527,11 @@ impl<'a> Panel<'a> {
                 permissions: Some(MainPermissions::Full),
                 ..Default::default()
             },
-            host,
-            &AttemptCache::default(),
+            LeadExecution {
+                host,
+                attempts: &AttemptCache::default(),
+                transaction: None,
+            },
         )
     }
 
@@ -3526,9 +3541,13 @@ impl<'a> Panel<'a> {
         requested_account: Option<&str>,
         task: Option<&str>,
         launch: LeadLaunch<'_>,
-        host: &dyn AccountHost,
-        attempts: &AttemptCache,
+        execution: LeadExecution<'_>,
     ) -> Result<Value> {
+        let LeadExecution {
+            host,
+            attempts,
+            transaction,
+        } = execution;
         let model = orchestrator_default_model(provider)?;
         if let Some(task) = task {
             require(
@@ -3601,13 +3620,19 @@ impl<'a> Panel<'a> {
                 )?;
             }
             let status = if let Some(task) = task {
-                let turn = oms_panel_core::digest(
+                static TURN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+                let stamp = if assignment.is_some() {
                     format!(
-                        "{}:{provider}:{}:{task}",
-                        self.attempt,
-                        oms_panel_core::now()
+                        "{:?}:{}:{}",
+                        std::time::SystemTime::now(),
+                        std::process::id(),
+                        TURN_SEQUENCE.fetch_add(1, Ordering::Relaxed),
                     )
-                    .as_bytes(),
+                } else {
+                    oms_panel_core::now()
+                };
+                let turn = oms_panel_core::digest(
+                    format!("{}:{provider}:{stamp}:{task}", self.attempt).as_bytes(),
                 );
                 let turn = &turn[..20];
                 let locator = assignment
@@ -3623,11 +3648,15 @@ impl<'a> Panel<'a> {
                 let prompt = format!(
                     "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {role_contract}{locator} Task: {task}"
                 );
-                self.send(
+                self.send_checked(
                     provider,
                     &prompt,
                     Proof::Turn(turn),
                     assignment.as_ref().map(|proof| (proof, host, attempts)),
+                    assignment
+                        .as_ref()
+                        .and(transaction)
+                        .map(AssignmentEvidence::Primary),
                 )?;
                 "submitted"
             } else {
@@ -3703,9 +3732,12 @@ impl<'a> Panel<'a> {
         prompt: &str,
         proof: Proof,
         assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
-        bound: Option<&native_assignment::Binding>,
+        evidence: Option<AssignmentEvidence<'_>>,
     ) -> Result<()> {
-        if provider == "codex" && bound.is_none() && matches!(proof, Proof::Turn(_)) {
+        if provider == "codex"
+            && !matches!(evidence, Some(AssignmentEvidence::Bound(_)))
+            && matches!(proof, Proof::Turn(_))
+        {
             require(
                 prompt.chars().count() <= CODEX_VISIBLE_PASTE_CHARS,
                 "Codex assignment is too long to verify in the composer",
@@ -3743,19 +3775,35 @@ impl<'a> Panel<'a> {
                     "Codex assignment custody changed",
                 )?;
             }
-            if let Some(binding) = bound {
+            if let Some(AssignmentEvidence::Bound(binding)) = evidence {
                 binding.revalidate(self)?;
             }
             Ok(())
         };
         fence(true)?;
+        let ticket = match (evidence, assignment, proof) {
+            (Some(AssignmentEvidence::Primary(tx)), Some((custody, _, _)), Proof::Turn(turn)) => {
+                native_assignment::PrimaryTicket::prepare(self, custody, tx, turn, prompt)?
+            }
+            _ => None,
+        };
+        let mut before_paste = true;
         paste_and_submit(
             provider,
             &lead.id,
-            prompt,
+            ticket.as_ref().map_or(prompt, |ticket| &ticket.prompt),
             proof,
             &mut |args| self.tmux(args),
-            &mut || fence(false),
+            &mut || {
+                fence(false)?;
+                if let Some(ticket) = &ticket {
+                    ticket.revalidate(self)?;
+                    if std::mem::take(&mut before_paste) {
+                        self.require_provider_input(provider)?;
+                    }
+                }
+                Ok(())
+            },
             Pace {
                 now: &mut Instant::now,
                 sleep: &mut std::thread::sleep,
@@ -5344,8 +5392,11 @@ fn run_with_host(
                 options.get("account"),
                 options.get("task"),
                 launch,
-                host,
-                &attempts_cache,
+                LeadExecution {
+                    host,
+                    attempts: &attempts_cache,
+                    transaction: Some(&tx),
+                },
             )?
         }
     };
@@ -5441,6 +5492,14 @@ fn claude_sighting<P: PartialEq>(
             .filter(|row| row["participant"] == participant);
         if let (Some(usage), Some(row), None) = (&child.usage, painted.next(), painted.next()) {
             row["native_response_usage"] = claude_usage_field(usage);
+            if let Some(model) = usage
+                .response
+                .as_ref()
+                .and_then(|response| response.observed_model.as_deref())
+                .and_then(crate::native_children::observed_model)
+            {
+                row["observed_model"] = json!(model);
+            }
             // Only the proven spawn and delivered-notice clocks; never from `state`.
             for (key, at) in [
                 ("started_at", &usage.spawned_at),
@@ -5533,6 +5592,12 @@ fn agy_usage_sighting(
         if let (true, Some(row), None) =
             (painted.contains(&participant), named.next(), named.next())
         {
+            if let Some(model) = value["model"]
+                .as_str()
+                .and_then(crate::native_children::observed_model)
+            {
+                row["observed_model"] = json!(model);
+            }
             row["native_response_usage"] =
                 json!({"scope": "latest_child_response", "response": value});
         }
@@ -6208,6 +6273,7 @@ mod tests {
                 id: "msg_1".into(),
                 at: "2026-11-22T01:00:00Z".into(),
                 usage,
+                observed_model: Some("claude-opus-5-5".into()),
             }),
             spawned_at: Some("2026-11-22T00:59:00Z".into()),
             delivered_at: None,
@@ -6235,6 +6301,24 @@ mod tests {
             "spawned_at": "2026-11-22T00:59:00Z", "delivered_at": null});
         assert_eq!(rows[1]["native_response_usage"], field);
         assert!(rows[0].get("native_response_usage").is_none());
+        // The exact reply model is its own row key, never inside the usage object.
+        assert_eq!(rows[1]["observed_model"], "claude-opus-5-5");
+        assert!(rows[0].get("observed_model").is_none());
+        assert!(field["response"].get("observed_model").is_none());
+        let mut unseen = read([1, 2, 3, 4]);
+        unseen.response.as_mut().unwrap().observed_model = None;
+        let no_model = Some((
+            turn.to_owned(),
+            vec![ClaudeChild {
+                usage: Some(unseen),
+                ..child(turn, "done")
+            }],
+        ));
+        let (rows_nm, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), no_model);
+        assert!(
+            rows_nm[1].get("observed_model").is_none()
+                && rows_nm[1].get("native_response_usage").is_some()
+        );
         // Row clocks come from the proven spawn and delivered notice, never the state.
         let clocks = |row: &serde_json::Value| {
             (row.get("started_at").cloned(), row.get("ended_at").cloned())
@@ -6246,9 +6330,10 @@ mod tests {
         let own = json!({"participant": bound[0].0, "state": "working"});
         let (rows, _) = claude_sighting(vec![own.clone()], &"pane", Some(&"pane"), single());
         assert!(rows.len() == 1 && rows[0]["native_response_usage"] == field);
-        // Two rows of one participant stay bound, but neither gets usage.
+        // Two rows of one participant stay bound, but neither gets usage or a model.
         let (rows, bound) = claude_sighting(vec![own.clone(); 2], &"pane", Some(&"pane"), single());
         assert!(rows == vec![own.clone(); 2] && bound.len() == 1);
+        assert!(rows.iter().all(|row| row.get("observed_model").is_none()));
         // Usage withheld (over the tail budget or unproven) leaves the field absent;
         // a total past u64 is unknown, the clocks stay.
         let with = |usage| {
@@ -6260,6 +6345,7 @@ mod tests {
         assert!(
             rows.len() == 2 && rows[1].get("native_response_usage").is_none() && bound.len() == 1
         );
+        assert!(rows[1].get("observed_model").is_none());
         assert_eq!(clocks(&rows[1]), (None, None));
         let clocked = |state, delivered: Option<&str>| {
             let mut usage = read([1, 2, 3, 4]);
@@ -7430,6 +7516,7 @@ mod tests {
             dock_after_break: RefCell<Option<[String; 2]>>,
             dock_rows: RefCell<String>,
             task_transition: RefCell<Option<TaskTransition>>,
+            primary_columns: Cell<Option<usize>>,
         }
 
         impl SpyPanel {
@@ -7484,6 +7571,7 @@ mod tests {
                     dock_after_break: Default::default(),
                     dock_rows: Default::default(),
                     task_transition: RefCell::new(None),
+                    primary_columns: Cell::new(None),
                 }
             }
 
@@ -7570,11 +7658,33 @@ mod tests {
                         "-p",
                         "-t",
                         pane,
+                        native_assignment::PRIMARY_TICKET_LAYOUT,
+                    ] => {
+                        let leads = self.leads.borrow();
+                        let lead = leads.iter().find(|lead| lead.pane_id == *pane).unwrap();
+                        let active = u8::from(lead.active);
+                        let width = self.primary_columns.get().unwrap_or(80);
+                        format!(
+                            "$1\t{}\t{pane}\t{}\t0\t0\t1\t{active}\t{width}\t.",
+                            lead.window, lead.pid,
+                        )
+                    }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane,
                         ORDINARY_CODEX_DRAFT_FORMAT,
                         ..,
                     ] => {
                         let screens = self.screens.borrow();
-                        ordinary_frame(pane, screens.get(*pane).map_or("", String::as_str), 80, 0)
+                        ordinary_frame(
+                            pane,
+                            screens.get(*pane).map_or("", String::as_str),
+                            self.primary_columns.get().unwrap_or(80),
+                            0,
+                        )
                     }
                     ["tmux", "list-panes", "-s", "-t", _, "-F", PANE_FORMAT] => {
                         let mut lines = vec![format!(
@@ -8056,7 +8166,14 @@ mod tests {
                             let text = text
                                 .strip_suffix(r"\;")
                                 .map_or(Cow::Borrowed(text.as_str()), |p| format!("{p};").into());
-                            let (draft, cursor) = alternate_draft(&text);
+                            let (draft, cursor) = match self.primary_columns.get() {
+                                Some(width) if crate::render::width(&text) + 2 <= width => {
+                                    let status = CODEX_DISPLAY_STATUS.lines().nth(1).unwrap();
+                                    let draft = format!("{}› {text}\n\n{status}", "\n".repeat(87));
+                                    (draft, (crate::render::width(&text) + 2, 87))
+                                }
+                                _ => alternate_draft(&text),
+                            };
                             self.cursor_x.set(cursor.0 as u32);
                             self.screens.borrow_mut().insert(pane.into(), draft);
                         } else {
@@ -10809,8 +10926,11 @@ mod tests {
                     Some("acct-a"),
                     None,
                     requested,
-                    &host,
-                    &AttemptCache::default(),
+                    LeadExecution {
+                        host: &host,
+                        attempts: &AttemptCache::default(),
+                        transaction: None,
+                    },
                 )
                 .unwrap();
             let launch = &spy.calls_named("new-window")[0];
@@ -10849,8 +10969,11 @@ mod tests {
                     Some("acct-a"),
                     None,
                     requested,
-                    &host,
-                    &AttemptCache::default(),
+                    LeadExecution {
+                        host: &host,
+                        attempts: &AttemptCache::default(),
+                        transaction: None,
+                    },
                 )
                 .unwrap_err();
             assert!(explicit_reuse.message.contains("already connected"));
@@ -11248,6 +11371,190 @@ mod tests {
                 .unwrap_err();
             assert!(main_err.message.contains("live Main attempt"));
             assert!(spy.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn codex_primary_task_reference_preserves_payload_and_fences_enter() {
+            let (_tmp, spy, host, _) = primary_codex_fixture("primary-ticket");
+            let store = Store::open(&spy.repo).unwrap();
+            let transaction = store
+                .transaction("panel-provider-sessions", Duration::from_secs(3))
+                .unwrap();
+            let send = |task: &str| {
+                spy.load().execute_with_host_cached(
+                    "codex",
+                    Some("acct-a"),
+                    Some(task),
+                    LeadLaunch::default(),
+                    LeadExecution {
+                        host: &host,
+                        attempts: &AttemptCache::default(),
+                        transaction: Some(&transaction),
+                    },
+                )
+            };
+            let path_from_prompt = |prompt: &str| {
+                let (_, remainder) = prompt.split_once(" Read '").unwrap();
+                PathBuf::from(remainder.split_once("' for the assignment;").unwrap().0)
+            };
+            let reset = || {
+                spy.calls.borrow_mut().clear();
+                spy.cursor_x.set(2);
+                spy.screens
+                    .borrow_mut()
+                    .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            };
+            spy.primary_columns.set(Some(316));
+            let brief = concat!(
+                "Review the exact fixture;  preserve bytes and explain the résultat for /",
+                "home/example/fixture."
+            );
+            assert_eq!(send(brief).unwrap()["status"], "submitted");
+            let mut buffers = spy.calls_named("set-buffer");
+            assert_eq!(buffers.len(), 1);
+            let prompt = &buffers.pop().unwrap()[5];
+            assert!(prompt.is_ascii() && !prompt.contains('\n'));
+            assert!(crate::render::width(prompt) + 2 < 316);
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert_eq!(spy.calls_named("send-keys").len(), 1);
+            let turn = prompt
+                .split_once(" Turn ")
+                .unwrap()
+                .1
+                .split_once(". ")
+                .unwrap()
+                .0;
+            let path = path_from_prompt(prompt);
+            assert_eq!(
+                path,
+                spy.repo
+                    .join(format!(".oms/artifacts/native-tasks/{turn}.json"))
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            let packet: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(packet["turn"], turn);
+            assert_eq!(packet["room"], ROOM);
+            assert_eq!(packet["main_attempt"], MAIN);
+            assert_eq!(packet["main_participant"], MAIN);
+            assert_eq!(packet["lead_pane"]["id"], "%4");
+            assert_eq!(packet["account"]["account_id"], "acct-a");
+            let locator = assignment_locator(&spy.repo, ROOM).unwrap();
+            let full = format!(
+                "{} Turn {turn}. You own this provider's work. {ALTERNATE_STARTUP_PROMPT}{locator} Task: {brief}",
+                crate::native_children::TASK_PREFIX,
+            );
+            assert_eq!(packet["payload"], full);
+            assert_eq!(
+                packet["payload_sha256"],
+                oms_panel_core::digest(full.as_bytes())
+            );
+
+            for (hook, mutation) in [
+                ("set-buffer", "missing"),
+                ("set-buffer", "invalid"),
+                ("paste-buffer", "foreign"),
+                ("paste-buffer", "changed"),
+            ] {
+                reset();
+                spy.task_transition.replace(Some((
+                    hook,
+                    Box::new(move |spy| {
+                        let drafts = spy.recent_screens.borrow();
+                        let path = path_from_prompt(&drafts["_pending_paste"]);
+                        if mutation == "missing" {
+                            std::fs::remove_file(&path).unwrap();
+                        } else if mutation == "invalid" {
+                            std::fs::write(&path, b"{").unwrap();
+                        } else {
+                            let mut packet: Value =
+                                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                            let field = if mutation == "foreign" {
+                                "room"
+                            } else {
+                                "payload"
+                            };
+                            packet[field] = mutation.into();
+                            std::fs::write(&path, serde_json::to_vec(&packet).unwrap()).unwrap();
+                        }
+                    }),
+                )));
+                let error = send(brief).unwrap_err();
+                assert!(
+                    error
+                        .message
+                        .contains("task reference is missing or changed")
+                );
+                assert_eq!(error.publication_uncertain, hook == "paste-buffer");
+                assert_eq!(
+                    spy.calls_named("paste-buffer").len(),
+                    usize::from(hook == "paste-buffer")
+                );
+                assert!(spy.calls_named("send-keys").is_empty());
+                if hook == "paste-buffer" {
+                    spy.calls.borrow_mut().clear();
+                    assert!(send(brief).is_err());
+                    assert!(spy.mutating_calls().is_empty());
+                }
+            }
+
+            reset();
+            spy.task_transition
+                .replace(Some(("set-buffer", Box::new(|spy| spy.cursor_x.set(12)))));
+            let error = send(brief).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("provider cursor is outside the start")
+            );
+            assert!(!error.publication_uncertain);
+            assert!(spy.calls_named("paste-buffer").is_empty());
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            let count_records = || std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+            let records = count_records();
+            reset();
+            let sensitive = format!("Review {}{}", "ghp_", "p".repeat(36));
+            let error = send(&sensitive).unwrap_err();
+            assert!(error.message.contains("task reference content refused"));
+            assert!(spy.mutating_calls().is_empty());
+            assert_eq!(count_records(), records);
+
+            reset();
+            spy.primary_columns.set(Some(0));
+            let error = send(brief).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("task reference layout is unavailable")
+            );
+            assert!(spy.mutating_calls().is_empty());
+            assert_eq!(count_records(), records);
+
+            for columns in [1200, 145] {
+                reset();
+                spy.primary_columns.set(Some(columns));
+                assert_eq!(send(brief).unwrap()["status"], "submitted");
+                assert!(spy.calls_named("set-buffer")[0][5].ends_with(brief));
+                assert_eq!(spy.calls_named("send-keys").len(), 1);
+                assert_eq!(count_records(), records);
+            }
+
+            reset();
+            spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(|spy| {
+                    let mut screens = spy.screens.borrow_mut();
+                    let draft = screens.get_mut("%4").unwrap();
+                    assert!(draft.contains(" \n  "));
+                    *draft = draft.replacen(" \n  ", "\n  ", 1);
+                }),
+            )));
+            let error = send(brief).unwrap_err();
+            assert!(error.publication_uncertain);
+            assert!(spy.calls_named("set-buffer")[0][5].ends_with(brief));
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+            assert_eq!(count_records(), records);
         }
 
         #[test]
@@ -11919,8 +12226,11 @@ mod tests {
                     None,
                     Some("cached one"),
                     LeadLaunch::default(),
-                    &host,
-                    &shared_cache,
+                    LeadExecution {
+                        host: &host,
+                        attempts: &shared_cache,
+                        transaction: None,
+                    },
                 )
                 .unwrap();
             assert_eq!(spy.event_lists.get(), 1);
@@ -11931,8 +12241,11 @@ mod tests {
                     None,
                     Some("cached two"),
                     LeadLaunch::default(),
-                    &host,
-                    &shared_cache,
+                    LeadExecution {
+                        host: &host,
+                        attempts: &shared_cache,
+                        transaction: None,
+                    },
                 )
                 .unwrap();
             assert_eq!(spy.event_lists.get(), 0);
@@ -11946,8 +12259,11 @@ mod tests {
                     None,
                     Some("cached three"),
                     LeadLaunch::default(),
-                    &host,
-                    &shared_cache,
+                    LeadExecution {
+                        host: &host,
+                        attempts: &shared_cache,
+                        transaction: None,
+                    },
                 )
                 .unwrap();
             assert_eq!(spy.event_lists.get(), 1);
@@ -13321,6 +13637,7 @@ mod tests {
             let (got, offered, proofs) = sample(rows.clone(), turn, turn, true);
             assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
             assert_eq!(got[0]["native_response_usage"], field(2));
+            assert_eq!(got[0]["observed_model"], "gemini");
             assert!(
                 got[0]["native_response_usage"]["response"]
                     .get("total_tokens")
@@ -13343,6 +13660,12 @@ mod tests {
             assert_eq!(offered, vec![set(&[&b])]);
             assert!(got[0] == rows[0] && got[1] == rows[1] && got[3] == rows[3]);
             assert_eq!(got[2]["native_response_usage"], field(2));
+            assert_eq!(got[2]["observed_model"], "gemini");
+            assert!(
+                got.iter()
+                    .enumerate()
+                    .all(|(i, r)| i == 2 || r.get("observed_model").is_none())
+            );
 
             // More than three eligible: only the first three in participant order.
             let mut order = [&a, &b, &c, &d];
@@ -13370,6 +13693,26 @@ mod tests {
             let mut none = rows.clone();
             agy_usage_sighting(&mut none, turn, |_| None, || unreachable!());
             assert_eq!(none, rows);
+            assert!(none[0].get("observed_model").is_none());
+
+            // A model the shared validator rejects is omitted; the usage is unchanged.
+            for bad in ["<synthetic>", "\u{1b}[31mgemini", " gemini"] {
+                let mut invalid = usage(2);
+                invalid["model"] = json!(bad);
+                let scan = BTreeMap::from([(b.clone(), invalid.clone())]);
+                let mut rows = vec![row(&b)];
+                agy_usage_sighting(
+                    &mut rows,
+                    turn,
+                    |_| Some((turn.to_owned(), scan.clone())),
+                    || true,
+                );
+                assert!(rows[0].get("observed_model").is_none(), "{bad:?}");
+                assert_eq!(
+                    rows[0]["native_response_usage"],
+                    json!({"scope": "latest_child_response", "response": invalid})
+                );
+            }
 
             // No eligible row or no shown Turn: neither the scan nor the fence runs.
             for (rows, shown) in [

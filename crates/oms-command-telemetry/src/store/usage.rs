@@ -132,6 +132,11 @@ pub struct Projection {
     pub calls: Vec<AccountedCall>,
 }
 
+pub(crate) struct StorageStats {
+    pub retained_bytes: usize,
+    pub receipt_rows: usize,
+}
+
 /// Provider-native token counts attributable to one physical call. Components
 /// may overlap. The total uses a reported value when available and otherwise
 /// requires enough compatible components to calculate it.
@@ -158,6 +163,30 @@ pub struct AttributedCall<'a> {
 struct AttributionSession<'a> {
     saw_unknown_account: bool,
     accounts: BTreeMap<&'a str, (AccountContinuity, Option<&'a Usage>)>,
+    aliases: ScopeAliases,
+}
+
+/// A proven home may be registered under a different alias between calls.
+/// An observation under that alias breaks the previous alias's baseline.
+#[derive(Default)]
+struct ScopeAliases(BTreeMap<String, String>);
+
+impl ScopeAliases {
+    fn switched(&mut self, account: Option<&str>, scope: Option<&str>) -> bool {
+        let Some((account, scope)) = account.zip(scope) else {
+            return false;
+        };
+        if self
+            .0
+            .get(scope)
+            .is_some_and(|previous| previous == account)
+        {
+            return false;
+        }
+        self.0
+            .insert(scope.to_owned(), account.to_owned())
+            .is_some()
+    }
 }
 
 /// A renamed registration must not reuse the old home's cumulative baseline.
@@ -204,9 +233,10 @@ impl<'a> AttributionSession<'a> {
         let (continuity, snapshot) = self.accounts.entry(account).or_default();
         let first = !continuity.seen;
         let continuous = continuity.observe(account_scope);
+        let alias_changed = self.aliases.switched(Some(account), account_scope);
         let previous = snapshot.take();
         *snapshot = observed.filter(|_| continuity.can_anchor());
-        if !continuous {
+        if !continuous || alias_changed {
             return None;
         }
         match (observed, previous) {
@@ -727,11 +757,21 @@ fn current(rows: &[Receipt]) -> Result<Vec<Receipt>, StoreError> {
 /// Read a strict, complete snapshot. Missing history means no tracked calls,
 /// never an assertion that the provider has billed nothing outside OMS.
 pub fn load(repo: &Path) -> Result<Projection, StoreError> {
-    let mut projection = project(&receipts(&read_index(
-        repo,
-        Some(Path::new(RECEIPTS)),
-        true,
-    )?)?)?;
+    load_with_storage(repo).map(|(projection, _)| projection)
+}
+
+/// Storage counts and usage describe the same validated snapshot, including
+/// superseded revisions. They do not require another read of the ledger.
+pub(crate) fn load_with_storage(repo: &Path) -> Result<(Projection, StorageStats), StoreError> {
+    let (mut projection, storage) = {
+        let bytes = read_index(repo, Some(Path::new(RECEIPTS)), true)?;
+        let rows = receipts(&bytes)?;
+        let storage = StorageStats {
+            retained_bytes: bytes.len(),
+            receipt_rows: rows.len(),
+        };
+        (project(&rows)?, storage)
+    };
     // Optional evidence: a missing, oversized, torn or unreadable supplement
     // leaves core usage intact and reasoning unknown.
     if let Ok(found) = read_reasoning(repo).and_then(|bytes| reasoning_index(&bytes)) {
@@ -739,7 +779,7 @@ pub fn load(repo: &Path) -> Result<Projection, StoreError> {
             call.reasoning_tokens = proven_reasoning(&call.receipt, &found);
         }
     }
-    Ok(projection)
+    Ok((projection, storage))
 }
 
 /// The supplement is small by contract; reads and rewrites enforce it before
@@ -940,46 +980,60 @@ pub fn record_reasoning(
 }
 type SessionIdentity = (String, Option<String>, String);
 type MeasuredTotals = (Option<u64>, Option<u64>);
+struct LedgerSession {
+    continuity: AccountContinuity,
+    totals: MeasuredTotals,
+    last_unbound: u64,
+    last_usage: Option<Usage>,
+}
 fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
     let rows = current(rows)?;
-    let mut sessions: BTreeMap<SessionIdentity, (AccountContinuity, MeasuredTotals, u64)> =
-        BTreeMap::new();
-    let mut unknown_accounts = BTreeMap::new();
+    let mut sessions = BTreeMap::<SessionIdentity, LedgerSession>::new();
+    let mut families = BTreeMap::<_, (ScopeAliases, u64)>::new();
     let mut calls = Vec::new();
     for receipt in rows {
         let mut tokens = receipt.usage.tokens();
         let mut cost = receipt.cost.microusd();
         let mut conflict = false;
         if let Some(session) = &receipt.cumulative {
-            let family = (
-                receipt.identity.provider.clone(),
-                session.session_id.clone(),
-            );
+            let (aliases, unbound_observation) = families
+                .entry((
+                    receipt.identity.provider.clone(),
+                    session.session_id.clone(),
+                ))
+                .or_default();
             if receipt.identity.account.is_none() {
                 // An unbound observation can belong to any named home in this
                 // provider/session. Fence that family without scanning unrelated
                 // sessions each time an unknown account is observed.
-                unknown_accounts.insert(family.clone(), receipt.ordinal);
+                *unbound_observation = receipt.ordinal;
             }
-            let unbound_observation = unknown_accounts.get(&family).copied().unwrap_or(0);
+            let unbound_observation = *unbound_observation;
+            let alias_changed = aliases.switched(
+                receipt.identity.account.as_deref(),
+                receipt.identity.account_scope_sha256.as_deref(),
+            );
             let key = (
                 receipt.identity.provider.clone(),
                 receipt.identity.account.clone(),
                 session.session_id.clone(),
             );
-            let (continuity, totals, last_unbound) = sessions.entry(key).or_insert_with(|| {
-                (
-                    AccountContinuity::default(),
-                    if session.baseline_unknown
-                        || (receipt.identity.account_scope_sha256.is_some()
-                            && unbound_observation != 0)
-                    {
-                        (None, None)
-                    } else {
-                        (Some(0), Some(0))
-                    },
-                    unbound_observation,
-                )
+            let LedgerSession {
+                continuity,
+                totals,
+                last_unbound,
+                last_usage,
+            } = sessions.entry(key).or_insert_with(|| LedgerSession {
+                continuity: AccountContinuity::default(),
+                totals: if session.baseline_unknown
+                    || (receipt.identity.account_scope_sha256.is_some() && unbound_observation != 0)
+                {
+                    (None, None)
+                } else {
+                    (Some(0), Some(0))
+                },
+                last_unbound: unbound_observation,
+                last_usage: None,
             });
             let first = !continuity.seen;
             let continuous = continuity.observe(receipt.identity.account_scope_sha256.as_deref());
@@ -988,14 +1042,22 @@ fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
             let observed = receipt.phase == Phase::Final
                 && continuity.can_anchor()
                 && !(continuity.saw_proof && !first && !session.baseline_unknown);
-            let prior = if continuous && observed && !unbound_gap {
+            let comparable = continuous && observed && !unbound_gap && !alias_changed;
+            let component_conflict = comparable
+                && last_usage
+                    .as_ref()
+                    .is_some_and(|prior| AttributedUsage::between(&receipt.usage, prior).is_err());
+            let prior = if comparable && !component_conflict {
                 *totals
             } else {
                 (None, None)
             };
-            conflict = matches!((tokens,prior.0),(Some(n),Some(p)) if n < p)
+            conflict = component_conflict
+                || matches!((tokens,prior.0),(Some(n),Some(p)) if n < p)
                 || matches!((cost,prior.1),(Some(n),Some(p)) if n < p);
-            *totals = if !observed || (continuity.saw_proof && conflict) {
+            let can_anchor = observed && !(continuity.saw_proof && conflict);
+            *last_usage = (can_anchor && continuity.saw_proof).then(|| receipt.usage.clone());
+            *totals = if !can_anchor {
                 (None, None)
             } else if continuity.saw_proof {
                 (tokens, cost)
@@ -1107,7 +1169,9 @@ fn begin_inner(
         if let Some(session) = &cumulative
             && rows.iter().any(|r| {
                 r.identity.provider == identity.provider
-                    && r.identity.account == identity.account
+                    && (r.identity.account == identity.account
+                        || identity.account_scope_sha256.is_some()
+                            && r.identity.account_scope_sha256 == identity.account_scope_sha256)
                     && r.cumulative
                         .as_ref()
                         .is_some_and(|s| s.session_id == session.session_id)

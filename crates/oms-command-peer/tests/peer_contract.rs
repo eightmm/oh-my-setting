@@ -3765,7 +3765,9 @@ fn provider_usage_follows_bound_account_home_generation() {
                 "  mkdir -m 700 \"$CODEX_HOME\" || exit 82\n",
                 "fi\n",
                 "n=$(cat \"$HOME/usage-total\")\n",
-                "printf '{\"type\":\"thread.started\",\"thread_id\":\"continuity-thread\"}\\n'\n",
+                "thread=continuity-thread\n",
+                "if [ -f \"$HOME/replace-account-home\" ]; then thread=foreign-thread; fi\n",
+                "printf '{\"type\":\"thread.started\",\"thread_id\":\"%s\"}\\n' \"$thread\"\n",
                 "printf '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\\n'\n",
                 "printf '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":%s,\"output_tokens\":0,\"cached_input_tokens\":0,\"total_tokens\":%s}}\\n' \"$n\" \"$n\"\n",
                 "if [ -f \"$HOME/replace-account-home\" ]; then echo 'rate limit reached' >&2; exit 1; fi\n",
@@ -3861,32 +3863,31 @@ fn provider_usage_follows_bound_account_home_generation() {
                 assert_latest(Some(50), usage::Phase::Final).as_ref(),
                 Some(&replaced_scope)
             );
-            // A mid-call change preserves unknown liability and cleanup. Even a
-            // capacity-looking error must not trigger fallback/resend.
+            // A replacement can report another thread. Keep the exact intent's
+            // unknown liability and cleanup even with a capacity-looking error.
             let before = account_log(home).len();
             fs::write(home.join("replace-account-home"), "replace\n").unwrap();
             let interrupted = invoke(700);
             assert_ne!(interrupted.0, 0, "{}", message(&interrupted));
-            let output = String::from_utf8_lossy(&interrupted.1);
-            let report = fs::read_to_string(output.lines().next().unwrap()).unwrap();
-            assert!(
-                report.contains("home changed during invocation"),
-                "{report}"
-            );
             assert_eq!(account_log(home).len(), before + 1);
             assert_eq!(
                 assert_latest(None, usage::Phase::Unknown).as_ref(),
                 Some(&replaced_scope)
             );
+            let projection = usage::load(&repo.0).unwrap();
+            let receipt = &projection.calls.last().unwrap().receipt;
             assert_eq!(
-                usage::load(&repo.0)
-                    .unwrap()
-                    .calls
-                    .last()
-                    .unwrap()
-                    .receipt
-                    .cleanup_complete,
-                Some(true)
+                receipt.cumulative.as_ref().unwrap().session_id,
+                "continuity-thread"
+            );
+            assert!(receipt.source_sha256.is_some());
+            assert_eq!(receipt.usage, usage::Usage::default());
+            assert_eq!(receipt.cleanup_complete, Some(true));
+            let output = String::from_utf8_lossy(&interrupted.1);
+            let report = fs::read_to_string(output.lines().next().unwrap()).unwrap();
+            assert!(
+                report.contains("home changed during invocation"),
+                "{report}"
             );
             fs::remove_file(home.join("replace-account-home")).unwrap();
             let after = invoke(730);
@@ -4190,6 +4191,32 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         br#"[{"id":"finding_1","status":"open","summary":"review freshness"}]"#.to_vec()
                     }
                 };
+                    if matches!(self.mode, "empty" | "omitted_only" | "omitted_one")
+                        && projection != HandoffProjection::TaskStatus
+                    {
+                        let key = match projection {
+                            HandoffProjection::EvidenceMatrix => "criteria",
+                            HandoffProjection::NextStep => "actions",
+                            HandoffProjection::JournalDecisions => "decisions",
+                            HandoffProjection::ReviewFindings => "",
+                            HandoffProjection::TaskStatus => unreachable!(),
+                        };
+                        stdout = if key.is_empty() {
+                            b"[]".to_vec()
+                        } else {
+                            format!(
+                                r#"{{"{key}":{{"items":[],"omitted":{}}}}}"#,
+                                if self.mode == "omitted_only" {
+                                    u64::MAX
+                                } else if self.mode == "omitted_one" {
+                                    1
+                                } else {
+                                    0
+                                }
+                            )
+                            .into_bytes()
+                        };
+                    }
                     let mut complete = true;
                     if self.mode == "collections" && projection != HandoffProjection::TaskStatus {
                         let (key, name, count, omitted, bounded) = match projection {
@@ -4322,6 +4349,15 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     reads,
                 )
             };
+            let flags = |body: &str, section: &str| {
+                body.split(&format!("\n## {section}\n"))
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("missing {section}: {body}"))
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
             let reads = Reads::new("complete");
             let result = call(&reads, &["prompt"]);
             assert_eq!(result.0, 0, "{}", message(&result));
@@ -4346,6 +4382,17 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 assert!(body.contains(recorded), "missing {recorded}: {body}");
             }
             assert!(body.len() <= 4096);
+            for section in [
+                "Goal",
+                "State",
+                "Decisions",
+                "Open findings",
+                "Verified / Not verified",
+                "Next step",
+                "Pointers",
+            ] {
+                assert_eq!(flags(body, section), "[-]", "{section}: {body}");
+            }
             let calls = reads.calls.lock().unwrap();
             assert_eq!(calls.len(), 5);
             assert!(calls.windows(2).all(|pair| pair[0].1 >= pair[1].1));
@@ -4364,6 +4411,21 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     .unwrap()
                     .contains("truncated:")
             );
+            let small_body = std::str::from_utf8(&small.1).unwrap();
+            assert!(small_body.contains("p=producer loss,r=render loss"));
+            for section in [
+                "Goal",
+                "State",
+                "Decisions",
+                "Open findings",
+                "Verified / Not verified",
+                "Next step",
+                "Pointers",
+            ] {
+                let state = flags(small_body, section);
+                assert_ne!(state, "[e]", "trimmed content is not empty: {small_body}");
+            }
+            assert!(flags(small_body, "Verified / Not verified").contains('r'));
             for (mode, gap, absent) in [
                 (
                     "unavailable",
@@ -4398,6 +4460,21 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     body.contains(gap) && !body.contains(absent),
                     "{mode}: {body}"
                 );
+                let expected = if mode == "line_budget" { 'r' } else { 'u' };
+                assert!(
+                    flags(body, "Verified / Not verified").contains(expected),
+                    "{mode}: {body}"
+                );
+                let tiny = call(&Reads::new(mode), &["prompt", "--max-bytes", "512"]);
+                assert_eq!(tiny.0, 0, "{mode}: {}", message(&tiny));
+                assert!(tiny.1.len() <= 512);
+                assert!(
+                    flags(
+                        std::str::from_utf8(&tiny.1).unwrap(),
+                        "Verified / Not verified"
+                    )
+                    .contains(expected)
+                );
             }
             let collections = call(
                 &Reads::new("collections"),
@@ -4412,6 +4489,8 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 assert!(!body.contains(&format!("\"{name}-06\"")), "{name}");
             }
             assert!(body.contains("truncated: 81 line(s) omitted; withheld: 0 line(s)"));
+            assert_eq!(flags(body, "Verified / Not verified"), "[pr]");
+            assert_eq!(flags(body, "Open findings"), "[r]");
             let ordinary_budget = call(&Reads::new("collections"), &["prompt"]);
             assert_eq!(ordinary_budget.0, 0, "{}", message(&ordinary_budget));
             let body = std::str::from_utf8(&ordinary_budget.1).unwrap();
@@ -4442,7 +4521,18 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
             assert_eq!(saved.0, 0, "{}", message(&saved));
             let body = fs::read_to_string(repo.0.join(".oms/handoffs/safe.md")).unwrap();
             assert!(body.contains("withheld: this source matched") && !body.contains(&private));
+            assert!(flags(&body, "Verified / Not verified").contains('w'));
             assert!(body.contains("finding_1") && body.contains("plan goal: Plan continuity"));
+            let tiny = call(&Reads::new("sensitive"), &["prompt", "--max-bytes", "512"]);
+            assert_eq!(tiny.0, 0, "{}", message(&tiny));
+            assert!(tiny.1.len() <= 512);
+            assert!(
+                flags(
+                    std::str::from_utf8(&tiny.1).unwrap(),
+                    "Verified / Not verified"
+                )
+                .contains('w')
+            );
 
             repo.write(
                 ".oms/plan/tasks.json",
@@ -4484,7 +4574,138 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 let body = std::str::from_utf8(&result.1).unwrap();
                 assert!(body.contains(gap) && !body.contains(&private));
                 assert!(body.contains("plan goal: Plan continuity") && body.contains("decision_1"));
+                for section in ["Goal", "Decisions"] {
+                    assert!(
+                        flags(body, section).contains(if gap.starts_with("withheld") {
+                            'w'
+                        } else {
+                            'u'
+                        })
+                    );
+                }
             }
+            let empty_packet = "# Task\n- task_id: handoff-fixture\n- status: active\n\n## Goal\nContinue\n\n## Decisions\n";
+            repo.write(".oms/task/current.md", empty_packet);
+            let empty = call(&Reads::new("empty"), &["prompt"]);
+            assert_eq!(empty.0, 0, "{}", message(&empty));
+            let body = std::str::from_utf8(&empty.1).unwrap();
+            for section in [
+                "Decisions",
+                "Open findings",
+                "Verified / Not verified",
+                "Next step",
+            ] {
+                assert_eq!(flags(body, section), "[e]", "{body}");
+            }
+            let empty = call(&Reads::new("empty"), &["prompt", "--max-bytes", "512"]);
+            assert_eq!(empty.0, 0, "{}", message(&empty));
+            assert!(empty.1.len() <= 512);
+            let body = std::str::from_utf8(&empty.1).unwrap();
+            for section in [
+                "Decisions",
+                "Open findings",
+                "Verified / Not verified",
+                "Next step",
+            ] {
+                assert_eq!(flags(body, section), "[e]", "{body}");
+            }
+            assert!(!body.contains("no records returned"));
+            let retained = body.lines().filter(|line| line.starts_with("- ")).count();
+            assert!(
+                body.contains(&format!(
+                    "truncated: {} line(s) omitted; withheld: 0 line(s)",
+                    4 - retained
+                )),
+                "{body}"
+            );
+
+            // Removing producer-loss explanations does not count their records twice.
+            let omitted = call(
+                &Reads::new("omitted_one"),
+                &["prompt", "--max-bytes", "512"],
+            );
+            assert_eq!(omitted.0, 0, "{}", message(&omitted));
+            let body = std::str::from_utf8(&omitted.1).unwrap();
+            assert!(!body.contains("no records returned"));
+            let retained = body.lines().filter(|line| line.starts_with("- ")).count();
+            assert!(
+                body.contains(&format!(
+                    "truncated: {} line(s) omitted; withheld: 0 line(s)",
+                    7 - retained
+                )),
+                "{body}"
+            );
+            for section in ["Decisions", "Verified / Not verified", "Next step"] {
+                assert_eq!(flags(body, section), "[p]", "{body}");
+            }
+
+            repo.write(
+                ".oms/task/current.md",
+                empty_packet.replace("Continue", " \t "),
+            );
+            repo.write(
+                ".oms/plan/tasks.json",
+                br#"{"schema":3,"goal":" \t ","accept":"","tasks":{}}"#,
+            );
+            let whitespace = call(&Reads::new("empty"), &["prompt", "--max-bytes", "512"]);
+            assert_eq!(whitespace.0, 0, "{}", message(&whitespace));
+            let body = std::str::from_utf8(&whitespace.1).unwrap();
+            assert_eq!(flags(body, "Goal"), "[e]", "{body}");
+            repo.write(".oms/task/current.md", empty_packet);
+            repo.write(
+                ".oms/plan/tasks.json",
+                br#"{"schema":3,"goal":"Plan continuity","accept":"","tasks":{}}"#,
+            );
+            let omitted = call(
+                &Reads::new("omitted_only"),
+                &["prompt", "--max-bytes", "512"],
+            );
+            assert_eq!(omitted.0, 0, "{}", message(&omitted));
+            assert!(omitted.1.len() <= 512);
+            let body = std::str::from_utf8(&omitted.1).unwrap();
+            for section in ["Decisions", "Verified / Not verified", "Next step"] {
+                assert!(flags(body, section).contains('p'), "{body}");
+                assert!(!flags(body, section).contains('e'), "{body}");
+            }
+            for (decisions, count) in [
+                (
+                    (0..9)
+                        .map(|n| format!("- 2026-11-20T00:00:00Z [main] decision {n}\n"))
+                        .collect::<String>(),
+                    3,
+                ),
+                (
+                    format!("- 2026-11-20T00:00:00Z [main] {}\n", "λ".repeat(2200)),
+                    1,
+                ),
+            ] {
+                repo.write(".oms/task/current.md", format!("{empty_packet}{decisions}"));
+                let result = call(&Reads::new("empty"), &["prompt", "--max-bytes", "65536"]);
+                assert_eq!(result.0, 0, "{}", message(&result));
+                let body = std::str::from_utf8(&result.1).unwrap();
+                assert_eq!(flags(body, "Decisions"), "[p]");
+                assert!(
+                    body.contains(&format!("truncated: {count} line(s) omitted")),
+                    "{body}"
+                );
+                repo.write(
+                    ".oms/task/current.md",
+                    format!("{empty_packet}{decisions}")
+                        .replace("status: active", "status: closed"),
+                );
+                let closed = call(&Reads::new("empty"), &["prompt"]);
+                assert_eq!(closed.0, 0, "{}", message(&closed));
+                let body = std::str::from_utf8(&closed.1).unwrap();
+                assert_eq!(flags(body, "Decisions"), "[e]");
+                assert!(body.contains("truncated: 0 line(s) omitted"), "{body}");
+            }
+            repo.write(
+                ".oms/task/current.md",
+                empty_packet.replace("Continue", &"λ".repeat(301)),
+            );
+            let shortened = call(&Reads::new("empty"), &["prompt"]);
+            assert_eq!(shortened.0, 0, "{}", message(&shortened));
+            assert!(flags(std::str::from_utf8(&shortened.1).unwrap(), "Goal").contains('r'));
             repo.write(".oms/task/current.md", packet);
             let interrupted = call(&Reads::new("interrupted"), &["prompt"]);
             assert_eq!(interrupted.0, 130, "{}", message(&interrupted));

@@ -72,7 +72,7 @@ explains overlapping entrypoints.
 | `recipe` | Run typed reusable recipes and workspace actions; import versioned local packs, link worksets and create due/event requests. | `oms recipe` | [Recipes and workspaces](RECIPES.md) |
 | `patch-admit` | Check delegated patch scope and evidence. | `oms patch-admit` | [Delegating writes](#delegating-writes) |
 | `patch-land` | Apply an admitted delegated patch. | `oms patch-land` | [Delegating writes](#delegating-writes) |
-| `land` | Gate, push and update a committed worktree. | `oms land` | [Verification and release](#verification-and-release) |
+| `land` | Gate a committed worktree, publish it as a PR or push, and update. | `oms land` | [Verification and release](#verification-and-release) |
 | `sync-shared` | Fetch and fast-forward an idle shared checkout. | `oms sync-shared` | [Verification and release](#verification-and-release) |
 | `draft-pr` | Publish a verified clean HEAD as a draft pull request. | `oms draft-pr` | [Verification and release](#verification-and-release) |
 | `ci-status` | Read the CI conclusion for a branch HEAD. | `oms ci-status` | [Verification and release](#verification-and-release) |
@@ -1554,9 +1554,21 @@ is scanned before projection, and unsafe sources are withheld while independent
 sources remain available. Output lines carry source tags. Each collection can
 contribute up to six whole records within a 2,048-byte per-row budget. The
 renderer scans the final draft before printing or writing and respects
-`--max-bytes` (512-65536, default 4096), counting omitted records and draft lines.
+`--max-bytes` (512-65536, default 4096), counting omitted content records.
 Recorded claims require fresh verification before action. `--output` creates a
 new file and refuses to overwrite one. The draft conveys advisory context.
+Each section retains compact coverage flags outside the removable content rows:
+`p` for producer selection loss, `r` for renderer selection or excerpt loss,
+`w` for withheld sources, `u` for unavailable sources, `e` for a successfully
+observed empty section, and `-` for no observed loss. Several flags can coexist;
+they survive the minimum 512-byte budget. A withheld or unavailable task packet
+marks both Goal and Decisions. The footer counts omitted whole records once
+across producer selection and rendering; an abbreviated goal sets `r` without
+counting its retained row as omitted. A closed packet's excluded decisions are
+policy, not truncation. Removing synthetic gap or empty-source notes does not
+count the same underlying records again or turn known empty data into loss.
+These flags describe delivery coverage, not whether the
+recorded claims are true or freshly verified.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
@@ -2495,7 +2507,7 @@ Host ancestry aliases remain supported. This is not a same-user filesystem sandb
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
 | `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
-| `land` | Gates and pushes one committed SHA, follows CI, and updates eligible installations. `oms land status` reads its receipt and log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/`. See [verification and release](#verification-and-release) for proof, retries and sibling coordination. |
+| `land` | Gates one committed SHA, publishes it as a GitHub PR (merged only with `--merge`) or a direct push, follows CI, and updates eligible installations. `oms land status` reads its receipt and log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/`. See [verification and release](#verification-and-release) for proof, retries and sibling coordination. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and failures recurring on only one old commit retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. The idle-main wake is opt-in with `OMS_TICK_WAKE=1`: when a repo's one verified panel main (any provider) has no live child call, its activity record shows it idle for at least 30 minutes, the panel's `panel-main-start` lock is free, and plan tasks are ready or an autopilot proposal waits in `proposal-review`, the tick types one ordinary prompt (never `/goal`) naming that reason into the main's pane, so the contract is provider-neutral; it never starts a main or a worker. A main without an idle activity record is never woken, and a user's unsent draft is never submitted: the live pane must prove the input line empty (out of copy mode, exactly one `>`/`❯`/`›` prompt line between the borders around it, that line and the lines below it holding only blanks, box sides and dim or grey placeholder text, and an inverse cursor cell only as the first one right before that placeholder), otherwise the wake is skipped, the skip recorded, and nothing is typed, cleared or entered. Keys typed in the about 0.8 s between that check and Enter can still be submitted with the prompt. The pane id alone is not trusted: the wake records the pane's pid, dead flag, main attempt and native-pane option when it judges the pane, and re-reads them right before typing; any change (a respawned or re-owned pane) or an unreadable answer types nothing and records a skip, as does a `send-keys` tmux rejects (a skip, not a delivery, so it holds neither the dedupe key nor the cap). Wakes are bounded to one per main per run and 6 per UTC day, recorded in `.oms/tick/last.json` under `wakes` before typing with a per-reason dedupe key, so a retried tick never submits twice; recorded skips count toward neither. `oms tick status` adds a line per repo whose ledger holds a wake — `wakes today (UTC): 2 of 6 spent (1 main prompt(s), 1 autopilot resume(s)); 1 skipped; tokens, cost and wall time: not recorded` — counted from that ledger; what a woken main or a resumed autopilot then spent is not recorded there, and the line says so rather than showing zero. Only a missing receipt is empty history: an empty, malformed, unreadable, symlinked, hard-linked or non-regular receipt refuses the wake and is never rewritten or replaced by the sweep, which applies the same check and prints one recovery line instead. A headless autopilot resume also refuses to start when the contract's last approval is older than `OMS_TICK_AUTOPILOT_MAX_AGE_DAYS` (default 7, 0 disables): the receipt writer appends each person-run `approved` write to `.oms/plan/autopilot-approvals.jsonl` (a wake-launched run records only when none exists, so unattended resumes never extend an approval, and a contract that predates the record starts its clock at its first headless resume), and an older approval is a recorded skip naming the age and `oms autopilot reenter`, never a kill of running work. `tick run --dry-run` prints the prompt it would send. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`, plus `wake` (`skipped` when off, else 0 or 1); a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
 | `panel` | Native Sol/Opus main plus OMS activity sidebar; scoped role dispatch and a difficulty-tiered council (routine, deep or frontier) reuse peer front doors. An installed Antigravity seat joins with the newest routable catalog model of its configured family and level (or the single other family at that level when the configured one is gone) when the 12-primary-call budget permits. Owner summaries and app delivery receipts are immutable indexed artifacts. `--results` reads retained evidence; `--finalize` preserves owner acceptance authority; `--retry-delivery` never resends a persisted revision. See [terminal panel](TERMINAL-PANEL.md). |
@@ -3364,10 +3376,44 @@ checks the selected jobs and their planned skips.
 
 macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
 userland compatibility), but macOS runners are no longer part of GitHub Actions
-CI; verify macOS/BSD-sensitive changes locally with
-`tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
+CI. `tests/bsd-portability-smoke.sh` (wired into `scripts/check.sh`) exercises
+userland-sensitive tools on the host's own userland, which is GNU in CI, so it
+does not prove macOS/BSD behaviour there.
 
-Require it in branch protection before enabling a local quick push hook; having a
+`oms ci-status attention [branch] [--limit N] [--json]` reads scheduled and manual
+workflow runs separately, so a newer PR or push run cannot hide a maintenance
+failure. Without a branch it uses the GitHub origin's default branch. It requests
+at most 20 runs per event by default (1–100), then reports the newest run and
+attempt for each observed workflow. Each line includes the event, workflow ID,
+outcome, run URL and the run's last-update time. An incomplete history window is
+labelled `bounded`; it may omit workflows that have not run recently. The JSON
+form is schema 1, kind
+`oms-ci-attention`, with repository, branch, observation time and observations.
+
+Exit 0 means only the selected latest observations succeeded; it establishes
+neither complete workflow coverage, recent scheduled execution, nor a healthy
+default-branch HEAD. Read each run's timestamp to assess its age. Exit 1 means a
+completed failure was observed; exit 2 takes precedence when any outcome is
+pending or unknown. Missing runs, unreadable responses and skipped or unrecognized
+outcomes remain unknown. A newer successful
+run or attempt replaces that workflow's earlier failure; a queued run is pending.
+This explicit GET-only command reads no job logs, writes no ledger, changes no
+checkout and never dispatches, retries or grants landing/install evidence. It is
+not polled by ordinary Board refresh or session startup. `attention` reports
+the workflow events that exist; it does not imply macOS CI is running.
+
+Before restoring a macOS CI lane, resolve the native Team channel investigation
+[#327](https://github.com/eightmm/oh-my-setting/issues/327) and concurrent input
+queue investigation [#343](https://github.com/eightmm/oh-my-setting/issues/343)
+with controlled fixtures and evidence from a macOS host. Check the BSD smoke,
+native Rust tests and install lifecycle on the proposed commit; Linux success
+alone does not establish those results. Reintroduce the lane in a separate,
+reviewed workflow change that states its trigger and runner cost, updates the
+selected-job gate contract, and preserves exact-SHA installation proof. A
+successful portability smoke is useful evidence but does not close the native
+concurrency investigations by itself.
+
+Require `gate` in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
 that on request: it reads the branch's protection and active rulesets (GET only; the
 default is the repository's default branch) and reports whether `gate` is a required
@@ -3438,7 +3484,7 @@ the shared [`oms-github` crate](../crates/oms-github/src/declaration.rs).
 Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
-pushes its SHA, waits for CI success, then updates only to that SHA when
+publishes its SHA, waits for CI success, then updates only to that SHA when
 the run's jobs prove the full selection (the default proof) or a full local gate does
 (the option). Failed or skipped CI cannot refresh the installation. When the push run
 was affected-only or its scope cannot be read, it supplies no full proof. For an
@@ -3459,6 +3505,19 @@ failed remote-tip lookup is retried within the CI wait budget; an unavailable or
 changed tip blocks dispatch and directs the operator to resume the landing.
 A full run takes about 40 minutes of CI wall clock (one measured run), so pass a larger
 `--ci-wait` than the 2700 s default if it queues.
+
+The publication mode defaults to PR on a GitHub destination and Direct otherwise;
+on GitHub, `OMS_LAND_MODE=pr|direct` selects it explicitly. PR mode pushes a head branch (the current
+branch when it is not the target; otherwise `oms/<type>/<slug>` from the newest
+Conventional Commit subject, else `oms/land-<sha12>`) and opens a PR whose body has
+`## Summary`, `## Motivation` and `## Verification` sections. Motivation comes from
+`--why TEXT`, else the commit bodies; with neither, land refuses. Without `--merge`,
+land ends after CI in receipt state `awaiting-merge` with exit 0 and installs nothing.
+`--merge [--merge-method squash|merge|rebase]` merges after CI succeeds for the exact
+PR head, then installs. After a squash merge, installation proceeds when the merge
+commit's tree equals the PR head tree on an unchanged base; otherwise it waits for CI
+on the target. On GitHub, `--direct` pushes straight to the target and accepts only a
+change of at most two lines in `.md` files.
 
 A moving update target is rejected by the updater. Local CI-parity hides registry
 provider CLIs and adds operator-tools when tier-routing inputs change; it does not parse
@@ -3522,7 +3581,8 @@ declared mechanical gate.
 - Version publication, merge, and release remain explicit owner actions.
   `goal-drive` only creates local commits. `draft-pr publish` is the narrow
   exception for a verified create-only branch and Draft PR; it never updates
-  an existing branch or advances the PR.
+  an existing branch or advances the PR. `oms land` opens a PR on GitHub and
+  merges only with an explicit `--merge`.
 - Recovery-branch admission is a continuity guard, not an ownership proof:
   autopilot accepts only the deterministic branch or a strict
   `oms/autopilot-<spec-digest>-rN` branch descended from the reviewed base,

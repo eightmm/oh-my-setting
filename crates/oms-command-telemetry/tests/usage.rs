@@ -2103,6 +2103,51 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
         support::field(lifetime, "cost_microusd"),
         &oms_context::Json::Number("0".into())
     );
+    let retained = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let metadata = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
+    let storage = support::field(lifetime, "storage");
+    for (field, expected) in [
+        ("retained_bytes", retained.len()),
+        ("receipt_rows", 5),
+        ("max_bytes", oms_command_telemetry::store::MAX_INDEX_BYTES),
+        (
+            "remaining_bytes",
+            oms_command_telemetry::store::MAX_INDEX_BYTES - retained.len(),
+        ),
+    ] {
+        assert_eq!(
+            support::field(storage, field),
+            &oms_context::Json::Number(expected.to_string())
+        );
+    }
+    assert_eq!(
+        support::text(support::field(storage, "update_mode")),
+        "full-ledger-atomic-replacement"
+    );
+    let filtered = root.call(&["--by", "role", "--since", "2027-01-01", "--json"]);
+    assert_eq!(filtered.0, 0);
+    let filtered = oms_context::parse_json(&filtered.1).unwrap();
+    assert_eq!(
+        support::field(
+            support::field(&filtered, "lifetime_provider_usage"),
+            "storage"
+        ),
+        storage,
+        "artifact windows do not hide retained receipt revisions"
+    );
+    let human = root.call(&[]);
+    assert_eq!(human.0, 0);
+    assert!(String::from_utf8_lossy(&human.1).contains(&format!(
+        "usage storage: retained-bytes={} receipt-rows=5",
+        retained.len()
+    )));
+    let after = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
+    assert_eq!(after.ino(), metadata.ino());
+    assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+    assert_eq!(
+        std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(),
+        retained
+    );
 }
 #[test]
 fn cumulative_resume_has_a_baseline_and_separate_account_session_identity() {
@@ -2434,6 +2479,48 @@ fn cumulative_attribution_withholds_resets_and_contradictory_deltas() {
             assert_eq!(call.usage, AttributedUsage::default(), "{id}");
         }
     }
+
+    let scoped = Temp::new();
+    for (call, input, output, read, total, expected) in [cases[0], cases[2], cases[3], cases[4]] {
+        let receipt = usage::begin(
+            &scoped.0,
+            Identity {
+                account_scope_sha256: Some("a".repeat(64)),
+                ..bound_identity(call)
+            },
+            Some(Cumulative {
+                session_id: "session_one".into(),
+                baseline_unknown: call != "fresh",
+            }),
+            &stop,
+        )
+        .unwrap();
+        let mut receipt = observe(receipt, 1, total, Cost::Reported(total * 10));
+        receipt.usage.input_tokens = Some(input);
+        receipt.usage.output_tokens = Some(output);
+        receipt.usage.cache_read_tokens = Some(read);
+        receipt.usage.cache_in_input = Some(true);
+        usage::record(&scoped.0, &receipt, &stop).unwrap();
+        let projection = usage::load(&scoped.0).unwrap();
+        let accounted = projection.calls.last().unwrap();
+        assert_eq!(accounted.tokens, expected, "scoped ledger: {call}");
+        assert_eq!(
+            accounted.cost_microusd,
+            expected.map(|value| value * 10),
+            "scoped ledger cost: {call}"
+        );
+        assert_eq!(accounted.conflict, call == "input_decrease");
+        assert_eq!(
+            projection
+                .attributed_calls()
+                .last()
+                .unwrap()
+                .usage
+                .total_tokens,
+            expected,
+            "scoped Board: {call}",
+        );
+    }
 }
 
 #[test]
@@ -2443,6 +2530,7 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
     let account_one = ("codex", Some("one"), "one");
     let account_two = ("codex", Some("two"), "one");
     let account_three = ("codex", Some("three"), "one");
+    let renamed = ("codex", Some("renamed"), "one");
     let other_provider = ("agy", Some("one"), "one");
     let other_session = ("codex", Some("one"), "two");
     let cases = [
@@ -2460,6 +2548,24 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
         ("next_three", account_three, false, 85, Some(15)),
         ("next_provider", other_provider, false, 90, Some(50)),
         ("next_session", other_session, false, 95, Some(45)),
+        ("renamed", renamed, false, 100, None),
+        ("alias_returned", account_one, false, 115, None),
+        ("next_other_account", account_two, false, 90, Some(10)),
+        ("after_alias_returned", account_one, false, 120, Some(5)),
+        (
+            "provider_still_independent",
+            other_provider,
+            false,
+            125,
+            Some(35),
+        ),
+        (
+            "session_still_independent",
+            other_session,
+            false,
+            130,
+            Some(35),
+        ),
     ];
     for (call, (provider, account, session), fresh, total, _) in cases {
         let receipt = usage::begin(
@@ -2467,7 +2573,15 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
             Identity {
                 provider: provider.into(),
                 account: account.map(str::to_owned),
-                account_scope_sha256: account.map(|_| "a".repeat(64)),
+                account_scope_sha256: account.map(|alias| {
+                    match alias {
+                        "one" | "renamed" => "a",
+                        "two" => "b",
+                        "three" => "c",
+                        _ => unreachable!("unexpected fixture account"),
+                    }
+                    .repeat(64)
+                }),
                 ..bound_identity(call)
             },
             Some(Cumulative {
@@ -2477,7 +2591,12 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
             &stop,
         )
         .unwrap();
-        usage::record(&root.0, &observe(receipt, 1, total, Cost::Unknown), &stop).unwrap();
+        usage::record(
+            &root.0,
+            &observe(receipt, 1, total, Cost::Reported(total * 10)),
+            &stop,
+        )
+        .unwrap();
     }
     let projection = usage::load(&root.0).unwrap();
     let calls = projection.attributed_calls();
@@ -2493,8 +2612,40 @@ fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
                 "ledger: {}",
                 call.receipt.identity.call_id
             );
+            assert_eq!(
+                call.cost_microusd,
+                total.map(|value| value * 10),
+                "ledger cost: {}",
+                call.receipt.identity.call_id
+            );
         }
     }
+
+    let session = Cumulative {
+        session_id: "one".into(),
+        baseline_unknown: true,
+    };
+    let pending = |call, account: &str, scope: &str| {
+        usage::begin(
+            &root.0,
+            Identity {
+                provider: "codex".into(),
+                account: Some(account.into()),
+                account_scope_sha256: Some(scope.repeat(64)),
+                ..bound_identity(call)
+            },
+            Some(session.clone()),
+            &stop,
+        )
+    };
+    pending("pending_original", "one", "a").unwrap();
+    assert!(
+        pending("pending_alias", "renamed", "a")
+            .unwrap_err()
+            .to_string()
+            .contains("resumed session has unresolved provider usage")
+    );
+    pending("pending_independent_home", "two", "b").unwrap();
 }
 
 #[test]
@@ -2953,6 +3104,12 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
     ] {
         root.write(usage::RECEIPTS, &malformed);
         assert!(usage::load(&root.0).is_err());
+        let report = root.call(&["--json"]);
+        assert_ne!(report.0, 0);
+        assert!(
+            report.1.is_empty(),
+            "invalid history has no capacity estimate"
+        );
         assert!(usage::begin(&root.0, identity("call_new"), None, &stop).is_err());
         assert!(
             usage::record(

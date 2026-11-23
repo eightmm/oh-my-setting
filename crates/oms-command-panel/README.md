@@ -121,6 +121,17 @@ Terminal calls collapse into history. `Tab` opens the all-calls views, and expli
 search or Attention includes matching history. Narrow boards use the flat view
 and preserve the same selection identity.
 
+Active managed workers bound to the current Room and Main enter Attention as
+`no recent lifecycle events` when their latest recorded event reaches the
+existing heartbeat window (300 seconds by default). This includes starting,
+working and verifying calls, and uses the snapshot's observation time. Fresh
+events clear the advisory; missing, malformed, future or stale snapshot evidence
+cannot create it. Native children, unmanaged native assignments and Main are
+excluded. The attention-only filter keeps these rows visible. The worker row
+shows `[no events]`; Call Detail gives the reason and last recorded lifecycle
+state. This is an event-liveness advisory, not proof of missing output or a stalled model;
+it neither reads transcripts nor cancels, retries or changes a lifecycle state.
+
 The [panel contract](../../docs/TEAM-ORCHESTRATION-PANEL.md) describes the
 task-first view, native assignment binding and shared result inspector planned
 on top of the existing task, Room, attempt and result records.

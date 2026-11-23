@@ -37,15 +37,18 @@
 - Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
   and pushes only while HEAD and the tracked tree remain unchanged, without a
   duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`.
-  Installation needs successful CI for that same SHA plus full proof (`gate`
+  On GitHub it pushes a work branch, opens a PR and stops at `awaiting-merge`
+  after CI; `--merge`, only when the user asked to merge, merges and installs.
+  Installation needs successful CI for that same SHA (after a squash merge: an
+  identical tree on an unchanged base) plus full proof (`gate`
   + `lint` + `focused` + `native (ubuntu-latest, copy)`, with optional
   `rust (ubuntu-24.04)`).
 - CI is Linux-only and scopes PRs and main pushes alike using pure-Rust jobs
   (Linux lint, Rust fmt/clippy/tests on Ubuntu, pure-Bash focused E2E suites,
   and a Linux copy-install lifecycle test) with pinned Rust `1.99.1`. macOS
-  remains a supported runtime and install host (verified locally with
-  `tests/bsd-portability-smoke.sh` and GNU/BSD-compatible scripts). Only
-  plan-authorized skips pass the stable gate. CI remains authoritative.
+  remains a supported runtime and install host with GNU/BSD-compatible scripts
+  (no macOS CI; `tests/bsd-portability-smoke.sh` runs on the host userland).
+  Only plan-authorized skips pass the stable gate. CI remains authoritative.
 - Every tracked file passes the outbound scrubber
   (`scrubber_passes_tracked_repository_sources`): in fixtures, split key-shaped
   strings and literal home paths across quotes, and avoid identifiers that read

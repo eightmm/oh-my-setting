@@ -62,7 +62,7 @@ No implementation in this crate duplicates another domain's writers.
 | `ReferenceOperation::finish` | Actual exit status after releasing the packet lock. Preserve terminal no-write refusals. A failed or interrupted operation must remain unresolved; Drop must stop/reap only its owned monitor generation. |
 | `observe_journal` | `JournalObservation` with repo, actual source path and typed update/verify/close operation; only close supplies passed/not-verified from pre-archive freshness. Inject `oms-command-journal`'s native source observer. It derives the existing journal payload, stable source ID, correlation, decision, blocker and next-action fields, and owns journal admission, dedupe, locks and projections. |
 | `promote_memory` | `MemoryOutcome`: project repo, agent bytes, canonical outcome text, `task_close` source tag, task identity and actual pre-close verification status. Inject `oms-command-memory`'s native project-append API. It owns memory source/provenance, scrub, locking and indexing. |
-| `observe_failure` | Actual command bytes, exit and bounded summary; record a verify failure or resolve that exact command after success. Return only intended advisory stderr bytes. |
+| `observe_failure` | Actual command bytes, exit and bounded summary; record a nonzero verify failure after its outcome note, or resolve the command's failure only after the successful verification receipt is accepted. Return only intended advisory stderr bytes. |
 | `observe_verify` | Repo and at most the last 16 MiB of actual merged command output; call the native `observe` adapters and return advisory note lines and zero-test runner names. Version collection uses the parent's bounded read-only process owner; `fingerprint` takes a concrete version-probe callback. Failure drops observations, never fabricates a verdict. |
 | `skill_contracts` | Repo; return read-only name/command hint rows. These commands are never executed at close. |
 
@@ -98,6 +98,16 @@ for the user's verification command.
 | Verification | Snapshot sets active under lock, then the user command runs unlocked. Outcomes compare task identity; successful receipts also recheck command digest and fresh Git state. Rotation or a changed contract cannot give its successor a pass. Interruption leaves active state and no successful receipt. A successful run preserves the source's two Verification bullets before setting verified. |
 | Memory and journal | These are written only by the injected native producers. Opt-in memory proposals precede close/archive, and journal close follows archive. A kill between those domains can leave memory without an archive, or an archive without its journal observation; their existing producers own dedupe/reconciliation. This crate does not claim cross-domain atomicity. |
 | Reference lifecycle/monitor | Owned entirely by the injected reference service; a kill or unproven monitor shutdown must preserve unresolved operation evidence. Membership or an operation record grants no new authority. |
+
+Failure-ledger observation is advisory. A zero exit reaches resolution only
+after task identity, Verify command and Git-state checks and final receipt
+publication succeed. Rotation, a changed contract or repository, or refused
+publication leaves the command's failures unresolved; skipped verification
+does not observe the failure ledger. A failure to observe the ledger cannot
+grant or revoke task verification. Interruption after receipt publication can
+leave the advisory failure unresolved because these writes are not one
+transaction. Resolution retains the existing command-fingerprint scope;
+task/attempt-specific recovery lineage remains unproven.
 
 Canonical packet reads refuse symlinks, multiple hard links, foreign owners,
 non-regular files, changed generations and records over 32 MiB. The existing

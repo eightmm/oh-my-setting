@@ -1842,7 +1842,8 @@ worktree; create a local, nontracking task branch there with
 `git checkout --no-track -b oms/<task>`, then admit worker patches and rebase on
 the remote target. No upstream is needed. After verification, commit and run
 `oms land` from that worktree only when commit and publication are authorized;
-`oms land` pushes the verified SHA to its target. Nobody commits in the shared
+`oms land` opens a GitHub PR for the verified SHA (merging only with `--merge`) or
+pushes it to a non-GitHub target. Nobody commits in the shared
 checkout. Mains in sessions outside this panel may land independently:
 a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
 Worker guard stop diagnostics identify the snapshot, path and kind that caused

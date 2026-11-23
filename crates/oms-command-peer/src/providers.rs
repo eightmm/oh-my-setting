@@ -2363,17 +2363,25 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         };
         let home_changed = account_home.as_ref().is_some_and(|home| !home.current());
         let account_observed = named_account.is_none() || account_home.is_some();
-        let accounting = crate::usage::finish(
-            &usage_repo,
-            usage_receipt,
-            &result.stdout,
-            result.complete
-                && terminal
-                && !home_changed
-                && account_observed
-                && (route.provider != "antigravity" || result.code == 0),
-            result.cleanup_complete,
-        )
+        let accounting = if home_changed {
+            crate::usage::finish_unobserved(
+                &usage_repo,
+                usage_receipt,
+                Some(&result.stdout),
+                result.cleanup_complete,
+            )
+        } else {
+            crate::usage::finish(
+                &usage_repo,
+                usage_receipt,
+                &result.stdout,
+                result.complete
+                    && terminal
+                    && account_observed
+                    && (route.provider != "antigravity" || result.code == 0),
+                result.cleanup_complete,
+            )
+        }
         .map_err(|error| {
             Error::new(
                 error.code,
