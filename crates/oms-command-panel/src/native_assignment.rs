@@ -5,7 +5,7 @@ use oms_command_operations as events;
 use oms_command_operations::value::{V, obj};
 use oms_panel_core::services::ExecutionRequest;
 
-const MAX_BINDING: usize = 64 * 1024;
+pub(super) const MAX_BINDING: usize = 64 * 1024;
 // Codex leads launch without the provider policy, so the assignment carries it.
 const LEAD_DUTIES: &str = "Integrate only; children: roles/disjoint scopes/checks, read-only research/review/verify, builders assigned paths, no delegate/commit/push/land/install/publish; simple: cheaper supported native model, escalate scope/risk, keep explicit user choice/account/isolation/spend.";
 
@@ -154,11 +154,11 @@ fn assignment_prompt(
         .ok_or_else(|| Error::new("repository cannot be represented in a Room locator"))?;
     // One shell variable keeps the state repository pinned without repeating it.
     let fixed = format!(
-        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} `R={}; oms agent-plan --repo \"$R\" evidence-snapshot --id {}; oms room show --repo \"$R\" --id {} --exact --json`. plan {}, lease {}, Room message {message}; obey paths/accept/verifier; report evidence/unverified/model/unknown/binding; receipt!=accept. Task: ",
+        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} `R={}; oms agent-plan --repo \"$R\" evidence-snapshot --id {}; oms panel --repo \"$R\" --results --task-id {} --json`. plan {}, lease {}, Room {room} message {message}; fill return template; model/unknown; report!=accept. Task: ",
         crate::native_children::TASK_PREFIX,
         assignment_shell_word(repo),
         assignment_shell_word(text(task, "id")),
-        assignment_shell_word(room),
+        assignment_shell_word(text(task, "id")),
         text(task, "plan_id"),
         text(task, "lease_id"),
     );
@@ -180,7 +180,7 @@ fn operation_value(value: &Value) -> Result<V> {
     V::parse(&serde_json::to_vec(value).map_err(Error::new)?).map_err(Error::new)
 }
 
-fn task(panel: &Panel<'_>, id: &str) -> Result<Value> {
+pub(super) fn task(panel: &Panel<'_>, id: &str) -> Result<Value> {
     let status = commands::query(
         panel.services,
         NativeCommand::Plan,
@@ -218,7 +218,7 @@ fn task(panel: &Panel<'_>, id: &str) -> Result<Value> {
     Ok(task)
 }
 
-fn claimed(panel: &Panel<'_>, task: &Value) -> Result<()> {
+pub(super) fn claimed(panel: &Panel<'_>, task: &Value) -> Result<()> {
     require(
         ["claimed", "running"].contains(&text(task, "state"))
             && task["claimed_by_participant"] == panel.attempt
@@ -251,7 +251,7 @@ fn git(panel: &Panel<'_>, cwd: &Path, argument: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
-fn checkout(panel: &Panel<'_>, lead: &Pane) -> Result<Value> {
+pub(super) fn checkout(panel: &Panel<'_>, lead: &Pane) -> Result<Value> {
     let raw = panel.tmux(&[
         "display-message",
         "-p",
@@ -362,7 +362,7 @@ fn annotate(panel: &Panel<'_>, binding: &Binding, key: &str, refs: Value) -> Res
     Ok(())
 }
 
-fn current_operation(panel: &Panel<'_>, attempt: &str) -> Result<Value> {
+pub(super) fn current_operation(panel: &Panel<'_>, attempt: &str) -> Result<Value> {
     commands::query(
         panel.services,
         NativeCommand::Events,
@@ -391,26 +391,32 @@ pub(super) fn register_result(
         .leads
         .get("codex")
         .ok_or_else(|| Error::new("native result requires the original ordinary Codex lead"))?;
-    let capture = oms_panel_core::native_results::Capture::read(
+    let input = oms_panel_core::native_results::CaptureInput::read(
         panel.repo,
         Path::new(&options.required("native-result")?),
     )?;
-    let artifact = format!(
+    let operation = current_operation(panel, input.attempt())?;
+    let fallback = format!(
         ".oms/lifecycle/attempts/{}/native-assignment.json",
-        capture.attempt()
+        input.attempt()
     );
-    let raw = tx.read(Path::new(&artifact), MAX_BINDING, false)?;
+    let artifact = operation["refs"]["native_binding"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .unwrap_or(&fallback)
+        .to_owned();
+    let raw = native_result::packet(panel, &operation)?;
     require(
-        oms_panel_core::digest(&raw) == capture.binding_digest(),
+        oms_panel_core::digest(&raw) == input.binding_digest(),
         "native result assignment digest changed",
     )?;
-    let packet: Value = serde_json::from_slice(&raw).map_err(Error::new)?;
-    let operation = current_operation(panel, capture.attempt())?;
+    let packet = oms_panel_core::decode(&raw, MAX_BINDING)?;
+    let checked = oms_panel_core::native_contract::CheckedAssignment::parse(&raw)?;
     require(
         packet["schema"] == 1
             && packet["kind"] == "oms-native-assignment"
             && packet["provider"] == "codex"
-            && packet["attempt_id"] == capture.attempt()
+            && packet["attempt_id"] == input.attempt()
             && packet["parent_attempt_id"] == panel.attempt
             && packet["room"] == panel.room
             && packet["task"]["id"] == options.required("task-id")?
@@ -419,7 +425,7 @@ pub(super) fn register_result(
             && operation["parent_attempt_id"] == panel.attempt
             && operation["task_id"] == packet["task"]["id"]
             && operation["refs"]["native_assignment_schema"] == "1"
-            && operation["refs"]["native_binding_sha256"] == capture.binding_digest()
+            && operation["refs"]["native_binding_sha256"] == input.binding_digest()
             && operation["refs"]["plan_id"] == packet["task"]["plan_id"]
             && operation["refs"]["lease_id"] == packet["task"]["lease_id"]
             && operation["refs"]["panel_room_id"] == panel.room,
@@ -444,9 +450,9 @@ pub(super) fn register_result(
     let binding = Binding {
         task: packet["task"].clone(),
         checkout: packet["checkout"].clone(),
-        attempt: capture.attempt().into(),
+        attempt: input.attempt().into(),
         intent_digest,
-        digest: capture.binding_digest().into(),
+        digest: input.binding_digest().into(),
         transport,
     };
     let revalidate = || -> Result<()> {
@@ -497,6 +503,7 @@ pub(super) fn register_result(
         tx.check()
     };
     revalidate()?;
+    let capture = input.capture(panel.repo, checked.as_ref())?;
     capture.validate_scope(&packet)?;
     let previous = oms_panel_core::native_results::read(&Store::open(panel.repo)?, &operation)?;
     require(
@@ -508,6 +515,47 @@ pub(super) fn register_result(
             }),
         "native result predecessor changed; retain and review the current report",
     )?;
+    if let Some(assignment) = checked.as_ref() {
+        let requested_previous = options.get("expected-previous-result-sha256");
+        let expected_result = previous.as_ref().map(|v| text(v, "artifact_sha256"));
+        if let Some(expected) = requested_previous {
+            require(
+                expected_result == Some(expected),
+                "native result predecessor changed; reread its retained digest",
+            )?;
+        }
+        let replay = previous
+            .as_ref()
+            .is_some_and(|v| v["input_sha256"] == capture.input_digest());
+        if previous.is_some() && !replay {
+            require(
+                requested_previous == expected_result,
+                "changed native return requires --expected-previous-result-sha256",
+            )?;
+            require(
+                operation["refs"]["native_resolution"] != "reviewed",
+                "reviewed native result cannot be silently replaced",
+            )?;
+        }
+        let prior_source = previous
+            .as_ref()
+            .map(|prior| native_result::source_report(panel, assignment, prior))
+            .transpose()?;
+        let source = capture
+            .checked_report()
+            .ok_or_else(|| Error::new("typed native return source is unavailable"))?;
+        oms_panel_core::native_contract::check_report(
+            source.raw(),
+            assignment,
+            prior_source.as_ref(),
+            prior_source.as_ref().map(|prior| prior.sha256()),
+        )?;
+    } else {
+        require(
+            !options.has("expected-previous-result-sha256"),
+            "explicit result revision CAS requires a typed assignment",
+        )?;
+    }
     let retained = capture.retain(tx, &packet, &artifact)?;
     let digest = text(&retained, "sha256");
     let prior = text(&operation["refs"], "native_result_sha256");
@@ -518,6 +566,12 @@ pub(super) fn register_result(
     revalidate()?;
     let previous_operation = operation_value(&operation)?;
     let previous_refs = previous_operation.get("refs");
+    let mut result_refs = json!({"native_result_schema":"1",
+        "native_result_path":retained["path"],"native_result_sha256":digest});
+    if checked.is_some() {
+        result_refs["native_resolution"] = "pending".into();
+        result_refs["native_resolution_result_sha256"] = "".into();
+    }
     let event = events::new_event(
         capture.attempt(),
         0usize.into(),
@@ -531,11 +585,7 @@ pub(super) fn register_result(
                 ]),
             ),
             ("idempotency_key", format!("native-result-{digest}").into()),
-            (
-                "refs",
-                operation_value(&json!({"native_result_schema":"1",
-            "native_result_path":retained["path"],"native_result_sha256":digest}))?,
-            ),
+            ("refs", operation_value(&result_refs)?),
         ]),
     )
     .map_err(Error::new)?;
@@ -558,6 +608,8 @@ pub(super) fn register_result(
                 "native_result_schema",
                 "native_result_path",
                 "native_result_sha256",
+                "native_resolution",
+                "native_resolution_result_sha256",
             ]
             .iter()
             .any(|key| refs.get(key) != previous_refs.get(key))
@@ -648,7 +700,11 @@ pub(super) fn run(
     let lead = &panel.leads["codex"];
     let location = checkout(panel, lead)?;
     let mut canonical = task(panel, &id)?;
+    // Fail incomplete execution criteria before taking a lease or retiring a
+    // previous assignment. The final contract is frozen again after claim.
+    oms_panel_core::native_contract::execution_contract(&canonical)?;
     let history = attempts.attempts(panel.repo, panel.services, panel.stop)?;
+    native_result::guard_lead(panel, &canonical, &history, tx)?;
     require(
         !crate::rows(&history).iter().any(|attempt| {
             attempt["tool"] == "panel-native-assignment"
@@ -680,6 +736,21 @@ pub(super) fn run(
         canonical = task(panel, &id)?;
     }
     claimed(panel, &canonical)?;
+    if let Some(prior) = crate::rows(&history).iter().find(|attempt| {
+        attempt["tool"] == "panel-native-assignment"
+            && attempt["task_id"] == id
+            && attempt["refs"]["plan_id"] == canonical["plan_id"]
+            && attempt["refs"]["lease_id"] == canonical["lease_id"]
+            && attempt["parent_attempt_id"] == panel.attempt
+    }) {
+        return resume(
+            panel, options, host, attempts, tx, &custody, prior, &text_task,
+        );
+    }
+    require(
+        !options.has("after-native-result"),
+        "native continuation has no existing assignment",
+    )?;
     let mut binding = Binding {
         task: canonical.clone(),
         checkout: location,
@@ -711,7 +782,8 @@ pub(super) fn run(
         "account": custody.binding, "account_verification": account_verification,
         "checkout": binding.checkout, "room_message_id": message,
         "payload_sha256": payload_digest, "payload": prompt,
-        "result_contract": "preserve task/lease/attempt binding; existing review and acceptance are separate"});
+        "round":1,"brief":text_task,
+        "result_contract": oms_panel_core::native_contract::execution_contract(&canonical)?});
     let raw = serde_json::to_vec(&packet).map_err(Error::new)?;
     require(
         raw.len() <= MAX_BINDING,
@@ -726,11 +798,13 @@ pub(super) fn run(
             task_id: id,
             parent_attempt_id: panel.attempt.clone(),
             idempotency_key: format!("native-{key}"),
-            refs: operation_value(&json!({"native_assignment_schema": "1",
+            refs: operation_value(
+                &json!({"native_assignment_schema": "1", "native_return_schema":"1",
             "native_intent_sha256": intent_digest, "native_payload_sha256": payload_digest,
             "plan_id": canonical["plan_id"], "lease_id": canonical["lease_id"],
             "panel_room_id": panel.room, "panel_owner": panel.owner,
-            "panel_native_scheduling": "unmanaged", "native_transport": "intent"}))?,
+            "panel_native_scheduling": "unmanaged", "native_transport": "intent"}),
+            )?,
             ..Default::default()
         },
         panel.stop,
@@ -748,10 +822,54 @@ pub(super) fn run(
     binding.digest = binding_digest.clone();
     let artifact = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
     tx.write(Path::new(&artifact), &raw, true, MAX_BINDING)?;
+    oms_panel_core::native_contract::CheckedAssignment::parse(&raw)?;
+    annotate(
+        panel,
+        &binding,
+        "native-contract-bound",
+        json!({
+            "native_binding":artifact,"native_binding_sha256":binding_digest,
+            "native_round":"1","native_resolution":"awaiting-report",
+        }),
+    )?;
+    deliver(
+        panel,
+        &mut binding,
+        &custody,
+        &prompt,
+        &artifact,
+        &message,
+        host,
+        attempts,
+        tx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver(
+    panel: &Panel<'_>,
+    binding: &mut Binding,
+    custody: &CodexAssignment,
+    prompt: &str,
+    artifact: &str,
+    message: &str,
+    host: &dyn AccountHost,
+    attempts: &AttemptCache,
+    tx: &Transaction<'_>,
+) -> Result<Value> {
+    let attempt = binding.attempt.clone();
+    let canonical = binding.task.clone();
+    let binding_digest = binding.digest.clone();
+    let payload_digest = oms_panel_core::digest(prompt.as_bytes());
+    let turn = prompt
+        .split(" Turn ")
+        .nth(1)
+        .and_then(|s| s.split('.').next())
+        .ok_or_else(|| Error::new("native turn marker unavailable"))?;
     let prior = current_operation(panel, &attempt)?;
     match text(&prior["refs"], "native_transport") {
-        "submitted" => return Ok(result(&attempt, &artifact, &message, "submitted", true)),
-        "sending" | "unknown" => return Ok(result(&attempt, &artifact, &message, "unknown", true)),
+        "submitted" => return Ok(result(&attempt, artifact, message, "submitted", true)),
+        "sending" | "unknown" => return Ok(result(&attempt, artifact, message, "unknown", true)),
         "intent" => {}
         _ => return Err(Error::new("invalid native assignment transport state")),
     }
@@ -769,6 +887,8 @@ pub(super) fn run(
         "worker",
         "--parent",
         &panel.attempt,
+        "--task-id",
+        text(&canonical, "id"),
         "--label",
         "Native task assignment",
     ]);
@@ -804,7 +924,7 @@ pub(super) fn run(
                 "--kind",
                 "note",
                 "--message-id",
-                &message,
+                message,
                 "--text",
                 &notice,
             ]),
@@ -820,8 +940,8 @@ pub(super) fn run(
     // disappears here, the next call only reports unknown; it cannot resend.
     annotate(
         panel,
-        &binding,
-        "native-send-intent",
+        binding,
+        &format!("native-send-intent-{}", binding.digest),
         json!({
             "native_transport": "sending", "native_binding": artifact,
             "native_room_message": message, "native_binding_sha256": binding_digest,
@@ -830,20 +950,20 @@ pub(super) fn run(
     binding.transport = "sending";
     let sent = panel.send_checked(
         "codex",
-        &prompt,
+        prompt,
         Proof::Turn(turn),
-        Some((&custody, host, attempts)),
-        Some(AssignmentEvidence::Bound(&binding)),
+        Some((custody, host, attempts)),
+        Some(AssignmentEvidence::Bound(binding)),
     );
     let state = if sent.is_ok() { "submitted" } else { "unknown" };
     let annotation = annotate(
         panel,
-        &binding,
-        "native-send-observed",
+        binding,
+        &format!("native-send-observed-{}", binding.digest),
         json!({"native_transport": state}),
     );
     let state = if annotation.is_ok() { state } else { "unknown" };
-    let mut output = result(&attempt, &artifact, &message, state, false);
+    let mut output = result(&attempt, artifact, message, state, false);
     if sent.is_err() || annotation.is_err() {
         output["reconcile_required"] = true.into();
         output["reason"] = if let Err(error) = sent {
@@ -853,6 +973,165 @@ pub(super) fn run(
         };
     }
     Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume(
+    panel: &Panel<'_>,
+    options: &Options,
+    host: &dyn AccountHost,
+    attempts: &AttemptCache,
+    tx: &Transaction<'_>,
+    custody: &CodexAssignment,
+    prior: &Value,
+    brief: &str,
+) -> Result<Value> {
+    let raw = native_result::packet(panel, prior)?;
+    let mut packet: Value = oms_panel_core::decode(&raw, MAX_BINDING)?;
+    require(
+        packet["schema"] == 1
+            && packet["kind"] == "oms-native-assignment"
+            && packet["provider"] == "codex"
+            && packet["attempt_id"] == prior["attempt_id"]
+            && packet["parent_attempt_id"] == panel.attempt
+            && packet["room"] == panel.room
+            && packet["task"]["id"] == prior["task_id"]
+            && packet["task"]["plan_id"] == prior["refs"]["plan_id"]
+            && packet["task"]["lease_id"] == prior["refs"]["lease_id"],
+        "native assignment replay lineage changed",
+    )?;
+    let canonical = task(panel, text(&packet["task"], "id"))?;
+    claimed(panel, &canonical)?;
+    let same_contract = match oms_panel_core::native_contract::CheckedAssignment::parse(&raw)? {
+        Some(assignment) => assignment.matches_task(&canonical)?,
+        None => packet["task"] == canonical,
+    };
+    require(
+        same_contract,
+        "native assignment frozen criteria changed before replay",
+    )?;
+    native_result::check_custody(panel, &packet, host, attempts)?;
+    let attempt = text(prior, "attempt_id");
+    let previous = options.get("after-native-result");
+    let same_round =
+        previous.is_none() || packet["previous_result_sha256"] == previous.unwrap_or_default();
+    if same_round {
+        require(
+            packet["brief"] == brief
+                || (packet["brief"].is_null()
+                    && text(&packet, "payload").ends_with(&format!(" Task: {brief}"))),
+            "native assignment brief changed; reconcile its return and use --after-native-result",
+        )?;
+        let state = text(&prior["refs"], "native_transport");
+        if state != "intent" {
+            return Ok(result(
+                attempt,
+                text(&prior["refs"], "native_binding"),
+                text(&packet, "room_message_id"),
+                if state == "submitted" {
+                    "submitted"
+                } else {
+                    "unknown"
+                },
+                true,
+            ));
+        }
+    } else {
+        let current = native_result::load(panel, attempt, host, attempts)?;
+        let retained = native_result::report(panel, &current)?
+            .ok_or_else(|| Error::new("native continuation needs a retained result"))?;
+        let result_sha = text(&retained, "artifact_sha256");
+        let report = native_result::source_report(panel, &current.assignment, &retained)?;
+        require(
+            previous == Some(result_sha)
+                && current.operation["refs"]["native_resolution"] == "request-revision"
+                && current.operation["refs"]["native_resolution_result_sha256"] == result_sha
+                && current.operation["terminal"] == false,
+            "native continuation requires Main request-revision for this exact retained result",
+        )?;
+        native_result::check_custody(panel, current.assignment.packet(), host, attempts)?;
+        let round = current
+            .assignment
+            .round()
+            .checked_add(1)
+            .ok_or_else(|| Error::new("native round limit reached"))?;
+        require(
+            round <= 32,
+            "native assignment reached its bounded 32-round limit",
+        )?;
+        let key = oms_panel_core::digest(
+            &serde_json::to_vec(&json!({
+                "attempt":attempt,"previous_result_sha256":result_sha,"round":round,
+            }))
+            .map_err(Error::new)?,
+        );
+        let message = format!("msg-{}", &key[..32]);
+        let prompt = assignment_prompt(
+            panel.repo,
+            panel.room,
+            &packet["task"],
+            &key[..20],
+            &message,
+            brief,
+        )?;
+        packet["round"] = round.into();
+        packet["previous_report_sha256"] = report.sha256().into();
+        packet["previous_result_sha256"] = result_sha.into();
+        packet["previous_assignment_sha256"] = current.assignment.sha256().into();
+        packet["brief"] = brief.into();
+        packet["room_message_id"] = message.into();
+        packet["payload_sha256"] = oms_panel_core::digest(prompt.as_bytes()).into();
+        packet["payload"] = prompt.into();
+        let bytes = serde_json::to_vec(&packet).map_err(Error::new)?;
+        oms_panel_core::native_contract::CheckedAssignment::parse(&bytes)?;
+        let digest = oms_panel_core::digest(&bytes);
+        let mut intent = packet.clone();
+        intent.as_object_mut().unwrap().remove("attempt_id");
+        let intent_digest =
+            oms_panel_core::digest(&serde_json::to_vec(&intent).map_err(Error::new)?);
+        let artifact =
+            format!(".oms/lifecycle/attempts/{attempt}/native-round-{round}-{digest}.json");
+        tx.write(Path::new(&artifact), &bytes, true, MAX_BINDING)?;
+        let fresh = native_result::load(panel, attempt, host, &AttemptCache::default())?;
+        require(
+            fresh.operation == current.operation,
+            "native report changed before continuation",
+        )?;
+        tx.check()?;
+        native_result::annotate(
+            panel,
+            &current.operation,
+            &format!("native-round-{round}-{digest}"),
+            json!({
+                "native_transport":"intent","native_binding":artifact,"native_binding_sha256":digest,
+                "native_intent_sha256":intent_digest,"native_payload_sha256":packet["payload_sha256"],
+                "native_room_message":packet["room_message_id"],"native_round":round.to_string(),
+                "native_result_schema":"","native_result_path":"","native_result_sha256":"",
+                "native_resolution":"awaiting-report","native_resolution_result_sha256":"",
+                "native_previous_result_sha256":result_sha,
+            }),
+        )?;
+    }
+    let current = current_operation(panel, attempt)?;
+    let mut binding = Binding {
+        task: packet["task"].clone(),
+        checkout: packet["checkout"].clone(),
+        attempt: attempt.into(),
+        intent_digest: text(&current["refs"], "native_intent_sha256").into(),
+        digest: text(&current["refs"], "native_binding_sha256").into(),
+        transport: "intent",
+    };
+    deliver(
+        panel,
+        &mut binding,
+        custody,
+        text(&packet, "payload"),
+        text(&current["refs"], "native_binding"),
+        text(&packet, "room_message_id"),
+        host,
+        attempts,
+        tx,
+    )
 }
 
 // The canonical flow fixture lives in orchestrator.rs; these pin the prompt budget.
@@ -894,7 +1173,7 @@ mod tests {
         for exact in [
             format!("plan plan_{},", "a".repeat(32)),
             format!("lease lease_{},", "b".repeat(32)),
-            format!("Room message msg-{};", "d".repeat(32)),
+            format!("Room room-eeeeeeeeeeee message msg-{};", "d".repeat(32)),
         ] {
             assert_eq!(prompt.matches(&exact).count(), 1, "{exact}");
         }
@@ -942,7 +1221,7 @@ mod tests {
             assert_eq!(
                 String::from_utf8(out.stdout).unwrap(),
                 format!(
-                    "agent-plan|--repo|{repo}|evidence-snapshot|--id|native-one|\nroom|show|--repo|{repo}|--id|room-eeeeeeeeeeee|--exact|--json|\n"
+                    "agent-plan|--repo|{repo}|evidence-snapshot|--id|native-one|\npanel|--repo|{repo}|--results|--task-id|native-one|--json|\n"
                 )
             );
         }

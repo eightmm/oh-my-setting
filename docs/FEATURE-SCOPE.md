@@ -274,3 +274,42 @@ The review covers the current entrypoint/owner map, seven Team documents, all
 40 follow-up packets and the decisive native callers. It is not a proof that
 every workspace function is redundant or equivalent. No transport or state
 store is removed on the basis of missing usage telemetry.
+
+## Native assignment return contracts
+
+The ordinary Codex bound-task path now shares a checked
+[assignment/return contract](../crates/oms-panel-core/src/native_contract.rs)
+between the sender, existing native result capture and Results projection. New
+assignments require explicit scope and a parent verifier, freeze exact
+Plan/task/lease/epoch/Main/Room/attempt/checkout/base identity, and preserve
+registered requirement IDs. A declared role defaults to `worker` and grants no
+capabilities. Task ID/title is only the fallback when registered IDs are absent;
+inventory coverage does not prove all user prose or task semantics are satisfied.
+
+The [existing capture owner](../crates/oms-panel-core/src/native_results.rs) retains
+the typed source plus every referenced patch/verification snapshot. Strict bounded
+parsing, decoded outbound checks and directional scope validation precede capture.
+Legacy prose reports remain advisory. Same-byte replay is idempotent; a changed
+typed report requires the exact previous retained-result digest at the CLI and
+manifest boundary, with a separate source revision chain. No report command is run
+and no claimed check establishes verification, acceptance or cleanup.
+
+[Main reconciliation](../crates/oms-command-panel/src/native_result.rs) records
+`request-revision`, `blocked` or `reviewed` against an exact retained result.
+Continuation creates an immutable next round under the same claim/attempt. A
+reviewed candidate may enter canonical Plan review, then uses the existing external
+patch admission/landing and genuine completion receipts. Canonical done/cancelled
+tasks permit administrative assignment/Room retirement without closing the Lead
+session or claiming child cleanup.
+
+[Results](../crates/oms-panel-core/src/results.rs) supplies source/manifest templates,
+input paths and structured next actions in task, participant and list views, with at
+most 20 bounded typed metadata reads. Unimported input presence is advisory; the
+existing [tick wake](../crates/oms-panel-core/src/tick.rs) only notifies an eligible
+idle Main. Main still chooses import, reconciliation and continuation; approved
+goal-drive/autopilot remains the existing bounded automatic executor. There is no
+new scheduler, permission default, native session control or completion authority.
+Other native providers use managed task dispatch until their bound adapters exist;
+explicit unbound conversations receive no canonical task credit. The practical
+[two-layer return workflow](TERMINAL-PANEL.md#retain-a-bound-native-report) documents
+the public result digest separately from the source digest and remaining limits.

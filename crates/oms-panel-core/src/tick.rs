@@ -1336,7 +1336,150 @@ impl Env<'_> {
         if receipt["stage"] == "proposal-review" && !held {
             reasons.push("an autopilot proposal waits in proposal-review".into());
         }
+        if let Some(reason) = self.native_return_wake_reason()? {
+            reasons.push(reason);
+        }
         Ok((reasons.join("; "), held))
+    }
+
+    /// Observe bounded return metadata only. Import, live custody revalidation,
+    /// evidence verification and every owner decision remain explicit operations.
+    fn native_return_wake_reason(&self) -> std::result::Result<Option<String>, String> {
+        let (session, _) = self.resolve_session();
+        let [_, main, _, _, room] = self.main_window(&session)?;
+        let history = self.main_history(&room)?;
+        let owner = history
+            .iter()
+            .find(|row| row["attempt_id"] == main && row["tool"] == "panel-main")
+            .and_then(|row| row["provider"].as_str())
+            .ok_or("native return Main owner is unavailable")?;
+        let mut attempts: Vec<_> = history
+            .iter()
+            .filter(|row| {
+                row["tool"] == "panel-native-assignment"
+                    && row["provider"] == "codex"
+                    && row["terminal"] == false
+                    && row["parent_attempt_id"] == main
+                    && row["refs"]["panel_room_id"] == room
+                    && row["refs"]["panel_owner"] == owner
+                    && row["refs"]["native_assignment_schema"] == "1"
+                    && row["refs"]["native_return_schema"] == "1"
+            })
+            .collect();
+        if attempts.len() > 20 {
+            return Err("native return observation exceeds 20 active assignments".into());
+        }
+        attempts.sort_by_key(|row| row["attempt_id"].as_str().unwrap_or_default());
+        let store = Store::open(&self.repo).map_err(|e| e.message)?;
+        let mut pending = vec![];
+        for row in attempts {
+            let refs = &row["refs"];
+            match refs["native_transport"].as_str() {
+                Some("intent") => continue,
+                Some("submitted" | "sending" | "unknown") => {}
+                _ => return Err("native return transport is unavailable".into()),
+            }
+            let metadata = crate::native_results::metadata(&store, row).map_err(|e| {
+                format!(
+                    "native return metadata unavailable: {}",
+                    cut(&e.message, 120)
+                )
+            })?;
+            let result = metadata["artifact_sha256"].as_str().unwrap_or("");
+            let phase = match (
+                metadata["status"].as_str(),
+                refs["native_resolution"].as_str(),
+                refs["native_resolution_result_sha256"]
+                    .as_str()
+                    .unwrap_or(""),
+            ) {
+                (Some("awaiting-report"), Some("awaiting-report"), "") => None,
+                (Some("reported"), Some("pending"), "") => Some("reconciliation"),
+                (Some("reported"), Some("request-revision"), digest) if digest == result => {
+                    Some("continuation")
+                }
+                (Some("reported"), Some("blocked" | "reviewed"), digest) if digest == result => {
+                    None
+                }
+                _ => return Err("native return resolution differs from its retained result".into()),
+            };
+            let input = match metadata["input_presence"]["manifest"].as_str() {
+                Some("absent") => None,
+                Some("present") => {
+                    let path = metadata["input_paths"]["manifest"]
+                        .as_str()
+                        .ok_or("native return input path is unavailable")?;
+                    let input =
+                        crate::native_results::CaptureInput::read(&self.repo, Path::new(path))
+                            .map_err(|e| {
+                                format!("native return input unavailable: {}", cut(&e.message, 120))
+                            })?;
+                    if input.attempt() != row["attempt_id"].as_str().unwrap_or("")
+                        || input.binding_digest()
+                            != metadata["binding_sha256"].as_str().unwrap_or("")
+                    {
+                        return Err("native return input differs from its active assignment".into());
+                    }
+                    if metadata["input_sha256"] == input.input_digest() {
+                        None
+                    } else if refs["native_resolution"] == "reviewed" {
+                        return Err(
+                            "reviewed native return has changed input; owner inspection required"
+                                .into(),
+                        );
+                    } else if input.previous_digest() == result {
+                        if metadata["input_presence"]["source"] != "present" {
+                            return Err("native return source is absent or unsafe; owner inspection required".into());
+                        }
+                        Some(input.input_digest().to_owned())
+                    } else {
+                        return Err(
+                            "native return input predecessor differs from its retained result"
+                                .into(),
+                        );
+                    }
+                }
+                _ => {
+                    return Err(
+                        "native return input presence is unknown; owner inspection required".into(),
+                    );
+                }
+            };
+            if let Some((phase, digest)) = input
+                .as_deref()
+                .map(|digest| ("import", digest))
+                .or_else(|| phase.map(|phase| (phase, result)))
+            {
+                pending.push(json!({"attempt":row["attempt_id"],"task":row["task_id"],
+                    "round":metadata["round"],"phase":phase,"sha256":digest}));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let names = pending
+            .iter()
+            .take(8)
+            .map(|row| {
+                format!(
+                    "{} ({})",
+                    cut(row["task"].as_str().unwrap_or(""), 80),
+                    row["phase"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>();
+        let digest = crate::digest(
+            &crate::value::encoded(&Value::Array(pending.clone())).map_err(|e| e.message)?,
+        );
+        Ok(Some(format!(
+            "native return awaits owner import/reconciliation/continuation: {}{}; observation {digest}; input remains untrusted until owner import; inspect oms panel --results --json",
+            names.join(", "),
+            if pending.len() > 8 {
+                format!(" (+{} more)", pending.len() - 8)
+            } else {
+                String::new()
+            },
+        )))
     }
 
     // ---- the resume path
@@ -1853,7 +1996,7 @@ impl Env<'_> {
                 return if held {
                     skip(ISSUE_PENDING, ISSUE_RESTAMP)
                 } else {
-                    "skipped: no ready plan work or pending proposal".into()
+                    "skipped: no ready plan work, pending proposal or native return".into()
                 };
             }
             Ok((r, _)) => r,
@@ -1877,6 +2020,11 @@ impl Env<'_> {
     ) -> std::result::Result<String, Fail> {
         let (receipt, wakes) = self.ledger_checked(tx)?;
         let (pane, member) = self.wake_target().map_err(Fail::Other)?;
+        // A Main swap or result import before this lock must not deliver a
+        // reminder whose owner or exact pending evidence has already changed.
+        if self.wake_reason().map_err(Fail::Other)?.0 != reason {
+            return Ok("skipped: shared work changed before wake; reread on the next tick".into());
+        }
         let day = self.day();
         let spent: Vec<&Value> = wakes.iter().filter(|w| w["outcome"] != "skipped").collect();
         let key = hash16(&[&member, &day, reason]);
@@ -4735,6 +4883,246 @@ mod tests {
     fn wake(rig: &Rig, dry: bool) -> String {
         rig.env(T).wake_main(dry, None)
     }
+    fn native_return_fixture(rig: &Rig) -> (Value, Value, String) {
+        use crate::native_contract::{CheckedAssignment, execution_contract};
+        let attempt = "att_cccccccccccccccccccccccccccccccc";
+        let task = json!({"id":"native-task","title":"Inspect the source","role":"researcher",
+            "plan_id":format!("plan_{}","a".repeat(32)),"lease_id":format!("lease_{}","b".repeat(32)),
+            "lease_epoch":1,"provider":"claude","claimed_by_participant":ATT,"state":"claimed",
+            "claim_expired":false,"contract_stale":false,"allowed_paths":["src"],
+            "forbidden_paths":[],"verify":"cargo test","covers":["criterion-one"]});
+        let mut packet = json!({"schema":1,"kind":"oms-native-assignment","parent_attempt_id":ATT,
+            "provider":"codex","room":ROOM,"round":1,"session":"oms-fixture",
+            "main_pane":{"id":PANE,"window":"@2","pid":"4242","birth":"main-birth"},
+            "lead_pane":{"id":"%9","window":"@3","pid":"4243","birth":"lead-birth"},
+            "account":null,"account_verification":"unknown",
+            "checkout":{"cwd":rig.dir.0,"worktree":rig.dir.0,"base_sha":"c".repeat(40),"write_isolation":"unmanaged"},
+            "result_contract":execution_contract(&task).unwrap(),"task":task});
+        let intent = crate::digest(&serde_json::to_vec(&packet).unwrap());
+        packet["attempt_id"] = attempt.into();
+        let raw = serde_json::to_vec(&packet).unwrap();
+        let assignment = CheckedAssignment::parse(&raw).unwrap().unwrap();
+        let binding = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
+        rig.dir.put(&binding, std::str::from_utf8(&raw).unwrap());
+        let paths = crate::native_results::input_paths(&assignment);
+        let mut source = assignment.report_template();
+        source["summary"] = "Source observations await Main review".into();
+        let source = serde_json::to_string(&source).unwrap();
+        rig.dir.put(paths["source"].as_str().unwrap(), &source);
+        let manifest = json!({"schema":1,"attempt_id":attempt,"binding_sha256":assignment.sha256(),
+            "previous_sha256":"","kind":"findings","summary":"Source observations await Main review",
+            "source":{"path":paths["source"],"sha256":crate::digest(source.as_bytes())},
+            "patch":null,"verification":[]});
+        let path = paths["manifest"].as_str().unwrap().to_owned();
+        rig.dir.put(&path, &manifest.to_string());
+        let row = json!({"attempt_id":attempt,"tool":"panel-native-assignment","provider":"codex",
+            "parent_attempt_id":ATT,"task_id":"native-task","state":"working","terminal":false,
+            "refs":{"panel_room_id":ROOM,"panel_owner":"claude","plan_id":task["plan_id"],
+                "lease_id":task["lease_id"],"native_assignment_schema":"1","native_return_schema":"1",
+                "native_transport":"submitted","native_intent_sha256":intent,"native_binding":binding,
+                "native_binding_sha256":assignment.sha256(),"native_round":"1","native_resolution":"awaiting-report"}});
+        (row, packet, path)
+    }
+    #[test]
+    fn native_return_wakes_bind_the_current_owner_and_exact_import_or_result() {
+        let rig = typed_rig();
+        rig.fake.ready.borrow_mut().clear();
+        let (row, packet, path) = native_return_fixture(&rig);
+        rig.fake.children.borrow_mut().push(row.clone());
+        let first = wake(&rig, false);
+        assert!(
+            first.starts_with("woke ") && first.contains("native-task (import)"),
+            "{first}"
+        );
+        let store = Store::open(&rig.dir.0).unwrap();
+        assert!(
+            crate::native_results::read(&store, &row).unwrap().is_none(),
+            "wake never imports"
+        );
+        assert!(wake(&rig, false).contains("already woken today"));
+        let first_key = rig.dir.wakes()[0]["key"].clone();
+        let original = rig.dir.read(&path);
+        let mut changed: Value = serde_json::from_str(&original).unwrap();
+        changed["summary"] = "Updated untrusted observations".into();
+        rig.dir.put(&path, &changed.to_string());
+        assert!(
+            wake(&rig, false).starts_with("woke "),
+            "new input bytes are distinct work"
+        );
+        assert_ne!(rig.dir.wakes()[1]["key"], first_key);
+        rig.dir.put(&path, &original);
+
+        let assignment =
+            crate::native_contract::CheckedAssignment::parse(&serde_json::to_vec(&packet).unwrap())
+                .unwrap()
+                .unwrap();
+        let capture = crate::native_results::CaptureInput::read(&rig.dir.0, Path::new(&path))
+            .unwrap()
+            .capture(&rig.dir.0, Some(&assignment))
+            .unwrap();
+        let retained = {
+            let tx = store
+                .transaction("native-return-fixture", Duration::from_secs(1))
+                .unwrap();
+            capture
+                .retain(
+                    &tx,
+                    &packet,
+                    row["refs"]["native_binding"].as_str().unwrap(),
+                )
+                .unwrap()
+        };
+        {
+            let mut rows = rig.fake.children.borrow_mut();
+            let refs = &mut rows[0]["refs"];
+            refs["native_result_schema"] = "1".into();
+            refs["native_result_path"] = retained["path"].clone();
+            refs["native_result_sha256"] = retained["sha256"].clone();
+            refs["native_resolution"] = "pending".into();
+            refs["native_resolution_result_sha256"] = "".into();
+        }
+        let reported = wake(&rig, false);
+        assert!(
+            reported.starts_with("woke ") && reported.contains("native-task (reconciliation)"),
+            "{reported}"
+        );
+        assert!(wake(&rig, false).contains("already woken today"));
+        for decision in ["reviewed", "blocked", "request-revision"] {
+            {
+                let mut rows = rig.fake.children.borrow_mut();
+                rows[0]["refs"]["native_resolution"] = decision.into();
+                rows[0]["refs"]["native_resolution_result_sha256"] = retained["sha256"].clone();
+            }
+            let status = wake(&rig, true);
+            if decision == "request-revision" {
+                assert!(
+                    status.starts_with("would wake ")
+                        && status.contains("native-task (continuation)"),
+                    "{status}"
+                );
+            } else {
+                assert!(status.contains("no ready plan work"), "{status}");
+            }
+        }
+        rig.fake.children.borrow_mut()[0]["refs"]["native_resolution"] = "reviewed".into();
+        changed["previous_sha256"] = retained["sha256"].clone();
+        rig.dir.put(&path, &changed.to_string());
+        assert!(wake(&rig, false).contains("reviewed native return has changed input"));
+        rig.dir.put(&path, &original);
+        rig.fake.children.borrow_mut()[0]["refs"]["native_resolution_result_sha256"] =
+            "d".repeat(64).into();
+        assert!(wake(&rig, false).contains("resolution differs"));
+        assert_eq!(
+            rig.dir.wakes().len(),
+            3,
+            "refusal and dry runs spend no wake"
+        );
+    }
+    #[test]
+    fn native_return_wakes_refuse_unsafe_inputs_and_keep_existing_wake_guards() {
+        use std::os::unix::fs::symlink;
+        let rig = typed_rig();
+        rig.fake.ready.borrow_mut().clear();
+        let (row, _, path) = native_return_fixture(&rig);
+        rig.fake.children.borrow_mut().push(row.clone());
+        for (field, value) in [
+            ("parent_attempt_id", json!("other-main")),
+            ("terminal", json!(true)),
+        ] {
+            rig.fake.children.borrow_mut()[0][field] = value;
+            assert!(wake(&rig, true).contains("no ready plan work"));
+            rig.fake.children.borrow_mut()[0] = row.clone();
+        }
+        for field in ["panel_owner", "panel_room_id"] {
+            rig.fake.children.borrow_mut()[0]["refs"][field] = "other".into();
+            assert!(wake(&rig, true).contains("no ready plan work"));
+            rig.fake.children.borrow_mut()[0] = row.clone();
+        }
+        let original = rig.dir.read(&path);
+        let original_input: Value = serde_json::from_str(&original).unwrap();
+        let source_path = original_input["source"]["path"].as_str().unwrap();
+        let source = rig.dir.read(source_path);
+        for field in ["attempt_id", "binding_sha256", "previous_sha256"] {
+            let mut input: Value = serde_json::from_str(&original).unwrap();
+            input[field] = if field == "attempt_id" {
+                "other-attempt".into()
+            } else {
+                "d".repeat(64).into()
+            };
+            rig.dir.put(&path, &input.to_string());
+            let status = wake(&rig, false);
+            assert!(
+                status.contains("native return input differs")
+                    || status.contains("input predecessor differs"),
+                "{status}"
+            );
+        }
+        rig.dir.put(&path, "{}");
+        assert!(wake(&rig, false).contains("input unavailable"));
+        rig.dir.put(&path, &"x".repeat(64 * 1024 + 1));
+        assert!(wake(&rig, false).contains("input presence is unknown"));
+        std::fs::remove_file(rig.dir.0.join(&path)).unwrap();
+        assert!(wake(&rig, true).contains("no ready plan work"));
+        rig.dir.put("untrusted-input.json", &original);
+        symlink(
+            rig.dir.0.join("untrusted-input.json"),
+            rig.dir.0.join(&path),
+        )
+        .unwrap();
+        assert!(wake(&rig, false).contains("input presence is unknown"));
+        std::fs::remove_file(rig.dir.0.join(&path)).unwrap();
+        rig.dir.put(&path, &original);
+        rig.dir.put(source_path, &"x".repeat(64 * 1024 + 1));
+        assert!(wake(&rig, false).contains("source is absent or unsafe"));
+        std::fs::remove_file(rig.dir.0.join(source_path)).unwrap();
+        symlink(
+            rig.dir.0.join("untrusted-input.json"),
+            rig.dir.0.join(source_path),
+        )
+        .unwrap();
+        assert!(wake(&rig, false).contains("source is absent or unsafe"));
+        std::fs::remove_file(rig.dir.0.join(source_path)).unwrap();
+        rig.dir.put(source_path, &source);
+        rig.fake.children.borrow_mut()[0]["refs"]["native_binding"] = ".oms/unrelated.json".into();
+        assert!(wake(&rig, false).contains("metadata unavailable"));
+        rig.fake.children.borrow_mut()[0] = row.clone();
+        rig.idle_since(T, 1799);
+        assert_eq!(
+            wake(&rig, false),
+            "skipped: main is not idle for 30 minutes"
+        );
+        rig.idle_since(T, 1800);
+        rig.fake.children.borrow_mut().push(json!({"attempt_id":"child","terminal":false,"refs":{"panel_room_id":ROOM,"panel_role":"worker"}}));
+        assert_eq!(wake(&rig, false), "skipped: main has a live child call");
+        rig.fake.children.borrow_mut().pop();
+        rig.seed(json!(
+            (0..WAKE_DAILY_LIMIT)
+                .map(|n| wake_row("2026-11-10", "other", &format!("k{n}"), "woke"))
+                .collect::<Vec<_>>()
+        ));
+        assert!(wake(&rig, false).contains("reached 6 wakes today"));
+        assert!(rig.fake.sent.borrow().is_empty());
+        rig.fake.children.borrow_mut().resize(21, row);
+        assert!(wake(&rig, false).contains("exceeds 20 active assignments"));
+
+        let raced = typed_rig();
+        raced.fake.ready.borrow_mut().clear();
+        let (row, _, path) = native_return_fixture(&raced);
+        raced.fake.children.borrow_mut().push(row);
+        let changed = || {
+            let mut input: Value = serde_json::from_str(&raced.dir.read(&path)).unwrap();
+            input["summary"] = "changed before wake lock".into();
+            raced.dir.put(&path, &input.to_string());
+        };
+        let mut env = raced.env(T);
+        env.after_panel_lock = Some(&changed);
+        assert!(
+            env.wake_main(false, None)
+                .contains("shared work changed before wake")
+        );
+        assert!(raced.fake.sent.borrow().is_empty());
+        assert!(!raced.dir.0.join(".oms/tick/last.json").exists());
+    }
     #[test]
     fn an_idle_main_with_an_empty_prompt_is_woken_once_with_the_ledger_written_first() {
         let rig = typed_rig();
@@ -4985,7 +5373,7 @@ mod tests {
         *rig.fake.ready.borrow_mut() = String::new();
         assert_eq!(
             wake(&rig, false),
-            "skipped: no ready plan work or pending proposal"
+            "skipped: no ready plan work, pending proposal or native return"
         );
         // A proposal held for a GitHub issue never wakes the main and records nothing.
         rig.dir.put(

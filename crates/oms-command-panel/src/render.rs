@@ -5791,6 +5791,23 @@ pub fn results(report: &Value, columns: usize) -> String {
                 ),
                 columns,
             ));
+            if entry["return_state"].is_string() {
+                lines.extend(wrap(
+                    &format!(
+                        "    Return {} · resolution {} · verification {}",
+                        text(entry, "return_state"),
+                        text(entry, "resolution"),
+                        text(entry, "verification")
+                    ),
+                    columns,
+                ));
+                if let Some(next) = entry["next_action"]["reason"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                {
+                    lines.extend(wrap(&format!("    Next: {next}"), columns));
+                }
+            }
             let report = &entry["report"];
             if report.is_object() {
                 lines.extend(wrap(
@@ -11350,6 +11367,25 @@ mod tests {
         ));
         assert!(output.contains("decision pending"));
         assert!(output.contains("Missing: native completion and child cleanup are unconfirmed"));
+        reported["native_assignment"]["return_state"] = "reported".into();
+        reported["native_assignment"]["resolution"] = "pending".into();
+        reported["native_assignment"]["verification"] = "unverified".into();
+        reported["native_assignment"]["next_action"] =
+            json!({"reason":"Reconcile the exact retained result digest"});
+        for columns in [32, 56, 160] {
+            let shown = results(&json!({"rows":[reported.clone()]}), columns);
+            assert!(shown.lines().all(|line| width(line) <= columns), "{shown}");
+            let joined: String = shown.chars().filter(|c| !c.is_whitespace()).collect();
+            for fact in [
+                "Return reported",
+                "resolution pending",
+                "verification unverified",
+                "Reconcile the exact retained result digest",
+            ] {
+                let compact: String = fact.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(joined.contains(&compact), "{fact}: {shown}");
+            }
+        }
         let narrow = results(&json!({"rows":[reported]}), 30);
         assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
     }
