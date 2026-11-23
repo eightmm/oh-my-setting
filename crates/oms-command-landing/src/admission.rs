@@ -184,7 +184,7 @@ impl Scope {
         std::fs::write(temporary.path.join("result"), &result)?;
         let stop = Arc::new(AtomicBool::new(false));
         let mut scope = Self {
-            protocol,
+            protocol: protocol.with_startup_diagnostics(),
             repo: repo.to_owned(),
             channel,
             expected,
