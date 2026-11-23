@@ -119,8 +119,8 @@ usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
 
-Runs the pure-Rust repository gate: lint (shellcheck, oms-migrate inventory,
-skill manifest, doc references) then focused smoke suites and Rust tests.
+Runs the pure-Rust repository gate: lint (shellcheck, oms-migrate inventory and
+policy, skill manifest, doc references) then focused smoke suites and Rust tests.
 
   --no-lint             Skip lint only when equivalent checks ran separately.
   --lint-only           Run only lint stages.
@@ -339,6 +339,12 @@ run_stage_with_deadline() {
   return "$rc"
 }
 
+# The migration inventory and the static repository policy share one stage.
+rust_migration_checks() {
+  local migrate=(cargo +1.99.1 run --quiet --manifest-path Cargo.toml -p oms-migrate --locked --offline --)
+  "${migrate[@]}" check --repo . && "${migrate[@]}" policy --repo .
+}
+
 stage() {
   local name="$1" log rc=0 started elapsed deadline=1800
   shift
@@ -497,7 +503,7 @@ if [ "$RUN_LINT" = 1 ]; then
     templates/*.sh tests/*.sh tests/lib/*.sh
   stage skill-manifest bash scripts/install-skills.sh
   stage doc-references bash tests/source-distribution-smoke.sh --docs-only
-  stage rust-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+  stage rust-migration-check rust_migration_checks
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
@@ -528,7 +534,7 @@ if [ "$RUN_INVARIANTS" = 1 ] || [ "$RUN_QUICK" = 1 ]; then
   if [ "$RUN_LINT" != 1 ]; then
     stage invariants-skill-manifest bash scripts/install-skills.sh
     stage invariants-doc-references bash tests/source-distribution-smoke.sh --docs-only
-    stage invariants-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+    stage invariants-migration-check rust_migration_checks
   fi
   stage invariants-source-distribution bash tests/source-distribution-smoke.sh
 fi
