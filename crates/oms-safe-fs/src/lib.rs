@@ -202,8 +202,16 @@ fn safe_registry_dir(s: &Stat) -> bool {
         && (s.st_uid == 0 || s.st_uid == rustix::process::getuid().as_raw())
         && s.st_mode & 0o022 == 0
 }
+fn root_sticky_directory(stat: &Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+        && stat.st_uid == 0
+        && stat.st_mode & 0o1000 != 0
+}
+fn same_directory_mode(a: &Stat, b: &Stat) -> bool {
+    identity(a, b) && a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_mode == b.st_mode
+}
 fn same_registry_dir(a: &Stat, b: &Stat) -> bool {
-    safe_registry_dir(b) && identity(a, b) && a.st_uid == b.st_uid && a.st_mode == b.st_mode
+    safe_registry_dir(b) && same_directory_mode(a, b)
 }
 
 fn size_matches(stat: &Stat, count: usize) -> bool {
@@ -247,7 +255,24 @@ impl Root {
     /// `/var` -> `/private/var` must be supplied in their physical spelling;
     /// symlink aliases are rejected, including aliases in ancestors.
     pub fn open_private_registry(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let path = path.as_ref();
+        Self::open_private(path.as_ref(), None)
+    }
+
+    /// Open a workspace for private records while preserving legacy permission
+    /// bits on ancestors whose group membership is positively private.
+    /// A root-owned sticky ancestor protects entries owned by root or this UID.
+    /// All descendants opened for packet operations use private-registry rules.
+    pub fn open_private_workspace(
+        path: impl AsRef<Path>,
+        mut private_group: impl FnMut(u32) -> bool,
+    ) -> Result<Self, Error> {
+        Self::open_private(path.as_ref(), Some(&mut private_group))
+    }
+
+    fn open_private(
+        path: &Path,
+        mut private_group: Option<&mut dyn FnMut(u32) -> bool>,
+    ) -> Result<Self, Error> {
         let raw = path.as_os_str().as_bytes();
         if !path.is_absolute() || raw.contains(&0) || raw.starts_with(b"//") {
             return Err(Error::InvalidPath);
@@ -265,17 +290,30 @@ impl Root {
             return Err(Error::Unsafe);
         }
         let mut ancestry = vec![(root, stat, std::ffi::OsString::new())];
-        for part in parts {
+        let mut verified_groups = std::collections::BTreeSet::new();
+        for (index, part) in parts.iter().enumerate() {
             let name = OsStr::from_bytes(part);
             let parent = &ancestry.last().unwrap().0;
             let named = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(map_open)?;
-            if !safe_registry_dir(&named) {
-                return Err(Error::Unsafe);
+            let root_sticky_ancestor =
+                private_group.is_some() && index + 1 < parts.len() && root_sticky_directory(&named);
+            if !safe_registry_dir(&named) && !root_sticky_ancestor {
+                let private = FileType::from_raw_mode(named.st_mode) == FileType::Directory
+                    && named.st_uid == rustix::process::getuid().as_raw()
+                    && named.st_mode & 0o022 == 0o020
+                    && (verified_groups.contains(&named.st_gid)
+                        || private_group
+                            .as_mut()
+                            .is_some_and(|check| check(named.st_gid)));
+                if !private {
+                    return Err(Error::Unsafe);
+                }
+                verified_groups.insert(named.st_gid);
             }
             let fd =
                 fs::openat(parent, name, directory_flags(), Mode::empty()).map_err(map_open)?;
             let opened = fs::fstat(&fd).map_err(map_open)?;
-            if !same_registry_dir(&named, &opened) {
+            if !same_directory_mode(&named, &opened) {
                 return Err(Error::Changed);
             }
             ancestry.push((fd, opened, name.to_owned()));
@@ -298,6 +336,24 @@ impl Root {
         Ok(result)
     }
 
+    /// Recheck the captured directory names, access modes, and private groups.
+    pub fn recheck_private_workspace(
+        &self,
+        mut private_group: impl FnMut(u32) -> bool,
+    ) -> Result<(), Error> {
+        let chain = self.private_ancestry.as_ref().ok_or(Error::Unsafe)?;
+        self.revalidate_private().map_err(|()| Error::Changed)?;
+        let groups: std::collections::BTreeSet<_> = chain
+            .iter()
+            .filter(|(_, stat, _)| stat.st_mode & 0o020 != 0 && !root_sticky_directory(stat))
+            .map(|(_, stat, _)| stat.st_gid)
+            .collect();
+        if !groups.into_iter().all(&mut private_group) {
+            return Err(Error::Unsafe);
+        }
+        self.revalidate_private().map_err(|()| Error::Changed)
+    }
+
     fn revalidate_private(&self) -> Result<(), ()> {
         let Some(chain) = &self.private_ancestry else {
             return Ok(());
@@ -310,7 +366,7 @@ impl Root {
             } else {
                 fs::statat(&chain[i - 1].0, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| ())?
             };
-            if !same_registry_dir(initial, &opened) || !same_registry_dir(initial, &named) {
+            if !same_directory_mode(initial, &opened) || !same_directory_mode(initial, &named) {
                 return Err(());
             }
         }

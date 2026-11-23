@@ -1,13 +1,25 @@
 //! Bounded input delivery evidence for ordinary managed AGY and Claude leads.
-use super::{AccountHost, CHAT_SGR, PaneIdentity, Panel, input_ready};
+use super::{AccountHost, CHAT_SGR, PaneIdentity, Panel, assignment_shell_word, input_ready};
 use crate::{Error, Result, require};
-use oms_panel_core::{Store, Transaction, terminals::SessionProof};
+use oms_panel_core::{Store, Transaction, services::ExecutionRequest, terminals::SessionProof};
+use oms_safe_fs::{ByteReadOptions, MutationError, MutationPhase, Root};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::cell::RefCell;
+use std::ffi::OsStr;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const MAX_RECEIPT: usize = 8 * 1024;
+const MAX_TICKET: usize = 64 * 1024;
+const GROUP_PROOF_BUDGET: Duration = Duration::from_secs(2);
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_ROWS: usize = 160;
+pub(super) const TICKET_SERVER: &str = "#{pid}\t#{start_time}\t#{session_created}\t.";
+pub(super) const ENTER_SENT: &str = "OMS_AGY_ENTER_SENT";
+pub(super) const ENTER_REFUSED: &str = "OMS_AGY_ENTER_REFUSED";
+pub(super) const TICKET_CWD: &str = "#{pane_current_path}\t.";
 pub(super) const FRAME: &str = concat!(
     "#{pane_id}\t#{pane_dead}\t#{pane_in_mode}\t#{cursor_x}\t#{cursor_y}\t",
     "#{pane_width}\t#{pane_height}\t.",
@@ -100,6 +112,340 @@ impl Scope {
     }
 }
 
+/// An ordinary AGY turn carries a reference. A native user-input record can
+/// confirm the reference was submitted, while reading its body remains unverified.
+pub(super) struct AgyTicket<'a> {
+    pub(super) prompt: String,
+    project: Root,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    generation: PrivateFileGeneration,
+    dimensions: (usize, usize),
+    server_times: (u64, u64),
+    room_log: PathBuf,
+    room_generation: RefCell<Option<PrivateFileGeneration>>,
+    tx: &'a Transaction<'a>,
+}
+
+impl<'a> AgyTicket<'a> {
+    pub(super) fn prepare(
+        panel: &Panel<'_>,
+        scope: &Scope,
+        tx: &'a Transaction<'a>,
+        turn: &str,
+        payload: &str,
+    ) -> Result<Self> {
+        require(
+            scope.provider == "antigravity" && valid_turn(turn),
+            "AGY task reference scope is invalid",
+        )?;
+        let canonical = panel.repo.canonicalize().map_err(Error::new)?;
+        let project = Root::open_private_workspace(canonical, group_check(panel))
+            .map_err(|_| Error::new("AGY task reference workspace ancestry is unsafe"))?;
+        Self::require_cwd(panel, scope, &project)?;
+        let dimensions = Self::dimensions(panel, scope)?;
+        let (width, height) = dimensions;
+        let server_times = Self::server_times(panel, scope)?;
+        let repo = project.physical_root().to_str().ok_or_else(|| {
+            Error::new("repository cannot be represented in an AGY task reference")
+        })?;
+        require(
+            safe_guard_atom(&scope.room),
+            "AGY task reference Room identity is invalid",
+        )?;
+        let room_log = project
+            .physical_root()
+            .join(format!(".oms/threads/{}.jsonl", scope.room));
+        let locator = format!(".oms/artifacts/native-agy-tasks/{turn}.json");
+        let path = PathBuf::from(&locator);
+        let prompt = format!(
+            "{} Turn {turn}. You own this provider's work. Read {}; stop if unavailable.",
+            crate::native_children::TASK_PREFIX,
+            assignment_shell_word(&locator),
+        );
+        // Account for the prompt marker, cursor row, and both composer rules.
+        // The actual capture must still prove every byte, including any wraps.
+        let rows = (crate::render::width(&prompt) + 2) / width + 3;
+        require(
+            prompt.is_ascii() && rows <= height,
+            "AGY task reference cannot fit the verified composer viewport",
+        )?;
+        let packet = json!({
+            "schema": 1, "kind": "oms-ordinary-agy-task", "turn": turn,
+            "repo": repo, "main_owner": panel.owner, "scope": scope,
+            "payload": payload, "payload_sha256": oms_panel_core::digest(payload.as_bytes()),
+        });
+        let bytes = serde_json::to_vec(&packet).map_err(Error::new)?;
+        for data in [payload.as_bytes(), bytes.as_slice()] {
+            require(
+                oms_panel_core::redact(data)?.as_bytes() == data,
+                "AGY task reference content refused by scrubber",
+            )?;
+        }
+        tx.check()?;
+        project
+            .create_private(&path, &bytes, MAX_TICKET)
+            .map_err(|error| match error {
+                MutationError::Storage { phase, .. } => Error {
+                    publication_uncertain: phase != MutationPhase::BeforePublication,
+                    ..Error::new("AGY task reference could not be created exclusively")
+                },
+                MutationError::Transform(never) => match never {},
+            })?;
+        let generation = PrivateFileGeneration::verified(&project, &path, &bytes)?;
+        Ok(Self {
+            prompt,
+            project,
+            path,
+            bytes,
+            generation,
+            dimensions,
+            server_times,
+            room_log,
+            room_generation: RefCell::default(),
+            tx,
+        })
+    }
+
+    fn server_times(panel: &Panel<'_>, scope: &Scope) -> Result<(u64, u64)> {
+        const INVALID: &str = "AGY task reference tmux generation unavailable";
+        let raw = panel.tmux(&["display-message", "-p", "-t", &scope.lead.id, TICKET_SERVER])?;
+        let fields: Vec<_> = raw.split('\t').collect();
+        let [pid, start, created, "."] = fields.as_slice() else {
+            return Err(Error::new(INVALID));
+        };
+        let start = start.parse().map_err(|_| Error::new(INVALID))?;
+        let created = created.parse().map_err(|_| Error::new(INVALID))?;
+        require(
+            pid.parse() == Ok(scope.session.server_pid) && start > 0 && created >= start,
+            INVALID,
+        )?;
+        Ok((start, created))
+    }
+
+    pub(super) fn verify_room(&self, verify: impl FnOnce() -> Result<()>) -> Result<()> {
+        const INVALID: &str = "AGY task reference Room changed during verification";
+        let before = PrivateFileGeneration::for_room(&self.room_log)?;
+        verify()?;
+        require(
+            PrivateFileGeneration::for_room(&self.room_log)? == before,
+            INVALID,
+        )?;
+        self.room_generation.replace(Some(before));
+        Ok(())
+    }
+
+    pub(super) fn enter(
+        &self,
+        scope: &Scope,
+        draft: &Draft,
+        tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
+    ) -> Result<bool> {
+        let room = PrivateFileGeneration::for_room(&self.room_log).ok();
+        if room.is_none() || room != *self.room_generation.borrow() {
+            return Ok(false);
+        }
+        let Cursor {
+            x,
+            row,
+            width,
+            height,
+        } = draft.cursor;
+        let (server_start, session_created) = self.server_times;
+        let wanted = format!(
+            "{}:{server_start}:{session_created}:{}:{}:{}:{}:0:0:0:{}:{}:{}:{x}:{row}:{width}:{height}",
+            scope.session.server_pid,
+            scope.session.session,
+            scope.lead.window,
+            scope.lead.id,
+            scope.lead.pid,
+            scope.room,
+            scope.provider,
+            scope.attempt,
+        );
+        let predicate = format!(
+            "#{{&&:#{{==:#{{pane_current_path}},#{{@oms_panel_repo}}}},#{{==:#{{pid}}:#{{start_time}}:#{{session_created}}:#{{session_id}}:#{{window_id}}:#{{pane_id}}:#{{pane_pid}}:#{{pane_dead}}:#{{&&:#{{window_active}},#{{pane_active}}}}:#{{pane_in_mode}}:#{{@oms_panel_room}}:#{{@oms_provider_session}}:#{{@oms_provider_parent}}:#{{cursor_x}}:#{{cursor_y}}:#{{pane_width}}:#{{pane_height}},{wanted}}}}}"
+        );
+        let yes = format!(
+            "send-keys -t {} Enter ; display-message -p {ENTER_SENT}",
+            assignment_shell_word(&scope.lead.id),
+        );
+        let no = format!("display-message -p {ENTER_REFUSED}");
+        match tmux(&[
+            "if-shell",
+            "-F",
+            "-t",
+            &scope.lead.id,
+            &predicate,
+            &yes,
+            &no,
+        ])?
+        .as_str()
+        {
+            ENTER_SENT => Ok(true),
+            ENTER_REFUSED => Ok(false),
+            _ => Err(Error::new("AGY Enter delivery is uncertain")),
+        }
+    }
+
+    fn require_cwd(panel: &Panel<'_>, scope: &Scope, root: &Root) -> Result<()> {
+        const INVALID: &str = "AGY lead cwd is not the physical repository root";
+        let error = || Error::new(INVALID);
+        let mut request = ExecutionRequest::new(
+            [
+                "tmux",
+                "display-message",
+                "-p",
+                "-t",
+                &scope.lead.id,
+                TICKET_CWD,
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+            panel.repo,
+        );
+        request.timeout = Duration::from_secs(3);
+        request.output_limit = 4098;
+        let output = panel
+            .services
+            .execute(&request, panel.stop)
+            .map_err(|_| error())?;
+        require(
+            output.code == 0
+                && output.cleanup_complete
+                && output.output_complete
+                && !output.limited,
+            INVALID,
+        )?;
+        // The display adapter normally scrubs terminal controls. A path proof
+        // must preserve them and refuse the path if any are present.
+        let raw = std::str::from_utf8(&output.stdout).map_err(|_| error())?;
+        let cwd = raw
+            .strip_suffix('\n')
+            .unwrap_or(raw)
+            .strip_suffix("\t.")
+            .filter(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .and_then(|path| path.canonicalize().ok());
+        require(cwd.as_deref() == Some(root.physical_root()), INVALID)?;
+        let (held, _) = root
+            .pinned_metadata(OsStr::new(".oms"))
+            .map_err(|_| error())?;
+        let named = rustix::fs::lstat(root.physical_root()).map_err(|_| error())?;
+        require(
+            rustix::fs::FileType::from_raw_mode(named.st_mode) == rustix::fs::FileType::Directory
+                && (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino),
+            INVALID,
+        )
+    }
+
+    fn dimensions(panel: &Panel<'_>, scope: &Scope) -> Result<(usize, usize)> {
+        let pane = &scope.lead.id;
+        let metadata = panel.tmux(&["display-message", "-p", "-t", pane, FRAME])?;
+        let cursor = Cursor::parse(&metadata, pane)?;
+        Ok((cursor.width, cursor.height))
+    }
+
+    pub(super) fn revalidate(&self, panel: &Panel<'_>, scope: &Scope) -> Result<()> {
+        self.tx.check()?;
+        self.project
+            .recheck_private_workspace(group_check(panel))
+            .map_err(|_| Error::new("AGY task reference workspace ancestry changed"))?;
+        Self::require_cwd(panel, scope, &self.project)?;
+        require(
+            Self::dimensions(panel, scope)? == self.dimensions,
+            "AGY task reference viewport changed",
+        )?;
+        require(
+            PrivateFileGeneration::verified(&self.project, &self.path, &self.bytes)?
+                == self.generation,
+            "AGY task reference is missing or changed",
+        )
+    }
+}
+
+fn group_check<'a>(panel: &'a Panel<'_>) -> impl FnMut(u32) -> bool + 'a {
+    let deadline = Instant::now() + GROUP_PROOF_BUDGET;
+    let uid = rustix::process::getuid().as_raw();
+    move |gid| {
+        Instant::now() < deadline
+            && panel
+                .services
+                .workspace_group(gid, deadline, panel.stop)
+                .is_some_and(|proof| {
+                    Instant::now() < deadline
+                        && proof.gid == gid
+                        && proof
+                            .explicit_member_uids
+                            .iter()
+                            .all(|member| *member == uid)
+                        && proof.primary_member_uids == [uid]
+                })
+    }
+}
+
+fn safe_guard_atom(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+}
+
+#[derive(PartialEq, Eq)]
+struct PrivateFileGeneration {
+    inode: (u64, u64),
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl PrivateFileGeneration {
+    fn from_meta(meta: &std::fs::Metadata) -> Self {
+        Self {
+            inode: (meta.dev(), meta.ino()),
+            bytes: meta.len(),
+            modified: (meta.mtime(), meta.mtime_nsec()),
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
+
+    fn for_room(path: &Path) -> Result<Self> {
+        const INVALID: &str = "AGY task reference Room generation unavailable";
+        let meta = std::fs::symlink_metadata(path).map_err(|_| Error::new(INVALID))?;
+        require(meta.is_file() && meta.nlink() == 1, INVALID)?;
+        Ok(Self::from_meta(&meta))
+    }
+
+    fn verified(root: &Root, path: &Path, expected: &[u8]) -> Result<Self> {
+        const INVALID: &str = "AGY task reference is missing or changed";
+        let named = root.physical_root().join(path);
+        let identity = || -> Result<Self> {
+            let meta = std::fs::symlink_metadata(&named).map_err(|_| Error::new(INVALID))?;
+            require(
+                meta.is_file()
+                    && meta.uid() == rustix::process::getuid().as_raw()
+                    && meta.mode() & 0o7777 == 0o600
+                    && meta.nlink() == 1
+                    && meta.len() == expected.len() as u64,
+                INVALID,
+            )?;
+            Ok(Self::from_meta(&meta))
+        };
+        let before = identity()?;
+        let options = ByteReadOptions {
+            max_bytes: MAX_TICKET,
+            missing_ok: false,
+        };
+        let bytes = root
+            .read_no_follow(path, options)
+            .map_err(|_| Error::new(INVALID))?;
+        require(bytes == expected && identity()? == before, INVALID)?;
+        Ok(before)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Receipt {
@@ -140,11 +486,7 @@ impl Receipt {
             .ok()??;
         let receipt: Self = serde_json::from_value(raw).ok()?;
         (receipt.scope == Scope::sample(panel, provider, host).ok()?
-            && receipt.turn_id.len() == 20
-            && receipt
-                .turn_id
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+            && valid_turn(&receipt.turn_id))
         .then_some(receipt.delivery)
     }
 }
@@ -154,12 +496,42 @@ fn receipt_path(provider: &str) -> Option<PathBuf> {
         .then(|| format!(".oms/artifacts/native-lead-delivery/{provider}.json").into())
 }
 
+fn valid_turn(turn: &str) -> bool {
+    turn.len() == 20
+        && turn
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cursor {
     x: usize,
     row: usize,
     width: usize,
     height: usize,
+}
+
+impl Cursor {
+    fn parse(metadata: &str, pane: &str) -> Result<Self> {
+        let fields: Vec<_> = metadata.split('\t').collect();
+        let [found, "0", "0", x, row, width, height, "."] = fields.as_slice() else {
+            return Err(Error::new("lead delivery viewport changed"));
+        };
+        let cursor = Self {
+            x: x.parse().map_err(Error::new)?,
+            row: row.parse().map_err(Error::new)?,
+            width: width.parse().map_err(Error::new)?,
+            height: height.parse().map_err(Error::new)?,
+        };
+        require(
+            *found == pane
+                && cursor.height <= MAX_ROWS
+                && cursor.row < cursor.height
+                && cursor.x < cursor.width,
+            "lead delivery viewport changed",
+        )?;
+        Ok(cursor)
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -203,24 +575,7 @@ impl Frame {
             .split_once('\n')
             .and_then(|(head, body)| Some((head, body.strip_suffix("\n.")?)))
             .ok_or_else(|| Error::new("lead delivery viewport unavailable"))?;
-        let fields: Vec<_> = head.split('\t').collect();
-        let [found, "0", "0", x, row, width, height, "."] = fields.as_slice() else {
-            return Err(Error::new("lead delivery viewport changed"));
-        };
-        let cursor = Cursor {
-            x: x.parse().map_err(Error::new)?,
-            row: row.parse().map_err(Error::new)?,
-            width: width.parse().map_err(Error::new)?,
-            height: height.parse().map_err(Error::new)?,
-        };
-        require(
-            *found == pane
-                && cursor.height <= MAX_ROWS
-                && cursor.row < cursor.height
-                && cursor.x < cursor.width,
-            "lead delivery viewport changed",
-        )?;
-        Ok((cursor, screen.to_owned()))
+        Ok((Cursor::parse(head, pane)?, screen.to_owned()))
     }
 
     pub(super) fn capture(
