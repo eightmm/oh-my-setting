@@ -3999,3 +3999,245 @@ fn landing_front_doors_never_report_an_unavailable_service() {
         l.oms_env(args, &[("OMS_REPORT_REPO", "example/oms")]);
     }
 }
+
+#[test]
+fn github_project_mode_activates_from_the_checked_in_declaration() {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    let (data, fork, log) = (f.0.join("data"), f.0.join("fork"), f.0.join("gh.log"));
+    // On PATH and as OMS_GH_BIN: any GitHub call, configured or raw, is logged.
+    let gh = bin.join("gh");
+    let stub = format!(
+        "#!{}\nprintf '%s\\n' \"$*\" >> \"$OMS_TEST_GH_LOG\"\nexit 1\n",
+        bin.join("bash").display()
+    );
+    std::fs::write(&gh, stub).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A git repository standing in for the operator's state repo: a leaked
+    // locator would resolve and write here.
+    let ambient = f.0.join("ambient");
+    std::fs::create_dir(&ambient).unwrap();
+    assert!(
+        f.command(&bin, &bin.join("git"))
+            .current_dir(&ambient)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let ambient_before = files(&ambient);
+    for dir in ["tmp", "xdg/config", "xdg/data", "xdg/state", "xdg/cache"] {
+        std::fs::create_dir_all(f.0.join(dir)).unwrap();
+    }
+    // Every child gets exactly this allowlist; ambient state, room, panel,
+    // lease and worktree locators are cleared whether inherited or set below.
+    const KEEP: &[&str] = &[
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "OH_MY_SETTING_ROLES_DIR",
+        "OMS_PYTHON_RUNTIME_ROOT",
+        "OMS_TEST_PREFLIGHT",
+        "OMS_HARNESS_CHILD",
+        "OMS_HARNESS_DELEGATE_DEPTH",
+        "OMS_GH_BIN",
+        "OMS_TEST_GH_LOG",
+    ];
+    let seal = |mut c: Command| {
+        // Hostile inheritance a live panel pane exports.
+        for key in [
+            "OMS_STATE_REPO",
+            "OMS_ROOM_REPO",
+            "OMS_DELEGATE_WORKTREE_ROOT",
+            "OMS_FAIL_LEDGER",
+        ] {
+            c.env(key, &ambient);
+        }
+        for key in [
+            "OMS_ROOM_ID",
+            "OMS_ROOM_PARTICIPANT",
+            "OMS_PANEL_MAIN_ATTEMPT",
+            "OMS_ATTEMPT_ID",
+            "OMS_AUTOPILOT_OWNER_ID",
+            "OMS_PLAN_LEASE_ID",
+        ] {
+            c.env(key, "ambient");
+        }
+        c.env("TMPDIR", f.0.join("tmp"))
+            .env("XDG_CONFIG_HOME", f.0.join("xdg/config"))
+            .env("XDG_DATA_HOME", f.0.join("xdg/data"))
+            .env("XDG_STATE_HOME", f.0.join("xdg/state"))
+            .env("XDG_CACHE_HOME", f.0.join("xdg/cache"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("OMS_GH_BIN", &gh)
+            .env("OMS_TEST_GH_LOG", &log);
+        let kept: Vec<_> = c
+            .get_envs()
+            .filter(|(k, _)| KEEP.iter().any(|w| *k == *w))
+            .filter_map(|(k, v)| Some((k.to_owned(), v?.to_owned())))
+            .collect();
+        c.env_clear().envs(kept);
+        c
+    };
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let mut c = seal(f.command(&bin, &bin.join("git")));
+        let out = c
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let oms = |dir: &std::path::Path, args: &[&str]| {
+        seal(f.private(&bin, "--oms-dispatch"))
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let ok = |dir: &std::path::Path, args: &[&str]| {
+        let out = oms(dir, args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let refused = |dir: &std::path::Path, args: &[&str], message: &str| {
+        let out = oms(dir, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(err.contains(message), "{args:?}: {err}");
+    };
+
+    // This repository's own declaration, committed; there is no PROJECT.md.
+    let declaration =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/oms-project.md");
+    std::fs::create_dir(data.join(".github")).unwrap();
+    std::fs::copy(declaration, data.join(".github/oms-project.md")).unwrap();
+    git(&data, &["add", ".github/oms-project.md"]);
+    git(&data, &["commit", "-qm", "declare"]);
+    git(
+        &data,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:eightmm/oh-my-setting.git",
+        ],
+    );
+    let status: serde_json::Value =
+        serde_json::from_slice(&ok(&data, &["github", "status", "--json"])).unwrap();
+    assert_eq!(
+        json!([
+            status["project"],
+            status["project_source"],
+            status["project_active"],
+            status["origin"]
+        ]),
+        json!([
+            "eightmm/oh-my-setting",
+            "tracked",
+            true,
+            "eightmm/oh-my-setting"
+        ])
+    );
+    let init = String::from_utf8(ok(&data, &["agent-plan", "init", "--goal", "g"])).unwrap();
+    let tasks = data.join(
+        init.strip_prefix("plan: initialized (")
+            .unwrap()
+            .strip_suffix(")\n")
+            .unwrap(),
+    );
+    let before = std::fs::read(&tasks).unwrap();
+    refused(
+        &data,
+        &["agent-plan", "add", "--id", "a", "--title", "t"],
+        "GitHub project mode",
+    );
+    assert_eq!(std::fs::read(&tasks).unwrap(), before);
+    ok(
+        &data,
+        &[
+            "agent-plan",
+            "add",
+            "--id",
+            "b",
+            "--title",
+            "t",
+            "--issue",
+            "12",
+        ],
+    );
+
+    // Worker intake carries the canonical issue reference.
+    let claimed: serde_json::Value = serde_json::from_slice(&ok(
+        &data,
+        &[
+            "agent-plan",
+            "next",
+            "--claim",
+            "--provider",
+            "codex",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        json!([claimed["id"], claimed["state"], claimed["issue"]]),
+        json!(["b", "claimed", "eightmm/oh-my-setting#12"])
+    );
+
+    // A fork inherits the tracked declaration but not the local plan: inactive.
+    git(&data, &["clone", "-q", ".", fork.to_str().unwrap()]);
+    git(
+        &fork,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:fork-org/oh-my-setting.git",
+        ],
+    );
+    exact(
+        oms(&fork, &["github", "status"]),
+        0,
+        b"project mode: inactive (.github/oms-project.md names eightmm/oh-my-setting; origin is fork-org/oh-my-setting)\norigin: fork-org/oh-my-setting\n",
+        b"",
+    );
+    ok(&fork, &["agent-plan", "init", "--goal", "g"]);
+    ok(&fork, &["agent-plan", "add", "--id", "c", "--title", "t"]);
+    refused(
+        &fork,
+        &[
+            "github",
+            "post-evidence",
+            "--issue",
+            "12",
+            "--pull",
+            "3",
+            "--yes",
+        ],
+        "post-evidence: project mode is not active",
+    );
+    assert!(std::fs::read(&log).unwrap_or_default().is_empty());
+    assert!(!f.0.join("preflight").exists());
+    assert_eq!(files(&ambient), ambient_before);
+}

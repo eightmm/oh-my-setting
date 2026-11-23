@@ -115,6 +115,7 @@ fn run_with_source_writer(
     let mut split = DockSplit::default();
     let mut observations = Observations::default();
     let mut main_footer = MainFooter::default();
+    let mut main_checkout = MainCheckout::default();
     let mut selection_changed = SelectionFence::None;
     let mut switch = MainSwitch::default();
     loop {
@@ -134,13 +135,14 @@ fn run_with_source_writer(
                 )
             });
         let mut accepted_refresh = false;
+        let mut checkout_changed = false;
         let mut checked_agy = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
                 let ready = board.worker.ready();
                 (target.sample(repo, services, interrupted), ready)
             });
-            let checkout_changed = board.checkout_changed(&live);
+            checkout_changed = board.checkout_changed(&live);
             let launch = std::mem::take(&mut requested)
                 || (Instant::now() >= deadline && !board.worker.busy());
             let seed = NativeSeed {
@@ -179,6 +181,7 @@ fn run_with_source_writer(
             }
             if checkout_changed && let Some(Value::Object(fields)) = &mut previous {
                 fields.remove("board_checkout");
+                fields.remove("board_checkout_last_known");
             }
             if changed {
                 room = board.scope.as_ref().map_or("", |scope| &scope.room).into();
@@ -197,6 +200,7 @@ fn run_with_source_writer(
                 reset_weekly_scope(&mut weekly, true);
                 observations = Default::default();
                 main_footer = MainFooter::default();
+                main_checkout.clear();
                 nav.selected = 0;
                 nav.offset = 0;
                 nav.detail = false;
@@ -250,19 +254,27 @@ fn run_with_source_writer(
         if let Some(name) = repo.file_name().and_then(std::ffi::OsStr::to_str) {
             report["project_name"] = json!(name);
         }
-        if let Some(board) = &board
-            && (!accepted_refresh
+        if let Some(board) = &board {
+            if !accepted_refresh
                 || board
                     .scope
                     .as_ref()
-                    .is_some_and(|scope| scope.main.is_none()))
-        {
-            main_footer.project(
+                    .is_some_and(|scope| scope.main.is_none())
+            {
+                main_footer.project(
+                    board.scope.as_ref(),
+                    accepted_refresh,
+                    &mut report,
+                    Instant::now(),
+                    |_| None,
+                );
+            }
+            main_checkout.project(
                 board.scope.as_ref(),
                 accepted_refresh,
+                checkout_changed,
                 &mut report,
                 Instant::now(),
-                |_| None,
             );
         }
         let pending = report["collection"]["pending"] == true;
@@ -938,6 +950,9 @@ fn run_with_source_writer(
                     output.flush().map_err(Error::new)?;
                     last_size = size;
                 }
+                if scope.checkout_repaint {
+                    main_checkout.clear();
+                }
                 if (changed
                     || weekly.repaint
                     || ((detail_repaint || scope.checkout_repaint) && !dock_moved))
@@ -1067,6 +1082,7 @@ impl InputScope {
         let checkout_changed = board.checkout_changed(&live);
         if checkout_changed && let Some(fields) = report.as_object_mut() {
             fields.remove("board_checkout");
+            fields.remove("board_checkout_last_known");
             clear_footer_model(fields);
             self.checkout_repaint = true;
         }
@@ -1103,6 +1119,42 @@ struct MainSwitch {
     running: Option<Receiver<Result<()>>>,
 }
 
+fn legacy_main_switch_source(report: &Value, main: &LiveMain, attempt: &Value) -> bool {
+    let room = &report["room"];
+    let refs = &attempt["refs"];
+    if stale_report(report)
+        || report["collection"]["pending"] == true
+        || room["closed"] != false
+        || !room["successor"].is_null()
+        || attempt["attempt_id"] != main.attempt
+        || attempt["tool"] != "panel-main"
+        || refs["panel_role"] != "main"
+        || refs["panel_room_id"] != room["id"]
+        || !oms_command_room::main_owner_matches(crate::text(refs, "panel_harness"), &main.owner)
+        || [
+            "panel_host",
+            "panel_wrapper_pid",
+            "panel_wrapper_identity",
+            "panel_native_pid",
+            "panel_native_identity",
+        ]
+        .iter()
+        .any(|key| !refs[*key].is_null())
+    {
+        return false;
+    }
+    let mut mains = crate::rows(&room["participants"]).iter().filter(|row| {
+        row["participant"] == main.member || (row["role"] == "main" && row["joined"] == true)
+    });
+    mains.next().is_some_and(|row| {
+        row["participant"] == main.member
+            && row["provider"] == main.owner
+            && row["role"] == "main"
+            && row["joined"] == true
+            && (row["parent"].is_null() || row["parent"] == "")
+    }) && mains.next().is_none()
+}
+
 impl MainSwitch {
     fn open(
         &mut self,
@@ -1112,6 +1164,18 @@ impl MainSwitch {
         nav: &mut navigation::Navigation,
     ) -> Result<()> {
         crate::parent_only()?;
+        self.open_with(scope, report, nav, |current| {
+            crate::native_panel::main_switch_targets(source, current)
+        })
+    }
+
+    fn open_with(
+        &mut self,
+        scope: Option<&BoardScope>,
+        report: &Value,
+        nav: &mut navigation::Navigation,
+        targets: impl FnOnce(&str) -> Result<Vec<crate::native_panel::MainSwitchTarget>>,
+    ) -> Result<()> {
         crate::require(
             self.running.is_none(),
             "A Main switch is already in progress",
@@ -1124,18 +1188,23 @@ impl MainSwitch {
             .as_ref()
             .ok_or_else(|| Error::new("No current Main verified"))?;
         let attempt = &report["room_attempts"][&main.attempt];
+        let current = attempt["provider"] == main.owner
+            && attempt["terminal"] == false
+            && attempt["state"] == "working"
+            && oms_panel_core::state::main_participant(attempt) == main.member;
+        if current && legacy_main_switch_source(report, main, attempt) {
+            return Err(Error::new(
+                "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
+            ));
+        }
         crate::require(
-            attempt["provider"] == main.owner
-                && attempt["refs"]["panel_host"] == "tmux"
-                && attempt["terminal"] == false
-                && attempt["state"] == "working"
-                && oms_panel_core::state::main_participant(attempt) == main.member,
+            current && attempt["refs"]["panel_host"] == "tmux",
             "Current Main is unavailable for a managed switch",
         )?;
-        let current = attempt["refs"]["panel_harness"]
-            .as_str()
-            .unwrap_or_default();
-        let targets = crate::native_panel::main_switch_targets(source, current)?;
+        let current = attempt["refs"]["panel_harness"].as_str();
+        crate::native_panel::check_outgoing_main_swap_harness(current)?;
+        let current = current.unwrap_or_default();
+        let targets = targets(current)?;
         nav.main_switch = Some(navigation::MainSwitchMenu {
             current: current.into(),
             choices: targets
@@ -1425,6 +1494,173 @@ impl MainFooter {
         if let Some(rollout) = rollout {
             report["main_model_observation"] = rollout;
         }
+    }
+}
+
+/// Maximum age for carrying a display-only Main checkout proof across pending
+/// refreshes without a fresh verified snapshot.
+const CHECKOUT_LAST_KNOWN_MAX_AGE: Duration = Duration::from_secs(30);
+/// Maximum consecutive sampling or collection failures tolerated before
+/// clearing the display-only Main checkout proof back to unknown.
+const CHECKOUT_LAST_KNOWN_MAX_FAILURES: u8 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidCheckout {
+    attempt: String,
+    worktree: String,
+    branch: Option<String>,
+    detached: bool,
+}
+
+impl ValidCheckout {
+    fn parse(attempt: &str, value: &Value) -> Option<Self> {
+        if attempt.is_empty() || value["attempt"].as_str() != Some(attempt) {
+            return None;
+        }
+        let detached = match value.get("detached") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(flag)) => *flag,
+            Some(_) => return None,
+        };
+        let worktree = value.get("worktree").and_then(Value::as_str)?;
+        if worktree.is_empty()
+            || worktree.contains(['/', '\\'])
+            || render::clean(worktree, 4096) != worktree
+        {
+            return None;
+        }
+        let branch = if detached {
+            match value.get("branch") {
+                None | Some(Value::Null) => None,
+                Some(_) => return None,
+            }
+        } else {
+            let branch = value.get("branch").and_then(Value::as_str)?;
+            if branch.is_empty()
+                || branch.starts_with(['/', '\\'])
+                || branch.chars().any(char::is_whitespace)
+                || render::clean(branch, 4096) != branch
+            {
+                return None;
+            }
+            Some(branch.to_owned())
+        };
+        Some(Self {
+            attempt: attempt.to_owned(),
+            worktree: worktree.to_owned(),
+            branch,
+            detached,
+        })
+    }
+
+    fn to_last_known_value(&self, room: &str) -> Value {
+        json!({
+            "room": room,
+            "attempt": self.attempt,
+            "worktree": self.worktree,
+            "branch": self.branch,
+            "detached": self.detached,
+            "display_only": true,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CheckoutReading {
+    scope: BoardScope,
+    checkout: ValidCheckout,
+    sampled_at: Instant,
+    failures: u8,
+}
+
+/// Strictly display-only last-known checkout proof for an unchanged owned Main.
+/// Action authority remains gated exclusively on fresh verified snapshots.
+#[derive(Clone, Default)]
+struct MainCheckout(Option<CheckoutReading>);
+
+impl MainCheckout {
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    fn note_sample_failure(&mut self, now: Instant) {
+        if let Some(reading) = &mut self.0 {
+            reading.failures = reading.failures.saturating_add(1);
+            if reading.failures >= CHECKOUT_LAST_KNOWN_MAX_FAILURES
+                || now.saturating_duration_since(reading.sampled_at) >= CHECKOUT_LAST_KNOWN_MAX_AGE
+            {
+                self.0 = None;
+            }
+        }
+    }
+
+    fn project(
+        &mut self,
+        scope: Option<&BoardScope>,
+        accepted_refresh: bool,
+        checkout_changed: bool,
+        report: &mut Value,
+        now: Instant,
+    ) {
+        if let Some(fields) = report.as_object_mut() {
+            fields.remove("board_checkout_last_known");
+        }
+        if checkout_changed {
+            self.clear();
+            return;
+        }
+        let Some((scope, main)) = scope.and_then(|scope| {
+            let main = scope.main.as_ref()?;
+            (report["room"]["id"] == scope.room
+                && report["room"]["closed"] != true
+                && report["room"]["successor"].is_null())
+            .then_some((scope, main))
+        }) else {
+            self.clear();
+            return;
+        };
+        if self
+            .0
+            .as_ref()
+            .is_some_and(|old| !same_footer_scope(&old.scope, scope))
+        {
+            self.clear();
+        }
+        let fresh = accepted_refresh
+            && report["collection"]["ok"] == true
+            && report["collection"]["pending"] != true
+            && report["capacity_stale"] != true;
+        if fresh {
+            let Some(valid) = ValidCheckout::parse(&main.attempt, &report["board_checkout"]) else {
+                self.clear();
+                return;
+            };
+            self.0 = Some(CheckoutReading {
+                scope: scope.clone(),
+                checkout: valid,
+                sampled_at: now,
+                failures: 0,
+            });
+            return;
+        }
+        if report["collection"]["ok"] != true || report["capacity_stale"] == true {
+            self.note_sample_failure(now);
+            return;
+        }
+        if report["collection"]["pending"] != true {
+            return;
+        }
+        let Some(reading) = &self.0 else {
+            return;
+        };
+        if reading.failures >= CHECKOUT_LAST_KNOWN_MAX_FAILURES
+            || now.saturating_duration_since(reading.sampled_at) >= CHECKOUT_LAST_KNOWN_MAX_AGE
+            || !same_footer_scope(&reading.scope, scope)
+        {
+            self.clear();
+            return;
+        }
+        report["board_checkout_last_known"] = reading.checkout.to_last_known_value(&scope.room);
     }
 }
 
@@ -5202,6 +5438,225 @@ mod tests {
     }
 
     #[test]
+    fn main_checkout_proof_is_carried_only_for_unchanged_owned_main_within_bounds() {
+        use super::{
+            BoardScope, CHECKOUT_LAST_KNOWN_MAX_AGE, CHECKOUT_LAST_KNOWN_MAX_FAILURES, LiveMain,
+            MainCheckout, RefreshKey, allow_board_action, navigation, render,
+        };
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        use std::time::{Duration, Instant};
+
+        let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let make_scope = |room: &str, attempt: &str, launch: &str| BoardScope {
+            key: RefreshKey::new(&repo, Some(room), Some(attempt))
+                .unwrap()
+                .with_member(Some("main-member"))
+                .unwrap()
+                .with_launch_path(Some(launch.to_owned())),
+            room: room.into(),
+            main: Some(LiveMain {
+                attempt: attempt.into(),
+                member: "main-member".into(),
+                owner: "codex".into(),
+                session: "$1".into(),
+                window: "@1".into(),
+                pane: "%1".into(),
+                pid: 77,
+                birth: "boot:7".into(),
+            }),
+        };
+        let base_report = |room: &str, attempt: &str, pending: bool| {
+            json!({
+                "collection": {"ok": true, "pending": pending},
+                "room": {
+                    "id": room,
+                    "closed": false,
+                    "successor": null,
+                    "owner": "main-member",
+                    "participants": [{
+                        "participant": "main-member",
+                        "role": "main",
+                        "provider": "codex",
+                        "attempt": attempt,
+                        "state": "working",
+                        "joined": true,
+                    }]
+                },
+                "room_attempts": {
+                    attempt: {
+                        "attempt_id": attempt,
+                        "tool": "panel-main",
+                        "provider": "codex",
+                        "state": "working",
+                        "terminal": false,
+                        "refs": {
+                            "panel_room_id": room,
+                            "panel_role": "main",
+                            "panel_room_participant": "main-member",
+                        }
+                    }
+                }
+            })
+        };
+
+        let scope = make_scope("room-one", "main-1", "/tmp/wt-main");
+        let t0 = Instant::now();
+        let mut checkout = MainCheckout::default();
+
+        // 1. Fresh accepted report records the verified checkout proof.
+        let mut fresh = base_report("room-one", "main-1", false);
+        fresh["board_checkout"] = json!({
+            "attempt": "main-1",
+            "branch": "oms/review",
+            "worktree": "wt-main",
+            "detached": false,
+        });
+        checkout.project(Some(&scope), true, false, &mut fresh, t0);
+        assert!(fresh.get("board_checkout_last_known").is_none());
+
+        // 2. Ordinary pending refresh for unchanged owned Main carries display-only proof.
+        let mut pending = base_report("room-one", "main-1", true);
+        checkout.project(
+            Some(&scope),
+            false,
+            false,
+            &mut pending,
+            t0 + Duration::from_secs(2),
+        );
+        assert_eq!(pending["board_checkout_last_known"]["display_only"], true);
+        assert_eq!(pending["board_checkout_last_known"]["room"], "room-one");
+        assert_eq!(pending["board_checkout_last_known"]["attempt"], "main-1");
+        let rendered =
+            render::frame(&pending, &Default::default(), 100, 20, &BTreeMap::new()).join("\n");
+        assert!(
+            rendered.contains("Branch oms/review · Worktree wt-main"),
+            "{rendered}"
+        );
+        // Action authority remains unchanged (denied while pending / !row_authority).
+        let mut nav = navigation::Navigation::default();
+        assert_eq!(
+            allow_board_action(&mut nav, navigation::Action::SwitchMain, true, false),
+            navigation::Action::None
+        );
+
+        // 3. Confirmed checkout change clears proof immediately.
+        let mut changed_checkout = base_report("room-one", "main-1", true);
+        checkout.project(
+            Some(&scope),
+            false,
+            true,
+            &mut changed_checkout,
+            t0 + Duration::from_secs(3),
+        );
+        assert!(changed_checkout.get("board_checkout_last_known").is_none());
+        let rendered = render::frame(
+            &changed_checkout,
+            &Default::default(),
+            100,
+            20,
+            &BTreeMap::new(),
+        )
+        .join("\n");
+        assert!(rendered.contains("Checkout unknown"), "{rendered}");
+
+        // 4. Launch path change or Main replacement clears proof immediately.
+        checkout.project(Some(&scope), true, false, &mut fresh, t0);
+        let moved_launch = make_scope("room-one", "main-1", "/tmp/wt-other");
+        let mut moved_pending = base_report("room-one", "main-1", true);
+        checkout.project(
+            Some(&moved_launch),
+            false,
+            false,
+            &mut moved_pending,
+            t0 + Duration::from_secs(1),
+        );
+        assert!(moved_pending.get("board_checkout_last_known").is_none());
+
+        checkout.project(Some(&scope), true, false, &mut fresh, t0);
+        let replaced_main = make_scope("room-one", "main-2", "/tmp/wt-main");
+        let mut replaced_pending = base_report("room-one", "main-2", true);
+        checkout.project(
+            Some(&replaced_main),
+            false,
+            false,
+            &mut replaced_pending,
+            t0 + Duration::from_secs(1),
+        );
+        assert!(replaced_pending.get("board_checkout_last_known").is_none());
+
+        // 5. Missing or malformed metadata clears/refuses proof.
+        for bad in [
+            json!(null),
+            json!({"attempt": "main-1", "branch": "oms/review", "worktree": "../escape", "detached": false}),
+            json!({"attempt": "main-1", "branch": "bad branch", "worktree": "wt-main", "detached": false}),
+            json!({"attempt": "main-1", "branch": "oms/review", "worktree": "wt-main", "detached": "yes"}),
+            json!({"attempt": "other-main", "branch": "oms/review", "worktree": "wt-main", "detached": false}),
+        ] {
+            checkout.project(Some(&scope), true, false, &mut fresh, t0);
+            let mut malformed = base_report("room-one", "main-1", false);
+            malformed["board_checkout"] = bad;
+            checkout.project(
+                Some(&scope),
+                true,
+                false,
+                &mut malformed,
+                t0 + Duration::from_secs(1),
+            );
+            let mut after = base_report("room-one", "main-1", true);
+            checkout.project(
+                Some(&scope),
+                false,
+                false,
+                &mut after,
+                t0 + Duration::from_secs(2),
+            );
+            assert!(after.get("board_checkout_last_known").is_none());
+        }
+
+        // 6. No unbounded trust after repeated sampling failures or age expiry.
+        checkout.project(Some(&scope), true, false, &mut fresh, t0);
+        for step in 0..CHECKOUT_LAST_KNOWN_MAX_FAILURES {
+            let mut failed = base_report("room-one", "main-1", false);
+            failed["collection"] = json!({"ok": false, "error": "sample failed"});
+            checkout.project(
+                Some(&scope),
+                false,
+                false,
+                &mut failed,
+                t0 + Duration::from_secs(u64::from(step) + 1),
+            );
+            assert!(failed.get("board_checkout_last_known").is_none());
+        }
+        let mut after_failures = base_report("room-one", "main-1", true);
+        checkout.project(
+            Some(&scope),
+            false,
+            false,
+            &mut after_failures,
+            t0 + Duration::from_secs(5),
+        );
+        assert!(
+            after_failures.get("board_checkout_last_known").is_none(),
+            "proof must clear after bounded consecutive failures"
+        );
+
+        checkout.project(Some(&scope), true, false, &mut fresh, t0);
+        let mut expired = base_report("room-one", "main-1", true);
+        checkout.project(
+            Some(&scope),
+            false,
+            false,
+            &mut expired,
+            t0 + CHECKOUT_LAST_KNOWN_MAX_AGE,
+        );
+        assert!(
+            expired.get("board_checkout_last_known").is_none(),
+            "proof must expire after bounded age window"
+        );
+    }
+
+    #[test]
     fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
         use super::*;
         use input::Key;
@@ -5253,6 +5708,7 @@ mod tests {
             "collection": {"ok": true},
             "room": {
                 "id": "room-one",
+                "closed": false,
                 "main": "main-member",
                 "participants": [
                     {"participant": "earlier", "role": "main", "provider": "claude", "model": "opus", "state": "working", "created_at": "1"},
@@ -5388,6 +5844,130 @@ mod tests {
             ),
             navigation::Action::None
         );
+        let mut legacy_scope = scope.clone();
+        legacy_scope.main.as_mut().unwrap().member = "attempt-old".into();
+        legacy_scope.key = legacy_scope.key.with_member(Some("attempt-old")).unwrap();
+        let mut legacy = report.clone();
+        legacy["room"]["participants"][1]["participant"] = json!("attempt-old");
+        let refs = legacy["room_attempts"]["attempt-old"]["refs"]
+            .as_object_mut()
+            .unwrap();
+        refs.remove("panel_host");
+        refs.remove("panel_room_participant");
+        let blocked = |report: &Value| {
+            let mut flow = MainSwitch::default();
+            let mut nav = navigation::Navigation::default();
+            let error = flow
+                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                    panic!("unavailable Main must not resolve targets")
+                })
+                .unwrap_err();
+            assert!(nav.main_switch.is_none());
+            assert!(flow.selection.is_none() && flow.running.is_none());
+            error.message
+        };
+        assert_eq!(
+            blocked(&legacy),
+            "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
+        );
+        for (path, value) in [
+            ("/collection/pending", json!(true)),
+            ("/room/closed", json!(true)),
+            (
+                "/room_attempts/attempt-old/attempt_id",
+                json!("foreign-attempt"),
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_room_id",
+                json!("room-foreign"),
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_wrapper_pid",
+                json!("52"),
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("inline"),
+            ),
+            ("/room_attempts/attempt-old/state", json!("done")),
+            ("/room/participants/1/joined", json!(false)),
+        ] {
+            let mut refused = legacy.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(
+                blocked(&refused),
+                "Current Main is unavailable for a managed switch",
+                "{path}"
+            );
+        }
+        let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
+            .unwrap_err()
+            .message;
+        for (owner, harness) in [
+            ("claude", Some("claude")),
+            ("antigravity", Some("agy")),
+            ("codex", Some("pi")),
+            ("codex", Some("unknown")),
+            ("codex", None),
+        ] {
+            let mut case_scope = scope.clone();
+            case_scope.main.as_mut().unwrap().owner = owner.into();
+            let mut case_report = report.clone();
+            let attempt = case_report["room_attempts"]["attempt-old"]
+                .as_object_mut()
+                .unwrap();
+            attempt.insert("provider".into(), json!(owner));
+            let refs = attempt["refs"].as_object_mut().unwrap();
+            match harness {
+                Some(value) => {
+                    refs.insert("panel_harness".into(), json!(value));
+                }
+                None => {
+                    refs.remove("panel_harness");
+                }
+            }
+            let mut flow = MainSwitch::default();
+            let mut nav = navigation::Navigation::default();
+            let error = flow
+                .open_with(Some(&case_scope), &case_report, &mut nav, |_| {
+                    panic!("unsupported outgoing harness must not resolve targets")
+                })
+                .unwrap_err();
+            assert_eq!(error.message, expected_refusal);
+            assert!(nav.main_switch.is_none());
+            assert!(flow.selection.is_none());
+            assert!(flow.running.is_none());
+            assert!(!flow.key(
+                &Key::Char('1'),
+                &mut nav,
+                || Some(case_scope.clone()),
+                refuse
+            ));
+            assert!(!flow.key(
+                &Key::Char('y'),
+                &mut nav,
+                || Some(case_scope.clone()),
+                refuse
+            ));
+        }
+        let mut opened_flow = MainSwitch::default();
+        let mut opened_nav = navigation::Navigation {
+            notice: Some("stale".into()),
+            ..Default::default()
+        };
+        opened_flow
+            .open_with(Some(&scope), &report, &mut opened_nav, |current| {
+                assert_eq!(current, "codex");
+                Ok(vec![crate::native_panel::MainSwitchTarget {
+                    harness: "agy",
+                    model: "gemini-4-carbon-high".into(),
+                }])
+            })
+            .unwrap();
+        assert_eq!(opened_nav.main_switch.as_ref().unwrap().current, "codex");
+        assert!(opened_nav.notice.is_none());
+        assert!(opened_flow.selection.is_some());
         let (mut flow, mut nav) = make_menu();
         let modal = frame(&report, &nav, (100, 20), &read, false, None, None, None);
         assert!(modal.main_switch.is_none());

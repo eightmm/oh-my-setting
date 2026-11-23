@@ -325,6 +325,7 @@ remain separate from shared OMS records.
 For a PROJECT.md goal, `oms plan-from-spec` proposes tasks; review the bytes,
 then apply with `--apply --expected-proposal-sha256 DIGEST`. Applied tasks use
 the ordinary shared plan. `oms agent-plan add` is for bounded gaps only.
+In GitHub project mode both paths refuse a task without an issue (`--issue N`).
 Claim ready tasks in dependency order; dispatch with `--task-id` moves a task
 to running. After verification, inspection, integration and required checks,
 run `oms agent-plan review` after acceptance and record the owner result.

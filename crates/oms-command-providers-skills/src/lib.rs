@@ -10,6 +10,7 @@ mod harness;
 pub mod https;
 mod lifecycle;
 mod messages;
+pub mod model_probe;
 mod models;
 mod permissions;
 mod project;

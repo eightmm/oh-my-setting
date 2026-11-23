@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/hero.png" alt="The central Rust OMS hub connects Codex, Claude Code and Antigravity to shared project rules, work state and review" width="100%"></p>
+<p align="center"><img src="docs/assets/hero-providers.png" alt="The oh-my-setting Rust OMS hub connects Claude Code with a coral pixel emblem, Codex with a blue-violet terminal cloud, and Antigravity with a multicolor orbit" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>

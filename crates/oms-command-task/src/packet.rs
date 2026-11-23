@@ -110,7 +110,10 @@ pub fn set_metadata(raw: &[u8], key: &str, v: &[u8]) -> Vec<u8> {
                 found = true;
                 continue;
             }
-            if (l.starts_with(b"## ") || l.starts_with(b"Short-lived handoff packet")) && !found {
+            if (l.starts_with(b"## ") || l.starts_with(b"Short-lived handoff packet"))
+                && !found
+                && !inserted
+            {
                 out.extend_from_slice(&row);
                 out.extend_from_slice(b"\n\n");
                 inserted = true;

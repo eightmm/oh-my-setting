@@ -79,6 +79,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
                 "--remediation-plan",
                 "--repair",
                 "--surfaces",
+                "--integrations",
                 "--tool-lock",
                 "--contract",
                 "--security",
@@ -94,7 +95,14 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
                 "--providers",
                 "--check",
             ],
-            &["--repo", "--probe-tools", "--table", "--root"],
+            &[
+                "--repo",
+                "--probe-tools",
+                "--table",
+                "--root",
+                "--conformance",
+                "--probe-bound",
+            ],
         ),
         "install" => (
             &[
@@ -141,7 +149,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
         ),
         "install-hooks" => (
             &["--quick", "--check-protection", "--remove", "--dry-run"],
-            &[],
+            &["--repo"],
         ),
         "install-claude-hooks" => (
             &["--remove", "--print-expected", "--dry-run"],
@@ -218,6 +226,16 @@ fn usage(tool: &str) -> String {
              both options require --prepare. The digest is not a publisher signature.\n",
         );
     }
+    if tool == "doctor" {
+        help.push_str(
+            "\n--providers displays the capability table; --check validates its source references.\n\
+             --providers --conformance PATH checks one oms-agent-adapter-ID executable\n\
+             with --version and --help only, without an inference request.\n\
+             --probe-bound SECONDS sets each probe deadline (default 10, range 1-60).\n\
+             Conformance returns JSON and does not update capability evidence.\n\
+             Run/write, prompt and isolation conformance are not implemented.\n",
+        );
+    }
     help
 }
 pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
@@ -265,6 +283,7 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                     | "--receipt"
                     | "--compare"
                     | "--from"
+                    | "--conformance"
             ) {
                 let entries = out.paths.entry(s.into()).or_default();
                 if !entries.is_empty() && s != "--repo" {
@@ -370,10 +389,18 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         }
     }
     if tool == "doctor" {
+        if out.has("--integrations")
+            && ["--contract", "--live-models", "--strict-diversity"]
+                .iter()
+                .any(|s| out.has(s))
+        {
+            return r::fail("--integrations checks recorded wiring without live model probes");
+        }
         let modes = [
             "--security",
             "--sandbox",
             "--surfaces",
+            "--integrations",
             "--extensions",
             "--mcp",
             "--providers",
@@ -387,6 +414,8 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
             ("--probe", "--sandbox"),
             ("--pin", "--mcp"),
             ("--probe-tools", "--mcp"),
+            ("--conformance", "--providers"),
+            ("--probe-bound", "--conformance"),
         ] {
             if out.has(child) && !out.has(parent) {
                 return r::fail(format!("{child} requires {parent}"));
@@ -394,6 +423,23 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         }
         if out.has("--repair") && modes.iter().any(|s| out.has(s)) {
             return r::fail("--repair cannot be combined with standalone reports");
+        }
+        if out.has("--conformance") {
+            if out
+                .flags
+                .iter()
+                .any(|s| !["--providers", "--json"].contains(&s.as_str()))
+                || out.values.keys().any(|s| s != "--probe-bound")
+                || out
+                    .paths
+                    .keys()
+                    .any(|s| !["--repo", "--conformance"].contains(&s.as_str()))
+            {
+                return r::fail(
+                    "--conformance accepts only --providers, --json, --repo and --probe-bound",
+                );
+            }
+            crate::adapter_conformance::probe_bound(&out)?;
         }
     }
     Ok(out)

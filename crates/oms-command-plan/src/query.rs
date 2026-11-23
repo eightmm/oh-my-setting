@@ -26,6 +26,61 @@ impl Plan<'_> {
         }
         Ok(v)
     }
+    /// Cached status for a bound task from the local snapshot cache only;
+    /// nothing here contacts GitHub. Unbound tasks have none.
+    pub(crate) fn issue_cache(&self, s: &mut Snapshot, t: &Value) -> Option<Value> {
+        let issue = t.text("issue");
+        if issue.is_empty() {
+            return None;
+        }
+        let cache = s.github_cache.get_or_insert_with(|| {
+            self.store
+                .optional(oms_github::freshness::CACHE_REL, 4 * 1024 * 1024)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        });
+        let now = parse_ts(&self.context.ts).unwrap_or(0) as i64;
+        let (cached, freshness) = match oms_github::freshness::lookup(cache, issue, now) {
+            // A pull row never reports as issue state.
+            (Some(c), _) if c.kind != "issue" => {
+                (None, oms_github::freshness::Freshness::Unavailable)
+            }
+            found => found,
+        };
+        let freshness = match freshness {
+            oms_github::freshness::Freshness::Fresh => "fresh",
+            oms_github::freshness::Freshness::Stale => "stale",
+            oms_github::freshness::Freshness::Unavailable => "unavailable",
+        };
+        Some(match cached {
+            Some(c) => object([
+                ("state", string(c.state)),
+                ("freshness", string(freshness)),
+                ("captured_at", number(c.captured_at)),
+                ("title", string(c.title)),
+            ]),
+            None => object([
+                ("state", Value::Null),
+                ("freshness", string(freshness)),
+                ("captured_at", Value::Null),
+                ("title", Value::Null),
+            ]),
+        })
+    }
+    /// Human token for a bound task; the remote title stays JSON-only.
+    fn issue_note(&self, s: &mut Snapshot, t: &Value) -> Option<String> {
+        let cache = self.issue_cache(s, t)?;
+        let state = match cache.get("state") {
+            Value::Null => "unknown",
+            v => v.str().unwrap_or("unknown"),
+        };
+        Some(format!(
+            "{} ({state}, {})",
+            t.text("issue"),
+            cache.text("freshness")
+        ))
+    }
     fn expiry_note(&self, t: &Value) -> String {
         format!(
             "claim EXPIRED (age {}s >= ttl {}s, was @{})",
@@ -88,6 +143,9 @@ impl Plan<'_> {
                     .map_err(|_| error("assignment encoding unavailable"))?
             ));
         }
+        if let Some(note) = self.issue_note(s, t) {
+            lines.push(format!("issue: {note}"));
+        }
         for name in ["covers", "discovered_from", "role"] {
             if t.get(name).truth() {
                 lines.push(format!(
@@ -119,6 +177,11 @@ impl Plan<'_> {
                 }
                 v.set("claim_expired", Value::Bool(self.expired(s, &t, false)?))?;
                 v.set("task_sha256", string(json::hash(&t)?))?;
+                if req.action == Show
+                    && let Some(cache) = self.issue_cache(s, &t)
+                {
+                    v.set("issue_cache", cache)?;
+                }
                 if matches!(t.text("state"), "claimed" | "running" | "review")
                     && let Some(age) = age(&t, &self.context.ts)
                 {
@@ -335,6 +398,13 @@ impl Plan<'_> {
                     ("verify", t.get("verify").clone()),
                     ("depends", t.get("depends").clone()),
                     ("why_ready", string(why)),
+                    ("role", string(t.text("role"))),
+                    (
+                        "resources",
+                        t.opt("resources")
+                            .cloned()
+                            .unwrap_or_else(|| Value::Array(Vec::new())),
+                    ),
                 ]);
                 if t.get("discovered_from").truth() {
                     v.set("discovered_from", t.get("discovered_from").clone())?;
@@ -375,14 +445,21 @@ impl Plan<'_> {
         let mut views = Vec::new();
         let mut lines = Vec::new();
         for t in s.ordered()? {
-            let view = self.view(s, &t, true)?;
+            let mut view = self.view(s, &t, true)?;
             if !filter.is_empty() && view.text("state") != filter {
                 continue;
             }
             if req.has("json") {
+                if let Some(cache) = self.issue_cache(s, &t) {
+                    view.set("issue_cache", cache)?;
+                }
                 views.push(view);
                 continue;
             }
+            let issue = self
+                .issue_note(s, &t)
+                .map(|note| format!(" issue {note}"))
+                .unwrap_or_default();
             let deps = t.get("depends").strings()?;
             let dep = if deps.is_empty() {
                 String::new()
@@ -409,7 +486,7 @@ impl Plan<'_> {
                 String::new()
             };
             lines.push(format!(
-                "{:<10} {:<9} {}{provider}{dep}{tag}",
+                "{:<10} {:<9} {}{provider}{dep}{issue}{tag}",
                 t.text("id"),
                 view.text("state"),
                 t.text("title")

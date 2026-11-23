@@ -327,6 +327,59 @@ fn open_pr(r: &Run<'_>, repo_arg: &str) -> Result<Option<V>> {
     )?;
     Ok(rows.array().first().cloned())
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BranchDelete {
+    Allow,
+    SkipDependentPr,
+    SkipUnverified,
+}
+impl BranchDelete {
+    fn allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+    fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Allow => None,
+            Self::SkipDependentPr => Some("open-dependent-pr"),
+            Self::SkipUnverified => Some("dependent-pr-check-unverified"),
+        }
+    }
+    fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::Allow => None,
+            Self::SkipDependentPr => Some("branch kept: open dependent PR targets head branch"),
+            Self::SkipUnverified => Some("branch kept: dependent PR check unverified"),
+        }
+    }
+}
+fn dependent_pr_delete_guard(r: &Run<'_>, repo_arg: &str) -> Result<BranchDelete> {
+    match ci::gh(
+        r.c,
+        &[
+            "pr",
+            "list",
+            "--repo",
+            repo_arg,
+            "--state",
+            "open",
+            "--base",
+            r.head_branch,
+            "--json",
+            "number",
+            "--limit",
+            "1",
+        ],
+        Duration::from_secs(30),
+    ) {
+        Ok(V::Arr(rows)) if rows.is_empty() => Ok(BranchDelete::Allow),
+        Ok(V::Arr(_)) => Ok(BranchDelete::SkipDependentPr),
+        Ok(_) => Ok(BranchDelete::SkipUnverified),
+        Err(_) => {
+            crate::check(r.c.interrupted)?;
+            Ok(BranchDelete::SkipUnverified)
+        }
+    }
+}
 fn pr_text(base: &str, r: &Run<'_>, scope: &str) -> Result<(String, String)> {
     let range = format!("{base}..{}", r.snapshot.head);
     let log = r
@@ -600,26 +653,25 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         );
         return finish(r.receipt, row, "awaiting-merge", &message, c);
     }
+    let delete_branch = dependent_pr_delete_guard(r, &repo_arg)?;
     let flag = format!("--{method}");
-    let merge_state = obj([("method", method.into()), ("state", "requested".into())]);
+    let mut merge_state = obj([
+        ("method", method.into()),
+        ("state", "requested".into()),
+        ("delete_branch", delete_branch.allowed().into()),
+    ]);
+    if let Some(reason) = delete_branch.skip_reason() {
+        merge_state.set("delete_branch_skipped", reason);
+    }
     row.set("merge", merge_state);
     save(r.receipt, row, c.interrupted)?;
     // A neutral cwd keeps `--delete-branch` from touching this checkout.
-    let merged = gh_exec(
-        r,
-        &scratch.path,
-        &[
-            "pr",
-            "merge",
-            &number,
-            "--repo",
-            &repo_arg,
-            &flag,
-            "--delete-branch",
-            "--match-head-commit",
-            &snapshot.head,
-        ],
-    )?;
+    let mut merge_args = vec!["pr", "merge", &number, "--repo", &repo_arg, &flag];
+    if delete_branch.allowed() {
+        merge_args.push("--delete-branch");
+    }
+    merge_args.extend(["--match-head-commit", &snapshot.head]);
+    let merged = gh_exec(r, &scratch.path, &merge_args)?;
     if merged.code != 0 {
         return finish(
             r.receipt,
@@ -649,14 +701,16 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         ),
         Err(_) => (String::from("UNKNOWN"), "".into()),
     };
-    row.set(
-        "merge",
-        obj([
-            ("method", method.into()),
-            ("state", state.clone().into()),
-            ("commit", commit),
-        ]),
-    );
+    let mut merge_row = obj([
+        ("method", method.into()),
+        ("state", state.clone().into()),
+        ("commit", commit),
+        ("delete_branch", delete_branch.allowed().into()),
+    ]);
+    if let Some(reason) = delete_branch.skip_reason() {
+        merge_row.set("delete_branch_skipped", reason);
+    }
+    row.set("merge", merge_row);
     save(r.receipt, row, c.interrupted)?;
     if state != "MERGED" {
         return finish(
@@ -748,13 +802,11 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         );
     }
     save(r.receipt, row, c.interrupted)?;
-    let mut output = finish(
-        r.receipt,
-        row,
-        "passed",
-        &format!("merged PR #{number} ({method}) after exact-SHA CI"),
-        c,
-    )?;
+    let message = match delete_branch.notice() {
+        Some(notice) => format!("merged PR #{number} ({method}) after exact-SHA CI ({notice})"),
+        None => format!("merged PR #{number} ({method}) after exact-SHA CI"),
+    };
+    let mut output = finish(r.receipt, row, "passed", &message, c)?;
     tail(r, &mut output)?;
     Ok(output)
 }

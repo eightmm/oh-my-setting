@@ -360,7 +360,26 @@ fn models_preview_preserves_full_catalog_routability() {
     not_routed.push("claude-sonnet-5-5".into());
     assert_eq!(row["not_routed"], serde_json::json!(not_routed));
     assert_eq!(row["usable"], serde_json::Value::Null);
+    assert_eq!(row["exact_model_override"], true);
     assert!(!cache.join("codex.env").exists());
+
+    let (code, out, err) = isolated(
+        "models",
+        &["--providers", "deepseek,vibe,openhands", "--json"],
+        tmp.path(),
+        &oms_source(),
+        &[
+            ("HOME", utf8(&home)),
+            ("OMS_CAPABILITY_DIR", utf8(&cache)),
+            ("PATH", ""),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+    for row in report["providers"].as_array().unwrap() {
+        assert_eq!(row["exact_model_override"], false, "{row}");
+        assert_eq!(row["usable"], serde_json::Value::Null);
+    }
 
     let mut rows = (0..21)
         .map(|minor| format!("gemini-3.{minor}-flash-low\tGemini 3 Flash"))

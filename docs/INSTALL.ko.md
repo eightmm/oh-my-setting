@@ -13,8 +13,9 @@ credential origin을 증명하지 못하므로 `--verify` 격리 검증은 여�
 unsupported/uncertain이다. Native status는 선택된 root에 metadata를 초기화할 수
 있다. 등록·doctor·update는 status를 자동 실행하지 않는다. Claude 상태는 기존
 Codex 및 Pi 파일과 분리되며, 구버전은 이를 관리하거나 임의 홈 충돌을 보호하지
-못한다. Antigravity OAuth 계정 격리는 확인되지 않아 fail-closed
-(`provider account isolation is unproved`)로 거부된다.
+못한다. Antigravity 계정은 로컬 ADC 프로필 등록·`--verify`·`--remove`
+(`antigravity:ID --home PATH`)만 지원한다. 런타임 라우팅은 이 계정을 선택하지
+않으며, 로그인·실제 제공 계정·OAuth 계정 격리는 여전히 확인되지 않았다.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
@@ -199,6 +200,11 @@ blocked/skipped로 보고한다. 개인 정책은 추적되는 설치 트리 밖
 Incoming 설치는 도구를 다시 설치하거나 capability 선택을 덮어쓰지 않고 OMS 구성만
 맞춘다. 업데이트를 소유한 부모가 core commit 뒤 선택된 도구를 갱신하며,
 `--no-tools`와 rollback에서는 그 갱신도 생략한다.
+갱신 성공 뒤에는 `doctor --integrations`로 기록된 hook·plugin·OMS MCP 설정을
+검사한다. 실제 모델 호출이나 임의 MCP 서버 실행은 추가하지 않으며,
+`--no-doctor`는 이 검사도 명시적으로 생략한다. 갱신 뒤 연동 검사가 실패하면
+partial 결과와 허용된 phase·tool·exit 진단을 남기고 확정된 core receipt를
+유지한다. Vendor binary를 rollback했다고 보고하지 않는다.
 Incoming revision의 설치기를 실행하므로, 이 분리 이전의 오래된 revision으로
 rollback하면 그 revision의 기존 설치 동작이 적용된다.
 

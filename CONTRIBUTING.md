@@ -77,6 +77,20 @@ fix(run-ledger): block sensitive gate skip reasons
 docs: ...
 ```
 
+## Issue and pull request templates
+
+The [work issue form](.github/ISSUE_TEMPLATE/work.yml) and the
+[pull request template](.github/pull_request_template.md) use stable headings.
+Keep their text unchanged. No tool validates them yet.
+
+- Issue: `### Goal`, `### Scope`, `### Acceptance criteria`,
+  `### Verification`, `### Risk and authority`, `### Related`. GitHub renders
+  each form field as `### <label>` and an empty optional field as
+  `_No response_`. Issues opened through the API or `gh` should write the same
+  headings by hand.
+- Pull request: `## Linked issue`, `## Summary`, `## Decision and evidence`,
+  `## Verification`, `## Remaining follow-up`, `## Risk and rollback`.
+
 ## Scope of changes to flag
 
 Ask before changing: install/auto-update defaults, the symlink/backup behavior,

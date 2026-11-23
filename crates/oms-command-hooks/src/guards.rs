@@ -99,6 +99,47 @@ fn physical(path: &Path) -> PathBuf {
     }
     normalize(path)
 }
+/// Main-write-guard resolution: walks components, following symlinks even when
+/// the leaf or its parents are missing. Separate from `physical`, which the
+/// command guards rely on unchanged.
+fn main_write_physical(path: &Path) -> PathBuf {
+    main_write_physical_inner(path, 0)
+}
+fn main_write_physical_inner(path: &Path, depth: u8) -> PathBuf {
+    if let Ok(p) = path.canonicalize() {
+        return p;
+    }
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.push("..");
+                if let Ok(p) = resolved.canonicalize() {
+                    resolved = p;
+                } else {
+                    resolved = normalize(&resolved);
+                }
+            }
+            _ => {
+                resolved.push(component.as_os_str());
+                if let Ok(p) = resolved.canonicalize() {
+                    resolved = p;
+                } else if depth < 16
+                    && let Ok(link) = fs::read_link(&resolved)
+                {
+                    let next = if link.is_absolute() {
+                        link
+                    } else {
+                        resolved.parent().unwrap_or(Path::new("/")).join(link)
+                    };
+                    resolved = main_write_physical_inner(&next, depth + 1);
+                }
+            }
+        }
+    }
+    normalize(&resolved)
+}
 fn rm_rule(args: &[String], base: Option<&Path>) -> Option<Verdict> {
     let (letters, longs) = flags(args);
     if !(letters.contains(&'r') || letters.contains(&'R') || longs.contains("--recursive"))
@@ -458,7 +499,76 @@ fn audit_rows() -> Vec<Value> {
         .filter_map(document)
         .collect()
 }
+const AUDIT_KEEP: usize = 1000;
+fn audit_window(raw: &[u8], now: f64, hours: u64) -> String {
+    let cutoff = now - hours as f64 * 3600.0;
+    let (mut lines, mut unreadable, mut bad_ts, mut inside) = (0usize, 0usize, 0usize, 0usize);
+    let mut oldest = f64::INFINITY;
+    let mut verdicts = BTreeMap::<&str, usize>::new();
+    for line in raw.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        lines += 1;
+        let Some(row) = document(line) else {
+            unreadable += 1;
+            continue;
+        };
+        let Some(t) = epoch(text(&row, "ts")).filter(|t| *t <= now) else {
+            bad_ts += 1;
+            continue;
+        };
+        oldest = oldest.min(t);
+        if t < cutoff {
+            continue;
+        }
+        inside += 1;
+        let v = match text(&row, "verdict") {
+            "refused" => "refused",
+            "bypassed" => "bypassed",
+            "noted" => "noted",
+            _ => "other",
+        };
+        *verdicts.entry(v).or_default() += 1;
+    }
+    let count = |k: &str| verdicts.get(k).copied().unwrap_or(0);
+    let mut output = format!(
+        "command guard: last {hours}h (UTC): {inside} row(s): {} refused, {} bypassed, {} noted, {} other\n",
+        count("refused"),
+        count("bypassed"),
+        count("noted"),
+        count("other")
+    );
+    output.push_str(&format!(
+        "not counted: {bad_ts} row(s) with a missing, malformed or future timestamp, {unreadable} unreadable line(s)\n"
+    ));
+    output.push_str(if lines < AUDIT_KEEP {
+        "coverage: the log is under its 1000-row cap; a removed or edited log cannot be detected\n"
+    } else if !oldest.is_finite() {
+        "coverage: unknown; the log is at its 1000-row cap and no row has a usable timestamp\n"
+    } else if oldest >= cutoff {
+        "coverage: possibly incomplete; the log is at its 1000-row cap and its oldest dated row is not before the window start, so eligible earlier rows may have been dropped\n"
+    } else {
+        "coverage: the retained rows reach back before the window start; a removed or edited log cannot be detected\n"
+    });
+    output.push_str("rows are counted by verdict category only, with no rule, command text or timestamps; any process of this user can edit the file, so read it as a record, not proof\n");
+    output
+}
 fn audit(args: &[OsString]) -> Output {
+    if args.get(1).is_some_and(|a| a == "--hours") {
+        let hours = args
+            .get(2)
+            .map(|s| s.to_string_lossy())
+            .filter(|s| !s.is_empty() && s.len() <= 4 && s.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|h| (1..=720).contains(h));
+        return match (hours, args.len()) {
+            (Some(h), 3) => match read(&audit_path(), 8 * INPUT_MAX) {
+                Ok(raw) => out(audit_window(&raw, seconds(), h)),
+                Err(_) => {
+                    out("command guard: history absent, unsafe or oversized; no window counted\n")
+                }
+            },
+            _ => fail("--audit --hours takes one whole number of hours from 1 to 720"),
+        };
+    }
     if args.len() > 2 {
         return fail("--audit takes one optional row count");
     }
@@ -1084,6 +1194,78 @@ pub fn git_move(raw: &[u8], ctx: &Context<'_>) -> Output {
     empty()
 }
 
+/// Checkout root and shared Git directory of the checkout containing `path`,
+/// so linked worktrees share a common directory and submodules sit under their
+/// parent checkout root.
+fn git_checkout(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let path = main_write_physical(path);
+    let top = path
+        .ancestors()
+        .find(|a| fs::symlink_metadata(a.join(".git")).is_ok())?
+        .to_path_buf();
+    let dot = top.join(".git");
+    if fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {
+        return Some((top, main_write_physical(&dot)));
+    }
+    let pointer = String::from_utf8(read(&dot, 4096).ok()?).ok()?;
+    let admin = absolute(&top, Path::new(pointer.strip_prefix("gitdir:")?.trim()));
+    let shared = read(&admin.join("commondir"), 4096)
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .map_or_else(
+            || admin.clone(),
+            |relative| absolute(&admin, Path::new(relative.trim())),
+        );
+    Some((top, main_write_physical(&shared)))
+}
+
+/// A panel Overall Main manages only. Its file-edit tools are refused inside
+/// the repository it manages, linked worktrees and submodules included; other
+/// paths pass.
+pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
+    // Managed workers inherit OMS_PANEL_MAIN_ATTEMPT and the oms-* session but
+    // carry OMS_PANEL_DISPATCH=1 (set by dispatch and review; Main removes it).
+    if !panel()
+        || env("OMS_PANEL_DISPATCH") == "1"
+        || delegate_child()
+        || off("OMS_MAIN_WRITE_GUARD")
+        || raw.is_empty()
+    {
+        return empty();
+    }
+    let Some(v) = document(raw) else {
+        return (0,vec![],b"main write guard: cannot evaluate this edit (hook payload is not valid JSON); allowing it unchecked.\n".to_vec());
+    };
+    let target = first(&v["tool_input"], &["file_path", "notebook_path"]);
+    if target.is_empty() {
+        return empty();
+    }
+    let payload_dir = expand(payload_cwd(&v, ctx.cwd));
+    let cwd = main_write_physical(&if payload_dir.is_absolute() {
+        payload_dir
+    } else {
+        ctx.cwd.join(payload_dir)
+    });
+    let managed =
+        env_path("OMS_ROOM_REPO").map_or_else(|| cwd.clone(), |repo| absolute(ctx.cwd, &repo));
+    let Some((managed_root, managed_common)) = git_checkout(&managed) else {
+        return empty();
+    };
+    let expanded = expand(Path::new(target));
+    let edited_raw = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    let edited_phys = main_write_physical(&edited_raw);
+    let inside = edited_phys.starts_with(&managed_root)
+        || git_checkout(&edited_phys).is_some_and(|(_, common)| common == managed_common);
+    if !inside {
+        return empty();
+    }
+    (2,vec![],b"main write guard: a panel Overall Main manages only, and this file is inside the repository it manages. Instead: assign the change with oms panel --dispatch ROLE --access write, return a fix to its writer with --continue TASK_ID, or send a conflict to --dispatch integrator. Write a brief or other scratch file outside the repository (session scratch or TMPDIR). If the user told this Main to make this change itself, record that in the Room and ask them to make the edit in their own shell (or start the panel with OMS_MAIN_WRITE_GUARD=0).\n".to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,5 +1386,59 @@ mod tests {
             assert!(git_rule(sub, &[], None, false).is_none());
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn audit_window_counts_utc_rows_and_reports_gaps_without_row_text() {
+        let now = epoch("2026-11-23T12:00:00Z").unwrap();
+        let row = |ts: &str, verdict: &str, rule: &str| {
+            format!(
+                "{{\"ts\":\"{ts}\",\"verdict\":\"{verdict}\",\"rule\":\"{rule}\",\"command\":\"SECRETCMD\"}}\n"
+            )
+        };
+        let mut raw = String::new();
+        raw += &row("2026-11-23T11:00:00Z", "refused", "git-clean");
+        raw += &row("2026-11-23T10:00:00+00:00", "noted", "transfer");
+        raw += &row("2026-11-22T11:59:59Z", "refused", "git-clean");
+        raw += &row("2026-11-23T12:00:01Z", "refused", "git-clean");
+        raw += &row("garbage", "weird", "x/../y");
+        raw += "not json\n";
+        raw += &row("2026-11-23T09:00:00Z", "ZVERDICTID", "ZRULEID").replace("SECRETCMD", "ZCMDID");
+        let report = audit_window(raw.as_bytes(), now, 24);
+        assert!(
+            !report.contains("ZRULEID")
+                && !report.contains("ZVERDICTID")
+                && !report.contains("ZCMDID")
+        );
+        assert!(
+            report.contains("last 24h (UTC): 3 row(s): 1 refused, 0 bypassed, 1 noted, 1 other")
+        );
+        assert!(report.contains("not counted: 2 row(s)"), "{report}");
+        assert!(report.contains("1 unreadable line(s)"));
+        assert!(report.contains("under its 1000-row cap") && !report.contains("git-clean"));
+        assert!(!report.contains("SECRETCMD") && !report.contains("2026-11-23T11"));
+        let full = row("2026-11-23T11:00:00Z", "refused", "git-clean").repeat(AUDIT_KEEP);
+        assert!(audit_window(full.as_bytes(), now, 24).contains("coverage: possibly incomplete"));
+        let edge = row("2026-11-22T12:00:00Z", "refused", "x").repeat(AUDIT_KEEP);
+        assert!(audit_window(edge.as_bytes(), now, 24).contains("possibly incomplete"));
+        let older = row("2026-11-20T00:00:00Z", "refused", "x") + &full;
+        assert!(audit_window(older.as_bytes(), now, 1).contains("reach back before"));
+        let undated = row("bad", "refused", "x").repeat(AUDIT_KEEP);
+        assert!(audit_window(undated.as_bytes(), now, 24).contains("coverage: unknown"));
+    }
+
+    #[test]
+    fn audit_hours_rejects_malformed_options_and_plain_audit_is_unchanged() {
+        let a = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        for bad in [
+            &["--audit", "--hours"][..],
+            &["--audit", "--hours", "0"],
+            &["--audit", "--hours", "721"],
+            &["--audit", "--hours", "1", "5"],
+            &["--audit", "--hours", "-1"],
+        ] {
+            assert_eq!(audit(&a(bad)).0, 2, "{bad:?}");
+        }
+        assert_eq!(audit(&a(&["--audit", "1", "2"])).0, 2);
     }
 }

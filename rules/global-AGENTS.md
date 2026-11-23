@@ -109,6 +109,11 @@ Default: concise, scoped, evidence-driven.
   workers return coverage, gaps and source anchors; their parent checks decisive
   text. For authorized delegation, load `oms-agent-harness`.
 - Scope briefs; skip unchanged heartbeats, keep user updates.
+- Before substantive work, record every actionable deliverable from the user
+  cumulatively (scope, dependencies, completion, receipt) in the existing Room
+  note or Plan when available, else internal work state; recheck pending items
+  on each new message and on resume. Answer status questions separately. Keep
+  no raw user text; records grant no authority.
 
 ## Harness
 

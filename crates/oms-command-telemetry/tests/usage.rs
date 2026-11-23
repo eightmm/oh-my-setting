@@ -1914,6 +1914,7 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
                 cache_read_tokens: Some(20),
                 cache_write_tokens: Some(0),
                 total_tokens: Some(100),
+                reasoning_tokens: None,
             }
         }]
     );
@@ -2185,6 +2186,7 @@ fn cumulative_attribution_does_not_bridge_unobserved_dimensions() {
                     cache_read_tokens: read,
                     cache_write_tokens: write,
                     total_tokens: total,
+                    reasoning_tokens: None,
                 },
                 "{id}"
             );
@@ -2780,4 +2782,173 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
     impossible.usage.input_tokens = Some(10);
     impossible.usage.output_tokens = Some(1);
     assert!(usage::record(&root.0, &impossible, &stop).is_err());
+}
+
+#[test]
+fn optional_reasoning_evidence_is_exact_bounded_and_never_core_usage() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let digest = "ab".repeat(32);
+    let pending = usage::begin(&root.0, bound_identity("call_one"), None, &stop).unwrap();
+    let mut final_ = observe(pending, 1, 20, Cost::Unknown);
+    final_.source_sha256 = Some(digest.clone());
+    // Nothing is recorded for an unrecorded or non-matching receipt.
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    assert!(!root.0.join(usage::REASONING).exists());
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let core = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let load = || usage::load(&root.0).unwrap();
+    assert_eq!(load().calls[0].reasoning_tokens, None);
+
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert!(!usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert!(usage::record_reasoning(&root.0, &final_, 8, &stop).is_err());
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), core);
+    let projected = load();
+    assert_eq!(projected.calls[0].reasoning_tokens, Some(7));
+    assert_eq!(projected.calls[0].tokens, Some(20), "totals are unchanged");
+    assert_eq!(
+        projected.attributed_calls()[0].usage.reasoning_tokens,
+        Some(7)
+    );
+    assert_eq!(projected.attributed_calls()[0].usage.total_tokens, Some(20));
+
+    let good = std::fs::read(root.0.join(usage::REASONING)).unwrap();
+    let text = String::from_utf8(good.clone()).unwrap();
+    // Mismatched identity, torn, duplicate-key, unknown-field and extra-schema
+    // supplements leave core usage readable and reasoning unknown.
+    let mut unknown = text.trim_end().to_owned();
+    unknown.pop();
+    let bad = [
+        text.replace("call_one", "call_two"),
+        text.replace("att_call_one", "att_other"),
+        text.replace(&digest, &"cd".repeat(32)),
+        text.replace("\"revision\": 1", "\"revision\": 2"),
+        text.replacen('{', "{\"schema\":1,", 1),
+        format!("{unknown},\"extra\":1}}\n"),
+        text.replace("\"schema\": 1", "\"schema\": 2"),
+        text.trim_end().to_owned(),
+        text.replace("tokens\": 7", "tokens\": -7"),
+        format!("{text}{{bad}}\n"),
+    ];
+    for supplement in bad {
+        root.write(usage::REASONING, supplement.as_bytes());
+        let projected = load();
+        assert_eq!(projected.calls[0].reasoning_tokens, None, "{supplement}");
+        assert_eq!(projected.calls[0].tokens, Some(20));
+        assert_eq!(projected.attributed_calls()[0].usage.reasoning_tokens, None);
+    }
+    // Conflicting counts for one exact receipt prove nothing.
+    root.write(
+        usage::REASONING,
+        format!("{text}{}", text.replace("tokens\": 7", "tokens\": 8")).as_bytes(),
+    );
+    assert_eq!(load().calls[0].reasoning_tokens, None);
+    // Zero is a valid observation, distinct from absence.
+    root.write(
+        usage::REASONING,
+        text.replace("tokens\": 7", "tokens\": 0").as_bytes(),
+    );
+    assert_eq!(load().calls[0].reasoning_tokens, Some(0));
+    root.write(usage::REASONING, &good);
+    assert_eq!(load().calls[0].reasoning_tokens, Some(7));
+
+    // A later receipt revision, or a non-final/cumulative receipt, is not proven.
+    let mut newer = observe(final_.clone(), 2, 30, Cost::Unknown);
+    newer.source_sha256 = Some(digest.clone());
+    usage::record(&root.0, &newer, &stop).unwrap();
+    assert_eq!(load().calls[0].reasoning_tokens, None);
+    let mut partial = newer.clone();
+    partial.phase = Phase::Partial;
+    assert!(usage::record_reasoning(&root.0, &partial, 7, &stop).is_err());
+    let mut resumed = newer;
+    resumed.cumulative = Some(Cumulative {
+        session_id: "session_one".into(),
+        baseline_unknown: false,
+    });
+    assert!(usage::record_reasoning(&root.0, &resumed, 7, &stop).is_err());
+}
+
+#[test]
+fn reasoning_evidence_is_bounded_nonblocking_and_conflict_free() {
+    use oms_command_telemetry::store::{StoreError, canonical_index};
+    use oms_lock::{Lock, Mode, Settings};
+    use std::path::Path;
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let digest = "ab".repeat(32);
+    let pending = usage::begin(&root.0, bound_identity("call_one"), None, &stop).unwrap();
+    let mut final_ = observe(pending, 1, 20, Cost::Unknown);
+    final_.source_sha256 = Some(digest.clone());
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let core = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let reasoning = || usage::load(&root.0).unwrap().calls[0].reasoning_tokens;
+    let supplement = root.0.join(usage::REASONING);
+
+    // A held lock fails fast without writing; core usage is untouched and a
+    // later retry records the evidence.
+    let target = canonical_index(&root.0, Some(Path::new(usage::REASONING)), false, false).unwrap();
+    let mut settings = Settings::from_env().unwrap();
+    settings.mode = Mode::LegacyAuto;
+    let held = Lock::for_file(&target, settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap_err();
+    assert!(
+        matches!(error, StoreError::Lock(oms_lock::Error::Busy)),
+        "{error:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!supplement.exists());
+    assert_eq!(reasoning(), None);
+    drop(held);
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert_eq!(reasoning(), Some(7));
+    let good = std::fs::read(&supplement).unwrap();
+
+    // Cancellation is honoured before any write.
+    let cancelled = AtomicBool::new(true);
+    std::fs::remove_file(&supplement).unwrap();
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &cancelled).is_err());
+    assert!(!supplement.exists());
+
+    // An oversized supplement is neither read nor extended; core stays intact.
+    let oversized = vec![b'\n'; usage::MAX_REASONING_BYTES + 1];
+    root.write(usage::REASONING, &oversized);
+    assert_eq!(reasoning(), None);
+    assert_eq!(usage::load(&root.0).unwrap().calls[0].tokens, Some(20));
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    assert_eq!(std::fs::read(&supplement).unwrap(), oversized);
+
+    // Conflicting duplicates for one call and revision are rejected before
+    // identity matching, even when one row matches the receipt exactly.
+    let text = String::from_utf8(good.clone()).unwrap();
+    let other_attempt = text.replace("att_call_one", "att_other");
+    root.write(
+        usage::REASONING,
+        format!("{text}{other_attempt}").as_bytes(),
+    );
+    assert_eq!(reasoning(), None);
+    root.write(
+        usage::REASONING,
+        format!("{other_attempt}{text}").as_bytes(),
+    );
+    assert_eq!(reasoning(), None);
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    // Identical repeats stay idempotent.
+    root.write(usage::REASONING, format!("{text}{text}").as_bytes());
+    assert_eq!(reasoning(), Some(7));
+
+    // An unsafe supplement fails only the optional write; once repaired the
+    // same settlement records exactly once.
+    std::fs::remove_file(&supplement).unwrap();
+    std::fs::create_dir(&supplement).unwrap();
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    assert_eq!(reasoning(), None);
+    std::fs::remove_dir(&supplement).unwrap();
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert_eq!(std::fs::read(&supplement).unwrap(), good);
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), core);
 }

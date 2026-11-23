@@ -5,6 +5,7 @@
 
 use oms_command_landing::services::{Execution, PublicationGuard, Services};
 use oms_command_landing::{TOOLS, V, obj, owns, run, run_with_services, usage};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -427,8 +428,8 @@ fn inproc(tool: &str, args: &[&str]) -> (i32, String, String) {
 }
 
 #[test]
-fn owns_exactly_the_twelve_tools() {
-    assert_eq!(TOOLS.len(), 12);
+fn owns_exactly_the_thirteen_tools() {
+    assert_eq!(TOOLS.len(), 13);
     for t in TOOLS {
         assert!(owns(t, &[]), "{t}");
         assert!(
@@ -1721,7 +1722,11 @@ squash() {{
 }}
 case "$1 $2" in
   "pr list")
-    if [ -f '{state}' ]; then
+    if [ -z "$head" ]; then
+      if [ -f '{state}.dependents' ]; then
+        IFS= read -rd '' text < '{state}.dependents'; printf '%s' "$text"
+      else echo '[]'; fi
+    elif [ -f '{state}' ]; then
       tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
       printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s"}}]\n' "$tip"
     else echo '[]'; fi ;;
@@ -2349,4 +2354,1054 @@ fn manifest_publish_refuses_checked_out_target_drift() {
         "{receipt}"
     );
     assert_eq!(iso.git_out(&repo, &["rev-parse", "main"]), inter_sha);
+}
+
+const GH_PROJECT: &str = "# P\n\n## Collaboration\n\n- GitHub project: example-org/example-repo\n";
+const GH_COMMENTS: &str = "repos/example-org/example-repo/issues/3/comments?per_page=100&page=1";
+const GH_PULL: &str = "repos/example-org/example-repo/pulls/7";
+const GH_MERGED: &str = r#""state":"closed","merged_at":"2026-11-01T00:00:00Z","merged":true"#;
+const GH_POST: [&str; 6] = ["post-evidence", "--issue", "3", "--pull", "7", "--yes"];
+const GH_USER_GET: &str = "api --method GET -H Accept: application/vnd.github+json user";
+
+/// `oms github` sandbox: a repo with a github.com origin and a bash-builtin
+/// fake `gh` that logs argv, answers GETs from `GET-<endpoint>` files, and
+/// turns a POST into the stored comment GitHub would list, answering with
+/// that comment. Switch files in `dir` alter the answer: `post.fail` exits 1,
+/// `post.interrupt` dies of SIGINT, and `post.issue`, `post.login`,
+/// `post.htmlseg`, `post.htmlissue`, `post.frag` and `post.body` replace the
+/// echoed issue_url number, author, html_url segment, number and fragment id,
+/// and JSON-escaped body. Endpoints match case-insensitively, as on GitHub.
+struct GhRepo {
+    repo: PathBuf,
+    gh: PathBuf,
+    log: PathBuf,
+    dir: PathBuf,
+}
+impl GhRepo {
+    fn new(iso: &Isolated, name: &str, project: bool) -> Self {
+        let repo = iso.repo(name);
+        iso.git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example-org/example-repo.git",
+            ],
+        );
+        if project {
+            fs::write(repo.join("PROJECT.md"), GH_PROJECT).unwrap();
+        }
+        let dir = iso.home.path().join(format!("{name}-gh"));
+        fs::create_dir_all(&dir).unwrap();
+        let (gh, log) = (dir.join("fake-gh"), dir.join("gh.log"));
+        let script = format!(
+            r#"#!{bash}
+printf '%s\n' "$*" >> '{log}'
+dir='{dir}' method=GET endpoint= body=
+args=("$@")
+for ((i = 0; i < ${{#args[@]}}; i++)); do
+  case "${{args[i]}}" in
+    --method) method=${{args[i+1]}} ;;
+    repos/*|user) endpoint=${{args[i]}} ;;
+    body=*) body=${{args[i]#body=}} ;;
+  esac
+done
+key=${{endpoint,,}}; key=${{key//[^a-z0-9]/_}}
+if [ "$method" = POST ]; then
+  e=${{body//\\/\\\\}}; e=${{e//\"/\\\"}}; e=${{e//$'\t'/\\t}}; e=${{e//$'\r'/\\r}}; e=${{e//$'\n'/\\n}}
+  api=https://api.github.com/repos/example-org/example-repo/issues
+  web=https://github.com/example-org/example-repo
+  printf '[{{"id":4242,"user":{{"login":"oms-bot"}},"body":"%s","issue_url":"%s/3","html_url":"%s/issues/3#issuecomment-4242"}}]\n' "$e" "$api" "$web" > "$dir/GET-${{key}}_per_page_100_page_1"
+  [ -f "$dir/post.fail" ] && exit 1
+  [ -f "$dir/post.interrupt" ] && {{ kill -INT $$; exit 130; }}
+  issue=3 login=oms-bot seg=issues hissue=3 frag=4242
+  [ -f "$dir/post.issue" ] && issue=$(<"$dir/post.issue")
+  [ -f "$dir/post.htmlseg" ] && seg=$(<"$dir/post.htmlseg")
+  [ -f "$dir/post.htmlissue" ] && hissue=$(<"$dir/post.htmlissue")
+  [ -f "$dir/post.login" ] && login=$(<"$dir/post.login")
+  [ -f "$dir/post.frag" ] && frag=$(<"$dir/post.frag")
+  [ -f "$dir/post.body" ] && e=$(<"$dir/post.body")
+  printf '{{"id":4242,"user":{{"login":"%s"}},"body":"%s","issue_url":"%s/%s","html_url":"%s/%s/%s#issuecomment-%s"}}\n' "$login" "$e" "$api" "$issue" "$web" "$seg" "$hissue" "$frag"
+  exit 0
+fi
+[ -f "$dir/GET-$key" ] || exit 1
+printf '%s\n' "$(<"$dir/GET-$key")"
+"#,
+            bash = which("bash").display(),
+            log = log.display(),
+            dir = dir.display(),
+        );
+        fs::write(&gh, script).unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+        Self { repo, gh, log, dir }
+    }
+    fn respond(&self, endpoint: &str, body: &str) {
+        let key: String = endpoint
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        fs::write(self.dir.join(format!("GET-{key}")), body).unwrap();
+    }
+    /// A declared repo whose pull #7 is cached as merged, authenticated as
+    /// `oms-bot`, with an empty comment list on issue #3.
+    fn ready(iso: &Isolated, name: &str) -> Self {
+        let r = Self::new(iso, name, true);
+        r.respond(
+            GH_PULL,
+            &gh_item("pull", 7, "example-org/example-repo", GH_MERGED),
+        );
+        let (code, _, err) = r.run(iso, &["refresh", "--pull", "7", "--ttl-s", "600"]);
+        assert_eq!(code, 0, "{err}");
+        r.respond(GH_COMMENTS, "[]");
+        r.respond("user", r#"{"login":"oms-bot"}"#);
+        r
+    }
+    fn run(&self, iso: &Isolated, args: &[&str]) -> (i32, String, String) {
+        self.run_in(iso, &self.repo, args)
+    }
+    fn run_in(&self, iso: &Isolated, cwd: &Path, args: &[&str]) -> (i32, String, String) {
+        iso.run_env(
+            "github",
+            cwd,
+            args,
+            &[("OMS_GH_BIN", self.gh.to_str().unwrap())],
+        )
+    }
+    fn calls(&self) -> String {
+        fs::read_to_string(&self.log).unwrap_or_default()
+    }
+    fn posts(&self) -> usize {
+        self.calls().matches("--method POST").count()
+    }
+    fn user_gets(&self) -> usize {
+        self.calls().lines().filter(|l| *l == GH_USER_GET).count()
+    }
+    fn cache(&self) -> Option<String> {
+        fs::read_to_string(self.repo.join(".oms/github/cache.jsonl")).ok()
+    }
+    fn ledger_path(&self) -> PathBuf {
+        self.repo.join(".oms/github/writes.jsonl")
+    }
+    fn ledger(&self) -> String {
+        fs::read_to_string(self.ledger_path()).unwrap_or_default()
+    }
+    fn phases(&self) -> Vec<String> {
+        self.ledger()
+            .lines()
+            .map(|l| {
+                let tail = l.split("\"phase\":\"").nth(1).expect("phase field");
+                tail.split('"').next().unwrap().to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The evidence marker for issue #3 and pull #7 of the sandbox origin.
+fn gh_marker() -> String {
+    let key =
+        Sha256::digest(b"post-evidence|example-org/example-repo#3|example-org/example-repo#7");
+    format!("<!-- oms-evidence:{key:x} -->")
+}
+
+/// A one-comment list page as GitHub returns it for `issue`; `body` must
+/// already be JSON-escaped.
+fn gh_comment(id: u32, login: &str, body: &str, issue: u32) -> String {
+    format!(
+        r#"[{{"id":{id},"user":{{"login":"{login}"}},"body":"{body}","issue_url":"https://api.github.com/repos/example-org/example-repo/issues/{issue}","html_url":"https://github.com/example-org/example-repo/issues/{issue}#issuecomment-{id}"}}]"#
+    )
+}
+
+/// The JSON-escaped comment post-evidence sends for issue #3 and pull #7.
+fn gh_evidence(receipt: &str) -> String {
+    format!(
+        "OMS merge evidence for example-org/example-repo#3\\n\\n- Pull request: \
+         example-org/example-repo#7\\n- Merge state: merged\\n- Land receipt: {receipt}\\n\\n{}\\n",
+        gh_marker()
+    )
+}
+
+/// Write a land receipt into `repo`'s `delivery::state_directory`, whose
+/// name ends in the POSIX cksum of the repository path.
+fn gh_land_receipt(iso: &Isolated, repo: &Path, file: &str, url: &str, sha: &str) {
+    let raw = repo.as_os_str().as_encoded_bytes();
+    let mut crc = 0u32;
+    let mut add = |b: u8| {
+        crc ^= u32::from(b) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04c1_1db7
+            } else {
+                crc << 1
+            };
+        }
+    };
+    raw.iter().for_each(|b| add(*b));
+    let mut size = raw.len();
+    while size != 0 {
+        add((size & 255) as u8);
+        size >>= 8;
+    }
+    let name = repo.file_name().unwrap().to_str().unwrap();
+    let state = iso.home.path().join(".local/state");
+    let dir = state
+        .join("oh-my-setting/land")
+        .join(format!("{name}-{}-{}", !crc, raw.len()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(file),
+        format!(r#"{{"pr_number":7,"pr_url":"{url}","sha":"{sha}"}}"#),
+    )
+    .unwrap();
+    strip_group_world_write(&state);
+}
+
+fn gh_item(kind: &str, number: u32, slug: &str, extra: &str) -> String {
+    let (html, api) = if kind == "issue" {
+        ("issues", "issues")
+    } else {
+        ("pull", "pulls")
+    };
+    format!(
+        r#"{{"number":{number},"html_url":"https://github.com/{slug}/{html}/{number}","url":"https://api.github.com/repos/{slug}/{api}/{number}","title":"Fix\u0007 LEAK-title","labels":[{{"name":"bug"}}],"body":"LEAK-body",{extra}}}"#
+    )
+}
+
+#[test]
+fn github_status_is_offline_and_refresh_caches_only_validated_rows() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "ghstatus", true);
+    fs::create_dir_all(r.repo.join(".oms/task")).unwrap();
+    fs::write(
+        r.repo.join(".oms/task/current.md"),
+        "# Task\n\n- github_issue: example-org/example-repo#3\n\n## Goal\n\nx\n",
+    )
+    .unwrap();
+    fs::create_dir_all(r.repo.join(".oms/plan")).unwrap();
+    fs::write(
+        r.repo.join(".oms/plan/tasks.json"),
+        r#"{"tasks":{"T1":{"issue":"example-org/example-repo#3"}}}"#,
+    )
+    .unwrap();
+    let (code, out, err) = r.run(&iso, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    for needle in [
+        "\"project\": \"example-org/example-repo\"",
+        "\"origin\": \"example-org/example-repo\"",
+        "\"freshness\": \"unavailable\"",
+        "\"task\": \"T1\"",
+    ] {
+        assert!(out.contains(needle), "{needle}: {out}");
+    }
+    let report = V::parse(out.as_bytes()).unwrap();
+    let navigation = report.get("navigation");
+    for (key, url) in [
+        ("repository", "https://github.com/example-org/example-repo"),
+        (
+            "issues",
+            "https://github.com/example-org/example-repo/issues",
+        ),
+        (
+            "pull_requests",
+            "https://github.com/example-org/example-repo/pulls",
+        ),
+        (
+            "actions",
+            "https://github.com/example-org/example-repo/actions",
+        ),
+        ("wiki", "https://github.com/example-org/example-repo/wiki"),
+    ] {
+        assert_eq!(navigation.get(key).text(), Some(url), "{key}: {out}");
+    }
+    let links = report.get("linked").array();
+    assert_eq!(links.len(), 2);
+    for (row, source) in links.iter().zip(["task", "plan"]) {
+        assert_eq!(row.get("source").text(), Some(source));
+        assert_eq!(
+            row.get("url").text(),
+            Some("https://github.com/example-org/example-repo/issues/3")
+        );
+    }
+    assert!(r.calls().is_empty() && r.cache().is_none());
+    let issue = "repos/example-org/example-repo/issues/3";
+    let open = r#""state":"open""#;
+    for (case, body) in [
+        (
+            "wrong repo",
+            gh_item("issue", 3, "other-org/example-repo", open),
+        ),
+        (
+            "number",
+            gh_item("issue", 4, "example-org/example-repo", open),
+        ),
+        (
+            "state",
+            gh_item("issue", 3, "example-org/example-repo", r#""state":"x""#),
+        ),
+        (
+            "pull as issue",
+            gh_item(
+                "issue",
+                3,
+                "example-org/example-repo",
+                r#""state":"open","pull_request":{}"#,
+            ),
+        ),
+        ("malformed", r#"{"number":3,"#.to_owned()),
+        (
+            "duplicate key",
+            format!(
+                "{{\"number\":4,{}",
+                &gh_item("issue", 3, "example-org/example-repo", open)[1..]
+            ),
+        ),
+    ] {
+        r.respond(issue, &body);
+        let (code, out, err) = r.run(&iso, &["refresh", "--issue", "3"]);
+        assert_ne!(code, 0, "{case}: {out}");
+        assert!(!err.contains("LEAK"), "{case}: {err}");
+        assert!(r.cache().is_none(), "{case}");
+    }
+    fs::remove_file(
+        r.dir
+            .join(format!("GET-{}", issue.replace(['/', '-'], "_"))),
+    )
+    .unwrap();
+    let (code, _, err) = r.run(&iso, &["refresh", "--issue", "3"]);
+    assert_ne!(code, 0);
+    assert!(err.contains("gh not authenticated"), "{err}");
+    assert!(r.cache().is_none());
+    let (code, _, err) = r.run(&iso, &["refresh", "--issue", "other-org/example-repo#3"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("same-repository"), "{err}");
+
+    r.respond(
+        issue,
+        &gh_item("issue", 3, "example-org/example-repo", open),
+    );
+    let (code, out, err) = r.run(&iso, &["refresh", "--linked", "--ttl-s", "600"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "refreshed example-org/example-repo#3 (issue, open)\n");
+    let cache = r.cache().unwrap();
+    assert_eq!(cache.lines().count(), 1, "{cache}");
+    assert!(cache.contains("\"Fix  LEAK-title\"") && cache.contains("\"ttl_s\":600"));
+    assert!(!cache.contains("LEAK-body") && cache.contains("\"body_sha256\":"));
+    let before = r.calls();
+    let (code, out, _) = r.run(&iso, &["status"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("task: example-org/example-repo#3 [fresh] open Fix  LEAK-title")
+            && out.contains("plan T1: example-org/example-repo#3 [fresh]"),
+        "{out}"
+    );
+    for line in [
+        "repository: https://github.com/example-org/example-repo",
+        "issues: https://github.com/example-org/example-repo/issues",
+        "pull requests: https://github.com/example-org/example-repo/pulls",
+        "actions: https://github.com/example-org/example-repo/actions",
+        "wiki: https://github.com/example-org/example-repo/wiki",
+    ] {
+        assert!(out.lines().any(|actual| actual == line), "{out}");
+    }
+    assert_eq!(
+        out.matches("https://github.com/example-org/example-repo/issues/3")
+            .count(),
+        2
+    );
+    assert_eq!(r.calls(), before, "status must never invoke gh");
+
+    fs::write(
+        r.repo.join("PROJECT.md"),
+        GH_PROJECT.replace("example-org/", "other-org/"),
+    )
+    .unwrap();
+    let (code, out, _) = r.run(&iso, &["status"]);
+    assert_eq!(code, 1);
+    assert!(
+        out.contains("error: PROJECT.md declares a different GitHub project"),
+        "{out}"
+    );
+    assert!(!out.contains("https://github.com/"), "{out}");
+    let (code, out, _) = r.run(&iso, &["status", "--json"]);
+    assert_eq!(code, 1, "{out}");
+    let report = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(report.get("navigation"), &V::Null);
+    assert!(
+        report
+            .get("linked")
+            .array()
+            .iter()
+            .all(|row| row.get("url") == &V::Null)
+    );
+    let (code, _, err) = r.run(&iso, &["refresh", "--issue", "3"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("different GitHub project"), "{err}");
+    assert_eq!(r.calls(), before);
+
+    // A clean checkout has no PROJECT.md: the committed declaration alone
+    // turns the mode on, and only its HEAD blob counts.
+    let plain = GhRepo::new(&iso, "ghplain", false);
+    let (code, out, err) = plain.run(&iso, &["status"]);
+    assert_eq!(
+        (code, out.lines().next()),
+        (0, Some("project mode: off")),
+        "{err}"
+    );
+    let t = GhRepo::new(&iso, "ghtracked", false);
+    let tracked = t.repo.join(".github/oms-project.md");
+    fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+    fs::write(&tracked, GH_PROJECT).unwrap();
+    iso.git(&t.repo, &["add", ".github/oms-project.md"]);
+    iso.git(&t.repo, &["commit", "-q", "-m", "declare"]);
+    strip_group_world_write(&t.repo);
+    fs::write(&tracked, GH_PROJECT.replace("example-org/", "other-org/")).unwrap();
+    let (code, out, err) = t.run(&iso, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    for needle in [
+        "\"project\": \"example-org/example-repo\"",
+        "\"project_source\": \"tracked\"",
+        "\"project_active\": true",
+    ] {
+        assert!(out.contains(needle), "{needle}: {out}");
+    }
+    assert_eq!(
+        V::parse(out.as_bytes())
+            .unwrap()
+            .get("navigation")
+            .get("repository")
+            .text(),
+        Some("https://github.com/example-org/example-repo")
+    );
+    fs::write(t.repo.join("PROJECT.md"), GH_PROJECT).unwrap();
+    let (code, out, _) = t.run(&iso, &["status"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("project mode: on (example-org/example-repo, both)\n"),
+        "{out}"
+    );
+    // A fork inherits the upstream's committed declaration without opting in.
+    fs::remove_file(t.repo.join("PROJECT.md")).unwrap();
+    iso.git(
+        &t.repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:fork-org/example-repo.git",
+        ],
+    );
+    fs::create_dir_all(t.repo.join(".oms/task")).unwrap();
+    fs::write(
+        t.repo.join(".oms/task/current.md"),
+        "# Task\n\n- github_issue: #3\n",
+    )
+    .unwrap();
+    let (code, out, err) = t.run(&iso, &["status"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.starts_with(
+            "project mode: inactive (.github/oms-project.md names example-org/example-repo; \
+             origin is fork-org/example-repo)\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("task: fork-org/example-repo#3 [unavailable]"),
+        "{out}"
+    );
+    assert!(!out.contains("https://github.com/"), "{out}");
+    let (code, out, _) = t.run(&iso, &["status", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("\"project_active\": false")
+            && out.contains("\"project_inactive_reason\": \"fork\""),
+        "{out}"
+    );
+    let report = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(report.get("navigation"), &V::Null);
+    let links = report.get("linked").array();
+    assert_eq!(links.len(), 1, "{out}");
+    assert_eq!(
+        links[0].get("reference").text(),
+        Some("fork-org/example-repo#3")
+    );
+    assert_eq!(links[0].get("url"), &V::Null);
+    for args in [
+        &["refresh", "--linked"][..],
+        &["post-evidence", "--issue", "3", "--pull", "7", "--yes"],
+    ] {
+        let (code, _, err) = t.run(&iso, args);
+        assert_eq!(code, 2, "{args:?}: {err}");
+        assert!(
+            err.contains("project mode is not active"),
+            "{args:?}: {err}"
+        );
+    }
+    iso.git(&t.repo, &["remote", "remove", "origin"]);
+    let (code, out, err) = t.run(&iso, &["status"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.starts_with(
+            "project mode: inactive (.github/oms-project.md names example-org/example-repo; \
+             origin is missing or not a github.com remote)\n"
+        ),
+        "{out}"
+    );
+    let (_, out, _) = t.run(&iso, &["status", "--json"]);
+    assert!(
+        out.contains("\"project_inactive_reason\": \"origin\""),
+        "{out}"
+    );
+    assert_eq!(
+        plain.calls() + &t.calls(),
+        "",
+        "status must never invoke gh"
+    );
+}
+
+#[test]
+fn github_adopt_merged_applies_only_the_previewed_selection() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "ghadopt", true);
+    let list =
+        "repos/example-org/example-repo/pulls?state=closed&sort=updated&direction=desc&per_page=5";
+    let merged = r#""state":"closed","merged_at":"2026-11-01T00:00:00Z""#;
+    let unmerged = r#""state":"closed","merged_at":null"#;
+    let listing = format!(
+        "[{},{}]",
+        gh_item("pull", 7, "example-org/example-repo", merged),
+        gh_item("pull", 8, "example-org/example-repo", unmerged)
+    );
+    r.respond(list, &listing);
+    let preview = |r: &GhRepo| {
+        let (code, out, err) = r.run(&iso, &["adopt-merged", "--limit", "5"]);
+        assert_eq!(code, 0, "{err}");
+        let sha = out
+            .lines()
+            .find_map(|l| l.strip_prefix("selection-sha256: "))
+            .expect("selection sha")
+            .to_owned();
+        (out, sha)
+    };
+    let (out, sha) = preview(&r);
+    assert!(
+        out.contains("example-org/example-repo#7  Fix  LEAK-title") && !out.contains("#8"),
+        "{out}"
+    );
+    assert!(r.cache().is_none(), "the preview writes nothing");
+    for args in [
+        vec!["adopt-merged", "--limit", "5", "--apply"],
+        vec![
+            "adopt-merged",
+            "--limit",
+            "5",
+            "--apply",
+            "--expected-sha256",
+            &"0".repeat(64),
+        ],
+        vec!["adopt-merged", "--limit", "51"],
+        vec!["adopt-merged", "--limit", "5", "--expected-sha256", &sha],
+    ] {
+        let (code, _, err) = r.run(&iso, &args);
+        assert_eq!(code, 2, "{args:?}: {err}");
+        assert!(r.cache().is_none(), "{args:?}");
+    }
+    let apply: [&str; 6] = [
+        "adopt-merged",
+        "--limit",
+        "5",
+        "--apply",
+        "--expected-sha256",
+        &sha,
+    ];
+    // A title edit between the preview and --apply changes the selection.
+    r.respond(list, &listing.replace("LEAK-title", "LEAK-edited"));
+    let (code, _, err) = r.run(&iso, &apply);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("rerun the preview") && r.cache().is_none(),
+        "{err}"
+    );
+    // '|' survives title and label sanitizing, so field boundaries must be
+    // part of the digest: moving it from the title into a label is an edit.
+    let fields = r#""title":"Fix\u0007 LEAK-title","labels":[{"name":"bug"}]"#;
+    let split = |title: &str, label: &str| {
+        listing.replace(
+            fields,
+            &format!(r#""title":"{title}","labels":[{{"name":"{label}"}}]"#),
+        )
+    };
+    r.respond(list, &split("Fix|LEAK", "title"));
+    let (_, moved) = preview(&r);
+    assert_ne!(moved, sha);
+    r.respond(list, &split("Fix", "LEAK|title"));
+    let (code, _, err) = r.run(
+        &iso,
+        &[
+            "adopt-merged",
+            "--limit",
+            "5",
+            "--apply",
+            "--expected-sha256",
+            &moved,
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("rerun the preview") && r.cache().is_none(),
+        "{err}"
+    );
+    r.respond(list, &listing);
+    let (code, out, err) = r.run(&iso, &apply);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("adopted 1 merged pull request(s)"), "{out}");
+    let cache = r.cache().unwrap();
+    assert_eq!(cache.lines().count(), 1);
+    assert!(
+        cache.contains("\"reference\":\"example-org/example-repo#7\"")
+            && cache.contains("\"state\":\"merged\"")
+    );
+}
+
+#[test]
+fn github_post_evidence_is_gated_and_never_reposts() {
+    let iso = Isolated::new();
+    let off = GhRepo::new(&iso, "ghoff", false);
+    let (code, _, err) = off.run(&iso, &["post-evidence", "--issue", "3", "--pull", "7"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("pass --yes"), "{err}");
+    let args = GH_POST;
+    let (code, _, err) = off.run(&iso, &args);
+    assert_eq!(code, 2);
+    assert!(err.contains("requires PROJECT.md"), "{err}");
+    assert_eq!(off.calls(), "");
+
+    for (name, fail) in [("ghpost", false), ("ghunknown", true)] {
+        let r = GhRepo::new(&iso, name, true);
+        let (code, _, err) = r.run(&iso, &args);
+        assert_eq!(code, 2);
+        assert!(err.contains("run `oms github refresh --pull REF`"), "{err}");
+        assert_eq!(r.calls(), "", "no cache row, no network");
+        r.respond(
+            GH_PULL,
+            &gh_item("pull", 7, "example-org/example-repo", GH_MERGED),
+        );
+        assert_eq!(
+            r.run(&iso, &["refresh", "--pull", "7", "--ttl-s", "600"]).0,
+            0
+        );
+        // A forged marker by another author must not suppress the post.
+        r.respond(GH_COMMENTS, &gh_comment(1, "intruder", &gh_marker(), 3));
+        r.respond("user", r#"{"login":"OMS-bot"}"#);
+        // The same pull number on another remote is not this pull's receipt.
+        let foreign = "f".repeat(40);
+        gh_land_receipt(
+            &iso,
+            &r.repo,
+            "other.json",
+            "https://github.com/other-org/other-repo/pull/7",
+            &foreign,
+        );
+        if fail {
+            fs::write(r.dir.join("post.fail"), "").unwrap();
+        }
+        let (code, out, err) = r.run(&iso, &args);
+        if fail {
+            assert_eq!(code, 1, "{out}");
+            assert!(err.contains("outcome is unknown"), "{err}");
+            assert_eq!(r.phases(), ["prepared", "unknown"], "{}", r.ledger());
+        } else {
+            assert_eq!(code, 0, "{err}");
+            assert_eq!(
+                out,
+                "posted evidence comment 4242 on example-org/example-repo#3\n"
+            );
+            assert_eq!(r.phases(), ["prepared", "complete"], "{}", r.ledger());
+        }
+        let text = r.ledger();
+        assert!(text.contains("Merge state: merged") && !text.contains("oms-evidence"));
+        assert!(
+            text.contains("Land receipt: not recorded locally")
+                && !text.contains(&foreign)
+                && !r.calls().contains(&foreign),
+            "{text}"
+        );
+        if fail {
+            // A retry resends only the prepared body, as the prepared account.
+            let (head, newest) = text.trim_end().rsplit_once('\n').unwrap();
+            let sha = format!("`{}`", "a".repeat(40));
+            let marker = gh_marker();
+            let key = marker
+                .strip_prefix("<!-- oms-evidence:")
+                .and_then(|m| m.strip_suffix(" -->"))
+                .unwrap();
+            for (n, tampered) in [
+                text.replace(key, &"0".repeat(64)),
+                text.replace(
+                    r#""target":"example-org/example-repo#3""#,
+                    r##""target":"#3""##,
+                ),
+                text.replace(
+                    "Pull request: example-org/example-repo#7",
+                    "Pull request: example-org/example-repo#8",
+                ),
+                text.replace("not recorded locally", "not recorded locally (edited)"),
+                // A renderable body on the newest row alone still disagrees.
+                format!("{head}\n{}\n", newest.replace("not recorded locally", &sha)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_ne!(tampered, text, "edit {n}");
+                fs::write(r.ledger_path(), &tampered).unwrap();
+                let (code, _, err) = r.run(&iso, &args);
+                assert_eq!(code, 2, "edit {n}: {err}");
+                assert!(
+                    err.contains(
+                        "evidence receipt is inconsistent; repair .oms/github/writes.jsonl"
+                    ),
+                    "edit {n}: {err}"
+                );
+                assert_eq!(r.ledger(), tampered, "edit {n}: no receipt row is added");
+            }
+            fs::write(r.ledger_path(), &text).unwrap();
+            r.respond("user", r#"{"login":"other-bot"}"#);
+            let before = r.user_gets();
+            let (code, _, err) = r.run(&iso, &args);
+            assert_eq!(code, 2, "{err}");
+            assert!(
+                err.contains(
+                    "authenticated GitHub account differs from the one that prepared this \
+                     evidence; nothing was posted"
+                ),
+                "{err}"
+            );
+            assert_eq!(r.user_gets(), before + 1, "a retry re-reads the account");
+            assert_eq!(r.ledger(), text);
+            r.respond("user", r#"{"login":"OMS-bot"}"#);
+            // An own marker comment reconciles only with the prepared body.
+            let exact = gh_evidence("not recorded locally");
+            let edited = exact.replace("Merge state: merged", "Merge state: open");
+            r.respond(GH_COMMENTS, &gh_comment(4242, "oms-bot", &edited, 3));
+            let (code, _, err) = r.run(&iso, &args);
+            assert_eq!(code, 2, "{err}");
+            assert!(
+                err.contains(
+                    "evidence marker comment 4242 does not carry the prepared receipt body; \
+                     nothing was posted"
+                ),
+                "{err}"
+            );
+            assert_eq!((r.posts(), r.ledger()), (1, text.clone()));
+            // The prepared body without its final newline still reconciles.
+            let listed = exact.strip_suffix("\\n").unwrap();
+            r.respond(GH_COMMENTS, &gh_comment(4242, "oms-bot", listed, 3));
+        }
+        // Another spelling of the same origin maps to the same receipt, and a
+        // retry under it keeps the receipt's own spellings.
+        let respell = || {
+            iso.git(
+                &r.repo,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://github.com/Example-Org/Example-Repo",
+                ],
+            )
+        };
+        if fail {
+            respell();
+        }
+        let users = r.user_gets();
+        let (code, out, err) = r.run(&iso, &args);
+        assert_eq!(code, 0, "{err}");
+        if fail {
+            assert!(
+                out.contains("already present on example-org/example-repo#3 (comment 4242)"),
+                "{out}"
+            );
+            assert_eq!(r.phases(), ["prepared", "unknown", "complete"]);
+            assert_eq!(r.user_gets(), users + 1, "a retry re-reads the account");
+            let ledger = r.ledger();
+            let complete = ledger.lines().last().unwrap();
+            assert!(
+                complete.contains(r#""target":"example-org/example-repo#3""#)
+                    && complete.contains(r#""pull":"example-org/example-repo#7""#),
+                "{complete}"
+            );
+        } else {
+            assert!(out.contains("already posted"), "{out}");
+            assert_eq!(r.phases(), ["prepared", "complete"]);
+            assert_eq!(r.user_gets(), users, "a completed receipt is offline");
+            // A complete row must still name a real comment id.
+            let text = r.ledger();
+            let tampered = text.replace(r#""comment_id":"4242""#, r#""comment_id":"x""#);
+            assert_ne!(tampered, text);
+            fs::write(r.ledger_path(), &tampered).unwrap();
+            let (code, _, err) = r.run(&iso, &args);
+            assert_eq!(code, 2, "{err}");
+            assert!(
+                err.contains("evidence receipt is inconsistent; repair .oms/github/writes.jsonl"),
+                "{err}"
+            );
+            assert_eq!(r.ledger(), tampered);
+            fs::write(r.ledger_path(), &text).unwrap();
+        }
+        respell();
+        let (code, out, err) = r.run(&iso, &args);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("already posted"), "{out}");
+        assert_eq!(r.posts(), 1, "{}", r.calls());
+    }
+}
+
+/// Only a POST answer naming the target issue, the exact sent body and the
+/// authenticated author completes a receipt; any other answer, or an
+/// interrupt, leaves it unknown for a marker-checked rerun.
+#[test]
+fn github_post_evidence_completes_only_on_a_confirmed_answer() {
+    let iso = Isolated::new();
+    let marker = gh_marker();
+    let foreign = GhRepo::ready(&iso, "ghforeign");
+    foreign.respond(GH_COMMENTS, &gh_comment(9, "oms-bot", &marker, 4));
+    let (code, _, err) = foreign.run(&iso, &GH_POST);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("GitHub comment list does not belong to the target issue; nothing was posted"),
+        "{err}"
+    );
+    assert_eq!(foreign.posts(), 0);
+    assert!(
+        !foreign.phases().iter().any(|p| p == "complete"),
+        "{}",
+        foreign.ledger()
+    );
+
+    let r = GhRepo::ready(&iso, "ghconfirm");
+    let edited = format!("Edited\\n{marker}\\n");
+    for (n, (switch, value)) in [
+        ("post.issue", "4"),
+        ("post.login", "intruder"),
+        (
+            "post.body",
+            "OMS merge evidence for example-org/example-repo#3",
+        ),
+        ("post.body", edited.as_str()),
+        ("post.frag", "4243"),
+        ("post.htmlissue", "4"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fs::write(r.dir.join(switch), value).unwrap();
+        let (code, out, err) = r.run(&iso, &GH_POST);
+        assert_eq!(code, 1, "{switch}={value}: {out}{err}");
+        assert!(
+            err.contains("comment POST response did not confirm the target issue, body and author"),
+            "{switch}={value}: {err}"
+        );
+        let phases = r.phases();
+        assert!(
+            phases.first().is_some_and(|p| p == "prepared")
+                && phases.last().is_some_and(|p| p == "unknown")
+                && !phases.iter().any(|p| p == "complete"),
+            "{switch}={value}: {}",
+            r.ledger()
+        );
+        assert_eq!(r.posts(), n + 1, "{switch}={value}");
+        if value == edited {
+            // That answer's own marker comment is not the prepared one either.
+            r.respond(GH_COMMENTS, &gh_comment(4242, "oms-bot", value, 3));
+            let ledger = r.ledger();
+            let (code, _, err) = r.run(&iso, &GH_POST);
+            assert_eq!(code, 2, "{err}");
+            assert!(
+                err.contains(
+                    "evidence marker comment 4242 does not carry the prepared receipt body"
+                ),
+                "{err}"
+            );
+            assert_eq!((r.posts(), r.ledger()), (n + 1, ledger));
+        }
+        fs::remove_file(r.dir.join(switch)).unwrap();
+        // Hide the stored comment so the next variant posts again.
+        r.respond(GH_COMMENTS, "[]");
+    }
+    // GitHub may link an issue comment through the pull web path.
+    fs::write(r.dir.join("post.htmlseg"), "pull").unwrap();
+    let (code, out, err) = r.run(&iso, &GH_POST);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "posted evidence comment 4242 on example-org/example-repo#3\n"
+    );
+    assert_eq!(r.phases().last().map(String::as_str), Some("complete"));
+
+    let r = GhRepo::ready(&iso, "ghcancel");
+    fs::write(r.dir.join("post.interrupt"), "").unwrap();
+    let (code, _, err) = r.run(&iso, &GH_POST);
+    assert_eq!(code, 130, "{err}");
+    assert!(
+        err.contains("interrupted") && err.contains("outcome is unknown"),
+        "{err}"
+    );
+    assert_eq!(r.phases(), ["prepared", "unknown"], "{}", r.ledger());
+    fs::remove_file(r.dir.join("post.interrupt")).unwrap();
+    let (code, out, err) = r.run(&iso, &GH_POST);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("already present on example-org/example-repo#3 (comment 4242)"),
+        "{out}"
+    );
+    assert_eq!(r.phases(), ["prepared", "unknown", "complete"]);
+    assert_eq!(r.posts(), 1, "{}", r.calls());
+}
+
+/// A registered scratch checkout resolves to the primary checkout's state
+/// repository, so every checkout shares one cache and one write ledger.
+#[test]
+fn github_state_is_shared_by_scratch_checkouts() {
+    let iso = Isolated::new();
+    // Only the execution checkout declares the project; state still goes
+    // to the primary.
+    let r = GhRepo::new(&iso, "ghshared", false);
+    let scratch = iso
+        .home
+        .path()
+        .join(".cache/oh-my-setting/worktrees/oh-my-setting-scratch.gh1");
+    fs::create_dir_all(&scratch).unwrap();
+    let wt = scratch.join("wt");
+    iso.git(
+        &r.repo,
+        &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+    );
+    strip_group_world_write(&r.repo);
+    fs::write(
+        scratch.join(".oh-my-setting-tmp"),
+        format!(
+            "kind=oh-my-setting-temp\ntemporary=1\nrepo={}\nworktree={}\n",
+            r.repo.display(),
+            wt.display()
+        ),
+    )
+    .unwrap();
+    fs::write(wt.join("PROJECT.md"), GH_PROJECT).unwrap();
+    strip_group_world_write(&iso.home.path().join(".cache"));
+    r.respond(
+        GH_PULL,
+        &gh_item("pull", 7, "example-org/example-repo", GH_MERGED),
+    );
+    let (code, _, err) = r.run_in(&iso, &wt, &["refresh", "--pull", "7", "--ttl-s", "600"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        r.cache().is_some(),
+        "the cache lives in the primary checkout"
+    );
+    r.respond(GH_COMMENTS, "[]");
+    r.respond("user", r#"{"login":"oms-bot"}"#);
+    // Only a receipt naming this origin's pull exactly is cited.
+    let landed = "b".repeat(40);
+    gh_land_receipt(
+        &iso,
+        &r.repo,
+        "land.json",
+        "https://github.com/example-org/example-repo/pull/7",
+        &landed,
+    );
+    let (code, out, err) = r.run_in(&iso, &wt, &GH_POST);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "posted evidence comment 4242 on example-org/example-repo#3\n"
+    );
+    assert_eq!(r.phases(), ["prepared", "complete"], "{}", r.ledger());
+    assert!(
+        r.ledger().contains(&format!("- Land receipt: `{landed}`")),
+        "{}",
+        r.ledger()
+    );
+    assert!(
+        !wt.join(".oms/github").exists(),
+        "the scratch checkout keeps no GitHub state"
+    );
+    fs::write(r.repo.join("PROJECT.md"), GH_PROJECT).unwrap();
+    let (code, out, err) = r.run(&iso, &GH_POST);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("already posted"), "{out}");
+    assert_eq!(r.posts(), 1, "{}", r.calls());
+}
+
+#[test]
+fn land_pr_merge_preserves_head_branch_when_dependent_pr_is_open_or_unverified() {
+    for (dependents_payload, expected_reason, expected_notice) in [
+        (
+            "[{\"number\":345}]\n",
+            "open-dependent-pr",
+            "branch kept: open dependent PR targets head branch",
+        ),
+        (
+            "not-json\n",
+            "dependent-pr-check-unverified",
+            "branch kept: dependent PR check unverified",
+        ),
+    ] {
+        let iso = Isolated::new();
+        let (repo, bare) = iso.with_github_remote("prstack");
+        let head = iso.commit_as(
+            &repo,
+            "stack.txt",
+            "base slice\n",
+            &["feat: base slice", "Stacked base PR."],
+        );
+        let (gh, log) = iso.fake_gh(&bare, "success");
+        fs::write(iso.home.path().join("gh.pr.dependents"), dependents_payload)
+            .expect("dependents payload");
+        let r = iso.run_with_services(
+            "land",
+            &repo,
+            &[
+                "--merge",
+                "--gate",
+                "true",
+                "--ignore-siblings",
+                "--no-update",
+            ],
+            &[("OMS_GH_BIN", gh.to_str().unwrap())],
+        );
+        assert_eq!(r.0, 0, "{r:?}");
+        assert!(r.1.contains(expected_notice), "{r:?}");
+        let calls = fs::read_to_string(&log).expect("gh log");
+        assert!(
+            calls.contains(
+                "pr list --repo github.com/owner/prstack --state open --base oms/feat/base-slice --json number --limit 1"
+            ),
+            "{calls}"
+        );
+        assert!(
+            calls.contains(&format!(
+                "pr merge 7 --repo github.com/owner/prstack --squash --match-head-commit {head}"
+            )),
+            "{calls}"
+        );
+        assert!(!calls.contains("--delete-branch"), "{calls}");
+        let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+        let row = V::parse(status.as_bytes()).expect("status json");
+        assert_eq!(
+            row.get("merge").get("delete_branch"),
+            &V::Bool(false),
+            "{status}"
+        );
+        assert_eq!(
+            row.get("merge").get("delete_branch_skipped").text(),
+            Some(expected_reason),
+            "{status}"
+        );
+    }
 }

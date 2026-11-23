@@ -487,7 +487,7 @@ fi
 grep -Fq 'Spec stage first' "$ROOT/custom-skills/oms-agent-harness/references/review-gates.md" ||
   fail "review gates reference lost the spec-compliance stage before deep review"
 
-# 6. CI workflow invariants (gate completeness, no setup-python, no windows-latest)
+# 6. CI workflow invariants (Linux-only CI, gate completeness, no setup-python, no windows/macOS runners)
 workflow="$ROOT/.github/workflows/test.yml"
 if grep -Fq 'setup-python' "$workflow"; then
   fail "streamlined CI workflow must not install setup-python"
@@ -495,8 +495,20 @@ fi
 if grep -Fq 'windows-latest' "$workflow"; then
   fail "native Windows is unsupported in CI"
 fi
-grep -Fq 'bsd-portability-smoke.sh' "$workflow" ||
-  fail "macOS portability job must run bsd-portability-smoke.sh"
+if grep -Fq 'macos-latest' "$workflow" || grep -Fq "runner.os == 'macOS'" "$workflow"; then
+  fail "CI workflow must stay Linux-only (no macOS jobs or steps)"
+fi
+if grep -Fq 'inputs.macos' "$workflow"; then
+  fail "CI workflow must not keep schedule/dispatch macOS hooks"
+fi
+grep -Fq 'lint:' "$workflow" ||
+  fail "workflow must keep the lint job"
+grep -Fq 'name: rust (ubuntu-24.04)' "$workflow" ||
+  fail "workflow must keep the Linux rust (ubuntu-24.04) job"
+grep -Fq 'focused:' "$workflow" ||
+  fail "workflow must keep the focused job"
+grep -Fq 'name: native (ubuntu-latest, copy)' "$workflow" ||
+  fail "workflow must keep the Linux native (ubuntu-latest, copy) job"
 grep -Fq 'gate:' "$workflow" ||
   fail "workflow must expose a fixed gate job"
 grep -Fq 'if: always()' "$workflow" ||

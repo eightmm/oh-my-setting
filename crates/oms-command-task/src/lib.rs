@@ -387,6 +387,49 @@ impl Task<'_> {
         }
         Ok(body)
     }
+    /// Sets `github_issue` on a packet that is not being rotated away. The same
+    /// ref (owner/repo compared case-insensitively) leaves the bytes untouched;
+    /// a different ref needs `--replace-goal` and records the replaced ref.
+    /// `issue` is the canonical `owner/repo#N` resolved against origin.
+    fn bind(&self, body: Vec<u8>, issue: Option<&[u8]>) -> Result<Vec<u8>> {
+        let Some(issue) = issue else {
+            return Ok(body);
+        };
+        let bound = packet::metadata(&body, "github_issue")
+            .unwrap_or_default()
+            .to_vec();
+        if bound.eq_ignore_ascii_case(issue) {
+            return Ok(body);
+        }
+        let mut body = packet::touch(packet::set_metadata(&body, "github_issue", issue), &now());
+        if !bound.is_empty() {
+            if !self.options.has("replace-goal") {
+                return Err(Error::bytes(
+                    2,
+                    [
+                        b"refusing to rebind task issue ".as_slice(),
+                        &bound,
+                        b" to ",
+                        issue,
+                        b"\na parent can replace the binding with --replace-goal REASON",
+                    ]
+                    .concat(),
+                ));
+            }
+            let note = [
+                b"issue rebound (".as_slice(),
+                &self.options.action,
+                b"): previous github_issue=",
+                &bound,
+                b"; reason: ",
+                self.options.value("replace-goal"),
+            ]
+            .concat();
+            safe(&note, "note")?;
+            body = self.append(&body, "Decisions", &note);
+        }
+        Ok(body)
+    }
     fn replacement(&self, raw: &[u8]) -> Result<Vec<u8>> {
         let o = &self.options;
         if ![b"init".as_slice(), b"rotate", b"update"].contains(&o.action.as_slice())
@@ -615,6 +658,11 @@ fn execute(
     let read_only = ["show", "context", "status"]
         .iter()
         .any(|mode| options.mode(mode));
+    let issue = if options.values.contains_key("issue") {
+        Some(resolve_issue(options.value("issue"), &repo, interrupted)?)
+    } else {
+        None
+    };
     let state_repo = if read_only {
         repo.clone()
     } else {
@@ -716,19 +764,24 @@ fn execute(
     let (archive, replacement, replacement_id) = task.operation(services, |reference| {
         let before = task.store.read()?;
         let replacement = task.replacement(before.as_deref().unwrap_or_default())?;
-        // Validate all supplied inputs before rotating the active file.
-        let mut candidate = task.apply(task.initialize(before.clone()))?;
         let rotate = task.options.mode("rotate")
             || task.options.mode("init")
                 && before.as_ref().is_some_and(|v| !v.is_empty())
                 && task.options.has("goal");
+        // Validate all supplied inputs before rotating the active file. A
+        // rotated-away packet keeps its own binding, so only a surviving
+        // packet is checked for an issue conflict.
+        let mut candidate = task.apply(task.initialize(before.clone()))?;
+        if !rotate {
+            candidate = task.bind(candidate, issue.as_deref())?;
+        }
         let archive = if rotate {
             let archived = if let Some(raw) = before.as_ref() {
                 Some(task.archive(task.initialize(Some(raw.clone())), reference)?)
             } else {
                 None
             };
-            candidate = task.apply(task.initialize(None))?;
+            candidate = task.bind(task.apply(task.initialize(None))?, issue.as_deref())?;
             archived
         } else {
             None
@@ -790,6 +843,37 @@ fn execute(
     Ok(0)
 }
 
+/// Canonical `owner/repo#N` for `--issue`, resolved locally against `origin`
+/// and any GitHub project declaration (PROJECT.md or the committed
+/// `.github/oms-project.md`). Nothing contacts GitHub, and
+/// diagnostics never echo the remote URL.
+/// The project declaration is read from the toplevel of the repository whose
+/// origin is used, even when `--file` places the packet elsewhere.
+fn resolve_issue(raw: &[u8], repo: &Path, interrupted: &AtomicBool) -> Result<Vec<u8>> {
+    let fail = |m: &str| Error::new(2, format!("--issue: {m}"));
+    let input = std::str::from_utf8(raw)
+        .map_err(|_| fail("issue reference must be N, #N or owner/repo#N"))?;
+    let args = ["remote", "get-url", "origin"].map(OsStr::new);
+    let (exit, url) = git::query(repo, &args, interrupted)?;
+    if exit != 0 {
+        return Err(fail("requires an origin remote; none is configured"));
+    }
+    let origin = std::str::from_utf8(url.strip_suffix(b"\n").unwrap_or(&url))
+        .map_err(|_| fail("remote URL is empty or malformed"))
+        .and_then(|url| {
+            oms_github::Slug::from_remote(url)
+                .map_err(|e| fail(&format!("requires a github.com origin: {}", e.message)))
+        })?;
+    let toplevel = git::repository(repo, interrupted)?;
+    // Only the conflict matters here: with the mode off (a fork ignoring the
+    // upstream's tracked declaration), an explicit --issue binds to origin.
+    let declared = oms_github::declaration::inspect(&toplevel).map_err(|e| fail(&e.message))?;
+    oms_github::declaration::active(declared.as_ref(), Some(&origin))
+        .map_err(|e| fail(&e.message))?;
+    oms_github::IssueRef::parse(input, &origin)
+        .map(|issue| issue.to_string().into_bytes())
+        .map_err(|e| fail(&e.message))
+}
 fn context(task: &Task<'_>, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let Some(raw) = task.store.read()?.filter(|v| !v.is_empty()) else {
         return Ok(());
@@ -810,6 +894,11 @@ fn context(task: &Task<'_>, out: &mut dyn Write, err: &mut dyn Write) -> Result<
     line(out, &[b"- file: ", relative.as_os_str().as_bytes()])?;
     if let Some(updated) = packet::metadata(&raw, "updated").filter(|v| !v.is_empty()) {
         line(out, &[b"- updated: ", updated])?;
+    }
+    // Header metadata does not survive context pruning, so the binding is
+    // repeated here.
+    if let Some(issue) = packet::metadata(&raw, "github_issue").filter(|v| !v.is_empty()) {
+        line(out, &[b"- github_issue: ", issue])?;
     }
     let verification = task.verification(&raw)?;
     if verification != "fresh" && !packet::command(&raw).is_empty() {
@@ -873,6 +962,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
     let id = packet::metadata(&raw, "task_id").unwrap_or(b"legacy");
     let state = packet::metadata(&raw, "status").unwrap_or(b"active");
     let source = packet::metadata(&raw, "source_session").unwrap_or_default();
+    let issue = packet::metadata(&raw, "github_issue").unwrap_or_default();
     let activity = packet::metadata(&raw, "last_activity")
         .or_else(|| packet::metadata(&raw, "updated"))
         .unwrap_or_default();
@@ -889,7 +979,12 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("last_activity", activity),
             ("closed_at", closed),
             ("stale", if stale { b"yes" } else { b"no" }),
+            ("github_issue", issue),
         ] {
+            // Unbound packets keep the established text rows.
+            if k == "github_issue" && v.is_empty() {
+                continue;
+            }
             bytes.extend_from_slice(k.as_bytes());
             bytes.extend_from_slice(b": ");
             bytes.extend_from_slice(v);
@@ -917,18 +1012,24 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ]),
         }
     };
-    let value = object([
-        ("schema", Json::Number("1".into())),
-        ("present", Json::Bool(true)),
-        ("task_id", string(id)),
-        ("status", string(state)),
-        ("source_session", nullable(source)),
-        ("last_activity", nullable(activity)),
-        ("closed_at", nullable(closed)),
-        ("stale", Json::Bool(stale)),
-        ("verification", string(verification)),
-        ("lifecycle", lifecycle),
-    ]);
+    // An unbound packet omits `github_issue`, keeping the established bytes.
+    let value = object(
+        [
+            ("schema", Json::Number("1".into())),
+            ("present", Json::Bool(true)),
+            ("task_id", string(id)),
+            ("status", string(state)),
+            ("source_session", nullable(source)),
+            ("github_issue", nullable(issue)),
+            ("last_activity", nullable(activity)),
+            ("closed_at", nullable(closed)),
+            ("stale", Json::Bool(stale)),
+            ("verification", string(verification)),
+            ("lifecycle", lifecycle),
+        ]
+        .into_iter()
+        .filter(|(k, _)| *k != "github_issue" || !issue.is_empty()),
+    );
     let encoded = json::encode(&value);
     oms_work_inspect::task_status_snapshot(&encoded).map_err(|e| Error::new(1, e.to_string()))?;
     line(out, &[&encoded])

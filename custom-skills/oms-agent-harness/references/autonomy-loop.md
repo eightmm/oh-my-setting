@@ -250,6 +250,13 @@ oms goal-drive --repo . --to codex --max-cycles 3
 `oms plan-from-spec` decomposes a confirmed PROJECT.md into that plan, but only
 ever PROPOSES. The parent reviews the task list before `--apply`; generated
 plans never enter silently, and a `State: draft` spec is refused.
+In GitHub project mode every added or applied task needs an issue (`add
+--issue N`). `oms plan-from-spec --issue REF` / `oms autopilot propose --issue
+REF` stamp the reviewed issue; an adopted `intent draft --from-issue` contract
+carries its same-repo issue while PROJECT.md is unchanged. Restamp a proposal
+pending an issue with `oms plan-from-spec --restamp PATH
+--expected-proposal-sha256 SHA --issue REF` (autopilot: `oms autopilot propose
+--restamp PATH --expected-proposal-sha256 SHA --issue REF`).
 
 For the full bounded path, the parent uses this two-step admission boundary:
 

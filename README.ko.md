@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/hero.png" alt="중앙의 Rust 기반 OMS 허브가 Codex, Claude Code, Antigravity를 공유 프로젝트 규칙, 작업 상태, 리뷰에 연결하는 모습" width="100%"></p>
+<p align="center"><img src="docs/assets/hero-providers.png" alt="oh-my-setting의 Rust 기반 OMS 허브가 산호색 픽셀 문양의 Claude Code, 청보라색 터미널 구름의 Codex, 다색 궤도의 Antigravity를 연결하는 모습" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
