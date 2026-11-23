@@ -344,9 +344,10 @@ impl oms_command_plan::Services for LocalServices<'_> {
             self.interrupted,
         )
         .map_err(|e| plan_error(e.message))?;
+        let exit = execution.0.clamp(0, 255) as u8;
         Ok(Execution {
-            exit: execution.0.clamp(0, 255) as u8,
-            runner_exit: 0,
+            exit,
+            runner_exit: exit,
             timed_out: execution.0 == 124,
             output_limited: execution.0 == 125,
             launch_error: false,
