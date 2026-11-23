@@ -12520,7 +12520,13 @@ pub(crate) mod tests {
         fn ordinary_agy_task_reference_preserves_payload_and_fences_enter() {
             let tmp = TempDir::new("orch-agy-ticket");
             let repo = private_dir(&tmp.0.join("répo"));
-            std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+            let set_mode = |mode| {
+                std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(mode)).unwrap();
+            };
+            set_mode(0o775);
+            let group_writes = oms_safe_fs::Root::open_private_workspace(&repo, |_| true).is_ok();
+            let workspace_mode = if group_writes { 0o775 } else { 0o755 };
+            set_mode(workspace_mode);
             let room_log = repo.join(format!(".oms/threads/{ROOM}.jsonl"));
             private_dir(room_log.parent().unwrap());
             std::fs::write(&room_log, b"fixture initial Room").unwrap();
@@ -12691,6 +12697,9 @@ pub(crate) mod tests {
                 "cwd",
                 "draft",
             ] {
+                if changed == "group" && !group_writes {
+                    continue;
+                }
                 reset(126, 21);
                 spy.room_closed.set(false);
                 spy.task_transition.replace(Some((
@@ -12798,30 +12807,32 @@ pub(crate) mod tests {
                 assert!(send().is_err(), "held draft must still block another send");
             }
 
-            for proof in [
-                None,
-                Some(oms_command_plan::services::GroupMembership {
-                    explicit_member_uids: vec![uid + 1],
-                    ..group.clone()
-                }),
-                Some(oms_command_plan::services::GroupMembership {
-                    primary_member_uids: vec![uid, uid + 1],
-                    ..group.clone()
-                }),
-            ] {
-                reset(126, 21);
-                spy.workspace_group.replace(proof);
-                let err = send().unwrap_err();
-                assert!(err.message.contains("workspace ancestry"), "{err}");
-                assert!(spy.mutating_calls().is_empty());
+            if group_writes {
+                for proof in [
+                    None,
+                    Some(oms_command_plan::services::GroupMembership {
+                        explicit_member_uids: vec![uid + 1],
+                        ..group.clone()
+                    }),
+                    Some(oms_command_plan::services::GroupMembership {
+                        primary_member_uids: vec![uid, uid + 1],
+                        ..group.clone()
+                    }),
+                ] {
+                    reset(126, 21);
+                    spy.workspace_group.replace(proof);
+                    let err = send().unwrap_err();
+                    assert!(err.message.contains("workspace ancestry"), "{err}");
+                    assert!(spy.mutating_calls().is_empty());
+                }
             }
             reset(126, 21);
-            std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o777)).unwrap();
+            set_mode(0o777);
             assert!(oms_safe_fs::Root::open_private_workspace(&repo, |_| true).is_err());
             let err = send().unwrap_err();
             assert!(err.message.contains("workspace ancestry"), "{err}");
             assert!(spy.mutating_calls().is_empty());
-            std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+            set_mode(workspace_mode);
 
             let artifacts = repo.join(".oms/artifacts");
             let original = std::fs::metadata(&artifacts).unwrap().permissions();

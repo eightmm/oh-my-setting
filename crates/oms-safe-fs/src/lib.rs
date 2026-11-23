@@ -214,6 +214,30 @@ fn same_registry_dir(a: &Stat, b: &Stat) -> bool {
     safe_registry_dir(b) && same_directory_mode(a, b)
 }
 
+fn workspace_group_writable(stat: &Stat) -> bool {
+    stat.st_uid == rustix::process::getuid().as_raw() && stat.st_mode & 0o022 == 0o020
+}
+
+#[cfg(target_os = "linux")]
+fn group_workspace_has_mode_only_access(fd: &OwnedFd, before: &Stat) -> bool {
+    // Linux exposes owner-readable POSIX access ACLs at this name on the ext
+    // family (0xef53) and tmpfs (0x01021994). Other filesystems can enforce other ACLs.
+    workspace_group_writable(before)
+        && rustix::process::geteuid().as_raw() == before.st_uid
+        && fs::fstatfs(fd).is_ok_and(|filesystem| matches!(filesystem.f_type, 0xef53 | 0x01021994))
+        && matches!(
+            fs::fgetxattr_query(fd, "system.posix_acl_access"),
+            Err(rustix::io::Errno::NODATA)
+        )
+        && fs::fstat(fd)
+            .is_ok_and(|after| stable(before, &after) && same_directory_mode(before, &after))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn group_workspace_has_mode_only_access(_: &OwnedFd, _: &Stat) -> bool {
+    false
+}
+
 fn size_matches(stat: &Stat, count: usize) -> bool {
     u64::try_from(stat.st_size).ok() == u64::try_from(count).ok()
 }
@@ -259,7 +283,8 @@ impl Root {
     }
 
     /// Open a workspace for private records while preserving legacy permission
-    /// bits on ancestors whose group membership is positively private.
+    /// bits on ancestors with positively private groups and no extended access
+    /// ACL on a supported local filesystem.
     /// A root-owned sticky ancestor protects entries owned by root or this UID.
     /// All descendants opened for packet operations use private-registry rules.
     pub fn open_private_workspace(
@@ -297,10 +322,10 @@ impl Root {
             let named = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(map_open)?;
             let root_sticky_ancestor =
                 private_group.is_some() && index + 1 < parts.len() && root_sticky_directory(&named);
-            if !safe_registry_dir(&named) && !root_sticky_ancestor {
+            let needs_group = !safe_registry_dir(&named) && !root_sticky_ancestor;
+            if needs_group {
                 let private = FileType::from_raw_mode(named.st_mode) == FileType::Directory
-                    && named.st_uid == rustix::process::getuid().as_raw()
-                    && named.st_mode & 0o022 == 0o020
+                    && workspace_group_writable(&named)
                     && (verified_groups.contains(&named.st_gid)
                         || private_group
                             .as_mut()
@@ -315,6 +340,9 @@ impl Root {
             let opened = fs::fstat(&fd).map_err(map_open)?;
             if !same_directory_mode(&named, &opened) {
                 return Err(Error::Changed);
+            }
+            if needs_group && !group_workspace_has_mode_only_access(&fd, &opened) {
+                return Err(Error::Unsafe);
             }
             ancestry.push((fd, opened, name.to_owned()));
         }
@@ -345,8 +373,12 @@ impl Root {
         self.revalidate_private().map_err(|()| Error::Changed)?;
         let groups: std::collections::BTreeSet<_> = chain
             .iter()
-            .filter(|(_, stat, _)| stat.st_mode & 0o020 != 0 && !root_sticky_directory(stat))
-            .map(|(_, stat, _)| stat.st_gid)
+            .enumerate()
+            .filter(|(index, (_, stat, _))| {
+                workspace_group_writable(stat)
+                    && !(*index + 1 < chain.len() && root_sticky_directory(stat))
+            })
+            .map(|(_, (_, stat, _))| stat.st_gid)
             .collect();
         if !groups.into_iter().all(&mut private_group) {
             return Err(Error::Unsafe);
@@ -367,6 +399,12 @@ impl Root {
                 fs::statat(&chain[i - 1].0, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| ())?
             };
             if !same_directory_mode(initial, &opened) || !same_directory_mode(initial, &named) {
+                return Err(());
+            }
+            if workspace_group_writable(initial)
+                && !(i + 1 < chain.len() && root_sticky_directory(initial))
+                && !group_workspace_has_mode_only_access(fd, &opened)
+            {
                 return Err(());
             }
         }
@@ -717,6 +755,79 @@ mod tests {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_group_access_requires_absent_descriptor_acl() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let directory = fixture.0.canonicalize().unwrap();
+        let set_mode = |mode| {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set_mode(0o775);
+        let fd = fs::open(&directory, directory_flags(), Mode::empty()).unwrap();
+        let stat = fs::fstat(&fd).unwrap();
+        let group = |gid| gid == stat.st_gid;
+        if !matches!(fs::fstatfs(&fd).unwrap().f_type, 0xef53 | 0x01021994)
+            || fs::fgetxattr_query(&fd, "system.posix_acl_access") == Err(rustix::io::Errno::NOTSUP)
+        {
+            assert!(matches!(
+                Root::open_private_workspace(&directory, group),
+                Err(Error::Unsafe)
+            ));
+            return;
+        }
+        let root = Root::open_private_workspace(&directory, group).unwrap();
+        root.recheck_private_workspace(group).unwrap();
+        fn set_extended_acl(fd: &OwnedFd, uid: u32, mask: u16) {
+            // Linux POSIX ACL xattr v2: owner, named user, group, mask, other.
+            let mut acl = 2u32.to_le_bytes().to_vec();
+            for (tag, perm, id) in [
+                (0x01u16, 7u16, u32::MAX),
+                (0x02, 7, uid ^ 1),
+                (0x04, mask, u32::MAX),
+                (0x10, mask, u32::MAX),
+                (0x20, 5, u32::MAX),
+            ] {
+                acl.extend(tag.to_le_bytes());
+                acl.extend(perm.to_le_bytes());
+                acl.extend(id.to_le_bytes());
+            }
+            fs::fsetxattr(fd, "system.posix_acl_access", &acl, fs::XattrFlags::empty()).unwrap();
+            assert_eq!(
+                fs::fgetxattr_query(fd, "system.posix_acl_access"),
+                Ok(acl.len())
+            );
+        }
+        set_extended_acl(&fd, stat.st_uid, 7);
+        assert_eq!(fs::fstat(&fd).unwrap().st_mode & 0o777, 0o775);
+        assert!(matches!(
+            Root::open_private_workspace(&directory, group),
+            Err(Error::Unsafe)
+        ));
+        assert!(root.recheck_private_workspace(group).is_err());
+        assert!(
+            root.create_private(Path::new("packet"), b"fixture", 1024)
+                .is_err()
+        );
+        assert!(!directory.join("packet").exists());
+
+        fs::fremovexattr(&fd, "system.posix_acl_access").unwrap();
+        root.recheck_private_workspace(group).unwrap();
+        set_mode(0o755);
+        set_extended_acl(&fd, stat.st_uid, 5);
+        assert_eq!(fs::fstat(&fd).unwrap().st_mode & 0o777, 0o755);
+        let strict = Root::open_private_workspace(&directory, |_| {
+            panic!("strict mode requires no group lookup")
+        })
+        .unwrap();
+        strict
+            .recheck_private_workspace(|_| panic!("strict mode requires no group lookup"))
+            .unwrap();
+    }
+
     #[test]
     fn rejects_invalid_label() {
         let root = Root::open(std::env::temp_dir()).unwrap();

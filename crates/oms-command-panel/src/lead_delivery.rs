@@ -142,6 +142,10 @@ impl<'a> AgyTicket<'a> {
         let canonical = panel.repo.canonicalize().map_err(Error::new)?;
         let project = Root::open_private_workspace(canonical, group_check(panel))
             .map_err(|_| Error::new("AGY task reference workspace ancestry is unsafe"))?;
+        require_room_repo(
+            project.physical_root(),
+            std::env::var_os("OMS_STATE_REPO").as_deref(),
+        )?;
         Self::require_cwd(panel, scope, &project)?;
         let dimensions = Self::dimensions(panel, scope)?;
         let (width, height) = dimensions;
@@ -225,6 +229,10 @@ impl<'a> AgyTicket<'a> {
 
     pub(super) fn verify_room(&self, verify: impl FnOnce() -> Result<()>) -> Result<()> {
         const INVALID: &str = "AGY task reference Room changed during verification";
+        require_room_repo(
+            self.project.physical_root(),
+            std::env::var_os("OMS_STATE_REPO").as_deref(),
+        )?;
         let before = PrivateFileGeneration::for_room(&self.room_log)?;
         verify()?;
         require(
@@ -245,47 +253,13 @@ impl<'a> AgyTicket<'a> {
         if room.is_none() || room != *self.room_generation.borrow() {
             return Ok(false);
         }
-        let Cursor {
-            x,
-            row,
-            width,
-            height,
-        } = draft.cursor;
-        let (server_start, session_created) = self.server_times;
-        let wanted = format!(
-            "{}:{server_start}:{session_created}:{}:{}:{}:{}:0:0:0:{}:{}:{}:{x}:{row}:{width}:{height}",
-            scope.session.server_pid,
-            scope.session.session,
-            scope.lead.window,
-            scope.lead.id,
-            scope.lead.pid,
-            scope.room,
-            scope.provider,
-            scope.attempt,
-        );
-        let predicate = format!(
-            "#{{&&:#{{==:#{{pane_current_path}},#{{@oms_panel_repo}}}},#{{==:#{{pid}}:#{{start_time}}:#{{session_created}}:#{{session_id}}:#{{window_id}}:#{{pane_id}}:#{{pane_pid}}:#{{pane_dead}}:#{{&&:#{{window_active}},#{{pane_active}}}}:#{{pane_in_mode}}:#{{@oms_panel_room}}:#{{@oms_provider_session}}:#{{@oms_provider_parent}}:#{{cursor_x}}:#{{cursor_y}}:#{{pane_width}}:#{{pane_height}},{wanted}}}}}"
-        );
-        let yes = format!(
-            "send-keys -t {} Enter ; display-message -p {ENTER_SENT}",
-            assignment_shell_word(&scope.lead.id),
-        );
-        let no = format!("display-message -p {ENTER_REFUSED}");
-        match tmux(&[
-            "if-shell",
-            "-F",
-            "-t",
-            &scope.lead.id,
-            &predicate,
-            &yes,
-            &no,
-        ])?
-        .as_str()
-        {
-            ENTER_SENT => Ok(true),
-            ENTER_REFUSED => Ok(false),
-            _ => Err(Error::new("AGY Enter delivery is uncertain")),
-        }
+        send_guarded_enter(
+            tmux,
+            self.project.physical_root(),
+            scope,
+            self.server_times,
+            draft.cursor,
+        )
     }
 
     fn require_cwd(panel: &Panel<'_>, scope: &Scope, root: &Root) -> Result<()> {
@@ -326,10 +300,8 @@ impl<'a> AgyTicket<'a> {
             .unwrap_or(raw)
             .strip_suffix("\t.")
             .filter(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
-            .map(Path::new)
-            .filter(|path| path.is_absolute())
-            .and_then(|path| path.canonicalize().ok());
-        require(cwd.as_deref() == Some(root.physical_root()), INVALID)?;
+            .map(Path::new);
+        require(cwd == Some(root.physical_root()), INVALID)?;
         let (held, _) = root
             .pinned_metadata(OsStr::new(".oms"))
             .map_err(|_| error())?;
@@ -363,6 +335,83 @@ impl<'a> AgyTicket<'a> {
                 == self.generation,
             "AGY task reference is missing or changed",
         )
+    }
+}
+
+fn require_room_repo(project: &Path, state_repo: Option<&OsStr>) -> Result<()> {
+    require(
+        state_repo
+            .filter(|path| !path.is_empty())
+            .is_none_or(|state| {
+                Path::new(state)
+                    .canonicalize()
+                    .is_ok_and(|path| path == project)
+            }),
+        "AGY task reference requires Room state in the physical project repository",
+    )
+}
+
+fn tmux_format_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '#' | ',' | '}') {
+            literal.push('#');
+        }
+        literal.push(character);
+    }
+    literal
+}
+
+fn send_guarded_enter(
+    tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
+    project: &Path,
+    scope: &Scope,
+    (server_start, session_created): (u64, u64),
+    Cursor {
+        x,
+        row,
+        width,
+        height,
+    }: Cursor,
+) -> Result<bool> {
+    let path = project
+        .to_str()
+        .filter(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
+        .ok_or_else(|| Error::new("AGY task reference workspace path is unrepresentable"))?;
+    let expected_path = tmux_format_literal(path);
+    let wanted = format!(
+        "{}:{server_start}:{session_created}:{}:{}:{}:{}:0:0:0:{}:{}:{}:{x}:{row}:{width}:{height}",
+        scope.session.server_pid,
+        scope.session.session,
+        scope.lead.window,
+        scope.lead.id,
+        scope.lead.pid,
+        scope.room,
+        scope.provider,
+        scope.attempt,
+    );
+    let predicate = format!(
+        "#{{&&:#{{&&:#{{==:#{{pane_current_path}},{expected_path}}},#{{==:#{{@oms_panel_repo}},{expected_path}}}}},#{{==:#{{pid}}:#{{start_time}}:#{{session_created}}:#{{session_id}}:#{{window_id}}:#{{pane_id}}:#{{pane_pid}}:#{{pane_dead}}:#{{&&:#{{window_active}},#{{pane_active}}}}:#{{pane_in_mode}}:#{{@oms_panel_room}}:#{{@oms_provider_session}}:#{{@oms_provider_parent}}:#{{cursor_x}}:#{{cursor_y}}:#{{pane_width}}:#{{pane_height}},{wanted}}}}}"
+    );
+    let yes = format!(
+        "send-keys -t {} Enter ; display-message -p {ENTER_SENT}",
+        assignment_shell_word(&scope.lead.id),
+    );
+    let no = format!("display-message -p {ENTER_REFUSED}");
+    match tmux(&[
+        "if-shell",
+        "-F",
+        "-t",
+        &scope.lead.id,
+        &predicate,
+        &yes,
+        &no,
+    ])?
+    .as_str()
+    {
+        ENTER_SENT => Ok(true),
+        ENTER_REFUSED => Ok(false),
+        _ => Err(Error::new("AGY Enter delivery is uncertain")),
     }
 }
 
@@ -683,6 +732,195 @@ fn composer_body<'a>(provider: &str, line: &'a str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use crate::orchestrator::{SystemAccountHost, codex_chat_fixture::BoardSpy};
+
+    #[test]
+    fn ordinary_agy_ticket_refuses_split_room_state() {
+        use super::super::account_binding::test_support::{TempDir, private_dir};
+
+        let temp = TempDir::new("agy-state");
+        let project = private_dir(&temp.0.join("project"));
+        let other = private_dir(&temp.0.join("other"));
+        let alias = temp.0.join("alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        assert!(require_room_repo(&project, None).is_ok());
+        assert!(require_room_repo(&project, Some(alias.as_os_str())).is_ok());
+        assert!(require_room_repo(&project, Some(other.as_os_str())).is_err());
+        assert!(require_room_repo(&project, Some(temp.0.join("missing").as_os_str())).is_err());
+    }
+
+    #[test]
+    fn ordinary_agy_enter_pins_exact_path_in_tmux_server() {
+        use super::super::account_binding::test_support::{TempDir, private_dir};
+        use std::process::Command;
+
+        if !Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            return;
+        }
+        struct Server(PathBuf);
+        impl Server {
+            fn run(&self, args: &[&str]) -> Result<String> {
+                let output = Command::new("tmux")
+                    .args(["-u", "-f", "/dev/null", "-S"])
+                    .arg(&self.0)
+                    .args(args)
+                    .env_remove("TMUX")
+                    .env_remove("TMUX_PANE")
+                    .output()
+                    .map_err(Error::new)?;
+                require(
+                    output.status.success(),
+                    &String::from_utf8_lossy(&output.stderr),
+                )?;
+                Ok(String::from_utf8(output.stdout)
+                    .map_err(Error::new)?
+                    .trim_end_matches('\n')
+                    .to_owned())
+            }
+        }
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = self.run(&["kill-server"]);
+            }
+        }
+        fn until(mut matches: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !matches() {
+                assert!(
+                    Instant::now() < deadline,
+                    "tmux fixture did not reach its expected state"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        let temp = TempDir::new("agy-enter");
+        let repo = private_dir(&temp.0.join("répo#,{x}#{pane_pid},ré}"));
+        let other = private_dir(&temp.0.join("other"));
+        let count = temp.0.join("keys");
+        let server = Server(temp.0.join("tmux"));
+        let run = |args: &[&str]| server.run(args).unwrap();
+        run(&[
+            "new-session",
+            "-d",
+            "-s",
+            "fixture",
+            "-x",
+            "100",
+            "-y",
+            "25",
+            "-c",
+            &tmux_format_literal(repo.to_str().unwrap()),
+            "/bin/sh",
+            "-c",
+            r#"stty -echo
+printf ready > "$1"
+while IFS= read -r directory; do
+    if [ -n "$directory" ]; then cd -P -- "$directory" || exit
+    else printf x >> "$1"
+    fi
+done"#,
+            "sh",
+            count.to_str().unwrap(),
+        ]);
+        until(|| std::fs::read(&count).is_ok_and(|bytes| bytes == b"ready"));
+        run(&[
+            "new-window",
+            "-t",
+            "fixture",
+            "-n",
+            "control",
+            "exec /bin/sleep 60",
+        ]);
+        let target = "fixture:0.0";
+        let display = |format| run(&["display-message", "-p", "-t", target, format]);
+        assert_eq!(display("#{&&:#{window_active},#{pane_active}}"), "0");
+        let set = |key, value| {
+            run(&["set-option", "-w", "-t", target, key, value]);
+        };
+        let info = display(
+            "#{pid}\t#{start_time}\t#{session_created}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}",
+        );
+        let fields: Vec<_> = info.split('\t').collect();
+        let [
+            server_pid,
+            start,
+            created,
+            session,
+            window,
+            pane_id,
+            pane_pid,
+        ] = fields.as_slice()
+        else {
+            panic!("missing tmux fixture generation: {info}");
+        };
+        let pane = PaneIdentity {
+            window: (*window).into(),
+            id: (*pane_id).into(),
+            pid: pane_pid.parse().unwrap(),
+            birth: "fixture".into(),
+        };
+        let scope = Scope {
+            session: SessionProof {
+                session: (*session).into(),
+                server_pid: server_pid.parse().unwrap(),
+                server_birth: "fixture".into(),
+                socket_digest: String::new(),
+            },
+            room: "room-fixture".into(),
+            attempt: "attempt-fixture".into(),
+            member: "member-fixture".into(),
+            provider: "antigravity".into(),
+            main: pane.clone(),
+            lead: pane,
+        };
+        for (key, value) in [
+            ("@oms_panel_room", scope.room.as_str()),
+            ("@oms_provider_session", scope.provider.as_str()),
+            ("@oms_provider_parent", scope.attempt.as_str()),
+        ] {
+            set(key, value);
+        }
+        let frame = display(FRAME);
+        let cursor = Cursor::parse(&frame, pane_id).unwrap();
+        let guarded_enter = || {
+            send_guarded_enter(
+                &mut |args| server.run(args),
+                &repo,
+                &scope,
+                (start.parse().unwrap(), created.parse().unwrap()),
+                cursor,
+            )
+            .unwrap()
+        };
+        let cwd = |path: &Path| {
+            run(&["send-keys", "-t", target, "-l", path.to_str().unwrap()]);
+            run(&["send-keys", "-t", target, "Enter"]);
+            until(|| Path::new(&display("#{pane_current_path}")) == path);
+            assert_eq!(display(FRAME), frame);
+        };
+
+        assert_eq!(Path::new(&display("#{pane_current_path}")), repo);
+        set("@oms_panel_repo", other.to_str().unwrap());
+        assert!(
+            !guarded_enter(),
+            "changed repo tag alone must withhold Enter"
+        );
+        cwd(&other);
+        assert!(
+            !guarded_enter(),
+            "matching live CWD and tag cannot substitute a different repo"
+        );
+        set("@oms_panel_repo", repo.to_str().unwrap());
+        assert!(!guarded_enter(), "changed CWD alone must withhold Enter");
+        assert_eq!(std::fs::read(&count).unwrap(), b"ready");
+        cwd(&repo);
+        assert!(guarded_enter(), "exact escaped repository must send");
+        until(|| std::fs::read(&count).is_ok_and(|bytes| bytes == b"readyx"));
+    }
 
     #[test]
     fn ordinary_lead_delivery_receipt_requires_live_generation() {
