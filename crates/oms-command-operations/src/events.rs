@@ -115,12 +115,29 @@ pub fn append_lifecycle(repo: &Path, candidate: V, interrupted: &AtomicBool) -> 
 /// The callback must not reacquire that lock. An error appends no event.
 pub fn append_lifecycle_checked<F>(
     repo: &Path,
-    mut candidate: V,
+    candidate: V,
     interrupted: &AtomicBool,
     check: F,
 ) -> Result<V>
 where
     F: FnOnce(&[V], Option<&V>) -> Result<()>,
+{
+    append_lifecycle_checked_with_projection(repo, candidate, interrupted, |rows, _, current| {
+        check(rows, current)
+    })
+}
+
+/// Check the ledger, its projected attempts, and the current attempt under the
+/// lifecycle lock before appending. The callback must not reacquire that lock.
+/// An error appends no event.
+pub fn append_lifecycle_checked_with_projection<F>(
+    repo: &Path,
+    mut candidate: V,
+    interrupted: &AtomicBool,
+    check: F,
+) -> Result<V>
+where
+    F: FnOnce(&[V], &BTreeMap<String, V>, Option<&V>) -> Result<()>,
 {
     storage::ensure_oms(repo)?;
     let path = event_path(repo);
@@ -129,7 +146,7 @@ where
     let projection = projection::project_values(&rows)?;
     let attempt = candidate.get("attempt_id").py();
     let current = select(&projection, &attempt);
-    check(&rows, current)?;
+    check(&rows, &projection, current)?;
     if let Some(prior) = existing_idempotent(&rows, &candidate)? {
         return Ok(prior);
     }

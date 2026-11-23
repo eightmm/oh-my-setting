@@ -32,23 +32,21 @@ case "${XDG_CONFIG_HOME:-}" in
 esac
 # Fixtures choose their tools through PATH; runtime activation must not undo it.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
-# Poison any accidental interpreter lookup in smoke suites unless explicitly allowed.
-if [ "${OMS_SMOKE_ALLOW_PYTHON:-0}" != 1 ]; then
-  OMS_SMOKE_POISON_BIN="${OMS_SMOKE_CONFIG_HOME:-$XDG_CONFIG_HOME}/poison-bin"
-  mkdir -p "$OMS_SMOKE_POISON_BIN"
-  for oms_smoke_py in python python3; do
-    if [ ! -x "$OMS_SMOKE_POISON_BIN/$oms_smoke_py" ]; then
-      printf '#!/usr/bin/env sh\necho "error: retired interpreter invoked in pure-Rust smoke test: %s $*" >&2\nexit 99\n' "$oms_smoke_py" > "$OMS_SMOKE_POISON_BIN/$oms_smoke_py"
-      chmod +x "$OMS_SMOKE_POISON_BIN/$oms_smoke_py"
-    fi
-  done
-  export OMS_SMOKE_POISON_BIN
-  case ":$PATH:" in
-    *":$OMS_SMOKE_POISON_BIN:"*) ;;
-    *) PATH="$OMS_SMOKE_POISON_BIN:$PATH"; export PATH ;;
-  esac
-  unset oms_smoke_py
-fi
+# Poison any accidental interpreter lookup in smoke suites.
+OMS_SMOKE_POISON_BIN="${OMS_SMOKE_CONFIG_HOME:-$XDG_CONFIG_HOME}/poison-bin"
+mkdir -p "$OMS_SMOKE_POISON_BIN"
+for oms_smoke_py in python python3; do
+  if [ ! -x "$OMS_SMOKE_POISON_BIN/$oms_smoke_py" ]; then
+    printf '#!/usr/bin/env sh\necho "error: retired interpreter invoked in pure-Rust smoke test: %s $*" >&2\nexit 99\n' "$oms_smoke_py" > "$OMS_SMOKE_POISON_BIN/$oms_smoke_py"
+    chmod +x "$OMS_SMOKE_POISON_BIN/$oms_smoke_py"
+  fi
+done
+export OMS_SMOKE_POISON_BIN
+case ":$PATH:" in
+  *":$OMS_SMOKE_POISON_BIN:"*) ;;
+  *) PATH="$OMS_SMOKE_POISON_BIN:$PATH"; export PATH ;;
+esac
+unset oms_smoke_py
 # The host's AppArmor userns setting must not gate fixture Codex write dispatches;
 # sandbox-gate tests point this at their own file.
 export OMS_DOCTOR_USERNS_SYSCTL_PATH=/nonexistent/oms-test-userns

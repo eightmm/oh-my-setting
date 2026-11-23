@@ -4,8 +4,17 @@ use super::*;
 use oms_command_operations as events;
 use oms_command_operations::value::{V, obj};
 use oms_panel_core::services::ExecutionRequest;
+use oms_safe_fs::{
+    ByteError, ByteReadOptions, MutationError, MutationOptions, MutationPhase, Root,
+};
 
 pub(super) const MAX_BINDING: usize = 64 * 1024;
+// Test-only crash between the immutable round-1 write and its binding record.
+#[cfg(test)]
+thread_local! {
+    pub(super) static CRASH_AFTER_BINDING_WRITE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
 // Codex leads launch without the provider policy, so the assignment carries it.
 const LEAD_DUTIES: &str = "Integrate only; children: roles/disjoint scopes/checks, read-only research/review/verify, builders assigned paths, no delegate/commit/push/land/install/publish; simple: cheaper supported native model, escalate scope/risk, keep explicit user choice/account/isolation/spend.";
 
@@ -326,7 +335,32 @@ impl Binding {
     }
 }
 
+pub(super) fn require_live_main_in_locked_ledger(
+    panel: &Panel<'_>,
+    projected: &std::collections::BTreeMap<String, V>,
+) -> std::result::Result<(), String> {
+    let main = events::projection::select(projected, &panel.attempt)
+        .map(|row| {
+            let bytes = row.json(false)?;
+            serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())
+        })
+        .transpose()?;
+    panel
+        .require_live_codex_assignment_main(main.as_ref())
+        .map_err(|e| e.message)
+}
+
 fn annotate(panel: &Panel<'_>, binding: &Binding, key: &str, refs: Value) -> Result<()> {
+    annotate_before_append(panel, binding, key, refs, |_| Ok(()))
+}
+
+fn annotate_before_append(
+    panel: &Panel<'_>,
+    binding: &Binding,
+    key: &str,
+    refs: Value,
+    prepare: impl FnOnce(&V) -> Result<()>,
+) -> Result<()> {
     let attempt = &binding.attempt;
     let candidate = events::new_event(
         attempt,
@@ -345,21 +379,55 @@ fn annotate(panel: &Panel<'_>, binding: &Binding, key: &str, refs: Value) -> Res
         ]),
     )
     .map_err(Error::new)?;
-    events::append_lifecycle_checked(panel.repo, candidate, panel.stop, |_, current| {
-        let current =
-            current.ok_or_else(|| "native assignment operation disappeared".to_owned())?;
-        if current.get("terminal").truth()
-            || current.get("refs").get("native_intent_sha256").py() != binding.intent_digest
-            || current.get("refs").get("native_transport").py() != binding.transport
-            || (binding.transport != "intent"
-                && current.get("refs").get("native_binding_sha256").py() != binding.digest)
-        {
-            return Err("native assignment operation was cancelled or changed".into());
-        }
-        Ok(())
-    })
-    .map_err(Error::new)?;
-    Ok(())
+    let mut preparation_error = None;
+    let appended = events::append_lifecycle_checked_with_projection(
+        panel.repo,
+        candidate,
+        panel.stop,
+        |_, projected, current| {
+            require_live_main_in_locked_ledger(panel, projected)?;
+            let current =
+                current.ok_or_else(|| "native assignment operation disappeared".to_owned())?;
+            if current.get("terminal").truth()
+                || current.get("refs").get("native_intent_sha256").py() != binding.intent_digest
+                || current.get("refs").get("native_transport").py() != binding.transport
+                || (binding.transport != "intent"
+                    && current.get("refs").get("native_binding_sha256").py() != binding.digest)
+            {
+                return Err("native assignment operation was cancelled or changed".into());
+            }
+            prepare(current).map_err(|error| {
+                let message = error.message.clone();
+                preparation_error = Some(error);
+                message
+            })
+        },
+    );
+    match preparation_error {
+        Some(error) => Err(error),
+        None => appended.map(|_| ()).map_err(Error::new),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn annotate_with_binding(
+    panel: &Panel<'_>,
+    attempt: &str,
+    intent_digest: &str,
+    digest: &str,
+    transport: &'static str,
+    key: &str,
+    refs: Value,
+) -> Result<()> {
+    let binding = Binding {
+        task: Value::Null,
+        checkout: Value::Null,
+        attempt: attempt.into(),
+        intent_digest: intent_digest.into(),
+        digest: digest.into(),
+        transport,
+    };
+    annotate(panel, &binding, key, refs)
 }
 
 pub(super) fn current_operation(panel: &Panel<'_>, attempt: &str) -> Result<Value> {
@@ -386,6 +454,17 @@ pub(super) fn register_result(
     host: &dyn AccountHost,
     attempts: &AttemptCache,
     tx: &Transaction<'_>,
+) -> Result<Value> {
+    register_result_with_before_append(panel, options, host, attempts, tx, || ())
+}
+
+pub(super) fn register_result_with_before_append(
+    panel: &Panel<'_>,
+    options: &Options,
+    host: &dyn AccountHost,
+    attempts: &AttemptCache,
+    tx: &Transaction<'_>,
+    before_append: impl FnOnce(),
 ) -> Result<Value> {
     let lead = panel
         .leads
@@ -564,6 +643,7 @@ pub(super) fn register_result(
         "native result predecessor changed; retain and review the current report",
     )?;
     revalidate()?;
+    before_append();
     let previous_operation = operation_value(&operation)?;
     let previous_refs = previous_operation.get("refs");
     let mut result_refs = json!({"native_result_schema":"1",
@@ -590,35 +670,46 @@ pub(super) fn register_result(
     )
     .map_err(Error::new)?;
     let mut append_authorized = false;
-    let appended = events::append_lifecycle_checked(panel.repo, event, panel.stop, |_, current| {
-        let current = current.ok_or_else(|| "native result assignment disappeared".to_owned())?;
-        let refs = current.get("refs");
-        if current.get("terminal").truth()
-            || ["tool", "provider", "parent_attempt_id", "task_id"]
+    // Room membership, Plan lease, tmux pane identity, and account custody are
+    // sampled across separate stores before/after the lifecycle lock; only
+    // exact Main liveness/currentness and child/predecessor state are checked
+    // atomically under the lifecycle ledger lock (not atomic cross-store custody).
+    let appended = events::append_lifecycle_checked_with_projection(
+        panel.repo,
+        event,
+        panel.stop,
+        |_, projected, current| {
+            require_live_main_in_locked_ledger(panel, projected)?;
+            let current =
+                current.ok_or_else(|| "native result assignment disappeared".to_owned())?;
+            let refs = current.get("refs");
+            if current.get("terminal").truth()
+                || ["tool", "provider", "parent_attempt_id", "task_id"]
+                    .iter()
+                    .any(|key| current.get(key) != previous_operation.get(key))
+                || refs.get("native_binding_sha256").py() != binding.digest
+                || refs.get("native_intent_sha256").py() != binding.intent_digest
+                || refs.get("native_transport").py() != transport
+                || [
+                    "native_assignment_schema",
+                    "plan_id",
+                    "lease_id",
+                    "panel_room_id",
+                    "native_result_schema",
+                    "native_result_path",
+                    "native_result_sha256",
+                    "native_resolution",
+                    "native_resolution_result_sha256",
+                ]
                 .iter()
-                .any(|key| current.get(key) != previous_operation.get(key))
-            || refs.get("native_binding_sha256").py() != binding.digest
-            || refs.get("native_intent_sha256").py() != binding.intent_digest
-            || refs.get("native_transport").py() != transport
-            || [
-                "native_assignment_schema",
-                "plan_id",
-                "lease_id",
-                "panel_room_id",
-                "native_result_schema",
-                "native_result_path",
-                "native_result_sha256",
-                "native_resolution",
-                "native_resolution_result_sha256",
-            ]
-            .iter()
-            .any(|key| refs.get(key) != previous_refs.get(key))
-        {
-            return Err("native result assignment or predecessor changed".into());
-        }
-        append_authorized = true;
-        Ok(())
-    });
+                .any(|key| refs.get(key) != previous_refs.get(key))
+            {
+                return Err("native result assignment or predecessor changed".into());
+            }
+            append_authorized = true;
+            Ok(())
+        },
+    );
     appended.map_err(|error| Error {
         publication_uncertain: append_authorized,
         ..Error::new(error)
@@ -648,6 +739,72 @@ pub(super) fn register_result(
         "effective_permissions":"unknown",
         "acceptance_eligible":false}),
     )
+}
+
+pub(super) fn unbound_intent(operation: &Value) -> bool {
+    let refs = &operation["refs"];
+    refs["native_transport"] == "intent"
+        && refs.get("native_binding").is_none()
+        && refs.get("native_binding_sha256").is_none()
+}
+
+pub(super) fn original_unbound_intent(operation: &Value) -> bool {
+    operation["state"] == "queued"
+        && operation["terminal"] == false
+        && operation["sequence"] == 1
+        && operation["refs"]["native_return_schema"] == "1"
+        && unbound_intent(operation)
+}
+
+pub(super) fn initial_packet_missing(repo: &Path, path: &Path) -> Result<bool> {
+    let root =
+        Root::open(repo).map_err(|e| Error::new(format!("native assignment root: {e:?}")))?;
+    match root.read_no_follow(
+        path,
+        ByteReadOptions {
+            max_bytes: 0,
+            missing_ok: false,
+        },
+    ) {
+        Err(ByteError::Missing) => Ok(true),
+        Ok(_) | Err(ByteError::InputTooLarge) => Ok(false),
+        Err(error) => Err(Error::new(format!(
+            "native assignment packet read refused: {error:?}"
+        ))),
+    }
+}
+
+fn create_initial_packet(
+    panel: &Panel<'_>,
+    tx: &Transaction<'_>,
+    path: &Path,
+    raw: &[u8],
+) -> Result<()> {
+    tx.check()?;
+    let root =
+        Root::open(panel.repo).map_err(|e| Error::new(format!("native assignment root: {e:?}")))?;
+    root.atomic_mutate(
+        path,
+        MutationOptions {
+            read: ByteReadOptions {
+                max_bytes: 0,
+                missing_ok: true,
+            },
+            create_parent: true,
+            max_output: MAX_BINDING,
+            expected_exists: Some(false),
+            ..MutationOptions::default()
+        },
+        |_| Ok::<_, Error>(raw.to_vec()),
+    )
+    .map(|_| ())
+    .map_err(|error| match error {
+        MutationError::Storage { phase, error } => Error {
+            publication_uncertain: phase != MutationPhase::BeforePublication,
+            ..Error::new(format!("native assignment packet {phase:?}: {error:?}"))
+        },
+        MutationError::Transform(error) => error,
+    })
 }
 
 pub(super) fn run(
@@ -743,9 +900,32 @@ pub(super) fn run(
             && attempt["refs"]["lease_id"] == canonical["lease_id"]
             && attempt["parent_attempt_id"] == panel.attempt
     }) {
-        return resume(
-            panel, options, host, attempts, tx, &custody, prior, &text_task,
-        );
+        require(
+            prior["reason_code"] != native_result::UNSENT_RETIREMENT,
+            "this unsent intent was retired; release its exact Plan lease before assigning this task again",
+        )?;
+        let unwritten = unbound_intent(prior) && {
+            require(
+                prior["terminal"] == false,
+                "native assignment intent is terminal",
+            )?;
+            let attempt = text(prior, "attempt_id");
+            crate::identifier(attempt)?;
+            let fallback = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
+            tx.check()?;
+            initial_packet_missing(panel.repo, Path::new(&fallback))?
+        };
+        if !unwritten {
+            return resume(
+                panel, options, host, attempts, tx, &custody, prior, &text_task,
+            );
+        }
+        // The identical start request must reclaim the original intent below.
+        // Drift changes its start refs and fails the idempotency check.
+        require(
+            original_unbound_intent(prior),
+            "only the original queued native intent may recreate its missing packet",
+        )?;
     }
     require(
         !options.has("after-native-result"),
@@ -821,9 +1001,8 @@ pub(super) fn run(
     binding.intent_digest = intent_digest;
     binding.digest = binding_digest.clone();
     let artifact = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
-    tx.write(Path::new(&artifact), &raw, true, MAX_BINDING)?;
     oms_panel_core::native_contract::CheckedAssignment::parse(&raw)?;
-    annotate(
+    annotate_before_append(
         panel,
         &binding,
         "native-contract-bound",
@@ -831,6 +1010,21 @@ pub(super) fn run(
             "native_binding":artifact,"native_binding_sha256":binding_digest,
             "native_round":"1","native_resolution":"awaiting-report",
         }),
+        |current| {
+            // Hold the lifecycle lock across the packet write so an independent
+            // cancellation cannot supersede its original creation event first.
+            require(
+                current.get("sequence").py() == "1"
+                    && current.get("state").text() == Some("queued"),
+                "only the original queued native intent may create its packet",
+            )?;
+            create_initial_packet(panel, tx, Path::new(&artifact), &raw)?;
+            #[cfg(test)]
+            if CRASH_AFTER_BINDING_WRITE.with(|crash| crash.replace(false)) {
+                return Err(Error::new("test crash after binding write"));
+            }
+            Ok(())
+        },
     )?;
     deliver(
         panel,
@@ -857,6 +1051,7 @@ fn deliver(
     attempts: &AttemptCache,
     tx: &Transaction<'_>,
 ) -> Result<Value> {
+    require_bound(&binding.digest, artifact)?;
     let attempt = binding.attempt.clone();
     let canonical = binding.task.clone();
     let binding_digest = binding.digest.clone();
@@ -975,6 +1170,14 @@ fn deliver(
     Ok(output)
 }
 
+/// Input is only ever sent against a recorded binding digest and artifact.
+fn require_bound(digest: &str, artifact: &str) -> Result<()> {
+    require(
+        !digest.is_empty() && !artifact.is_empty(),
+        "native assignment has no recorded binding; reconcile before input",
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resume(
     panel: &Panel<'_>,
@@ -1035,6 +1238,44 @@ fn resume(
                 },
                 true,
             ));
+        }
+        if text(&prior["refs"], "native_binding_sha256").is_empty() {
+            // A crash after the immutable round-1 write lost only its binding
+            // record. Adopt those bytes only when they are exactly that intent.
+            let intent_digest = text(&prior["refs"], "native_intent_sha256");
+            let mut intent = packet.clone();
+            intent
+                .as_object_mut()
+                .ok_or_else(|| Error::new("invalid native assignment packet"))?
+                .shift_remove("attempt_id");
+            let intent = serde_json::to_vec(&intent).map_err(Error::new)?;
+            require(
+                oms_panel_core::native_contract::CheckedAssignment::parse(&raw)?.is_some()
+                    && packet["round"].as_u64() == Some(1)
+                    && text(&prior["refs"], "native_binding").is_empty()
+                    && !intent_digest.is_empty()
+                    && oms_panel_core::digest(&intent) == intent_digest,
+                "native assignment binding does not match its recorded intent",
+            )?;
+            tx.check()?;
+            let recovered = Binding {
+                task: packet["task"].clone(),
+                checkout: packet["checkout"].clone(),
+                attempt: attempt.into(),
+                intent_digest: intent_digest.into(),
+                digest: String::new(),
+                transport: "intent",
+            };
+            annotate(
+                panel,
+                &recovered,
+                "native-contract-bound",
+                json!({
+                    "native_binding":format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json"),
+                    "native_binding_sha256":oms_panel_core::digest(&raw),
+                    "native_round":"1","native_resolution":"awaiting-report",
+                }),
+            )?;
         }
     } else {
         let current = native_result::load(panel, attempt, host, attempts)?;
@@ -1225,6 +1466,19 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn native_input_requires_a_recorded_binding() {
+        for (digest, artifact) in [("", "binding.json"), ("abc", ""), ("", "")] {
+            assert!(
+                require_bound(digest, artifact)
+                    .unwrap_err()
+                    .message
+                    .contains("no recorded binding")
+            );
+        }
+        assert!(require_bound("abc", "binding.json").is_ok());
     }
 
     #[test]

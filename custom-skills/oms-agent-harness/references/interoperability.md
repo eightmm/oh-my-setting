@@ -101,7 +101,7 @@ a Task. Its `taskId` is the existing durable peer operation ID.
 
 - `tasks/get` polls that operation.
 - `tasks/cancel` requests cancellation for new supervised POSIX operations.
-  A live `run-bounded.py` owner stops its own provider process group, escalating
+  A live `oms-run-bounded-helper` owner stops its own provider process group, escalating
   TERM to KILL after the configured grace period. Subsequent calls see the request
   before spawning. The reader never signals a persisted PID. Until provider cleanup
   and CLI completion, `tasks/get` remains `working` with `cancellation_requested`.

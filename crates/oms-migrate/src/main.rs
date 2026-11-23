@@ -1,4 +1,6 @@
-use oms_migrate::{BASELINE, inventory, parse_baseline, regressions, render, repository_root};
+use oms_migrate::{
+    BASELINE, inventory, parse_baseline, policy, regressions, render, repository_root,
+};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -7,11 +9,13 @@ use std::process::ExitCode;
 
 const USAGE: &str = "OMS migration preparation (development only)\n\
 Usage: oms-migrate inventory [--repo PATH]\n\
-       oms-migrate check [--repo PATH] [--baseline PATH] [--require-zero]\n\n\
+       oms-migrate check [--repo PATH] [--baseline PATH] [--require-zero]\n\
+       oms-migrate policy [--repo PATH]\n\n\
 Inventory reads tracked working-tree files and emits sorted TSV.\n\
 Check rejects new/increased legacy Python footprints; reductions are allowed.\n\
 The default baseline is crates/oms-migrate/tests/python-inventory.tsv, relative to the repo.\n\
 --require-zero also rejects remaining rows. No mode rewrites the baseline.\n\
+Policy enforces crate layering, typed suppressions and no workaround comments.\n\
 This lexical inventory is not proof that Rust or dynamic commands avoid Python.\n";
 
 fn run() -> Result<bool, String> {
@@ -28,7 +32,7 @@ fn run() -> Result<bool, String> {
         println!("oms-migrate {}", env!("CARGO_PKG_VERSION"));
         return Ok(true);
     }
-    if !matches!(command, "inventory" | "check") {
+    if !matches!(command, "inventory" | "check" | "policy") {
         return Err(format!("unknown command: {command:?}\n{USAGE}"));
     }
     let mut repo = PathBuf::from(".");
@@ -48,6 +52,16 @@ fn run() -> Result<bool, String> {
         }
     }
     let repo = repository_root(&repo)?;
+    if command == "policy" {
+        let failures = policy::check(&repo)?;
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        if failures.is_empty() {
+            println!("repository policy: PASS");
+        }
+        return Ok(failures.is_empty());
+    }
     let current = inventory(&repo)?;
     if command == "inventory" {
         io::stdout()

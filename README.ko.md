@@ -22,7 +22,7 @@
 | **독립 자문과 리뷰 받기** | `oms consult`로 한 에이전트에게 묻고, `oms peer-ask --debate`로 provider별 응답을 비교합니다. `oms peer-review`로 독립 diff 리뷰를 요청합니다. Overall Main은 리뷰 결과를 종합해 수락 여부를 판단합니다. | [에이전트 협업](docs/COMPONENTS.md#asking-other-agents) |
 | **프로젝트 의도를 기록하고 영향 범위 찾기** | `oms init`으로 프로젝트 정책을 구성하고, 합의한 범위·결정·검증 조건을 `PROJECT.md`에 기록합니다. `oms graph project`로 심볼·의존 관계·영향 경로를 찾고, `oms runtime context`로 필요한 작업 맥락을 제한된 분량으로 구성합니다. | [프로젝트 맥락](docs/PROJECT-CONTEXT.md) · [그래프 안내](docs/GRAPH-ENGINEERING.md#project-graph) |
 | **계획을 추적하고 인수인계하기** | `oms agent-plan`은 의존 관계와 검토 상태를 추적합니다. `oms inbox`와 `oms dashboard`에서 확인이 필요한 일을 찾고, `oms agent-task`, `oms journal`, `oms session-handoff`로 재개 메모·작업 이력·세션 요약을 남깁니다. | [계획](docs/COMPONENTS.md#plans-and-bounded-autonomy) · [상태와 인수인계](docs/COMPONENTS.md#state-memory-and-handoff) |
-| **변경을 검증하고 게시하기** | `oms patch-admit`과 `oms patch-land`로 위임 패치를 검사하고 적용합니다. `oms land`는 커밋된 변경을 검증한 뒤 승인된 push를 진행하고 CI 결과를 기다릴 수 있습니다. `oms draft-pr`는 권한이 승인되면 검증한 HEAD를 draft PR로 게시합니다. | [검증과 릴리스](docs/COMPONENTS.md#verification-and-release) |
+| **변경을 검증하고 게시하기** | `oms patch-admit`과 `oms patch-land`로 위임 패치를 검사하고 적용합니다. `oms land`는 커밋된 변경을 검증한 뒤 승인된 GitHub pull request를 열고 CI 결과를 기다립니다. 병합은 `--merge`를 줄 때만 합니다. `oms draft-pr`는 권한이 승인되면 검증한 HEAD를 draft PR로 게시합니다. | [검증과 릴리스](docs/COMPONENTS.md#verification-and-release) |
 | **OMS 설치와 유지 관리하기** | 필요한 기능 프로필을 선택하고, `oms status`와 `oms doctor`로 구성을 점검합니다. `oms update`로 갱신하고, `oms uninstall`로 관리 대상 설정을 복원합니다. | [설치와 업데이트](docs/INSTALL.ko.md) |
 | **선택 기능으로 작업 확장하기** | `oms runtime`으로 작업 근거, 실험, 지원되는 실행 백엔드를 사용합니다. `oms recipe`와 `oms autopilot`은 명시적으로 선택한 워크플로를 실행합니다. 연구·HPC 도구는 데이터셋 검사, 로컬 큐, 원격 SSH 대상, Slurm 제출과 실행 기록 대조를 지원합니다. `oms harness`는 Pi와 Claude Code에서 Codex 추론을 사용할 수 있는 실험적 브리지를 제공합니다. | [런타임](docs/OMS-RUNTIME.md) · [레시피](docs/RECIPES.md) · [ML과 HPC](docs/COMPONENTS.md#ml-and-hpc-components) · [대체 하네스](docs/CODEX-HARNESSES.md) |
 
@@ -69,7 +69,7 @@ oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 1. **목표를 합의합니다.** 새 프로젝트는 에이전트와 짧게 요구 사항을 확인할 수 있습니다. 기존 저장소에서는 프로젝트 정책, 코드, 남겨 둔 상태를 먼저 읽습니다. 합의한 제약과 완료 검사는 `PROJECT.md`에 남깁니다.
 2. **작업을 나누어 맡깁니다.** Builder별 수정 경로를 겹치지 않게 정하고, 읽기 전용 조사와 리뷰를 따로 배정합니다. 쓰기 워커는 기본적으로 `${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees` 아래 격리된 Git worktree에서 실행됩니다.
 3. **결과를 검증합니다.** 영향 범위에 맞는 검사를 돌리고 변경에 필요한 독립 리뷰를 요청합니다. 위임 패치를 적용하기 전에 배정 범위와 검증 근거에 맞는지 확인합니다.
-4. **게시하고 넘겨줍니다.** 승인된 push는 `oms land`로 검증해 진행합니다. 다음 세션이 이어받을 수 있도록 검증·반영 근거와 남은 일을 저널이나 인수인계 기록에 적습니다.
+4. **게시하고 넘겨줍니다.** 검증한 변경은 `oms land`로 승인된 pull request로 게시하고, 병합은 요청받았을 때만 `--merge`로 합니다. 다음 세션이 이어받을 수 있도록 검증·반영 근거와 남은 일을 저널이나 인수인계 기록에 적습니다.
 
 <details>
 <summary>자주 쓰는 요청 예시</summary>

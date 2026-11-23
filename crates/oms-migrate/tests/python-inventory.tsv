@@ -1,5 +1,4 @@
 path	kind	units
-.github/workflows/test.yml	python-reference	1
 Cargo.toml	python-reference	1
 crates/oms-command-graph/Cargo.toml	python-reference	1
 crates/oms-command-graph/tests/project-engine-reference.json	python-reference	1
@@ -14,7 +13,6 @@ crates/oms-graph-shell/tests/python_other.json	python-reference	2
 crates/oms-graph/Cargo.toml	python-reference	1
 crates/oms-mcp-server/tests/parser-reference.json	python-reference	3
 crates/oms-mcp-server/tests/value-reference.json	python-reference	1
-scripts/check.sh	python-reference	3
 scripts/lib/platform.sh	python-reference	2
 scripts/package-native-release.sh	python-reference	1
 templates/check.sh	python-reference	7
@@ -23,5 +21,5 @@ templates/ml_smoke.py	python-source	32
 templates/python-ci.yml	python-reference	1
 templates/recipes/workspace.json	python-reference	4
 templates/slurm-job.sh	python-reference	1
-tests/lib/smoke-env.sh	python-reference	2
-tests/source-distribution-smoke.sh	python-reference	6
+tests/lib/smoke-env.sh	python-reference	1
+tests/source-distribution-smoke.sh	python-reference	5
