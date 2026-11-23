@@ -8606,16 +8606,27 @@ pub(crate) mod tests {
                         "display-message",
                         "-p",
                         "-t",
-                        "%4",
+                        pane,
                         lead_delivery::TICKET_SERVER,
                     ] => {
+                        assert!(self.leads.borrow().iter().any(|lead| {
+                            lead.pane_id == *pane && lead.provider == "antigravity"
+                        }));
                         format!("{}\t1\t2\t.", self.server_pid)
                     }
-                    ["tmux", "if-shell", "-F", "-t", "%4", predicate, yes, no] => {
+                    ["tmux", "if-shell", "-F", "-t", pane, predicate, yes, no]
+                        if yes.ends_with(lead_delivery::ENTER_SENT) =>
+                    {
+                        let leads = self.leads.borrow();
+                        let lead = leads
+                            .iter()
+                            .find(|lead| lead.pane_id == *pane && lead.provider == "antigravity")
+                            .expect("conditional Enter must target the AGY pane");
                         let suffix = format!(
-                            "{}:1:2:$1:@4:%4:2001:0:0:0:{ROOM}:antigravity:{MAIN}:",
-                            self.server_pid
+                            "{}:1:2:$1:{}:{pane}:{}:0:0:0:{}:antigravity:{}:",
+                            self.server_pid, lead.window, lead.pid, self.room, self.main_attempt,
                         );
+                        drop(leads);
                         assert!(predicate.contains(&suffix), "{predicate}");
                         assert!(
                             predicate.contains("#{pane_in_mode}")
@@ -8623,14 +8634,16 @@ pub(crate) mod tests {
                         );
                         assert_eq!(
                             *yes,
-                            "send-keys -t '%4' Enter ; display-message -p OMS_AGY_ENTER_SENT"
+                            format!(
+                                "send-keys -t '{pane}' Enter ; display-message -p OMS_AGY_ENTER_SENT"
+                            )
                         );
                         assert_eq!(*no, "display-message -p OMS_AGY_ENTER_REFUSED");
                         if let Some(response) = self.agy_enter_response.get() {
                             return Ok(out(response));
                         }
                         let send = ExecutionRequest::new(
-                            crate::commands::strings(&["tmux", "send-keys", "-t", "%4", "Enter"]),
+                            crate::commands::strings(&["tmux", "send-keys", "-t", pane, "Enter"]),
                             &self.repo,
                         );
                         self.execute(&send, &self.stop)?;
@@ -13240,6 +13253,10 @@ pub(crate) mod tests {
             host.owners.insert(2001, owner_entry(2001, "p2001", uid));
             host.owners.insert(2002, owner_entry(2002, "p2002", uid));
             let spy = SpyPanel::new(repo);
+            let oms = private_dir(&spy.repo.join(".oms"));
+            let room_log = private_dir(&oms.join("threads")).join(format!("{}.jsonl", spy.room));
+            std::fs::write(&room_log, b"fixture initial Room").unwrap();
+            std::fs::set_permissions(&room_log, std::fs::Permissions::from_mode(0o600)).unwrap();
             host.owners
                 .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
             spy.allow_board_queries.set(true);
@@ -13272,43 +13289,41 @@ pub(crate) mod tests {
             });
 
             let claude_empty = "❯\u{a0}\x1b[2mTry something\x1b[0m\n────\n";
-            let agy_empty = "\x1b[38;5;111m>\x1b[39m \x1b[38;5;109mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\x1b[39m\n────\n";
-
-            for (provider, pane, screen, account, task_text) in [
-                (
-                    "claude",
-                    "%4",
-                    claude_empty,
-                    Some("work"),
-                    "delegate claude work",
-                ),
-                ("antigravity", "%5", agy_empty, None, "delegate agy work"),
+            for (provider, pane, account, task_text) in [
+                ("claude", "%4", Some("work"), "delegate claude work"),
+                ("antigravity", "%5", None, "delegate agy work"),
             ] {
                 spy.calls.borrow_mut().clear();
                 spy.cursor_x.set(2);
-                spy.screens.borrow_mut().insert(pane.into(), screen.into());
-                spy.task_transition.replace(Some((
-                    "paste-buffer",
-                    Box::new(move |spy| {
-                        let text = spy.recent_screens.borrow()["_pending_paste"].clone();
-                        let marker = if provider == "claude" {
-                            "❯\u{a0}"
-                        } else {
-                            "> "
-                        };
-                        let draft = format!("{marker}{text}");
-                        spy.cursor_x.set(crate::render::width(&draft) as u32);
-                        spy.screens
-                            .borrow_mut()
-                            .insert(pane.into(), super::lead_box(&draft));
-                        spy.task_transition.replace(Some((
-                            "send-keys",
-                            Box::new(move |spy| {
-                                spy.screens.borrow_mut().insert(pane.into(), screen.into());
-                            }),
-                        )));
-                    }),
-                )));
+                if provider == "claude" {
+                    spy.screens
+                        .borrow_mut()
+                        .insert(pane.into(), claude_empty.into());
+                    spy.task_transition.replace(Some((
+                        "paste-buffer",
+                        Box::new(move |spy| {
+                            let text = spy.recent_screens.borrow()["_pending_paste"].clone();
+                            let draft = format!("❯\u{a0}{text}");
+                            spy.cursor_x.set(crate::render::width(&draft) as u32);
+                            spy.screens
+                                .borrow_mut()
+                                .insert(pane.into(), super::lead_box(&draft));
+                            spy.task_transition.replace(Some((
+                                "send-keys",
+                                Box::new(move |spy| {
+                                    spy.screens
+                                        .borrow_mut()
+                                        .insert(pane.into(), claude_empty.into());
+                                }),
+                            )));
+                        }),
+                    )));
+                } else {
+                    spy.agy_geometry.set(Some((126, 21)));
+                    spy.screens
+                        .borrow_mut()
+                        .insert(pane.into(), super::lead_box("> "));
+                }
                 let out = spy
                     .load()
                     .execute_with_host_cached(
@@ -13326,9 +13341,41 @@ pub(crate) mod tests {
                 assert_eq!(out["status"], "unknown");
                 assert_eq!(out["delivery"], "input_cleared_unverified");
                 assert_eq!(spy.calls_named("send-keys").len(), 1);
+                assert_eq!(spy.calls_named("send-keys")[0][3], pane);
                 let buffers = spy.calls_named("set-buffer");
                 assert_eq!(buffers.len(), 1);
-                let prompt = &buffers[0][5];
+                let wire = &buffers[0][5];
+                let full = if provider == "claude" {
+                    assert!(out.get("payload_consumption").is_none());
+                    assert!(spy.calls_named("if-shell").is_empty());
+                    wire.clone()
+                } else {
+                    assert_eq!(out["payload_consumption"], "unconfirmed");
+                    assert_eq!(spy.calls_named("if-shell").len(), 1);
+                    let turn = out["turn_id"].as_str().unwrap();
+                    let path = format!(".oms/artifacts/native-agy-tasks/{turn}.json");
+                    assert!(wire.contains(&format!("Turn {turn}.")));
+                    assert!(wire.ends_with(&format!("Read '{path}'; stop if unavailable.")));
+                    assert!(wire.is_ascii() && !wire.contains(task_text));
+                    assert!(!wire.contains(STARTUP_PROMPT.trim()));
+                    let file = spy.repo.join(path);
+                    assert_eq!(
+                        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                    let packet: Value =
+                        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+                    assert_eq!(packet["turn"], turn);
+                    assert_eq!(packet["scope"]["room"], spy.room);
+                    assert_eq!(packet["scope"]["lead"]["id"], pane);
+                    let payload = packet["payload"].as_str().unwrap();
+                    assert_eq!(
+                        packet["payload_sha256"],
+                        oms_panel_core::digest(payload.as_bytes())
+                    );
+                    payload.to_owned()
+                };
+                let prompt = &full;
                 assert!(prompt.contains(STARTUP_PROMPT.trim()));
                 assert!(prompt.chars().count() > CODEX_VISIBLE_PASTE_CHARS);
                 assert!(!prompt.contains(ALTERNATE_STARTUP_PROMPT));
