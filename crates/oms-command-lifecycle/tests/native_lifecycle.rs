@@ -4762,6 +4762,240 @@ printf 'ok\n'
 }
 
 #[test]
+fn doctor_adapter_conformance() {
+    const FIXTURE: &str = "OMS_ADAPTER_CONFORMANCE_FIXTURE";
+    let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) else {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("oms-adapter-conformance-{}", std::process::id())),
+        );
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&fixture.0)
+            .unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "doctor_adapter_conformance", "--nocapture"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", fixture.0.join("home"))
+            .env("XDG_CONFIG_HOME", fixture.0.join("config"))
+            .env("XDG_DATA_HOME", fixture.0.join("data"))
+            .env("XDG_STATE_HOME", fixture.0.join("state"))
+            .env("TMPDIR", &fixture.0)
+            .env(FIXTURE, &fixture.0)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    };
+    let source = root.join("source");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(root.join("home")).unwrap();
+    let adapters = source.join("adapters");
+    fs::create_dir(&adapters).unwrap();
+    let log = adapters.join("calls");
+    let host = NativeServices::default();
+    let script = |name: &str, body: &str| {
+        let path = adapters.join(name);
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${{0%/*}}/calls\"\n{body}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+    let probe = |adapter: &Path, extra: &[&str]| {
+        let mut args = vec![
+            "--providers",
+            "--conformance",
+            adapter.to_str().unwrap(),
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let out = call("doctor", &args, &source, &host);
+        assert!(out.2.is_empty(), "{}", String::from_utf8_lossy(&out.2));
+        let value: Value = serde_json::from_slice(&out.1).unwrap();
+        (out.0, value)
+    };
+    let check = |value: &Value, name: &str| {
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let good = script(
+        "oms-agent-adapter-fixture",
+        "case \"${1:-}\" in --version|--help) printf 'private probe detail\\n' >&2; exit 0 ;; *) exit 71 ;; esac",
+    );
+    let (code, result) = probe(
+        Path::new("adapters/oms-agent-adapter-fixture"),
+        &["--probe-bound", "08"],
+    );
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["kind"], "oms-adapter-conformance");
+    assert_eq!(result["mode"], "probe");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["adapter"], "fixture");
+    assert_eq!(result["probe_bound_seconds"], 8);
+    assert_eq!(check(&result, "version-probe")["status"], "ok");
+    assert_eq!(check(&result, "help-probe")["status"], "ok");
+    assert_eq!(check(&result, "read-call")["status"], "unknown");
+    assert_eq!(check(&result, "isolation")["status"], "unknown");
+    assert!(!result.to_string().contains("private probe detail"));
+    assert_eq!(fs::read_to_string(&log).unwrap(), "--version\n--help\n");
+    assert!(!source.join(".oms").exists());
+    assert!(!root.join("config").exists());
+    assert!(!root.join("data").exists());
+
+    for name in [
+        "Bad_Name".to_owned(),
+        "oms-agent-adapter-.bad".to_owned(),
+        "oms-agent-adapter-bad..id".to_owned(),
+        format!("oms-agent-adapter-{}", "a".repeat(65)),
+    ] {
+        let adapter = script(&name, "exit 0");
+        let before = fs::read(&log).unwrap();
+        let (code, result) = probe(&adapter, &[]);
+        assert_eq!(code, 1, "{result}");
+        assert_eq!(check(&result, "name")["status"], "fail");
+        assert_eq!(fs::read(&log).unwrap(), before, "invalid name executed");
+    }
+    let no_exec = script("oms-agent-adapter-disabled", "exit 0");
+    fs::set_permissions(&no_exec, fs::Permissions::from_mode(0o600)).unwrap();
+    let (code, result) = probe(&no_exec, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(check(&result, "executable")["status"], "fail");
+    let (code, result) = probe(&adapters.join("oms-agent-adapter-missing"), &[]);
+    assert_eq!(code, 1);
+    assert_eq!(check(&result, "executable")["status"], "fail");
+
+    let failed = script(
+        "oms-agent-adapter-failure",
+        "case \"$1\" in --version) printf 'private failure detail\\n' >&2; exit 7 ;; --help) exit 0 ;; *) exit 71 ;; esac",
+    );
+    let (code, result) = probe(&failed, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(check(&result, "version-probe")["exit"], 7);
+    assert_eq!(check(&result, "version-probe")["reason"], "nonzero_exit");
+    assert_eq!(check(&result, "help-probe")["status"], "ok");
+    assert!(!result.to_string().contains("private failure detail"));
+
+    for redirect in ["", " >&2"] {
+        let flood = script(
+            "oms-agent-adapter-overflow",
+            &format!(
+                "case \"$1\" in --version) exit 0 ;; --help) dd if=/dev/zero bs=65536 count=1{redirect} 2>/dev/null ;; *) exit 71 ;; esac"
+            ),
+        );
+        let (code, result) = probe(&flood, &[]);
+        assert_eq!(code, 1, "{result}");
+        assert_eq!(check(&result, "help-probe")["reason"], "output_limit");
+        assert!(result.to_string().len() < 4096);
+    }
+    let slow = script("oms-agent-adapter-slow", "exec sleep 30");
+    let started = Instant::now();
+    let (code, result) = probe(&slow, &["--probe-bound", "1"]);
+    assert_eq!(code, 1, "{result}");
+    assert_eq!(check(&result, "version-probe")["reason"], "deadline");
+    assert!(started.elapsed() < Duration::from_secs(15));
+
+    let interrupted = AtomicBool::new(false);
+    let before_length = fs::metadata(&log).unwrap().len();
+    let cancelled = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(3);
+            while fs::metadata(&log).unwrap().len() == before_length && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            interrupted.store(true, std::sync::atomic::Ordering::Release);
+        });
+        run_with_services(
+            "doctor",
+            &[
+                "--providers".into(),
+                "--conformance".into(),
+                slow.as_os_str().into(),
+            ],
+            &source,
+            &source,
+            &interrupted,
+            &host,
+        )
+    });
+    assert_eq!(
+        cancelled.0,
+        130,
+        "{}",
+        String::from_utf8_lossy(&cancelled.2)
+    );
+    let result: Value = serde_json::from_slice(&cancelled.1).unwrap();
+    assert_eq!(check(&result, "version-probe")["reason"], "cancelled");
+    assert_eq!(check(&result, "help-probe")["reason"], "not_started");
+
+    let before = fs::read(&log).unwrap();
+    for args in [
+        vec!["--conformance", good.to_str().unwrap()],
+        vec!["--providers", "--probe-bound", "1"],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--check",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--contract",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--table",
+            "unused",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--run",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--probe-bound",
+            "0",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--probe-bound",
+            "999999999999999999999",
+        ],
+    ] {
+        let out = call("doctor", &args, &source, &host);
+        assert_eq!(out.0, 2, "{args:?}: {}", String::from_utf8_lossy(&out.2));
+    }
+    assert_eq!(fs::read(&log).unwrap(), before, "invalid options executed");
+
+    // The established table/reference checker remains independent of probes.
+    doctor_provider_capability_evidence(&source, &root, &host);
+    assert_eq!(fs::read(&log).unwrap(), before);
+    assert!(host.0.borrow().is_empty());
+}
+
+#[test]
 fn agy_preinvocation_forwards_boolean_intake_intent_only() {
     use oms_command_operations::{StartRequest, create_attempt, load_projection, value::obj};
 
