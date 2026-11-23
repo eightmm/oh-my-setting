@@ -13,6 +13,8 @@ const TRANSCRIPT: &str = ".system_generated/logs/transcript.jsonl";
 const MAX_TRANSCRIPT: usize = 4 * 1024 * 1024;
 const MAX_LINE: usize = 256 * 1024;
 const CODEX_CANDIDATE_LIMIT: usize = 24;
+const CODEX_OLDER_PARENT_LOOKBACK_DAYS: u64 = 14;
+const CODEX_OLDER_PARENT_ENTRY_BUDGET: usize = 2048;
 const CODEX_READ_BUDGET: usize = 8 * 1024 * 1024;
 const CODEX_RECENT_ROOT_BYTES: usize = 1024 * 1024;
 const CODEX_CHAT_WINDOW: usize = 1024 * 1024;
@@ -479,6 +481,7 @@ fn codex_filename_id(path: &Path) -> Option<&str> {
     (stamp.len() > 1 && stamp.ends_with('-') && uuid(id)).then_some(id)
 }
 
+#[derive(Clone)]
 struct CodexRollout {
     path: PathBuf,
     snapshot: Stat,
@@ -500,6 +503,7 @@ impl CodexAnchor {
 struct CodexRollouts {
     home: PathBuf,
     root: OwnedFd,
+    today: chrono::NaiveDate,
     candidates: Vec<CodexRollout>,
 }
 
@@ -598,6 +602,7 @@ fn codex_candidates_at(
     Some(CodexRollouts {
         home,
         root,
+        today,
         candidates,
     })
 }
@@ -847,8 +852,8 @@ fn codex_interactions(
     seen
 }
 
-struct CodexParentSample<'a> {
-    rollout: &'a CodexRollout,
+struct CodexParentSample {
+    rollout: CodexRollout,
     file: File,
     sampled: Stat,
     header: Vec<u8>,
@@ -856,24 +861,209 @@ struct CodexParentSample<'a> {
     body: Vec<u8>,
 }
 
+fn codex_parent_source(meta: &Value) -> bool {
+    matches!(meta["source"].as_str(), Some("vscode" | "cli")) && meta["thread_source"] == "user"
+}
+
+fn codex_uuidv7_date(id: &str) -> Option<chrono::NaiveDate> {
+    let bytes = id.as_bytes();
+    if bytes.len() != 36
+        || !bytes.iter().enumerate().all(|(i, &b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+            }
+        })
+        || bytes[14] != b'7'
+        || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+    {
+        return None;
+    }
+    let hi = u64::from_str_radix(&id[0..8], 16).ok()?;
+    let lo = u64::from_str_radix(&id[9..13], 16).ok()?;
+    let ms = i64::try_from((hi << 16) | lo).ok()?;
+    Some(chrono::DateTime::from_timestamp_millis(ms)?.date_naive())
+}
+
+fn codex_older_parent_candidates(
+    rollouts: &CodexRollouts,
+    needed: &BTreeSet<&str>,
+    stop: &AtomicBool,
+) -> Option<Vec<CodexRollout>> {
+    if stop.load(Ordering::Acquire) {
+        return None;
+    }
+    if needed.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut window = Vec::with_capacity(CODEX_OLDER_PARENT_LOOKBACK_DAYS as usize);
+    let mut cursor = rollouts.today.pred_opt().and_then(|day| day.pred_opt());
+    for _ in 0..CODEX_OLDER_PARENT_LOOKBACK_DAYS {
+        let Some(date) = cursor else {
+            break;
+        };
+        window.push(date);
+        cursor = date.pred_opt();
+    }
+    let (Some(&newest), Some(&oldest)) = (window.first(), window.last()) else {
+        return Some(Vec::new());
+    };
+    let mut hinted_dates: BTreeMap<chrono::NaiveDate, BTreeSet<&str>> = BTreeMap::new();
+    let mut unhinted: BTreeSet<&str> = BTreeSet::new();
+    for &id in needed {
+        if let Some(hint_day) = codex_uuidv7_date(id) {
+            for date in [hint_day.pred_opt(), Some(hint_day), hint_day.succ_opt()]
+                .into_iter()
+                .flatten()
+                .filter(|date| (oldest..=newest).contains(date))
+            {
+                hinted_dates.entry(date).or_default().insert(id);
+            }
+        } else {
+            unhinted.insert(id);
+        }
+    }
+    if hinted_dates.is_empty() && unhinted.is_empty() {
+        return Some(Vec::new());
+    }
+    let owner = rustix::process::geteuid().as_raw();
+    if fs::fstat(&rollouts.root).ok()?.st_uid != owner {
+        return None;
+    }
+    rollouts.root_unchanged()?;
+    let mut found = BTreeMap::new();
+    let mut entries_remaining = CODEX_OLDER_PARENT_ENTRY_BUDGET;
+    let mut truncated = false;
+    for date in window {
+        if unhinted.is_empty() && !hinted_dates.contains_key(&date) {
+            continue;
+        }
+        if entries_remaining == 0 {
+            truncated = true;
+            break;
+        }
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+        let path = Path::new("sessions").join(date.format("%Y/%m/%d").to_string());
+        let Some(dir) = codex_directory(&rollouts.root, &path) else {
+            continue;
+        };
+        let Ok(entries) = Dir::read_from(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            if entries_remaining == 0 {
+                truncated = true;
+                break;
+            }
+            entries_remaining -= 1;
+            if stop.load(Ordering::Acquire) {
+                return None;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let name = entry.file_name();
+            let Ok(filename) = name.to_str() else {
+                continue;
+            };
+            let Some(id) = codex_filename_id(Path::new(filename)) else {
+                continue;
+            };
+            if !needed.contains(id) {
+                continue;
+            }
+            if let Ok(stat) = fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)
+                && FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                && stat.st_uid == owner
+                && stat.st_nlink == 1
+                && stat.st_size >= 0
+            {
+                let rollout = CodexRollout {
+                    path: path.join(filename),
+                    snapshot: stat,
+                };
+                if found.insert(id.to_owned(), rollout).is_some() {
+                    return None;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+    if truncated && !found.is_empty() {
+        return None;
+    }
+    Some(found.into_values().collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn codex_verify_parent(
+    rollouts: &CodexRollouts,
+    rollout: &CodexRollout,
+    mut file: File,
+    sampled: Stat,
+    size: u64,
+    header_bytes: Vec<u8>,
+    id: &str,
+    turn: &str,
+    remaining: &mut usize,
+    stop: &AtomicBool,
+) -> Option<Option<CodexParentSample>> {
+    // Every eligible root's scan must fit the shared budget to prove uniqueness.
+    let recent_only = size > MAX_TRANSCRIPT as u64;
+    let offset = if recent_only {
+        // Probe the byte before the suffix for an LF at the boundary.
+        size - CODEX_RECENT_ROOT_BYTES as u64 - 1
+    } else {
+        header_bytes.len() as u64
+    };
+    let len = usize::try_from(size.checked_sub(offset)?).ok()?;
+    if stop.load(Ordering::Acquire) {
+        return None;
+    }
+    let body = codex_read_range(&mut file, offset, len, remaining)?.ok()?;
+    let matched = codex_has_assignment(&body, recent_only, id, turn);
+    if !rollouts.confirm_snapshot(
+        rollout,
+        &mut file,
+        &sampled,
+        &[(0, &header_bytes), (offset, &body)],
+        remaining,
+    )? {
+        return None;
+    }
+    Some(matched.then(|| CodexParentSample {
+        rollout: rollout.clone(),
+        file,
+        sampled,
+        header: header_bytes,
+        offset,
+        body,
+    }))
+}
+
 #[cfg(test)]
-fn codex_rows<'a>(
-    rollouts: &'a CodexRollouts,
+fn codex_rows(
+    rollouts: &CodexRollouts,
     repo: &Path,
     turn: &str,
     remaining: &mut usize,
-) -> Option<(ObservedChildren, CodexParentSample<'a>)> {
+) -> Option<(ObservedChildren, CodexParentSample)> {
     codex_rows_at(rollouts, repo, turn, remaining, codex_now_ms())
 }
 
 #[cfg(test)]
-fn codex_rows_at<'a>(
-    rollouts: &'a CodexRollouts,
+fn codex_rows_at(
+    rollouts: &CodexRollouts,
     repo: &Path,
     turn: &str,
     remaining: &mut usize,
     now_ms: u64,
-) -> Option<(ObservedChildren, CodexParentSample<'a>)> {
+) -> Option<(ObservedChildren, CodexParentSample)> {
     codex_rows_checked(
         rollouts,
         repo,
@@ -893,17 +1083,18 @@ fn codex_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn codex_rows_checked<'a>(
-    rollouts: &'a CodexRollouts,
+fn codex_rows_checked(
+    rollouts: &CodexRollouts,
     repo: &Path,
     turn: &str,
     remaining: &mut usize,
     stop: &AtomicBool,
     now_ms: u64,
     project_usage: bool,
-) -> Option<(ObservedChildren, CodexParentSample<'a>)> {
-    let mut parent = None;
+) -> Option<(ObservedChildren, CodexParentSample)> {
+    let mut parent: Option<(String, CodexParentSample)> = None;
     let mut children = Vec::new();
+    let mut recent_ids = BTreeSet::new();
     for rollout in &rollouts.candidates {
         if stop.load(Ordering::Acquire) {
             return None;
@@ -911,6 +1102,7 @@ fn codex_rows_checked<'a>(
         let Some(id) = codex_filename_id(&rollout.path) else {
             continue;
         };
+        recent_ids.insert(id);
         // An unreadable selected header could belong to another eligible root.
         let (mut file, sampled) = rollouts.open(rollout)?;
         let size = u64::try_from(sampled.st_size).ok()?;
@@ -929,7 +1121,6 @@ fn codex_rows_checked<'a>(
             continue;
         };
         let meta = &header["payload"];
-        let source = &meta["source"];
         let spawn = codex_spawn(&header);
         let spawned_by = text(spawn, "parent_thread_id");
         if uuid(spawned_by) && spawned_by != id {
@@ -952,42 +1143,21 @@ fn codex_rows_checked<'a>(
                 started,
                 codex_child_title(spawn).to_owned(),
             ));
-        } else if source == "vscode" && meta["thread_source"] == "user" {
-            // Every eligible root's scan must fit the shared budget to prove uniqueness.
-            let recent_only = size > MAX_TRANSCRIPT as u64;
-            let offset = if recent_only {
-                // Probe the byte before the suffix for an LF at the boundary.
-                size - CODEX_RECENT_ROOT_BYTES as u64 - 1
-            } else {
-                header_bytes.len() as u64
-            };
-            let len = usize::try_from(size.checked_sub(offset)?).ok()?;
-            if stop.load(Ordering::Acquire) {
-                return None;
-            }
-            let body = codex_read_range(&mut file, offset, len, remaining)?.ok()?;
-            let matched = codex_has_assignment(&body, recent_only, id, turn);
-            if !rollouts.confirm_snapshot(
+        } else if codex_parent_source(meta) {
+            if let Some(sample) = codex_verify_parent(
+                rollouts,
                 rollout,
-                &mut file,
-                &sampled,
-                &[(0, &header_bytes), (offset, &body)],
+                file,
+                sampled,
+                size,
+                header_bytes,
+                id,
+                turn,
                 remaining,
-            )? {
+                stop,
+            )? && parent.replace((id.to_owned(), sample)).is_some()
+            {
                 return None;
-            }
-            if matched {
-                let sample = CodexParentSample {
-                    rollout,
-                    file,
-                    sampled,
-                    header: header_bytes,
-                    offset,
-                    body,
-                };
-                if parent.replace((id, sample)).is_some() {
-                    return None;
-                }
             }
         } else {
             rollouts
@@ -1001,9 +1171,65 @@ fn codex_rows_checked<'a>(
                 .then_some(())?;
         }
     }
+    let missing_parents: BTreeSet<&str> = children
+        .iter()
+        .map(|(_, _, by, _, _)| by.as_str())
+        .filter(|&by| !recent_ids.contains(by))
+        .collect();
+    for rollout in codex_older_parent_candidates(rollouts, &missing_parents, stop)? {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+        let Some(id) = codex_filename_id(&rollout.path) else {
+            continue;
+        };
+        let (mut file, sampled) = rollouts.open(&rollout)?;
+        let size = u64::try_from(sampled.st_size).ok()?;
+        let header_bytes = codex_read_header(&mut file, size, remaining)?;
+        let Some(header) = codex_header(&header_bytes, id, repo) else {
+            rollouts
+                .confirm_snapshot(
+                    &rollout,
+                    &mut file,
+                    &sampled,
+                    &[(0, &header_bytes)],
+                    remaining,
+                )?
+                .then_some(())?;
+            continue;
+        };
+        if codex_parent_source(&header["payload"]) {
+            if let Some(sample) = codex_verify_parent(
+                rollouts,
+                &rollout,
+                file,
+                sampled,
+                size,
+                header_bytes,
+                id,
+                turn,
+                remaining,
+                stop,
+            )? && parent.replace((id.to_owned(), sample)).is_some()
+            {
+                return None;
+            }
+        } else {
+            rollouts
+                .confirm_snapshot(
+                    &rollout,
+                    &mut file,
+                    &sampled,
+                    &[(0, &header_bytes)],
+                    remaining,
+                )?
+                .then_some(())?;
+        }
+    }
     let root = rollouts.root_unchanged()?;
-    let (parent_id, mut parent_sample) = parent?;
-    let parent = CodexAnchor::new(parent_id, parent_sample.rollout);
+    let (parent_id_owned, mut parent_sample) = parent?;
+    let parent_id = parent_id_owned.as_str();
+    let parent = CodexAnchor::new(parent_id, &parent_sample.rollout);
     let mut counts = BTreeMap::new();
     for (id, _, _, _, _) in &children {
         *counts.entry(*id).or_insert(0) += 1;
@@ -1108,7 +1334,7 @@ fn codex_rows_checked<'a>(
         .any(|row| row.get("native_response_usage").is_some());
     if rollouts.root_unchanged()? != root
         || rollouts
-            .status(parent_sample.rollout, &parent_sample.file)
+            .status(&parent_sample.rollout, &parent_sample.file)
             .is_none()
     {
         return None;
@@ -1116,7 +1342,7 @@ fn codex_rows_checked<'a>(
     if has_usage {
         let confirmed = rollouts
             .confirm_snapshot(
-                parent_sample.rollout,
+                &parent_sample.rollout,
                 &mut parent_sample.file,
                 &parent_sample.sampled,
                 &[
@@ -1128,7 +1354,7 @@ fn codex_rows_checked<'a>(
             .unwrap_or(false);
         if rollouts.root_unchanged()? != root
             || rollouts
-                .status(parent_sample.rollout, &parent_sample.file)
+                .status(&parent_sample.rollout, &parent_sample.file)
                 .is_none()
         {
             return None;
@@ -1318,7 +1544,7 @@ fn codex_chat_checked(
         )?
         .then_some(())?;
     (rollouts.confirm_snapshot(
-        parent.rollout,
+        &parent.rollout,
         &mut parent.file,
         &parent.sampled,
         &[(0, &parent.header), (parent.offset, &parent.body)],
@@ -4675,6 +4901,293 @@ mod tests {
             titles,
             BTreeSet::from(["Ada", "[oms-redacted:github-token]", "Native subagent"])
         );
+    }
+
+    #[test]
+    fn codex_discovers_older_verified_vscode_and_cli_parent_for_new_child() {
+        let older = chrono::NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        let terminal = format!("› {}\n", codex_prompt(TURN));
+        for source in ["vscode", "cli"] {
+            let fixture = RolloutFixture::new(&format!("older-parent-{source}"));
+            let repo = fixture.store.repo();
+            fixture.write(
+                older,
+                PARENT,
+                &[
+                    codex_meta(PARENT, repo, json!(source)),
+                    codex_user_event(PARENT, TURN),
+                ],
+            );
+            fixture.write(
+                fixture.date,
+                CHILD,
+                &[
+                    codex_child_meta(CHILD, repo),
+                    codex_context("reply-turn", repo),
+                    codex_agent_event(CHILD, "reply-turn", "older parent reply"),
+                ],
+            );
+            let observed = fixture.projection(TURN).unwrap();
+            let participant = participant_id("codex", CHILD);
+            assert_eq!(observed.rows.len(), 1);
+            assert_eq!(text(&observed.rows[0], "participant"), participant);
+            let locator = observed.codex.get(&participant).unwrap();
+            assert_eq!(
+                fixture.chat(&terminal, locator).as_deref(),
+                Some("older parent reply")
+            );
+        }
+    }
+
+    #[test]
+    fn codex_rejects_older_parent_with_wrong_scope_or_source() {
+        let older = chrono::NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        let fixture = RolloutFixture::new("older-parent-wrong-scope");
+        let repo = fixture.store.repo();
+        let other_repo = repo.join("other");
+        std::fs::create_dir(&other_repo).unwrap();
+        fixture.write(fixture.date, CHILD, &[codex_child_meta(CHILD, repo)]);
+
+        // Wrong repo/cwd.
+        fixture.write(
+            older,
+            PARENT,
+            &[
+                codex_meta(PARENT, &other_repo, json!("cli")),
+                codex_user_event(PARENT, TURN),
+            ],
+        );
+        assert!(fixture.observe(TURN).is_none());
+
+        // Wrong thread_source (not "user").
+        let mut non_user = codex_meta(PARENT, repo, json!("cli"));
+        non_user["payload"]["thread_source"] = json!("subagent");
+        fixture.write(older, PARENT, &[non_user, codex_user_event(PARENT, TURN)]);
+        assert!(fixture.observe(TURN).is_none());
+
+        // Unsupported source.
+        fixture.write(
+            older,
+            PARENT,
+            &[
+                codex_meta(PARENT, repo, json!("exec")),
+                codex_user_event(PARENT, TURN),
+            ],
+        );
+        assert!(fixture.observe(TURN).is_none());
+    }
+
+    #[test]
+    fn codex_rejects_duplicate_older_parent_files() {
+        let older = chrono::NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        let earlier = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let fixture = RolloutFixture::new("older-parent-duplicate");
+        let repo = fixture.store.repo();
+        let parent_rows = [
+            codex_meta(PARENT, repo, json!("cli")),
+            codex_user_event(PARENT, TURN),
+        ];
+        fixture.write(older, PARENT, &parent_rows);
+        fixture.write(fixture.date, CHILD, &[codex_child_meta(CHILD, repo)]);
+        assert!(fixture.observe(TURN).is_some());
+
+        // Duplicate matching the same parent_thread_id in the same older date directory.
+        let same_day_dup = fixture
+            .path(older, PARENT)
+            .with_file_name(format!("rollout-2026-11-13T16-02-02-{PARENT}.jsonl"));
+        std::fs::copy(fixture.path(older, PARENT), &same_day_dup).unwrap();
+        assert!(fixture.observe(TURN).is_none());
+        std::fs::remove_file(&same_day_dup).unwrap();
+        assert!(fixture.observe(TURN).is_some());
+
+        // Duplicate matching the same parent_thread_id in another older date directory.
+        fixture.write(earlier, PARENT, &parent_rows);
+        assert!(fixture.observe(TURN).is_none());
+    }
+
+    #[test]
+    fn codex_bounds_older_parent_lookback_budget_and_stop() {
+        let too_old = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let edge = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let fixture = RolloutFixture::new("older-parent-bounds");
+        let repo = fixture.store.repo();
+        let parent_rows = [
+            codex_meta(PARENT, repo, json!("cli")),
+            codex_user_event(PARENT, TURN),
+        ];
+        fixture.write(fixture.date, CHILD, &[codex_child_meta(CHILD, repo)]);
+
+        // Beyond the 14-day lookback cap (today - 16): not discovered.
+        fixture.write(too_old, PARENT, &parent_rows);
+        assert!(fixture.observe(TURN).is_none());
+
+        // At the exact 14-day lookback boundary (today - 15): discovered without scanning too_old.
+        fixture.write(edge, PARENT, &parent_rows);
+        assert!(fixture.observe(TURN).is_some());
+
+        // Exhausted remaining budget after reading the child header stops boundedly.
+        let rollouts = fixture.rollouts();
+        let mut tight = std::fs::read(fixture.path(fixture.date, CHILD))
+            .unwrap()
+            .len();
+        assert!(codex_rows(&rollouts, repo, TURN, &mut tight).is_none());
+        assert_eq!(tight, 0);
+
+        // Pre-set stop flag aborts without consuming read budget.
+        let mut remaining = CODEX_READ_BUDGET;
+        assert!(
+            codex_rows_checked(
+                &rollouts,
+                repo,
+                TURN,
+                &mut remaining,
+                &AtomicBool::new(true),
+                0,
+                true,
+            )
+            .is_none()
+        );
+        assert_eq!(remaining, CODEX_READ_BUDGET);
+    }
+
+    fn codex_uuidv7(date: chrono::NaiveDate, suffix: &str) -> String {
+        let ms = u64::try_from(
+            date.and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis(),
+        )
+        .unwrap();
+        let hi = (ms >> 16) as u32;
+        let lo = (ms & 0xffff) as u16;
+        format!("{hi:08x}-{lo:04x}-7000-8000-{suffix:0>12}")
+    }
+
+    fn write_codex_decoys(repo: &Path, date: chrono::NaiveDate, count: usize) {
+        let dir = repo
+            .join("sessions")
+            .join(date.format("%Y/%m/%d").to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..count {
+            std::fs::File::create(dir.join(format!("d{i}"))).unwrap();
+        }
+    }
+
+    #[test]
+    fn codex_uuidv7_hint_skips_unhinted_days_and_honors_timezone_margin() {
+        let hint_day = chrono::NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        let tz_prev = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let tz_next = chrono::NaiveDate::from_ymd_opt(2026, 11, 14).unwrap();
+        let decoy_day_1 = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        let decoy_day_2 = chrono::NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+        let ancient_day = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let edge_day = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+
+        let p_exact = codex_uuidv7(hint_day, "1");
+        assert_eq!(codex_uuidv7_date(&p_exact), Some(hint_day));
+        assert_eq!(codex_uuidv7_date(PARENT), None);
+        assert_eq!(codex_uuidv7_date(&p_exact.to_ascii_uppercase()), None);
+        let bad_variant = format!("{}-c000-{}", &p_exact[..18], &p_exact[24..]);
+        assert_eq!(codex_uuidv7_date(&bad_variant), None);
+
+        let fixture = RolloutFixture::new("older-parent-uuidv7-hint");
+        let repo = fixture.store.repo();
+        // More than CODEX_OLDER_PARENT_ENTRY_BUDGET decoys in unhinted days (today - 2, today - 3).
+        write_codex_decoys(repo, decoy_day_1, 1100);
+        write_codex_decoys(repo, decoy_day_2, 1100);
+
+        let write_child = |parent_id: &str| {
+            fixture.write(
+                fixture.date,
+                CHILD,
+                &[codex_meta(
+                    CHILD,
+                    repo,
+                    json!({"subagent": {"thread_spawn": {"parent_thread_id": parent_id}}}),
+                )],
+            );
+        };
+
+        // Exact hint day succeeds despite >2048 decoys in unhinted intermediate days.
+        fixture.write(
+            hint_day,
+            &p_exact,
+            &[
+                codex_meta(&p_exact, repo, json!("cli")),
+                codex_user_event(&p_exact, TURN),
+            ],
+        );
+        write_child(&p_exact);
+        let rows = fixture.observe(TURN).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            text(&rows[0], "participant"),
+            participant_id("codex", CHILD)
+        );
+
+        // Timezone margin: parent stored at hint_day - 1 succeeds.
+        let p_tz = codex_uuidv7(hint_day, "2");
+        fixture.write(
+            tz_prev,
+            &p_tz,
+            &[
+                codex_meta(&p_tz, repo, json!("vscode")),
+                codex_user_event(&p_tz, TURN),
+            ],
+        );
+        write_child(&p_tz);
+        assert_eq!(fixture.observe(TURN).unwrap().len(), 1);
+
+        // Timezone margin: parent stored at hint_day + 1 succeeds.
+        std::fs::remove_file(fixture.path(tz_prev, &p_tz)).unwrap();
+        fixture.write(
+            tz_next,
+            &p_tz,
+            &[
+                codex_meta(&p_tz, repo, json!("cli")),
+                codex_user_event(&p_tz, TURN),
+            ],
+        );
+        assert_eq!(fixture.observe(TURN).unwrap().len(), 1);
+
+        // UUIDv7 older than today - 16 has no intersection with lookback window -> 0 dirs opened.
+        let p_ancient = codex_uuidv7(ancient_day, "3");
+        fixture.write(
+            edge_day,
+            &p_ancient,
+            &[
+                codex_meta(&p_ancient, repo, json!("cli")),
+                codex_user_event(&p_ancient, TURN),
+            ],
+        );
+        write_child(&p_ancient);
+        assert!(fixture.observe(TURN).is_none());
+    }
+
+    #[test]
+    fn codex_unhinted_older_parent_stops_at_shared_entry_budget() {
+        let decoy_day_1 = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        let decoy_day_2 = chrono::NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+        let parent_day = chrono::NaiveDate::from_ymd_opt(2026, 11, 14).unwrap();
+
+        let fixture = RolloutFixture::new("older-parent-shared-cap");
+        let repo = fixture.store.repo();
+        assert_eq!(codex_uuidv7_date(PARENT), None);
+        fixture.write(
+            parent_day,
+            PARENT,
+            &[
+                codex_meta(PARENT, repo, json!("cli")),
+                codex_user_event(PARENT, TURN),
+            ],
+        );
+        fixture.write(fixture.date, CHILD, &[codex_child_meta(CHILD, repo)]);
+        assert!(fixture.observe(TURN).is_some());
+
+        // Decoys across earlier days exhaust the shared CODEX_OLDER_PARENT_ENTRY_BUDGET.
+        write_codex_decoys(repo, decoy_day_1, 1100);
+        write_codex_decoys(repo, decoy_day_2, 1100);
+        assert!(fixture.observe(TURN).is_none());
     }
 
     fn agy_planner(calls: Value) -> Value {

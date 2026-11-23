@@ -596,6 +596,19 @@ fn agy_weekly_remaining(v: &Value, ctx: &Context<'_>) -> Option<String> {
     })
 }
 
+fn agy_has_running_subagent(v: &Value) -> bool {
+    v.get("subagents")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.as_object()
+                    .and_then(|obj| obj.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("running")
+            })
+        })
+}
+
 fn agy(v: &Value, unambiguous: bool, ctx: &Context<'_>) -> String {
     let mut parts = Vec::new();
     let model = &v["model"];
@@ -647,7 +660,11 @@ fn agy(v: &Value, unambiguous: bool, ctx: &Context<'_>) -> String {
                         | "error"
                 ) =>
         {
-            state.clone()
+            if state == "idle" && agy_has_running_subagent(v) {
+                "working".to_owned()
+            } else {
+                state.clone()
+            }
         }
         _ => String::new(),
     };
