@@ -12,7 +12,7 @@ pub(super) struct Current {
     pub task: Value,
 }
 
-fn settled(task: &Value) -> bool {
+pub(super) fn settled(task: &Value) -> bool {
     matches!(task["state"].as_str(), Some("done" | "cancelled"))
         && task["completion_verified"] != false
 }
@@ -88,7 +88,7 @@ pub(super) fn guard_lead(
         if operation["task_id"] == task["id"]
             && operation["refs"]["plan_id"] == task["plan_id"]
             && operation["refs"]["lease_id"] == task["lease_id"]
-            && operation["parent_attempt_id"] == panel.attempt
+            && native_succession::selected(panel, operation)
         {
             continue;
         }
@@ -114,9 +114,12 @@ pub(super) fn guard_lead(
                 && old["lease_id"] == operation["refs"]["lease_id"]
                 && old["lease_epoch"] == binding["task"]["lease_epoch"]
                 && old["provider"] == binding["task"]["provider"]
-                && old["claimed_by_participant"] == operation["parent_attempt_id"]
+                && binding
+                    .get("parent_participant")
+                    .unwrap_or(&binding["parent_attempt_id"])
+                    == &old["claimed_by_participant"]
                 && settled(&old)
-                && operation["parent_attempt_id"] == panel.attempt,
+                && native_succession::selected(panel, operation),
             &unresolved,
         )?;
         fresh_main(panel, &AttemptCache::default())?;
@@ -128,6 +131,7 @@ pub(super) fn guard_lead(
 
 fn retire(panel: &Panel<'_>, operation: &Value, plan_state: &str) -> Result<()> {
     let attempt = text(operation, "attempt_id");
+    let parent = native_succession::retirement_parent(panel, operation)?;
     let room = commands::query(
         panel.services,
         NativeCommand::Room,
@@ -143,7 +147,7 @@ fn retire(panel: &Panel<'_>, operation: &Value, plan_state: &str) -> Result<()> 
         .iter()
         .find(|p| {
             p["participant"] == attempt
-                && p["parent"] == panel.attempt
+                && p["parent"] == parent
                 && p["provider"] == "codex"
                 && p["role"] == "worker"
                 && p["joined"].is_boolean()
@@ -252,7 +256,7 @@ pub(super) fn annotate(panel: &Panel<'_>, operation: &Value, key: &str, refs: Va
     annotate_checked(panel, operation, key, refs, false)
 }
 
-fn annotate_checked(
+pub(super) fn annotate_checked(
     panel: &Panel<'_>,
     operation: &Value,
     key: &str,
@@ -323,7 +327,7 @@ pub(super) fn packet(panel: &Panel<'_>, operation: &Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn fresh_main<'a>(panel: &Panel<'a>, attempts: &AttemptCache) -> Result<Panel<'a>> {
+pub(super) fn fresh_main<'a>(panel: &Panel<'a>, attempts: &AttemptCache) -> Result<Panel<'a>> {
     let fresh = panel.reload()?;
     require(
         fresh.room == panel.room
@@ -347,6 +351,7 @@ pub(super) fn check_custody(
     attempts: &AttemptCache,
 ) -> Result<()> {
     let fresh = fresh_main(panel, attempts)?;
+    let assignment = native_succession::custody(&fresh, assignment)?;
     let lead = panel
         .leads
         .get("codex")
@@ -391,7 +396,6 @@ pub(super) fn load(
     let operation = native_assignment::current_operation(panel, attempt)?;
     require(
         operation["tool"] == "panel-native-assignment"
-            && operation["parent_attempt_id"] == panel.attempt
             && operation["refs"]["panel_room_id"] == panel.room,
         "native result is not owned by this Main and Room",
     )?;
@@ -399,20 +403,20 @@ pub(super) fn load(
         .ok_or_else(|| Error::new("legacy native assignment has no typed return contract; reconcile it with its existing owner"))?;
     require(
         assignment.attempt_id() == attempt
-            && assignment.parent_attempt_id() == panel.attempt
+            && assignment.parent_attempt_id() == text(&operation, "parent_attempt_id")
             && assignment.room() == panel.room
-            && assignment.owner() == panel.owner
             && assignment.task_id() == text(&operation, "task_id")
             && assignment.plan_id() == text(&operation["refs"], "plan_id")
             && assignment.lease_id() == text(&operation["refs"], "lease_id"),
         "native return assignment identity differs from the lifecycle owner",
     )?;
+    native_succession::authorize(panel, &operation, &assignment)?;
     let task = native_assignment::task(panel, assignment.task_id())?;
     require(
         task["plan_id"] == assignment.plan_id()
             && task["lease_id"] == assignment.lease_id()
             && task["lease_epoch"] == assignment.lease_epoch()
-            && task["claimed_by_participant"] == panel.attempt
+            && task["claimed_by_participant"] == assignment.parent_participant()
             && oms_panel_core::native_contract::stable_task_sha256(&task)?
                 == assignment.task_sha256(),
         "native return task, lease or frozen criteria changed",
@@ -439,14 +443,14 @@ pub(super) fn load(
     let joined = crate::rows(&room["participants"]).iter().any(|p| {
         p["participant"] == attempt
             && p["joined"] == true
-            && p["parent"] == panel.attempt
+            && p["parent"] == assignment.parent_participant()
             && p["provider"] == "codex"
             && p["role"] == "worker"
     });
     let left = crate::rows(&room["participants"]).iter().any(|p| {
         p["participant"] == attempt
             && p["joined"] == false
-            && p["parent"] == panel.attempt
+            && p["parent"] == assignment.parent_participant()
             && p["provider"] == "codex"
             && p["role"] == "worker"
     });
@@ -526,7 +530,7 @@ fn notice(
                 "--participant",
                 current.assignment.attempt_id(),
                 "--to",
-                &panel.attempt,
+                &panel.participant,
                 "--kind",
                 "status",
                 "--message-id",
@@ -568,9 +572,7 @@ fn retire_unsent(
     require(
         operation["tool"] == "panel-native-assignment"
             && operation["provider"] == "codex"
-            && operation["parent_attempt_id"] == panel.attempt
-            && refs["panel_room_id"] == panel.room
-            && refs["panel_owner"] == panel.owner
+            && native_succession::original_custodian(panel, &operation)
             && refs["native_assignment_schema"] == "1"
             && refs["native_return_schema"] == "1"
             && refs["native_intent_sha256"] == intent,
@@ -592,7 +594,7 @@ fn retire_unsent(
                 && task["plan_id"] == refs["plan_id"]
                 && task["lease_id"] == refs["lease_id"]
                 && task["provider"] == panel.owner
-                && task["claimed_by_participant"] == panel.attempt,
+                && task["claimed_by_participant"] == panel.participant,
             "native intent no longer owns its exact canonical Plan claim",
         )?;
     }
@@ -729,7 +731,7 @@ pub(super) fn reconcile(
         )?;
         if decision == "reviewed" && candidate {
             if current.task["state"] != "review" {
-                native_assignment::claimed(panel, &current.task)?;
+                native_succession::claimed(panel, &current.task, &current.operation)?;
                 tx.check()?;
                 panel
                     .services
@@ -756,7 +758,7 @@ pub(super) fn reconcile(
                     .success()?;
             }
         } else {
-            native_assignment::claimed(panel, &current.task)?;
+            native_succession::claimed(panel, &current.task, &current.operation)?;
         }
         let fresh = load(panel, &attempt, host, &AttemptCache::default())?;
         require(

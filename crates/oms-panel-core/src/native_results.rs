@@ -387,6 +387,7 @@ fn typed_view(
     projected["binding_sha256"] = assignment.sha256().into();
     projected["attempt_id"] = assignment.attempt_id().into();
     projected["parent_attempt_id"] = assignment.parent_attempt_id().into();
+    projected["parent_participant"] = assignment.parent_participant().into();
     projected["task_id"] = assignment.task_id().into();
     projected["plan_id"] = assignment.plan_id().into();
     projected["lease_id"] = assignment.lease_id().into();

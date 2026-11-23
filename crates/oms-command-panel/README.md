@@ -224,6 +224,29 @@ Replacing a typed report within a round instead requires both the manifest's
 the first report need no replacement flag. These public digests identify the
 retained result artifact, not its source file.
 
+After a canonical Main swap, Results offers
+`--native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]`.
+The new Main explicitly adopts the exact current assignment and, if present, its
+retained result. Omitting the result digest asserts that no current result exists.
+The producer proves the ordered Room swap lineage, outgoing wrapper/native process
+absence, and fresh successor Main custody. An immutable successor record preserves
+the original task claimant, lease, attempt, round and account binding. The stable
+Room participant is distinct from the new Main attempt; no claim or budget is reset.
+The original Codex Lead/account proof is rechecked through its original private
+anchor, without changing accounts or reentering provider input. Supported Main
+provider swaps retain this ordinary Codex Lead boundary.
+
+Import, reconciliation, report revision and another round work after adoption.
+Unknown input remains unknown and is not replayed. A canonically done/cancelled task
+instead permits retirement-only adoption: the original checkout may have advanced,
+but this mode cannot reopen execution. The next task obtains its own ordinary
+claim and freshly checked checkout after the prior reservation is retired.
+Existing tick reminders follow the checked successor, revalidate its current
+session and process, and include the new Main attempt in their dedupe identity.
+A cue delivered before the swap therefore does not hide unconsumed work from the
+successor; it still spends the same daily wake quota. Retirement-only custody
+produces an administrative retirement reminder, never an import or execution decision.
+
 A reviewed candidate can enter canonical Plan review with the exact lease and
 captured patch. Existing `patch-admit`/`patch-land --plan-task` verification and
 genuine Plan finish still own acceptance. After canonical completion or

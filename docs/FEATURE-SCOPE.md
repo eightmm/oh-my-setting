@@ -333,3 +333,27 @@ Other native providers use managed task dispatch until their bound adapters exis
 explicit unbound conversations receive no canonical task credit. The practical
 [two-layer return workflow](TERMINAL-PANEL.md#retain-a-bound-native-report) documents
 the public result digest separately from the source digest and remaining limits.
+
+## Native Main succession
+
+[Explicit adoption](../crates/oms-command-panel/src/native_succession.rs) connects a
+canonical Main swap to an existing typed native assignment. A bounded
+[immutable custody chain](../crates/oms-panel-core/src/native_succession.rs) retains
+the original Plan claimant/lease, assignment attempt, packet/report digests, round
+and account identity. The producer proves the ordered canonical swap target and
+outgoing wrapper/native process absence, then freshly validates successor Main
+and the existing ordinary Codex Lead/account/checkout. Same-Room membership alone
+does not grant authority. The old Main cannot continue mutating the assignment.
+
+Results provides an exact `--native-adopt` action before import, reconciliation,
+revision or continuation by the successor. Same-byte replay is idempotent and a
+new round carries the checked custody digest without rewriting its predecessor.
+Stable Room participant and Main lifecycle attempt are frozen separately for new
+assignments, so the successor can claim a new task after retiring the previous one.
+Canonical done/cancelled work permits retirement-only adoption after checkout
+advance; it supplies no permission to reopen execution or prove child cleanup.
+Adoption adds no claim, input submission, budget reset or acceptance authority.
+The existing tick reminder follows the checked successor with fresh process and
+session proof. Wake deduplication includes the current Main attempt as well as the
+original assignment and input/result digest; daily quota and result identity
+are preserved. Retirement-only custody emits administrative guidance only.

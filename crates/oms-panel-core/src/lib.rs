@@ -19,6 +19,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod native_contract;
 pub mod native_results;
+pub mod native_succession;
 pub mod release;
 pub mod results;
 pub mod review;
