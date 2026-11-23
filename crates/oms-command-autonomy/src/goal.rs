@@ -352,6 +352,16 @@ fn evidence(ctx: &Context<'_>, path: &str) -> Result<Vec<u8>> {
         path.starts_with(&ctx.state),
         "task evidence escaped canonical state repository",
     )?;
+    // Native landing publications retain a second link to their certified
+    // anchor. Only the existing capture owner may validate those bytes;
+    // ordinary evidence still requires the Store's single-link invariant.
+    if path.parent() == Some(ctx.state.join(".oms/landing-patches").as_path())
+        && let Some(bytes) = ctx
+            .services
+            .read_managed_patch(&ctx.state, &path, 16 * MAX_FILE)?
+    {
+        return Ok(bytes);
+    }
     Ok(ctx.store.read(path, 16 * MAX_FILE)?)
 }
 fn completed_landing(ctx: &Context<'_>, id: &str) -> Result<Value> {
