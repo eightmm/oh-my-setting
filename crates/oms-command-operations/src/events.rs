@@ -122,7 +122,24 @@ pub fn append_lifecycle_checked<F>(
 where
     F: FnOnce(&[V], Option<&V>) -> Result<()>,
 {
-    append_lifecycle_checked_observed(repo, candidate, interrupted, check, |_| {})
+    append_lifecycle_checked_with_projection(repo, candidate, interrupted, |rows, _, current| {
+        check(rows, current)
+    })
+}
+
+/// Check the ledger, its projected attempts, and the current attempt under the
+/// lifecycle lock before appending. The callback must not reacquire that lock.
+/// An error appends no event.
+pub fn append_lifecycle_checked_with_projection<F>(
+    repo: &Path,
+    candidate: V,
+    interrupted: &AtomicBool,
+    check: F,
+) -> Result<V>
+where
+    F: FnOnce(&[V], &BTreeMap<String, V>, Option<&V>) -> Result<()>,
+{
+    append_lifecycle_checked_inner(repo, candidate, interrupted, check, |_| {})
 }
 
 #[derive(Clone, Copy)]
@@ -135,9 +152,25 @@ pub enum CheckedAppendPhase {
 /// the lifecycle lock and must not reacquire it or decide admission.
 pub fn append_lifecycle_checked_observed(
     repo: &Path,
-    mut candidate: V,
+    candidate: V,
     interrupted: &AtomicBool,
     check: impl FnOnce(&[V], Option<&V>) -> Result<()>,
+    observe: impl FnMut(CheckedAppendPhase),
+) -> Result<V> {
+    append_lifecycle_checked_inner(
+        repo,
+        candidate,
+        interrupted,
+        |rows, _, current| check(rows, current),
+        observe,
+    )
+}
+
+fn append_lifecycle_checked_inner(
+    repo: &Path,
+    mut candidate: V,
+    interrupted: &AtomicBool,
+    check: impl FnOnce(&[V], &BTreeMap<String, V>, Option<&V>) -> Result<()>,
     mut observe: impl FnMut(CheckedAppendPhase),
 ) -> Result<V> {
     storage::ensure_oms(repo)?;
@@ -149,7 +182,7 @@ pub fn append_lifecycle_checked_observed(
     let attempt = candidate.get("attempt_id").py();
     let current = select(&projection, &attempt);
     observe(CheckedAppendPhase::ProjectionReady);
-    check(&rows, current)?;
+    check(&rows, &projection, current)?;
     if let Some(prior) = existing_idempotent(&rows, &candidate)? {
         return Ok(prior);
     }

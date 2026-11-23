@@ -473,7 +473,7 @@ fn run_with_source_writer(
                                     .then(|| target.sample(repo, services, interrupted).ok())
                                     .flatten()
                             },
-                            |scope, target| start_main_switch(repo, scope, target),
+                            |scope, target| start_main_switch(repo, source, scope, target),
                         ) {
                             changed = true;
                             break;
@@ -1192,16 +1192,54 @@ impl MainSwitch {
             && attempt["terminal"] == false
             && attempt["state"] == "working"
             && oms_panel_core::state::main_participant(attempt) == main.member;
-        if current && legacy_main_switch_source(report, main, attempt) {
+        if !current {
+            let live_state = (attempt["attempt_id"] == main.attempt
+                && attempt["provider"] == main.owner
+                && attempt["terminal"] == false
+                && oms_panel_core::state::main_participant(attempt) == main.member)
+                .then(|| attempt["state"].as_str())
+                .flatten()
+                .filter(|state| {
+                    *state != "working" && oms_panel_core::state::LIVE_STATES.contains(state)
+                });
+            if let Some(state) = live_state {
+                return Err(Error::new(format!(
+                    "Current Main is {state}; wait until it is working to switch"
+                )));
+            }
+            return Err(Error::new(
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ));
+        }
+        if legacy_main_switch_source(report, main, attempt) {
             return Err(Error::new(
                 "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
             ));
         }
-        crate::require(
-            current && attempt["refs"]["panel_host"] == "tmux",
-            "Current Main is unavailable for a managed switch",
-        )?;
+        match attempt["refs"]["panel_host"].as_str() {
+            Some("tmux") => {}
+            Some("inline") => {
+                return Err(Error::new(
+                    "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+                ));
+            }
+        }
+        if attempt["refs"]["panel_native_scheduling"] == "campaign" {
+            return Err(Error::new(
+                "Main swap is unavailable during a managed campaign",
+            ));
+        }
         let current = attempt["refs"]["panel_harness"].as_str();
+        if current == Some("agy") && main.owner == "antigravity" {
+            return Err(Error::new(
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ));
+        }
         crate::native_panel::check_outgoing_main_swap_harness(current)?;
         let current = current.unwrap_or_default();
         let targets = targets(current)?;
@@ -1290,11 +1328,12 @@ impl MainSwitch {
 
 fn start_main_switch(
     repo: &Path,
+    source: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
 ) -> Result<Receiver<Result<()>>> {
     let services = oms_panel_core::SubcommandServices::sibling()?;
-    let request = main_switch_request(&services.executable, repo, scope, target)?;
+    let request = main_switch_request(&services.executable, source, repo, scope, target)?;
     let (completed, result) = mpsc::channel();
     // The canonical host owns lifecycle reconciliation once submitted. Closing
     // this display neither retries the transition nor sends a second request.
@@ -1328,6 +1367,7 @@ fn start_main_switch(
 
 fn main_switch_request(
     executable: &Path,
+    source: &Path,
     repo: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
@@ -1337,11 +1377,18 @@ fn main_switch_request(
         .as_ref()
         .ok_or_else(|| Error::new("No current Main verified"))?;
     crate::require(
-        executable.is_absolute() && executable.file_name().is_some_and(|name| name == "oms"),
+        executable.is_absolute()
+            && rustix::fs::access(executable, rustix::fs::Access::EXEC_OK).is_ok(),
         "Canonical OMS dispatcher unavailable",
     )?;
+    let (source, revision) = crate::native_panel::staged_dispatch_args(source, executable)
+        .ok_or_else(|| Error::new("Canonical staged OMS dispatcher unavailable"))?;
     let mut argv = vec![
         executable.as_os_str().into(),
+        "--oms-dispatch".into(),
+        source.into(),
+        revision.into(),
+        "--".into(),
         "panel".into(),
         "--repo".into(),
         repo.as_os_str().into(),
@@ -1835,12 +1882,13 @@ pub(crate) struct NativeReading {
     agy: Option<AgyDockCheck>,
 }
 
-const NATIVE_FIELDS: [&str; 11] = [
+const NATIVE_FIELDS: [&str; 12] = [
     "native_children",
     "native_dock",
     "provider_sessions",
     "provider_models",
     "provider_activity",
+    "provider_delivery",
     "provider_accounts",
     "provider_status",
     "claude_local_weekly",
@@ -1999,6 +2047,7 @@ impl RefreshPhase {
                     "provider_sessions",
                     "provider_models",
                     "provider_activity",
+                    "provider_delivery",
                     "provider_accounts",
                     "provider_status",
                     "native_children",
@@ -5691,8 +5740,17 @@ mod tests {
     #[test]
     fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
         use super::*;
+        use crate::orchestrator::account_binding::test_support::TempDir;
         use input::Key;
+        use std::os::unix::fs::PermissionsExt;
         let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let staged = TempDir::new("board-main-switch");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let payload = staged.0.join("target/oms-native").join(revision);
+        std::fs::create_dir_all(&payload).unwrap();
+        let executable = payload.join("oms");
+        std::fs::write(&executable, b"fixture executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let scope = BoardScope {
             key: RefreshKey::new(&repo, Some("room-one"), Some("attempt-old"))
                 .unwrap()
@@ -5886,11 +5944,11 @@ mod tests {
             .unwrap();
         refs.remove("panel_host");
         refs.remove("panel_room_participant");
-        let blocked = |report: &Value| {
+        let blocked = |case_scope: &BoardScope, report: &Value| {
             let mut flow = MainSwitch::default();
             let mut nav = navigation::Navigation::default();
             let error = flow
-                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                .open_with(Some(case_scope), report, &mut nav, |_| {
                     panic!("unavailable Main must not resolve targets")
                 })
                 .unwrap_err();
@@ -5899,49 +5957,91 @@ mod tests {
             error.message
         };
         assert_eq!(
-            blocked(&legacy),
+            blocked(&legacy_scope, &legacy),
             "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
         );
-        for (path, value) in [
-            ("/collection/pending", json!(true)),
-            ("/room/closed", json!(true)),
+        for (path, value, expected) in [
+            (
+                "/collection/pending",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room/closed",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
             (
                 "/room_attempts/attempt-old/attempt_id",
                 json!("foreign-attempt"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_room_id",
                 json!("room-foreign"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_wrapper_pid",
                 json!("52"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_host",
                 json!("inline"),
+                "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
             ),
-            ("/room_attempts/attempt-old/state", json!("done")),
-            ("/room/participants/1/joined", json!(false)),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("done"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ),
+            (
+                "/room/participants/1/joined",
+                json!(false),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
         ] {
             let mut refused = legacy.clone();
             let (parent, key) = path.rsplit_once('/').unwrap();
             refused.pointer_mut(parent).unwrap()[key] = value;
-            assert_eq!(
-                blocked(&refused),
-                "Current Main is unavailable for a managed switch",
-                "{path}"
-            );
+            assert_eq!(blocked(&legacy_scope, &refused), expected, "{path}");
+        }
+        for (path, value, expected) in [
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("external"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("blocked"),
+                "Current Main is blocked; wait until it is working to switch",
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_native_scheduling",
+                json!("campaign"),
+                "Main swap is unavailable during a managed campaign",
+            ),
+        ] {
+            let mut refused = report.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(blocked(&scope, &refused), expected, "{path}");
         }
         let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
             .unwrap_err()
             .message;
-        for (owner, harness) in [
-            ("claude", Some("claude")),
-            ("antigravity", Some("agy")),
-            ("codex", Some("pi")),
-            ("codex", Some("unknown")),
-            ("codex", None),
+        for (owner, harness, expected) in [
+            ("claude", Some("claude"), expected_refusal.as_str()),
+            (
+                "antigravity",
+                Some("agy"),
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ),
+            ("codex", Some("pi"), expected_refusal.as_str()),
+            ("codex", Some("unknown"), expected_refusal.as_str()),
+            ("codex", None, expected_refusal.as_str()),
         ] {
             let mut case_scope = scope.clone();
             case_scope.main.as_mut().unwrap().owner = owner.into();
@@ -5966,7 +6066,7 @@ mod tests {
                     panic!("unsupported outgoing harness must not resolve targets")
                 })
                 .unwrap_err();
-            assert_eq!(error.message, expected_refusal);
+            assert_eq!(error.message, expected);
             assert!(nav.main_switch.is_none());
             assert!(flow.selection.is_none());
             assert!(flow.running.is_none());
@@ -6030,8 +6130,24 @@ mod tests {
             || Some(scope.clone()),
             |expected, target| {
                 assert_eq!(expected, &scope);
-                let req = main_switch_request(Path::new("/fixture/oms"), &repo, expected, target)?;
-                let opts = Options::parse(&req.argv[2..])?;
+                assert!(
+                    main_switch_request(&executable, &staged.0, &repo, expected, target).is_err()
+                );
+                std::fs::write(payload.join("manifest.json"), b"{}").unwrap();
+                assert!(main_switch_request(&executable, &repo, &repo, expected, target).is_err());
+                let req = main_switch_request(&executable, &staged.0, &repo, expected, target)?;
+                assert_eq!(
+                    req.argv[..6],
+                    [
+                        executable.as_os_str().to_owned(),
+                        "--oms-dispatch".into(),
+                        staged.0.as_os_str().to_owned(),
+                        revision.into(),
+                        "--".into(),
+                        "panel".into(),
+                    ]
+                );
+                let opts = Options::parse(&req.argv[6..])?;
                 assert_eq!(opts.get("room"), Some("room-one"));
                 assert_eq!(opts.get("swap-main"), Some("agy"));
                 assert_eq!(opts.get("model"), Some("gemini-4-carbon-high"));

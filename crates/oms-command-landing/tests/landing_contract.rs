@@ -270,6 +270,47 @@ struct TestServices;
 struct TestPlanServices;
 struct NoGuard;
 impl PublicationGuard for NoGuard {}
+
+#[cfg(target_os = "linux")]
+const ADMISSION_STARTUP_FAULT: &str = "OMS_CT_ADMISSION_STARTUP_FAULT";
+
+#[cfg(target_os = "linux")]
+struct AdmissionStartupFault {
+    native: oms_reference::controller::Controller,
+    foreground: std::thread::ThreadId,
+    event_path: PathBuf,
+    retained_lock: Option<std::sync::Mutex<Option<oms_command_operations::lock::FileLock>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl oms_reference::controller::ExecutingImage for AdmissionStartupFault {
+    fn verify_current(&self, image: &fs::File) -> oms_reference::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        self.native.check()?;
+        let bound = image.metadata().map_err(|e| e.to_string())?;
+        let live = fs::metadata("/proc/self/exe").map_err(|e| e.to_string())?;
+        assert_eq!((bound.dev(), bound.ino()), (live.dev(), live.ino()));
+        if std::thread::current().id() == self.foreground {
+            return Ok(());
+        }
+        if let Some(retained) = &self.retained_lock {
+            // Scope registration has finished. Keep a real competing lock alive
+            // until the foreground returns and releases its last controller clone.
+            let mut retained = retained.lock().unwrap();
+            if retained.is_none() {
+                *retained = Some(oms_command_operations::lock::FileLock::acquire(
+                    &self.event_path,
+                    &AtomicBool::new(false),
+                )?);
+            }
+        } else if oms_command_operations::lock::runtime_lock_dir(&self.event_path)?.is_dir() {
+            // The native producer acquired the lock and projected the ledger.
+            return Err("fixture stops the initial heartbeat before append".into());
+        }
+        Ok(())
+    }
+}
+
 fn test_group_resolver(
     gid: u32,
 ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
@@ -294,11 +335,34 @@ impl Services for TestServices {
     fn plan(&self) -> Option<&dyn oms_command_plan::Services> {
         Some(&TestPlanServices)
     }
+    #[cfg(target_os = "linux")]
+    fn controller(&self) -> oms_command_landing::Result<oms_reference::controller::Controller> {
+        use oms_reference::controller::Controller;
+        let native = Controller::capture_current()?;
+        let Ok(mode) = std::env::var(ADMISSION_STARTUP_FAULT) else {
+            return Ok(native);
+        };
+        assert!(matches!(mode.as_str(), "lock" | "projection"));
+        Ok(Controller::from_authenticated_descriptor(
+            fs::File::open("/proc/self/exe")?,
+            std::sync::Arc::new(AdmissionStartupFault {
+                native,
+                foreground: std::thread::current().id(),
+                event_path: oms_command_operations::event_path(&std::env::current_dir()?),
+                retained_lock: (mode == "lock").then(|| std::sync::Mutex::new(None)),
+            }),
+        )?)
+    }
     fn supervise(
         &self,
         request: &oms_command_landing::services::VerifyRequest,
         _: &AtomicBool,
     ) -> oms_command_landing::Result<Execution> {
+        #[cfg(target_os = "linux")]
+        assert!(
+            std::env::var_os(ADMISSION_STARTUP_FAULT).is_none(),
+            "an unready reference monitor must block the admission verifier"
+        );
         let started = std::time::Instant::now();
         let out = Command::new(&request.argv[0])
             .args(&request.argv[1..])
@@ -312,6 +376,74 @@ impl Services for TestServices {
             elapsed: started.elapsed(),
         })
     }
+    #[cfg(target_os = "linux")]
+    fn supervise_batch(
+        &self,
+        request: &oms_command_landing::services::VerifyRequest,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<oms_command_landing::services::BatchVerification> {
+        use oms_command_landing::services::{BatchVerification, VerificationOutcome::*};
+        use oms_supervisor::process::{Progress, Reactor, Request, StopReason};
+        use std::time::{Duration, Instant};
+        let mode = std::env::var("OMS_CT_BATCH_MODE").unwrap_or_default();
+        assert_ne!(
+            mode, "never",
+            "stale or invalid preview launched a verifier"
+        );
+        assert!(!request.cwd.starts_with(std::env::current_dir().unwrap()));
+        assert_eq!(request.wall, Duration::from_secs(1800));
+        if mode == "setup-unavailable" {
+            return Ok(BatchVerification {
+                outcome: Unavailable,
+                verifier_exit: None,
+                elapsed: Duration::ZERO,
+            });
+        }
+        let mut command = Request::new(request.argv.clone());
+        command.cwd = Some(request.cwd.clone());
+        command.capture.max_bytes = 512;
+        command.capture.on_limit = oms_supervisor::capture::LimitAction::Terminate;
+        command.deadline = Some(Instant::now() + Duration::from_secs(5));
+        let mut reactor = Reactor::new();
+        let job = reactor.start(command).unwrap();
+        if mode == "cancel" {
+            interrupted.store(true, Ordering::Release);
+            reactor.stop(job, StopReason::Cancelled).unwrap();
+        }
+        if let (Ok(branch), Ok(new), Ok(old)) = (
+            std::env::var("OMS_CT_BATCH_MOVE_REF"),
+            std::env::var("OMS_CT_BATCH_MOVE_TO"),
+            std::env::var("OMS_CT_BATCH_MOVE_FROM"),
+        ) {
+            assert!(
+                Command::new("git")
+                    .args(["update-ref", &branch, &new, &old])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        loop {
+            if let Progress::Complete(done) = reactor.poll(job, Duration::from_millis(10)).unwrap()
+            {
+                assert!(done.cleanup_complete());
+                let exit = done.exit.map(|exit| exit.shell_code());
+                let outcome = match (done.stop, exit) {
+                    (Some(StopReason::Cancelled), _) => Cancelled,
+                    (Some(StopReason::OutputLimit), _) => OutputLimited,
+                    (None, Some(0)) => Passed,
+                    (None, Some(1)) => Failed,
+                    _ => panic!("unexpected verifier completion: {:?}", done.stop),
+                };
+                return Ok(BatchVerification {
+                    outcome,
+                    verifier_exit: if done.stop.is_none() { exit } else { None },
+                    elapsed: done.duration,
+                });
+            }
+        }
+    }
+
     fn publication_guard(
         &self,
         _: &Path,
@@ -797,6 +929,74 @@ fn patch_admit_runs_locally_without_services() {
     // the private capture lives outside the repository and must be readable
     let (code, out, err) = iso.run("patch-admit", &repo, &["--patch", patch]);
     assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn patch_admit_timeout_stops_before_verification_and_publication() {
+    use std::time::{Duration, Instant};
+    let iso = Isolated::new();
+    for (fault, last_phase, state, events_expected) in [
+        ("projection", "lifecycle-projection-ready", "blocked", 4),
+        ("lock", "initial-heartbeat-started", "working", 3),
+    ] {
+        let repo = iso.repo(fault);
+        let patch = real_patch(&iso, &repo);
+        let patch_bytes = fs::read(repo.join(patch)).unwrap();
+        let report = iso.tmp.join("admission.md");
+        let started = Instant::now();
+        let (code, out, err) = iso.run_with_services(
+            "patch-admit",
+            &repo,
+            &[
+                "--patch",
+                patch,
+                "--report",
+                report.to_str().unwrap(),
+                "--verify",
+                "true",
+            ],
+            &[(ADMISSION_STARTUP_FAULT, fault), ("OMS_LOCK_TIMEOUT", "8")],
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            (Duration::from_millis(1500)..Duration::from_secs(7)).contains(&elapsed),
+            "{fault}: unexpected startup timeout and cleanup duration: {elapsed:?} ({err})"
+        );
+        let phase = format!(
+            "error: reference monitor did not become ready (last_phase={last_phase}, phase_elapsed_ms="
+        );
+        let (reported, disposition) = err
+            .trim_end()
+            .strip_prefix(&phase)
+            .and_then(|detail| detail.split_once(')'))
+            .unwrap_or_else(|| panic!("{err}"));
+        assert!(reported.parse::<u64>().is_ok_and(|ms| ms <= 1500), "{err}");
+        if fault == "lock" {
+            assert!(disposition.contains("lifecycle attempt remains"), "{err}");
+        } else {
+            assert_eq!(disposition, "", "{err}");
+        }
+        assert!(!report.exists());
+        assert!(!repo.join(".oms/artifacts/index.jsonl").exists());
+        assert_eq!(fs::read_dir(&iso.tmp).unwrap().count(), 0);
+        assert_eq!(fs::read(repo.join(patch)).unwrap(), patch_bytes);
+        iso.git(&repo, &["diff", "--exit-code", "HEAD", "--"]);
+
+        let (events, attempts) = oms_command_operations::load_projection(&repo).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].get("tool").text(), Some("patch-admit"));
+        assert_eq!(attempts[0].get("state").text(), Some(state));
+        assert_eq!(events.len(), events_expected);
+        assert!(events.iter().all(|event| {
+            matches!(
+                event.get("event_type").text(),
+                Some("attempt.created" | "attempt.state_changed")
+            )
+        }));
+    }
 }
 
 #[test]
@@ -2490,6 +2690,408 @@ fn manifest_failure_holds_dependents_keeps_integrated_repos_and_resumes_idempote
     let again = iso.run_with_services("land", iso.home.path(), &args, &[]);
     assert_eq!(again.0, 0, "{again:?}");
     assert_eq!(m.count(&iso, "repo-app"), 1);
+}
+
+#[test]
+fn batch_preview_pins_the_order_and_leaves_source_unchanged() {
+    let iso = Isolated::new();
+    let repo = iso.repo("ordered-preview");
+    let version = iso.git_out(&repo, &["version"]);
+    let mut version = version.split_whitespace().nth(2).unwrap().split('.');
+    let major = version.next().unwrap().parse::<u32>().unwrap();
+    let minor = version.next().unwrap().parse::<u32>().unwrap();
+    if (major, minor) < (2, 38) {
+        let branch = "refs/heads/main";
+        let (code, out, err) = iso.run("land", &repo, &["batch-preview", "--base", branch, branch]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("requires Git 2.38"), "{err}");
+        return;
+    }
+    let base = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let branch = |name: &str, from: &str, file: &str, content: &str| {
+        iso.git(&repo, &["checkout", "-qb", name, from]);
+        fs::write(repo.join(file), content).unwrap();
+        iso.git(&repo, &["add", "--", file]);
+        iso.git(&repo, &["commit", "-qm", name]);
+        iso.git_out(&repo, &["rev-parse", "HEAD"])
+    };
+    let first = "refs/heads/oms/first";
+    let first_alias = "refs/remotes/origin/first";
+    let stacked = "refs/heads/oms/stacked";
+    let independent = "refs/remotes/origin/independent";
+    let conflicting = "refs/heads/oms/conflicting";
+    let target = "refs/remotes/origin/main";
+    let first_oid = branch("oms/first", &base, "a.txt", "first\n");
+    let stacked_oid = branch("oms/stacked", &first_oid, "stacked.txt", "stacked\n");
+    let independent_oid = branch("oms/independent", &base, "independent.txt", "solo\n");
+    let conflicting_oid = branch("oms/conflicting", &base, "a.txt", "other\n");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    iso.git(&repo, &["update-ref", target, &base]);
+    iso.git(&repo, &["update-ref", first_alias, &first_oid]);
+    iso.git(&repo, &["update-ref", independent, &independent_oid]);
+    fs::write(repo.join("local.txt"), "user work\n").unwrap();
+    let source = || {
+        (
+            iso.git_out(
+                &repo,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            ),
+            iso.git_out(&repo, &["rev-parse", "HEAD"]),
+            iso.git_out(&repo, &["worktree", "list", "--porcelain"]),
+            iso.git_out(&repo, &["cat-file", "--batch-all-objects", "--batch-check"]),
+            fs::read(repo.join(".git/index")).unwrap(),
+            fs::read_to_string(repo.join("local.txt")).unwrap(),
+        )
+    };
+    let before = source();
+    let preview = |candidates: &[&str], code: i32| {
+        let mut args = vec!["batch-preview", "--base", target, "--json"];
+        args.extend_from_slice(candidates);
+        let (actual, out, err) = iso.run("land", &repo, &args);
+        assert_eq!(actual, code, "{out}{err}");
+        V::parse(out.as_bytes()).unwrap()
+    };
+    let clean = preview(&[first, independent, stacked, first_alias], 0);
+    assert_eq!(clean.get("status").text(), Some("clean"));
+    assert_eq!(clean.get("base").get("oid").text(), Some(base.as_str()));
+    let rows = clean.get("steps").array();
+    assert_eq!(rows[0].get("oid").text(), Some(first_oid.as_str()));
+    assert_eq!(rows[1].get("oid").text(), Some(independent_oid.as_str()));
+    assert_eq!(rows[2].get("oid").text(), Some(stacked_oid.as_str()));
+    assert_eq!(rows[2].get("depends_on").array().len(), 1);
+    assert_eq!(rows[2].get("depends_on").array()[0].text(), Some(first));
+    assert_eq!(rows[3].get("ref").text(), Some(first_alias));
+    assert_eq!(rows[3].get("oid").text(), Some(first_oid.as_str()));
+    assert_eq!(rows[3].get("status").text(), Some("already_present"));
+
+    assert_eq!(
+        preview(&[conflicting], 0).get("status").text(),
+        Some("clean")
+    );
+    let user_git_config = iso.home.path().join(".config/git");
+    fs::create_dir_all(&user_git_config).unwrap();
+    let user_attributes = user_git_config.join("attributes");
+    fs::write(&user_attributes, "a.txt merge=union\n").unwrap();
+    let blocked = preview(
+        &[first, independent, stacked, conflicting, "refs/heads/main"],
+        1,
+    );
+    assert_eq!(blocked.get("status").text(), Some("conflict"));
+    assert!(matches!(blocked.get("tree_oid"), V::Null));
+    assert_eq!(
+        blocked.get("conflict_paths").array()[0].text(),
+        Some("a.txt")
+    );
+    let rows = blocked.get("steps").array();
+    assert_eq!(rows[3].get("oid").text(), Some(conflicting_oid.as_str()));
+    assert_eq!(rows[3].get("status").text(), Some("conflict"));
+    assert_eq!(rows[4].get("status").text(), Some("blocked"));
+    fs::remove_file(user_attributes).unwrap();
+
+    let wrong_order = preview(&[stacked, first_alias, first], 3);
+    let rows = wrong_order.get("steps").array();
+    assert_eq!(rows[0].get("status").text(), Some("out_of_order"));
+    assert_eq!(rows[0].get("depends_on").array().len(), 1);
+    assert_eq!(
+        rows[0].get("depends_on").array()[0].text(),
+        Some(first_alias)
+    );
+    assert_eq!(rows[1].get("status").text(), Some("blocked"));
+    assert_eq!(rows[2].get("status").text(), Some("blocked"));
+    assert!(matches!(wrong_order.get("tree_oid"), V::Null));
+    for extra in ["--pr", "--merge", "--local-merge", "--execute-manifest"] {
+        let (code, out, err) = iso.run(
+            "land",
+            &repo,
+            &["batch-preview", "--base", target, first, extra],
+        );
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("accepts only"), "{err}");
+    }
+    assert_eq!(source(), before);
+    assert!(!repo.join(".oms").exists());
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
+
+    // Simulate an independent ref update after pinning, during merge-tree.
+    let git = iso.bin.join("git");
+    let real_git = fs::read_link(&git).unwrap();
+    fs::remove_file(&git).unwrap();
+    fs::write(
+        &git,
+        r#"#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == merge-tree ]]; then
+        "$PREVIEW_TEST_GIT" -C "$PREVIEW_TEST_REPO" update-ref "$PREVIEW_TEST_REF" "$PREVIEW_TEST_OID" || exit $?
+        break
+    fi
+done
+exec "$PREVIEW_TEST_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    let (code, out, err) = iso.run_env(
+        "land",
+        &repo,
+        &["batch-preview", "--base", target, first, "--json"],
+        &[
+            ("PREVIEW_TEST_GIT", real_git.to_str().unwrap()),
+            ("PREVIEW_TEST_REPO", repo.to_str().unwrap()),
+            ("PREVIEW_TEST_REF", first),
+            ("PREVIEW_TEST_OID", &conflicting_oid),
+        ],
+    );
+    assert_eq!(code, 3, "{out}{err}");
+    let stale = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert_eq!(stale.get("moved_refs").array()[0].text(), Some(first));
+    assert!(matches!(stale.get("tree_oid"), V::Null));
+    fs::remove_file(&git).unwrap();
+    std::os::unix::fs::symlink(real_git, git).unwrap();
+    iso.git(&repo, &["update-ref", first, &first_oid]);
+    assert_eq!(source(), before);
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
+
+    iso.git(&repo, &["checkout", "-qb", "expected", &base]);
+    for head in [first, independent, stacked] {
+        iso.git(&repo, &["merge", "-q", "--no-ff", "--no-edit", head]);
+    }
+    let expected = iso.git_out(&repo, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(clean.get("tree_oid").text(), Some(expected.as_str()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn batch_check_copied_candidates_are_bounded_and_cannot_supply_hosted_ci() {
+    let iso = Isolated::new();
+    let repo = iso.repo("ordered-check");
+    let version = iso.git_out(&repo, &["version"]);
+    let mut parts = version.split_whitespace().nth(2).unwrap().split('.');
+    if (
+        parts.next().unwrap().parse::<u32>().unwrap(),
+        parts.next().unwrap().parse::<u32>().unwrap(),
+    ) < (2, 38)
+    {
+        return;
+    }
+    fs::create_dir(repo.join("scripts")).unwrap();
+    fs::write(
+        repo.join("scripts/check.sh"),
+        r#"#!/bin/bash
+set -eu
+[[ "$1 $2 $3 $5 $6" == "--affected --ci-parity --changed-from --changed-to HEAD" ]]
+git merge-base --is-ancestor "$4" HEAD
+[[ -z "$(git remote)" && ! -e .git/objects/info/alternates && ! -e user-untracked ]]
+if [[ ${OMS_CT_BATCH_MODE:-} == output ]]; then
+    for ((i = 0; i < 1024; i++)); do
+        printf 'private-verifier-output\n'
+    done
+fi
+[[ ! -e first-flag || ! -e final-flag ]]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".gitattributes"),
+        "final-flag filter=fixture-smudge\n",
+    )
+    .unwrap();
+    iso.git(&repo, &["add", "scripts/check.sh", ".gitattributes"]);
+    iso.git(&repo, &["commit", "-qm", "verifier"]);
+    let base = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let pin = |name: &str, from: &str, file: &str| {
+        iso.git(&repo, &["checkout", "-qb", name, from]);
+        fs::write(repo.join(file), "fixture\n").unwrap();
+        iso.git(&repo, &["add", file]);
+        iso.git(&repo, &["commit", "-qm", name]);
+        iso.git_out(&repo, &["rev-parse", "HEAD"])
+    };
+    let first_oid = pin("oms/first", &base, "first-flag");
+    let stacked_oid = pin("oms/stacked", &first_oid, "stacked-flag");
+    let side_oid = pin("oms/side", &base, "final-flag");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    fs::write(
+        repo.join("user-untracked"),
+        "untouched
+",
+    )
+    .unwrap();
+    let base_ref = "refs/heads/main";
+    let first = "refs/heads/oms/first";
+    let stacked = "refs/heads/oms/stacked";
+    let side = "refs/heads/oms/side";
+    let names = [first, stacked, side];
+    let state = || {
+        (
+            iso.git_out(&repo, &["rev-parse", "HEAD"]),
+            iso.git_out(
+                &repo,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            ),
+            iso.git_out(&repo, &["worktree", "list", "--porcelain"]),
+            iso.git_out(&repo, &["cat-file", "--batch-all-objects", "--batch-check"]),
+            fs::read(repo.join(".git/index")).unwrap(),
+            fs::read(repo.join("user-untracked")).unwrap(),
+        )
+    };
+    let before = state();
+    let preview = |refs: &[&str]| {
+        let mut args = vec!["batch-preview", "--base", base_ref, "--json"];
+        args.extend(refs);
+        let (code, out, err) =
+            iso.run_with_services("land", &repo, &args, &[("OMS_CT_BATCH_MODE", "never")]);
+        assert_eq!(code, 0, "{out}{err}");
+        V::parse(out.as_bytes()).unwrap()
+    };
+    let checked = |refs: &[&str], digest: &str, mode: &str, expected_code| {
+        let mut args = vec![
+            "batch-check",
+            "--base",
+            base_ref,
+            "--expected-preview-sha256",
+            digest,
+            "--json",
+        ];
+        args.extend(refs);
+        let (code, out, err) =
+            iso.run_with_services("land", &repo, &args, &[("OMS_CT_BATCH_MODE", mode)]);
+        assert_eq!(code, expected_code, "{out}{err}");
+        assert!(!out.contains("private-verifier-output"), "{out}");
+        assert!(out.len() < 8192, "unexpected diagnostic size");
+        (out.clone(), V::parse(out.as_bytes()).unwrap())
+    };
+    let full = preview(&names);
+    let digest = full.get("preview_sha256").text().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert_eq!(
+        full.get("steps").array()[1].get("depends_on").array(),
+        &[V::from(first)]
+    );
+    let (_, stale) = checked(&[first, side, stacked], digest, "never", 3);
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert!(stale.get("checks").array().is_empty());
+    iso.git(&repo, &["update-ref", side, &stacked_oid, &side_oid]);
+    let (_, stale) = checked(&names, digest, "never", 3);
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert!(stale.get("checks").array().is_empty());
+    iso.git(&repo, &["update-ref", side, &side_oid, &stacked_oid]);
+    assert_eq!(state(), before);
+
+    let mut race = vec![
+        "batch-check",
+        "--base",
+        base_ref,
+        "--expected-preview-sha256",
+        digest,
+        "--json",
+    ];
+    race.extend(names);
+    let (code, out, err) = iso.run_with_services(
+        "land",
+        &repo,
+        &race,
+        &[
+            ("OMS_CT_BATCH_MOVE_REF", side),
+            ("OMS_CT_BATCH_MOVE_TO", &stacked_oid),
+            ("OMS_CT_BATCH_MOVE_FROM", &side_oid),
+        ],
+    );
+    assert_eq!(code, 3, "{out}{err}");
+    let stale = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(stale.get("moved_refs").array(), &[V::from(side)]);
+    assert_eq!(
+        stale.get("checks").array().len(),
+        1,
+        "stale run cannot launch a prefix"
+    );
+    assert_eq!(
+        stale.get("checks").array()[0].get("tree_oid"),
+        full.get("tree_oid")
+    );
+    iso.git(&repo, &["update-ref", side, &side_oid, &stacked_oid]);
+    assert_eq!(state(), before);
+
+    let (_, outcome) = checked(&names, digest, "", 1);
+    assert_eq!(outcome.get("status").text(), Some("failed"));
+    assert_eq!(outcome.get("hosted_ci_evidence"), &V::Bool(false));
+    let rows = outcome.get("checks").array();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("tree_oid"), full.get("tree_oid"));
+    assert_eq!(rows[0].get("candidate_count").py(), "3");
+    assert_eq!(rows[0].get("outcome").text(), Some("failed"));
+    assert_eq!(
+        rows[1].get("tree_oid"),
+        full.get("steps").array()[1].get("tree_oid")
+    );
+    assert_eq!(rows[1].get("candidate_count").py(), "2");
+    assert_eq!(rows[1].get("outcome").text(), Some("passed"));
+    assert!(
+        rows.iter()
+            .all(|row| row.get("scope").text() == Some("affected-ci-parity")
+                && row.get("duration_ms").integer(false))
+    );
+
+    for (mode, code, status) in [
+        ("cancel", 130, "cancelled"),
+        ("output", 125, "output_limited"),
+        ("setup-unavailable", 2, "unavailable"),
+    ] {
+        let (_, result) = checked(&names, digest, mode, code);
+        assert_eq!(result.get("status").text(), Some(status));
+        assert_eq!(result.get("checks").array().len(), 1);
+    }
+    let alone = preview(&[side]);
+    let sentinel = iso.home.path().join("checkout-filter-ran");
+    let global_config = iso.home.path().join(".gitconfig");
+    let filter = format!(
+        "[filter \"fixture-smudge\"]\n    smudge = \"printf fixture > '{}'; /bin/cat\"\n",
+        sentinel.display(),
+    );
+    fs::write(&global_config, filter).unwrap();
+    let (code, local_success, error) = iso.run_with_services(
+        "land",
+        &repo,
+        &[
+            "batch-check",
+            "--base",
+            base_ref,
+            "--expected-preview-sha256",
+            alone.get("preview_sha256").text().unwrap(),
+            side,
+            "--json",
+        ],
+        &[
+            ("GIT_CONFIG_GLOBAL", global_config.to_str().unwrap()),
+            ("GIT_CONFIG_NOSYSTEM", "0"),
+        ],
+    );
+    assert!(
+        !sentinel.exists(),
+        "private Git copy ran an ambient smudge filter"
+    );
+    assert_eq!(code, 0, "{local_success}{error}");
+    let parsed = V::parse(local_success.as_bytes()).unwrap();
+    assert_eq!(parsed.get("status").text(), Some("passed"));
+    assert_eq!(parsed.get("hosted_ci_evidence"), &V::Bool(false));
+    let gh = iso.bin.join("gh");
+    fs::write(
+        &gh,
+        b"#!/bin/bash\nprintf '%s' \"$OMS_CT_BATCH_DIAGNOSTIC\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(gh, fs::Permissions::from_mode(0o700)).unwrap();
+    let (code, output, error) = iso.run_env(
+        "ci-status",
+        &repo,
+        &[],
+        &[("OMS_CT_BATCH_DIAGNOSTIC", &local_success)],
+    );
+    assert_eq!(code, 2, "{output}{error}");
+    assert!(error.contains("unreadable run list"), "{output}{error}");
+
+    assert_eq!(state(), before);
+    assert!(!repo.join(".oms").exists());
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
 }
 
 #[test]

@@ -234,7 +234,8 @@ promise that an interactive model will leave the checkout untouched. To isolate
 those later edits, use `session fork` instead.
 
 Local records live under ignored, private `.oms/sessions` paths and are written
-atomically through `oms_runtime.common`. Checkpoints retain their existing
+atomically through [native peer storage](../crates/oms-command-peer/src/storage.rs).
+Checkpoints retain their existing
 private `.oms/checkpoints` location. Records contain local references and hashes,
 not conversation excerpts or search queries. They are not portable capsules and
 must not be published as such.
@@ -248,9 +249,11 @@ gate because versions differ:
 - [Codex CLI source](https://github.com/openai/codex/blob/main/codex-rs/cli/src/main.rs)
 - [Pi coding-agent CLI documentation](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/cli.md)
 
-`python3 -m unittest discover -s tests -p test_sessions.py -v` exercises the public
-entrypoint with temporary Git repositories and fake Claude, Codex, and Pi
-executables. It checks native argv/cwd/identity, separate file/conversation
-restore, staged and unstaged preservation, bounded untracked omission, private
-bookmarks, secret filtering, repository scope, source preservation, child and
-symlink boundaries, and failure recovery. It makes no real provider calls.
+Run the session cases in the [native peer contract suite](../crates/oms-command-peer/tests/peer_contract.rs).
+
+```bash
+cargo +1.99.1 test --locked --offline -p oms-command-peer --test peer_contract session
+```
+
+The cases exercise bounded handoff reads and Pi resume with the owning home,
+using temporary repositories and fixture providers.

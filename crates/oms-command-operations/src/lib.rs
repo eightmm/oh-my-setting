@@ -18,9 +18,10 @@ pub use approvals::{
 };
 pub use events::{
     CheckedAppendPhase, StartRequest, append_lifecycle, append_lifecycle_checked,
-    append_lifecycle_checked_observed, attempt_spec_from_created, attempt_spec_path,
-    create_attempt, effective_run_id, existing_idempotent, lifecycle_semantics, load_projection,
-    new_event, project_attempts, validate_event_row,
+    append_lifecycle_checked_observed, append_lifecycle_checked_with_projection,
+    attempt_spec_from_created, attempt_spec_path, create_attempt, effective_run_id,
+    existing_idempotent, lifecycle_semantics, load_projection, new_event, project_attempts,
+    validate_event_row,
 };
 pub use incremental::EventsProjectionCache;
 use std::io::Read;

@@ -153,7 +153,7 @@ struct Scope {
     stop: Arc<AtomicBool>,
     monitor: Option<std::thread::JoinHandle<oms_reference::Result<()>>>,
     temporary: Option<storage::Temp>,
-    finished: bool,
+    finalize_on_drop: bool,
 }
 impl Scope {
     fn healthy(&self) -> Result<()> {
@@ -192,7 +192,7 @@ impl Scope {
             stop,
             monitor: None,
             temporary: Some(temporary),
-            finished: false,
+            finalize_on_drop: true,
         };
         let p = scope.protocol.clone();
         let r = scope.repo.clone();
@@ -202,13 +202,16 @@ impl Scope {
         scope.monitor = Some(std::thread::spawn(move || {
             p.monitor(&r, &ch, &expected, &stop)
         }));
-        let proof = scope.protocol.await_monitor(
-            repo,
-            &scope.channel,
-            &scope.expected,
-            &std::process::id().to_string(),
-            c.interrupted,
-        )?;
+        let proof = scope
+            .protocol
+            .await_monitor(
+                repo,
+                &scope.channel,
+                &scope.expected,
+                &std::process::id().to_string(),
+                c.interrupted,
+            )
+            .map_err(|error| scope.abort_startup(error))?;
         std::fs::write(
             scope.channel.parent().unwrap().join("proof"),
             format!("{proof}\n"),
@@ -217,26 +220,56 @@ impl Scope {
     }
     fn finish(&mut self, interrupted: &AtomicBool) -> Result<()> {
         oms_reference::publication::finish(&self.repo, &self.attempt, "0", interrupted)?;
-        self.finished = true;
+        self.finalize_on_drop = false;
         self.close(interrupted)
     }
-    fn close(&mut self, interrupted: &AtomicBool) -> Result<()> {
+    fn stop_monitor(&mut self) -> Result<()> {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(m) = self.monitor.take() {
             let _ = m
                 .join()
                 .map_err(|_| Error::new(2, "reference monitor panicked"))?;
         }
+        Ok(())
+    }
+    fn close(&mut self, interrupted: &AtomicBool) -> Result<()> {
+        self.stop_monitor()?;
         self.protocol
             .close_scope(&self.repo, &self.channel, &self.expected, interrupted)?;
         self.temporary.take();
         Ok(())
     }
+    fn abort_startup(&mut self, error: String) -> Error {
+        self.finalize_on_drop = false;
+        let _ = self.stop_monitor();
+        let cleanup = AtomicBool::new(false);
+        let (done, wait) = std::sync::mpsc::channel();
+        // Refusal cleanup shares one deadline, even if a live writer still holds
+        // the lifecycle lock that prevented the monitor from starting.
+        let recorded = std::thread::scope(|scope| {
+            let cleanup = &cleanup;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_secs(1)).is_err() {
+                    cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            let recorded =
+                oms_reference::publication::finish(&self.repo, &self.attempt, "1", cleanup).is_ok();
+            let _ = self.close(cleanup);
+            let _ = done.send(());
+            recorded
+        });
+        if recorded {
+            error.into()
+        } else {
+            format!("{error}; lifecycle attempt remains unconfirmed after bounded cleanup").into()
+        }
+    }
 }
 impl Drop for Scope {
     fn drop(&mut self) {
         let clear = AtomicBool::new(false);
-        if !self.finished {
+        if self.finalize_on_drop {
             let _ = oms_reference::publication::finish(&self.repo, &self.attempt, "1", &clear);
         }
         if self.monitor.is_some() {
@@ -289,8 +322,21 @@ pub(crate) fn admit(
     };
     let mut allowed = vec![];
     let mut forbidden = vec![];
+    let mut reviewed_task = None;
     if !policy.task.is_empty() {
         let row = task(c, repo, &policy.task)?;
+        if row.has("review_evidence") {
+            require(
+                row.get("state").text() == Some("review"),
+                "exact reviewed evidence requires a task in review",
+            )?;
+            require(
+                row.get("review_evidence").get("patch").get("sha256").text()
+                    == Some(digest(&bytes).as_str()),
+                "patch differs from exact reviewed evidence",
+            )?;
+            reviewed_task = Some((row.get("plan_id").clone(), row.get("task_sha256").clone()));
+        }
         let stored = string(&row, "verify");
         require(
             !stored.is_empty(),
@@ -703,6 +749,13 @@ pub(crate) fn admit(
         git.snapshot()? == snapshot,
         "source changed after admission checks; no outcome witness published",
     )?;
+    if let Some((plan_id, task_sha)) = reviewed_task {
+        let current = task(c, repo, &policy.task)?;
+        require(
+            current.get("plan_id") == &plan_id && current.get("task_sha256") == &task_sha,
+            "exact reviewed evidence or task changed during admission; no outcome witness published",
+        )?;
+    }
     storage::write_external(&report, None, body.as_bytes(), c.interrupted)?;
     let report_rel = report
         .strip_prefix(&state)
