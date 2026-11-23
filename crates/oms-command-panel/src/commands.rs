@@ -501,8 +501,9 @@ pub(crate) fn snapshot(
         options.get("owner-attempt"),
         services,
         stop,
+        false,
     )
-    .map(|(snapshot, _)| snapshot)
+    .map(|(snapshot, _, _)| snapshot)
 }
 pub(crate) fn snapshot_with(
     session: &Session,
@@ -513,13 +514,14 @@ pub(crate) fn snapshot_with(
 ) -> Result<state::Snapshot> {
     clear_codex_quota_receipt();
     let main = options.get("owner-attempt");
-    let (snapshot, sources) = snapshot_for(
+    let (snapshot, sources, _) = snapshot_for(
         session,
         repo,
         room(options).as_deref(),
         main,
         services,
         stop,
+        false,
     )?;
     if options.has("watch") && !options.has("log") {
         publish_codex_quota_receipt(repo, main, &snapshot, sources);
@@ -534,9 +536,20 @@ pub(crate) fn snapshot_for(
     main_attempt: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<(state::Snapshot, metrics::CodexQuotaSources)> {
-    let mut snapshot =
-        state::snapshot_with_cache(repo, room_id, services, stop, Some(session.attempt_cache()))?;
+    include_write_slots: bool,
+) -> Result<(
+    state::Snapshot,
+    metrics::CodexQuotaSources,
+    Option<oms_panel_core::dispatch::WriteSlots>,
+)> {
+    let (mut snapshot, write_slots) = state::snapshot_with_write_slots(
+        repo,
+        room_id,
+        services,
+        stop,
+        session.attempt_cache(),
+        main_attempt.filter(|_| include_write_slots),
+    )?;
     let calls = crate::render::calls(&snapshot.report);
     let tasks: Vec<_> = calls
         .iter()
@@ -602,7 +615,7 @@ pub(crate) fn snapshot_for(
             snapshot.report["main_token_observation"] = tokens;
         }
     }
-    Ok((snapshot, quota_sources))
+    Ok((snapshot, quota_sources, write_slots))
 }
 
 fn unix_now() -> f64 {

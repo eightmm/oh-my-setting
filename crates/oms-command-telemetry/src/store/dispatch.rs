@@ -252,6 +252,9 @@ pub fn read_snapshot(
 ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
     Ok(snapshot(&Root::open(repo)?, interrupted, false)?.map(|state| state.raw))
 }
+pub fn validate_registry_bytes(body: &[u8]) -> std::result::Result<(), StoreError> {
+    validate_registry(body, false).map(|_| ())
+}
 pub(super) struct RegistrySnapshot {
     pub raw: Vec<u8>,
     pub resources: Option<resources::Summary>,
