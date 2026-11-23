@@ -3,6 +3,7 @@
 use oms_command_autonomy::{CommandResult, Invocation, ModelRoute, Services, run_with_services};
 use oms_command_plan::services::{GroupMembership, GroupResolver};
 use oms_command_plan::storage::ACTIVE;
+use oms_command_plan::{Action, Context, Plan, Request};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -100,7 +101,10 @@ impl ReviewRace {
             .wake
             .wait_timeout_while(state, Duration::from_secs(20), |s| !s.resume_reader)
             .unwrap();
-        assert!(state.resume_reader, "sibling never attempted Review");
+        assert!(
+            state.resume_reader,
+            "sibling never released the Plan reader"
+        );
     }
 
     fn reader_holds_lock(&self, repo: &Path) -> bool {
@@ -109,10 +113,7 @@ impl ReviewRace {
             .wake
             .wait_timeout_while(state, Duration::from_secs(20), |s| !s.reader_open)
             .unwrap();
-        assert!(
-            state.reader_open,
-            "post-delegate reader never opened the Plan"
-        );
+        assert!(state.reader_open, "reader never opened the Plan");
         drop(state);
         let lock =
             oms_lock::Lock::for_file(&repo.join(ACTIVE), oms_lock::Settings::from_env().unwrap())
@@ -137,7 +138,7 @@ thread_local! {
 
 fn group_with_review_race(gid: u32) -> oms_command_plan::Result<GroupMembership> {
     // Only the Plan file is group-writable. Its second group proof occurs
-    // after the post-delegate Show has opened the file and sampled its inode.
+    // after the Plan reader has opened the file and sampled its inode.
     let opened = RACE_READER.with(|reader| {
         let mut reader = reader.borrow_mut();
         match reader.as_mut() {
@@ -183,13 +184,25 @@ impl oms_command_plan::Services for Mock {
 impl Mock {
     fn plan(&self, repo: &Path, args: &[&str]) -> (i32, String) {
         let _one = self.plan.lock().unwrap();
+        let (code, out, err) = self.plan_command(repo, args);
+        assert_eq!(code, 0, "{args:?}: {}", String::from_utf8_lossy(&err));
+        (code, String::from_utf8(out).unwrap())
+    }
+    fn plan_command(&self, repo: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
         let mut full = vec!["--repo", repo.to_str().unwrap()];
         full.extend_from_slice(args);
         let words = full.iter().map(OsString::from).collect::<Vec<_>>();
-        let (code, out, err) =
-            oms_command_plan::run_with_services(&words, repo, &AtomicBool::new(false), self);
-        assert_eq!(code, 0, "{args:?}: {}", String::from_utf8_lossy(&err));
-        (code, String::from_utf8(out).unwrap())
+        oms_command_plan::run_with_services(&words, repo, &AtomicBool::new(false), self)
+    }
+    fn delegate_lease(&self, repo: &Path, id: &str) -> String {
+        let stop = AtomicBool::new(false);
+        let req = Request::new(Action::Show).with("id", id);
+        let context = Context::from_environment_at(&req, repo, repo, None).unwrap();
+        let plan = Plan::open(context, self, &stop).unwrap();
+        let shown = plan.show_task_with_locked_snapshot(id).unwrap();
+        assert_eq!(shown.code, 0, "cannot read the mock delegate lease");
+        let task: Value = serde_json::from_slice(&shown.stdout).unwrap();
+        task["lease_id"].as_str().unwrap().to_owned()
     }
     fn wait_for(&self, predicate: impl Fn(&[String]) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -238,9 +251,6 @@ impl Mock {
         if self.review_race.is_none() {
             std::thread::sleep(Duration::from_millis(30));
         }
-        let (_, shown) = self.plan(&call.cwd, &["show", "--id", &id]);
-        let task: Value = serde_json::from_str(&shown).unwrap();
-        let lease = task["lease_id"].as_str().unwrap().to_owned();
         let mut free_lock = None;
         if let Some(race) = &self.review_race
             && id == "t1-slow"
@@ -253,6 +263,7 @@ impl Mock {
                 free_lock = Some(race);
             }
         }
+        let lease = self.delegate_lease(&call.cwd, &id);
         self.plan(
             &call.cwd,
             &[
@@ -433,6 +444,55 @@ fn overlapping_scopes_never_run_together() {
     for id in ["o1", "o2", "o3"] {
         assert_eq!(state(&repo, id)["state"], "review");
     }
+}
+
+#[test]
+fn delegate_lease_read_cannot_race_controller_publication() {
+    if scrubbed_child("delegate_lease_read_cannot_race_controller_publication") {
+        return;
+    }
+    let repo = fixture(&[("o2", "src/lib.rs"), ("o3", "docs/")]);
+    let race = Arc::new(ReviewRace::default());
+    let mock = Mock {
+        review_race: Some(race.clone()),
+        ..Mock::default()
+    };
+    mock.plan(&repo.0, &["claim", "--id", "o3", "--provider", "codex"]);
+    let expected = state(&repo, "o3")["lease_id"].as_str().unwrap().to_owned();
+    assert!(!expected.is_empty());
+    for relative in ["", ".oms", ".oms/plan"] {
+        fs::set_permissions(repo.0.join(relative), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(repo.0.join(ACTIVE), fs::Permissions::from_mode(0o660)).unwrap();
+
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            RACE_READER.with(|reader| reader.replace(Some((race.clone(), false))));
+            mock.delegate_lease(&repo.0, "o3")
+        });
+        let guarded = race.reader_holds_lock(&repo.0);
+        if guarded {
+            race.resume_reader();
+        }
+        // The controller does not share the mock delegate's command mutex.
+        let (code, _, err) =
+            mock.plan_command(&repo.0, &["claim", "--id", "o2", "--provider", "codex"]);
+        if !guarded {
+            race.resume_reader();
+        }
+        assert_eq!(
+            code,
+            0,
+            "controller claim: {}",
+            String::from_utf8_lossy(&err)
+        );
+        assert_eq!(reader.join().unwrap(), expected);
+        assert!(
+            guarded,
+            "mock delegate read must hold the canonical Plan lock"
+        );
+    });
+    assert_eq!(state(&repo, "o2")["state"], "claimed");
 }
 
 #[test]
