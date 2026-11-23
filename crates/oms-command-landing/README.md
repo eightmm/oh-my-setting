@@ -229,12 +229,10 @@ recorded `push.base`; bounded archive capture requires UTF-8 names; the dedicate
 adversary coverage need the parent supervisor/verification lane. These are not claimed
 as passing behavior based on compilation.
 
-Nearest existing contracts include
-[`patch-admit.sh`](../../scripts/patch-admit.sh),
-[`patch-land.sh`](../../scripts/patch-land.sh),
-[`land.sh`](../../scripts/land.sh),
-`draft-pr-smoke.sh`,
-`durable-writers-contract-smoke.sh`,
-`scripts-smoke.sh`,
-`dispatch_results.py` and
-`auto_review.py`.
+The [landing contract suite](tests/landing_contract.rs) covers the native
+routes behind [`patch-admit.sh`](../../scripts/patch-admit.sh),
+[`patch-land.sh`](../../scripts/patch-land.sh), and
+[`land.sh`](../../scripts/land.sh).
+The original migration notes cited `draft-pr-smoke.sh`,
+`durable-writers-contract-smoke.sh`, `scripts-smoke.sh`,
+`dispatch_results.py` and `auto_review.py` as historical evidence.
