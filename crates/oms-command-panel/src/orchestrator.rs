@@ -11874,7 +11874,7 @@ mod tests {
             }
             // Each transport failure is an independent live reservation. Reusing
             // one Lead across these unrelated tasks would violate its contract.
-            for scenario in 0..7 {
+            for scenario in 0..8 {
                 let tmp = TempDir::new("orch-native-case");
                 let repo = private_dir(&tmp.0.join("repo"));
                 let git = |args: &[&str]| {
@@ -12791,7 +12791,7 @@ mod tests {
                         serde_json::from_slice(&plan(&["show", "--id", "native-one"])).unwrap();
                     assert_eq!(original["state"], "review"); // no synthetic Plan completion was written
                 }
-                if scenario == 1 {
+                if scenario == 1 || scenario == 7 {
                     // Enter happened, then the caller lost the ability to record a
                     // response. The durable intent survives and a retry sends nothing.
                     spy.task_transition.replace(Some((
@@ -12825,6 +12825,132 @@ mod tests {
                         before
                     );
                     assert!(spy.mutating_calls().is_empty());
+                    if scenario == 7 {
+                        // Preserve the upstream race at the lifecycle lock with
+                        // a valid typed replacement, so earlier source validation
+                        // cannot hide a missing current-Main fence.
+                        let source_path = tmp.0.join("transport-return.json");
+                        let original = std::fs::read(&source_path).unwrap();
+                        let mut source: Value = serde_json::from_slice(&original).unwrap();
+                        source["summary"] = "Report racing terminal Main".into();
+                        source["revision"] = 2.into();
+                        source["previous_report_sha256"] = oms_panel_core::digest(&original).into();
+                        let bytes = serde_json::to_vec(&source).unwrap();
+                        std::fs::write(&source_path, &bytes).unwrap();
+                        let input_path = tmp.0.join("transport-manifest.json");
+                        let mut manifest: Value =
+                            serde_json::from_slice(&std::fs::read(&input_path).unwrap()).unwrap();
+                        manifest["summary"] = source["summary"].clone();
+                        manifest["source"]["sha256"] = oms_panel_core::digest(&bytes).into();
+                        manifest["previous_sha256"] = reported["result"]["sha256"].clone();
+                        std::fs::write(&input_path, serde_json::to_vec(&manifest).unwrap())
+                            .unwrap();
+                        let race_options = Options::parse(&commands::strings(&[
+                            "--orchestrator",
+                            "codex",
+                            "--room",
+                            ROOM,
+                            "--task-id",
+                            "native-two",
+                            "--native-result",
+                            input_path.to_str().unwrap(),
+                            "--expected-previous-result-sha256",
+                            text(&reported["result"], "sha256"),
+                        ]))
+                        .unwrap();
+                        let panel = spy.load();
+                        let attempts = AttemptCache::default();
+                        panel.require_main_with_cache(None, &attempts).unwrap();
+                        let store = Store::open(&repo).unwrap();
+                        let tx = store
+                            .transaction("native-result-main-terminal-race", Duration::from_secs(3))
+                            .unwrap();
+                        let events_path = repo.join(".oms/lifecycle/events.jsonl");
+                        let before_lines = std::fs::read_to_string(&events_path)
+                            .unwrap()
+                            .lines()
+                            .count();
+                        let operation = native_assignment::current_operation(
+                            &panel,
+                            text(&unknown, "attempt_id"),
+                        )
+                        .unwrap();
+                        let mut main_terminated = false;
+                        let error = native_assignment::register_result_with_before_append(
+                            &panel,
+                            &race_options,
+                            &host,
+                            &attempts,
+                            &tx,
+                            || {
+                                for state in ["blocked", "abandoned"] {
+                                    let event = oms_command_operations::new_event(
+                                        MAIN,
+                                        0usize.into(),
+                                        "attempt.state_changed",
+                                        oms_command_operations::value::obj([
+                                            ("to_state", state.into()),
+                                            (
+                                                "actor",
+                                                oms_command_operations::value::obj([
+                                                    ("kind", "owner".into()),
+                                                    ("name", "test-main-terminal".into()),
+                                                ]),
+                                            ),
+                                        ]),
+                                    )
+                                    .unwrap();
+                                    oms_command_operations::append_lifecycle(
+                                        &repo, event, &spy.stop,
+                                    )
+                                    .unwrap();
+                                }
+                                main_terminated = true;
+                            },
+                        )
+                        .unwrap_err();
+                        assert!(main_terminated, "{}", error.message);
+                        assert!(!error.publication_uncertain);
+                        assert!(
+                            error
+                                .message
+                                .contains("live Main attempt could not be verified"),
+                            "{}",
+                            error.message
+                        );
+                        let after = std::fs::read_to_string(&events_path).unwrap();
+                        let appended: Vec<Value> = after
+                            .lines()
+                            .skip(before_lines)
+                            .map(|line| serde_json::from_str(line).unwrap())
+                            .collect();
+                        assert_eq!(appended.len(), 2);
+                        assert!(appended.iter().all(|row| row["attempt_id"] == MAIN));
+                        let transport = match text(&operation["refs"], "native_transport") {
+                            "sending" => "sending",
+                            "unknown" => "unknown",
+                            other => panic!("unexpected native transport: {other}"),
+                        };
+                        let error = native_assignment::annotate_with_binding(
+                            &panel,
+                            text(&unknown, "attempt_id"),
+                            text(&operation["refs"], "native_intent_sha256"),
+                            text(&operation["refs"], "native_binding_sha256"),
+                            transport,
+                            "native-annotate-after-main-terminal",
+                            json!({"native_transport":"unknown"}),
+                        )
+                        .unwrap_err();
+                        assert!(
+                            error
+                                .message
+                                .contains("live Main attempt could not be verified"),
+                            "{}",
+                            error.message
+                        );
+                        assert_eq!(std::fs::read_to_string(&events_path).unwrap(), after);
+                        assert!(spy.mutating_calls().is_empty());
+                    }
                 }
                 if scenario == 2 {
                     // A canonical operation cancellation after buffering fences paste

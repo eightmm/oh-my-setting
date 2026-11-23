@@ -8,8 +8,9 @@ Original concept review: 2026-11-18, source
 [`189bfdaa`](https://github.com/eightmm/oh-my-setting/commit/189bfdaa28b6b628f0d4d50a4ca3d0df28396b88).
 The role, Main capability and verification-planning corrections below were
 checked against `8527cd07` on 2026-11-22 and again against `051fd3ea` on
-2026-11-23. The queue's
-[dated source review](ORCHESTRATOR-WORK-QUEUE.md#8-2026-11-22-재대조와-작은-통합-단위)
+2026-11-23. The native assignment and Main swap boundaries below were corrected
+against `afbf42b2` on 2026-11-23. The queue's
+[latest source review](ORCHESTRATOR-WORK-QUEUE.md#9-2026-11-23-claude-피드백-38개와-현재-source의-대조)
 separates implemented slices from the remaining work; it is not a new full audit.
 This page owns feature scope; the [implementation queue](ORCHESTRATOR-WORK-QUEUE.md)
 owns the remaining work and its admission conditions. Earlier CP/TM/MR/UX/NF
@@ -98,10 +99,19 @@ Here, the historical `Direct work` label groups assigned workers; it does not
 authorize the team Main to edit repository files.
 This display correction does not change dispatch, key/mouse targets or ownership,
 and does not implement common task cards or the assignment bridge.
-Native `--orchestrator --task` sends text rather than producing the same
-task/lease/result binding as managed dispatch. The unimplemented native
-assignment/result bridge is specified by
-[#285 P0-B](https://github.com/eightmm/oh-my-setting/pull/285).
+Native `--orchestrator PROVIDER --task TEXT` without `--task-id` sends an
+unbound task prompt. The explicit Codex path
+`--orchestrator codex --task-id ID --task TEXT` uses the
+[native assignment producer](../crates/oms-command-panel/src/native_assignment.rs):
+it validates or claims the current Main's canonical Plan task, binds its lease,
+attempt, checkout and Room participant, and records a durable send intent before
+input submission. Repeated or uncertain sends reuse that intent; unknown delivery
+does not cause an automatic resend. The existing ordinary Codex Lead is required.
+Its receipt still reports consumption and task completion as unconfirmed,
+write isolation as unmanaged and child cleanup as unsupported. Result artifacts,
+verifier evidence, common task-card consumption and acceptance remain the next
+[#285 P0-B](https://github.com/eightmm/oh-my-setting/pull/285) slices; the other
+providers do not inherit this bound assignment capability from the text path.
 Reuse its Plan/operations/Room/result writers and TM-06A/B/C consumers; do not add
 another queue, task database or scheduler. General native conversation remains an
 unbound session without mandatory Plan/Team registration. Task cards link existing
@@ -191,12 +201,22 @@ a universal permission rule. The current schema-2 router and role restrictions
 remain in force until a versioned consumer migration. See
 [model selection](TEAM-ORCHESTRATION-MODEL-TIERS.md#5-선택-순서와-재현성).
 
-Main swapping is also a capability, not a property of the model picker. The
-native host currently keeps the unsupported `swap_main_host` default in
-[CollabServices](../crates/oms/src/services_collab.rs). Keep current sessions
-stable; CC-09's host work needs a concrete handoff requirement and lifecycle
-evidence. A core/Fake fixture or a quota reading does not establish native swap
-support or an automatic replacement policy.
+Main swapping is also a capability, not a property of the model picker. The live
+[CollabServices](../crates/oms/src/services_collab.rs) overrides the generic
+unsupported default and calls
+[`native_panel::swap_main_host`](../crates/oms-command-panel/src/native_panel.rs).
+The current physical transition requires the outgoing session to be the Room's
+one OMS-managed Codex Main: a live recorded `panel-main` attempt whose tmux
+pane and verified native wrapper/process custody match it, with an empty idle
+composer. A legacy or pre-custody Main is refused and must be reopened. The
+target must be an installed Main capability whose admission resolves exactly the
+requested configured model. Its guarded handoff
+preserves the owned Room and execution checkout, and carries forward the recorded
+permission mode unless the explicit `OMS_PANEL_MAIN_PERMISSIONS=native` override applies.
+This implements a bounded native path, not every provider-to-provider swap.
+Non-Codex outgoing shutdown and ownership transfer remain CC-09 work with
+provider-specific lifecycle evidence. A quota reading grants no automatic swap
+authority; source wiring alone is not a live host verification result.
 
 ## Durable observations and budgets
 

@@ -326,6 +326,21 @@ impl Binding {
     }
 }
 
+fn require_live_main_in_locked_ledger(
+    panel: &Panel<'_>,
+    projected: &std::collections::BTreeMap<String, V>,
+) -> std::result::Result<(), String> {
+    let main = events::projection::select(projected, &panel.attempt)
+        .map(|row| {
+            let bytes = row.json(false)?;
+            serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())
+        })
+        .transpose()?;
+    panel
+        .require_live_codex_assignment_main(main.as_ref())
+        .map_err(|e| e.message)
+}
+
 fn annotate(panel: &Panel<'_>, binding: &Binding, key: &str, refs: Value) -> Result<()> {
     let attempt = &binding.attempt;
     let candidate = events::new_event(
@@ -345,21 +360,48 @@ fn annotate(panel: &Panel<'_>, binding: &Binding, key: &str, refs: Value) -> Res
         ]),
     )
     .map_err(Error::new)?;
-    events::append_lifecycle_checked(panel.repo, candidate, panel.stop, |_, current| {
-        let current =
-            current.ok_or_else(|| "native assignment operation disappeared".to_owned())?;
-        if current.get("terminal").truth()
-            || current.get("refs").get("native_intent_sha256").py() != binding.intent_digest
-            || current.get("refs").get("native_transport").py() != binding.transport
-            || (binding.transport != "intent"
-                && current.get("refs").get("native_binding_sha256").py() != binding.digest)
-        {
-            return Err("native assignment operation was cancelled or changed".into());
-        }
-        Ok(())
-    })
+    events::append_lifecycle_checked_with_projection(
+        panel.repo,
+        candidate,
+        panel.stop,
+        |_, projected, current| {
+            require_live_main_in_locked_ledger(panel, projected)?;
+            let current =
+                current.ok_or_else(|| "native assignment operation disappeared".to_owned())?;
+            if current.get("terminal").truth()
+                || current.get("refs").get("native_intent_sha256").py() != binding.intent_digest
+                || current.get("refs").get("native_transport").py() != binding.transport
+                || (binding.transport != "intent"
+                    && current.get("refs").get("native_binding_sha256").py() != binding.digest)
+            {
+                return Err("native assignment operation was cancelled or changed".into());
+            }
+            Ok(())
+        },
+    )
     .map_err(Error::new)?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn annotate_with_binding(
+    panel: &Panel<'_>,
+    attempt: &str,
+    intent_digest: &str,
+    digest: &str,
+    transport: &'static str,
+    key: &str,
+    refs: Value,
+) -> Result<()> {
+    let binding = Binding {
+        task: Value::Null,
+        checkout: Value::Null,
+        attempt: attempt.into(),
+        intent_digest: intent_digest.into(),
+        digest: digest.into(),
+        transport,
+    };
+    annotate(panel, &binding, key, refs)
 }
 
 pub(super) fn current_operation(panel: &Panel<'_>, attempt: &str) -> Result<Value> {
@@ -386,6 +428,17 @@ pub(super) fn register_result(
     host: &dyn AccountHost,
     attempts: &AttemptCache,
     tx: &Transaction<'_>,
+) -> Result<Value> {
+    register_result_with_before_append(panel, options, host, attempts, tx, || ())
+}
+
+pub(super) fn register_result_with_before_append(
+    panel: &Panel<'_>,
+    options: &Options,
+    host: &dyn AccountHost,
+    attempts: &AttemptCache,
+    tx: &Transaction<'_>,
+    before_append: impl FnOnce(),
 ) -> Result<Value> {
     let lead = panel
         .leads
@@ -564,6 +617,7 @@ pub(super) fn register_result(
         "native result predecessor changed; retain and review the current report",
     )?;
     revalidate()?;
+    before_append();
     let previous_operation = operation_value(&operation)?;
     let previous_refs = previous_operation.get("refs");
     let mut result_refs = json!({"native_result_schema":"1",
@@ -590,35 +644,46 @@ pub(super) fn register_result(
     )
     .map_err(Error::new)?;
     let mut append_authorized = false;
-    let appended = events::append_lifecycle_checked(panel.repo, event, panel.stop, |_, current| {
-        let current = current.ok_or_else(|| "native result assignment disappeared".to_owned())?;
-        let refs = current.get("refs");
-        if current.get("terminal").truth()
-            || ["tool", "provider", "parent_attempt_id", "task_id"]
+    // Room membership, Plan lease, tmux pane identity, and account custody are
+    // sampled across separate stores before/after the lifecycle lock; only
+    // exact Main liveness/currentness and child/predecessor state are checked
+    // atomically under the lifecycle ledger lock (not atomic cross-store custody).
+    let appended = events::append_lifecycle_checked_with_projection(
+        panel.repo,
+        event,
+        panel.stop,
+        |_, projected, current| {
+            require_live_main_in_locked_ledger(panel, projected)?;
+            let current =
+                current.ok_or_else(|| "native result assignment disappeared".to_owned())?;
+            let refs = current.get("refs");
+            if current.get("terminal").truth()
+                || ["tool", "provider", "parent_attempt_id", "task_id"]
+                    .iter()
+                    .any(|key| current.get(key) != previous_operation.get(key))
+                || refs.get("native_binding_sha256").py() != binding.digest
+                || refs.get("native_intent_sha256").py() != binding.intent_digest
+                || refs.get("native_transport").py() != transport
+                || [
+                    "native_assignment_schema",
+                    "plan_id",
+                    "lease_id",
+                    "panel_room_id",
+                    "native_result_schema",
+                    "native_result_path",
+                    "native_result_sha256",
+                    "native_resolution",
+                    "native_resolution_result_sha256",
+                ]
                 .iter()
-                .any(|key| current.get(key) != previous_operation.get(key))
-            || refs.get("native_binding_sha256").py() != binding.digest
-            || refs.get("native_intent_sha256").py() != binding.intent_digest
-            || refs.get("native_transport").py() != transport
-            || [
-                "native_assignment_schema",
-                "plan_id",
-                "lease_id",
-                "panel_room_id",
-                "native_result_schema",
-                "native_result_path",
-                "native_result_sha256",
-                "native_resolution",
-                "native_resolution_result_sha256",
-            ]
-            .iter()
-            .any(|key| refs.get(key) != previous_refs.get(key))
-        {
-            return Err("native result assignment or predecessor changed".into());
-        }
-        append_authorized = true;
-        Ok(())
-    });
+                .any(|key| refs.get(key) != previous_refs.get(key))
+            {
+                return Err("native result assignment or predecessor changed".into());
+            }
+            append_authorized = true;
+            Ok(())
+        },
+    );
     appended.map_err(|error| Error {
         publication_uncertain: append_authorized,
         ..Error::new(error)

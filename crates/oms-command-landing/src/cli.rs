@@ -110,11 +110,14 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "file",
                 "head-branch",
                 "merge-method",
+                "why",
                 "check-manifest",
                 "manifest-receipt",
             ],
             &[
                 "pr",
+                "direct",
+                "merge",
                 "local-merge",
                 "wait",
                 "ci-full",
@@ -226,8 +229,12 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
     }
     if tool == "land" {
         require(
-            !(out.has("pr") && out.has("local-merge")),
-            "--pr and --local-merge are mutually exclusive",
+            ["pr", "direct", "local-merge"]
+                .iter()
+                .filter(|k| out.has(k))
+                .count()
+                <= 1,
+            "--pr, --direct and --local-merge are mutually exclusive",
         )?;
         require(
             !out.has("local-merge") || out.has("from"),
@@ -239,6 +246,10 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
             "--merge-method must be squash, merge or rebase",
         )?;
         require(
+            !out.has("merge-method") || out.has("merge"),
+            "--merge-method requires --merge",
+        )?;
+        require(
             out.has("check-manifest") == out.has("manifest-receipt"),
             "--check-manifest and --manifest-receipt PATH are required together",
         )?;
@@ -248,8 +259,11 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         )?;
         require(
             !out.has("check-manifest")
-                || (out.words.is_empty() && !out.has("pr") && !out.has("local-merge")),
-            "--check-manifest cannot be combined with a land action, --pr or --local-merge",
+                || (out.words.is_empty()
+                    && !out.has("pr")
+                    && !out.has("direct")
+                    && !out.has("local-merge")),
+            "--check-manifest cannot be combined with a land action, --pr, --direct or --local-merge",
         )?;
     }
     Ok(out)
@@ -263,7 +277,7 @@ pub(crate) fn usage(tool: &str) -> Option<&'static str> {
             "Usage: oms patch-land [--patch FILE | --plan-task ID] [--repo PATH] [--verify CMD] [--recover] [--request-approval | --approval ID --approval-token GRANT --approval-version N] [--ml] [--allow-verifier-change] [--allow-test-reduction] [--allow-restructure] [--allow-floor-change REASON] [--accept-salvaged] [--accept-encoding-loss]\n"
         }
         "land" => {
-            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land --pr [--head-branch NAME] [--merge-method squash|merge|rebase] [land options]\n       oms land --local-merge --from REF [land options]\n       (OMS_LAND_MODE=pr|auto|direct selects the mode when neither --pr nor --local-merge is given)\n       oms land --check-manifest FILE --manifest-receipt PATH [--execute-manifest]  (multi-repo: verify, or fast-forward with --execute-manifest; exit 3 = partial hold)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n"
+            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land [--pr] [--why TEXT] [--head-branch NAME] [--merge [--merge-method squash|merge|rebase]] [land options]\n       oms land --direct [land options]\n       oms land --local-merge --from REF [land options]\n       (default: a GitHub destination opens a pull request and leaves it unmerged unless --merge; other destinations push directly. --direct to GitHub is limited to a docs-only change of at most 2 lines. OMS_LAND_MODE=pr|direct selects the mode when no mode flag is given)\n       oms land --check-manifest FILE --manifest-receipt PATH [--execute-manifest]  (multi-repo: verify, or fast-forward with --execute-manifest; exit 3 = partial hold)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n"
         }
         "change-guard" => {
             "Usage: oms change-guard [--repo PATH] [--file PATH] [--allow PATH] [--deny PATH] [--from-task] [--strict] <begin|check|end|status>\n"

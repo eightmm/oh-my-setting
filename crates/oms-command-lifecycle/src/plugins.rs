@@ -49,7 +49,7 @@ fn inventory(paths: &Paths, flag: &AtomicBool) -> Result<(bool, Option<PathBuf>)
     });
     Ok((installed, root))
 }
-fn cache(paths: &Paths) -> Result<PathBuf> {
+pub(crate) fn cache(paths: &Paths) -> Result<PathBuf> {
     let source = paths.source.join("plugins/oh-my-setting");
     let version = r::value(&source.join(".codex-plugin/plugin.json"))?["version"]
         .as_str()
@@ -61,9 +61,7 @@ fn cache(paths: &Paths) -> Result<PathBuf> {
         .join("plugins/cache/oh-my-setting-local/oh-my-setting")
         .join(version))
 }
-fn native_codex(paths: &Paths) -> Result<r::Scratch> {
-    let source = paths.source.join("plugins/oh-my-setting");
-    let stage = r::Scratch::new()?;
+pub(crate) fn codex_hooks(paths: &Paths) -> Result<serde_json::Value> {
     let mut hooks = json!({"hooks":{}});
     for (event, action, matcher, timeout) in [
         ("UserPromptSubmit", "skill-router", None, 5),
@@ -88,6 +86,12 @@ fn native_codex(paths: &Paths) -> Result<r::Scratch> {
             .unwrap()
             .push(group);
     }
+    Ok(hooks)
+}
+fn native_codex(paths: &Paths) -> Result<r::Scratch> {
+    let source = paths.source.join("plugins/oh-my-setting");
+    let stage = r::Scratch::new()?;
+    let hooks = codex_hooks(paths)?;
     std::fs::create_dir(stage.0.join(".codex-plugin"))?;
     r::new_file(
         &stage.0.join(".codex-plugin/plugin.json"),
