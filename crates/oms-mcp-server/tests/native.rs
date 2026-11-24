@@ -361,6 +361,24 @@ fn cross_host_project_reads() {
         json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
     );
     let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
+    // The transport duplicates compact payloads in text and structuredContent.
+    // A dense snapshot still retains structured evidence within the wire budget.
+    let large = json!({"scope":"repository","goal":"g".repeat(2000),
+        "managedScratch":{"status":"partial","attempts":[]},
+        "operations":(0..100).map(|n|json!({"id":n,"description":"d".repeat(410)})).collect::<Vec<_>>()});
+    fixture_settings(
+        &source,
+        json!({"stdout":json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":large}).to_string()}),
+    );
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let mut bound = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let result = bound.tool("oms_panel_snapshot", json!({"project":"fixture"}));
+        assert_eq!(
+            result["result"]["structuredContent"]["dashboard"], large,
+            "{profile}"
+        );
+        assert!(result.to_string().len() < 60_000, "{profile}");
+    }
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","updated":"2026-11-24T10:00:00Z","conversationMain":null,"observation":obs}});
     fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     let reply=c.call("tools/call",json!({"name":"oms_panel_snapshot","arguments":{"project":"fixture"},"_meta":{"threadId":"00000000-0000-4000-8000-000000000001"}}));

@@ -25,6 +25,7 @@ pub mod results;
 pub mod review;
 pub mod routing;
 pub mod salvage;
+pub mod scratch_activity;
 pub mod services;
 pub mod since;
 pub mod state;

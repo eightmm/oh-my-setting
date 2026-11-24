@@ -544,10 +544,15 @@ pub(crate) fn run(
     let mut code = 0;
     for i in 0..count {
         crate::checkpoint(ctx.interrupted)?;
-        let state = match cached.take() {
+        let mut state = match cached.take() {
             Some(state) => state,
             None => collect_snapshot(&ctx, host, consumer)?,
         };
+        if matches!(tool, "state" | "dashboard")
+            && let Some(observed) = host.scratch_activity(&ctx.repo, ctx.interrupted)
+        {
+            state.set("managedScratch", observed)?;
+        }
         let report = match tool {
             "state" => state,
             "inbox" => {

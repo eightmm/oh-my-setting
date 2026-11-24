@@ -4283,6 +4283,109 @@ fn landing_plain_approval_and_recover_converge_through_native_services() {
 }
 
 #[test]
+fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts() {
+    use oms_panel_core::native::operations::{append_lifecycle, new_event, value::obj};
+    use std::{fs, path::Path, sync::atomic::AtomicBool};
+
+    let host = Landing::new();
+    let add = || {
+        host.ok(&[
+            "scratch-worktree",
+            "add",
+            "--owner-pid",
+            &std::process::id().to_string(),
+        ])
+    };
+    let scratch = PathBuf::from(add().trim());
+    let other = PathBuf::from(add().trim());
+    let record = |repo: &Path, tool: &str| {
+        let event = new_event(
+            "same-local-id",
+            1usize.into(),
+            "attempt.created",
+            obj([
+                ("to_state", "queued".into()),
+                ("provider", "codex".into()),
+                ("tool", tool.into()),
+            ]),
+        )
+        .unwrap();
+        append_lifecycle(repo, event, &AtomicBool::new(false)).unwrap();
+    };
+    record(&host.repo, "peer-ask");
+    record(&scratch, "peer-review");
+    record(&other, "peer-delegate");
+    let read = |args: &[&str]| {
+        let (code, out, err) = host.oms(args);
+        assert!(matches!(code, 0 | 1), "{err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap_or_else(|_| panic!("{err}: {out}"))
+    };
+    let dashboard = || read(&["dashboard", "--json", "--panel-snapshot"])["dashboard"].clone();
+    let current = dashboard();
+    let scratch_only = &current["managedScratch"];
+    let attempts = scratch_only["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{scratch_only}");
+    assert_ne!(attempts[0]["id"], attempts[1]["id"]);
+    assert_ne!(attempts[0]["sourceId"], attempts[1]["sourceId"]);
+    assert_eq!(current["commandStatus"]["total"], 1);
+    assert_eq!(current["active"], 1);
+    assert!(current["conversationMain"].is_null());
+    assert!(!scratch_only.to_string().contains("same-local-id"));
+    assert!(
+        !scratch_only
+            .to_string()
+            .contains(&*host.f.0.to_string_lossy())
+    );
+    assert_eq!(&read(&["state", "--json"])["managedScratch"], scratch_only);
+    assert_eq!(
+        &read(&["dashboard", "--json"])["managedScratch"],
+        scratch_only
+    );
+    let text = host.oms(&["state"]).1;
+    assert!(text.contains("recorded queued at") && text.contains("peer-review"));
+    let board = host.oms(&["panel", "--watch", "--count", "1"]);
+    assert!(
+        board.1.contains("Managed scratch records") && board.1.contains("peer-review"),
+        "board: {board:?}"
+    );
+    add_companions(&host.f, &["oms-mcp-peer-owner"]);
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let bin = host.f.binary();
+        let mut command = Command::new(&bin);
+        host.env(&mut command);
+        command
+            .arg("--oms-dispatch")
+            .arg(&host.f.0)
+            .arg(bin.parent().unwrap().file_name().unwrap())
+            .arg("--")
+            .current_dir(&host.repo);
+        let (data, bytes) = fixture_panel_tool(command, profile, &host.repo, "oms_panel_snapshot");
+        assert_eq!(
+            &data["dashboard"]["managedScratch"], scratch_only,
+            "{profile}"
+        );
+        assert_eq!(data["dashboard"]["active"], 1);
+        assert!(bytes < 60_000, "{profile} {bytes}");
+        println!("{profile} scratch snapshot: {bytes} wire bytes");
+    }
+    let marker = scratch.parent().unwrap().join(".oh-my-setting-tmp");
+    fs::write(marker, "forged\n").unwrap();
+    let changed = dashboard();
+    let after = &changed["managedScratch"];
+    assert_eq!(after["status"], "partial", "{after}");
+    assert_eq!(after["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(after["attempts"][0]["tool"], "peer-delegate");
+    assert_eq!(changed["commandStatus"]["total"], 1);
+    host.git(&["worktree", "remove", "--force", other.to_str().unwrap()]);
+    assert!(
+        dashboard()["managedScratch"]["attempts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn plan_queries_from_registered_scratch_use_only_proven_shared_state() {
     use std::{fs, os::unix::fs::symlink, path::Path};
     let host = Landing::new();
@@ -5492,10 +5595,43 @@ fn add_companions(fixture: &Fixture, names: &[&str]) {
     std::fs::write(manifest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
-#[test]
-fn panel_capabilities_matches_native_oms_list_all_without_side_effects() {
+fn fixture_panel_tool(
+    mut command: Command,
+    profile: &str,
+    repo: &std::path::Path,
+    tool: &str,
+) -> (serde_json::Value, usize) {
     use std::io::Write;
     use std::process::Stdio;
+    let mut child = command
+        .arg("mcp-server")
+        .env("OMS_MCP_TOOL_PROFILE", profile)
+        .env(
+            "OMS_PANEL_PROJECTS",
+            serde_json::json!({"fixture":repo}).to_string(),
+        )
+        .env_remove("OMS_PANEL_REPO")
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env_remove("OMS_HARNESS_CHILD")
+        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{"project":"fixture"}}});
+    writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    (
+        reply["result"]["structuredContent"].clone(),
+        out.stdout.len(),
+    )
+}
+
+#[test]
+fn panel_capabilities_matches_native_oms_list_all_without_side_effects() {
     let fixture = Fixture::new();
     add_companions(&fixture, &["oms-mcp-peer-owner"]);
     let bin = fixture.binary();
@@ -5520,29 +5656,8 @@ fn panel_capabilities_matches_native_oms_list_all_without_side_effects() {
         })
         .collect::<Vec<_>>();
     assert!(!expected.is_empty());
-    let mut child = invoke()
-        .arg("mcp-server")
-        .env("OMS_MCP_TOOL_PROFILE", "mcp-app")
-        .env(
-            "OMS_PANEL_PROJECTS",
-            serde_json::json!({"fixture":fixture.0}).to_string(),
-        )
-        .env_remove("OMS_PANEL_REPO")
-        .env_remove("OMS_PANEL_PROJECTS_FILE")
-        .env_remove("OMS_ROOM_PARTICIPANT")
-        .env_remove("OMS_HARNESS_CHILD")
-        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oms_panel_capabilities","arguments":{"project":"fixture"}}});
-    writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success());
-    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let data = &reply["result"]["structuredContent"];
-    assert_eq!(data["commands"], serde_json::json!(expected), "{reply}");
+    let (data, _) = fixture_panel_tool(invoke(), "mcp-app", &fixture.0, "oms_panel_capabilities");
+    assert_eq!(data["commands"], serde_json::json!(expected), "{data}");
     assert_eq!(data["total"], expected.len());
     assert_eq!(data["omitted"], 0);
     assert!(!fixture.0.join(".oms").exists());

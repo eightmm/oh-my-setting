@@ -1262,7 +1262,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         ),
     )?;
     let scope = runtime.get("scope");
-    Ok(object([
+    let mut report = object([
         ("schema", number(1)),
         ("kind", string("oms-dashboard")),
         ("git", state.get("git").clone()),
@@ -1369,7 +1369,11 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         ("acceptance", acceptance),
         ("attention", attention),
         ("fleet", fleet::dashboard(state)),
-    ]))
+    ]);
+    if let Some(scratch) = state.opt("managedScratch") {
+        report.set("managedScratch", scratch.clone())?;
+    }
+    Ok(report)
 }
 
 fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
@@ -1435,14 +1439,25 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
         ),
         ("conversation", binding),
     ];
+    let scratch = dashboard.opt("managedScratch");
+    let scratch_status = scratch.map(|s| match s.text("status") {
+        "ready" => "ok",
+        "partial" => "partial",
+        _ => "unavailable",
+    });
     let observed = states
         .iter()
-        .any(|(_, value)| !matches!(*value, "unavailable" | "unconfirmed" | "ambiguous"));
+        .any(|(_, value)| !matches!(*value, "unavailable" | "unconfirmed" | "ambiguous"))
+        || scratch.is_some_and(|s| s.get("attempts").array().is_ok_and(|rows| !rows.is_empty()));
     let gaps = states
         .iter()
         .any(|(_, value)| !matches!(*value, "ok" | "unconfirmed" | "matched"))
+        || scratch_status.is_some_and(|status| status != "ok")
         || dashboard.get("degraded").truth();
     let mut sources = object(states.map(|(name, value)| (name, string(value))));
+    if let Some(status) = scratch_status {
+        let _ = sources.set("managedScratch", string(status));
+    }
     let nonneg = |v: &Value| {
         v.int()
             .ok()
@@ -1477,7 +1492,8 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
             dashboard.get("conversationMain").get("participantsOmitted"),
         ))
         .saturating_add(attempts_omitted)
-        .saturating_add(active_omitted);
+        .saturating_add(active_omitted)
+        .saturating_add(scratch.map_or(0, |s| nonneg(s.get("omittedAttempts"))));
     let trimmed = attempts_trimmed
         .saturating_add(nonneg(dashboard.get("operationsTrimmed")))
         .saturating_add(nonneg(dashboard.get("attentionTrimmed")))
@@ -1803,6 +1819,25 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             }
         }
     }
+    if let Some(scratch) = report.opt("managedScratch") {
+        let mut scratch = scratch.clone();
+        let size = crate::json::encoded(&scratch).map_or(usize::MAX, |v| v.len());
+        // Preserve the canonical window. A busy scratch registry cannot displace
+        // the existing Room, task, attempt or approval evidence.
+        if bytes.saturating_add(size) > 52_000 {
+            let attempts = scratch.get("attempts").array().map_or(0, |rows| rows.len());
+            let sources = scratch.get("sources").array().map_or(0, |rows| rows.len());
+            if attempts + sources > 0 {
+                let omitted = scratch.get("omittedAttempts").int().unwrap_or(0) as usize;
+                let _ = scratch.set("omittedAttempts", number(omitted + attempts));
+                let _ = scratch.set("omittedSources", number(sources));
+                let _ = scratch.set("status", string("partial"));
+                let _ = scratch.set("sources", Value::Array(vec![]));
+                let _ = scratch.set("attempts", Value::Array(vec![]));
+            }
+        }
+        let _ = dashboard.set("managedScratch", scratch);
+    }
     let observation = build_observation(repo, &dashboard, report);
     let _ = dashboard.set("observation", observation);
     dashboard
@@ -1818,6 +1853,35 @@ pub(super) fn panel_snapshot(repo: &Path, report: &Value, conversation: &Value) 
         ),
     ])
 }
+fn scratch_lines(report: &Value) -> Vec<String> {
+    let Some(observation) = report.opt("managedScratch") else {
+        return vec![];
+    };
+    let attempts = observation.get("attempts").array().unwrap_or(&[]);
+    if attempts.is_empty() && observation.text("status") == "ready" {
+        return vec![];
+    }
+    let sources = observation.get("sources").array().unwrap_or(&[]);
+    let mut lines = vec![format!(
+        "Managed scratch lifecycle records ({})",
+        observation.text("status")
+    )];
+    for a in attempts {
+        let label = sources
+            .iter()
+            .find(|s| s.text("id") == a.text("sourceId"))
+            .map_or("unknown", |s| s.text("label"));
+        lines.push(format!(
+            "  {label} · {} {} · recorded {} at {}",
+            a.text("provider"),
+            a.text("tool"),
+            a.text("state"),
+            a.text("updatedAt")
+        ));
+    }
+    lines
+}
+
 fn dashboard_text(report: &Value) -> Result<String> {
     fn shown(v: &Value) -> String {
         if matches!(v, Value::Null) || v.str() == Ok("") {
@@ -1905,6 +1969,7 @@ fn dashboard_text(report: &Value) -> Result<String> {
             ));
         }
     }
+    lines.extend(scratch_lines(report));
     let goal = report.get("goal");
     lines.push(format!(
         "goal: {}",
@@ -2130,6 +2195,10 @@ fn state_text(state: &Value) -> Result<String> {
             objective.text("source"),
             objective.text("text")
         ));
+    }
+    for line in scratch_lines(state) {
+        out.push_str(&line);
+        out.push('\n');
     }
     let mail = state.get("room_mail");
     if mail.get("bound").truth() {
@@ -2632,6 +2701,40 @@ mod panel_snapshot_tests {
         let ambiguous = panel_snapshot(&report, &Value::Null);
         assert_eq!(ambiguous.get("dashboard").get("main"), &Value::Null);
         assert_eq!(ambiguous.get("dashboard").text("goal"), goal);
+        let before = ambiguous.get("dashboard");
+        report
+            .set(
+                "managedScratch",
+                object([
+                    ("status", string("ready")),
+                    (
+                        "sources",
+                        Value::Array(vec![object([("id", string("source"))])]),
+                    ),
+                    (
+                        "attempts",
+                        Value::Array(vec![object([("label", string("x".repeat(52_000)))])]),
+                    ),
+                    ("omittedAttempts", number(0)),
+                ]),
+            )
+            .unwrap();
+        let capped = panel_snapshot(&report, &Value::Null);
+        let after = capped.get("dashboard");
+        assert_eq!(after.get("managedScratch").text("status"), "partial");
+        assert!(after.get("managedScratch").get("omittedAttempts").is_int(1));
+        for key in [
+            "active",
+            "activeAttempts",
+            "attempts",
+            "commandStatus",
+            "goal",
+            "main",
+            "currentRoom",
+        ] {
+            assert_eq!(before.get(key), after.get(key), "{key}");
+        }
+        assert!(crate::json::encoded(&capped).unwrap().len() < 60_000);
     }
 
     #[test]
