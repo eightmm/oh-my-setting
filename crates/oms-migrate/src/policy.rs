@@ -388,7 +388,7 @@ fn rust_violations<'a>(
                     ));
                 }
             }
-            if name == "expect" && reasons.is_empty() {
+            if name == "expect" && reasons.iter().all(|reason| blank_lint_reason(reason)) {
                 failures.push(format!(
                     "{path}:{line}: {shown} without a reason; add reason = \"...\""
                 ));
@@ -569,19 +569,94 @@ fn quoted(body: &str, delimiter: char) -> Option<usize> {
     None
 }
 
-fn raw_literal(source: &str) -> Option<usize> {
+fn raw_literal_parts(source: &str) -> Option<(&str, &str)> {
     let tail = ["r", "br", "cr"]
         .iter()
         .find_map(|prefix| source.strip_prefix(prefix))?;
     let hashes = tail.bytes().take_while(|&b| b == b'#').count();
-    let body = tail[hashes..].strip_prefix('"')?;
-    let suffix = &tail[..hashes];
+    Some((tail[hashes..].strip_prefix('"')?, &tail[..hashes]))
+}
+
+fn raw_literal(source: &str) -> Option<usize> {
+    let (body, suffix) = raw_literal_parts(source)?;
     for (offset, _) in body.match_indices('"') {
         if body[offset + 1..].starts_with(suffix) {
-            return Some(source.len() - body.len() + offset + 1 + hashes);
+            return Some(source.len() - body.len() + offset + 1 + suffix.len());
         }
     }
     Some(source.len())
+}
+
+fn blank_lint_reason(item: &str) -> bool {
+    let Some(literal) = item.strip_prefix("reason=") else {
+        return false;
+    };
+    if literal.starts_with('r')
+        && let Some((body, suffix)) = raw_literal_parts(literal)
+    {
+        return body
+            .strip_suffix(suffix)
+            .and_then(|body| body.strip_suffix('"'))
+            .is_some_and(|body| body.trim().is_empty());
+    }
+    let Some(body) = literal.strip_prefix('"') else {
+        return false;
+    };
+    quoted(body, '"') == Some(body.len()) && cooked_whitespace(&body[..body.len() - 1])
+}
+
+/// Classify whitespace escapes only. Rustc still checks the attribute's literal syntax.
+fn cooked_whitespace(mut body: &str) -> bool {
+    while let Some(c) = body.chars().next() {
+        body = &body[c.len_utf8()..];
+        if c.is_whitespace() {
+            continue;
+        }
+        if c != '\\' {
+            return false;
+        }
+        let Some(escape) = body.chars().next() else {
+            return false;
+        };
+        body = &body[escape.len_utf8()..];
+        match escape {
+            'n' | 'r' | 't' | '\n' => {}
+            '\r' if body.starts_with('\n') => {}
+            'x' => {
+                let Some(digits) = body.get(..2) else {
+                    return false;
+                };
+                if !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || !u8::from_str_radix(digits, 16)
+                        .is_ok_and(|byte| byte.is_ascii() && char::from(byte).is_whitespace())
+                {
+                    return false;
+                }
+                body = &body[2..];
+            }
+            'u' => {
+                let Some((digits, rest)) =
+                    body.strip_prefix('{').and_then(|body| body.split_once('}'))
+                else {
+                    return false;
+                };
+                let hex = digits.replace('_', "");
+                if digits.starts_with('_')
+                    || !(1..=6).contains(&hex.len())
+                    || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || !u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .is_some_and(char::is_whitespace)
+                {
+                    return false;
+                }
+                body = rest;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Full-line `#` comments after the shebang and outside heredoc bodies: `shellcheck`
