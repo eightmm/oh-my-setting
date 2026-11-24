@@ -165,9 +165,7 @@ impl ChildWakeSource for DayWatch {
             {
                 return None;
             }
-            let Some(name) = event.file_name() else {
-                return None;
-            };
+            let name = event.file_name()?;
             let name = std::ffi::OsStr::from_bytes(name.to_bytes());
             if flags.contains(ReadFlags::ISDIR) || codex_filename_id(Path::new(name)).is_none() {
                 continue;
