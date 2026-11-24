@@ -17,7 +17,7 @@ impl Plan<'_> {
         }
         if details {
             v.set("task_sha256", string(json::hash(t)?))?;
-            v.set("claim_expired", Value::Bool(self.expired(s, t, false)?))?;
+            v.set("claim_expired", Value::Bool(self.expired(s, t, true)?))?;
             if ["claimed", "running", "review"].contains(&t.text("state"))
                 && let Some(age) = age(t, &self.context.ts)
             {
@@ -96,8 +96,13 @@ impl Plan<'_> {
     fn brief(&self, s: &mut Snapshot, t: &Value) -> Result<String> {
         let v = self.view(s, t, false)?;
         let mut state = v.text("state").to_owned();
-        if self.expired(s, t, false)? {
-            state.push_str(&format!(" [{}; claimable]", self.expiry_note(t)));
+        if self.expired(s, t, true)? {
+            let claimable = if t.text("state") == "claimed" {
+                "; claimable"
+            } else {
+                ""
+            };
+            state.push_str(&format!(" [{}{claimable}]", self.expiry_note(t)));
         }
         let mut lines = vec![
             format!("# Task {}: {}", t.text("id"), t.text("title")),
@@ -178,7 +183,7 @@ impl Plan<'_> {
                         s.plan.opt("plan_id").cloned().unwrap_or(string("")),
                     )?;
                 }
-                v.set("claim_expired", Value::Bool(self.expired(s, &t, false)?))?;
+                v.set("claim_expired", Value::Bool(self.expired(s, &t, true)?))?;
                 v.set("task_sha256", string(json::hash(&t)?))?;
                 if req.action == Show
                     && let Some(cache) = self.issue_cache(s, &t)
@@ -483,7 +488,7 @@ impl Plan<'_> {
                     " STALE(review {}h old)",
                     age(&t, &self.context.ts).unwrap() / 3600
                 )
-            } else if self.expired(s, &t, false)? {
+            } else if view.get("claim_expired").truth() {
                 format!(" EXPIRED({})", self.expiry_note(&t))
             } else {
                 String::new()
@@ -590,7 +595,7 @@ impl Plan<'_> {
             if !["done", "cancelled"].contains(&view.text("state")) {
                 open.push(t.clone());
             }
-            if self.expired(s, t, false)? {
+            if self.expired(s, t, true)? {
                 stale.push(object([
                     ("id", t.get("id").clone()),
                     ("provider", t.get("provider").clone()),
@@ -762,7 +767,7 @@ impl Plan<'_> {
             lines.push(format!("contract blocker: {}", s.contract.text("blocker")));
         }
         for t in s.ordered()? {
-            if self.expired(s, &t, false)? {
+            if self.expired(s, &t, true)? {
                 lines.push(format!(
                     "expired claim {}: {}",
                     t.text("id"),
