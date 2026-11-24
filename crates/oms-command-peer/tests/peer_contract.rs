@@ -1755,6 +1755,168 @@ fn review_classification_and_validation() {
             String::from_utf8_lossy(&validation.1),
             String::from_utf8_lossy(&validation.2)
         );
+
+        struct GateVerifyProbe<'a> {
+            repo: &'a Repo,
+            provider_calls: AtomicU64,
+            verify_commands: Mutex<Vec<String>>,
+            strip_fast_during_call: bool,
+        }
+        impl Executor for GateVerifyProbe<'_> {
+            fn execute(
+                &self,
+                request: Invocation,
+                stop: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                if request.argv[0] == "git" {
+                    return Native.execute(request, stop);
+                }
+                if request.argv[0] == "bash" {
+                    if let Some(cmd) = request.argv.last() {
+                        self.verify_commands
+                            .lock()
+                            .unwrap()
+                            .push(cmd.to_string_lossy().into_owned());
+                    }
+                    return Ok(Completed {
+                        code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        complete: true,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::ZERO,
+                    });
+                }
+                self.provider_calls.fetch_add(1, Ordering::SeqCst);
+                if self.strip_fast_during_call {
+                    self.repo
+                        .write("scripts/check.sh", "#!/usr/bin/env bash\nexit 0\n");
+                }
+                Ok(Completed {
+                    code: 0,
+                    stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
+                    stderr: Vec::new(),
+                    complete: true,
+                    cleanup_complete: Some(true),
+                    owned_cleanup: None,
+                    elapsed: Duration::ZERO,
+                })
+            }
+        }
+        let gate_repo = provider_repo();
+        let commit_check_sh = |script: &str, message: &str| {
+            gate_repo.write("scripts/check.sh", script);
+            gate_repo.git(&["add", "scripts/check.sh"]);
+            gate_repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                message,
+            ]);
+        };
+        let run_gate = |extra: &[&str], directory: &str, strip_fast: bool| {
+            let probe = GateVerifyProbe {
+                repo: &gate_repo,
+                provider_calls: AtomicU64::new(0),
+                verify_commands: Mutex::new(Vec::new()),
+                strip_fast_during_call: strip_fast,
+            };
+            let mut values = vec![
+                "--providers",
+                "codex",
+                "--model",
+                "fixture",
+                "--gate",
+                "--prompt",
+                "check gate verify resolution",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-graph-context",
+                "--artifact-dir",
+                directory,
+            ];
+            values.extend_from_slice(extra);
+            let output = oms_command_peer::run_with_executor(
+                "peer-review",
+                &args(&values),
+                &gate_repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &STOP,
+                &probe,
+            );
+            (
+                output,
+                probe.provider_calls.load(Ordering::SeqCst),
+                probe.verify_commands.into_inner().unwrap(),
+            )
+        };
+
+        commit_check_sh(
+            "#!/usr/bin/env bash\nexit 0\n",
+            "check.sh without fast mode",
+        );
+        let (output, calls, verified) = run_gate(&[], ".oms/review-gate-no-fast", false);
+        assert_eq!(output.0, 2);
+        assert!(
+            String::from_utf8_lossy(&output.2)
+                .contains("check.sh has no declared fast mode; give --verify CMD or --no-verify"),
+            "{output:?}"
+        );
+        assert_eq!(
+            calls, 0,
+            "unresolvable gate verify must fail before starting any provider seat"
+        );
+        assert!(verified.is_empty());
+
+        let (output, calls, verified) = run_gate(
+            &["--verify", "true", "--no-verify"],
+            ".oms/review-gate-conflict",
+            false,
+        );
+        assert_eq!(output.0, 2);
+        assert!(
+            String::from_utf8_lossy(&output.2)
+                .contains("--verify and --no-verify are mutually exclusive"),
+            "{output:?}"
+        );
+        assert_eq!(calls, 0);
+        assert!(verified.is_empty());
+
+        let (output, calls, verified) =
+            run_gate(&["--verify", "echo ok"], ".oms/review-gate-explicit", false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        assert_eq!(verified, vec!["echo ok".to_owned()]);
+
+        let (output, calls, verified) =
+            run_gate(&["--no-verify"], ".oms/review-gate-no-verify", false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        assert!(verified.is_empty());
+
+        commit_check_sh(
+            "#!/usr/bin/env bash\ncase \"${1:-}\" in\n  fast) exit 0 ;;\nesac\n",
+            "check.sh with fast mode",
+        );
+        let (output, calls, verified) = run_gate(&[], ".oms/review-gate-fast", false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        assert_eq!(verified, vec!["bash scripts/check.sh fast".to_owned()]);
+
+        // Reusing the pre-resolved verify command must not re-parse scripts/check.sh after reviews.
+        let (output, calls, verified) = run_gate(&[], ".oms/review-gate-reused", true);
+        assert_eq!(output.0, 2, "{output:?}");
+        assert!(
+            !String::from_utf8_lossy(&output.2).contains("no declared fast mode"),
+            "{output:?}"
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(verified, vec!["bash scripts/check.sh fast".to_owned()]);
     });
 }
 #[test]
