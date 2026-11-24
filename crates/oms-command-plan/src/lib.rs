@@ -32,7 +32,7 @@ pub mod team;
 pub mod team_request;
 
 pub use cli::{owns, run, run_with_io, run_with_services};
-pub use engine::{Context, DelegateBinding, Plan, ReviewFence, Snapshot};
+pub use engine::{Context, DelegateBinding, Plan, ReviewFence, Snapshot, stored_task_revision};
 pub use product::{completed_patch_landing, patch_landing_receipt_digest};
 pub use request::{Action, Request};
 pub use services::{Services, UnavailableServices};
