@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v3.html";
+const URI: &str = "ui://oms/conversation-panel/v4.html";
+const V3: &str = "ui://oms/conversation-panel/v3.html";
 const V1: &str = "ui://oms/conversation-panel/v1.html";
 const V2: &str = "ui://oms/conversation-panel/v2.html";
 const OPEN: &str = "oms_open_panel";
@@ -24,6 +25,16 @@ const APPROVALS: &str = "oms_list_approvals";
 const DECIDE: &str = "oms_decide_approval";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
 type PanelResult<T> = Result<T, String>;
+
+pub(super) fn runtime_request(request: &Value) -> bool {
+    let id = &request["id"];
+    (matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024))
+        && request["method"] == "tools/call"
+        && matches!(
+            request["params"]["name"].as_str(),
+            Some(SNAPSHOT | START | START_STATUS | APPROVALS | DECIDE)
+        )
+}
 
 pub(super) fn definitions() -> Value {
     let make = |name: &str,
@@ -46,6 +57,7 @@ pub(super) fn definitions() -> Value {
         false,
     );
     opener["_meta"]["ui"]["resourceUri"] = json!(URI);
+    opener["_meta"]["openai/outputTemplate"] = json!(URI);
     opener["_meta"]["openai/ui"] = json!({"entrypoints":[{"type":"thread"}]});
     json!([
         opener,
@@ -325,10 +337,11 @@ impl Server<'_> {
             return error(id, -32602, "expected object");
         }
         let result = match method {
+            "resources/templates/list" => json!({"resourceTemplates":[]}),
             "resources/list" => {
                 json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
             }
-            "resources/read" if matches!(params["uri"].as_str(), Some(URI | V1 | V2)) => {
+            "resources/read" if matches!(params["uri"].as_str(), Some(URI | V1 | V2 | V3)) => {
                 json!({"contents":[{
                     "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
                     "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}

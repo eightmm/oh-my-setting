@@ -261,7 +261,12 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v3.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v4.html");
+    assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
+    assert_eq!(
+        c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
+        json!([])
+    );
     let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
     assert_eq!(resources.as_array().unwrap().len(), 1);
     assert_eq!(resources[0]["uri"], *uri);
@@ -274,6 +279,7 @@ fn conversation_panel() {
     for historical_uri in [
         json!("ui://oms/conversation-panel/v1.html"),
         json!("ui://oms/conversation-panel/v2.html"),
+        json!("ui://oms/conversation-panel/v3.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -306,6 +312,40 @@ fn conversation_panel() {
         record(&source)["argv"],
         json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
     );
+    // Keep one runtime command blocked while the host opens and reads its tab.
+    // A queued project call must stay behind the snapshot and emit its own ID.
+    fixture_settings(
+        &source,
+        json!({"snapshotGate":true,"stdout":snapshot.to_string()}),
+    );
+    let send = |client: &mut Client, id: i64, name: &str| {
+        client.raw(format!("{}\n", json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":{}}})).as_bytes());
+    };
+    send(&mut c, 9001, "oms_panel_snapshot");
+    until(|| source.join("snapshot-ready").exists());
+    for id in 9002..=9009 {
+        send(&mut c, id, "oms_list_approvals");
+    }
+    send(&mut c, 9010, "oms_list_approvals");
+    let refused = c.read();
+    assert_eq!(refused["id"], 9010);
+    assert_eq!(refused["error"]["code"], -32000);
+    assert_eq!(
+        c.tool("oms_open_panel", json!({}))["result"]["structuredContent"]["panel"],
+        "OMS"
+    );
+    assert_eq!(read(&mut c, uri)["text"], current["text"]);
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    let ready = c.read();
+    assert_eq!(ready["id"], 9001);
+    assert_eq!(payload(&ready)["dashboard"]["project"], "demo");
+    for id in 9002..=9009 {
+        let approvals = c.read();
+        assert_eq!(approvals["id"], id);
+        assert_eq!(payload(&approvals)["approvals"], json!([]));
+    }
+    fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     for full in [false, true] {
         let mut regular = Client::new(&source, &repo, full, false, false);
         assert!(
@@ -2804,6 +2844,15 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if cfg["snapshotGate"] == true {
+        if args.first().is_some_and(|v| v == "dashboard") {
+            std::fs::write(source.join("snapshot-ready"), "").unwrap();
+            until(|| source.join("snapshot-release").exists());
+        } else if args.get(1).is_some_and(|v| v == "desktop-requests") {
+            println!("{}", json!({"approvals":[],"incomplete":false}));
+            return;
+        }
+    }
     if args.iter().any(|v| v == "--conversation-digest") {
         let mut report: Value = serde_json::from_str(cfg["stdout"].as_str().unwrap()).unwrap();
         report["dashboard"]["conversationBinding"] = cfg["binding"]["conversationBinding"]
@@ -3290,14 +3339,14 @@ fn main() {
         if Path::new(&args[2]).join("fixture-owner").is_file() {
             fixture_config.peer_owner = std::env::current_exe().unwrap();
         }
-        oms_mcp_server::serve(
+        Server::new(
             Path::new(&args[2]),
             Path::new(&args[3]),
             &flag,
-            &mut std::io::stdin().lock(),
-            &mut std::io::stdout().lock(),
             fixture_config,
         )
+        .unwrap()
+        .serve_connection(&mut std::io::stdin().lock(), &mut std::io::stdout())
         .unwrap();
         return;
     }

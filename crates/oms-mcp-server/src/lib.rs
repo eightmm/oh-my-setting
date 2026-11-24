@@ -237,6 +237,7 @@ pub(crate) fn prefix_chars(s: &str, limit: usize) -> String {
 
 /// One persistent session. Tool definitions and trusted version are captured
 /// once; mutable authority, receipts and run state are acquired per action.
+#[derive(Clone)]
 pub struct Server<'a> {
     pub(crate) source_root: PathBuf,
     pub(crate) caller_cwd: PathBuf,
@@ -591,6 +592,29 @@ fn serve_server<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
 ) -> io::Result<()> {
+    read_records(interrupted, reader, |record| {
+        let response = match record {
+            Ok(message) => server.handle_value(&message),
+            Err(error) => Some(error),
+        };
+        write_response(writer, response)
+    })
+}
+
+fn write_response(writer: &mut impl Write, response: Option<Value>) -> io::Result<()> {
+    if let Some(value) = response {
+        writer.write_all(value::encode(&value, true, false, false, false).as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn read_records(
+    interrupted: &AtomicBool,
+    reader: &mut impl BufRead,
+    mut handle: impl FnMut(Result<Value, Value>) -> io::Result<()>,
+) -> io::Result<()> {
     loop {
         if interrupted.load(Ordering::Relaxed) {
             break;
@@ -625,8 +649,8 @@ fn serve_server<R: BufRead, W: Write>(
         if !seen {
             break;
         }
-        let response = if oversize {
-            Some(error(
+        let parsed = if oversize {
+            Err(error(
                 &Value::Null,
                 -32600,
                 format!("request exceeds {MAX_REQUEST_BYTES}-byte limit"),
@@ -636,20 +660,78 @@ fn serve_server<R: BufRead, W: Write>(
             if line.is_empty() {
                 continue;
             }
-            match value::parse(line.as_bytes(), MAX_REQUEST_BYTES) {
-                Ok(v) => server.handle_value(&v),
-                Err(_) => Some(error(&Value::Null, -32700, "parse error")),
-            }
+            value::parse(line.as_bytes(), MAX_REQUEST_BYTES)
+                .map_err(|_| error(&Value::Null, -32700, "parse error"))
         } else {
-            Some(error(&Value::Null, -32700, "parse error"))
+            Err(error(&Value::Null, -32700, "parse error"))
         };
-        if let Some(v) = response {
-            writer.write_all(value::encode(&v, true, false, false, false).as_bytes())?;
-            writer.write_all(b"\n")?;
-            writer.flush()?;
-        }
+        handle(parsed)?;
     }
     Ok(())
+}
+
+impl Server<'_> {
+    /// Serve native stdio. Desktop content tabs may fetch their document while
+    /// a project query is running. Serialize all runtime calls on one bounded
+    /// worker, and write complete, ID-correlated responses from either thread.
+    pub fn serve_connection(
+        mut self,
+        reader: &mut impl BufRead,
+        writer: &mut (impl Write + Send),
+    ) -> io::Result<()> {
+        if self.config.profile != ToolProfile::ChatGptPanel {
+            let stop = self.interrupted;
+            return serve_server(&mut self, stop, reader, writer);
+        }
+        let mut runtime = self.clone();
+        let writer = std::sync::Mutex::new(writer);
+        let write = |response| {
+            write_response(
+                *writer
+                    .lock()
+                    .map_err(|_| io::Error::other("MCP writer unavailable"))?,
+                response,
+            )
+        };
+        std::thread::scope(|scope| {
+            let (queue, pending) = std::sync::mpsc::sync_channel::<(&'static str, Value)>(8);
+            let worker = scope.spawn(move || -> io::Result<()> {
+                for (version, request) in pending {
+                    if runtime.interrupted.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    runtime.protocol = version;
+                    write(runtime.handle_value(&request))?;
+                }
+                Ok(())
+            });
+            let input = read_records(self.interrupted, reader, |record| {
+                let request = match record {
+                    Ok(message) => message,
+                    Err(error) => return write(Some(error)),
+                };
+                if !panel::runtime_request(&request) {
+                    return write(self.handle_value(&request));
+                }
+                match queue.try_send((self.protocol, request)) {
+                    Ok(()) => Ok(()),
+                    Err(std::sync::mpsc::TrySendError::Full((_, message))) => write(Some(error(
+                        &message["id"],
+                        -32000,
+                        "OMS panel is busy. The request was not executed.",
+                    ))),
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        Err(io::Error::other("OMS panel worker stopped"))
+                    }
+                }
+            });
+            drop(queue);
+            worker
+                .join()
+                .map_err(|_| io::Error::other("OMS panel worker stopped"))??;
+            input
+        })
+    }
 }
 
 /// Private native owner entry, for a bundled executable only. Arguments are

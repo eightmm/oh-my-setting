@@ -233,9 +233,17 @@ isolated app-server test.
 
 To diagnose a specific thread, compare its named `mcpServerStatus/list` and
 `mcpServer/resource/read` results with the host-wide results. Use the server
-name and environment advertised by that plugin. A rendered panel showing
-degraded data has reached OMS. Its status describes collection on the project
-host.
+name and environment advertised by that plugin. Repeat the opener and HTML
+read on the same connection while a status query is running. Earlier servers
+queued both behind a slow project snapshot. The panel server now serves
+those requests independently. Its widget also acknowledges host `ping` and
+`ui/resource-teardown` requests, including when the host and widget happen
+to use the same request ID.
+
+If clicking **Retry** produces only a desktop inventory request, the executor
+has no opener or resource-read result for that click. The desktop renderer’s
+diagnostic log is needed to locate that failure. A rendered panel showing
+degraded data has reached OMS and describes collection on the project host.
 
 ### Register a marketplace once
 

@@ -163,6 +163,7 @@ let sequence = 0;
 let hostOrigin = '*';
 let initializing;
 let busy = false;
+let disposed = false;
 let project = '';
 let requestedProject = null;
 let generation = 0;
@@ -191,11 +192,12 @@ function updateContext(data) {
   });
 }
 
-function send(message) {
-  window.parent.postMessage({jsonrpc:'2.0', ...message}, hostOrigin);
+function send(message, origin = hostOrigin) {
+  window.parent.postMessage({jsonrpc:'2.0', ...message}, origin);
 }
 
 function request(method, params, timeout = 90000) {
+  if (disposed) return Promise.reject(new Error('패널이 닫혔습니다.'));
   const id = ++sequence;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -225,7 +227,28 @@ function reconcileOpens() {
 window.addEventListener('message', event => {
   const msg = event.data;
   if (event.source !== window.parent || (hostOrigin !== '*' && event.origin !== hostOrigin) ||
-      !msg || msg.jsonrpc !== '2.0') return;
+      !msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') return;
+  // The host and panel allocate request IDs independently.
+  if (typeof msg.method === 'string' && (typeof msg.id === 'string' || typeof msg.id === 'number')) {
+    const origin = event.origin && event.origin !== 'null' ? event.origin : '*';
+    if (msg.method === 'ui/resource-teardown' && !disposed) {
+      disposed = true;
+      generation++;
+      setBusy(true, true);
+      el('view').hidden = true;
+      el('status').textContent = '패널이 닫혔습니다.';
+      for (const call of pending.values()) {
+        clearTimeout(call.timer);
+        call.reject(new Error('패널이 닫혔습니다.'));
+      }
+      pending.clear();
+    }
+    const reply = msg.method === 'ping' || msg.method === 'ui/resource-teardown'
+      ? {result:{}} : {error:{code:-32601, message:'Method not found'}};
+    send({id:msg.id, ...reply}, origin);
+    return;
+  }
+  if (disposed) return;
   if (msg.method === 'ui/notifications/tool-input') {
     const target = projectArgument(msg.params?.arguments?.project);
     seenInputOrManual = true;
@@ -258,7 +281,7 @@ window.addEventListener('message', event => {
     }
     return;
   }
-  if (!pending.has(msg.id)) return;
+  if ('method' in msg || ('result' in msg) === ('error' in msg) || !pending.has(msg.id)) return;
   if (event.origin && event.origin !== 'null') hostOrigin = event.origin;
   const call = pending.get(msg.id);
   clearTimeout(call.timer);

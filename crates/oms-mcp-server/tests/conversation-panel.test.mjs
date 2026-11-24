@@ -28,7 +28,7 @@ async function panel(projects, dashboard = {}) {
   get('launch').reset = () => { get('brief').value = ''; };
   const window = new EventTarget();
   const calls = [];
-  const host = {status:null, failStart:true};
+  const host = {status:null, failStart:true, replies:[]};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -54,7 +54,9 @@ async function panel(projects, dashboard = {}) {
       default: throw new Error('Unexpected tool ' + name);
     }
   }
-  window.parent = {postMessage({id, method, params}) {
+  window.parent = {postMessage(message) {
+    const {id, method, params} = message;
+    if (!method) { host.replies.push(JSON.parse(JSON.stringify(message))); return; }
     if (id == null) return;
     let result = {};
     if (method === 'tools/call') {
@@ -62,6 +64,7 @@ async function panel(projects, dashboard = {}) {
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if (params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) {
         host.delay = null;
+        host.delayedId = id;
         host.release = () => notify({id, result});
         return;
       }
@@ -71,7 +74,7 @@ async function panel(projects, dashboard = {}) {
   const document = {getElementById:get, createElement:() => new Element()};
   runInNewContext(script, {window, document, Option:Element, setTimeout, clearTimeout, crypto:{randomUUID}});
   await setImmediate();
-  return {get, calls, host,
+  return {get, calls, host, notify,
     async event(id, type) {
       get(id).dispatchEvent(new Event(type, {cancelable:true}));
       await setImmediate();
@@ -114,6 +117,38 @@ test('automatic reserved receipt clears the initial launch error style', async (
   const start = p.calls.find(c => c.name === 'oms_start_main');
   assert.ok(p.get('receipt').textContent.includes('oms-app-' + start.args.requestId));
   assert.doesNotMatch(p.get('receipt').className || '', /\berror\b/);
+});
+
+test('host ping and unsupported requests with a pending snapshot ID leave the snapshot in flight', async () => {
+  const p = await panel(['one']);
+  p.host.delay = 'one';
+  await p.event('refresh', 'click');
+  const id = p.host.delayedId;
+  try {
+    p.notify({method:'ping', id});
+    p.notify({method:'unknown/request', id});
+    p.notify({id});
+    await setImmediate();
+    assert.deepEqual(p.host.replies[0], {jsonrpc:'2.0', id, result:{}});
+    assert.equal(p.host.replies[1]?.error.code, -32601);
+    assert.equal(p.get('view').ariaBusy, 'true');
+  } finally { p.host.release(); }
+  await setImmediate();
+  assert.equal(p.get('view').hidden, false);
+  assert.equal(p.get('view').ariaBusy, 'false');
+});
+
+test('teardown acknowledges the host and discards late reads without sending more tool calls', async () => {
+  const p = await panel(['one']);
+  p.host.delay = 'one';
+  await p.event('refresh', 'click');
+  const mark = p.calls.length;
+  p.notify({method:'ui/resource-teardown', id:'host-close', params:{}});
+  p.host.release();
+  await p.open('input', {arguments:{project:'one'}});
+  assert.deepEqual(p.host.replies, [{jsonrpc:'2.0', id:'host-close', result:{}}]);
+  assert.equal(p.get('view').hidden, true);
+  assert.equal(p.calls.length, mark);
 });
 
 for (const failure of ['unavailable', 'different request']) {
