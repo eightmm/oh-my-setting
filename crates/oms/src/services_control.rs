@@ -1817,6 +1817,10 @@ impl oms_command_landing::Services for ControlServices<'_> {
 }
 
 impl oms_command_state::HostServices for ControlServices<'_> {
+    fn scratch_activity(&self, repo: &Path, stop: &AtomicBool) -> Option<oms_command_state::Value> {
+        let display = oms_panel_core::scratch_activity::observe(repo, stop);
+        oms_command_state::json::parse(&serde_json::to_vec(&display).ok()?).ok()
+    }
     fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
         self
     }

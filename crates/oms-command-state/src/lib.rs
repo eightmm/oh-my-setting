@@ -88,6 +88,10 @@ pub trait HostServices {
     fn task_status(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Output> {
         None
     }
+    /// Optional display-only records from enrolled scratch checkouts.
+    fn scratch_activity(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Value> {
+        None
+    }
     /// Fresh canonical runtime evidence for this exact repository and snapshot.
     /// `None` keeps the library-only fallback; an error is a degraded source.
     fn runtime_envelope(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Result<Value>> {

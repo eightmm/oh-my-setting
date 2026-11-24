@@ -519,6 +519,14 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     ids
                 );
             }
+            if data["dashboard"]["managedScratch"].is_object()
+                && text.len() + json!(&text).to_string().len() + 1024 > crate::OUTPUT_LIMIT
+            {
+                if text.len() + 1024 > crate::OUTPUT_LIMIT {
+                    return response(Err("OMS panel snapshot exceeds its output limit.".into()));
+                }
+                text = "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into();
+            }
             json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false})
         }
         Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),

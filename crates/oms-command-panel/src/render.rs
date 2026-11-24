@@ -2880,6 +2880,42 @@ fn frame_with_capacity(
         })
         .filter(|compact| fixed + compact.len() < height);
     let mut optional = Vec::new();
+    let scratch = &report["managedScratch"];
+    if !stale
+        && report["collection"]["pending"] != true
+        && !overlay
+        && default_overview(nav)
+        && let Some(status) = scratch["status"].as_str()
+    {
+        let recorded = rows(&scratch["attempts"]);
+        if !recorded.is_empty() || status != "ready" {
+            optional.push(clip(
+                &format!(
+                    "Managed scratch records · {status} · {} returned",
+                    recorded.len()
+                ),
+                columns,
+            ));
+            for a in recorded.iter().take(3) {
+                if let Some(source) = rows(&scratch["sources"])
+                    .iter()
+                    .find(|s| s["id"] == a["sourceId"])
+                {
+                    optional.push(clip(
+                        &format!(
+                            "  {} · {} {} · recorded {} at {}",
+                            text(source, "label"),
+                            text(a, "provider"),
+                            text(a, "tool"),
+                            text(a, "state"),
+                            text(a, "updatedAt")
+                        ),
+                        columns,
+                    ));
+                }
+            }
+        }
+    }
     if height >= 14 || (short_board && required < height) || compact_main.is_some() {
         // One usage projection per frame; painting never rereads provider state.
         let now = oms_panel_core::timestamp() as f64;
@@ -9254,6 +9290,33 @@ mod tests {
         );
         assert!(filtered.contains("3 filt"), "{filtered}");
         assert!(filtered.contains("Claude · Activity"), "{filtered}");
+    }
+
+    #[test]
+    fn managed_scratch_records_do_not_become_call_or_chat_targets() {
+        let mut report = json!({"collection":{"ok":true},"managedScratch":{"status":"partial",
+            "sources":[{"id":"one","label":"wt-one (detached)"}],"attempts":[{
+            "id":"same","sourceId":"one","tool":"peer-review","provider":"claude","state":"working","updatedAt":"2026-01-01T00:00:00Z"}]}});
+        let nav = navigation::Navigation::default();
+        let read = BTreeMap::new();
+        let board = frame(&report, &nav, 120, 32, &read).join("\n");
+        assert!(
+            board.contains("Managed scratch records · partial"),
+            "{board}"
+        );
+        assert!(
+            board.contains(
+                "wt-one (detached) · claude peer-review · recorded working at 2026-01-01"
+            ),
+            "{board}"
+        );
+        assert!(calls(&report).is_empty());
+        report["capacity_stale"] = json!(true);
+        assert!(
+            !frame(&report, &nav, 120, 32, &read)
+                .join("\n")
+                .contains("wt-one")
+        );
     }
 
     #[test]
