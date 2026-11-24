@@ -179,18 +179,23 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
     }
     let mut task = state.get("task").clone();
     let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
-    let idle_secs = if !task_text.is_empty() {
-        oms_command_task::packet::idle_seconds(&task_text, now)
+    let open = task.get("present").truth() && task.text("status") != "closed";
+    let (is_stale, is_dormant, idle_secs) = if !task_text.is_empty() {
+        let f = oms_command_task::packet::freshness_from_env(&task_text, now);
+        (open && f.stale, open && f.dormant, f.idle_seconds)
     } else {
-        None
-    }
-    .or_else(|| helpers::now_age(task.text("last_activity")).and_then(|s| u64::try_from(s).ok()));
-    let is_stale = task.get("present").truth()
-        && task.text("status") != "closed"
-        && (task.get("stale").truth()
-            || idle_secs.is_some_and(|age| age >= oms_command_task::packet::STALE_TTL_SECONDS));
+        let idle = helpers::now_age(task.text("last_activity")).and_then(|s| u64::try_from(s).ok());
+        let stale = open && task.get("stale").truth();
+        let dormant = open
+            && !stale
+            && (task.get("dormant").truth()
+                || idle
+                    .is_some_and(|age| age >= oms_command_task::packet::DORMANT_THRESHOLD_SECONDS));
+        (stale, dormant, idle)
+    };
     if task.get("present").truth() {
         task.set("stale", Value::Bool(is_stale))?;
+        task.set("dormant", Value::Bool(is_dormant))?;
         if let Some(secs) = idle_secs {
             task.set("idle_seconds", number(secs))?;
         }
@@ -201,11 +206,7 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
     )?;
     task.set(
         "next",
-        if is_stale {
-            string("")
-        } else {
-            string(next.join(" ").chars().take(200).collect::<String>())
-        },
+        string(next.join(" ").chars().take(200).collect::<String>()),
     )?;
     state.set("task", task)?;
     let plan = file(ctx, ".oms/plan/tasks.json");
@@ -1935,6 +1936,8 @@ fn dashboard_text(report: &Value) -> Result<String> {
             shown(task.get("verification")),
             if task.get("stale").truth() {
                 "  STALE"
+            } else if task.get("dormant").truth() {
+                "  DORMANT"
             } else {
                 ""
             }
@@ -2192,25 +2195,26 @@ fn state_text(state: &Value) -> Result<String> {
         if !task.get("healthy").truth() {
             out.push_str("  status unavailable or invalid (run: oms agent-task status --json)\n");
         }
-        if task.get("stale").truth() {
-            let idle_days = task
+        let freshness = oms_command_task::packet::PacketFreshness {
+            idle_seconds: task
                 .get("idle_seconds")
                 .int()
                 .ok()
-                .filter(|s| *s >= 0)
-                .or_else(|| helpers::now_age(task.text("last_activity")).map(i128::from))
-                .map(|s| s / 86400);
-            if let Some(days) = idle_days {
-                out.push_str(&format!("  status: stale (idle {days}d)\n"));
-            } else {
-                out.push_str("  status: stale\n");
-            }
+                .and_then(|s| u64::try_from(s).ok())
+                .or_else(|| {
+                    helpers::now_age(task.text("last_activity")).and_then(|s| u64::try_from(s).ok())
+                }),
+            stale: task.get("stale").truth(),
+            dormant: task.get("dormant").truth(),
+        };
+        if let Some(label) = freshness.label() {
+            out.push_str(&format!("  status: {label}\n"));
             if !task.text("goal").is_empty() {
                 out.push_str(&format!("  goal: {}\n", task.text("goal")));
             }
-            out.push_str(
-                "  hint: stale handoff packet; close or rotate with `oms agent-task close --reason '...'`\n",
-            );
+            if let Some(hint) = freshness.hint() {
+                out.push_str(&format!("  hint: {hint}\n"));
+            }
         } else {
             for key in ["goal", "next"] {
                 if !task.text(key).is_empty() {

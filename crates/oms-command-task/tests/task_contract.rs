@@ -732,9 +732,9 @@ fn issue_rebind_needs_consent_and_rotation_keeps_archive_binding() {
 }
 
 #[test]
-fn status_marks_packet_stale_after_72_hours_without_modifying_packet() {
+fn status_separates_dormant_72h_and_stale_7d_ttl_without_modifying_packet() {
     if !isolated(
-        "status_marks_packet_stale_after_72_hours_without_modifying_packet",
+        "status_separates_dormant_72h_and_stale_7d_ttl_without_modifying_packet",
         &[],
     ) {
         return;
@@ -754,7 +754,7 @@ fn status_marks_packet_stale_after_72_hours_without_modifying_packet() {
     let path = repo.path().join(".oms/task/current.md");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-    // 71 hours idle: still fresh.
+    // 71 hours idle: neither stale nor dormant.
     let fresh_ts = stamp(71 * 3600);
     let fresh_raw = format!(
         "# Active Task\n- task_id: task-71h\n- status: active\n- updated: {fresh_ts}\n- last_activity: {fresh_ts}\n- closed_at:\n\n## Goal\n\nFresh packet\n"
@@ -763,21 +763,94 @@ fn status_marks_packet_stale_after_72_hours_without_modifying_packet() {
     let (code, json_out, err) = call(&repo, &mut svc, &["status", "--json"]);
     assert_eq!(code, 0, "{err}");
     assert!(json_out.contains(r#""stale": false"#), "{json_out}");
+    assert!(json_out.contains(r#""dormant": false"#), "{json_out}");
     let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
     assert_eq!(code, 0, "{err}");
     assert!(text_out.contains("stale: no\n"), "{text_out}");
+    assert!(text_out.contains("dormant: no\n"), "{text_out}");
 
-    // 73 hours idle: stale (>= 72h), packet left untouched.
-    let stale_ts = stamp(73 * 3600);
+    // 73 hours idle (default 7d TTL): dormant (display-only), NOT stale, packet untouched,
+    // and `init` still refuses to replace the active goal.
+    let dormant_ts = stamp(73 * 3600);
+    let dormant_raw = format!(
+        "# Active Task\n- task_id: task-73h\n- status: active\n- updated: {dormant_ts}\n- last_activity: {dormant_ts}\n- closed_at:\n\n## Goal\n\nDormant packet\n"
+    );
+    std::fs::write(&path, &dormant_raw).unwrap();
+    let (code, json_out, err) = call(&repo, &mut svc, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(json_out.contains(r#""stale": false"#), "{json_out}");
+    assert!(json_out.contains(r#""dormant": true"#), "{json_out}");
+    let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text_out.contains("stale: no\n"), "{text_out}");
+    assert!(text_out.contains("dormant: yes\n"), "{text_out}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), dormant_raw);
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "Replace dormant"]);
+    assert_eq!(
+        code, 2,
+        "default 7d TTL must refuse replacing 73h packet: {err}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), dormant_raw);
+
+    // 8 days idle (default 7d TTL): stale (not dormant), packet untouched on status,
+    // and `init` is allowed to rotate it.
+    let stale_ts = stamp(8 * 86400 + 60);
     let stale_raw = format!(
-        "# Active Task\n- task_id: task-73h\n- status: active\n- updated: {stale_ts}\n- last_activity: {stale_ts}\n- closed_at:\n\n## Goal\n\nStale packet\n"
+        "# Active Task\n- task_id: task-8d\n- status: active\n- updated: {stale_ts}\n- last_activity: {stale_ts}\n- closed_at:\n\n## Goal\n\nStale packet\n"
     );
     std::fs::write(&path, &stale_raw).unwrap();
     let (code, json_out, err) = call(&repo, &mut svc, &["status", "--json"]);
     assert_eq!(code, 0, "{err}");
     assert!(json_out.contains(r#""stale": true"#), "{json_out}");
+    assert!(json_out.contains(r#""dormant": false"#), "{json_out}");
     let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
     assert_eq!(code, 0, "{err}");
     assert!(text_out.contains("stale: yes\n"), "{text_out}");
+    assert!(text_out.contains("dormant: no\n"), "{text_out}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), stale_raw);
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "Replaced after 8d"]);
+    assert_eq!(
+        code, 0,
+        "8d idle packet must rotate under default 7d TTL: {err}"
+    );
+}
+
+#[test]
+fn status_honors_ttl_above_72h_as_dormant_not_stale() {
+    if !isolated(
+        "status_honors_ttl_above_72h_as_dormant_not_stale",
+        &[("OMS_AGENT_TASK_TTL", "864000")],
+    ) {
+        return;
+    }
+    let repo = Repo::new();
+    let mut svc = Fake::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let eight_days_ago = chrono::DateTime::<chrono::Utc>::from_timestamp(now - 8 * 86400 - 60, 0)
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let path = repo.path().join(".oms/task/current.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let raw = format!(
+        "# Active Task\n- task_id: task-8d-custom-ttl\n- status: active\n- updated: {eight_days_ago}\n- last_activity: {eight_days_ago}\n- closed_at:\n\n## Goal\n\nCustom TTL packet\n"
+    );
+    std::fs::write(&path, &raw).unwrap();
+
+    let (code, json_out, err) = call(&repo, &mut svc, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(json_out.contains(r#""stale": false"#), "{json_out}");
+    assert!(json_out.contains(r#""dormant": true"#), "{json_out}");
+    let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text_out.contains("stale: no\n"), "{text_out}");
+    assert!(text_out.contains("dormant: yes\n"), "{text_out}");
+
+    // Mutation refusal also honors OMS_AGENT_TASK_TTL=10d.
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "Blocked by 10d TTL"]);
+    assert_eq!(code, 2, "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
 }

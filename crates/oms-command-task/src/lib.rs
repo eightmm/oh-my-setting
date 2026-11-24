@@ -447,13 +447,8 @@ impl Task<'_> {
             return Ok(Vec::new());
         }
         let id = packet::metadata(raw, "task_id").unwrap_or(b"legacy");
-        let default_ttl = packet::STALE_TTL_SECONDS.to_string();
         if packet::metadata(raw, "status").unwrap_or(b"active") == b"active"
-            && !packet::stale(
-                raw,
-                &env("OMS_AGENT_TASK_TTL", default_ttl.as_bytes()),
-                utc(),
-            )
+            && !packet::stale(raw, &packet::configured_ttl(), utc())
             && !o.has("replace-goal")
         {
             let mut message = [
@@ -973,12 +968,9 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
         .or_else(|| packet::metadata(&raw, "updated").filter(|v| !v.is_empty()))
         .unwrap_or_default();
     let closed = packet::metadata(&raw, "closed_at").unwrap_or_default();
-    let default_ttl = packet::STALE_TTL_SECONDS.to_string();
-    let stale = packet::stale(
-        &raw,
-        &env("OMS_AGENT_TASK_TTL", default_ttl.as_bytes()),
-        utc(),
-    );
+    let freshness = packet::freshness_from_env(&raw, utc());
+    let stale = freshness.stale;
+    let dormant = freshness.dormant;
     let verification = task.verification(&raw)?;
     if !task.options.json {
         let mut bytes = Vec::new();
@@ -990,6 +982,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("last_activity", activity),
             ("closed_at", closed),
             ("stale", if stale { b"yes" } else { b"no" }),
+            ("dormant", if dormant { b"yes" } else { b"no" }),
             ("github_issue", issue),
         ] {
             // Unbound packets keep the established text rows.
@@ -1035,6 +1028,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("last_activity", nullable(activity)),
             ("closed_at", nullable(closed)),
             ("stale", Json::Bool(stale)),
+            ("dormant", Json::Bool(dormant)),
             ("verification", string(verification)),
             ("lifecycle", lifecycle),
         ]

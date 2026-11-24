@@ -1050,68 +1050,79 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         return empty();
     };
     let mut lines = Vec::new();
-    let plan = load(&repo.join(".oms/plan/tasks.json"));
-    let tasks = crate::routing::plan_tasks(&plan);
-    if !text(&plan, "goal").trim().is_empty()
-        && !(!tasks.is_empty()
-            && tasks
-                .iter()
-                .all(|t| ["done", "cancelled"].contains(&text(t, "state"))))
-    {
-        let mut counts = BTreeMap::<String, usize>::new();
-        let mut done_ids = std::collections::HashSet::new();
-        for t in &tasks {
-            let st = text(t, "state");
-            *counts.entry(st.into()).or_default() += 1;
-            if st == "done" {
-                let id = text(t, "id");
-                if !id.is_empty() {
-                    done_ids.insert(id);
+    let plan_path = repo.join(".oms/plan/tasks.json");
+    if plan_path.is_file() {
+        let plan = load(&plan_path);
+        let plan_goal = text(&plan, "goal").trim();
+        if !plan_goal.is_empty() {
+            let accept = flat(text(&plan, "accept"));
+            let state_out = oms_command_state::run_with_source(
+                "state",
+                &["--repo".into(), repo.as_os_str().into(), "--json".into()],
+                &repo,
+                ctx.source,
+                ctx.interrupted,
+            );
+            let plan_state = (state_out.0 == 0)
+                .then(|| document(&state_out.1))
+                .flatten()
+                .and_then(|doc| doc.get("plan").cloned());
+            if let Some(plan_state) = plan_state.filter(|p| p["healthy"] == true) {
+                if plan_state["all_closed"] != true {
+                    let mut counts = BTreeMap::<String, u64>::new();
+                    if let Some(by_state) = plan_state["by_state"].as_object() {
+                        for (state, count) in by_state {
+                            if let Some(n) = count.as_u64() {
+                                counts.insert(state.clone(), n);
+                            }
+                        }
+                    }
+                    let summary = counts
+                        .iter()
+                        .map(|(s, n)| format!("{s}={n}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    lines.push(format!(
+                        "- plan: {}{}",
+                        clip(&flat(plan_goal), 160),
+                        if summary.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{summary}]")
+                        }
+                    ));
+                    let contract = &plan_state["contract"];
+                    if contract["bound"] == true && contract["satisfied"] != true {
+                        let blocker = text(contract, "blocker");
+                        if blocker.is_empty() {
+                            lines.push("  contract: blocked".into());
+                        } else {
+                            lines.push(format!("  contract: blocked ({blocker})"));
+                        }
+                    }
+                    let actionable_ids: Vec<&str> = plan_state["actionable"]
+                        .as_array()
+                        .map(|rows| rows.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    if !actionable_ids.is_empty() {
+                        lines.push(format!(
+                            "  actionable: {}",
+                            format_actionable(&actionable_ids)
+                        ));
+                    }
+                    if !accept.is_empty() {
+                        lines.push(format!("  accept: {}", clip(&accept, 140)));
+                    }
+                }
+            } else {
+                lines.push(format!(
+                    "- plan: {} [status unavailable]",
+                    clip(&flat(plan_goal), 160)
+                ));
+                if !accept.is_empty() {
+                    lines.push(format!("  accept: {}", clip(&accept, 140)));
                 }
             }
-        }
-        let mut actionable_tasks: Vec<&Value> = tasks
-            .iter()
-            .filter(|t| {
-                text(t, "state") == "ready"
-                    && !text(t, "id").is_empty()
-                    && text(t, "executor_id").is_empty()
-                    && text(t, "executor_soul_sha256").is_empty()
-                    && t.get("depends")
-                        .and_then(Value::as_array)
-                        .is_none_or(|deps| {
-                            deps.iter()
-                                .all(|d| d.as_str().is_some_and(|id| done_ids.contains(id)))
-                        })
-            })
-            .collect();
-        actionable_tasks.sort_by(|a, b| {
-            (text(a, "created"), text(a, "id")).cmp(&(text(b, "created"), text(b, "id")))
-        });
-        let actionable_ids: Vec<&str> = actionable_tasks.iter().map(|t| text(t, "id")).collect();
-        let summary = counts
-            .iter()
-            .map(|(s, n)| format!("{s}={n}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(format!(
-            "- plan: {}{}",
-            clip(&flat(text(&plan, "goal")), 160),
-            if summary.is_empty() {
-                String::new()
-            } else {
-                format!(" [{summary}]")
-            }
-        ));
-        if !actionable_ids.is_empty() {
-            lines.push(format!(
-                "  actionable: {}",
-                format_actionable(&actionable_ids)
-            ));
-        }
-        let accept = flat(text(&plan, "accept"));
-        if !accept.is_empty() {
-            lines.push(format!("  accept: {}", clip(&accept, 140)));
         }
     }
     let task = read(&repo.join(".oms/task/current.md"), 1024 * 1024).unwrap_or_default();
@@ -1133,22 +1144,18 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
     let goal = section("Goal");
     if !task_id.is_empty() && status != "closed" {
         let now = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time());
-        let idle_secs = oms_command_task::packet::idle_seconds(&task, now);
-        let days = idle_secs.map(|s| s / 86400).unwrap_or(0);
-        let stale = oms_command_task::packet::is_stale(&task, now);
+        let freshness = oms_command_task::packet::freshness_from_env(&task, now);
+        let days = freshness.idle_days().unwrap_or(0);
         let goal_text = if goal.is_empty() {
             "no goal recorded"
         } else {
             &goal
         };
-        if stale {
-            lines.push(format!(
-                "- task {task_id} [stale (idle {days}d)]: {goal_text}"
-            ));
-            lines.push(
-                "  hint: stale handoff packet; close or rotate with `oms agent-task close --reason '...'`"
-                    .into(),
-            );
+        if let Some(label) = freshness.label() {
+            lines.push(format!("- task {task_id} [{label}]: {goal_text}"));
+            if let Some(hint) = freshness.hint() {
+                lines.push(format!("  hint: {hint}"));
+            }
         } else {
             lines.push(format!(
                 "- task {task_id} ({status}{}): {goal_text}",
@@ -1169,7 +1176,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
                 let verify_chars = verify_trimmed.chars().count();
                 if verify_chars > RESUME_VERIFY_INLINE_MAX {
                     lines.push(format!(
-                        "  verify: omitted ({verify_chars} chars; read .oms/task/current.md or run `oms agent-task show`)"
+                        "  verify: omitted ({verify_chars} chars; run `oms agent-task show`)"
                     ));
                 } else {
                     let verify = section("Verify");
@@ -1796,7 +1803,14 @@ mod tests {
         raw.into_bytes()
     }
 
-    fn write_plan(repo: &Path, goal: &str, ready_ids: &[&str], updated: &str) {
+    fn write_plan_doc(
+        repo: &Path,
+        goal: &str,
+        ready_ids: &[&str],
+        updated: &str,
+        contract: Option<Value>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
         let mut tasks = serde_json::Map::new();
         for (idx, id) in ready_ids.iter().enumerate() {
             let created = format!("2026-11-24T00:00:{:02}Z", idx % 60);
@@ -1812,34 +1826,56 @@ mod tests {
                 }),
             );
         }
-        let path = repo.join(".oms/plan/tasks.json");
-        fs::create_dir_all(path.parent().expect("plan dir")).expect("mkdir plan");
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "schema": 3,
-                "goal": goal,
-                "tasks": tasks,
-            }))
-            .expect("serialize plan"),
-        )
-        .expect("write plan");
+        let mut doc = json!({
+            "schema": 3,
+            "goal": goal,
+            "tasks": tasks,
+        });
+        if let Some(contract) = contract {
+            doc["project_contract"] = contract;
+        }
+        let plan_dir = repo.join(".oms/plan");
+        fs::create_dir_all(&plan_dir).expect("mkdir plan");
+        for dir in [repo, &repo.join(".oms"), &plan_dir] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod dir");
+        }
+        let path = plan_dir.join("tasks.json");
+        fs::write(&path, serde_json::to_vec(&doc).expect("serialize plan")).expect("write plan");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod plan");
+    }
+
+    fn write_plan(repo: &Path, goal: &str, ready_ids: &[&str], updated: &str) {
+        write_plan_doc(repo, goal, ready_ids, updated, None);
+    }
+
+    fn assert_hint_lines_fit_80_cols(text: &str) {
+        for line in text.lines() {
+            if line.trim_start().starts_with("hint:")
+                || line.trim_start().starts_with("verify: omitted")
+            {
+                assert!(
+                    line.chars().count() <= 80,
+                    "line exceeds 80 columns ({}): {line}",
+                    line.chars().count()
+                );
+            }
+        }
     }
 
     #[test]
-    fn resume_marks_stale_packet_and_prioritizes_running_plan() {
+    fn resume_marks_dormant_and_stale_packets_and_uses_plan_engine_actionable() {
         let tmp = TempDir::new("resume-stale");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
         let six_days_ago = rfc3339_secs_ago(6 * 86400 + 60);
         let original = write_packet(
             &repo,
-            "task-stale-6d",
+            "task-dormant-6d",
             "active",
             &six_days_ago,
             "Old abandoned handoff goal",
-            "Do not follow this stale next step",
-            "cargo test --stale-verify-marker",
+            "Do not follow this dormant next step",
+            "cargo test --dormant-verify-marker",
         );
         let fresh_ts = rfc3339_secs_ago(300);
         write_plan(
@@ -1864,10 +1900,15 @@ mod tests {
         assert_eq!(code, 0);
         let out = String::from_utf8(stdout).expect("utf8");
 
-        assert!(out.contains("stale (idle 6d)"), "{out}");
+        assert!(out.contains("dormant (idle 6d)"), "{out}");
+        assert!(!out.contains("stale (idle"), "{out}");
         assert!(out.contains("oms agent-task close --reason"), "{out}");
-        assert!(!out.contains("Do not follow this stale next step"), "{out}");
-        assert!(!out.contains("cargo test --stale-verify-marker"), "{out}");
+        assert_hint_lines_fit_80_cols(&out);
+        assert!(
+            !out.contains("Do not follow this dormant next step"),
+            "{out}"
+        );
+        assert!(!out.contains("cargo test --dormant-verify-marker"), "{out}");
         assert!(out.contains("- plan: Current live plan goal"), "{out}");
         assert!(
             out.contains("actionable: 8 (t1, t2, t3, t4, t5 +3 more)"),
@@ -1875,16 +1916,171 @@ mod tests {
         );
         assert!(!out.contains("t6"), "{out}");
         let plan_pos = out.find("- plan: Current live plan goal").expect("plan");
-        let task_pos = out.find("- task task-stale-6d").expect("task");
+        let task_pos = out.find("- task task-dormant-6d").expect("task");
         assert!(
             plan_pos < task_pos,
-            "running plan must precede stale task:\n{out}"
+            "running plan must precede dormant task:\n{out}"
         );
         assert_eq!(
             fs::read(repo.join(".oms/task/current.md")).expect("read packet"),
             original,
             "resume must never edit or close the handoff packet"
         );
+
+        // 8 days idle (past default 7d TTL): marked stale (not dormant), hint <= 80 cols.
+        let eight_days_ago = rfc3339_secs_ago(8 * 86400 + 60);
+        write_packet(
+            &repo,
+            "task-stale-8d",
+            "active",
+            &eight_days_ago,
+            "Old 8-day handoff goal",
+            "Do not follow this stale next step",
+            "cargo test --stale-verify-marker",
+        );
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let stale_out = String::from_utf8(stdout).expect("utf8");
+        assert!(stale_out.contains("stale (idle 8d)"), "{stale_out}");
+        assert!(!stale_out.contains("dormant (idle"), "{stale_out}");
+        assert!(
+            !stale_out.contains("Do not follow this stale next step"),
+            "{stale_out}"
+        );
+        assert!(
+            !stale_out.contains("cargo test --stale-verify-marker"),
+            "{stale_out}"
+        );
+        assert_hint_lines_fit_80_cols(&stale_out);
+
+        // Bind a PROJECT.md contract that blocks new work (draft spec):
+        // resume must report 0 actionable tasks, matching `oms state`.
+        fs::write(
+            repo.join("PROJECT.md"),
+            "# Project\n\n- State: draft\n\n## Goal\n\nDraft contract blocking work\n",
+        )
+        .expect("write draft PROJECT.md");
+        write_plan_doc(
+            &repo,
+            "Contract-blocked plan goal",
+            &["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
+            &fresh_ts,
+            Some(json!({
+                "schema": 1,
+                "spec_sha256": "a".repeat(64),
+            })),
+        );
+        let state_out = oms_command_state::run_with_source(
+            "state",
+            &["--repo".into(), repo.as_os_str().into(), "--json".into()],
+            &repo,
+            &repo,
+            &cancel,
+        );
+        assert_eq!(state_out.0, 0);
+        let state_doc = document(&state_out.1).expect("state json");
+        assert_eq!(state_doc["plan"]["healthy"], true);
+        assert_eq!(state_doc["plan"]["contract"]["bound"], true);
+        assert_eq!(state_doc["plan"]["contract"]["satisfied"], false);
+        assert_eq!(
+            state_doc["plan"]["actionable"].as_array().map(Vec::len),
+            Some(0),
+            "{state_doc}"
+        );
+
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let blocked_out = String::from_utf8(stdout).expect("utf8");
+        assert!(
+            blocked_out.contains("- plan: Contract-blocked plan goal"),
+            "{blocked_out}"
+        );
+        assert!(
+            blocked_out.contains("contract: blocked (project-draft)"),
+            "{blocked_out}"
+        );
+        assert!(
+            !blocked_out.contains("actionable:"),
+            "resume must show 0 actionable when PROJECT.md contract blocks work:\n{blocked_out}"
+        );
+    }
+
+    #[test]
+    fn resume_state_status_agree_on_dormant_when_ttl_exceeds_72h() {
+        if std::env::var_os("OMS_HOOK_TTL_ISOLATED").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("exe"))
+                .args([
+                    "--exact",
+                    "lifecycle::tests::resume_state_status_agree_on_dormant_when_ttl_exceeds_72h",
+                    "--nocapture",
+                ])
+                .env("OMS_HOOK_TTL_ISOLATED", "1")
+                .env("OMS_AGENT_TASK_TTL", "864000")
+                .output()
+                .expect("spawn isolated test");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let tmp = TempDir::new("resume-ttl");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
+        let eight_days_ago = rfc3339_secs_ago(8 * 86400 + 60);
+        write_packet(
+            &repo,
+            "task-8d-ttl",
+            "active",
+            &eight_days_ago,
+            "Eight day packet under 10d TTL",
+            "Hidden in text only",
+            "cargo test --hidden",
+        );
+
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let resume_out = String::from_utf8(stdout).expect("utf8");
+        assert!(resume_out.contains("dormant (idle 8d)"), "{resume_out}");
+        assert!(!resume_out.contains("stale (idle"), "{resume_out}");
+        assert!(!resume_out.contains("Hidden in text only"), "{resume_out}");
+        assert_hint_lines_fit_80_cols(&resume_out);
+
+        let (code, state_bytes, _) = oms_command_state::run_with_source(
+            "state",
+            &["--repo".into(), repo.as_os_str().into(), "--json".into()],
+            &repo,
+            &repo,
+            &cancel,
+        );
+        assert_eq!(code, 0);
+        let state_doc = document(&state_bytes).expect("state json");
+        assert_eq!(state_doc["task"]["stale"], false, "{state_doc}");
+        assert_eq!(state_doc["task"]["dormant"], true, "{state_doc}");
+        assert_eq!(state_doc["task"]["next"], "Hidden in text only");
+
+        let (code, status_bytes, _) = oms_command_task::run(
+            &["status".into(), "--repo".into(), repo.as_os_str().into()],
+            &repo,
+            &cancel,
+        );
+        assert_eq!(code, 0);
+        let status_text = String::from_utf8(status_bytes).expect("utf8");
+        assert!(status_text.contains("stale: no\n"), "{status_text}");
+        assert!(status_text.contains("dormant: yes\n"), "{status_text}");
     }
 
     #[test]
@@ -1992,5 +2188,6 @@ mod tests {
                 || verify_out.contains("oms agent-task show"),
             "{verify_out}"
         );
+        assert_hint_lines_fit_80_cols(&verify_out);
     }
 }
