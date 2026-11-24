@@ -3398,7 +3398,7 @@ fn review_classification_and_validation() {
         assert_eq!(verified, vec!["bash scripts/check.sh fast".to_owned()]);
 
         // #491: a prose key-marker mention with no END line redacts the rest of the answer; the
-        // verdict lines survive in canonical form so the gate still reads them.
+        // verdict read from the raw answer is stored in the artifact header, so the gate keeps it.
         *provider_answer.borrow_mut() = format!(
             "The finding quotes a {}{} PRIVATE KEY{} line from a fixture.\nCONFIDENCE: 0.7\nGATE: pass\n",
             "-----", "BEGIN", "-----"
@@ -3419,10 +3419,13 @@ fn review_classification_and_validation() {
             .collect::<String>();
         assert!(saved.contains("[oms-redacted:private-key]"), "{saved}");
         assert!(!saved.contains("from a fixture"), "{saved}");
-        assert!(saved.contains("CONFIDENCE: 0.7\nGATE: pass"), "{saved}");
+        assert!(
+            saved.contains("- verdict: pass\n- confidence: 0.7\n"),
+            "{saved}"
+        );
 
-        // A quoted earlier pass must not outrank the redacted final fail, and a refusal line hidden
-        // behind the marker must not turn into a pass.
+        // A quoted earlier pass must not outrank the redacted final fail, and a refusal, truncation
+        // or empty answer hidden behind the marker must not turn into a pass.
         let marker = format!("{}{} PRIVATE KEY{}", "-----", "BEGIN", "-----");
         for (answer, directory, expected) in [
             (
@@ -3444,6 +3447,11 @@ fn review_classification_and_validation() {
                     "CONFIDENCE: 0.9\nGATE: pass\nSee {marker} here.\nstop-reason: provider=codex reason=stream_truncated subtype=none is_error=0\n"
                 ),
                 ".oms/review-gate-redacted-truncated",
+                2,
+            ),
+            (
+                format!("served model\nGATE: pass\nsession id: {marker}\n"),
+                ".oms/review-gate-redacted-empty",
                 2,
             ),
         ] {

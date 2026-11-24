@@ -245,12 +245,8 @@ pub fn verdict(answer: &str, code: Option<i32>, complete: bool) -> (&'static str
     if code != Some(0) || !complete || providers::answer_quality(answer) != "ok" {
         return ("incomplete", None);
     }
-    let (gate, confidence) = verdict_lines(answer);
-    (gate.unwrap_or("no-verdict"), confidence)
-}
-fn verdict_lines(answer: &str) -> (Option<&'static str>, Option<f64>) {
     let mut confidence = None;
-    let mut gate = None;
+    let mut state = "no-verdict";
     for line in answer.lines() {
         let line = line.trim_matches(|c: char| c.is_whitespace() || c == '*');
         if let Some(value) = line.strip_prefix("CONFIDENCE:") {
@@ -261,34 +257,38 @@ fn verdict_lines(answer: &str) -> (Option<&'static str>, Option<f64>) {
                 .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
         }
         if line == "GATE: pass" {
-            gate = Some("pass");
+            state = "pass";
         } else if line == "GATE: fail" {
-            gate = Some("fail");
+            state = "fail";
         }
     }
-    (gate, confidence)
+    (state, confidence)
 }
-/// Redaction drops everything after a key marker with no END line, which can swallow a review's
-/// final verdict or leave an earlier quoted one in charge. Verdict lines carry no free text, so the
-/// raw answer's final verdict is appended canonically whenever the redacted text would read another.
-pub(crate) fn restore_verdict(raw: &str, mut redacted: String) -> String {
-    let (gate, confidence) = verdict_lines(raw);
-    let Some(gate) = gate else {
-        return redacted;
-    };
-    if verdict_lines(&redacted) == (Some(gate), confidence) {
-        return redacted;
+/// The verdict `call_routed` stored in the artifact header, which precedes every provider-written line.
+fn stored_verdict(raw: &str) -> Option<(&'static str, Option<f64>)> {
+    let header = raw.lines().take_while(|line| !line.starts_with("## "));
+    let mut state = None;
+    let mut confidence = None;
+    for line in header {
+        if let Some(value) = line.strip_prefix("- verdict: ") {
+            state = [
+                "pass",
+                "fail",
+                "no-verdict",
+                "incomplete",
+                "timed_out",
+                "interrupted",
+            ]
+            .into_iter()
+            .find(|known| *known == value);
+        } else if let Some(value) = line.strip_prefix("- confidence: ") {
+            confidence = value
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
+        }
     }
-    if !redacted.is_empty() && !redacted.ends_with('\n') {
-        redacted.push('\n');
-    }
-    match confidence {
-        Some(confidence) => redacted.push_str(&format!("CONFIDENCE: {confidence}\n")),
-        None => redacted.push_str("CONFIDENCE: unknown\n"),
-    }
-    redacted.push_str("GATE: ");
-    redacted.push_str(gate);
-    redacted
+    state.map(|state| (state, confidence))
 }
 fn overall(states: &[&str]) -> i32 {
     if states.is_empty() || states.iter().any(|s| !["pass", "fail"].contains(s)) {
@@ -358,7 +358,8 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         let bytes = storage::read(&repo, &directory.join(&name), false)?;
         let raw = String::from_utf8_lossy(&bytes);
         let (answer, code) = artifact_sections(&raw, true);
-        let (mut state, confidence) = verdict(&answer, code, true);
+        let (mut state, confidence) =
+            stored_verdict(&raw).unwrap_or_else(|| verdict(&answer, code, true));
         let mut detail = None;
         if state == "incomplete"
             && code.is_none()
@@ -721,7 +722,9 @@ pub(crate) fn finish(
     let mut seat_rows = Vec::new();
     let mut finding_rows = Vec::new();
     for seat in seats {
-        let (state, confidence) = verdict(&seat.answer, Some(seat.code), seat.complete);
+        let (state, confidence) = seat
+            .verdict
+            .unwrap_or_else(|| verdict(&seat.answer, Some(seat.code), seat.complete));
         states.push(state);
         let elapsed_secs = peer::rounded_secs(seat.elapsed);
         let detail = if state == "timed_out" {
