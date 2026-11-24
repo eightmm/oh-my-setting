@@ -30,7 +30,7 @@ pub mod team;
 pub mod team_request;
 
 pub use cli::{owns, run, run_with_io, run_with_services};
-pub use engine::{Context, Plan, Snapshot};
+pub use engine::{Context, Plan, Snapshot, stored_task_revision};
 pub use request::{Action, Request};
 pub use services::{Services, UnavailableServices};
 pub const USAGE: &str = include_str!("usage.txt");

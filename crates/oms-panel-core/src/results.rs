@@ -1001,6 +1001,19 @@ fn load_result(store: &Store, row: &Value) -> Result<Value> {
     Ok(value)
 }
 
+/// Read an indexed result only when bound to this exact stored task generation.
+pub fn verified_bound_result(store: &Store, plan: &Value, row: &Value) -> Result<Option<Value>> {
+    let task = row["task_id"]
+        .as_str()
+        .ok_or_else(|| Error::new("missing result task"))?;
+    let binding = crate::control::plan_binding(plan, task)?;
+    if binding.is_null() || !binding["plan_id"].is_string() {
+        return Ok(None);
+    }
+    let result = load_result(store, row)?;
+    Ok((result["plan_binding"] == binding).then_some(result))
+}
+
 const MAX_NATIVE_RETURNS: usize = 20;
 
 fn native_action(kind: &str, reason: &str, commands: Vec<Value>) -> Value {
