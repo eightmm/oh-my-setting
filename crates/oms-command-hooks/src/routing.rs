@@ -1436,12 +1436,12 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
     if equal && !prompt.trim().lines().skip(1).any(|s| !s.trim().is_empty()) {
         return;
     }
-    let stale = cap("OMS_AGENT_TASK_TTL", 604800, 0, 315360000) == 0
+    let default_ttl = oms_command_task::packet::STALE_TTL_SECONDS;
+    let ttl = cap("OMS_AGENT_TASK_TTL", default_ttl, 0, 315360000);
+    let stale = ttl == 0
         || oms_command_task::packet::stale(
             &task,
-            cap("OMS_AGENT_TASK_TTL", 604800, 0, 315360000)
-                .to_string()
-                .as_bytes(),
+            ttl.to_string().as_bytes(),
             chrono::DateTime::from(ctx.snapshot.time()),
         );
     let mut status = if task.is_empty() {

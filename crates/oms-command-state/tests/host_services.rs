@@ -1201,3 +1201,147 @@ fn dashboard_and_panel_snapshot_share_observation_revision_across_cli_json_and_f
         "{degraded_text}"
     );
 }
+
+#[test]
+fn state_projects_stale_task_packet_and_bounded_dated_plan() {
+    struct PlanOnlyHost(GroupPlan);
+    impl HostServices for PlanOnlyHost {
+        fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+            &self.0
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let stamp = |offset_secs: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp((now - offset_secs).max(0), 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+
+    let repo = TempRepo::new();
+    seed(repo.path());
+    let plan_updated = stamp(1800);
+    let mut task_entries = Vec::new();
+    for i in 1..=7 {
+        let created = stamp(7200 - i * 60);
+        task_entries.push(format!(
+            "\"t{i}\":{{\"id\":\"t{i}\",\"title\":\"Task {i}\",\"state\":\"ready\",\"depends\":[],\"created\":\"{created}\",\"updated\":\"{plan_updated}\"}}"
+        ));
+    }
+    let plan_json = format!(
+        "{{\"schema\":3,\"goal\":\"Live plan goal\",\"tasks\":{{{}}}}}",
+        task_entries.join(",")
+    );
+    fs::write(repo.path().join(".oms/plan/tasks.json"), &plan_json).unwrap();
+    fs::set_permissions(
+        repo.path().join(".oms/plan/tasks.json"),
+        Permissions::from_mode(0o664),
+    )
+    .unwrap();
+
+    let six_days_ago = stamp(6 * 86400 + 60);
+    let packet_path = repo.path().join(".oms/task/current.md");
+    fs::create_dir_all(packet_path.parent().unwrap()).unwrap();
+    let stale_packet = format!(
+        "# Active Task\n\
+         - task_id: task-stale-state\n\
+         - status: active\n\
+         - updated: {six_days_ago}\n\
+         - last_activity: {six_days_ago}\n\
+         - closed_at:\n\n\
+         ## Goal\n\nOld 6-day handoff goal\n\n\
+         ## Verify\n\ncargo test --stale-state-verify\n\n\
+         ## Next Step\n\nStale instruction that must not show\n"
+    );
+    fs::write(&packet_path, &stale_packet).unwrap();
+
+    let host = PlanOnlyHost(GroupPlan);
+    let snapshot = state(repo.path(), &host);
+    assert!(snapshot.get("task").get("stale").truth(), "{snapshot:?}");
+    assert_eq!(snapshot.get("task").text("next"), "");
+    assert_eq!(snapshot.get("plan").text("updated_at"), plan_updated);
+
+    let flag = AtomicBool::new(false);
+    let (code, out, err) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("stale (idle 6d)"), "{rendered}");
+    assert!(
+        rendered.contains("oms agent-task close --reason"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Stale instruction that must not show"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("cargo test --stale-state-verify"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("goal: Live plan goal"), "{rendered}");
+    assert!(
+        rendered.contains(&format!("updated: {plan_updated}")),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("actionable now: 7 (t1, t2, t3, t4, t5 +2 more)"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("t6"), "{rendered}");
+    assert_eq!(
+        fs::read_to_string(&packet_path).unwrap(),
+        stale_packet,
+        "oms state must never edit or close the handoff packet"
+    );
+
+    // Fresh packet remains active and keeps its next step.
+    let one_hour_ago = stamp(3600);
+    let fresh_packet = format!(
+        "# Active Task\n\
+         - task_id: task-fresh-state\n\
+         - status: active\n\
+         - updated: {one_hour_ago}\n\
+         - last_activity: {one_hour_ago}\n\
+         - closed_at:\n\n\
+         ## Goal\n\nFresh handoff goal\n\n\
+         ## Next Step\n\nFresh next step\n"
+    );
+    fs::write(&packet_path, &fresh_packet).unwrap();
+    let fresh_json = state(repo.path(), &host);
+    assert!(!fresh_json.get("task").get("stale").truth());
+    assert_eq!(fresh_json.get("task").text("next"), "Fresh next step");
+    let (code, out, err) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let fresh_rendered = String::from_utf8(out).unwrap();
+    assert!(
+        fresh_rendered.contains("goal: Fresh handoff goal"),
+        "{fresh_rendered}"
+    );
+    assert!(
+        fresh_rendered.contains("next: Fresh next step"),
+        "{fresh_rendered}"
+    );
+    assert!(!fresh_rendered.contains("stale (idle"), "{fresh_rendered}");
+    assert!(
+        !fresh_rendered.contains("oms agent-task close --reason"),
+        "{fresh_rendered}"
+    );
+}

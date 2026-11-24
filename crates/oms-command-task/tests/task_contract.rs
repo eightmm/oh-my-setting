@@ -190,7 +190,7 @@ fn owns_and_help_need_no_repository() {
     assert!(owns(&args(&["status"])));
     assert!(owns(&[]));
     let text = String::from_utf8(usage().to_vec()).unwrap();
-    assert!(text.contains("Usage: agent-task.sh"));
+    assert!(text.contains("Usage: oms agent-task"));
     let repo = Repo::new();
     let (code, out, _) = call(&repo, &mut Fake::default(), &["--help"]);
     assert_eq!(code, 0);
@@ -729,4 +729,55 @@ fn issue_rebind_needs_consent_and_rotation_keeps_archive_binding() {
     assert_eq!(bound("g1").as_deref(), Some("example-org/example-repo#6"));
     assert_eq!(bound("g2"), None);
     assert_eq!(bound("g3").as_deref(), Some("example-org/example-repo#9"));
+}
+
+#[test]
+fn status_marks_packet_stale_after_72_hours_without_modifying_packet() {
+    if !isolated(
+        "status_marks_packet_stale_after_72_hours_without_modifying_packet",
+        &[],
+    ) {
+        return;
+    }
+    let repo = Repo::new();
+    let mut svc = Fake::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let stamp = |offset_secs: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp((now - offset_secs).max(0), 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+    let path = repo.path().join(".oms/task/current.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    // 71 hours idle: still fresh.
+    let fresh_ts = stamp(71 * 3600);
+    let fresh_raw = format!(
+        "# Active Task\n- task_id: task-71h\n- status: active\n- updated: {fresh_ts}\n- last_activity: {fresh_ts}\n- closed_at:\n\n## Goal\n\nFresh packet\n"
+    );
+    std::fs::write(&path, &fresh_raw).unwrap();
+    let (code, json_out, err) = call(&repo, &mut svc, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(json_out.contains(r#""stale": false"#), "{json_out}");
+    let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text_out.contains("stale: no\n"), "{text_out}");
+
+    // 73 hours idle: stale (>= 72h), packet left untouched.
+    let stale_ts = stamp(73 * 3600);
+    let stale_raw = format!(
+        "# Active Task\n- task_id: task-73h\n- status: active\n- updated: {stale_ts}\n- last_activity: {stale_ts}\n- closed_at:\n\n## Goal\n\nStale packet\n"
+    );
+    std::fs::write(&path, &stale_raw).unwrap();
+    let (code, json_out, err) = call(&repo, &mut svc, &["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(json_out.contains(r#""stale": true"#), "{json_out}");
+    let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text_out.contains("stale: yes\n"), "{text_out}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), stale_raw);
 }

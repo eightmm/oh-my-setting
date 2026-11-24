@@ -92,6 +92,67 @@ fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usi
     }
     Ok((rows, resolved, bad))
 }
+const STATE_ACTIONABLE_MAX: usize = 5;
+
+fn format_actionable(ids: &[&str]) -> String {
+    if ids.len() <= STATE_ACTIONABLE_MAX {
+        format!("{} ({})", ids.len(), ids.join(", "))
+    } else {
+        format!(
+            "{} ({} +{} more)",
+            ids.len(),
+            ids[..STATE_ACTIONABLE_MAX].join(", "),
+            ids.len() - STATE_ACTIONABLE_MAX
+        )
+    }
+}
+
+fn plan_updated_at(plan: &Value, plan_path: &Path) -> Option<String> {
+    fn consider<'a>(best: &mut Option<(Option<i64>, &'a str)>, ts: &'a str) {
+        let ts = ts.trim();
+        if ts.is_empty() {
+            return;
+        }
+        let key = (crate::parse_timestamp(ts), ts);
+        if best.is_none_or(|cur| key > cur) {
+            *best = Some(key);
+        }
+    }
+    let mut best: Option<(Option<i64>, &str)> = None;
+    consider(&mut best, plan.text("updated_at"));
+    consider(&mut best, plan.text("updated"));
+    if let Ok(entries) = plan.get("tasks").object() {
+        for (_, t) in entries {
+            let updated = t.text("updated");
+            if !updated.is_empty() {
+                consider(&mut best, updated);
+            } else {
+                consider(&mut best, t.text("created"));
+            }
+        }
+    } else if let Ok(entries) = plan.get("tasks").array() {
+        for t in entries {
+            let updated = t.text("updated");
+            if !updated.is_empty() {
+                consider(&mut best, updated);
+            } else {
+                consider(&mut best, t.text("created"));
+            }
+        }
+    }
+    if let Some((_, ts)) = best {
+        return Some(ts.to_owned());
+    }
+    let mtime = std::fs::metadata(plan_path)
+        .and_then(|m| m.modified())
+        .ok()?;
+    Some(
+        chrono::DateTime::<chrono::Utc>::from(mtime)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
+    )
+}
+
 pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Value) -> Result<()> {
     let task_text = storage::read(
         &ctx.repo,
@@ -117,19 +178,43 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
         }
     }
     let mut task = state.get("task").clone();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let idle_secs = if !task_text.is_empty() {
+        oms_command_task::packet::idle_seconds(&task_text, now)
+    } else {
+        None
+    }
+    .or_else(|| helpers::now_age(task.text("last_activity")).and_then(|s| u64::try_from(s).ok()));
+    let is_stale = task.get("present").truth()
+        && task.text("status") != "closed"
+        && (task.get("stale").truth()
+            || idle_secs.is_some_and(|age| age >= oms_command_task::packet::STALE_TTL_SECONDS));
+    if task.get("present").truth() {
+        task.set("stale", Value::Bool(is_stale))?;
+        if let Some(secs) = idle_secs {
+            task.set("idle_seconds", number(secs))?;
+        }
+    }
     task.set(
         "goal",
         string(goal.join(" ").chars().take(200).collect::<String>()),
     )?;
     task.set(
         "next",
-        string(next.join(" ").chars().take(200).collect::<String>()),
+        if is_stale {
+            string("")
+        } else {
+            string(next.join(" ").chars().take(200).collect::<String>())
+        },
     )?;
     state.set("task", task)?;
     let plan = file(ctx, ".oms/plan/tasks.json");
     let mut projected = state.get("plan").clone();
     if let Ok(plan) = &plan {
         projected.set("goal", plan.get("goal").clone())?;
+        if let Some(updated_at) = plan_updated_at(plan, &ctx.repo.join(".oms/plan/tasks.json")) {
+            projected.set("updated_at", string(updated_at))?;
+        }
     }
     let (retirements, _) = rows(ctx, ".oms/plan/retirements.jsonl");
     if let Some(last) = retirements.last() {
@@ -2107,9 +2192,30 @@ fn state_text(state: &Value) -> Result<String> {
         if !task.get("healthy").truth() {
             out.push_str("  status unavailable or invalid (run: oms agent-task status --json)\n");
         }
-        for key in ["goal", "next"] {
-            if !task.text(key).is_empty() {
-                out.push_str(&format!("  {key}: {}\n", task.text(key)));
+        if task.get("stale").truth() {
+            let idle_days = task
+                .get("idle_seconds")
+                .int()
+                .ok()
+                .filter(|s| *s >= 0)
+                .or_else(|| helpers::now_age(task.text("last_activity")).map(i128::from))
+                .map(|s| s / 86400);
+            if let Some(days) = idle_days {
+                out.push_str(&format!("  status: stale (idle {days}d)\n"));
+            } else {
+                out.push_str("  status: stale\n");
+            }
+            if !task.text("goal").is_empty() {
+                out.push_str(&format!("  goal: {}\n", task.text("goal")));
+            }
+            out.push_str(
+                "  hint: stale handoff packet; close or rotate with `oms agent-task close --reason '...'`\n",
+            );
+        } else {
+            for key in ["goal", "next"] {
+                if !task.text(key).is_empty() {
+                    out.push_str(&format!("  {key}: {}\n", task.text(key)));
+                }
             }
         }
     } else {
@@ -2149,6 +2255,9 @@ fn state_text(state: &Value) -> Result<String> {
         if !plan.text("goal").is_empty() {
             out.push_str(&format!("  goal: {}\n", plan.text("goal")));
         }
+        if !plan.text("updated_at").is_empty() {
+            out.push_str(&format!("  updated: {}\n", plan.text("updated_at")));
+        }
         out.push_str(&format!("  by state: {}\n", counts(plan.get("by_state"))));
         let contract = plan.get("contract");
         if contract.get("bound").truth() && !contract.get("satisfied").truth() {
@@ -2157,7 +2266,10 @@ fn state_text(state: &Value) -> Result<String> {
         if let Ok(actionable) = plan.get("actionable").strings()
             && !actionable.is_empty()
         {
-            out.push_str(&format!("  actionable now: {}\n", actionable.join(", ")));
+            out.push_str(&format!(
+                "  actionable now: {}\n",
+                format_actionable(&actionable)
+            ));
         }
     } else {
         out.push_str("\n## Plan: none\n");

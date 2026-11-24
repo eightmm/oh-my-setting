@@ -343,26 +343,47 @@ fn prune_current(raw: &[u8], cap: usize) -> Vec<u8> {
     }
     out
 }
+/// Handoff packet staleness threshold: 72 hours (in seconds).
+pub const STALE_TTL_SECONDS: u64 = 72 * 3600;
+
+/// Non-negative idle age in seconds from `last_activity` (or `updated` fallback),
+/// or `None` when absent, unparseable, or in the future relative to `now`.
+pub fn idle_seconds(raw: &[u8], now: DateTime<Utc>) -> Option<u64> {
+    let value = metadata(raw, "last_activity")
+        .filter(|v| !v.is_empty())
+        .or_else(|| metadata(raw, "updated").filter(|v| !v.is_empty()))?;
+    let value = std::str::from_utf8(value).ok()?.trim();
+    let then = chrono::DateTime::parse_from_rfc3339(value)
+        .map(|t| t.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ")
+                .ok()
+                .map(|t| t.and_utc())
+        })?;
+    if now < then {
+        return None;
+    }
+    u64::try_from(now.signed_duration_since(then).num_seconds()).ok()
+}
+
+/// True when the handoff packet's last update is at least `STALE_TTL_SECONDS` (72 hours) old.
+pub fn is_stale(raw: &[u8], now: DateTime<Utc>) -> bool {
+    idle_seconds(raw, now).is_some_and(|age| age >= STALE_TTL_SECONDS)
+}
+
 pub fn stale(raw: &[u8], ttl: &[u8], now: DateTime<Utc>) -> bool {
+    let default_ttl;
     let ttl = if !ttl.is_empty() && ttl.iter().all(u8::is_ascii_digit) {
         std::str::from_utf8(ttl).unwrap()
     } else {
-        "604800"
+        default_ttl = STALE_TTL_SECONDS.to_string();
+        &default_ttl
     };
-    let Some(value) = metadata(raw, "last_activity").or_else(|| metadata(raw, "updated")) else {
+    let Some(age) = idle_seconds(raw, now) else {
         return false;
     };
-    let Ok(value) = std::str::from_utf8(value) else {
-        return false;
-    };
-    let Ok(then) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ") else {
-        return false;
-    };
-    if now < then.and_utc() {
-        return false;
-    }
-    let age = now.signed_duration_since(then.and_utc()).num_seconds();
-    age >= 0 && decimal_cmp(age.to_string().as_bytes(), ttl.as_bytes()) != std::cmp::Ordering::Less
+    decimal_cmp(age.to_string().as_bytes(), ttl.as_bytes()) != std::cmp::Ordering::Less
 }
 pub fn decimal_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     fn zero(v: &[u8]) -> &[u8] {

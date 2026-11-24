@@ -1026,6 +1026,22 @@ pub(crate) fn relay(v: &Value, repo: &Path, ctx: &Context<'_>) {
     let row = json!({"schema":1,"agent":"claude","session":session_hash(v),"ended_at":ctx.snapshot.now(),"head":git(repo,&["rev-parse","--short","HEAD"],ctx).unwrap_or_default(),"branch":git(repo,&["branch","--show-current"],ctx).unwrap_or_default(),"message":safe_text(&tail,cap("OMS_RELAY_BYTES",800,120,4000)as usize)});
     let _ = write(&repo.join(".oms/hooks/relay/claude.json"), &row);
 }
+const RESUME_VERIFY_INLINE_MAX: usize = 160;
+const RESUME_ACTIONABLE_MAX: usize = 5;
+
+fn format_actionable(ids: &[&str]) -> String {
+    if ids.len() <= RESUME_ACTIONABLE_MAX {
+        format!("{} ({})", ids.len(), ids.join(", "))
+    } else {
+        format!(
+            "{} ({} +{} more)",
+            ids.len(),
+            ids[..RESUME_ACTIONABLE_MAX].join(", "),
+            ids.len() - RESUME_ACTIONABLE_MAX
+        )
+    }
+}
+
 pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
     if !on("OMS_RESUME_HOOK") {
         return empty();
@@ -1034,6 +1050,70 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         return empty();
     };
     let mut lines = Vec::new();
+    let plan = load(&repo.join(".oms/plan/tasks.json"));
+    let tasks = crate::routing::plan_tasks(&plan);
+    if !text(&plan, "goal").trim().is_empty()
+        && !(!tasks.is_empty()
+            && tasks
+                .iter()
+                .all(|t| ["done", "cancelled"].contains(&text(t, "state"))))
+    {
+        let mut counts = BTreeMap::<String, usize>::new();
+        let mut done_ids = std::collections::HashSet::new();
+        for t in &tasks {
+            let st = text(t, "state");
+            *counts.entry(st.into()).or_default() += 1;
+            if st == "done" {
+                let id = text(t, "id");
+                if !id.is_empty() {
+                    done_ids.insert(id);
+                }
+            }
+        }
+        let mut actionable_tasks: Vec<&Value> = tasks
+            .iter()
+            .filter(|t| {
+                text(t, "state") == "ready"
+                    && !text(t, "id").is_empty()
+                    && text(t, "executor_id").is_empty()
+                    && text(t, "executor_soul_sha256").is_empty()
+                    && t.get("depends")
+                        .and_then(Value::as_array)
+                        .is_none_or(|deps| {
+                            deps.iter()
+                                .all(|d| d.as_str().is_some_and(|id| done_ids.contains(id)))
+                        })
+            })
+            .collect();
+        actionable_tasks.sort_by(|a, b| {
+            (text(a, "created"), text(a, "id")).cmp(&(text(b, "created"), text(b, "id")))
+        });
+        let actionable_ids: Vec<&str> = actionable_tasks.iter().map(|t| text(t, "id")).collect();
+        let summary = counts
+            .iter()
+            .map(|(s, n)| format!("{s}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!(
+            "- plan: {}{}",
+            clip(&flat(text(&plan, "goal")), 160),
+            if summary.is_empty() {
+                String::new()
+            } else {
+                format!(" [{summary}]")
+            }
+        ));
+        if !actionable_ids.is_empty() {
+            lines.push(format!(
+                "  actionable: {}",
+                format_actionable(&actionable_ids)
+            ));
+        }
+        let accept = flat(text(&plan, "accept"));
+        if !accept.is_empty() {
+            lines.push(format!("  accept: {}", clip(&accept, 140)));
+        }
+    }
     let task = read(&repo.join(".oms/task/current.md"), 1024 * 1024).unwrap_or_default();
     let meta = |key: &str| {
         oms_command_task::packet::metadata(&task, key)
@@ -1052,60 +1132,50 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
     };
     let goal = section("Goal");
     if !task_id.is_empty() && status != "closed" {
-        let days = epoch(&meta("last_activity"))
-            .map(|s| ((ctx.snapshot.seconds() - s) / 86400.).floor() as i64)
-            .unwrap_or(0);
-        lines.push(format!(
-            "- task {task_id} ({status}{}): {}",
-            if days >= 1 {
-                format!(", idle {days}d")
-            } else {
-                String::new()
-            },
-            if goal.is_empty() {
-                "no goal recorded"
-            } else {
-                &goal
+        let now = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time());
+        let idle_secs = oms_command_task::packet::idle_seconds(&task, now);
+        let days = idle_secs.map(|s| s / 86400).unwrap_or(0);
+        let stale = oms_command_task::packet::is_stale(&task, now);
+        let goal_text = if goal.is_empty() {
+            "no goal recorded"
+        } else {
+            &goal
+        };
+        if stale {
+            lines.push(format!(
+                "- task {task_id} [stale (idle {days}d)]: {goal_text}"
+            ));
+            lines.push(
+                "  hint: stale handoff packet; close or rotate with `oms agent-task close --reason '...'`"
+                    .into(),
+            );
+        } else {
+            lines.push(format!(
+                "- task {task_id} ({status}{}): {goal_text}",
+                if days >= 1 {
+                    format!(", idle {days}d")
+                } else {
+                    String::new()
+                },
+            ));
+            let next = section("Next Step");
+            if !next.is_empty() {
+                lines.push(format!("  next: {next}"));
             }
-        ));
-        let next = section("Next Step");
-        if !next.is_empty() {
-            lines.push(format!("  next: {next}"));
-        }
-        let verify = section("Verify");
-        if !verify.is_empty() {
-            lines.push(format!("  verify: {verify} (oms agent-task verify)"));
-        }
-    }
-    let plan = load(&repo.join(".oms/plan/tasks.json"));
-    let tasks = crate::routing::plan_tasks(&plan);
-    if !text(&plan, "goal").trim().is_empty()
-        && !(!tasks.is_empty()
-            && tasks
-                .iter()
-                .all(|t| ["done", "cancelled"].contains(&text(t, "state"))))
-    {
-        let mut counts = BTreeMap::<String, usize>::new();
-        for t in &tasks {
-            *counts.entry(text(t, "state").into()).or_default() += 1;
-        }
-        let summary = counts
-            .iter()
-            .map(|(s, n)| format!("{s}={n}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(format!(
-            "- plan: {}{}",
-            clip(&flat(text(&plan, "goal")), 160),
-            if summary.is_empty() {
-                String::new()
-            } else {
-                format!(" [{summary}]")
+            let verify_section = oms_command_task::packet::section(&task, "Verify");
+            let verify_raw = String::from_utf8_lossy(&verify_section);
+            let verify_trimmed = verify_raw.trim();
+            if !verify_trimmed.is_empty() {
+                let verify_chars = verify_trimmed.chars().count();
+                if verify_chars > RESUME_VERIFY_INLINE_MAX {
+                    lines.push(format!(
+                        "  verify: omitted ({verify_chars} chars; read .oms/task/current.md or run `oms agent-task show`)"
+                    ));
+                } else {
+                    let verify = section("Verify");
+                    lines.push(format!("  verify: {verify} (oms agent-task verify)"));
+                }
             }
-        ));
-        let accept = flat(text(&plan, "accept"));
-        if !accept.is_empty() {
-            lines.push(format!("  accept: {}", clip(&accept, 140)));
         }
     }
     let land = oms_command_landing::run_with_source(
@@ -1698,5 +1768,229 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "session-handoff capture --agent claude");
         assert_eq!(failures[0].1, 1);
+    }
+
+    fn write_packet(
+        repo: &Path,
+        task_id: &str,
+        status: &str,
+        last_activity: &str,
+        goal: &str,
+        next: &str,
+        verify: &str,
+    ) -> Vec<u8> {
+        let raw = format!(
+            "# Active Task\n\
+             - task_id: {task_id}\n\
+             - status: {status}\n\
+             - updated: {last_activity}\n\
+             - last_activity: {last_activity}\n\
+             - closed_at:\n\n\
+             ## Goal\n\n{goal}\n\n\
+             ## Verify\n\n{verify}\n\n\
+             ## Next Step\n\n{next}\n"
+        );
+        let path = repo.join(".oms/task/current.md");
+        fs::create_dir_all(path.parent().expect("task dir")).expect("mkdir task");
+        fs::write(&path, &raw).expect("write packet");
+        raw.into_bytes()
+    }
+
+    fn write_plan(repo: &Path, goal: &str, ready_ids: &[&str], updated: &str) {
+        let mut tasks = serde_json::Map::new();
+        for (idx, id) in ready_ids.iter().enumerate() {
+            let created = format!("2026-11-24T00:00:{:02}Z", idx % 60);
+            tasks.insert(
+                (*id).to_owned(),
+                json!({
+                    "id": id,
+                    "title": format!("Task {id}"),
+                    "state": "ready",
+                    "depends": [],
+                    "created": created,
+                    "updated": updated,
+                }),
+            );
+        }
+        let path = repo.join(".oms/plan/tasks.json");
+        fs::create_dir_all(path.parent().expect("plan dir")).expect("mkdir plan");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema": 3,
+                "goal": goal,
+                "tasks": tasks,
+            }))
+            .expect("serialize plan"),
+        )
+        .expect("write plan");
+    }
+
+    #[test]
+    fn resume_marks_stale_packet_and_prioritizes_running_plan() {
+        let tmp = TempDir::new("resume-stale");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
+        let six_days_ago = rfc3339_secs_ago(6 * 86400 + 60);
+        let original = write_packet(
+            &repo,
+            "task-stale-6d",
+            "active",
+            &six_days_ago,
+            "Old abandoned handoff goal",
+            "Do not follow this stale next step",
+            "cargo test --stale-verify-marker",
+        );
+        let fresh_ts = rfc3339_secs_ago(300);
+        write_plan(
+            &repo,
+            "Current live plan goal",
+            &["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
+            &fresh_ts,
+        );
+
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let out = String::from_utf8(stdout).expect("utf8");
+
+        assert!(out.contains("stale (idle 6d)"), "{out}");
+        assert!(out.contains("oms agent-task close --reason"), "{out}");
+        assert!(!out.contains("Do not follow this stale next step"), "{out}");
+        assert!(!out.contains("cargo test --stale-verify-marker"), "{out}");
+        assert!(out.contains("- plan: Current live plan goal"), "{out}");
+        assert!(
+            out.contains("actionable: 8 (t1, t2, t3, t4, t5 +3 more)"),
+            "{out}"
+        );
+        assert!(!out.contains("t6"), "{out}");
+        let plan_pos = out.find("- plan: Current live plan goal").expect("plan");
+        let task_pos = out.find("- task task-stale-6d").expect("task");
+        assert!(
+            plan_pos < task_pos,
+            "running plan must precede stale task:\n{out}"
+        );
+        assert_eq!(
+            fs::read(repo.join(".oms/task/current.md")).expect("read packet"),
+            original,
+            "resume must never edit or close the handoff packet"
+        );
+    }
+
+    #[test]
+    fn resume_keeps_fresh_packet_caps_long_verify_and_keeps_plan_before_truncation() {
+        let tmp = TempDir::new("resume-fresh");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
+        let one_hour_ago = rfc3339_secs_ago(3600);
+        write_packet(
+            &repo,
+            "task-fresh-1h",
+            "active",
+            &one_hour_ago,
+            "Fresh handoff goal",
+            "Run unit tests next",
+            "cargo test --lib",
+        );
+
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let fresh_out = String::from_utf8(stdout).expect("utf8");
+        assert!(
+            fresh_out.contains("- task task-fresh-1h (active): Fresh handoff goal"),
+            "{fresh_out}"
+        );
+        assert!(
+            fresh_out.contains("  next: Run unit tests next"),
+            "{fresh_out}"
+        );
+        assert!(
+            fresh_out.contains("  verify: cargo test --lib (oms agent-task verify)"),
+            "{fresh_out}"
+        );
+        assert!(!fresh_out.contains("stale"), "{fresh_out}");
+
+        // Now write a long verify command (> 160 chars) plus a long lower-priority section
+        // (via huge Next Step) and a running Plan to confirm verify is never inlined and the
+        // plan goal + bounded actionable list survive 4096-byte truncation.
+        let long_verify = format!("cargo test --workspace && echo {}", "v".repeat(500));
+        let long_next = "n".repeat(4200);
+        write_packet(
+            &repo,
+            "task-fresh-long",
+            "active",
+            &one_hour_ago,
+            "Fresh task with huge verify",
+            &long_next,
+            &long_verify,
+        );
+        write_plan(
+            &repo,
+            "Must survive resume truncation",
+            &["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+            &one_hour_ago,
+        );
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let capped_out = String::from_utf8(stdout).expect("utf8");
+        assert!(capped_out.len() <= 4096, "len={}", capped_out.len());
+        assert!(
+            capped_out.contains("[resume truncated; inspect current state]"),
+            "{capped_out}"
+        );
+        assert!(
+            capped_out.contains("- plan: Must survive resume truncation"),
+            "{capped_out}"
+        );
+        assert!(
+            capped_out.contains("actionable: 7 (p1, p2, p3, p4, p5 +2 more)"),
+            "{capped_out}"
+        );
+        assert!(!capped_out.contains(&long_verify), "{capped_out}");
+
+        // Without huge Next Step, verify line itself is visible, shows length and where to read it.
+        write_packet(
+            &repo,
+            "task-fresh-long",
+            "active",
+            &one_hour_ago,
+            "Fresh task with huge verify",
+            "short next",
+            &long_verify,
+        );
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let verify_out = String::from_utf8(stdout).expect("utf8");
+        assert!(!verify_out.contains(&long_verify), "{verify_out}");
+        assert!(
+            verify_out.contains(&format!("{} chars", long_verify.chars().count())),
+            "{verify_out}"
+        );
+        assert!(
+            verify_out.contains(".oms/task/current.md")
+                || verify_out.contains("oms agent-task show"),
+            "{verify_out}"
+        );
     }
 }
