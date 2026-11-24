@@ -185,6 +185,10 @@ EOF
     ! grep -Fxq 'rust-workspace-tests' <<< "$selected" || grep -Fxq 'invariants-source-distribution' <<< "$selected"; then
     fail "full --affected (without --ci-parity) stages changed: $selected"
   fi
+  rust_stages="$(grep -E '^rust-(fmt|clippy|workspace-tests)$' <<< "$selected" || true)"
+  expected_rust_stages="$(printf 'rust-fmt\nrust-clippy\nrust-workspace-tests')"
+  [ "$rust_stages" = "$expected_rust_stages" ] ||
+    fail "full --affected Rust stages must run rust-fmt and rust-clippy before rust-workspace-tests: $selected"
 
   # The first critical path selects the reason, but later paths still contribute
   # native CI coverage even when an earlier contract file already selected full.

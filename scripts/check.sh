@@ -527,6 +527,8 @@ if [ "$RUN_FOCUSED" = 1 ]; then
 fi
 
 if [ "$RUN_RUST" = 1 ]; then
+  stage rust-fmt cargo +1.99.1 fmt --manifest-path Cargo.toml --all -- --check
+  stage rust-clippy cargo +1.99.1 clippy --manifest-path Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
   stage rust-workspace-tests bash -c '
     cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline &&
       cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
