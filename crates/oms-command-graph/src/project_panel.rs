@@ -25,6 +25,7 @@ pub const MAX_DEPTH: i64 = 3;
 pub const MAX_EDGES: usize = 180;
 pub const MAX_SELECTION_NEIGHBORS: usize = 32;
 pub const MAX_SCAN_PATHS: usize = 20_000;
+const MAX_TREE_ENTRIES: usize = 30_000;
 
 const MAX_GIT_STDOUT_BYTES: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -377,7 +378,13 @@ fn try_read_indexed(repo: &Path, tracked: &[String], cancel: &AtomicBool) -> Res
         .as_array_mut()
         .unwrap()
         .retain_mut(|row| {
-            let valid = ids.contains(s(row, "source")) && ids.contains(s(row, "target"));
+            let valid = ids.contains(s(row, "source"))
+                && ids.contains(s(row, "target"))
+                && matches!(
+                    s(row, "relation"),
+                    "calls" | "contains" | "imports" | "references" | "tests"
+                )
+                && matches!(s(row, "confidence"), "EXTRACTED" | "INFERRED" | "AMBIGUOUS");
             if let Some(object) = row.as_object_mut() {
                 object.retain(|field, _| {
                     matches!(
@@ -594,7 +601,12 @@ fn indexed_row(row: &Value) -> Value {
     } else {
         path.rsplit('/').next().unwrap_or(path)
     };
-    json!({"id":id,"path":path,"kind":s(row,"kind"),"language":s(row,"language"),"label":sanitize(label,120)})
+    let kind = match s(row, "kind") {
+        known @ ("file" | "test" | "module" | "function" | "class" | "method" | "symbol"
+        | "type" | "struct" | "enum" | "trait" | "interface" | "constant" | "variable") => known,
+        _ => id.split_once(':').map_or("symbol", |(kind, _)| kind),
+    };
+    json!({"id":id,"path":path,"kind":kind,"language":language_for_path(path),"label":sanitize(label,120)})
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1014,7 +1026,7 @@ fn build_fallback_projection(
     include_tests: bool,
     cancel: &AtomicBool,
 ) -> Result<Value> {
-    let (source, revision, all_paths, scanned, excluded, clipped, note) = match scan {
+    let (source, revision, all_paths, scanned, excluded, mut clipped, note) = match scan {
         ScanOutcome::Paths {
             source,
             revision,
@@ -1045,6 +1057,11 @@ fn build_fallback_projection(
         if test && !include_tests {
             hidden_tests += 1;
             continue;
+        }
+        // A single deep path can introduce many intermediate directories.
+        if tree.len() + path.bytes().filter(|b| *b == b'/').count() + 2 > MAX_TREE_ENTRIES {
+            clipped = true;
+            break;
         }
         let mut id = format!("{}:{path}", if test { "test" } else { "file" });
         let mut rest = path.as_str();
@@ -1105,7 +1122,7 @@ fn build_fallback_projection(
             json!({"status":"found","node":item_row(&tree,node,&repo_name),"breadcrumbs":breadcrumbs,"neighbors":neighbors,
                 "omittedNeighbors":(item.children.len()+usize::from(item.parent.is_some())).saturating_sub(neighbors.len())})
         } else {
-            json!({"status":"not_found","node":null,"breadcrumbs":[],"neighbors":[]})
+            json!({"status":if clipped {"unknown"} else {"not_found"},"node":null,"breadcrumbs":[],"neighbors":[]})
         };
     }
     let mut queue = VecDeque::new();
@@ -1167,6 +1184,8 @@ fn build_fallback_projection(
     let incomplete = clipped || index_state == "invalid";
     let status = if scanned.is_none() {
         "unknown"
+    } else if clipped && (missed || nodes.is_empty()) {
+        "partial"
     } else if missed {
         "not_found"
     } else if nodes.is_empty() {
