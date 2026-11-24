@@ -10,7 +10,7 @@ use std::path::Path;
 #[path = "state_projection.rs"]
 mod projection;
 
-pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refresh-ci]\n       oms state gpu-status [--json]\n       oms state gpu-wait --min-free-mib N [--gpu IDX] [--timeout-secs S] [--poll-ms M] [--json]\n       oms state compact [--repo PATH] [--keep-recent N] [--dry-run] [--json]\n       oms state archive <list|show|search|stats> [--repo PATH] [--json]\n       oms state-verify [--repo PATH] [--json]\n       oms inbox [--repo PATH] [--json] [--fix-safe]\n       oms dashboard [--repo PATH] [--json] [--watch [--interval N] [--count N]]\nState views never grant authority. Unsupported sources are reported as degraded.\n";
+pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refresh-ci]\n       oms state gpu-status [--json]\n       oms state gpu-wait --min-free-mib N [--gpu IDX] [--timeout-secs S] [--poll-ms M] [--json]\n       oms state compact [--repo PATH] [--keep-recent N] [--dry-run] [--json]\n       oms state archive <list|show|search|stats> [--repo PATH] [--json]\n       oms state-verify [--repo PATH] [--json]\n       oms inbox [--repo PATH] [--json] [--fix-safe]\n       oms dashboard [--repo PATH] [--json [--panel-snapshot]] [--watch [--interval N] [--count N]]\nState views never grant authority. Unsupported sources are reported as degraded.\n";
 
 fn decoded(output: Output) -> Result<Value> {
     require(output.0 == 0, String::from_utf8_lossy(&output.2))?;
@@ -397,7 +397,10 @@ pub(crate) fn run(
     let (values, flags): (&[&str], &[&str]) = match tool {
         "state" => (&["repo"], &["json", "refresh-ci"]),
         "inbox" => (&["repo"], &["json", "fix-safe"]),
-        "dashboard" => (&["repo", "interval", "count"], &["json", "watch"]),
+        "dashboard" => (
+            &["repo", "interval", "count"],
+            &["json", "watch", "panel-snapshot"],
+        ),
         _ => (&["repo"], &["json"]),
     };
     let opts = Options::parse(args, values, flags)?;
@@ -453,6 +456,10 @@ pub(crate) fn run(
     require(
         opts.flag("watch") || opts.get("count").is_empty() && opts.get("interval").is_empty(),
         "--count and --interval require --watch",
+    )?;
+    require(
+        !opts.flag("panel-snapshot") || opts.flag("json"),
+        "--panel-snapshot requires --json",
     )?;
     let count = opts.number("count", if opts.flag("watch") { usize::MAX } else { 1 })?;
     let interval = opts.number("interval", 5)?;
@@ -532,7 +539,11 @@ pub(crate) fn run(
             "dashboard" => {
                 let report = projection::dashboard(&ctx, &state)?;
                 code = i32::from(!report.get("collection").get("ok").truth());
-                report
+                if opts.flag("panel-snapshot") {
+                    projection::panel_snapshot(&report)
+                } else {
+                    report
+                }
             }
             _ => return Err(error(2, "unknown state view")),
         };

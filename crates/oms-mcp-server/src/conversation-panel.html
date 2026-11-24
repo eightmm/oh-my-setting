@@ -60,7 +60,11 @@ fieldset { border: 0; min-width: 0; }
 .leads-region::before { content: ''; position: absolute; left: 50%; top: 0; height: 1.1rem; border-left: 1px solid var(--main-line); }
 .leads { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%, 9rem),1fr)); gap: .45rem; }
 .lead { padding: .65rem .75rem; }
+.leads-region h2 { margin-bottom: .45rem; }
 .lead h3 { margin-bottom: .16rem; }
+.lead p + p { margin-top: .3rem; }
+.evidence, .history { margin-top: .8rem; }
+.history summary { cursor: pointer; font-weight: 650; }
 .metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%, 7rem),1fr)); gap: .6rem; margin: .75rem 0; }
 .metrics div { padding-left: .6rem; border-left: 2px solid var(--line); }
 dd { font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -103,16 +107,22 @@ footer { margin: .65rem .05rem 0; }
         <button class="primary" id="start" type="submit">목표 전달</button>
       </fieldset>
     </form>
-    <section class="leads-region" aria-label="공급자별 작업 현황"><div id="leads" class="leads"></div></section>
+    <section class="leads-region" aria-labelledby="leads-heading">
+      <h2 id="leads-heading">프로젝트 전체 Lead</h2><div id="leads" class="leads"></div>
+    </section>
     <section class="card" aria-labelledby="progress">
-      <h2 id="progress">진행 상황</h2>
+      <h2 id="progress">프로젝트 전체 진행 상황</h2><p id="room" class="muted"></p>
       <dl class="metrics">
         <div><dt>진행 중 시도</dt><dd id="active"></dd></div>
         <div><dt>계획된 작업</dt><dd id="tasks"></dd></div>
         <div><dt>현재 상태</dt><dd id="taskStatus"></dd></div>
       </dl>
       <h3>기록된 목표</h3><p id="goal"></p>
-      <ul id="activity" aria-label="최근 작업"></ul>
+      <div class="evidence">
+        <h3>검증 현황</h3><p id="criteria"></p><p id="reviews" class="muted"></p>
+        <h3 class="evidence">최근 보관된 결과물</h3><ul id="operations"></ul>
+      </div>
+      <details class="history"><summary>최근 실행 기록</summary><ul id="activity"></ul></details>
       <ul id="attention" aria-label="확인이 필요한 항목"></ul>
     </section>
     <section class="card" aria-labelledby="approvals-heading">
@@ -135,7 +145,10 @@ let requestedProject = null;
 let generation = 0;
 const invalidProject = Symbol('invalid project');
 // A tool result may arrive after a newer open or a manual project selection.
-const opensWithInput = new Map();
+let openSeq = 0;
+let seenInputOrManual = false;
+const pendingOpens = [];
+const pendingErrors = [];
 let retryStart;
 let contextTypes;
 let contextKey;
@@ -171,28 +184,54 @@ function request(method, params, timeout = 90000) {
   });
 }
 
+function reconcileOpens() {
+  for (let i = 0; i < pendingErrors.length; ) {
+    const eligible = pendingOpens.filter(open => open.id <= pendingErrors[i]).length;
+    if (eligible < i + 1) {
+      pendingErrors.splice(i, 1);
+    } else if (eligible === i + 1) {
+      pendingOpens.splice(0, eligible);
+      pendingErrors.splice(0, i + 1);
+      i = 0;
+    } else {
+      i++;
+    }
+  }
+}
+
 window.addEventListener('message', event => {
   const msg = event.data;
   if (event.source !== window.parent || (hostOrigin !== '*' && event.origin !== hostOrigin) ||
       !msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'ui/notifications/tool-input') {
     const target = projectArgument(msg.params?.arguments?.project);
-    opensWithInput.set(target, (opensWithInput.get(target) || 0) + 1);
+    seenInputOrManual = true;
+    pendingOpens.push({id:++openSeq, target});
     switchProject(target);
     return;
   }
   if (msg.method === 'ui/notifications/tool-result') {
     if (msg.params?.isError) {
-      switchProject(invalidProject);
+      if (pendingOpens.length > pendingErrors.length) {
+        pendingErrors.push(openSeq);
+        reconcileOpens();
+      }
+      if (!seenInputOrManual) switchProject(invalidProject);
       return;
     }
     const result = msg.params?.structuredContent;
     if (result?.panel === 'OMS') {
       const target = projectArgument(result.project);
-      const count = opensWithInput.get(target);
-      if (count > 1) opensWithInput.set(target, count - 1);
-      else if (count === 1) opensWithInput.delete(target);
-      else switchProject(target);
+      let index = -1;
+      for (let i = pendingOpens.length - 1; i >= 0; i--) {
+        if (pendingOpens[i].target === target) { index = i; break; }
+      }
+      if (index >= 0) {
+        pendingOpens.splice(index, 1);
+        reconcileOpens();
+      } else {
+        switchProject(target);
+      }
     }
     return;
   }
@@ -245,7 +284,8 @@ function clearProject() {
   retryStart = undefined;
   el('launch').reset();
   el('brief').setCustomValidity('');
-  for (const id of ['receipt','project','branch','goal','current-main','active','tasks','taskStatus','updated','approvals','leads','activity','attention']) {
+  el('receipt').className = '';
+  for (const id of ['receipt','project','branch','room','goal','current-main','active','tasks','taskStatus','updated','approvals','leads','criteria','reviews','operations','activity','attention']) {
     el(id).replaceChildren();
   }
 }
@@ -287,7 +327,6 @@ function chooseProject(aliases) {
   const selected = target || (aliases.length === 1 ? aliases[0] : '');
   if (selected !== project) clearProject();
   project = selected;
-  if (selected) requestedProject = selected;
   if (aliases.length > 1) select.add(new Option('프로젝트 선택', ''));
   for (const alias of aliases) select.add(new Option(alias, alias));
   select.value = project;
@@ -298,30 +337,58 @@ function chooseProject(aliases) {
 }
 
 function renderActivity(d) {
+  el('room').textContent = d.currentRoom ? '연결된 작업방 · ' + d.currentRoom : '연결된 작업방 미확인';
   el('current-main').textContent = d.main?.provider
-    ? '현재 Main · ' + (names[d.main.provider] || d.main.provider) + ' · ' + (d.main.state || '상태 미확인')
+    ? ['현재 Main', names[d.main.provider] || d.main.provider, d.main.state || '상태 미확인', d.main.room].filter(Boolean).join(' · ')
     : '현재 Main 확인 안 됨';
-  const attempts = d.attempts || [];
+  const attempts = d.attempts || [], active = d.activeAttempts || [];
+  const complete = Array.isArray(d.activeAttempts) && d.active === active.length;
   const providers = new Set(['codex', 'claude', 'agy']);
-  for (const attempt of attempts) if (attempt.provider === 'pi') providers.add('pi');
+  if ([...active, ...attempts].some(attempt => attempt.provider === 'pi')) providers.add('pi');
   const cards = el('leads');
   cards.replaceChildren();
   for (const provider of providers) {
-    const observed = attempts.filter(attempt => names[attempt.provider] === names[provider] && attempt.role !== 'main');
     const card = node('article', '', 'lead');
-    const lead = observed.find(attempt => attempt.role === 'lead' || attempt.tool === 'panel-native-assignment');
-    card.append(node('h3', names[provider] + (lead ? ' Lead' : '')), node('p',
-      lead ? (lead.state || '상태 미확인') : observed.length ? '최근 시도 ' + observed.length + '건' : '최근 기록 없음', 'muted'));
+    const leads = active.filter(attempt => names[attempt.provider] === names[provider] &&
+      (attempt.role === 'lead' || (!attempt.role && attempt.tool === 'panel-native-assignment')));
+    card.append(node('h3', names[provider] + ' Lead'));
+    if (!leads.length) card.append(node('p', complete ? '진행 중인 Lead 없음' : '진행 여부 미확인', 'muted'));
+    for (const lead of leads) {
+      card.append(node('p', [lead.state || '상태 미확인', lead.task || lead.id, lead.room || '작업방 미확인'].filter(Boolean).join(' · '), 'muted'));
+    }
     cards.append(card);
   }
   const activity = el('activity');
   activity.replaceChildren();
   for (const attempt of attempts) {
     const item = node('li', '', 'entry');
-    const label = [names[attempt.provider] || attempt.provider, attempt.tool, attempt.task].filter(Boolean);
+    const label = [names[attempt.provider] || attempt.provider, attempt.tool, attempt.task, attempt.room].filter(Boolean);
     item.append(node('span', label.join(' · ')), node('strong', attempt.state || '상태 미확인'));
     activity.append(item);
   }
+  if (!attempts.length) activity.append(node('li', d.active == null ? '최근 실행 기록 미확인' : '최근 실행 기록 없음', 'muted'));
+
+  const acceptance = d.acceptance, reviews = d.reviews;
+  el('criteria').textContent = acceptance?.available === true
+    ? '완료 기준 검증 · ' + (acceptance.verified ?? '?') + ' / ' + (acceptance.total ?? '?') + '개' +
+      (acceptance.complete === true ? ' · 완료' : acceptance.complete === false ? ' · 미완료' : ' · 완료 여부 미확인')
+    : '완료 기준 미확인';
+  el('reviews').textContent = reviews?.available === true
+    ? '보관된 리뷰 기록 · 통과 ' + (reviews.passed ?? '?') + ' · 실패 ' + (reviews.failed ?? '?') + ' · 판정 없음 ' + (reviews.unknown ?? '?')
+    : '보관된 리뷰 기록 미확인';
+  const operations = el('operations');
+  operations.replaceChildren();
+  for (const operation of d.operations || []) {
+    const item = node('li', '', 'entry');
+    const label = [operation.kind || '결과물', names[operation.provider] || operation.provider, operation.artifactId].filter(Boolean);
+    const stamp = Date.parse(operation.updated);
+    if (Number.isFinite(stamp)) label.push(new Date(stamp).toLocaleString());
+    const outcome = [operation.status || '상태 미확인'];
+    if (operation.exit != null) outcome.push('종료 코드 ' + operation.exit);
+    item.append(node('span', label.join(' · ')), node('strong', outcome.join(' · ')));
+    operations.append(item);
+  }
+  if (!d.operations?.length) operations.append(node('li', reviews?.available === true ? '최근 보관된 결과물 없음' : '최근 결과물 미확인', 'muted'));
 }
 
 function renderApprovals(rows, incomplete) {
@@ -383,24 +450,34 @@ async function initialize() {
 }
 
 async function recoverStart(expected) {
-  if (!retryStart) return;
+  if (!retryStart || retryStart.project !== project) return null;
   const {main, goal, requestId} = retryStart;
   const response = await tool('oms_start_status', {requestId}, expected);
   const result = response.structuredContent;
-  if (result?.requestId !== requestId || result.status === 'not_found') return;
-  if (result.room !== 'oms-app-' + requestId) return;
-  if (result.status === 'reserved') {
-    el('receipt').textContent = '시작 요청 접수됨 · ' + result.room;
-  } else if (result.status === 'recorded' && result.provider === main && result.attempt) {
-    retryStart = undefined;
-    if (el('brief').value.trim() === goal) el('brief').value = '';
-    el('receipt').className = '';
-    el('receipt').textContent = names[main] + ' Main · ' + result.state + ' · ' + result.attempt;
-    updateContext({project:project || null, room:result.room, status:result.state});
+  const room = 'oms-app-' + requestId;
+  if (result?.requestId === requestId) {
+    if (result.status === 'not_found' && result.room == null && result.attempt == null) {
+      return 'not_found';
+    }
+    if (result.status === 'reserved' && result.room === room && result.attempt == null) {
+      el('receipt').className = '';
+      el('receipt').textContent = '시작 요청 접수됨 · ' + result.room;
+      return 'reserved';
+    }
+    if (result.status === 'recorded' && result.room === room && result.provider === main &&
+        typeof result.attempt === 'string' && result.attempt) {
+      retryStart = undefined;
+      if (el('brief').value.trim() === goal) el('brief').value = '';
+      el('receipt').className = '';
+      el('receipt').textContent = names[main] + ' Main · ' + (result.state || '상태 미확인') + ' · ' + result.attempt;
+      updateContext({project:project || null, room:result.room, status:result.state});
+      return 'recorded';
+    }
   }
+  throw new Error('시작 상태를 확인할 수 없습니다. 진행 상황을 새로고침하세요.');
 }
 
-async function loadStatus(expected) {
+async function loadStatus(expected, recover = true) {
   el('status').className = '';
   el('status').textContent = '프로젝트 상태를 확인하는 중…';
   try {
@@ -423,9 +500,14 @@ async function loadStatus(expected) {
     } catch (error) {
       if (expected === generation) el('approvals').replaceChildren(node('p', error.message, 'error'));
     }
-    if (expected === generation && retryStart) {
+    if (expected === generation && recover && retryStart) {
       try { await recoverStart(expected); }
-      catch (error) { if (expected === generation) el('status').textContent = error.message; }
+      catch (error) {
+        if (expected === generation) {
+          el('status').className = 'error';
+          el('status').textContent = error.message;
+        }
+      }
     }
   } catch (error) {
     if (generation !== expected) return;
@@ -442,21 +524,21 @@ async function refresh() {
   try { await loadStatus(expected); } finally { if (expected === generation) setBusy(false); }
 }
 
-async function mutate(action, onSuccess, expected = generation) {
+async function mutate(action, onSuccess, expected = generation, recoverAfter = () => true) {
   if (busy || expected !== generation || el('view').hidden) return;
   setBusy(true);
   el('receipt').className = '';
   el('receipt').textContent = '요청을 처리하는 중…';
   try {
     const response = await action();
-    if (expected === generation) onSuccess(response.structuredContent);
+    if (expected === generation && response) onSuccess(response.structuredContent);
   } catch (error) {
     if (expected !== generation) return;
     el('receipt').className = 'error';
     el('receipt').textContent = error.message;
   } finally {
     if (expected === generation) {
-      try { await loadStatus(expected); } finally { if (expected === generation) setBusy(false); }
+      try { await loadStatus(expected, recoverAfter()); } finally { if (expected === generation) setBusy(false); }
     }
   }
 }
@@ -471,14 +553,23 @@ el('launch').addEventListener('submit', event => {
     return;
   }
   const main = el('launch').elements.main.value;
-  if (!retryStart || retryStart.project !== project || retryStart.main !== main || retryStart.goal !== goal) {
-    retryStart = {project, main, goal, requestId:crypto.randomUUID()};
-  }
+  const isRetry = Boolean(retryStart && retryStart.project === project && retryStart.main === main && retryStart.goal === goal);
+  if (!isRetry) retryStart = {project, main, goal, requestId:crypto.randomUUID()};
   const requestId = retryStart.requestId;
+  const expected = generation;
+  let started = !isRetry;
   mutate(
-    () => tool('oms_start_main', {main, goal, requestId}),
+    async () => {
+      if (isRetry) {
+        if (await recoverStart(expected) !== 'not_found') return null;
+        started = true;
+      }
+      return tool('oms_start_main', {main, goal, requestId}, expected);
+    },
     result => {
-      if (result?.requestId !== requestId || result.room !== 'oms-app-' + requestId || !result.attempt ||
+      if (!started) return;
+      if (result?.requestId !== requestId || result.room !== 'oms-app-' + requestId ||
+          typeof result.attempt !== 'string' || !result.attempt ||
           result.provider !== main || result.status !== 'started') {
         throw new Error('시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요.');
       }
@@ -486,12 +577,15 @@ el('launch').addEventListener('submit', event => {
       el('brief').value = '';
       el('receipt').textContent = names[main] + ' Main 시작됨 · ' + result.room + ' · ' + result.attempt;
       updateContext({project:project || null, room:result.room, status:result.status});
-    }
+    },
+    expected,
+    () => started
   );
 });
 el('brief').addEventListener('input', () => el('brief').setCustomValidity(''));
 el('project-choice').addEventListener('change', () => {
   if (busy) return;
+  seenInputOrManual = true;
   switchProject(projectArgument(el('project-choice').value || null));
 });
 el('refresh').addEventListener('click', refresh);

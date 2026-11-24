@@ -1277,6 +1277,167 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         ("fleet", fleet::dashboard(state)),
     ]))
 }
+/// Compact public columns before command capture. Omit oversized strings whole
+/// so that the MCP outbound scanner never receives a credential prefix.
+pub(super) fn panel_snapshot(report: &Value) -> Value {
+    fn label(v: &Value, bytes: usize) -> Value {
+        match v.str() {
+            Ok(s) if !s.is_empty() && s.len() <= bytes && !s.chars().any(char::is_control) => {
+                string(s)
+            }
+            _ => Value::Null,
+        }
+    }
+    fn rows(v: &Value, limit: usize, f: impl Fn(&Value) -> Value) -> Value {
+        Value::Array(v.array().unwrap_or(&[]).iter().take(limit).map(f).collect())
+    }
+    fn count(v: &Value) -> Value {
+        v.int()
+            .ok()
+            .filter(|n| *n >= 0)
+            .map(number)
+            .unwrap_or(Value::Null)
+    }
+    fn attempt(row: &Value) -> Value {
+        let refs = row.get("refs");
+        let provider = if row.text("tool") == "panel-main" && !refs.text("panel_harness").is_empty()
+        {
+            refs.get("panel_harness")
+        } else {
+            row.get("provider")
+        };
+        object([
+            ("id", label(row.get("attempt_id"), 128)),
+            ("provider", label(provider, 64)),
+            ("tool", label(row.get("tool"), 96)),
+            ("role", label(refs.get("panel_role"), 64)),
+            ("room", label(refs.get("panel_room_id"), 128)),
+            ("task", label(row.get("task_id"), 192)),
+            ("state", label(row.get("state"), 64)),
+            ("updated", label(row.get("updated_at"), 64)),
+        ])
+    }
+    let attempts = report.get("attempts");
+    let active = attempts.get("active_recent");
+    let mail = report.get("attention").get("room_mail");
+    let current_room = if mail.get("bound").truth() && mail.get("healthy").truth() {
+        label(mail.get("room_id"), 128)
+    } else {
+        Value::Null
+    };
+    let window = active.array().unwrap_or(&[]);
+    let mut candidates = window.iter().filter(|r| {
+        r.text("tool") == "panel-main"
+            && (current_room == Value::Null || r.get("refs").get("panel_room_id") == &current_room)
+    });
+    let first = candidates.next();
+    // A partial repository-wide window cannot establish uniqueness.
+    let main = first.filter(|_| {
+        candidates.next().is_none()
+            && (current_room != Value::Null
+                || attempts.get("active").int().ok() == Some(window.len() as i128))
+    });
+    let goal_text = |v: &Value| {
+        v.str()
+            .ok()
+            .filter(|s| !s.is_empty() && s.chars().count() <= 2000)
+            .map(string)
+            .unwrap_or(Value::Null)
+    };
+    let goal = goal_text(report.get("goal").get("text"));
+    let plan = report.get("plan");
+    let acceptance = report.get("acceptance");
+    let operations = report.get("operations");
+    let reviews = report.get("reviews");
+    let dashboard = object([
+        ("scope", string("repository")),
+        ("currentRoom", current_room),
+        ("project", label(report.get("repo").get("name"), 255)),
+        ("branch", label(report.get("repo").get("branch"), 255)),
+        ("updated", label(report.get("generated_at"), 64)),
+        (
+            "goal",
+            if goal != Value::Null {
+                goal
+            } else {
+                main.map(|v| goal_text(v.get("refs").get("panel_label")))
+                    .unwrap_or(Value::Null)
+            },
+        ),
+        (
+            "degraded",
+            Value::Bool(!report.get("collection").get("ok").truth()),
+        ),
+        ("main", main.map(attempt).unwrap_or(Value::Null)),
+        (
+            "active",
+            if attempts.get("available").truth() {
+                count(attempts.get("active"))
+            } else {
+                Value::Null
+            },
+        ),
+        (
+            "tasks",
+            if plan.get("healthy").truth() {
+                count(plan.get("task_count"))
+            } else {
+                Value::Null
+            },
+        ),
+        ("taskStatus", label(report.get("task").get("status"), 96)),
+        ("attempts", rows(attempts.get("recent"), 16, attempt)),
+        ("activeAttempts", rows(active, 8, attempt)),
+        (
+            "attention",
+            rows(report.get("attention").get("items"), 8, |v| {
+                object([
+                    ("summary", label(v.get("summary"), 512)),
+                    ("count", count(v.get("count"))),
+                ])
+            }),
+        ),
+        (
+            "operations",
+            rows(operations.get("recent"), 8, |v| {
+                object([
+                    ("kind", label(v.get("kind"), 96)),
+                    ("provider", label(v.get("provider"), 64)),
+                    ("status", label(v.get("status"), 96)),
+                    ("updated", label(v.get("ts"), 64)),
+                    (
+                        "exit",
+                        v.get("exit").int().ok().map(number).unwrap_or(Value::Null),
+                    ),
+                    ("artifactId", label(v.get("artifact_id"), 128)),
+                ])
+            }),
+        ),
+        (
+            "reviews",
+            object([
+                ("available", operations.get("available").clone()),
+                ("passed", count(reviews.get("passed"))),
+                ("failed", count(reviews.get("failed"))),
+                ("unknown", count(reviews.get("unknown"))),
+            ]),
+        ),
+        (
+            "acceptance",
+            object([
+                ("available", acceptance.get("available").clone()),
+                ("total", count(acceptance.get("total"))),
+                ("verified", count(acceptance.get("counts").get("verified"))),
+                ("complete", acceptance.get("complete").clone()),
+            ]),
+        ),
+    ]);
+    object([
+        ("schema", number(1)),
+        ("kind", string("oms-panel-snapshot")),
+        ("dashboard", dashboard),
+    ])
+}
 fn dashboard_text(report: &Value) -> Result<String> {
     fn shown(v: &Value) -> String {
         if matches!(v, Value::Null) || v.str() == Ok("") {
@@ -1911,4 +2072,64 @@ fn state_text(state: &Value) -> Result<String> {
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod panel_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn compact_snapshot_binds_room_and_omits_private_or_unbounded_source_columns() {
+        let mut report = crate::json::parse(br#"{"kind":"oms-dashboard","schema":1,
+            "attempts":{"available":true,"active":1,"active_recent":[{"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-a"}}],
+            "recent":[{"attempt_id":"historical","tool":"panel-native-assignment","state":"done","refs":{"panel_role":"lead","panel_room_id":"older"}}]},
+            "attention":{"items":[{"summary":"Check results","command":"private command"}],"room_mail":{"bound":true,"healthy":true,"room_id":"room-b"}},
+            "acceptance":{"available":true,"total":3,"counts":{"verified":1},"complete":false},
+            "reviews":{"passed":2,"failed":1,"unknown":0},
+            "operations":{"available":true,"recent":[{"kind":"review","artifact_id":"review-1","exit":1,"status":"failed"}]}}"#).unwrap();
+        let raw = "x".repeat(350_000);
+        report
+            .set("plan", object([("private", string(&raw))]))
+            .unwrap();
+        report.set("goal", object([("text", string(raw))])).unwrap();
+        let projected = panel_snapshot(&report);
+        let d = projected.get("dashboard");
+        assert_eq!(d.text("scope"), "repository");
+        assert_eq!(d.text("currentRoom"), "room-b");
+        assert_eq!(d.get("main"), &Value::Null);
+        assert_eq!(d.get("goal"), &Value::Null);
+        assert_eq!(d.get("attempts").array().unwrap()[0].text("role"), "lead");
+        let active = d.get("activeAttempts").array().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].text("room"), "room-a");
+        assert_eq!(active[0].text("provider"), "pi");
+        assert_eq!(d.get("reviews").get("failed").int().unwrap(), 1);
+        assert_eq!(d.get("acceptance").get("verified").int().unwrap(), 1);
+        assert_eq!(
+            d.get("operations").array().unwrap()[0].text("artifactId"),
+            "review-1"
+        );
+        let wire = String::from_utf8(crate::json::encoded(&projected).unwrap()).unwrap();
+        assert!(wire.len() < 4096 && !wire.contains("private"));
+        report.set("attention", object([])).unwrap();
+        let unbound = panel_snapshot(&report);
+        assert_eq!(unbound.get("dashboard").get("currentRoom"), &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("main").text("id"), "main-1");
+        let mut attempts = report.get("attempts").clone();
+        let first = attempts.get("active_recent").array().unwrap()[0].clone();
+        let mut second = first.clone();
+        second.set("attempt_id", string("other-main")).unwrap();
+        attempts.set("active", number(2)).unwrap();
+        attempts
+            .set("active_recent", Value::Array(vec![first, second]))
+            .unwrap();
+        report.set("attempts", attempts).unwrap();
+        let goal = "한".repeat(2000);
+        report
+            .set("goal", object([("text", string(&goal))]))
+            .unwrap();
+        let ambiguous = panel_snapshot(&report);
+        assert_eq!(ambiguous.get("dashboard").get("main"), &Value::Null);
+        assert_eq!(ambiguous.get("dashboard").text("goal"), goal);
+    }
 }

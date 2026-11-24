@@ -21,6 +21,8 @@
       "reason": "Share harness state, graph-guided project work, provider/model routing, independent review, and bounded write delegation.",
       "triggers": [
         "oms state",
+        "oms panel status",
+        "패널 상태",
         "pick up where",
         "continue where",
         "현재 상태 확인",

@@ -242,6 +242,19 @@ fn checkout(dir: &Path) -> PanelResult<bool> {
     Ok(false)
 }
 
+pub(super) fn response(data: PanelResult<Value>) -> Value {
+    match data.and_then(|data| {
+        crate::output::outbound(data.to_string().as_bytes(), &Value::Null)
+            .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
+        Ok(data)
+    }) {
+        Ok(data) => {
+            json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
+        }
+        Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),
+    }
+}
+
 impl Server<'_> {
     fn panel_repo(&self, args: &Value) -> PanelResult<PathBuf> {
         let map = configured_projects()?;
@@ -336,19 +349,7 @@ impl Server<'_> {
                 }) {
                     return error(id, -32602, "unknown or invalid desktop tool arguments");
                 }
-                match self.panel_call(name, args).and_then(|data| {
-                    crate::output::outbound(data.to_string().as_bytes(), &Value::Null).map_err(
-                        |_| "OMS withheld this response during its outbound scan".to_owned(),
-                    )?;
-                    Ok(data)
-                }) {
-                    Ok(data) => {
-                        json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
-                    }
-                    Err(message) => {
-                        json!({"isError":true,"content":[{"type":"text","text":message}]})
-                    }
-                }
+                response(self.panel_call(name, args))
             }
             _ => return error(id, -32601, "method not found"),
         };
@@ -607,7 +608,7 @@ impl Server<'_> {
         }
     }
 
-    fn panel_snapshot(&self, repo: &Path) -> PanelResult<Value> {
+    pub(super) fn panel_snapshot(&self, repo: &Path) -> PanelResult<Value> {
         let (report, partial) = self.panel_exec(
             repo,
             vec![
@@ -615,61 +616,23 @@ impl Server<'_> {
                 "--repo".into(),
                 repo.as_os_str().into(),
                 "--json".into(),
+                "--panel-snapshot".into(),
             ],
             true,
         )?;
-        if report["kind"] != "oms-dashboard" || report["schema"] != 1 {
-            return Err("Unsupported OMS dashboard version.".into());
+        if report["kind"] != "oms-panel-snapshot"
+            || report["schema"] != 1
+            || !report["dashboard"].is_object()
+        {
+            return Err("Unsupported OMS panel snapshot version.".into());
         }
-        // Omit oversized fields whole so the outbound scan never receives just a secret prefix.
-        let label = |v: &Value| {
-            v.as_str()
-                .filter(|s| s.chars().count() <= 2000)
-                .map(str::to_owned)
-        };
-        let items = report["attention"]["items"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(8)
-            .map(|v| json!({"summary":label(&v["summary"]),"count":v["count"].as_i64()}))
-            .collect::<Vec<_>>();
-        let active = &report["attempts"];
-        let task = &report["task"];
-        let plan = &report["plan"];
-        let project_attempt = |row: &Value| {
-            let provider = if row["tool"] == "panel-main" {
-                label(&row["refs"]["panel_harness"]).or_else(|| label(&row["provider"]))
-            } else {
-                label(&row["provider"])
-            };
-            json!({"id":label(&row["attempt_id"]),"state":label(&row["state"]),"provider":provider,
-                   "tool":label(&row["tool"]),"room":label(&row["refs"]["panel_room_id"]),"role":label(&row["refs"]["panel_role"]),"task":label(&row["task_id"])})
-        };
-        let attempts = active["recent"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(16)
-            .map(project_attempt)
-            .collect::<Vec<_>>();
-        let current = active["active_recent"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|row| row["tool"] == "panel-main");
-        let main = current.map(project_attempt);
-        let goal = label(&report["goal"]["text"])
-            .or_else(|| current.and_then(|row| label(&row["refs"]["panel_label"])));
-        let data = json!({
-            "attempts":attempts,"main":main,
-            "project":label(&report["repo"]["name"]), "branch":label(&report["repo"]["branch"]),
-            "updated":label(&report["generated_at"]), "goal":goal,
-            "degraded":partial || report["collection"]["ok"] != true,
-            "active":active["available"].as_bool().filter(|v| *v).and(active["active"].as_i64()),
-            "tasks":plan["healthy"].as_bool().filter(|v| *v).and(plan["task_count"].as_i64()),
-            "taskStatus":label(&task["status"]), "attention":items
-        });
-        Ok(data)
+        let mut dashboard = report["dashboard"].clone();
+        if partial {
+            dashboard["degraded"] = json!(true);
+        }
+        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
+            return Err("OMS panel snapshot exceeds its output limit.".into());
+        }
+        Ok(dashboard)
     }
 }

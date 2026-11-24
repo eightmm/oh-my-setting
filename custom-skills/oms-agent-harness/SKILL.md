@@ -2,7 +2,7 @@
 name: oms-agent-harness
 description: >
   Use OMS for shared task state, graph-guided context, document summaries,
-  agent collaboration, recovery or verified landing;
+  panel status, agent collaboration, recovery or verified landing;
   ordinary self-contained edits need no harness workflow.
 ---
 
@@ -34,6 +34,7 @@ approvals, commit intents, or publication intents.
 | Work family | Start here; drill down only as needed |
 |---|---|
 | State | `oms inbox --repo .`; runtime envelope/next/evidence for detail, not another full dashboard by default. |
+| Panel status in chat | On the installed OMS Core/Full MCP server call `oms_panel_snapshot` with the current trusted project checkout as `repo`. For the standalone `@OMS` connection, use `project` only when it lists aliases. Refresh on request. |
 | Collaboration | Existing live `thread` for active collaborators; `oms consult` for explicitly authorized new peer judgment. |
 | Context | Use `oms graph project context --task "..."` when relationships or change impact are unclear; reuse a current pack. Direct search suffices for known local scope. Outline a large file with `oms graph project api PATH` before reading it whole. `oms runtime context --target PATH` supplies bounded source bytes. |
 | Delegation | When authorized: `oms panel --dispatch ROLE`, `oms peer-delegate --to NAME` (one write). For multi-slice terminal panel control-tower work use `oms-panel-orchestrator`. Load [roles.md](references/roles.md), [model-routing.md](references/model-routing.md), [delegation-artifacts.md](references/delegation-artifacts.md) as needed. |
@@ -41,6 +42,12 @@ approvals, commit intents, or publication intents.
 | Request tracking | Capture each actionable user deliverable cumulatively before substantive work: exact scope, dependencies, completion criterion and receipt. Reuse Room notes and `oms agent-plan ready` (plus the plan's show view when present). Recheck pending items on every new message and resume; answer status questions without altering the list. Use native leads or bounded dispatch only when authorized; a solo session keeps it as internal work state plus a durable record. Store summaries, never raw user text or transcripts; the record grants no publication or extra permission. |
 | Continuity | Journal for history, agent-memory for stable facts, session-handoff for local sessions, runtime capsule for sanitized transfer. See [state-memory.md](references/state-memory.md). |
 | Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows and the advisory-verb table use [runtime-core.md](references/runtime-core.md). |
+
+For a status request, keep the interaction read-only. Report the project and
+snapshot time, the observed Main/Room and recorded lead or worker attempts,
+current task, results and items needing attention. Keep review and evidence
+counts scoped to the repository. Mark unavailable data and unobserved roles.
+If the snapshot tool is missing, identify the missing connection.
 
 Use `oms list` for entrypoints, command routing for variants,
 and `oms list --all` for compatibility primitives. Read only references

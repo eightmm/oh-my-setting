@@ -33,9 +33,10 @@ const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXTENSION: &str = "io.modelcontextprotocol/tasks";
 const GRAPH_URI: &str = "ui://oms/project-graph/v1.html";
 const MIME: &str = "text/html;profile=mcp-app";
-const CORE: [&str; 13] = [
+const CORE: [&str; 14] = [
     "oms_inbox",
     "oms_repo_state",
+    "oms_panel_snapshot",
     "oms_handoffs",
     "oms_handoff_show",
     "oms_journal",
@@ -472,6 +473,32 @@ impl<'a> Server<'a> {
                         format!("unknown tool: {}", storage::repr(&json!(name))),
                     ));
                 };
+                if name == "oms_panel_snapshot" {
+                    if !args
+                        .as_object()
+                        .is_some_and(|fields| fields.keys().all(|key| key.as_str() == Some("repo")))
+                    {
+                        return Some(error(id, -32602, "expected only an optional repo"));
+                    }
+                    let result = self.repo(args).and_then(|repo| {
+                        if delegated() && repo != self.caller_cwd {
+                            return Err(
+                                "Delegated workers may read only their own repository.".into()
+                            );
+                        }
+                        self.panel_snapshot(&repo).map_err(ToolError::from)
+                    });
+                    let value = match result {
+                        Ok(dashboard) => panel::response(Ok(json!({"dashboard":dashboard}))),
+                        Err(ToolError::Text(message)) => {
+                            json!({"isError":true,"content":[{"type":"text","text":message}]})
+                        }
+                        Err(ToolError::InvalidField) => {
+                            return Some(error(id, -32602, FIELD_ERROR));
+                        }
+                    };
+                    return Some(reply(id, self.complete(value, params, false)));
+                }
                 let (text, bad, graph) = if name == "oms_project_graph_render" {
                     match self.graph(args) {
                         Ok((text, graph)) => (text, false, Some(graph)),

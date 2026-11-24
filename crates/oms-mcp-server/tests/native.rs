@@ -278,32 +278,45 @@ fn conversation_panel() {
     bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
     assert!(!source.join("last-call.json").exists());
     std::fs::create_dir(repo.join(".oms")).unwrap();
-    let snapshot = json!({"schema":1,"kind":"oms-dashboard","repo":{"name":"demo"},"goal":{"text":"Finish inspection"},"attempts":{"available":false,"active":0},"attention":{"items":[{"summary":"Review pending","count":2,"command":"private command"}]}});
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","currentRoom":null,"project":"demo","goal":"Finish inspection","active":null,"activeAttempts":[],"attention":[{"summary":"Review pending","count":2}]}});
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     let result = c.tool("oms_panel_snapshot", json!({}));
     let data = &result["result"]["structuredContent"]["dashboard"];
     assert_eq!(payload(&result)["dashboard"], *data);
+    assert_eq!(data["degraded"], true);
     assert_eq!(
         record(&source)["argv"],
-        json!(["dashboard", "--repo", repo, "--json"])
+        json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
     );
-    assert_eq!(data["goal"], "Finish inspection");
-    assert_eq!(data["degraded"], true);
-    assert!(data["active"].is_null());
-    assert_eq!(
-        data["attention"],
-        json!([{"summary":"Review pending","count":2}])
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "oms_panel_snapshot"
+                    && t["annotations"]["readOnlyHint"] == true
+                    && t.get("_meta").is_none())
+        );
+        assert_eq!(
+            regular.tool("oms_panel_snapshot", json!({"repo":repo}))["result"],
+            result["result"]
+        );
+        assert_eq!(
+            regular.tool("oms_panel_snapshot", json!({}))["result"],
+            result["result"]
+        );
+        assert!(
+            regular.tool("oms_panel_snapshot", json!({"project":"other"}))["error"].is_object()
+        );
+        assert!(regular.tool("oms_start_main", json!({}))["error"].is_object());
+    }
+    let mut worker = Client::with_depth(&source, &repo, "core", false, false, "1".as_ref());
+    bad(
+        &worker.tool("oms_panel_snapshot", json!({"repo":source})),
+        "own repository",
     );
-    assert!(!result.to_string().contains("private command"));
-    let mut observed = snapshot;
-    let main = json!({"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-live"}});
-    observed["attempts"] =
-        json!({"available":true,"active":1,"active_recent":[main],"recent":[main]});
-    fixture_settings(&source, json!({"stdout":observed.to_string()}));
-    let live = payload(&c.tool("oms_panel_snapshot", json!({})));
-    assert_eq!(live["dashboard"]["main"]["provider"], "pi");
-    assert_eq!(live["dashboard"]["main"]["room"], "room-live");
-    assert_eq!(live["dashboard"]["attempts"][0]["role"], "main");
     let start = json!({"main":"codex","goal":"--help; inspect scope","requestId":"4d6acd01-bd18-4567-bf69-ea05fb048b27"});
     let room = "oms-app-4d6acd01-bd18-4567-bf69-ea05fb048b27";
     fixture_settings(
@@ -670,7 +683,7 @@ fn discovery_protocols() {
     let listed = c.call("tools/list", json!({"_meta":modern()}));
     let golden: Value = serde_json::from_str(include_str!("definitions.json")).unwrap();
     assert_eq!(listed["result"]["tools"], golden);
-    assert_eq!(golden.as_array().unwrap().len(), 32);
+    assert_eq!(golden.as_array().unwrap().len(), 33);
     assert_eq!(listed["result"]["ttlMs"], 300000);
     let d = c.call("server/discover", json!({}));
     assert_eq!(
@@ -744,7 +757,7 @@ fn discovery_protocols() {
             .as_array()
             .unwrap()
             .len(),
-        13
+        14
     );
     good(&core.tool("oms_task_state", json!({})));
     assert_eq!(
