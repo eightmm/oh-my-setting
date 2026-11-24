@@ -2,14 +2,18 @@
 
 use oms_command_autonomy::{CommandResult, Invocation, ModelRoute, Services, run_with_services};
 use oms_command_plan::services::{GroupMembership, GroupResolver};
+use oms_command_plan::storage::ACTIVE;
+use oms_command_plan::{Action, Context, Plan, Request};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 fn ambient(key: &std::ffi::OsStr) -> bool {
@@ -77,6 +81,81 @@ fn group(gid: u32) -> oms_command_plan::Result<GroupMembership> {
 }
 
 #[derive(Default)]
+struct ReviewRace {
+    state: Mutex<ReviewRaceState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct ReviewRaceState {
+    reader_open: bool,
+    resume_reader: bool,
+}
+
+impl ReviewRace {
+    fn reader_opened(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.reader_open = true;
+        self.wake.notify_all();
+        let (state, _) = self
+            .wake
+            .wait_timeout_while(state, Duration::from_secs(20), |s| !s.resume_reader)
+            .unwrap();
+        assert!(
+            state.resume_reader,
+            "sibling never released the Plan reader"
+        );
+    }
+
+    fn reader_holds_lock(&self, repo: &Path) -> bool {
+        let state = self.state.lock().unwrap();
+        let (state, _) = self
+            .wake
+            .wait_timeout_while(state, Duration::from_secs(20), |s| !s.reader_open)
+            .unwrap();
+        assert!(state.reader_open, "reader never opened the Plan");
+        drop(state);
+        let lock =
+            oms_lock::Lock::for_file(&repo.join(ACTIVE), oms_lock::Settings::from_env().unwrap())
+                .unwrap()
+                .try_acquire();
+        match lock {
+            Err(oms_lock::Error::Busy) => true,
+            Ok(_) => false,
+            Err(error) => panic!("could not check the canonical Plan lock: {error}"),
+        }
+    }
+
+    fn resume_reader(&self) {
+        self.state.lock().unwrap().resume_reader = true;
+        self.wake.notify_all();
+    }
+}
+
+thread_local! {
+    static RACE_READER: RefCell<Option<(Arc<ReviewRace>, bool)>> = const { RefCell::new(None) };
+}
+
+fn group_with_review_race(gid: u32) -> oms_command_plan::Result<GroupMembership> {
+    // Only the Plan file is group-writable. Its second group proof occurs
+    // after the Plan reader has opened the file and sampled its inode.
+    let opened = RACE_READER.with(|reader| {
+        let mut reader = reader.borrow_mut();
+        match reader.as_mut() {
+            Some((_, seen)) if !*seen => {
+                *seen = true;
+                None
+            }
+            _ => reader.take().map(|(race, _)| race),
+        }
+    });
+    if let Some(race) = opened {
+        race.reader_opened();
+    }
+    group(gid)
+}
+
+#[derive(Default)]
 struct Mock {
     /// Task ids whose worker panics / reports failure.
     panics: BTreeSet<&'static str>,
@@ -91,22 +170,39 @@ struct Mock {
     peak: AtomicUsize,
     live: AtomicUsize,
     plan: Mutex<()>,
+    review_race: Option<Arc<ReviewRace>>,
 }
 impl oms_command_plan::Services for Mock {
     fn group_membership_resolver(&self) -> Option<GroupResolver> {
-        Some(group)
+        Some(if self.review_race.is_some() {
+            group_with_review_race
+        } else {
+            group
+        })
     }
 }
 impl Mock {
     fn plan(&self, repo: &Path, args: &[&str]) -> (i32, String) {
         let _one = self.plan.lock().unwrap();
+        let (code, out, err) = self.plan_command(repo, args);
+        assert_eq!(code, 0, "{args:?}: {}", String::from_utf8_lossy(&err));
+        (code, String::from_utf8(out).unwrap())
+    }
+    fn plan_command(&self, repo: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
         let mut full = vec!["--repo", repo.to_str().unwrap()];
         full.extend_from_slice(args);
         let words = full.iter().map(OsString::from).collect::<Vec<_>>();
-        let (code, out, err) =
-            oms_command_plan::run_with_services(&words, repo, &AtomicBool::new(false), self);
-        assert_eq!(code, 0, "{args:?}: {}", String::from_utf8_lossy(&err));
-        (code, String::from_utf8(out).unwrap())
+        oms_command_plan::run_with_services(&words, repo, &AtomicBool::new(false), self)
+    }
+    fn delegate_lease(&self, repo: &Path, id: &str) -> String {
+        let stop = AtomicBool::new(false);
+        let req = Request::new(Action::Show).with("id", id);
+        let context = Context::from_environment_at(&req, repo, repo, None).unwrap();
+        let plan = Plan::open(context, self, &stop).unwrap();
+        let shown = plan.show_task_with_locked_snapshot(id).unwrap();
+        assert_eq!(shown.code, 0, "cannot read the mock delegate lease");
+        let task: Value = serde_json::from_slice(&shown.stdout).unwrap();
+        task["lease_id"].as_str().unwrap().to_owned()
     }
     fn wait_for(&self, predicate: impl Fn(&[String]) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -152,10 +248,22 @@ impl Mock {
             self.running.lock().unwrap().remove(&id);
             panic!("injected worker panic for {id}");
         }
-        std::thread::sleep(Duration::from_millis(30));
-        let (_, shown) = self.plan(&call.cwd, &["show", "--id", &id]);
-        let task: Value = serde_json::from_str(&shown).unwrap();
-        let lease = task["lease_id"].as_str().unwrap().to_owned();
+        if self.review_race.is_none() {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let mut free_lock = None;
+        if let Some(race) = &self.review_race
+            && id == "t1-slow"
+        {
+            // Under the guard, let the reader finish before Review can
+            // publish. Without the guard, publish first to force inode drift.
+            if race.reader_holds_lock(&call.cwd) {
+                race.resume_reader();
+            } else {
+                free_lock = Some(race);
+            }
+        }
+        let lease = self.delegate_lease(&call.cwd, &id);
         self.plan(
             &call.cwd,
             &[
@@ -170,6 +278,14 @@ impl Mock {
                 &format!("patch-{id}"),
             ],
         );
+        if let Some(race) = free_lock {
+            race.resume_reader();
+        }
+        if let Some(race) = &self.review_race
+            && id == "t3-late"
+        {
+            RACE_READER.with(|reader| reader.replace(Some((race.clone(), false))));
+        }
         self.live.fetch_sub(1, Ordering::SeqCst);
         self.running.lock().unwrap().remove(&id);
     }
@@ -276,11 +392,16 @@ fn parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling() {
         return;
     }
     let repo = fixture(&[("t1-slow", "a/"), ("t2-boom", "b/"), ("t3-late", "c/")]);
+    for relative in ["", ".oms", ".oms/plan"] {
+        fs::set_permissions(repo.0.join(relative), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(repo.0.join(ACTIVE), fs::Permissions::from_mode(0o660)).unwrap();
     let mock = Mock {
         panics: ["t2-boom"].into(),
         // The slow task cannot finish until the third task has started, so the
         // freed slot must be refilled while the slow sibling is still running.
         waits: vec![("t1-slow", "t3-late")],
+        review_race: Some(Arc::new(ReviewRace::default())),
         ..Mock::default()
     };
     let (code, out, err) = run(&repo, &mock, &["--parallel", "--max-writers", "2"]);
@@ -323,6 +444,55 @@ fn overlapping_scopes_never_run_together() {
     for id in ["o1", "o2", "o3"] {
         assert_eq!(state(&repo, id)["state"], "review");
     }
+}
+
+#[test]
+fn delegate_lease_read_cannot_race_controller_publication() {
+    if scrubbed_child("delegate_lease_read_cannot_race_controller_publication") {
+        return;
+    }
+    let repo = fixture(&[("o2", "src/lib.rs"), ("o3", "docs/")]);
+    let race = Arc::new(ReviewRace::default());
+    let mock = Mock {
+        review_race: Some(race.clone()),
+        ..Mock::default()
+    };
+    mock.plan(&repo.0, &["claim", "--id", "o3", "--provider", "codex"]);
+    let expected = state(&repo, "o3")["lease_id"].as_str().unwrap().to_owned();
+    assert!(!expected.is_empty());
+    for relative in ["", ".oms", ".oms/plan"] {
+        fs::set_permissions(repo.0.join(relative), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(repo.0.join(ACTIVE), fs::Permissions::from_mode(0o660)).unwrap();
+
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            RACE_READER.with(|reader| reader.replace(Some((race.clone(), false))));
+            mock.delegate_lease(&repo.0, "o3")
+        });
+        let guarded = race.reader_holds_lock(&repo.0);
+        if guarded {
+            race.resume_reader();
+        }
+        // The controller does not share the mock delegate's command mutex.
+        let (code, _, err) =
+            mock.plan_command(&repo.0, &["claim", "--id", "o2", "--provider", "codex"]);
+        if !guarded {
+            race.resume_reader();
+        }
+        assert_eq!(
+            code,
+            0,
+            "controller claim: {}",
+            String::from_utf8_lossy(&err)
+        );
+        assert_eq!(reader.join().unwrap(), expected);
+        assert!(
+            guarded,
+            "mock delegate read must hold the canonical Plan lock"
+        );
+    });
+    assert_eq!(state(&repo, "o2")["state"], "claimed");
 }
 
 #[test]

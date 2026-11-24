@@ -35,4 +35,4 @@ After you install:
 - [Terminal panel](https://github.com/eightmm/oh-my-setting/blob/main/docs/TERMINAL-PANEL.md)
 - [Verification and release](https://github.com/eightmm/oh-my-setting/blob/main/docs/COMPONENTS.md#verification-and-release)
 - [Contributing](https://github.com/eightmm/oh-my-setting/blob/main/CONTRIBUTING.md)
-- [GitHub workflow](https://github.com/eightmm/oh-my-setting/blob/main/docs/wiki/GitHub-Workflow.md)
+- [GitHub workflow](https://github.com/eightmm/oh-my-setting/wiki/GitHub-Workflow)

@@ -417,9 +417,21 @@ impl<'a> Plan<'a> {
         }
     }
     pub fn load(&self) -> Result<Snapshot> {
-        let snap = self
-            .plan_storage()
-            .snapshot(&self.context.plan_file, MAX_JSON, true)?;
+        self.load_from_snapshot(self.read_snapshot()?)
+    }
+    fn read_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
+        self.plan_storage()
+            .snapshot(&self.context.plan_file, MAX_JSON, true)
+    }
+    /// Read the task against a stable Plan file while a sibling may publish
+    /// Review. Hold the writer's guard only for the bounded file snapshot.
+    pub fn show_task_with_locked_snapshot(&self, id: &str) -> Result<Response> {
+        let req = Request::new(Action::Show).with("id", id);
+        req.validate()?;
+        let snap = self.locked(false, None, || self.read_snapshot())?;
+        self.query(&req, &mut self.load_from_snapshot(snap)?)
+    }
+    fn load_from_snapshot(&self, snap: Option<storage::FileSnapshot>) -> Result<Snapshot> {
         let raw = snap.as_ref().map(|s| s.raw.clone());
         let strict =
             self.context.canonical() && self.store.directory_exists(".oms/plan/completions")?;
