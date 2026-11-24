@@ -148,8 +148,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             GIT,
-            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId from a linked project to read board pages.",
-            json!({"project":project,"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
+            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId for linked board pages, or issuePreview alone to review immutable metadata for one open issue in the selected project.",
+            json!({"project":project,"issuePreview":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
             &[],
             false
         ),
@@ -626,6 +626,7 @@ impl Server<'_> {
                     OPEN | APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
+                        "issuePreview",
                         "kind",
                         "number",
                         "inventory",
@@ -885,6 +886,79 @@ impl Server<'_> {
         Ok((output.stdout, output.code != 0))
     }
 
+    fn issue_preview(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
+        if ["kind", "number", "inventory", "boardId", "cursor"]
+            .iter()
+            .any(|key| args.get(key).is_some())
+        {
+            return Err("Select only one issue to review.".into());
+        }
+        let number = args["issuePreview"]
+            .as_u64()
+            .filter(|n| (1..=9_999_999_999).contains(n))
+            .ok_or("Invalid project issue number.")?;
+        // The native reader resolves the project's declared repository and origin itself.
+        let argv = vec![
+            "intent".into(),
+            "draft".into(),
+            "--repo".into(),
+            repo.as_os_str().to_owned(),
+            "--from-project-issue".into(),
+            number.to_string().into(),
+            "--dry-run".into(),
+        ];
+        let (data, _) = self
+            .panel_exec(repo, argv, false)
+            .map_err(|_| "Cannot verify an open issue in the selected project.")?;
+        if self.panel_repo(args)? != repo {
+            return Err(BINDING.into());
+        }
+        let source = &data["source"];
+        let url = source["reference"].as_str().unwrap_or("");
+        let slug = url
+            .strip_prefix("https://github.com/")
+            .and_then(|s| s.strip_suffix(&format!("/issues/{number}")))
+            .unwrap_or("");
+        let valid_slug = slug.split_once('/').is_some_and(|(owner, repo)| {
+            (1..=39).contains(&owner.len())
+                && owner.as_bytes()[0].is_ascii_alphanumeric()
+                && owner
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && (1..=100).contains(&repo.len())
+                && !matches!(repo, "." | "..")
+                && repo
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        });
+        let revision = source["revision"].as_str().unwrap_or("");
+        let sha = source["sha256"].as_str().unwrap_or("");
+        if data["schema"] != 1
+            || data["kind"] != "oms-intent-source"
+            || data["trusted"] != false
+            || source["kind"] != "github-issue"
+            || source["state"] != "open"
+            || !valid_slug
+            || revision.len() != 20
+            || !revision.ends_with('Z')
+            || chrono::DateTime::parse_from_rfc3339(revision).is_err()
+            || revision.as_bytes()[10] != b'T'
+            || sha.len() != 64
+            || !sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !source["bytes"]
+                .as_u64()
+                .is_some_and(|n| (1..=32768).contains(&n))
+        {
+            return Err("Unverified project issue metadata.".into());
+        }
+        Ok(
+            json!({"issuePreview":{"kind":"github-issue","reference":url,"state":"open",
+            "revision":revision,"sha256":sha,"bytes":source["bytes"]}}),
+        )
+    }
+
     fn panel_call(&self, name: &str, args: &Value, meta: &Value) -> PanelResult<Value> {
         if name == PROJECTS {
             if crate::delegated() {
@@ -930,6 +1004,9 @@ impl Server<'_> {
         }
         if name == CAPABILITIES {
             return self.panel_capabilities(&repo, args);
+        }
+        if name == GIT && args.get("issuePreview").is_some() {
+            return self.issue_preview(&repo, args);
         }
         let request_room = || -> PanelResult<String> {
             let key = args["requestId"]

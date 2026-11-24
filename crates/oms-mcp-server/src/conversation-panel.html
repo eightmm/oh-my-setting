@@ -479,7 +479,9 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
       <h2>Git · GitHub PR</h2><p id="git-local"></p><p id="git-status" class="muted" role="status"></p>
       <button type="button" class="link-action" id="git-backlog" data-i18n="gitBacklog" hidden>열린 작업 전체를 Main에 맡기기</button>
       <section id="git-editor" class="card" aria-label="GitHub 항목 작업 목표" data-i18n-attr="aria-label:gitEditor" hidden>
-        <h3 id="git-item"></h3><label for="git-provider" data-i18n="gitAssignee">배정 요청 대상</label>
+        <h3 id="git-item"></h3>
+        <button id="issue-review" type="button" hidden data-i18n="git.review">이슈 버전 확인</button>
+        <p id="issue-evidence" role="status" class="muted" style="white-space:pre-line;overflow-wrap:anywhere"></p><label for="git-provider" data-i18n="gitAssignee">배정 요청 대상</label>
         <select id="git-provider"><option value="" data-i18n="gitAuto">Main이 Lead 선택</option><option value="codex">Codex Lead</option>
           <option value="claude">Claude Lead</option><option value="agy">AGY Lead</option></select>
         <label for="git-goal" data-i18n="gitGoalLabel">대화에 전달할 목표</label><textarea id="git-goal" rows="3" maxlength="2000"></textarea>
@@ -879,6 +881,10 @@ git.ahead | 앞섬 {n} | Ahead {n}
 git.behind | 뒤처짐 {n} | Behind {n}
 git.prefix | {p} Lead에게 다음 작업을 배정해 주세요.  | Please assign the following work to the {p} Lead.\x20
 git.prefixAny | 담당 Lead를 정해 다음 작업을 배정해 주세요.  | Please choose a Lead and assign the following work.\x20
+git.review |  | Review issue version
+git.reading | 이슈 버전을 확인하고 있습니다… | Checking the issue version…
+git.proof | 열린 이슈 · 수정 시각 {rev} | Open issue · Updated {rev}
+git.noProof | 선택한 이슈의 버전을 확인할 수 없습니다. | Could not verify the selected issue version.
 git.draft | 작업 목표 작성 | Draft work goal
 git.draftAria | {label} 작업 목표 작성 | {label}: draft work goal
 git.editorHint | 대화로 보내면 Main이 이 목표로 작업을 시작할 수 있습니다. | Once sent to the conversation, Main can start working on this goal.
@@ -1822,7 +1828,7 @@ function loadTab(tab, force = false) {
   if (tab !== 'usage' && tab !== 'git') return;
   if (!force && (jobs.has(tab) || loaded.has(tab))) return;
   const status = el(tab + '-status');
-  if (tab === 'git') { gitReady = false; updateSendButton(); }
+  if (tab === 'git') { gitReady = false; resetIssueReview(); updateSendButton(); }
   put(status, () => t(tab === 'git' ? 'git.loading' : 'usage.loading'));
   detailRead(tab, tab === 'git' ? 'oms_panel_git_status' : 'oms_panel_usage', {}, data => {
     status.textContent = '';
@@ -2058,7 +2064,27 @@ function gitAction(kind,item) {
   putAttr(button,'aria-label',() => t('git.draftAria',{label:label()}));
   return button;
 }
+function resetIssueReview() {
+  jobs.delete('issue-review'); put('issue-evidence',() => '');
+}
+el('issue-review').addEventListener('click',() => {
+  const item = gitItem, source = gitData;
+  if (!gitReady || item?.kind !== 'issue' || item.stale || jobs.has('issue-review')) return;
+  const button = el('issue-review');
+  button.disabled = true; put('issue-evidence',() => t('git.reading'));
+  detailRead('issue-review','oms_panel_git_status',{issuePreview:item.number},data => {
+    if (item !== gitItem || source !== gitData || !gitReady || item.stale) return;
+    const v = data?.issuePreview;
+    const slug = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9_.-]+)\/issues\//.exec(v?.reference)?.[1];
+    if (v?.kind !== 'github-issue' || v.state !== 'open' || !slug || slug.toLowerCase() !== source.github.repository.toLowerCase() ||
+        v.reference !== 'https://github.com/' + slug + '/issues/' + item.number ||
+        !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(v.revision) || !/^[0-9a-f]{64}$/.test(v.sha256)) throw uiError('git.noProof');
+    put('issue-evidence',() => [t('git.proof',{rev:v.revision}),v.reference,'SHA-256 '+v.sha256].join('\n'));
+    button.disabled = false;
+  },() => { put('issue-evidence',() => t('git.noProof')); button.disabled = false; });
+});
 function editGitGoal(item,body) {
+  resetIssueReview();
   const saved = gitDrafts.get(item.url);
   draftProvider = saved?.provider || ''; gitItem = item;
   put('git-item', item.label);
@@ -2224,7 +2250,7 @@ el('git-find').addEventListener('submit',event => {
     result.replaceChildren();
     if (button) { result.append(node('p',item.title),button); }
     else if (gitItem?.number === number && gitItem.kind === kind) {
-      gitItem.stale = true; updateSendButton();
+      gitItem.stale = true; resetIssueReview(); updateSendButton();
       const note = () => found?.status === 'closed' ? t('git.closed') : t('git.notOpenNow');
       put(result, note); put('git-editor-status', note);
     }
@@ -2236,6 +2262,9 @@ function rememberGitGoal() {
   updateSendButton();
 }
 function updateSendButton() {
+  const review = el('issue-review');
+  review.hidden = gitItem?.kind !== 'issue';
+  review.disabled = !gitReady || Boolean(gitItem?.stale) || jobs.has('issue-review');
   const main = dashboardData?.conversationMain;
   const send = el('git-send');
   const bound = !readOnly && !el('header-main').hidden;
@@ -2488,7 +2517,7 @@ function clearProject() {
   el('goal-expand').setAttribute('aria-expanded','false');
   clearPeer(); clearReviewAttachment();
   checkedAt = ''; connectionReady = profileKnown = false; connectionState = 'conn.unknownProject'; hostFacts(); resetConnectionRows();
-  jobs.clear(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
+  jobs.clear(); resetIssueReview(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
   selectedMember = backTarget = olderCursor = tuiNext = undefined; chatRows = [];
   clearEvidence(); availableAttempts = [];
   members = []; tuiPages = []; el('tui-view').value = '';

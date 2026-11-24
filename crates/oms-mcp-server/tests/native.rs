@@ -379,6 +379,60 @@ fn cross_host_project_reads() {
         );
         assert!(result.to_string().len() < 60_000, "{profile}");
     }
+    let issue = json!({"kind":"github-issue","reference":"https://github.com/org/repo/issues/9",
+        "revision":"2026-11-24T09:00:00Z","state":"open","bytes":12,"sha256":"a".repeat(64)});
+    let mut preview = json!({"schema":1,"kind":"oms-intent-source","trusted":false,"source":issue,
+        "text":"not for relay","note":"not for relay"});
+    preview["source"]["title"] = json!("not for relay");
+    fixture_settings(&source, json!({"stdout":preview.to_string()}));
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let mut bound = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let result = bound.tool(
+            "oms_panel_git_status",
+            json!({"project":"fixture","issuePreview":9}),
+        );
+        assert_eq!(payload(&result), json!({"issuePreview":issue}));
+        assert!(!result.to_string().contains("not for relay"));
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "intent",
+                "draft",
+                "--repo",
+                repo,
+                "--from-project-issue",
+                "9",
+                "--dry-run"
+            ])
+        );
+    }
+    for (key, value) in [
+        ("reference", json!("https://github.com/org/repo/issues/10")),
+        ("reference", json!("https://github.com/org/repo/pull/9")),
+        ("state", json!("closed")),
+        ("bytes", json!(32769)),
+        ("sha256", json!("A".repeat(64))),
+        ("revision", json!("2026-02-31T00:00:00Z")),
+    ] {
+        let mut bad_source = preview.clone();
+        bad_source["source"][key] = value;
+        fixture_settings(&source, json!({"stdout":bad_source.to_string()}));
+        bad(
+            &c.tool(
+                "oms_panel_git_status",
+                json!({"project":"fixture","issuePreview":9}),
+            ),
+            "Unverified project issue",
+        );
+    }
+    fixture_settings(&source, json!({"exit":1,"stderr":"not for relay"}));
+    bad(
+        &c.tool(
+            "oms_panel_git_status",
+            json!({"project":"fixture","issuePreview":9}),
+        ),
+        "Cannot verify an open issue",
+    );
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","updated":"2026-11-24T10:00:00Z","conversationMain":null,"observation":obs}});
     fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     let reply=c.call("tools/call",json!({"name":"oms_panel_snapshot","arguments":{"project":"fixture"},"_meta":{"threadId":"00000000-0000-4000-8000-000000000001"}}));
@@ -1283,6 +1337,13 @@ fn conversation_panel() {
         ])
     );
     for args in [
+        json!({"issuePreview":0}),
+        json!({"issuePreview":10000000000i64}),
+        json!({"issuePreview":"9"}),
+        json!({"issuePreview":9,"cursor":null}),
+        json!({"issuePreview":9,"kind":"issue","number":9}),
+        json!({"issuePreview":9,"inventory":"issues"}),
+        json!({"issuePreview":9,"boardId":"PVT_1"}),
         json!({"kind":"issue"}),
         json!({"number":2}),
         json!({"kind":"pr","number":2}),

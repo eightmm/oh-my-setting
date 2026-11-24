@@ -517,6 +517,39 @@ async function pickIssue(p) {
   card.children.at(-1).dispatchEvent(new Event('click')); await setImmediate();
 }
 
+test('explicit open issue review shows fixed localized evidence separately from the draft and discards stale reads', async () => {
+  const p=await panel(['one','two'],{},{readOnly:true,message:true});
+  p.get('project-choice').value='one'; await p.event('project-choice','change');
+  await pickIssue(p);
+  const evidence=p.get('issue-evidence'), draft=p.get('git-goal');
+  const pin={kind:'github-issue',state:'open',reference:'https://github.com/Org/rEpO/issues/9',revision:'2026-11-24T09:00:00Z',sha256:'a'.repeat(64),bytes:30};
+  let source={...pin};
+  p.host.tools.oms_panel_git_status=args=>args.issuePreview?{issuePreview:source}:workData;
+  assert.equal(p.calls.some(c=>c.args.issuePreview),false);
+  draft.value='내가 쓴 지시'; await p.event('git-goal','input');
+  await p.event('issue-review','click');
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',issuePreview:9});
+  assert.match(evidence.textContent,/열린 이슈/);
+  for(const field of [pin.reference,pin.revision,pin.sha256]) assert.ok(evidence.textContent.includes(field));
+  await choose(p,'en'); assert.match(evidence.textContent,/Open issue/); assert.equal(draft.value,'내가 쓴 지시');
+  for(const reference of ['https://github.com/other/repo/issues/9',pin.reference+'?id=9',
+      pin.reference+'#comment',pin.reference.replace('/issues/','/ISSUES/'),pin.reference.replace('/9','/09')]){
+    source={...pin,reference};
+    await p.event('issue-review','click'); assert.match(evidence.textContent,/Could not verify/);
+    assert.ok(!evidence.textContent.includes(pin.sha256));
+  }
+  source={...pin}; p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click'); const old=p.host.release;
+  await p.event('refresh','click'); source={...pin,sha256:'b'.repeat(64)}; await p.event('issue-review','click'); old(); await setImmediate();
+  assert.ok(evidence.textContent.includes(source.sha256)); assert.ok(!evidence.textContent.includes(pin.sha256));
+  p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click'); const itemReply=p.host.release;
+  await p.event('git-backlog','click'); itemReply(); await setImmediate();
+  assert.equal(evidence.textContent,''); assert.equal(p.get('issue-review').hidden,true);
+  await pickIssue(p); p.host.tools.oms_panel_git_status=args=>args.issuePreview?{issuePreview:source}:workData;
+  p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click');
+  await p.open('input',{arguments:{project:'two'}}); p.host.release(); await setImmediate();
+  assert.equal(evidence.textContent,''); assert.equal(p.host.messages.length,0);
+  assert.deepEqual([...new Set(p.calls.map(c=>c.name))].sort(),['oms_list_projects','oms_panel_git_status','oms_panel_project_graph','oms_panel_snapshot','oms_panel_work_items']);
+});
 test('Git issue is an editable Lead request, and only an explicit send posts it to a matched Main', async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   await pickIssue(p);
