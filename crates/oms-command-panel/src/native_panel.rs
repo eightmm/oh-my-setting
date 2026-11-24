@@ -146,8 +146,18 @@ fn main_capability(harness: &str) -> Option<&'static MainCapability> {
         .find(|entry| entry.harness == harness)
 }
 
-/// Registry policy and executable presence only. Neither establishes login or a session.
+/// Observe registry and host policy without opening a provider session.
 pub(super) fn desktop_connections() -> Vec<Value> {
+    connection_rows(
+        claude_assisted_exit_available(),
+        MainPermissions::from_env().ok(),
+    )
+}
+
+fn connection_rows(
+    claude_exit_available: bool,
+    permissions: Option<MainPermissions>,
+) -> Vec<Value> {
     MAIN_CAPABILITIES
         .iter()
         .map(|cap| {
@@ -160,11 +170,22 @@ pub(super) fn desktop_connections() -> Vec<Value> {
             } else {
                 "requires verified session"
             };
+            let swap = check_outgoing_swap_on_host(Some(cap.harness), claude_exit_available).is_ok();
+            let swap_evidence = match cap.harness {
+                "codex" => "requires-verified-idle-pane-exit",
+                "claude" if swap => "assisted-exit-linux-proc-available",
+                "claude" => "assisted-exit-linux-proc-unavailable",
+                _ => "no-managed-outgoing-adapter",
+            };
             json!({
                 "harness": cap.harness, "owner": cap.owner, "transport": transport,
                 "installed": which_exists(cap.harness),
                 "dependencies": cap.requires.join(", "), "dependenciesPresent": cap.installed(),
                 "resumePolicy": resume, "accountSelection": cap.supports_account(),
+                "managedOutgoingSwap": if swap { "supported" } else { "unsupported" },
+                "swapEvidence": swap_evidence,
+                "configuredMainPermissions": permissions.map_or("unknown", MainPermissions::as_str),
+                "fullModeOption": if cap.full_permissions.is_some() { "supported" } else { "unsupported" },
             })
         })
         .collect()
@@ -6154,6 +6175,49 @@ pub(crate) mod native_lifecycle_contract {
         for available in [true, false] {
             assert!(check_outgoing_swap_on_host(Some("codex"), available).is_ok());
             assert!(check_outgoing_swap_on_host(Some("agy"), available).is_err());
+        }
+        for available in [false, true] {
+            for (input, normalized) in
+                [("full", "full"), ("native", "native"), ("other", "unknown")]
+            {
+                let rows = super::connection_rows(
+                    available,
+                    super::MainPermissions::parse(Some(input)).ok(),
+                );
+                assert_eq!(rows.len(), 4);
+                for row in rows {
+                    let harness = row["harness"].as_str().unwrap();
+                    let supported = check_outgoing_swap_on_host(Some(harness), available).is_ok();
+                    assert_eq!(
+                        row["managedOutgoingSwap"],
+                        if supported {
+                            "supported"
+                        } else {
+                            "unsupported"
+                        }
+                    );
+                    assert_eq!(row["configuredMainPermissions"], normalized);
+                    assert_eq!(
+                        row["fullModeOption"],
+                        if harness == "pi" {
+                            "unsupported"
+                        } else {
+                            "supported"
+                        }
+                    );
+                    assert_eq!(
+                        row["swapEvidence"],
+                        match harness {
+                            "codex" => "requires-verified-idle-pane-exit",
+                            "claude" if available => "assisted-exit-linux-proc-available",
+                            "claude" => "assisted-exit-linux-proc-unavailable",
+                            "agy" | "pi" => "no-managed-outgoing-adapter",
+                            _ => panic!("unexpected harness"),
+                        }
+                    );
+                    assert!(!row.to_string().contains("--"));
+                }
+            }
         }
         assert!(check_outgoing_swap_on_host(Some("claude"), true).is_ok());
         assert_eq!(

@@ -166,7 +166,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             VIEW,
-            "Read one OMS panel page. connections checks runtime PATH and harness policy, modelcatalog reads cached model and effort evidence, routes previews expected choices, and attribution shows recorded calls. Null means unverified.",
+            "Read one OMS panel page. connections reports CLI presence, managed outgoing swap policy, host preconditions and configured permission policy, modelcatalog reads cached model and effort evidence, routes previews expected choices, and attribution shows recorded calls. Null means unverified.",
             json!({"project":project,"view":{"type":"string","enum":VIEWS.to_vec()},"page":{"type":"integer","minimum":1,"maximum":1000}}),
             &["view"],
             false
@@ -327,6 +327,191 @@ fn alias(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
 }
+const CONNECTION_EVIDENCE: [(&str, &str); 4] = [
+    ("managedOutgoingSwap", "내보내는 Main 교체 계약"),
+    ("swapEvidence", "교체 계약 및 호스트 조건"),
+    ("configuredMainPermissions", "설정된 Main 권한 모드"),
+    ("fullModeOption", "full 모드 옵션 지원"),
+];
+
+fn connections(mut data: Value) -> PanelResult<Value> {
+    const INVALID: &str = "OMS returned unrecognized Connections evidence.";
+    const CELLS: &[(&str, &str)] = &[
+        ("harness", "하네스"),
+        ("owner", "디스패치 소유자"),
+        ("transport", "Main 전송 경로"),
+        ("installed", "CLI 설치"),
+        ("dependencies", "실행에 필요한 도구"),
+        ("dependenciesPresent", "도구 모두 발견"),
+        ("resumePolicy", "재개 계약"),
+        ("accountSelection", "계정 선택 계약"),
+        ("version", "확인된 CLI 버전"),
+        ("auth", "인증 준비"),
+        ("observedAt", "PATH 조회 시각"),
+    ];
+    let column_contract = |key: &str| {
+        CELLS
+            .iter()
+            .chain(&CONNECTION_EVIDENCE)
+            .find(|(k, _)| *k == key)
+            .map(|(_, label)| *label)
+    };
+    let columns = data["columns"].as_array().ok_or(INVALID)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for column in columns {
+        let key = column["key"].as_str().ok_or(INVALID)?;
+        let label = column_contract(key).ok_or(INVALID)?;
+        if !seen.insert(key)
+            || column["label"] != label
+            || !column.as_object().is_some_and(|o| o.keys().count() == 2)
+        {
+            return Err(INVALID.into());
+        }
+    }
+    if !data.as_object().is_some_and(|obj| {
+        obj.keys().all(|k| {
+            matches!(
+                k.as_str(),
+                Some(
+                    "view"
+                        | "page"
+                        | "nextPage"
+                        | "columns"
+                        | "rows"
+                        | "status"
+                        | "total"
+                        | "incomplete"
+                )
+            )
+        })
+    }) || !matches!(data["status"].as_str(), Some("ready" | "unavailable"))
+        || !data["nextPage"].is_null()
+        || !(data["total"].is_null() || data["total"].as_u64().is_some_and(|n| n <= 4))
+        || !(data["incomplete"].is_null() || data["incomplete"].is_boolean())
+    {
+        return Err(INVALID.into());
+    }
+    let page_has_rows = data["status"] == "ready" && data["page"] == 1;
+    let total = data["total"].as_u64().unwrap_or(4);
+    let Value::Array(rows) = &mut data["rows"] else {
+        return Err(INVALID.into());
+    };
+    if (!page_has_rows && !rows.is_empty()) || rows.len() as u64 > total {
+        return Err(INVALID.into());
+    }
+    let mut harnesses = std::collections::BTreeSet::new();
+    let mut legacy = false;
+    for row in rows {
+        let harness = match row["harness"].as_str() {
+            Some("codex") => "codex",
+            Some("claude") => "claude",
+            Some("pi") => "pi",
+            Some("agy" | "antigravity") => "agy",
+            _ => return Err(INVALID.into()),
+        };
+        let owner = match harness {
+            "pi" => "codex",
+            "agy" => "antigravity",
+            x => x,
+        };
+        let deps = if harness == "pi" {
+            "pi, codex, oms"
+        } else {
+            harness
+        };
+        let selectable = matches!(harness, "codex" | "claude");
+        let shape = row.as_object().ok_or(INVALID)?;
+        if !harnesses.insert(harness)
+            || !shape
+                .keys()
+                .all(|k| k.as_str().and_then(column_contract).is_some())
+            || row["owner"] != owner
+            || row["transport"]
+                != if harness == "pi" {
+                    "CodexGateway"
+                } else {
+                    "native"
+                }
+            || row["dependencies"] != deps
+            || !row["dependenciesPresent"].is_boolean()
+            || !row["installed"].is_boolean()
+            || row["resumePolicy"]
+                != if selectable {
+                    "requires verified session"
+                } else {
+                    "unsupported"
+                }
+            || row["accountSelection"].as_bool() != Some(selectable)
+            || !row["auth"].is_null()
+            || !row["version"].is_null()
+            || !(row["observedAt"].is_null() || row["observedAt"].as_u64().is_some())
+        {
+            return Err(INVALID.into());
+        }
+        if CONNECTION_EVIDENCE
+            .iter()
+            .all(|(k, _)| !shape.contains_key(k))
+        {
+            // A legacy runtime reports no policy evidence. Never infer a
+            // permission or swap capability from the harness name or PATH.
+            legacy = true;
+            for (key, _) in CONNECTION_EVIDENCE {
+                row[key] = json!("unknown");
+            }
+            continue;
+        }
+        let swap = row["managedOutgoingSwap"].as_str();
+        let evidence = row["swapEvidence"].as_str();
+        let valid = matches!(
+            (harness, swap, evidence),
+            (_, Some("unknown"), Some("unknown"))
+                | (
+                    "codex",
+                    Some("supported"),
+                    Some("requires-verified-idle-pane-exit")
+                )
+                | (
+                    "claude",
+                    Some("supported"),
+                    Some("assisted-exit-linux-proc-available")
+                )
+                | (
+                    "claude",
+                    Some("unsupported"),
+                    Some("assisted-exit-linux-proc-unavailable")
+                )
+                | (
+                    "pi" | "agy",
+                    Some("unsupported"),
+                    Some("no-managed-outgoing-adapter")
+                )
+        );
+        if !valid
+            || !matches!(
+                row["configuredMainPermissions"].as_str(),
+                Some("native" | "full" | "unknown")
+            )
+            || !(row["fullModeOption"] == "unknown"
+                || row["fullModeOption"]
+                    == if harness == "pi" {
+                        "unsupported"
+                    } else {
+                        "supported"
+                    })
+        {
+            return Err(INVALID.into());
+        }
+    }
+    if legacy && let Value::Array(columns) = &mut data["columns"] {
+        for (key, label) in CONNECTION_EVIDENCE {
+            if !columns.iter().any(|column| column["key"] == key) {
+                columns.push(json!({"key":key,"label":label}));
+            }
+        }
+    }
+    Ok(data)
+}
+
 fn valid_work_items_receipt(data: &Value) -> bool {
     let keys = [
         "id",
@@ -1277,7 +1462,11 @@ impl Server<'_> {
                 && data["columns"].is_array()
                 && data["rows"].is_array() =>
             {
-                Ok(data)
+                if data["view"] == "connections" {
+                    connections(data)
+                } else {
+                    Ok(data)
+                }
             }
             START
                 if data["status"] == "started"

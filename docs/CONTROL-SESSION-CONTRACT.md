@@ -23,6 +23,19 @@ Codex, Claude, Antigravity(AGY), Pi 중 어느 Main을 택하든 CLI·Board·MCP
 - Room에 글을 게시한 receipt는 Room 게시의 증거다. Native 입력의 tick fixture는 Claude Main을 대상으로 한다. 작업 프로세스 그룹의 stop, 등록 job의 interrupt, Codex·Claude 교체 중 검증된 종료에는 각각 별도의 대상과 전제조건이 있다. 정상 교체는 실행 중인 turn에 대한 범용 제어권을 주지 않는다. [Room](../crates/oms-command-room/src/cli.rs) · [wake fixture](../crates/oms-panel-core/src/tick.rs) · [supervisor stop](../crates/oms-supervisor/src/process.rs) · [Main 교체 절차](TERMINAL-PANEL.md#swap-the-main)
 - Board에서는 provider별로 로컬 사용량 관측을 별도로 읽는다. 예를 들어 `usage::provider_snapshot`은 AGY에 대해 기록된 quota window를 투영할 수 있다. 사용량 표의 마지막 행은 위임 결과 decoder에 한정한다. 측정된 토큰, 추정 비용, 현재 quota, 누락된 값을 구분하고 Pi 사용량을 Codex 계정에 임의 귀속하지 않는다. [사용량 decoder](../crates/oms-command-peer/src/usage.rs) · [Board 사용량](../crates/oms-command-panel/src/usage.rs)
 
+## Connections에서 읽을 수 있는 정책
+
+`oms panel --desktop-view connections --json`과 두 desktop MCP 프로필의
+`oms_panel_tui_view`가 다음 필드를 반환한다. 행은 기동 전 로컬 호스트의 정책 관측이다.
+
+| 행 필드 | 실제 의미 |
+|---|---|
+| `managedOutgoingSwap`, `swapEvidence` | Codex의 `supported` / `requires-verified-idle-pane-exit`는 교체 writer가 idle pane을 검증한 뒤 정상 종료를 요청할 수 있다는 계약이다. Claude는 기존 Linux proc 검사 결과에 따라 `supported` / `assisted-exit-linux-proc-available` 또는 `unsupported` / `assisted-exit-linux-proc-unavailable`이다. 이 경로는 운영자의 정상 종료와 세션 증거를 요구한다. AGY와 Pi는 `unsupported` / `no-managed-outgoing-adapter`다. |
+| `configuredMainPermissions` | 현행 Main 설정 parser의 결과다. 미설정 기본값은 `full`, 명시 가능한 정책은 `full`과 `native`, 잘못된 값은 `unknown`이다. |
+| `fullModeOption` | Codex·Claude·AGY의 native adapter에는 full 모드용 옵션이 있어 `supported`다. Pi gateway에는 해당 옵션이 없어 `unsupported`다. 실제 argv에 옵션을 포함할지는 기동 경로가 당시 정책으로 정한다. |
+
+이 필드가 없는 이전 runtime의 행은 MCP가 네 값을 `unknown`으로 제공한다. 로그인, 설치 완료, 지금 실행 중인 Main의 권한이나 호출자의 실행 승인은 별도의 근거를 요구한다. 아래 공통 메시지 예시는 계속 제안 단계다. [Native 정책](../crates/oms-command-panel/src/native_panel.rs) · [Board 열](../crates/oms-command-panel/src/desktop_board.rs) · [MCP 계약](../crates/oms-mcp-server/src/panel.rs)
+
 ## 식별자, 제어권, 재접속
 
 | 구분 | 기존 근거와 소비 방법 |
