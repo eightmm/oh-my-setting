@@ -5,6 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsString,
     fs,
     os::unix::{
         ffi::OsStrExt,
@@ -14,6 +15,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+const SKILL_FILE: &str = "SKILL.md";
+const HIDDEN_SKILL_FILE: &str = ".oms-hidden-SKILL.md";
 
 #[derive(Serialize, Deserialize)]
 struct Change {
@@ -26,13 +29,17 @@ struct Change {
     external: bool,
     #[serde(default)]
     parent_identity: Option<(u64, u64)>,
+    #[serde(default)]
+    hidden_old_skill: bool,
+    #[serde(default)]
+    hidden_new_skill: bool,
 }
 impl Change {
-    fn identity(&self, path: &Path) -> Result<Option<String>> {
+    fn identity(&self, path: &Path, allow_hidden_skill: bool) -> Result<Option<String>> {
         if self.external {
-            external_identity(path)
+            external_identity_with_hidden(path, allow_hidden_skill)
         } else {
-            identity(path)
+            identity_with_hidden(path, allow_hidden_skill)
         }
     }
 }
@@ -90,16 +97,19 @@ impl Transaction {
         r::atomic(&self.path, &r::bytes(&value)?)
     }
     pub fn write(&mut self, target: &Path, raw: &[u8], mode: u32) -> Result<()> {
-        self.replace(target, |p| r::new_file(p, raw, mode))
+        self.replace(target, |p| {
+            r::new_file(p, raw, mode)?;
+            Ok(false)
+        })
     }
     pub fn link(&mut self, target: &Path, source: &Path) -> Result<()> {
         self.replace(target, |p| {
             symlink(source, p)?;
-            Ok(())
+            Ok(false)
         })
     }
     pub fn copy(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace(target, |p| copy(source, p))
+        self.replace(target, |p| copy_staged(source, p))
     }
     pub fn files(&mut self, target: &Path, files: &[(&str, &[u8], u32)]) -> Result<()> {
         self.files_mode(target, files, false)
@@ -116,16 +126,29 @@ impl Transaction {
         self.replace_mode(target, false, create_only, |p| {
             fs::create_dir(p)?;
             fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
+            let hide = !files.iter().any(|(name, _, _)| *name == HIDDEN_SKILL_FILE);
+            let mut hid = false;
             for (name, raw, mode) in files {
                 if !r::safe_name(name) || matches!(*name, "." | "..") {
                     return r::fail("invalid staged payload member");
                 }
-                r::new_file(&p.join(name), raw, *mode)?;
+                let dest_name = if hide && *name == SKILL_FILE {
+                    hid = true;
+                    HIDDEN_SKILL_FILE
+                } else {
+                    *name
+                };
+                r::new_file(&p.join(dest_name), raw, *mode)?;
             }
-            r::sync_dir(p)
+            r::sync_dir(p)?;
+            Ok(hid)
         })
     }
-    fn replace(&mut self, target: &Path, prepare: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    fn replace(
+        &mut self,
+        target: &Path,
+        prepare: impl FnOnce(&Path) -> Result<bool>,
+    ) -> Result<()> {
         self.replace_mode(target, false, false, prepare)
     }
     fn replace_mode(
@@ -133,13 +156,13 @@ impl Transaction {
         target: &Path,
         external: bool,
         create_only: bool,
-        prepare: impl FnOnce(&Path) -> Result<()>,
+        prepare: impl FnOnce(&Path) -> Result<bool>,
     ) -> Result<()> {
-        let identify = |p: &Path| {
+        let identify = |p: &Path, allow_hidden: bool| {
             if external {
-                external_identity(p)
+                external_identity_with_hidden(p, allow_hidden)
             } else {
-                identity(p)
+                identity_with_hidden(p, allow_hidden)
             }
         };
         let target = r::leaf(target)?;
@@ -153,12 +176,17 @@ impl Transaction {
         if r::exists(&staged) || r::exists(&undo) {
             return r::fail("transaction staging name already exists");
         }
-        let old = identify(&target)?;
+        let old = identify(&target, false)?;
         if create_only && old.is_some() {
             return r::fail("refusing to replace an existing lifecycle target");
         }
-        prepare(&staged)?;
-        let new = identify(&staged)?;
+        let hidden_old_skill = if old.is_some() {
+            can_hide_skill(&target)?
+        } else {
+            false
+        };
+        let hidden_new_skill = prepare(&staged)?;
+        let new = identify(&staged, hidden_new_skill)?;
         self.journal.changes.push(Change {
             target,
             staged,
@@ -167,17 +195,25 @@ impl Transaction {
             new,
             external,
             parent_identity: None,
+            hidden_old_skill,
+            hidden_new_skill,
         });
         self.save()?;
         let change = self.journal.changes.last().unwrap();
-        if change.identity(&change.target)? != change.old {
+        if change.identity(&change.target, false)? != change.old {
             return r::fail("target changed while staging lifecycle mutation");
         }
         if change.old.is_some() {
             fs::rename(&change.target, &change.undo)?;
+            if change.hidden_old_skill {
+                hide_skill(&change.undo)?;
+            }
             r::sync_dir(change.target.parent().unwrap())?;
         }
         fs::rename(&change.staged, &change.target)?;
+        if change.hidden_new_skill {
+            unhide_skill(&change.target)?;
+        }
         r::sync_dir(change.target.parent().unwrap())?;
         Ok(())
     }
@@ -197,6 +233,7 @@ impl Transaction {
         if old.is_none() {
             return Ok(());
         }
+        let hidden_old_skill = can_hide_skill(&target)?;
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
         if r::exists(&undo) {
@@ -210,13 +247,18 @@ impl Transaction {
             new: None,
             external,
             parent_identity: None,
+            hidden_old_skill,
+            hidden_new_skill: false,
         });
         self.save()?;
         let change = self.journal.changes.last().unwrap();
-        if change.identity(&change.target)? != change.old {
+        if change.identity(&change.target, false)? != change.old {
             return r::fail("target changed before removal");
         }
         fs::rename(&change.target, &change.undo)?;
+        if change.hidden_old_skill {
+            hide_skill(&change.undo)?;
+        }
         r::sync_dir(change.target.parent().unwrap())?;
         Ok(())
     }
@@ -326,6 +368,8 @@ impl Transaction {
             new,
             external: false,
             parent_identity: Some((m.dev(), m.ino())),
+            hidden_old_skill: false,
+            hidden_new_skill: false,
         });
         self.save()?;
         check()?;
@@ -403,6 +447,8 @@ impl Transaction {
             new: None,
             external: false,
             parent_identity: Some((m.dev(), m.ino())),
+            hidden_old_skill: false,
+            hidden_new_skill: false,
         });
         self.save()?;
         inspect()?;
@@ -424,7 +470,7 @@ impl Transaction {
     /// Snapshot provider-owned files before letting its CLI rewrite them. A kill
     /// before sealing retains the undo copy and refuses uncertain recovery.
     pub fn publish_external(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace_mode(target, true, false, |p| external_copy(source, p))
+        self.replace_mode(target, true, false, |p| external_copy_staged(source, p))
     }
     pub fn prepare_external(&mut self, targets: &[PathBuf]) -> Result<usize> {
         let start = self.journal.changes.len();
@@ -438,6 +484,11 @@ impl Transaction {
                 return r::fail("external snapshot name already exists");
             }
             let old = external_identity(&target)?;
+            let hidden_old_skill = if old.is_some() {
+                can_hide_skill(&target)?
+            } else {
+                false
+            };
             self.journal.changes.push(Change {
                 target: target.clone(),
                 staged,
@@ -446,11 +497,16 @@ impl Transaction {
                 new: old.clone(),
                 external: true,
                 parent_identity: None,
+                hidden_old_skill,
+                hidden_new_skill: false,
             });
             self.save()?;
             if old.is_some() {
-                external_copy(&target, &undo)?;
-                if external_identity(&undo)? != old || external_identity(&target)? != old {
+                let hid = external_copy_staged(&target, &undo)?;
+                if hid != hidden_old_skill
+                    || external_identity_with_hidden(&undo, hidden_old_skill)? != old
+                    || external_identity(&target)? != old
+                {
                     return r::fail("provider state changed during snapshot");
                 }
                 r::sync_dir(target.parent().unwrap())?;
@@ -460,7 +516,7 @@ impl Transaction {
     }
     pub fn finish_external(&mut self, start: usize) -> Result<()> {
         for change in &mut self.journal.changes[start..] {
-            change.new = change.identity(&change.target)?;
+            change.new = change.identity(&change.target, false)?;
         }
         self.save()
     }
@@ -539,9 +595,14 @@ fn validate(j: &Journal) -> Result<()> {
 fn rollback(j: &Journal) -> Result<()> {
     validate(j)?;
     for c in j.changes.iter().rev() {
-        let current = c.identity(&c.target)?;
-        let undo = c.identity(&c.undo)?;
-        if c.external && current == c.old && undo == c.old && undo.is_some() {
+        let current_old = c.identity(&c.target, false)?;
+        let current_new = if c.hidden_new_skill {
+            c.identity(&c.target, true)?
+        } else {
+            current_old.clone()
+        };
+        let undo = c.identity(&c.undo, c.hidden_old_skill)?;
+        if c.external && current_old == c.old && undo == c.old && undo.is_some() {
             remove(&c.undo)?;
             if r::exists(&c.staged) {
                 return r::fail("unexpected external staging during rollback");
@@ -550,21 +611,24 @@ fn rollback(j: &Journal) -> Result<()> {
             continue;
         }
         if undo.is_some() {
-            if undo != c.old || (current.is_some() && current != c.new) {
+            if undo != c.old || (current_new.is_some() && current_new != c.new) {
                 return r::fail("rollback conflict; lifecycle recovery journal retained");
             }
             remove(&c.target)?;
+            if c.hidden_old_skill {
+                unhide_skill(&c.undo)?;
+            }
             fs::rename(&c.undo, &c.target)?;
         } else if c.old.is_none() {
-            if current.is_some() && current != c.new {
+            if current_new.is_some() && current_new != c.new {
                 return r::fail("new lifecycle target changed; recovery journal retained");
             }
             remove(&c.target)?;
-        } else if current != c.old {
+        } else if current_old != c.old {
             return r::fail("previous lifecycle target missing; recovery journal retained");
         }
         if r::exists(&c.staged) {
-            if c.identity(&c.staged)? != c.new {
+            if c.identity(&c.staged, c.hidden_new_skill)? != c.new {
                 return r::fail("staging content changed; recovery journal retained");
             }
             remove(&c.staged)?;
@@ -579,7 +643,7 @@ fn rollback(j: &Journal) -> Result<()> {
 fn cleanup(j: &Journal) -> Result<()> {
     for c in &j.changes {
         if r::exists(&c.undo) {
-            if c.identity(&c.undo)? != c.old {
+            if c.identity(&c.undo, c.hidden_old_skill)? != c.old {
                 return r::fail("undo content changed; recovery journal retained");
             }
             remove(&c.undo)?;
@@ -591,6 +655,88 @@ fn cleanup(j: &Journal) -> Result<()> {
     }
     Ok(())
 }
+fn can_hide_skill(dir: &Path) -> Result<bool> {
+    let m = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if !m.is_dir() || m.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let skill = match fs::symlink_metadata(dir.join(SKILL_FILE)) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if skill.is_dir() {
+        return Ok(false);
+    }
+    Ok(!r::exists(&dir.join(HIDDEN_SKILL_FILE)))
+}
+fn rename_skill_entry(dir: &Path, from: &str, to: &str) -> Result<()> {
+    let m = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if !m.is_dir() || m.file_type().is_symlink() {
+        return Ok(());
+    }
+    let src = dir.join(from);
+    let dst = dir.join(to);
+    let src_meta = match fs::symlink_metadata(&src) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if src_meta.is_dir() {
+        return Ok(());
+    }
+    if r::exists(&dst) {
+        return r::fail("skill visibility transition destination already exists");
+    }
+    let orig_mode = m.mode() & 0o777;
+    let writable = orig_mode & 0o200 != 0;
+    if !writable {
+        fs::set_permissions(dir, fs::Permissions::from_mode(orig_mode | 0o200))?;
+    }
+    let res = fs::rename(&src, &dst)
+        .and_then(|()| fs::File::open(dir)?.sync_all())
+        .map_err(r::Error::from);
+    if !writable {
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(orig_mode));
+    }
+    res
+}
+fn hide_skill(dir: &Path) -> Result<()> {
+    rename_skill_entry(dir, SKILL_FILE, HIDDEN_SKILL_FILE)
+}
+fn unhide_skill(dir: &Path) -> Result<()> {
+    rename_skill_entry(dir, HIDDEN_SKILL_FILE, SKILL_FILE)
+}
+fn remap_hidden_skill_entries(
+    raw_entries: Vec<fs::DirEntry>,
+    allow_hidden_skill: bool,
+) -> Result<Vec<(OsString, fs::DirEntry)>> {
+    let has_skill = raw_entries.iter().any(|e| e.file_name() == SKILL_FILE);
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for e in raw_entries {
+        let name = e.file_name();
+        let logical = if allow_hidden_skill
+            && !has_skill
+            && name == HIDDEN_SKILL_FILE
+            && !fs::symlink_metadata(e.path())?.is_dir()
+        {
+            OsString::from(SKILL_FILE)
+        } else {
+            name
+        };
+        entries.push((logical, e));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}
 pub(crate) fn remove(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() && !m.file_type().is_symlink() => fs::remove_dir_all(path)?,
@@ -601,6 +747,9 @@ pub(crate) fn remove(path: &Path) -> Result<()> {
     Ok(())
 }
 pub(crate) fn identity(path: &Path) -> Result<Option<String>> {
+    identity_with_hidden(path, false)
+}
+fn identity_with_hidden(path: &Path, allow_hidden_skill: bool) -> Result<Option<String>> {
     let m = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -618,21 +767,32 @@ pub(crate) fn identity(path: &Path) -> Result<Option<String>> {
         h.update(r::read(path, 1024 * 1024 * 1024)?);
     } else if m.is_dir() {
         h.update(b"directory\0");
-        fn visit(base: &Path, path: &Path, h: &mut Sha256, depth: usize) -> Result<()> {
+        fn visit(
+            base: &Path,
+            path: &Path,
+            h: &mut Sha256,
+            depth: usize,
+            allow_hidden_skill: bool,
+        ) -> Result<()> {
             if depth > 128 {
                 return r::fail("directory nesting exceeds lifecycle limit");
             }
-            let mut entries = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(|a| a.file_name());
-            for e in entries
+            let raw_entries = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+            let entries =
+                remap_hidden_skill_entries(raw_entries, depth == 0 && allow_hidden_skill)?;
+            for (logical, e) in entries
                 .iter()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|(_, e)| e.file_type().is_ok_and(|t| t.is_dir()))
             {
                 h.update(b"D\0");
-                h.update(e.path().strip_prefix(base).unwrap().as_os_str().as_bytes());
+                if depth == 0 {
+                    h.update(logical.as_bytes());
+                } else {
+                    h.update(e.path().strip_prefix(base).unwrap().as_os_str().as_bytes());
+                }
                 h.update(b"\0");
             }
-            for e in &entries {
+            for (logical, e) in &entries {
                 let m = fs::symlink_metadata(e.path())?;
                 if m.is_dir() {
                     continue;
@@ -641,24 +801,55 @@ pub(crate) fn identity(path: &Path) -> Result<Option<String>> {
                     return r::fail("managed directory contains a nonregular entry");
                 }
                 h.update(b"F\0");
-                h.update(e.path().strip_prefix(base).unwrap().as_os_str().as_bytes());
+                if depth == 0 {
+                    h.update(logical.as_bytes());
+                } else {
+                    h.update(e.path().strip_prefix(base).unwrap().as_os_str().as_bytes());
+                }
                 h.update(b"\0");
                 h.update(r::read(&e.path(), 1024 * 1024 * 1024)?);
                 h.update(b"\0");
             }
-            for e in entries
+            for (_, e) in entries
                 .iter()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|(_, e)| e.file_type().is_ok_and(|t| t.is_dir()))
             {
-                visit(base, &e.path(), h, depth + 1)?;
+                visit(base, &e.path(), h, depth + 1, false)?;
             }
             Ok(())
         }
-        visit(path, path, &mut h, 0)?;
+        visit(path, path, &mut h, 0, allow_hidden_skill)?;
     } else {
         return r::fail("unsupported lifecycle target type");
     }
     Ok(Some(format!("{:x}", h.finalize())))
+}
+fn copy_staged(source: &Path, target: &Path) -> Result<bool> {
+    let m = fs::symlink_metadata(source)?;
+    if m.file_type().is_symlink() {
+        return r::fail("managed copies cannot contain symlinks");
+    }
+    if m.is_dir() {
+        let hide = !r::exists(&source.join(HIDDEN_SKILL_FILE));
+        let mut hid = false;
+        fs::create_dir(target)?;
+        for e in fs::read_dir(source)? {
+            let e = e?;
+            let name = e.file_name();
+            let dest = if hide && name == SKILL_FILE && !fs::symlink_metadata(e.path())?.is_dir() {
+                hid = true;
+                target.join(HIDDEN_SKILL_FILE)
+            } else {
+                target.join(&name)
+            };
+            copy(&e.path(), &dest)?;
+        }
+        r::sync_dir(target)?;
+        Ok(hid)
+    } else {
+        copy(source, target)?;
+        Ok(false)
+    }
 }
 fn copy(source: &Path, target: &Path) -> Result<()> {
     let m = fs::symlink_metadata(source)?;
@@ -709,7 +900,10 @@ pub(crate) fn external_read(path: &Path) -> Result<Vec<u8>> {
     Ok(raw)
 }
 fn external_identity(path: &Path) -> Result<Option<String>> {
-    fn visit(path: &Path, h: &mut Sha256, depth: usize) -> Result<()> {
+    external_identity_with_hidden(path, false)
+}
+fn external_identity_with_hidden(path: &Path, allow_hidden_skill: bool) -> Result<Option<String>> {
+    fn visit(path: &Path, h: &mut Sha256, depth: usize, allow_hidden_skill: bool) -> Result<()> {
         if depth > 128 {
             return r::fail("external snapshot nesting exceeds limit");
         }
@@ -723,12 +917,12 @@ fn external_identity(path: &Path) -> Result<Option<String>> {
             h.update(external_read(path)?);
         } else if m.is_dir() {
             h.update(b"dir");
-            let mut rows = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-            rows.sort_by_key(|e| e.file_name());
-            for row in rows {
-                h.update(row.file_name().as_bytes());
+            let raw_rows = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+            let rows = remap_hidden_skill_entries(raw_rows, depth == 0 && allow_hidden_skill)?;
+            for (logical, row) in rows {
+                h.update(logical.as_bytes());
                 h.update(b"\0");
-                visit(&row.path(), h, depth + 1)?;
+                visit(&row.path(), h, depth + 1, false)?;
             }
         } else {
             return r::fail("provider snapshot refuses special files");
@@ -739,8 +933,35 @@ fn external_identity(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let mut h = Sha256::new();
-    visit(path, &mut h, 0)?;
+    visit(path, &mut h, 0, allow_hidden_skill)?;
     Ok(Some(format!("{:x}", h.finalize())))
+}
+fn external_copy_staged(source: &Path, target: &Path) -> Result<bool> {
+    let m = fs::symlink_metadata(source)?;
+    if m.is_dir() && !m.file_type().is_symlink() {
+        let hide = !r::exists(&source.join(HIDDEN_SKILL_FILE));
+        let mut hid = false;
+        fs::create_dir(target)?;
+        fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
+        for row in fs::read_dir(source)? {
+            let row = row?;
+            let name = row.file_name();
+            let dest = if hide && name == SKILL_FILE && !fs::symlink_metadata(row.path())?.is_dir()
+            {
+                hid = true;
+                target.join(HIDDEN_SKILL_FILE)
+            } else {
+                target.join(&name)
+            };
+            external_copy(&row.path(), &dest)?;
+        }
+        fs::set_permissions(target, fs::Permissions::from_mode(m.mode() & 0o777))?;
+        r::sync_dir(target)?;
+        Ok(hid)
+    } else {
+        external_copy(source, target)?;
+        Ok(false)
+    }
 }
 fn external_copy(source: &Path, target: &Path) -> Result<()> {
     let m = fs::symlink_metadata(source)?;
@@ -761,4 +982,328 @@ fn external_copy(source: &Path, target: &Path) -> Result<()> {
         return r::fail("provider snapshot refuses special files");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct Dir(PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fixture(name: &str) -> (Dir, Paths) {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("oms-tx-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::create_dir_all(root.join("home")).unwrap();
+        let paths = Paths {
+            home: root.join("home"),
+            source: root.join("source"),
+            receipt: root.join("receipt"),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+            cwd: root.clone(),
+        };
+        (Dir(root), paths)
+    }
+
+    fn write_skill_dir(dir: &Path, body: &str) {
+        fs::create_dir_all(dir.join("references")).unwrap();
+        // Include entries sorting before and after SKILL.md to catch sort-order drift.
+        fs::write(dir.join("README.md"), b"readme\n").unwrap();
+        fs::write(dir.join("SKILL.md"), body.as_bytes()).unwrap();
+        fs::write(dir.join("references/note.md"), b"note\n").unwrap();
+    }
+
+    fn siblings_with_skill_md(parent: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        for entry in fs::read_dir(parent).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".oms-") && entry.path().join("SKILL.md").exists() {
+                found.push(name);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn skill_directory_replace_hides_skill_md_in_stage_and_undo_and_recovers() {
+        let (root, paths) = fixture("skill-hide-commit-rollback");
+        let skills = root.0.join("skills");
+        let target = skills.join("oms-demo");
+        let source_v2 = root.0.join("source-v2");
+        write_skill_dir(&target, "---\nname: oms-demo\n---\nv1\n");
+        write_skill_dir(&source_v2, "---\nname: oms-demo\n---\nv2\n");
+        let old_id = identity(&target).unwrap();
+        let new_id = identity(&source_v2).unwrap();
+
+        // Replace and inspect staged and undo paths before commit, then rollback on drop.
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.replace(&target, |staged| {
+                let hid = copy_staged(&source_v2, staged)?;
+                assert!(hid);
+                assert!(
+                    !staged.join(SKILL_FILE).exists(),
+                    "staged directory must not expose top-level SKILL.md"
+                );
+                assert!(staged.join(HIDDEN_SKILL_FILE).is_file());
+                assert_eq!(identity_with_hidden(staged, true).unwrap(), new_id);
+                Ok(hid)
+            })
+            .unwrap();
+            let change = tx.journal.changes.last().unwrap();
+            assert!(change.undo.is_dir());
+            assert!(
+                !change.undo.join(SKILL_FILE).exists(),
+                "undo directory must not expose top-level SKILL.md"
+            );
+            assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
+            assert!(siblings_with_skill_md(&skills).is_empty());
+            assert_eq!(
+                fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+                "---\nname: oms-demo\n---\nv2\n"
+            );
+            assert!(!target.join(HIDDEN_SKILL_FILE).exists());
+        }
+        // Dropped without commit: original target with SKILL.md and old identity restored.
+        assert_eq!(
+            fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+            "---\nname: oms-demo\n---\nv1\n"
+        );
+        assert!(!target.join(HIDDEN_SKILL_FILE).exists());
+        assert_eq!(identity(&target).unwrap(), old_id);
+        assert!(siblings_with_skill_md(&skills).is_empty());
+
+        // Replace and commit: target has v2 SKILL.md and undo is cleaned up.
+        let mut tx = Transaction::begin(&paths).unwrap();
+        tx.copy(&target, &source_v2).unwrap();
+        let undo_path = tx.journal.changes.last().unwrap().undo.clone();
+        assert!(undo_path.is_dir());
+        assert!(!undo_path.join(SKILL_FILE).exists());
+        assert!(undo_path.join(HIDDEN_SKILL_FILE).is_file());
+        tx.commit().unwrap();
+        assert!(!undo_path.exists());
+        assert_eq!(
+            fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+            "---\nname: oms-demo\n---\nv2\n"
+        );
+        assert!(!target.join(HIDDEN_SKILL_FILE).exists());
+        assert_eq!(identity(&target).unwrap(), new_id);
+
+        // tx.files also hides SKILL.md while staged/undo and exposes it on live target.
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.files(
+                &target,
+                &[
+                    ("README.md", b"readme\n", 0o600),
+                    ("SKILL.md", b"---\nname: oms-demo\n---\nv3\n", 0o600),
+                ],
+            )
+            .unwrap();
+            let change = tx.journal.changes.last().unwrap();
+            assert!(!change.undo.join(SKILL_FILE).exists());
+            assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
+            assert_eq!(
+                fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+                "---\nname: oms-demo\n---\nv3\n"
+            );
+            assert!(!target.join(HIDDEN_SKILL_FILE).exists());
+        }
+        assert_eq!(identity(&target).unwrap(), new_id);
+
+        // Recovery from a legacy journal whose undo still holds a plain SKILL.md.
+        let legacy_undo = skills.join(".oms-undo-legacy.1");
+        let legacy_staged = skills.join(".oms-stage-legacy.1");
+        write_skill_dir(&legacy_undo, "---\nname: oms-demo\n---\nv1\n");
+        let journal_dir = paths.config.join("native-lifecycle");
+        fs::create_dir_all(&journal_dir).unwrap();
+        let journal = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": target,
+                "staged": legacy_staged,
+                "undo": legacy_undo,
+                "old": old_id,
+                "new": new_id,
+                "external": false,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        let tx = Transaction::begin(&paths).unwrap();
+        tx.commit().unwrap();
+        assert!(!legacy_undo.exists());
+        assert_eq!(
+            fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+            "---\nname: oms-demo\n---\nv1\n"
+        );
+        assert!(!target.join(HIDDEN_SKILL_FILE).exists());
+        assert_eq!(identity(&target).unwrap(), old_id);
+    }
+
+    #[test]
+    fn skill_directory_crash_windows_external_remove_and_symlinks() {
+        let (root, paths) = fixture("skill-crash-external-symlink");
+        let skills = root.0.join("skills");
+        let target = skills.join("oms-demo");
+        let source_v2 = root.0.join("source-v2");
+        write_skill_dir(&target, "---\nname: oms-demo\n---\nv1\n");
+        write_skill_dir(&source_v2, "---\nname: oms-demo\n---\nv2\n");
+        let old_id = identity(&target).unwrap();
+        let new_id = identity(&source_v2).unwrap();
+
+        // Crash between `staged -> target` rename and `unhide_skill(target)`:
+        // target still holds hidden v2, undo holds hidden v1; recovery restores plain v1.
+        let crash_undo = skills.join(".oms-undo-crash.1");
+        let crash_staged = skills.join(".oms-stage-crash.1");
+        fs::rename(&target, &crash_undo).unwrap();
+        hide_skill(&crash_undo).unwrap();
+        assert!(copy_staged(&source_v2, &target).unwrap());
+        assert!(!target.join(SKILL_FILE).exists());
+        assert!(target.join(HIDDEN_SKILL_FILE).is_file());
+        let journal_dir = paths.config.join("native-lifecycle");
+        fs::create_dir_all(&journal_dir).unwrap();
+        let journal = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": target,
+                "staged": crash_staged,
+                "undo": crash_undo,
+                "old": old_id,
+                "new": new_id,
+                "external": false,
+                "parent_identity": null,
+                "hidden_old_skill": true,
+                "hidden_new_skill": true
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        let tx = Transaction::begin(&paths).unwrap();
+        tx.commit().unwrap();
+        assert!(!crash_undo.exists());
+        assert_eq!(
+            fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+            "---\nname: oms-demo\n---\nv1\n"
+        );
+        assert!(!target.join(HIDDEN_SKILL_FILE).exists());
+        assert_eq!(identity(&target).unwrap(), old_id);
+
+        // Crash after `save()` before `rename(target, undo)`: staged holds hidden v2.
+        let pre_undo = skills.join(".oms-undo-pre.2");
+        let pre_staged = skills.join(".oms-stage-pre.2");
+        assert!(copy_staged(&source_v2, &pre_staged).unwrap());
+        let journal = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": target,
+                "staged": pre_staged,
+                "undo": pre_undo,
+                "old": old_id,
+                "new": new_id,
+                "external": false,
+                "parent_identity": null,
+                "hidden_old_skill": true,
+                "hidden_new_skill": true
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        let tx = Transaction::begin(&paths).unwrap();
+        tx.commit().unwrap();
+        assert!(!pre_staged.exists());
+        assert_eq!(identity(&target).unwrap(), old_id);
+
+        // tx.remove hides undo SKILL.md before commit and restores on rollback.
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.remove(&target).unwrap();
+            let change = tx.journal.changes.last().unwrap();
+            assert!(!target.exists());
+            assert!(!change.undo.join(SKILL_FILE).exists());
+            assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
+        }
+        assert_eq!(identity(&target).unwrap(), old_id);
+        assert!(target.join(SKILL_FILE).is_file());
+
+        // prepare_external snapshots with hidden SKILL.md and restores cleanly on rollback.
+        let old_ext_id = external_identity(&target).unwrap();
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let start = tx.prepare_external(std::slice::from_ref(&target)).unwrap();
+            let undo_path = tx.journal.changes.last().unwrap().undo.clone();
+            assert!(!undo_path.join(SKILL_FILE).exists());
+            assert!(undo_path.join(HIDDEN_SKILL_FILE).is_file());
+            fs::write(target.join(SKILL_FILE), b"---\nname: oms-demo\n---\next\n").unwrap();
+            tx.finish_external(start).unwrap();
+        }
+        assert_eq!(external_identity(&target).unwrap(), old_ext_id);
+        assert_eq!(
+            fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
+            "---\nname: oms-demo\n---\nv1\n"
+        );
+
+        // Symlink to a skill directory must never rename the symlink target's SKILL.md.
+        let link_target = skills.join("oms-linked");
+        symlink(&source_v2, &link_target).unwrap();
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.copy(&link_target, &target).unwrap();
+            assert!(
+                source_v2.join(SKILL_FILE).is_file(),
+                "undo of a symlink must never mutate the referenced source directory"
+            );
+            assert!(!source_v2.join(HIDDEN_SKILL_FILE).exists());
+        }
+        assert!(
+            fs::symlink_metadata(&link_target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(source_v2.join(SKILL_FILE).is_file());
+
+        // A directory that legitimately contains only `.oms-hidden-SKILL.md` is not corrupted.
+        let odd_src = root.0.join("odd-src");
+        fs::create_dir_all(&odd_src).unwrap();
+        fs::write(odd_src.join(HIDDEN_SKILL_FILE), b"literal\n").unwrap();
+        let odd_target = skills.join("oms-odd");
+        let odd_id = identity(&odd_src).unwrap();
+        let mut tx = Transaction::begin(&paths).unwrap();
+        tx.copy(&odd_target, &odd_src).unwrap();
+        tx.commit().unwrap();
+        assert!(!odd_target.join(SKILL_FILE).exists());
+        assert_eq!(
+            fs::read_to_string(odd_target.join(HIDDEN_SKILL_FILE)).unwrap(),
+            "literal\n"
+        );
+        assert_eq!(identity(&odd_target).unwrap(), odd_id);
+    }
 }
