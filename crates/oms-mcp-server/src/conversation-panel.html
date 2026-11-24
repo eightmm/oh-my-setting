@@ -321,7 +321,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
       <button type="button" id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
     <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-      <div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span></h2><span id="work-dot" class="count-badge" hidden></span></div><div id="leads" class="leads"></div>
+      <h2 id="leads-heading" class="section-head"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><div id="leads" class="leads"></div>
     </section>
     <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
     <section class="card" id="now-work" aria-labelledby="now-heading">
@@ -702,7 +702,6 @@ w.noneResults | 결과가 기록된 작업이 없습니다. | No work item has a
 w.noResultCount | 결과가 기록되지 않은 작업 {n}개 | {n} work items have no recorded result
 w.owner | 담당: {v} | Owner: {v}
 w.ownerUnknown | 담당 미확인 | Owner unknown
-w.stateUnknown | 상태 미확인 | State unknown
 w.id | ID {v} | ID {v}
 g.planned | 예정 | Planned
 g.active | 진행 | In progress
@@ -834,15 +833,17 @@ sv.modelcatalog | 로컬 공급자 카탈로그의 마지막 보고값입니다.
 sv.routes | 프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다. | Expected routing for the project's next call. Only confirmed logical aliases are shown for accounts.
 sv.attribution | 선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다. | Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.
 state.running | 실행 중 | Running
-state.working | 실행 중 | Running
-state.starting | 실행 중 | Running
+state.starting | 시작 중 | Starting
+state.active | 활성 | Active
+state.open | 열림 | Open
+state.planned | 예정 | Planned
+state.passed | 통과 | Passed
+state.supported | 근거 있음 | Supported
 state.claimed | 점유됨 | Claimed
 state.landing | 착지 중 | Landing
 state.verifying | 검증 중 | Verifying
 state.review | 검토 중 | In review
-state.in_review | 검토 중 | In review
 state.waiting |  | Needs you
-state.waiting_for_input | 확인 필요 | Needs you
 state.blocked | 차단됨 | Blocked
 state.ready | 준비됨 | Ready
 state.queued | 대기 중 | Pending
@@ -942,7 +943,6 @@ git.check.failed | 실패 | Failed
 git.check.pending | 대기 중 | Pending
 git.check.passed | 통과 | Passed
 git.check.other | 기타 | Other
-git.check.unknown | 미확인 | Unknown
 usage.loading | 기록된 사용량을 조회하는 중… | Loading recorded usage…
 usage.badResponse | 사용량 응답을 확인할 수 없습니다. | Cannot read the usage response.
 usage.totals | 프로젝트 누적 · 물리 호출 영수증 | Project totals · physical call receipts
@@ -1081,8 +1081,6 @@ lead.none | 미종료 Lead 기록 없음 | No open Lead records
 lead.unseen | 조회한 기록에서 미종료 Lead를 확인하지 못했습니다. | No open Lead found in the retrieved records.
 lead.taskUnknown | 작업 미확인 | Task unknown
 lead.aria | {assignee} · {task} · {p} 대화 열기 | Open conversation: {assignee} · {task} · {p}
-lead.count | Lead {n}개 | {n} Leads
-lead.countOne | Lead {n}개 | {n} Lead
 act.planned | 계획된 작업 {n} | Planned tasks {n}
 act.partialRuntime | 런타임 일부 조회 | Runtime partially retrieved
 act.attempts | 실행 시도 {n} | Execution attempts {n}
@@ -1176,8 +1174,6 @@ scratch.unexamined | 미조회 {n}개 | {n} unexamined
 scratch.sources | 작업트리 {n}개 생략 | {n} worktrees omitted
 scratch.recorded | 기록된 상태 · {s} | Recorded state · {s}
 scratch.at | 기록 시각 · {at} | Recorded at · {at}
-state.waiting_input | 입력 대기 | Waiting for input
-state.waiting_approval | 승인 대기 | Waiting for approval
 git.rec.scope | 이 페이지에 표시된 항목별 판단입니다. | Readiness is assessed per item on this page.
 git.rec.recommended | 추천 · {reason} | Recommended · {reason}
 git.rec.excluded | 제외 · {reason} | Excluded · {reason}
@@ -1984,9 +1980,9 @@ function node(tag, text, className) {
 const formatCount = n => Number.isFinite(n) ? n.toLocaleString(locale()) : t('unknown');
 const providerName = p => names[p] || p || t('providerUnknown');
 const STATE_ROLE={i:'info',w:'warning',a:'attention',c:'accent',m:'muted',s:'success',sm:'success-muted',e:'error'};
-const STATE_META=Object.fromEntries('running:▶:i;claimed:▷:i;landing:⟳:i;verifying:⟳:i;review:⚑:w;waiting:!:a;blocked:!:a;ready:▷:c;queued:·:m;done:✓:sm;completed:✓:sm;exited:✓:sm;accepted:✓:s;closed:·:m;cancelled:⊘:m;abandoned:⊘:m;interrupted:◷:w;failed:×:e;rejected:×:e;timed_out:◷:e;orphaned:?:w;guard_stop:!:w;partial:~:w;degraded:~:w;stale:~:w;unknown:?:m'.split(';').map(x=>{const [k,g,r]=x.split(':');return [k,[g,STATE_ROLE[r]]];}));
+const STATE_META=Object.fromEntries('running:▶:i;starting:▷:i;active:▷:i;claimed:▷:i;landing:⟳:i;verifying:⟳:i;review:⚑:w;waiting:!:a;blocked:!:a;ready:▷:c;queued:·:m;planned:·:m;open:·:m;done:✓:sm;completed:✓:sm;exited:✓:sm;accepted:✓:s;passed:✓:s;supported:✓:sm;closed:·:m;cancelled:⊘:m;abandoned:⊘:m;interrupted:◷:w;failed:×:e;rejected:×:e;timed_out:◷:e;orphaned:?:w;guard_stop:!:w;partial:~:w;degraded:~:w;stale:~:w;unknown:?:m'.split(';').map(x=>{const [k,g,r]=x.split(':');return [k,[g,STATE_ROLE[r]]];}));
 const CHECK_META={failed:['×','error'],pending:['·','muted'],passed:['✓','success'],other:['·','muted']};
-const STATE_ALIAS=Object.fromEntries('running:working,starting,active,in_progress;review:in_review;waiting:waiting_approval,waiting_input,waiting_for_input;queued:pending,planned,todo,open;accepted:passed,verified,supported;cancelled:canceled;failed:error;timed_out:timeout'.split(';').flatMap(g=>{const [c,l]=g.split(':');return l.split(',').map(k=>[k,c]);}));
+const STATE_ALIAS=Object.fromEntries('running:working,in_progress;review:in_review;waiting:waiting_approval,waiting_input,waiting_for_input;queued:pending,todo;accepted:verified;cancelled:canceled;failed:error;timed_out:timeout'.split(';').flatMap(g=>{const [c,l]=g.split(':');return l.split(',').map(k=>[k,c]);}));
 function resolveState(raw,check=false){
   const text=typeof raw==='string'?raw.trim():'',norm=text.toLowerCase().replace(/[\s-]+/g,'_');
   if(check&&Object.hasOwn(CHECK_META,norm)){const [glyph,role]=CHECK_META[norm];return {canonical:norm,glyph,role,key:'git.check.'+norm,raw:text};}
@@ -2499,7 +2495,7 @@ function clearProject() {
   el('git-number').value = el('git-goal').value = el('git-provider').value = '';
   el('approval-card').className = 'card'; el('approval-card').hidden = false;
   for (const id of ['view','pane-task','chat-evidence','chat-back','chat-older','tui-next','tui-prev','git-backlog','git-editor','work-threads','plan-strip','acceptance-bar','header-main','approval-badge','alerts-badge','latest-operations','work-dot']) el(id).hidden = true;
-  putAttr('work-dot','aria-label',() => '');
+  for (const id of ['work-dot','lead-count']) put(id, () => '');
   for (const id of ['now-active','now-results','work-groups','results-list','owners-list','deps-list','chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows','git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status','thread-rows','approval-idle','alerts-count','alerts-preview','latest-operations','work-dot','receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
     el(id).replaceChildren();
   }
@@ -3046,7 +3042,7 @@ function renderConversation(d) {
   const dot = el('work-dot');
   dot.hidden = !roomLeads.length;
   put(dot, () => roomLeads.length ? formatCount(roomLeads.length) : '');
-  putAttr(dot, 'aria-label', () => roomLeads.length ? t(roomLeads.length === 1 ? 'lead.countOne' : 'lead.count', {n:formatCount(roomLeads.length)}) : '');
+  put('lead-count', () => roomLeads.length ? ' (' + formatCount(roomLeads.length) + ')' : '');
   if (!roomLeads.length) {
     cards.append(node('p', () => t(complete ? 'lead.none' : 'lead.unseen'), 'muted'));
     return;
