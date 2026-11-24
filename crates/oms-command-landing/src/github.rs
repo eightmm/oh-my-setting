@@ -117,20 +117,24 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
 }
 
 fn read(root: &Path, rel: &str, max: usize) -> Result<Vec<u8>> {
-    storage::root(root)?
-        .read_no_follow(
-            Path::new(rel),
-            ByteReadOptions {
-                missing_ok: true,
-                max_bytes: max,
-            },
-        )
-        .map_err(|_| {
-            Error::new(
-                2,
-                format!("{rel} is unsafe, unreadable or exceeds its bound"),
-            )
-        })
+    Ok(read_optional(root, rel, max)?.unwrap_or_default())
+}
+
+fn read_optional(root: &Path, rel: &str, max: usize) -> Result<Option<Vec<u8>>> {
+    match storage::root(root)?.read_no_follow(
+        Path::new(rel),
+        ByteReadOptions {
+            missing_ok: false,
+            max_bytes: max,
+        },
+    ) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(oms_safe_fs::ByteError::Missing) => Ok(None),
+        Err(_) => Err(Error::new(
+            2,
+            format!("{rel} is unsafe, unreadable or exceeds its bound"),
+        )),
+    }
 }
 
 fn origin(git: &Git<'_>) -> Result<Slug> {
@@ -166,30 +170,55 @@ fn gate(root: &Path, git: &Git<'_>) -> Result<(Slug, Option<Slug>)> {
 
 /// The packet's `github_issue` header row, revalidated against origin.
 fn task_issue(root: &Path, origin: &Slug) -> Result<Option<IssueRef>> {
-    let raw = read(root, PACKET_REL, STATE_MAX)?;
+    Ok(task_issue_evidence(root, origin)?.0)
+}
+
+fn task_issue_evidence(root: &Path, origin: &Slug) -> Result<(Option<IssueRef>, bool)> {
+    let Some(raw) = read_optional(root, PACKET_REL, STATE_MAX)? else {
+        return Ok((None, true));
+    };
     let text = String::from_utf8_lossy(&raw);
-    let Some(value) = text
+    let complete = !raw.is_empty() && matches!(text, std::borrow::Cow::Borrowed(_));
+    let mut headers = text
         .lines()
         .take_while(|l| !l.starts_with("## "))
-        .find_map(|l| l.strip_prefix("- github_issue:"))
-    else {
-        return Ok(None);
+        .filter_map(|l| l.strip_prefix("- github_issue:"));
+    let Some(value) = headers.next() else {
+        return Ok((None, complete));
     };
-    IssueRef::parse(value.trim(), origin)
-        .map(Some)
-        .map_err(|_| Error::new(2, "task packet github_issue is not an origin reference"))
+    let issue = IssueRef::parse(value.trim(), origin)
+        .map_err(|_| Error::new(2, "task packet github_issue is not an origin reference"))?;
+    Ok((Some(issue), complete && headers.next().is_none()))
 }
 
 /// `(task id, canonical issue ref)` for plan tasks that carry `issue`.
 fn plan_issues(root: &Path, origin: &Slug) -> Result<Vec<(String, IssueRef)>> {
     let raw = read(root, PLAN_REL, PLAN_MAX)?;
-    if raw.is_empty() {
-        return Ok(vec![]);
-    }
-    let plan = V::parse(&raw).map_err(|_| Error::new(2, "plan tasks.json is not JSON"))?;
-    let V::Obj(tasks) = plan.get("tasks") else {
-        return Ok(vec![]);
+    Ok(plan_issue_links(&raw, origin)?.0)
+}
+
+/// A missing Plan proves no link, while a malformed document cannot prove absence.
+fn plan_issue_evidence(root: &Path, origin: &Slug) -> Result<(Vec<(String, IssueRef)>, bool)> {
+    let Some(raw) = read_optional(root, PLAN_REL, PLAN_MAX)? else {
+        return Ok((vec![], true));
     };
+    let (links, complete) = plan_issue_links(&raw, origin)?;
+    // Legacy browse accepts last-key-wins JSON. A duplicate might hide an
+    // issue link, so absence can only be proven from a strict document.
+    Ok((links, complete && oms_json::parse_strict(&raw).is_ok()))
+}
+
+fn plan_issue_links(raw: &[u8], origin: &Slug) -> Result<(Vec<(String, IssueRef)>, bool)> {
+    if raw.is_empty() {
+        return Ok((vec![], false));
+    }
+    let plan = V::parse(raw).map_err(|_| Error::new(2, "plan tasks.json is not JSON"))?;
+    let V::Obj(tasks) = plan.get("tasks") else {
+        return Ok((vec![], false));
+    };
+    let complete = tasks
+        .iter()
+        .all(|(id, task)| !id.is_empty() && matches!(task, V::Obj(_)));
     let mut out = vec![];
     for (id, task) in tasks {
         if !task.has("issue") {
@@ -208,7 +237,7 @@ fn plan_issues(root: &Path, origin: &Slug) -> Result<Vec<(String, IssueRef)>> {
             })?;
         out.push((id, issue));
     }
-    Ok(out)
+    Ok((out, complete))
 }
 
 fn cached(cache: &[u8], reference: &str, kind: Kind) -> (Option<Cached>, Freshness) {

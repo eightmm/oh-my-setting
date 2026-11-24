@@ -1,11 +1,14 @@
 //! Read a page of cards from a board linked to this repository.
-use super::super::{digits, plan_issues, spawn, strict, task_issue};
+use super::super::{digits, plan_issue_evidence, spawn, strict, task_issue_evidence};
 use super::{
     Kind, Number, READ_TIMEOUT, Slug, WEB, display, project_error, projects, stable_id,
     valid_cursor, work_item,
 };
 use crate::{Context, V, obj};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 const BOARD_FIELDS: [&str; 4] = ["Status", "Priority", "Area", "Phase"];
 const BOARD_QUERY: &str = "query=query($owner:String!,$number:Int!,$after:String){OWNER(login:$owner){login projectV2(number:$number){id number title url closed fields(first:50){pageInfo{hasNextPage} nodes{__typename ... on ProjectV2FieldCommon{id name} ... on ProjectV2SingleSelectField{options{id name}}}} items(first:20,after:$after){pageInfo{hasNextPage endCursor} nodes{type isArchived content{__typename ... on Issue{number title state url repository{nameWithOwner} issueType{name} labels(first:10){pageInfo{hasNextPage} nodes{name}} blockedBy(first:5){pageInfo{hasNextPage} nodes{state}}} ... on PullRequest{number title state url repository{nameWithOwner}}} fieldValues(first:20){pageInfo{hasNextPage} nodes{__typename ... on ProjectV2ItemFieldSingleSelectValue{optionId name field{... on ProjectV2FieldCommon{id}}}}}}}}}}";
@@ -82,6 +85,84 @@ fn board_fields(connection: &V) -> (V, Fields, bool) {
     let partial = !missing.is_empty();
     report.set("missing", V::Arr(missing));
     (report, fields, partial)
+}
+
+/// The browse projection may shorten display labels. A decision uses exact
+/// option names and rejects identities that the schema does not distinguish.
+fn recommendation_schema(connection: &V, fields: &Fields) -> bool {
+    fields.len() == BOARD_FIELDS.len()
+        && fields.values().all(|(id, options)| {
+            let mut matching = connection
+                .get("nodes")
+                .array()
+                .iter()
+                .filter(|field| field.get("id").text() == Some(id));
+            let Some(field) = matching.next() else {
+                return false;
+            };
+            matching.next().is_none()
+                && options.values().collect::<BTreeSet<_>>().len() == options.len()
+                && field.get("options").array().iter().all(|option| {
+                    option
+                        .get("id")
+                        .text()
+                        .and_then(|id| options.get(id))
+                        .map(String::as_str)
+                        == option.get("name").text()
+                })
+        })
+}
+
+fn recommendation(row: &V, node: &V, incomplete: Option<&str>, duplicate: bool) -> V {
+    let class = row.get("class").text().unwrap_or("unknown");
+    let fields = row.get("fields");
+    let values = node.get("fieldValues").get("nodes").array();
+    let issue = node.get("content");
+    let (state, reason) = if duplicate {
+        ("excluded", "duplicate")
+    } else if !matches!(class, "candidate" | "unknown" | "unverified") {
+        ("excluded", class)
+    } else if let Some(reason) = incomplete {
+        ("unverified", reason)
+    } else if row.get("dependencies").text() == Some("unknown") {
+        ("unverified", "dependencies_unknown")
+    } else if class != "candidate"
+        || row.get("incomplete") != &V::Bool(false)
+        || !(issue.get("issueType") == &V::Null
+            || issue
+                .get("issueType")
+                .get("name")
+                .text()
+                .is_some_and(|s| !s.trim().is_empty()))
+        || issue
+            .get("labels")
+            .get("nodes")
+            .array()
+            .iter()
+            .any(|n| n.get("name").text().is_none_or(|s| s.trim().is_empty()))
+    {
+        ("unverified", "item_evidence_incomplete")
+    } else if !BOARD_FIELDS.iter().all(|name| {
+        let selection = fields.get(name);
+        selection.get("optionId").text().is_some()
+            && values.iter().any(|v| {
+                v.get("field").get("id") == selection.get("fieldId")
+                    && v.get("optionId") == selection.get("optionId")
+                    && v.get("name") == selection.get("name")
+            })
+    }) {
+        ("unverified", "field_selection_unverified")
+    } else if fields.get("Status").get("name").text() != Some("Ready") {
+        ("excluded", "status_not_ready")
+    } else if !matches!(
+        fields.get("Priority").get("name").text(),
+        Some("P0" | "P1" | "P2")
+    ) {
+        ("unverified", "priority_unrecognized")
+    } else {
+        ("recommended", "ready_with_priority")
+    };
+    obj([("state", state.into()), ("reason", reason.into())])
 }
 
 fn board_item(node: &V, slug: &Slug, chosen: &Fields) -> V {
@@ -306,17 +387,48 @@ pub(super) fn page(
         return Ok(board_empty("unavailable", Some("partial_response")));
     };
     let planned = c.state(root).ok().filter(|p| p == root).and_then(|state| {
-        let mut linked: std::collections::BTreeSet<_> = plan_issues(&state, slug)
-            .ok()?
+        let (links, complete) = plan_issue_evidence(&state, slug).ok()?;
+        let mut linked: BTreeSet<_> = links
             .into_iter()
             .map(|(_, issue)| issue.number.to_string())
             .collect();
-        if let Some(issue) = task_issue(&state, slug).ok()? {
+        let (packet, packet_complete) = task_issue_evidence(&state, slug).ok()?;
+        if let Some(issue) = packet {
             linked.insert(issue.number.to_string());
         }
-        Some(linked)
+        Some((linked, complete && packet_complete))
     });
-    let mut seen = std::collections::BTreeSet::new();
+    let response_incomplete =
+        v.has("errors") && !matches!(v.get("errors"), V::Arr(e) if e.is_empty());
+    let evidence_gap = if response_incomplete || nodes.len() > 20 {
+        Some("partial_response")
+    } else if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
+        Some("plan_unverified")
+    } else if !recommendation_schema(board.get("fields"), &chosen) {
+        Some("field_schema_unverified")
+    } else {
+        None
+    };
+    // Keep both copies out of recommendations, even when an archived or closed
+    // copy was omitted from browse candidates. This comparison is page-local.
+    let mut issue_numbers = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+    for node in nodes.iter().take(20) {
+        let issue = node.get("content");
+        if issue.get("__typename").text() == Some("Issue")
+            && issue
+                .get("repository")
+                .get("nameWithOwner")
+                .text()
+                .and_then(|s| Slug::parse(s).ok())
+                .is_some_and(|r| r.matches(slug))
+            && let Some(number) = digits(issue.get("number"))
+            && !issue_numbers.insert(number)
+        {
+            duplicates.insert(number);
+        }
+    }
+    let mut seen = BTreeSet::new();
     let items: Vec<V> = nodes
         .iter()
         .take(20)
@@ -331,7 +443,7 @@ pub(super) fn page(
                     "closed_board"
                 } else if planned
                     .as_ref()
-                    .is_some_and(|links| links.contains(&number))
+                    .is_some_and(|(links, _)| links.contains(&number))
                 {
                     "plan_linked"
                 } else if planned.is_none()
@@ -352,6 +464,10 @@ pub(super) fn page(
                 };
                 row.set("class", class);
             }
+            let duplicate = row.get("kind").text() == Some("issue")
+                && digits(row.get("number")).is_some_and(|n| duplicates.contains(n));
+            let advice = recommendation(&row, n, evidence_gap, duplicate);
+            row.set("recommendation", advice);
             row
         })
         .collect();
