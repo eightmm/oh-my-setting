@@ -606,6 +606,72 @@ for (const kind of ['project', 'execution']) {
   first.nodes[1].fire('keydown', {key: 'p'}); first.get('reset').fire('click');
   assert.ok(first.nodes.every(n => n.attributes['data-pinned'] !== 'true'), 'Reset view releases every pin');
 }
+function dragNode(view, index, id, x, y) {
+  const c = camera(view); const p = positions(view)[index];
+  const from = {clientX: c.x + p.x * c.k, clientY: c.y + p.y * c.k};
+  view.svg.fire('pointerdown', {pointerId: id, button: 0, ...from, target: view.nodes[index]});
+  view.svg.fire('pointermove', {pointerId: id, clientX: x, clientY: y});
+  view.svg.fire('pointerup', {pointerId: id});
+}
+// Round 9: one camera padding, pin-aware recentring, scope refit, one-shot click suppression, honest badges.
+for (const w of [320, 736]) {
+  const view = render(chain('project', 40), {width: w});
+  const fitted = camera(view);
+  view.nodes.forEach(n => n.fire('click'));
+  assert.deepEqual(camera(view), fitted, `${w}px: clicking any node already inside the stage never moves the camera`);
+  const g = view.nodes[0]; const svg = view.svg;
+  dragNode(view, 0, 1, 1, 1);
+  assert.equal(g.attributes['data-pinned'], 'true');
+  const afterDrag = camera(view);
+  g.fire('click'); assert.deepEqual(camera(view), afterDrag, `${w}px: click on a node pinned at the border keeps the camera`);
+  svg.fire('dblclick', {target: g});
+  assert.equal(g.attributes['data-pinned'], 'false', `${w}px: click then double-click unpins a border-pinned node`);
+  // suppressClick swallows only the click that ends the drag.
+  dragNode(view, 1, 2, 150, 150);
+  view.flushTimers();
+  view.nodes[2].fire('click');
+  assert.match(view.get('detail').textContent, /n2/, `${w}px: a later programmatic click is not swallowed`);
+}
+{ // Free nodes recentre on their own centroid, not on one pulled by a far pin.
+  const view = render(chain('project', 6));
+  const centroid = pts => ({x: pts.reduce((a, p) => a + p.x, 0) / pts.length, y: pts.reduce((a, p) => a + p.y, 0) / pts.length});
+  const centre = centroid(positions(view));
+  dragNode(view, 0, 1, 1, 1); view.flushTimers();
+  const free = centroid(positions(view).slice(1));
+  assert.ok(Math.hypot(free.x - centre.x, free.y - centre.y) < 4, `unpinned nodes keep their own centroid at the world centre (${free.x.toFixed(1)},${free.y.toFixed(1)} vs ${centre.x.toFixed(1)},${centre.y.toFixed(1)})`);
+}
+{ // Task scope refits to the new scope unless the camera was moved; Reset view keeps the scope.
+  const data = chain('project', 40);
+  data.display = {production_only: true, task_focus: true, default_scope: 'neighbors'};
+  data.nodes.forEach((row, i) => { row.focus = i === 0; row.distance = i === 0 ? 0 : (i < 3 ? 1 : 3); });
+  const view = render(data); const sc = view.get('scope');
+  const narrow = camera(view);
+  sc.value = 'all'; sc.fire('change');
+  const wide = camera(view);
+  assert.ok(wide.k < narrow.k, 'widening the scope refits to the larger node set');
+  view.get('zoom-in').fire('click'); const moved = camera(view);
+  sc.value = 'neighbors'; sc.fire('change');
+  assert.deepEqual(camera(view), moved, 'a user-moved camera is kept on scope change');
+  sc.value = 'all'; sc.fire('change'); view.get('zoom-in').fire('click');
+  view.get('reset').fire('click');
+  assert.equal(sc.value, 'all', 'Reset view does not change the scope');
+  assert.ok(Math.abs(camera(view).k - wide.k) < 1e-2, 'Reset view fits the nodes in the current scope');
+  view.get('clear').fire('click');
+  assert.equal(sc.value, 'neighbors', 'Clear filters resets the scope');
+}
+{ // Status badges use the node's state tokens; unclassified and exited are never the verified colour.
+  const view = render({kind: 'execution', title: 'x', counts: {}, edges: [], nodes: [{id: 'a', label: 'A', kind: 'node', degree: 0, status: 'exited', show_label: true}]});
+  view.nodes[0].fire('click');
+  const badge = view.get('badges').children.find(c => c.attributes['data-pattern']);
+  assert.equal(badge.attributes['data-state'], 'exited');
+  const project = render({kind: 'project', title: 'x', counts: {}, edges: [], nodes: [{id: 'a', label: 'A', kind: 'file', degree: 0, show_label: true}]});
+  project.nodes[0].fire('click');
+  assert.equal(project.get('badges').children.find(c => c.attributes['data-pattern']).attributes['data-assurance'], 'unclassified');
+  for (const html of [template, mcp]) {
+    assert.doesNotMatch(style(html), /data-focus="true"\] \.oms-graph-node-body \{[^}]*stroke-dasharray/, 'focus halo never replaces the stroke dash');
+    assert.match(style(html), /\.oms-badge\[data-state\][^{]*\{ border-color: var\(--oms-st\)/);
+  }
+}
 // Reduced motion computes the settled layout before first paint and never requests animation frames.
 {
   const data = chain('project', 40);

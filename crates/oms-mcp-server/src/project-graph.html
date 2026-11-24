@@ -164,6 +164,7 @@
 #oms-graph-view-19ff9c65bfcf .oms-badge[data-pattern="dash-dot"] { border-style: double; border-width: 3px; border-color: var(--oms-destructive); }
 #oms-graph-view-19ff9c65bfcf .oms-badge[data-pattern="dotted"] { border-style: dotted; border-color: var(--oms-s4); }
 #oms-graph-view-19ff9c65bfcf .oms-badge[data-pattern="solid"] { border-color: var(--oms-s5); }
+#oms-graph-view-19ff9c65bfcf .oms-badge[data-state], #oms-graph-view-19ff9c65bfcf .oms-badge[data-assurance] { border-color: var(--oms-st); }
 #oms-graph-view-19ff9c65bfcf .oms-badge[data-change="changed"] { border-color: var(--oms-s1); }
 #oms-graph-view-19ff9c65bfcf .oms-badge[data-change="impacted"] { border-style: dashed; border-color: var(--oms-s2); }
 #oms-graph-view-19ff9c65bfcf .oms-graph-draft { width: 100%; }
@@ -249,7 +250,8 @@
 #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-assurance="needs-evidence"] .oms-graph-node-body { stroke-dasharray: 4 2; }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-assurance="attention"] .oms-graph-node-body { stroke-width: 2.4; stroke-dasharray: 6 2 2 2; }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-assurance="test-evidence"] .oms-graph-node-body { stroke-dasharray: 2 2; }
-#oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="running"] .oms-graph-node-body, #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-focus="true"] .oms-graph-node-body { stroke: var(--oms-s1); stroke-width: 2.4; stroke-dasharray: 6 2; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="running"] .oms-graph-node-body { stroke: var(--oms-s1); stroke-width: 2.4; stroke-dasharray: 6 2; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-node[data-focus="true"] .oms-graph-node-body { filter: drop-shadow(0 0 2px var(--oms-s1)) drop-shadow(0 0 1px var(--oms-s1)); }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="verifying"] .oms-graph-node-body { stroke-width: 2.2; stroke-dasharray: 4 2; }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="review"] .oms-graph-node-body, #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="ready"] .oms-graph-node-body { stroke-width: 2; stroke-dasharray: 8 3; }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="waiting"] .oms-graph-node-body, #oms-graph-view-19ff9c65bfcf .oms-graph-node[data-state="blocked"] .oms-graph-node-body { stroke-width: 2; stroke-dasharray: 3 3; }
@@ -853,6 +855,7 @@
   // ---- Deterministic force layout (link spring, repulsion, centring, collision, execution targets) ----
   const isExecution = data.kind === 'execution';
   const PAD = 20;
+  let gesture = null;
   const ALPHA_DECAY = 1 - Math.pow(.001, 1 / 300);
   const MIN_ALPHA = .001;
   const TICK_CAP = nodes.length > 400 ? 120 : 300;
@@ -1061,11 +1064,13 @@
     applyFans();
     collide(.7);
     applyFans();
-    if (nodes.length) {
+    // Recentre only free nodes by their own centroid; pins and an active drag define their own anchors.
+    const free = nodes.filter(row => row.fx === null || row.fx === undefined);
+    if (free.length && !(gesture && gesture.type === 'node' && gesture.moved)) {
       let mx = 0; let my = 0;
-      nodes.forEach(row => { mx += row.x; my += row.y; });
-      mx = mx / nodes.length - worldW / 2; my = my / nodes.length - worldH / 2;
-      nodes.forEach(row => { if (row.fx === null || row.fx === undefined) { row.x -= mx; row.y -= my; } });
+      free.forEach(row => { mx += row.x; my += row.y; });
+      mx = mx / free.length - worldW / 2; my = my / free.length - worldH / 2;
+      free.forEach(row => { row.x -= mx; row.y -= my; });
     }
     clampToWorld();
   }
@@ -1197,6 +1202,8 @@
   let camPlaced = false;
   const FRAME_FALLBACK_MS = 100;
   let userMoved = false;
+  let scopeMoved = false;
+  const markMoved = () => { userMoved = true; scopeMoved = true; };
   const clampK = k => Math.max(MIN_K, Math.min(MAX_K, k));
   const labelTier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
   function setCam(x, y, k) {
@@ -1247,6 +1254,7 @@
     const ratio = k / base.k;
     animateCam({x: px - (px - base.x) * ratio, y: py - (py - base.y) * ratio, k}, ms);
   }
+  // One screen padding per layout: fit bounds, ensureVisible and the drag clamp all read it.
   function fitPad() { return width <= 480 ? 24 : 44; }
   function fitTarget(rows) {
     if (!rows.length) return {x: 0, y: 0, k: 1};
@@ -1278,7 +1286,7 @@
   function focusOn(id, ms = 380) {
     const row = byId.get(id);
     if (!row) return;
-    userMoved = true;
+    markMoved();
     let hx = nodeRadius(row) + 8;
     let hy = hx;
     adjacency.get(id).forEach(otherId => {
@@ -1293,15 +1301,17 @@
   }
   function ensureVisible(row) {
     const goal = camGoal();
-    const margin = 40;
+    const margin = fitPad();
+    const r = nodeRadius(row) * goal.k;
     const sx = goal.x + row.x * goal.k;
     const sy = goal.y + row.y * goal.k;
-    const dx = sx < margin ? margin - sx : (sx > width - margin ? width - margin - sx : 0);
-    const dy = sy < margin ? margin - sy : (sy > height - margin ? height - margin - sy : 0);
-    if (dx || dy) { userMoved = true; animateCam({x: goal.x + dx, y: goal.y + dy, k: goal.k}, 260); }
+    const slack = .5;
+    const dx = sx - r < margin - slack ? margin - (sx - r) : (sx + r > width - margin + slack ? width - margin - (sx + r) : 0);
+    const dy = sy - r < margin - slack ? margin - (sy - r) : (sy + r > height - margin + slack ? height - margin - (sy + r) : 0);
+    if (dx || dy) { markMoved(); animateCam({x: goal.x + dx, y: goal.y + dy, k: goal.k}, 260); }
   }
   function zoomBy(factor) {
-    userMoved = true;
+    markMoved();
     zoomAt(width / 2, height / 2, factor, 260);
   }
 
@@ -1398,7 +1408,7 @@
     const meta = statusMeta(row);
     const items = [
       makeBadge(`${kindSymbol(row.kind)} ${row.kind || 'node'}`, {'data-kind': row.kind || 'node'}),
-      makeBadge(`${meta.glyph} ${meta.label}`, {'data-pattern': meta.pattern})
+      makeBadge(`${meta.glyph} ${meta.label}`, {'data-pattern': meta.pattern, [data.kind === 'project' ? 'data-assurance' : 'data-state']: meta.key})
     ];
     if (row.change) items.push(makeBadge(`${row.change === 'changed' ? 'Δ' : '~'} ${row.change}`, {'data-change': row.change}));
     if (Number.isInteger(row.distance)) items.push(makeBadge(t('distance', {n: row.distance})));
@@ -1659,16 +1669,25 @@
   relation.addEventListener('change', applyFilters);
   confidence.addEventListener('change', applyFilters);
   state.addEventListener('change', applyFilters);
-  scope.addEventListener('change', applyFilters);
+  scope.addEventListener('change', () => {
+    applyFilters();
+    if (!scopeMoved) fitAll();
+    scopeMoved = false;
+  });
   change.addEventListener('change', applyFilters);
   clear.addEventListener('click', () => {
+    const scopeBefore = scope.value;
     resetFilterValues();
     applyFilters();
+    if (scope.value !== scopeBefore && !scopeMoved) fitAll();
+    if (scope.value !== scopeBefore) scopeMoved = false;
     actionStatus.textContent = t('cleared');
     if (isFocusableInRoot(search)) search.focus();
   });
   reset.addEventListener('click', () => {
+    const keepScope = scope.value;
     resetFilterValues();
+    scope.value = keepScope;
     if (!selectedId || !byId.has(selectedId)) {
       selectNode((nodes.find(row => row.focus) || nodes[0] || {}).id || '');
     }
@@ -1688,7 +1707,6 @@
       y: (event.clientY - (bounds.top || 0)) * height / Math.max(1, bounds.height)};
   }
   const pointers = new Map();
-  let gesture = null;
   const nodeOf = event => {
     const el = event.target && typeof event.target.closest === 'function' ? event.target.closest('.oms-graph-node') : null;
     return el ? el.__data__ : null;
@@ -1696,7 +1714,7 @@
   const capture = id => { try { svgElement.setPointerCapture(id); } catch (_error) { /* capture is optional */ } };
   svgElement.addEventListener('wheel', event => {
     event.preventDefault();
-    userMoved = true;
+    markMoved();
     const unit = event.deltaMode === 1 ? 16 : 1;
     const p = toView(event);
     zoomAt(p.x, p.y, Math.exp(-event.deltaY * unit * (event.ctrlKey ? .012 : .0016)), 0);
@@ -1735,23 +1753,29 @@
       const [a, b] = [...pointers.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
       const mid = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
-      userMoved = true;
+      markMoved();
       zoomAt(mid.x, mid.y, dist / gesture.dist, 0);
       const goal = camGoal();
       setCam(goal.x + mid.x - gesture.mid.x, goal.y + mid.y - gesture.mid.y, goal.k);
       gesture.dist = dist; gesture.mid = mid;
     } else if (gesture.type === 'pan' && gesture.id === event.pointerId) {
-      userMoved = true;
+      markMoved();
       setCam(cam.x + p.x - previous.x, cam.y + p.y - previous.y, cam.k);
     } else if (gesture.type === 'node' && gesture.id === event.pointerId) {
       if (!gesture.moved) {
         if (Math.hypot(event.clientX - gesture.sx, event.clientY - gesture.sy) < 4) return;
-        gesture.moved = true; userMoved = true;
+        gesture.moved = true; markMoved();
         hideTip(); setPinned(gesture.row, true);
       }
       const row = gesture.row;
-      row.fx = Math.max(PAD, Math.min(worldW - PAD, (p.x - cam.x) / cam.k + gesture.dx));
-      row.fy = Math.max(PAD, Math.min(worldH - PAD, (p.y - cam.y) / cam.k + gesture.dy));
+      // Keep the whole node inside the padded stage so a later click never has to pan it back.
+      const inset = fitPad() + nodeRadius(row) * cam.k;
+      const clampAxis = (value, world, size, offset) => {
+        const min = Math.max(PAD, (inset - offset) / cam.k); const max = Math.min(world - PAD, (size - inset - offset) / cam.k);
+        return min > max ? Math.max(PAD, Math.min(world - PAD, value)) : Math.max(min, Math.min(max, value));
+      };
+      row.fx = clampAxis((p.x - cam.x) / cam.k + gesture.dx, worldW, width, cam.x);
+      row.fy = clampAxis((p.y - cam.y) / cam.k + gesture.dy, worldH, height, cam.y);
       row.x = row.fx; row.y = row.fy;
       if (reducedMotion()) paint();
       else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); scheduleSim(); }
@@ -1761,16 +1785,18 @@
     if (!pointers.has(event.pointerId)) return;
     pointers.delete(event.pointerId);
     try { svgElement.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
-    if (gesture && gesture.type === 'node' && gesture.id === event.pointerId) {
-      if (gesture.moved) {
+    const ended = gesture && (gesture.type !== 'node' || gesture.id === event.pointerId) ? gesture : null;
+    if (ended) gesture = null;
+    if (ended && ended.type === 'node') {
+      if (ended.moved) {
         suppressClick = true;
+        setTimeout(() => { suppressClick = false; }, 0);
         if (reducedMotion()) settle(.3, 90);
       } else if (event.type === 'pointerup') {
         // Capture retargets the native click to the svg, so a plain tap selects here.
-        selectNode(gesture.row.id); applyFilters(); ensureVisible(gesture.row);
+        selectNode(ended.row.id); applyFilters(); ensureVisible(ended.row);
       }
     }
-    if (gesture && (gesture.type !== 'node' || gesture.id === event.pointerId)) gesture = null;
   }
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, endPointer);
   svgElement.addEventListener('dblclick', event => {
