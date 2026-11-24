@@ -270,6 +270,7 @@ pub(crate) fn dispatch(
     } else {
         render_text(&payload).into_bytes()
     };
+    check(cancel)?;
     Ok((0, out, Vec::new()))
 }
 

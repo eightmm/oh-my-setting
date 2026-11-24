@@ -695,6 +695,91 @@ fn rust_workspace_cache_and_impact() {
 }
 
 #[test]
+fn panel_interrupt_during_selected_python_request_returns_no_output() {
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+
+    let repo = Fixture::new();
+    repo.build();
+    let path = "focus.py";
+    let source = "def focus():\n    pass\n";
+    fs::write(repo.0.join(path), source).unwrap();
+    for args in [["init", "-q"], ["add", path]] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repo.0)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    // Model a selection from a previously indexed Python file without
+    // requiring the optional packaged AST binary to build the test index.
+    let mut graph = project::load(&repo.state()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+    let nodes = graph["nodes"].as_array_mut().unwrap();
+    nodes.push(json!({"id":"file:focus.py","kind":"file","path":path,"source_digest":digest}));
+    nodes.push(json!({"id":"symbol:focus.py::focus","kind":"function","name":"focus","path":path,
+        "language":"python","source_digest":digest,"metadata":{"signature":"def focus()","line":1,"end_line":2}}));
+    fs::write(repo.state().join("graph.json"), graph.to_string()).unwrap();
+
+    let private = Fixture::empty();
+    let helper = private.0.join("parser");
+    let ready = private.0.join("parser.ready");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&ready)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        &helper,
+        br#"#!/bin/sh
+[ "$(dd bs=1 count=6 2>/dev/null)" = "$(printf 'OGPY\002\001')" ] || exit 1
+printf 'request\n' > "$0.ready"
+exec cat >/dev/null
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let args = [
+        "project",
+        "panel",
+        "--repo",
+        ".",
+        "--node=symbol:focus.py::focus",
+        "--json",
+    ]
+    .map(OsString::from);
+    let cancel = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let call = scope
+            .spawn(|| oms_command_graph::run_with_helper(&args, &repo.0, &cancel, Some(&helper)));
+        // Opening both ends makes the start deadline apply even if the helper
+        // was never invoked. The helper blocks until the session cancels it.
+        let started = Command::new("bash")
+            .args([
+                "-c",
+                r#"exec 3<>"$1"; IFS= read -r -t 8 -u 3 marker && [[ $marker = request ]]"#,
+                "wait",
+            ])
+            .arg(&ready)
+            .status();
+        cancel.store(true, Ordering::SeqCst);
+        let (code, stdout, stderr) = call.join().unwrap();
+        assert!(
+            started.unwrap().success(),
+            "parser did not receive its request"
+        );
+        assert_eq!(code, 130);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"graph: interrupted\n");
+    });
+}
+
+#[test]
 fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
     fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
         fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, u64, std::time::SystemTime)>) {
