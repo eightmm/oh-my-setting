@@ -1019,10 +1019,10 @@ function readGraph(focus, query = '', limit = 40) {
   graphQuery=query;graphLimit=limit;graphError='';
   if(!reuse) {graphData=undefined;el('graph-attached').textContent='';paintGraph(true);}
   else {el('map-status').textContent=el('graph-info').textContent=choice('현재 지도를 다시 읽는 중…','Refreshing this map…');}
-  detailRead('graph','oms_panel_project_graph',{...(focus ? {node:focus} : {}),...(query ? {query} : {}),limit}, data => {
+  detailRead('graph','oms_panel_project_graph',{...(focus ? {node:focus} : {}),...(query ? {query} : {}),limit}, (data, meta) => {
     if (data?.schema !== 1 || data.kind !== 'oms-panel-project-graph' || !Array.isArray(data.nodes) || !Array.isArray(data.edges))
       throw new Error(choice('그래프 응답 형식 미확인','Unrecognized graph response'));
-    const restoreFocus=preserveExplorerFocus();graphData = data; paintGraph();restoreFocus();
+    const restoreFocus=preserveExplorerFocus();graphData = {...data,definition:meta?.graphDefinition}; paintGraph();restoreFocus();
   }, error => {graphError = error.message; graphData = undefined; paintGraph();});
 }
 function enterNode(row) {
@@ -1122,6 +1122,13 @@ function paintGraph(loading = false) {
   const omitted=data.selection?.omittedNeighbors;
   const omittedLabel=Number.isSafeInteger(omitted) && omitted>0 ? choice('선택 항목 연결 '+omitted+'개 생략',omitted+' links omitted for this selection') : '';
   el('graph-info').textContent=[el('map-status').textContent,omittedLabel,query && choice('필터 결과 ','Filtered: ')+filtered.length].filter(Boolean).join(' · ');
+  if (selected?.id?.startsWith('symbol:') && selected.id===focus && focus===graphTrail.at(-1)?.id) {
+    const d=data.definition, info=el('graph-info');
+    info.append(node('br',''));
+    if (data.selection.status==='found' && provenance.source==='indexed-graph' && provenance.indexFreshness==='cached' && d?.id===focus && d.signature && d.line>0 && d.endLine>=d.line) {
+      info.append(node('span',selected.path+' · '+choice(d.line+'–'+d.endLine+'행','lines '+d.line+'–'+d.endLine)),node('br',''),node('code',d.signature));
+    } else info.append(node('span',choice('현재 소스 선언 미확인','Current declaration unverified')));
+  }
   el('graph-more').hidden=!partial || graphLimit>=60;
 }
 
@@ -1505,7 +1512,7 @@ async function detailRead(key, name, args, success, failure) {
   jobs.set(key, ticket);
   try {
     const response = await tool(name, args, expected);
-    if (validRead(key, ticket, expected)) success(key === 'chat' || key === 'evidence' ? response._meta?.chat : response.structuredContent);
+    if (validRead(key, ticket, expected)) success(key === 'chat' || key === 'evidence' ? response._meta?.chat : response.structuredContent,response._meta);
   } catch (error) {
     if (validRead(key, ticket, expected)) failure(error);
   } finally {

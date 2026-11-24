@@ -609,6 +609,129 @@ fn indexed_row(row: &Value) -> Value {
     json!({"id":id,"path":path,"kind":kind,"language":language_for_path(path),"label":sanitize(label,120)})
 }
 
+// A matching manifest version alone cannot detect an unindexed working-tree edit.
+// Only the selected, tracked symbol may contribute declaration text.
+fn selected_definition(
+    repo: &Path,
+    graph: &Graph,
+    symbol: &Value,
+    freshness: &str,
+) -> Option<Value> {
+    let path = s(symbol, "path");
+    let metadata = &symbol["metadata"];
+    if freshness != "cached"
+        || !s(symbol, "id").starts_with("symbol:")
+        || is_excluded_path(path)
+        || metadata["span_complete"] == false
+        || metadata["signature_truncated"] == true
+        || metadata["scope_truncated"] == true
+    {
+        return None;
+    }
+    let signature = metadata["signature"].as_str()?;
+    let line = metadata["line"].as_u64()?;
+    let end_line = metadata["end_line"].as_u64()?;
+    if line == 0
+        || end_line < line
+        || signature.is_empty()
+        || signature.len() > 320
+        || signature.trim() != signature
+        || signature
+            .chars()
+            .any(|c| !(c.is_alphanumeric() || " _:&<>,()[]?+-*!.='".contains(c)))
+        || signature.contains('\'')
+            && (s(symbol, "language") != "rust"
+                || signature
+                    .split('\'')
+                    .skip(1)
+                    .any(|tail| !tail.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')))
+        || scrub(signature) != signature
+    {
+        return None;
+    }
+    let file = graph
+        .nodes
+        .get(&format!("file:{path}"))
+        .or_else(|| graph.nodes.get(&format!("test:{path}")))?;
+    let digest = s(symbol, "source_digest");
+    if digest.len() != 64 || s(file, "source_digest") != digest {
+        return None;
+    }
+    let data = oms_safe_fs::Root::open(repo)
+        .ok()?
+        .read(
+            path,
+            2 * 1024 * 1024,
+            oms_safe_fs::Policy {
+                single_link: true,
+                ..oms_safe_fs::Policy::source()
+            },
+        )
+        .ok()?;
+    if sha(&data) != digest {
+        return None;
+    }
+    let text = std::str::from_utf8(&data).ok()?;
+    if end_line > text.lines().count() as u64 {
+        return None;
+    }
+    // Do not emit synthesized signatures, body excerpts or a signature stored
+    // at an unrelated location. Match only this bounded declaration prefix.
+    let header = text
+        .lines()
+        .skip((line - 1) as usize)
+        .take(((end_line - line + 1).min(12)) as usize)
+        .flat_map(str::split_whitespace)
+        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+        .take(640)
+        .collect::<String>();
+    let name = s(symbol, "name");
+    if name.is_empty() {
+        return None;
+    }
+    let language = s(symbol, "language");
+    let header = if language == "shell" {
+        header.strip_prefix("function ").unwrap_or(&header)
+    } else if language == "rust" {
+        ["pub(crate) ", "pub(super) ", "pub(self) "]
+            .iter()
+            .find_map(|prefix| header.strip_prefix(prefix))
+            .unwrap_or(&header)
+    } else {
+        &header
+    };
+    let tail = header.strip_prefix(signature)?.trim_start();
+    if !tail.starts_with(['{', ':', ';']) {
+        return None;
+    }
+    let valid_name = |declaration: &str| {
+        declaration.strip_prefix(name).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_')
+        })
+    };
+    let valid_decl = match language {
+        "shell" => signature == format!("{name}()"),
+        "rust" | "python" => {
+            let mut words = signature.split_whitespace().skip_while(|word| {
+                matches!(
+                    *word,
+                    "pub" | "async" | "unsafe" | "const" | "default" | "extern"
+                )
+            });
+            matches!(
+                (language, words.next()),
+                ("rust", Some("fn" | "struct" | "enum" | "trait" | "mod"))
+                    | ("python", Some("def" | "class"))
+            ) && words.next().is_some_and(valid_name)
+        }
+        _ => false,
+    };
+    if !valid_decl {
+        return None;
+    }
+    Some(json!({"id":symbol["id"],"line":line,"endLine":end_line,"signature":signature}))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_indexed_projection(
     repo: &Path,
@@ -664,6 +787,11 @@ fn build_indexed_projection(
                 })
                 .collect();
             selection = json!({"status":"found","node":selected,"breadcrumbs":crumbs,"neighbors":neighbors,"omittedNeighbors":rows.len().saturating_sub(neighbors.len())});
+            if node.starts_with("symbol:")
+                && let Some(detail) = selected_definition(repo, graph, record, freshness)
+            {
+                selection["definition"] = detail;
+            }
         } else {
             miss = Some("not_found");
             selection = json!({"status":"not_found","node":null,"neighbors":[],"breadcrumbs":[]});
