@@ -41,6 +41,18 @@ The internal consumers have one authority entry point:
 The native parent wires these domains directly. There is no legacy command
 backend or fallback.
 
+`discussion` is the shared producer/consumer contract for native advisory
+councils. A proposal may carry `discussion: {path, sha256}` pointing to an
+immutable `decision::retain_native` manifest. Apply validates strict JSON,
+spec/plan/base/scope bindings, the exact question, complete rounds and synthesis
+artifact/output digests. Each new task retains that reference; replay refuses
+a different or missing reference. The optional field preserves legacy proposal
+compatibility and adds no approval or acceptance authority. Autonomy requires
+this evidence in its explicit automatic collaboration mode and rechecks it on
+resume without rerunning the council.
+The same native output validator backs `agent-call --output-json`, so planning
+parses the exact provider stdout range instead of searching prompt/diagnostic text.
+
 ## Mode/source checklist
 
 All modes enter the same request/domain layer. Source ranges below identify the

@@ -368,6 +368,772 @@ fn provider_call(
     )
 }
 
+fn native_provider_answer(binary: &std::ffi::OsStr, answer: &[u8]) -> Vec<u8> {
+    use serde_json::{json, to_vec, to_vec_pretty};
+
+    let answer = std::str::from_utf8(answer).unwrap();
+    if binary == "codex" {
+        [
+            json!({"type":"thread.started","thread_id":"fixture"}),
+            json!({"type":"turn.started"}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":answer}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}),
+        ]
+        .into_iter()
+        .flat_map(|row| [to_vec(&row).unwrap(), vec![b'\n']].concat())
+        .collect()
+    } else if binary == "claude" {
+        [
+            json!({"type":"system","subtype":"init"}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":answer}]}}),
+            json!({"type":"result","subtype":"success","is_error":false,"result":answer}),
+        ]
+        .into_iter()
+        .flat_map(|row| [to_vec(&row).unwrap(), vec![b'\n']].concat())
+        .collect()
+    } else {
+        assert_eq!(binary, "agy");
+        to_vec_pretty(
+            &json!({"conversation_id":"native-fixture","status":"SUCCESS","response":answer}),
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn typed_agent_output_requires_terminal_provider_evidence() {
+    provider_isolated(
+        "typed_agent_output_requires_terminal_provider_evidence",
+        "private",
+        || {
+            use oms_command_telemetry::store::usage::{self, Phase};
+
+            struct NativeReport {
+                probe: ProviderProbe,
+                stdout: Vec<u8>,
+                code: i32,
+                complete: bool,
+            }
+            impl Executor for NativeReport {
+                fn execute(
+                    &self,
+                    req: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let git = req.argv[0] == "git";
+                    let mut result = self.probe.execute(req, stop)?;
+                    if !git {
+                        result.stdout.clone_from(&self.stdout);
+                        result.code = self.code;
+                        result.complete = self.complete;
+                    }
+                    Ok(result)
+                }
+            }
+            let answer = b"Native fixture response.";
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            for (provider, binary, failed) in [
+                (
+                    "codex",
+                    "codex",
+                    serde_json::json!({"type":"turn.failed","error":{"message":"fixture failure"}}),
+                ),
+                (
+                    "claude",
+                    "claude",
+                    serde_json::json!({"type":"result","subtype":"error_during_execution",
+                        "is_error":true,"result":"Native fixture response."}),
+                ),
+                (
+                    "antigravity",
+                    "agy",
+                    serde_json::json!({"conversation_id":"native-fixture",
+                        "status":"ERROR","response":"Native fixture response."}),
+                ),
+            ] {
+                let valid = native_provider_answer(binary.as_ref(), answer);
+                let truncated = if provider == "antigravity" {
+                    &valid[..valid.len() - 1]
+                } else {
+                    let terminal_start = valid[..valid.len() - 1]
+                        .iter()
+                        .rposition(|b| *b == b'\n')
+                        .unwrap();
+                    &valid[..=terminal_start]
+                };
+                let corrupt = [valid.as_slice(), b"\n{"].concat();
+                let failed = serde_json::to_vec(&failed).unwrap();
+                let failed = if provider == "antigravity" {
+                    failed
+                } else {
+                    [truncated, &failed, b"\n"].concat()
+                };
+                for (raw, code, complete, expected) in [
+                    (valid.as_slice(), 0, true, 0),
+                    (answer.as_slice(), 0, true, 2),
+                    (truncated, 0, true, 2),
+                    (&failed, 0, true, 2),
+                    (&corrupt, 0, true, 2),
+                    (valid.as_slice(), 1, true, 2),
+                    (valid.as_slice(), 0, false, 2),
+                    (valid.as_slice(), 130, false, 130),
+                ] {
+                    let repo = provider_repo();
+                    let report = NativeReport {
+                        probe: ProviderProbe::default(),
+                        stdout: raw.to_vec(),
+                        code,
+                        complete,
+                    };
+                    let options = args(&[
+                        "--to",
+                        provider,
+                        "--model",
+                        "fixture-model",
+                        "--prompt",
+                        "fixture question",
+                        "--output-json",
+                    ]);
+                    let result = oms_command_peer::run_with_executor(
+                        "agent-call",
+                        &options,
+                        &repo.0,
+                        source,
+                        &STOP,
+                        &report,
+                    );
+                    assert_eq!(
+                        result.0,
+                        expected,
+                        "{provider}/status {code} complete {complete}: {}",
+                        message(&result)
+                    );
+                    assert_eq!(report.probe.calls.lock().unwrap().len(), 1);
+                    if expected == 0 {
+                        let report: serde_json::Value = serde_json::from_slice(&result.1).unwrap();
+                        assert_eq!(report["kind"], "oms-agent-output");
+                        assert_eq!(report["output"]["output_bytes"], answer.len());
+                    } else {
+                        assert!(result.1.is_empty());
+                        assert_eq!(
+                            usage::load(&repo.0).unwrap().calls[0].receipt.phase,
+                            Phase::Unknown
+                        );
+                    }
+                }
+            }
+            let repo = provider_repo();
+            let probe = ProviderProbe::default();
+            let output = oms_command_peer::run_with_executor(
+                "agent-call",
+                &args(&[
+                    "--to",
+                    "pi",
+                    "--prompt",
+                    "fixture question",
+                    "--output-json",
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(output.0, 2, "{}", message(&output));
+            assert!(probe.calls.lock().unwrap().is_empty());
+        },
+    );
+}
+
+#[test]
+fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
+    provider_isolated(
+        "automatic_planning_consumes_native_synthesis_and_retains_review_lineage",
+        "private",
+        || {
+            use oms_command_autonomy::{ModelRoute, value};
+            const SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+            const SPEC: &str = "# Project\n## Status\n- State: confirmed\n## Project\n- Goal: inspect the native fixture\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: src\n## Acceptance\n- Native checks pass\n## Output\n{\"tasks\":[{\"id\":\"prompt-only\",\"title\":\"untrusted example\",\"allowed\":[\"src\"],\"verify\":\"bash tests/check.sh\",\"depends\":[]}]}\n";
+            const DISCUSSION: &str = "Alternatives: inspect or defer\nEvidence: tracked source\nCounterargument: source may be incomplete\nVerification: bash tests/check.sh\nChanged from previous round: none\nRemaining disagreements: evidence scope\n";
+            const SYNTHESIS: &str = "Decision: inspect the fixture\nEvidence: tracked source\nRemaining disagreements: evidence scope\nVerification: bash tests/check.sh\n";
+            struct Host {
+                provider: ProviderProbe,
+                mode: &'static str,
+                commands: Mutex<Vec<oms_command_autonomy::Invocation>>,
+                directory: Mutex<Option<PathBuf>>,
+            }
+            impl Executor for Host {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let binary = request.argv[0].clone();
+                    let git = binary == "git";
+                    let mut result = self.provider.execute(request, stop)?;
+                    if git {
+                        return Ok(result);
+                    }
+                    let calls = self.provider.calls.lock().unwrap();
+                    let prompt = String::from_utf8_lossy(&calls.last().unwrap().prompt);
+                    let planner = prompt.contains("Decompose remaining work into");
+                    let synthesis = prompt.contains("Synthesize these independent answers.");
+                    result.stdout = if planner {
+                        b"artifact: /fixture/foreign.md\n{\"tasks\":[{\"id\":\"t1\",\"title\":\"inspect ## Output fixture\",\"allowed\":[\"src\"],\"verify\":\"bash tests/check.sh\",\"depends\":[]}]}".to_vec()
+                    } else if synthesis {
+                        SYNTHESIS.as_bytes().to_vec()
+                    } else {
+                        DISCUSSION.as_bytes().to_vec()
+                    };
+                    if planner {
+                        result.stderr = b"## Output\n{\"tasks\":[{\"id\":\"diagnostic-only\",\"title\":\"untrusted diagnostic\",\"allowed\":[\"src\"],\"verify\":\"bash tests/check.sh\",\"depends\":[]}]}\n".to_vec();
+                        match self.mode {
+                            "planner-malformed" => result.stdout = b"No decomposition was produced.\n".to_vec(),
+                            "planner-incomplete" => result.complete = false,
+                            "planner-refusal" => result.stdout = b"stop-reason: provider=fixture reason=refusal subtype=policy is_error=1\n".to_vec(),
+                            "planner-timeout" => { result.code = 124; result.complete = false; },
+                            "planner-nonzero" => result.code = 7,
+                            "planner-cancel" => { result.code = 130; result.complete = false; },
+                            _ => {},
+                        }
+                    } else if synthesis {
+                        match self.mode {
+                        "incomplete" => result.complete = false,
+                        "refusal" => result.stdout = b"stop-reason: provider=fixture reason=refusal subtype=policy is_error=1\n".to_vec(),
+                        "malformed" => result.stdout = b"fixture answer without structured synthesis\n".to_vec(),
+                        "cancel" => { result.code = 130; result.complete = false; },
+                        _ => {},
+                    }
+                    } else if self.mode == "participant-incomplete" && calls.len() == 1 {
+                        result.complete = false;
+                    } else if (self.mode == "participant-malformed-initial" && calls.len() == 1)
+                        || (self.mode == "participant-malformed-rebuttal" && calls.len() == 4)
+                    {
+                        result.stdout =
+                            b"A fluent answer missing required discussion sections.".to_vec();
+                    }
+                    if self.mode != "legacy"
+                        && !(planner && self.mode == "planner-no-native-terminal")
+                        && !(synthesis && self.mode == "synthesis-no-native-terminal")
+                    {
+                        result.stdout = native_provider_answer(&binary, &result.stdout);
+                    }
+                    Ok(result)
+                }
+            }
+            impl oms_command_plan::Services for Host {}
+            impl oms_command_autonomy::Services for Host {
+                fn resolve_route(
+                    &self,
+                    _: &Path,
+                    assignment: &serde_json::Value,
+                    role: &str,
+                    _: &AtomicBool,
+                ) -> oms_command_autonomy::Result<ModelRoute> {
+                    let route = oms_command_peer::providers::resolve_route(
+                        Path::new(SOURCE),
+                        value::text(assignment, "provider"),
+                        value::text(assignment, "model"),
+                        value::text(assignment, "reasoning_effort"),
+                        role,
+                    )
+                    .map_err(|e| oms_command_autonomy::Error::new(e.code, e.message))?;
+                    Ok(ModelRoute {
+                        provider: route.provider,
+                        model_class: "standard".into(),
+                        primary: route.model,
+                        fallback: value::text(assignment, "fallback_model").into(),
+                        effort: if route.effort.is_empty() {
+                            "auto".into()
+                        } else {
+                            route.effort
+                        },
+                        fallback_effort: "auto".into(),
+                    })
+                }
+                fn invoke(
+                    &self,
+                    command: &oms_command_autonomy::Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_autonomy::Result<oms_command_autonomy::CommandResult>
+                {
+                    assert!(["peer-ask", "agent-call"].contains(&command.tool.as_str()));
+                    self.commands.lock().unwrap().push(command.clone());
+                    if command.tool == "peer-ask" {
+                        // The production caller formerly forgot this flag, so a successful
+                        // real native council could never satisfy its own consumer.
+                        assert!(option_value(&command.args, "--synthesize").is_some());
+                        assert!(command.args.iter().any(|arg| arg == "--synthesis-json"));
+                        *self.directory.lock().unwrap() = Some(PathBuf::from(
+                            option_value(&command.args, "--artifact-dir").unwrap(),
+                        ));
+                    }
+                    let mut output = oms_command_peer::run_with_executor(
+                        &command.tool,
+                        &command.args,
+                        &command.cwd,
+                        Path::new(SOURCE),
+                        stop,
+                        self,
+                    );
+                    if command.tool == "peer-ask" && output.0 == 0 {
+                        if self.mode == "missing-report" {
+                            output.1 = b"synthesis: unbound.md\n".to_vec();
+                        } else if self.mode == "foreign-report" {
+                            let mut report = value::parse(&output.1).unwrap();
+                            report["prompt_sha256"] = "0".repeat(64).into();
+                            output.1 = value::pretty(&report).unwrap();
+                        }
+                    }
+                    if command.tool == "agent-call" && self.mode == "mutate-during-plan" {
+                        fs::write(
+                            self.directory
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .unwrap()
+                                .join("question.md"),
+                            b"changed question",
+                        )
+                        .unwrap();
+                    }
+                    Ok(output)
+                }
+            }
+            let preflight_repo = provider_repo();
+            let preflight_probe = ProviderProbe::default();
+            for synthesize in [false, true] {
+                let mut options = args(&[
+                    "--providers",
+                    "codex:model=first,codex:model=second",
+                    "--debate",
+                    "1",
+                    "--deliberation",
+                    "--require-complete",
+                    "--synthesis-json",
+                    "--prompt",
+                    "fixture question",
+                ]);
+                if synthesize {
+                    options.extend(args(&["--synthesize", "codex:model=first"]));
+                }
+                let output = oms_command_peer::run_with_executor(
+                    "peer-ask",
+                    &options,
+                    &preflight_repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    &preflight_probe,
+                );
+                assert_eq!(output.0, 2, "{}", message(&output));
+                assert!(preflight_probe.calls.lock().unwrap().is_empty());
+            }
+            let typed_council = |target: &str, host: &dyn Executor| {
+                oms_command_peer::run_with_executor(
+                    "peer-ask",
+                    &args(&[
+                        "--providers",
+                        "codex:model=first,claude:model=second,antigravity:model=third",
+                        "--reasoning-effort",
+                        "high",
+                        "--debate",
+                        "2",
+                        "--deliberation",
+                        "--require-complete",
+                        "--synthesis-json",
+                        "--synthesize",
+                        target,
+                        "--prompt",
+                        "fixture question",
+                    ]),
+                    &preflight_repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    host,
+                )
+            };
+            for (target, reason) in [
+                (
+                    "codex:model=provider-default",
+                    "exact synthesis target model",
+                ),
+                (
+                    "antigravity:model=gemini-pro-orchestrator-argon",
+                    "has fixed effort",
+                ),
+                (
+                    "codex:model=exact-synthesis:account=absent",
+                    "account is unavailable",
+                ),
+                (
+                    "pi:model=exact-synthesis",
+                    "cannot prove native output completion",
+                ),
+            ] {
+                let output = typed_council(target, &preflight_probe);
+                assert_eq!(output.0, 2, "{target}: {}", message(&output));
+                assert!(
+                    message(&output).contains(reason),
+                    "{target}: {}",
+                    message(&output)
+                );
+                assert!(preflight_probe.calls.lock().unwrap().is_empty());
+            }
+            for (mode, target, effort, count, expected) in [
+                ("ok", "codex:model=exact-synthesis", "high", 10, 0),
+                ("ok", "codex:effort=low:model=exact-synthesis", "low", 10, 0),
+                (
+                    "participant-malformed-rebuttal",
+                    "codex:model=exact-synthesis",
+                    "high",
+                    6,
+                    2,
+                ),
+            ] {
+                let host = Host {
+                    provider: ProviderProbe::default(),
+                    mode,
+                    commands: Mutex::new(Vec::new()),
+                    directory: Mutex::new(None),
+                };
+                let output = typed_council(target, &host);
+                assert_eq!(output.0, expected, "{mode}/{target}: {}", message(&output));
+                let calls = host.provider.calls.lock().unwrap();
+                assert_eq!(calls.len(), count);
+                if expected == 0 {
+                    let argv = &calls.last().unwrap().request.argv;
+                    assert_eq!(option_value(argv, "--model").unwrap(), "exact-synthesis");
+                    assert_eq!(
+                        option_value(argv, "-c").unwrap(),
+                        &OsString::from(format!("model_reasoning_effort=\"{effort}\""))
+                    );
+                }
+            }
+            let legacy = Host {
+                provider: ProviderProbe::default(),
+                mode: "legacy",
+                commands: Mutex::new(Vec::new()),
+                directory: Mutex::new(None),
+            };
+            let output = oms_command_peer::run_with_executor(
+                "agent-call",
+                &args(&[
+                    "--to",
+                    "codex",
+                    "--model",
+                    "gpt-5.6-sol",
+                    "--prompt",
+                    "Decompose remaining work into one fixture task",
+                ]),
+                &preflight_repo.0,
+                Path::new(SOURCE),
+                &STOP,
+                &legacy,
+            );
+            assert_eq!(output.0, 0, "{}", message(&output));
+            let text = String::from_utf8(output.1).unwrap();
+            assert!(text.contains("artifact: /fixture/foreign.md"));
+            assert!(text.lines().last().unwrap().starts_with(&format!(
+                "artifact: {}/.oms/artifacts/call/",
+                preflight_repo.0.display()
+            )));
+            for (mode, planner, model, expected) in [
+                ("ok", "codex", "gpt-5.6-sol", 0),
+                ("ok", "codex", "", 0),
+                ("ok", "claude", "claude-sonnet-5-5", 0),
+                ("ok", "antigravity", "gemini-pro-orchestrator-argon", 0),
+                ("participant-incomplete", "codex", "gpt-5.6-sol", 2),
+                ("participant-malformed-initial", "codex", "gpt-5.6-sol", 2),
+                ("participant-malformed-rebuttal", "codex", "gpt-5.6-sol", 2),
+                ("synthesis-no-native-terminal", "codex", "gpt-5.6-sol", 2),
+                ("incomplete", "codex", "gpt-5.6-sol", 2),
+                ("refusal", "codex", "gpt-5.6-sol", 2),
+                ("malformed", "codex", "gpt-5.6-sol", 2),
+                ("cancel", "codex", "gpt-5.6-sol", 130),
+                ("missing-report", "codex", "gpt-5.6-sol", 2),
+                ("foreign-report", "codex", "gpt-5.6-sol", 2),
+                ("mutate-during-plan", "codex", "gpt-5.6-sol", 2),
+                ("planner-malformed", "codex", "gpt-5.6-sol", 3),
+                ("planner-incomplete", "codex", "gpt-5.6-sol", 2),
+                ("planner-refusal", "codex", "gpt-5.6-sol", 2),
+                ("planner-timeout", "codex", "gpt-5.6-sol", 2),
+                ("planner-nonzero", "codex", "gpt-5.6-sol", 2),
+                ("planner-no-native-terminal", "codex", "gpt-5.6-sol", 2),
+                ("planner-cancel", "codex", "gpt-5.6-sol", 130),
+            ] {
+                let repo = provider_repo();
+                repo.git(&["branch", "-M", "main"]);
+                repo.write(".git/info/exclude", ".oms/\n");
+                repo.write("PROJECT.md", SPEC);
+                repo.write("tests/check.sh", "exit 1\n");
+                repo.write("src/lib.rs", "pub fn fixture() {}\n");
+                repo.git(&["add", "PROJECT.md", "tests", "src"]);
+                repo.git(&[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "contract",
+                ]);
+                let host = Host {
+                    provider: ProviderProbe::default(),
+                    mode,
+                    commands: Mutex::new(Vec::new()),
+                    directory: Mutex::new(None),
+                };
+                let mut options = args(&[
+                    "--collaboration",
+                    "auto",
+                    "--to",
+                    planner,
+                    "--worker-provider",
+                    "antigravity",
+                    "--reasoning-effort",
+                    "auto",
+                ]);
+                if !model.is_empty() {
+                    options.extend(args(&["--model", model]));
+                }
+                let expected_route = oms_command_peer::providers::resolve_route(
+                    Path::new(SOURCE),
+                    planner,
+                    model,
+                    "auto",
+                    "advisor",
+                )
+                .unwrap();
+                let output = oms_command_autonomy::run_with_services(
+                    "plan-from-spec",
+                    &options,
+                    &repo.0,
+                    &STOP,
+                    &host,
+                );
+                assert_eq!(output.0, expected, "{mode}/{planner}: {}", message(&output));
+                let commands = host.commands.lock().unwrap();
+                let planned = commands.iter().filter(|c| c.tool == "agent-call").count();
+                assert_eq!(
+                    planned,
+                    usize::from(
+                        ["ok", "mutate-during-plan"].contains(&mode)
+                            || mode.starts_with("planner-")
+                    ),
+                    "{mode}"
+                );
+                let calls = host.provider.calls.lock().unwrap().len();
+                match mode {
+                    "participant-incomplete" | "participant-malformed-initial" => {
+                        assert_eq!(calls, 3)
+                    }
+                    "participant-malformed-rebuttal" => assert_eq!(calls, 6),
+                    _ => {}
+                }
+                let council = &commands[0];
+                let target = option_value(&council.args, "--synthesize")
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert!(
+                    target.starts_with(&format!("{planner}:effort="))
+                        && target.ends_with(&format!(":model={}", expected_route.model)),
+                    "{target}"
+                );
+                assert!(
+                    option_value(&council.args, "--reasoning-effort").is_none(),
+                    "planner effort must not override all seats"
+                );
+                drop(commands);
+                assert!(
+                    !repo.0.join(".oms/plan/tasks.json").exists(),
+                    "generation grants no Plan authority"
+                );
+                let proposals = fs::read_dir(repo.0.join(".oms/plan"))
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with("proposal-"))
+                    .map(|entry| entry.path())
+                    .collect::<Vec<_>>();
+                assert_eq!(proposals.len(), usize::from(mode == "ok"), "{mode}");
+                if mode != "ok" {
+                    continue;
+                }
+                assert_eq!(host.provider.calls.lock().unwrap().len(), 8);
+                let path = &proposals[0];
+                let raw = fs::read(path).unwrap();
+                let proposal = value::parse(&raw).unwrap();
+                assert_eq!(proposal["tasks"][0]["title"], "inspect ## Output fixture");
+                let digest = value::hash(&raw);
+                let reference = &proposal["discussion"];
+                let manifest =
+                    value::parse(&fs::read(repo.0.join(value::text(reference, "path"))).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    manifest["report"]["participants"].as_array().unwrap().len(),
+                    6
+                );
+                assert_eq!(
+                    manifest["report"]["synthesis"]["requested_model"],
+                    expected_route.model
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.1)
+                        .contains(value::text(&manifest["report"], "run"))
+                );
+                let apply = || {
+                    oms_command_autonomy::run_with_services(
+                        "plan-from-spec",
+                        &args(&[
+                            "--apply",
+                            path.to_str().unwrap(),
+                            "--expected-proposal-sha256",
+                            &digest,
+                            "--collaboration",
+                            "auto",
+                            "--worker-provider",
+                            "antigravity",
+                        ]),
+                        &repo.0,
+                        &STOP,
+                        &host,
+                    )
+                };
+                let applied = apply();
+                assert_eq!(applied.0, 0, "{}", message(&applied));
+                assert_eq!(apply().0, 0, "idempotent replay");
+                let plan =
+                    value::parse(&fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+                assert_eq!(&plan["tasks"]["t1"]["discussion"], reference);
+                assert_eq!(
+                    host.provider.calls.lock().unwrap().len(),
+                    8,
+                    "apply/replay must not rerun the council"
+                );
+                if planner != "codex" || model.is_empty() {
+                    continue;
+                }
+                let direct = |file: &str, sha: &str| {
+                    oms_command_plan::run_with_services(
+                        &args(&[
+                            "apply-proposal",
+                            "--proposal",
+                            file,
+                            "--expected-proposal-sha256",
+                            sha,
+                            "--expected-plan-sha256",
+                            "absent",
+                            "--goal",
+                            "inspect the native fixture",
+                            "--accept",
+                            "bash tests/check.sh",
+                            "--accept-files",
+                            "tests/check.sh",
+                            "--allowed-envelope",
+                            "src",
+                        ]),
+                        &repo.0,
+                        &STOP,
+                        &host,
+                    )
+                };
+                assert_eq!(direct(path.to_str().unwrap(), &digest).0, 0);
+                let duplicate = String::from_utf8(raw.clone()).unwrap().replacen(
+                    "\"schema\": 1",
+                    "\"schema\": 1, \"schema\": 1",
+                    1,
+                );
+                repo.write(".oms/plan/duplicate.json", &duplicate);
+                assert_eq!(
+                    direct(".oms/plan/duplicate.json", &value::hash(&duplicate)).0,
+                    2
+                );
+                let mut omitted = proposal.clone();
+                omitted.as_object_mut().unwrap().remove("discussion");
+                let omitted = value::pretty(&omitted).unwrap();
+                repo.write(".oms/plan/omitted.json", &omitted);
+                assert_eq!(
+                    direct(".oms/plan/omitted.json", &value::hash(&omitted)).0,
+                    2,
+                    "replay cannot lose its retained discussion"
+                );
+                let plan_before = fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap();
+                let calls_before = host.provider.calls.lock().unwrap().len();
+                let catalog = Path::new(value::text(reference, "path")).parent().unwrap();
+                for (name, edit) in [
+                    ("underquorum", ("providers", serde_json::json!(["codex"]))),
+                    ("wrongrounds", ("rounds", serde_json::json!(2))),
+                ] {
+                    let mut pinned = manifest.clone();
+                    pinned[edit.0] = edit.1;
+                    let bytes = value::pretty(&pinned).unwrap();
+                    let sha = value::hash(&bytes);
+                    let retained = catalog.join(format!("{sha}.json"));
+                    repo.write(retained.to_str().unwrap(), &bytes);
+                    let mut rewired = proposal.clone();
+                    rewired["discussion"] =
+                        serde_json::json!({"path": retained.to_str().unwrap(), "sha256": sha});
+                    let rewired = value::pretty(&rewired).unwrap();
+                    repo.write(&format!(".oms/plan/{name}.json"), &rewired);
+                    let result = direct(&format!(".oms/plan/{name}.json"), &value::hash(&rewired));
+                    assert_eq!(result.0, 2, "{name}: {}", message(&result));
+                    assert!(
+                        message(&result).contains(
+                            "discussion council differs from the automatic planning quorum"
+                        ),
+                        "{name}: {}",
+                        message(&result)
+                    );
+                }
+                assert_eq!(
+                    fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap(),
+                    plan_before,
+                    "rejected quorum must not mutate the plan"
+                );
+                assert_eq!(host.provider.calls.lock().unwrap().len(), calls_before);
+                let route = serde_json::json!({"model": "fixture-model", "fallback_model": "", "reasoning_effort": "auto", "timeout": "1s"});
+                let mut planner_route = route.clone();
+                planner_route["model"] = expected_route.model.as_str().into();
+                planner_route["reasoning_effort"] = if expected_route.effort.is_empty() {
+                    "auto"
+                } else {
+                    expected_route.effort.as_str()
+                }
+                .into();
+                let receipt = serde_json::json!({"schema":1,"kind":"autopilot-run","stage":"proposal-review","repo":repo.0,"spec_sha256":proposal["spec_sha256"],"providers":{"planner":planner,"worker":"antigravity","reviewer":"claude"},"routing":{"provider_timeout":"1s","planner":planner_route,"worker":route,"reviewer":route},"contract":{"allowed":"src","base":"main","base_sha":proposal["base_sha"],"remote":"origin","max_cycles":1,"initial_tasks":1,"replan_tasks":1,"auto_repair":false,"retry_known":false,"review_mode":"gate","draft_pr":false,"allow_verifier_change":false,"allow_floor_change":"","collaboration":"auto"},"proposal":{"path":path,"sha256":digest},"branch":format!("oms/autopilot-{}", &value::text(&proposal, "spec_sha256")[..12]),"owner_id":format!("owner_{}","a".repeat(32)),"updated":value::now()});
+                oms_command_autonomy::receipt::validate(&receipt).unwrap();
+                repo.write(
+                    ".oms/plan/autopilot-run.json",
+                    value::pretty(&receipt).unwrap(),
+                );
+                let resume = || {
+                    oms_command_autonomy::run_with_services(
+                        "autopilot",
+                        &args(&["run"]),
+                        &repo.0,
+                        &STOP,
+                        &host,
+                    )
+                };
+                assert!(message(&resume()).contains("parent proposal review required"));
+                let artifact = host
+                    .directory
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .join(value::text(&manifest["report"]["synthesis"], "artifact"));
+                let original = fs::read(&artifact).unwrap();
+                fs::write(&artifact, b"changed synthesis").unwrap();
+                assert_eq!(apply().0, 2);
+                assert_eq!(direct(path.to_str().unwrap(), &digest).0, 2);
+                assert!(message(&resume()).contains("native artifact bytes changed"));
+                fs::write(&artifact, original).unwrap();
+                assert_eq!(host.provider.calls.lock().unwrap().len(), 8);
+            }
+        },
+    );
+}
+
 #[test]
 fn council_seat_publication_stops_after_thread_append_failure() {
     provider_isolated_with_env(

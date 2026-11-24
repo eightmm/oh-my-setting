@@ -150,10 +150,12 @@ or unclear-failure work and low for mechanical edits, within the model's scale.
 8. The owner still admits patches and runs mechanical verification. Agreement
    is evidence, not a pass condition.
 
-`autopilot --collaboration auto` narrows this generic router to GPT-6 and Claude
-for decomposition, workers and reviewers; its planning council keeps the
-`oms panel --council` seats, Antigravity included. Codex defaults are pinned
-before catalog recovery, older explicit models and
-fallbacks are rejected, and reviewed Codex assignments require an exact Astra,
-Sol or Luna model. Claude follows the existing registry. This restriction is
-scoped to that campaign; it does not configure native Codex app subagents.
+`autopilot --collaboration auto` uses this generic router for decomposition,
+workers and reviewers, with no extra GPT-generation name allowlist. It freezes
+resolved model/effort routes, preserves explicit selections and still requires
+actual transport capabilities. The current fixed planning council is Codex,
+Claude and Antigravity. Its synthesis uses the planner's resolved advisor route;
+other seats keep their own routes. One implementation transport and a different
+gated reviewer remain required. Requested model metadata is not evidence of the
+served model or independent reasoning. This does not configure native app
+subagents or expand a provider's supported access mode.

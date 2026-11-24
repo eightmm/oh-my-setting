@@ -13,6 +13,7 @@ mod cli;
 pub mod completion;
 mod contracts;
 pub mod decision;
+pub mod discussion;
 mod engine;
 pub mod floor;
 pub mod json;

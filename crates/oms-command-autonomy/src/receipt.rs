@@ -189,8 +189,6 @@ pub fn validate(row: &Value) -> Result<()> {
             && value::commit(value::text(contract, "base_sha")),
         "invalid review base/remote binding",
     )?;
-    let codex_model_re =
-        regex::Regex::new(r"^gpt-([0-9]+)(?:\.[0-9]+)?-(?:astra|sol|terra|luna)$").unwrap();
     value::integer(&contract["max_cycles"], 1, 10, "max cycles")?;
     value::integer(&contract["initial_tasks"], 1, 12, "initial tasks")?;
     value::integer(&contract["replan_tasks"], 1, 2, "replan tasks")?;
@@ -221,25 +219,10 @@ pub fn validate(row: &Value) -> Result<()> {
             "auto collaboration requires gated independent review",
         )?;
         for role in ["planner", "worker", "reviewer"] {
-            let provider = value::text(&row["providers"], role);
             require(
-                ["codex", "claude"].contains(&provider),
-                "auto collaboration requires codex/claude transports",
+                !value::text(&row["routing"][role], "model").is_empty(),
+                "auto collaboration requires resolved model routes",
             )?;
-            if provider == "codex" {
-                for field in ["model", "fallback_model"] {
-                    let model = value::text(&row["routing"][role], field);
-                    if field == "model" || !model.is_empty() {
-                        require(
-                            codex_model_re
-                                .captures(model)
-                                .and_then(|c| c[1].parse::<u64>().ok())
-                                .is_some_and(|n| n >= 6),
-                            "auto collaboration requires GPT-6 or newer Codex routes",
-                        )?;
-                    }
-                }
-            }
         }
     }
     value::keys(&row["proposal"], &["path", "sha256"], &[])?;
@@ -343,6 +326,79 @@ fn base(ctx: &Context<'_>, remote: &str, branch: &str) -> Result<String> {
         "cannot resolve review base to a local commit",
     ))
 }
+fn validate_bound_proposal(ctx: &Context<'_>, row: &Value, proposal: &Value) -> Result<()> {
+    let contract = &row["contract"];
+    if contract["collaboration"] != "auto" {
+        return planning::validate_discussion(ctx, proposal, None);
+    }
+    planning::validate_discussion(
+        ctx,
+        proposal,
+        Some((
+            value::text(&row["providers"], "planner"),
+            value::text(&row["routing"]["planner"], "model"),
+        )),
+    )?;
+    let allowed = envelope(value::text(contract, "allowed"))?;
+    require(
+        proposal["spec_sha256"] == row["spec_sha256"]
+            && planning::strings(&proposal["allowed_envelope"])? == allowed,
+        "reviewed proposal differs from frozen spec or envelope",
+    )?;
+    let proposal_head = value::text(proposal, "base_sha");
+    require(
+        value::commit(proposal_head),
+        "reviewed proposal base must be a full commit",
+    )?;
+    let base = value::text(contract, "base_sha");
+    let plan = ctx.plan()?;
+    if proposal_head != base {
+        require(
+            value::text(proposal, "id_prefix") == "r1-"
+                && ctx
+                    .rows(".oms/plan/autopilot-replans.jsonl")?
+                    .iter()
+                    .any(|reservation| {
+                        reservation["kind"] == "autopilot-replan-reserved"
+                            && reservation["owner_id"] == row["owner_id"]
+                    }),
+            "reviewed proposal differs from frozen base",
+        )?;
+        plan.git().ancestor(base, proposal_head)?;
+    }
+    plan.git().ancestor(proposal_head, "HEAD")?;
+
+    if matches!(value::text(row, "stage"), "proposing" | "proposal-review") {
+        let current = plan.load()?;
+        let current_sha = current
+            .raw
+            .as_ref()
+            .map(value::hash)
+            .unwrap_or_else(|| "absent".into());
+        if proposal["plan_sha256"] == current_sha {
+            require(
+                proposal_head == ctx.git(&["rev-parse", "HEAD"])?,
+                "proposal base differs from HEAD",
+            )?;
+        } else {
+            let reference = value::plan(&proposal["discussion"])?;
+            let replay = proposal["tasks"].as_array().is_some_and(|tasks| {
+                !tasks.is_empty()
+                    && tasks.iter().all(|task| {
+                        current
+                            .task(value::text(task, "id"))
+                            .is_ok_and(|applied| applied.opt("discussion") == Some(&reference))
+                    })
+            });
+            require(
+                replay,
+                "plan changed after proposal generation; propose again",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn live(ctx: &Context<'_>, row: &Value) -> Result<()> {
     validate(row)?;
     require(
@@ -383,10 +439,12 @@ pub(crate) fn live(ctx: &Context<'_>, row: &Value) -> Result<()> {
             Path::new(path).parent() == Some(ctx.state.join(".oms/plan").as_path()),
             "approved proposal is outside private plan directory",
         )?;
+        let raw = ctx.store.read(path, MAX_FILE)?;
         require(
-            value::hash(ctx.store.read(path, MAX_FILE)?) == value::text(&row["proposal"], "sha256"),
+            value::hash(&raw) == value::text(&row["proposal"], "sha256"),
             "approved proposal digest changed",
         )?;
+        validate_bound_proposal(ctx, row, &value::parse(&raw)?)?;
     }
     Ok(())
 }
@@ -990,19 +1048,19 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
             ("worker", &worker),
             ("reviewer", &reviewer),
         ] {
-            if value::text(&routing[role], "model").is_empty() {
-                let assignment = json!({"provider": provider, "model": "", "fallback_model": value::text(&routing[role], "fallback_model"), "reasoning_effort": value::text(&routing[role], "reasoning_effort"), "workload": "standard"});
-                let resolved =
-                    ctx.services
-                        .resolve_route(&ctx.repo, &assignment, role, ctx.interrupted)?;
-                require(
-                    &resolved.provider == provider,
-                    "model resolver changed frozen provider",
-                )?;
-                routing[role]["model"] = resolved.primary.into();
-                routing[role]["fallback_model"] = resolved.fallback.into();
-                routing[role]["reasoning_effort"] = resolved.effort.into();
-            }
+            let requested = value::text(&routing[role], "model");
+            let assignment = json!({"provider": provider, "model": requested, "fallback_model": value::text(&routing[role], "fallback_model"), "reasoning_effort": value::text(&routing[role], "reasoning_effort"), "workload": "standard"});
+            let resolved =
+                ctx.services
+                    .resolve_route(&ctx.repo, &assignment, role, ctx.interrupted)?;
+            require(
+                &resolved.provider == provider
+                    && (requested.is_empty() || resolved.primary == requested),
+                "model resolver changed frozen provider or explicit model",
+            )?;
+            routing[role]["model"] = resolved.primary.into();
+            routing[role]["fallback_model"] = resolved.fallback.into();
+            routing[role]["reasoning_effort"] = resolved.effort.into();
         }
     }
     let allowed = if args.has("allowed") {
@@ -1200,9 +1258,11 @@ fn propose(
     let path = path.to_owned();
     let bytes = ctx.store.read(&path, MAX_FILE)?;
     let sha = value::hash(&bytes);
+    let proposal = value::parse(&bytes)?;
+    validate_bound_proposal(ctx, row, &proposal)?;
     row["stage"] = "proposal-review".into();
     row["proposal"] = json!({"path": path, "sha256": sha});
-    let blocked = mark_issue(ctx, row, &value::parse(&bytes)?)?;
+    let blocked = mark_issue(ctx, row, &proposal)?;
     save(ctx, row, Some(raw))?;
     out.code = 4;
     if blocked {
@@ -1506,6 +1566,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             let proposal = value::parse(&reviewed)?;
             let spec = planning::contract(ctx)?;
             planning::validate(ctx, &proposal, &spec, 12)?;
+            validate_bound_proposal(ctx, &fresh, &proposal)?;
             require(
                 envelope(value::text(&fresh["contract"], "allowed"))?
                     == planning::strings(&proposal["allowed_envelope"])?,
