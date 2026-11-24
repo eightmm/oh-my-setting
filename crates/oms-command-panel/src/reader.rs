@@ -939,19 +939,21 @@ fn append_transcript_for_target(
         if let Some((source, read)) = read_dispatch_transcript(repo, &candidate, *remaining_budget)
         {
             *remaining_budget = remaining_budget.saturating_sub(read.bytes_read);
-            let (formatted, heading, empty_note) = match source {
+            let (safe, heading, empty_note) = match source {
                 TranscriptSource::DispatchLog => (
-                    format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?,
+                    oms_panel_core::redact(
+                        format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?
+                            .as_bytes(),
+                    )?,
                     format!("{prefix} {label}"),
                     "No transcript events recorded",
                 ),
                 TranscriptSource::DispatchReport => (
-                    format_report_bytes(&read.bytes, read.truncated, read.budget_limited),
+                    format_report_bytes(&read.bytes, read.truncated, read.budget_limited)?,
                     format!("{prefix} {label} · dispatch report"),
                     "No dispatch report content recorded",
                 ),
             };
-            let safe = oms_panel_core::redact(formatted.as_bytes())?;
             items.push(TextItem::Line(heading));
             if safe.trim().is_empty() {
                 items.push(TextItem::Line(empty_note.into()));
@@ -1289,8 +1291,24 @@ fn read_dispatch_transcript(
     }
 }
 
-fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> String {
+fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> Result<String> {
     let raw = String::from_utf8_lossy(bytes);
+    let kept: Vec<&str> = raw.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let body = kept.join("\n");
+    // A tail cut can drop a key block's BEGIN line. Delegate marker recognition
+    // to oms_scrub so redaction visibly covers the cut block instead of dropping lines.
+    let redact_input =
+        if truncated && oms_scrub::first_unpaired_key_end_line(body.as_bytes()).is_some() {
+            format!("{}\n{body}", concat!("-----", "BEGIN PRIVATE KEY-----"))
+        } else {
+            body.clone()
+        };
+    let safe = oms_panel_core::redact(redact_input.as_bytes())?;
+    let safe_body = if !body.ends_with('\n') {
+        safe.strip_suffix('\n').unwrap_or(&safe)
+    } else {
+        &safe
+    };
     let mut lines: Vec<String> = Vec::new();
     if truncated {
         lines.push(
@@ -1302,19 +1320,10 @@ fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> S
             .into(),
         );
     }
-    let mut kept: Vec<&str> = raw.lines().map(|l| l.trim_end_matches('\r')).collect();
-    // A tail cut can drop a PEM block's BEGIN line, and redaction only matches whole
-    // blocks, so drop everything through an END line that has no BEGIN before it.
-    if truncated
-        && let Some(end) = kept.iter().position(|l| l.contains("-----END "))
-        && !kept[..end]
-            .iter()
-            .any(|l| l.contains(concat!("-----", "BEGIN ")))
-    {
-        kept.drain(..=end);
+    if !safe_body.is_empty() {
+        lines.push(safe_body.to_owned());
     }
-    lines.extend(kept.into_iter().map(str::to_owned));
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn transcript_value_text(value: &Value) -> String {
@@ -2783,20 +2792,27 @@ mod tests {
             budgeted.contains("REPORT2_TAIL"),
             "att-r2 tail should be retained:\n{budgeted}"
         );
-        // A tail cut inside a PEM block must not show the body whose BEGIN line was dropped.
+        // A tail cut inside a PEM block must visibly redact the body whose BEGIN line was dropped.
         let dashes = "-".repeat(5);
         let cut = format!(
             "KEYBODY_LINE\n{dashes}END {}{dashes}\nAFTER_KEY",
             ["PRIVATE", "KEY"].join(" ")
         );
-        let shown = format_report_bytes(cut.as_bytes(), true, true);
+        let shown = format_report_bytes(cut.as_bytes(), true, true).unwrap();
         assert!(!shown.contains("KEYBODY_LINE"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
         assert!(shown.contains("AFTER_KEY"), "{shown}");
-        assert!(format_report_bytes(cut.as_bytes(), false, false).contains("KEYBODY_LINE"));
-        let indented = cut.replace('\n', "\n    > ");
-        let shown = format_report_bytes(indented.as_bytes(), true, true);
         assert!(
-            !shown.contains("KEYBODY_LINE") && shown.contains("AFTER_KEY"),
+            format_report_bytes(cut.as_bytes(), false, false)
+                .unwrap()
+                .contains("KEYBODY_LINE")
+        );
+        let indented = cut.replace('\n', "\n    > ");
+        let shown = format_report_bytes(indented.as_bytes(), true, true).unwrap();
+        assert!(
+            !shown.contains("KEYBODY_LINE")
+                && shown.contains("[oms-redacted:private-key]")
+                && shown.contains("AFTER_KEY"),
             "{shown}"
         );
         assert!(
@@ -2810,6 +2826,220 @@ mod tests {
         assert!(
             !budgeted.contains("REPORT3_NEVER_READ_"),
             "att-r3 must not be read after budget exhaustion:\n{budgeted}"
+        );
+    }
+
+    #[test]
+    fn truncated_report_key_marker_redaction_uses_oms_scrub() {
+        let begin_u = concat!("-----", "BEGIN");
+        let begin_l = concat!("-----", "begin");
+        let end_u = concat!("-----", "END");
+        let end_l = concat!("-----", "end");
+
+        // END without trailing space must be visibly redacted, never leak body.
+        let no_space = format!("KEYBODY_NOSPACE\n{end_u}-----\nAFTER_NOSPACE");
+        let shown = format_report_bytes(no_space.as_bytes(), true, true).unwrap();
+        assert!(shown.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE), "{shown}");
+        assert!(!shown.contains("KEYBODY_NOSPACE"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_NOSPACE"), "{shown}");
+
+        // Lowercase END in cut block must be visibly redacted and keep trailing lines.
+        let lower_cut = format!("KEYBODY_LOWER\n{end_l} private key-----\nAFTER_LOWER");
+        let shown = format_report_bytes(lower_cut.as_bytes(), true, false).unwrap();
+        assert!(shown.contains(TRANSCRIPT_TRUNCATED_NOTE), "{shown}");
+        assert!(!shown.contains("KEYBODY_LOWER"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_LOWER"), "{shown}");
+
+        // Lowercase intact block in truncated report keeps sections before and after.
+        let lower_intact = format!(
+            "BEFORE_LOWER\n{begin_l} private key-----\nSECRET_LOWER\n{end_l} private key-----\nAFTER_LOWER"
+        );
+        let shown = format_report_bytes(lower_intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("BEFORE_LOWER"), "{shown}");
+        assert!(!shown.contains("SECRET_LOWER"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_LOWER"), "{shown}");
+
+        // Mixed-case BEGIN + uppercase END keeps preceding sections.
+        let mixed_intact = format!(
+            "BEFORE_MIXED\n{begin_l} private key-----\nSECRET_MIXED\n{end_u} PRIVATE KEY-----\nAFTER_MIXED"
+        );
+        let shown = format_report_bytes(mixed_intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("BEFORE_MIXED"), "{shown}");
+        assert!(!shown.contains("SECRET_MIXED"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_MIXED"), "{shown}");
+
+        // Single-line BEGIN+END pair on the END line keeps sections before and after.
+        let single_line = format!(
+            "SECTION_BEFORE\n{begin_u} PRIVATE KEY----- INLINE_SECRET {end_u} PRIVATE KEY-----\nSECTION_AFTER"
+        );
+        let shown = format_report_bytes(single_line.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("SECTION_BEFORE"), "{shown}");
+        assert!(!shown.contains("INLINE_SECRET"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("SECTION_AFTER"), "{shown}");
+
+        // Unpaired END in prose after normal sections is visibly redacted when truncated
+        // (never silently dropped) and preserved verbatim when untruncated.
+        let prose = format!(
+            "## Summary\nNormal section\nQuoted {end_u} PRIVATE KEY----- in prose\n## Exit\n0"
+        );
+        let shown_trunc = format_report_bytes(prose.as_bytes(), true, true).unwrap();
+        assert!(
+            shown_trunc.contains("[oms-redacted:private-key]"),
+            "{shown_trunc}"
+        );
+        assert!(shown_trunc.contains("## Exit"), "{shown_trunc}");
+        let shown_full = format_report_bytes(prose.as_bytes(), false, false).unwrap();
+        assert!(shown_full.contains("## Summary"), "{shown_full}");
+        assert!(shown_full.contains("Normal section"), "{shown_full}");
+        assert!(shown_full.contains("## Exit"), "{shown_full}");
+        assert!(
+            !shown_full.contains("[oms-redacted:"),
+            "untruncated report should not redact unpaired END:\n{shown_full}"
+        );
+
+        // Intact BEGIN..END block in a truncated report preserves preceding and following text.
+        let intact = format!(
+            "NORMAL_BEFORE\n{begin_u} PRIVATE KEY-----\nINTACT_SECRET\n{end_u} PRIVATE KEY-----\nNORMAL_AFTER"
+        );
+        let shown = format_report_bytes(intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("NORMAL_BEFORE"), "{shown}");
+        assert!(!shown.contains("INTACT_SECRET"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("NORMAL_AFTER"), "{shown}");
+
+        // BEGIN kept but END cut hides body through EOF while keeping preceding text.
+        let unclosed =
+            format!("KEEP_BEFORE\n{begin_u} PRIVATE KEY-----\nUNCLOSED_BODY_1\nUNCLOSED_BODY_2");
+        let shown = format_report_bytes(unclosed.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("KEEP_BEFORE"), "{shown}");
+        assert!(!shown.contains("UNCLOSED_BODY_1"), "{shown}");
+        assert!(!shown.contains("UNCLOSED_BODY_2"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+
+        // CRLF line endings for both cut and intact blocks.
+        let crlf_cut = format!("CRLF_BODY\r\n{end_u} PRIVATE KEY-----\r\nCRLF_AFTER\r\n");
+        let shown = format_report_bytes(crlf_cut.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains('\r'), "{shown:?}");
+        assert!(!shown.contains("CRLF_BODY"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("CRLF_AFTER"), "{shown}");
+
+        let crlf_intact = format!(
+            "CRLF_BEFORE\r\n{begin_u} PRIVATE KEY-----\r\nCRLF_SECRET\r\n{end_u} PRIVATE KEY-----\r\nCRLF_AFTER\r\n"
+        );
+        let shown = format_report_bytes(crlf_intact.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains('\r'), "{shown:?}");
+        assert!(shown.contains("CRLF_BEFORE"), "{shown}");
+        assert!(!shown.contains("CRLF_SECRET"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("CRLF_AFTER"), "{shown}");
+
+        // Multiple blocks: cut first block + intact second block.
+        let multi_cut_then_intact = format!(
+            "CUT_BODY_1\n{end_u} PRIVATE KEY-----\nBETWEEN_BLOCKS\n{begin_u} RSA PRIVATE KEY-----\nINTACT_BODY_2\n{end_u} RSA PRIVATE KEY-----\nAFTER_ALL"
+        );
+        let shown = format_report_bytes(multi_cut_then_intact.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains("CUT_BODY_1"), "{shown}");
+        assert!(shown.contains("BETWEEN_BLOCKS"), "{shown}");
+        assert!(!shown.contains("INTACT_BODY_2"), "{shown}");
+        assert!(shown.contains("AFTER_ALL"), "{shown}");
+        assert_eq!(
+            shown.matches("[oms-redacted:private-key]").count(),
+            2,
+            "{shown}"
+        );
+
+        // Multiple blocks: two intact blocks keep surrounding sections.
+        let multi_intact = format!(
+            "START_TEXT\n{begin_u} PRIVATE KEY-----\nB1\n{end_u} PRIVATE KEY-----\nMID_TEXT\n{begin_u} PRIVATE KEY-----\nB2\n{end_u} PRIVATE KEY-----\nEND_TEXT"
+        );
+        let shown = format_report_bytes(multi_intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("START_TEXT"), "{shown}");
+        assert!(shown.contains("MID_TEXT"), "{shown}");
+        assert!(shown.contains("END_TEXT"), "{shown}");
+        assert!(
+            !shown.contains("\nB1\n") && !shown.contains("\nB2\n"),
+            "{shown}"
+        );
+        assert_eq!(
+            shown.matches("[oms-redacted:private-key]").count(),
+            2,
+            "{shown}"
+        );
+
+        // Multiple blocks: cut first block + unclosed second block.
+        let multi_cut_then_unclosed = format!(
+            "CUT_BODY_1\n{end_u}-----\nMID_VISIBLE\n{begin_u} PRIVATE KEY-----\nUNCLOSED_BODY_2"
+        );
+        let shown = format_report_bytes(multi_cut_then_unclosed.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains("CUT_BODY_1"), "{shown}");
+        assert!(shown.contains("MID_VISIBLE"), "{shown}");
+        assert!(!shown.contains("UNCLOSED_BODY_2"), "{shown}");
+        assert_eq!(
+            shown.matches("[oms-redacted:private-key]").count(),
+            2,
+            "{shown}"
+        );
+
+        // End-to-end load_transcript_items path with a budget-truncated dispatch report on disk.
+        let repo = TempRepo::new("transcript-truncated-pem-e2e");
+        let delegate_dir = repo.0.join(".oms/artifacts/delegate");
+        std::fs::create_dir_all(&delegate_dir).unwrap();
+        std::fs::set_permissions(&delegate_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let head = format!(
+            "# Report\n{}\n{begin_u} PRIVATE KEY-----\nEARLY_KEY_LINE_{}\n",
+            "h".repeat(120),
+            "k".repeat(80)
+        );
+        let tail = format!(
+            "CUT_KEY_BODY_SECRET\n{end_l}-----\nVISIBLE_BETWEEN\n{begin_u} PRIVATE KEY-----\nSECOND_SECRET\n{end_u} PRIVATE KEY-----\nVISIBLE_END\n"
+        );
+        let full_report = format!("{head}{tail}");
+        let report_path = delegate_dir.join("cut-key.md");
+        std::fs::write(&report_path, full_report.as_bytes()).unwrap();
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let report_doc = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [{
+                    "attempt_id": "att-cut-key",
+                    "artifact": ".oms/artifacts/delegate/cut-key.md",
+                    "artifact_sha256": oms_panel_core::digest(full_report.as_bytes()),
+                }]
+            }]
+        });
+
+        // Pick a budget that lands inside EARLY_KEY_LINE so read_confined_file drops
+        // through the newline right before CUT_KEY_BODY_SECRET (dropping BEGIN).
+        let budget = tail.len() + 24;
+        let items = load_transcript_items(&repo.0, &report_doc, budget).unwrap();
+        let rendered = render_text_items(&items, View::Transcript, 120).join("\n");
+        assert!(
+            rendered.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("CUT_KEY_BODY_SECRET"),
+            "cut key body leaked:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("SECOND_SECRET"),
+            "second key body leaked:\n{rendered}"
+        );
+        assert!(rendered.contains("VISIBLE_BETWEEN"), "{rendered}");
+        assert!(rendered.contains("VISIBLE_END"), "{rendered}");
+        assert_eq!(
+            rendered.matches("[oms-redacted:private-key]").count(),
+            2,
+            "expected both cut and intact blocks to show redaction placeholders:\n{rendered}"
         );
     }
 }
