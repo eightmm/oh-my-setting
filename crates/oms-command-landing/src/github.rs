@@ -43,7 +43,7 @@ const DECLARE: &str = "project mode is not active: requires PROJECT.md or a comm
 const RUN_REFRESH: &str =
     "cached pull request state is stale or unavailable; run `oms github refresh --pull REF`";
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Issue,
     Pull,
@@ -81,6 +81,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "inventory",
             "cursor",
             "project-id",
+            "drift",
         ],
         "refresh" => &["repo", "issue", "pull", "linked", "ttl-s"],
         "adopt-merged" => &["repo", "limit", "apply", "expected-sha256", "ttl-s"],
