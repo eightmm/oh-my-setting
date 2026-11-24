@@ -211,9 +211,9 @@ chat. `oms_start_status` looks up the original project and request UUID.
 while launch remains unconfirmed. `recorded` returns the matching attempt
 and its state.
 
-The panel below uses seeded project data.
+This overview shows the OMS checkout’s Git-tracked directories in a 570-pixel Chromium test host. The compact preview ends before the project goal.
 
-![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
+![OMS overview showing the crates, scripts and docs directories and project exploration controls](assets/oms-chat-panel.png)
 
 In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
 to ask one Claude or AGY researcher a question. Submitting the form invokes the
@@ -245,8 +245,8 @@ Text clients can request the same pages with `oms_panel_tui_view`, a registered 
 
 ### Claude and Antigravity
 
-The cross-host connection serves the same OMS panel and seven read-only tools.
-Choose a registered project to inspect progress, Git and GitHub work, usage,
+The cross-host connection serves the same OMS panel and project-scoped read-only tools.
+Choose a registered project to inspect its graph, progress, Git and GitHub work, usage,
 a Board view, or the execution host’s command catalog. `oms_panel_capabilities`
 lists the names and descriptions from `oms list --all`. When it returns
 `nextOffset`, pass that value as `offset` on the same project to continue. A host that supports sending a user message can carry a

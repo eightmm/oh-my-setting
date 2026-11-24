@@ -1028,7 +1028,7 @@ function paintGraph(loading = false) {
     const rest = Number.isSafeInteger(r.omitted_children) && r.omitted_children > 0 ? choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children') : '';
     button.title = [r.path || title,description,rest].filter(Boolean).join(' · ');
     button.setAttribute('aria-label',button.title);button.setAttribute('data-explorer-key',location+':'+r.id);
-    const text = node('span',''); text.append(node('strong',title),node('small',description));
+    const text = node('span',''); text.append(node('strong',title),node('small',compact && size ? size : description));
     button.append(text); if (!compact) button.append(node('span','›','muted'));
     const li=node('li','');li.append(button);return li;
   }
