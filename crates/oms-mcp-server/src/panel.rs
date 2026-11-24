@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v7.html";
+const URI: &str = "ui://oms/conversation-panel/v8.html";
+const V7: &str = "ui://oms/conversation-panel/v7.html";
 const V6: &str = "ui://oms/conversation-panel/v6.html";
 const V5: &str = "ui://oms/conversation-panel/v5.html";
 const V4: &str = "ui://oms/conversation-panel/v4.html";
@@ -30,6 +31,9 @@ const VIEWS: &[&str] = &[
     "overview",
     "health",
     "providers",
+    "connections",
+    "modelcatalog",
+    "attribution",
     "teams",
     "sessions",
     "plan",
@@ -122,7 +126,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             VIEW,
-            "Read one page of a supported OMS terminal panel view.",
+            "Read one OMS panel page. connections checks runtime PATH and harness policy, modelcatalog reads cached model and effort evidence, routes previews expected choices, and attribution shows recorded calls. Null means unverified.",
             json!({"project":project,"view":{"type":"string","enum":VIEWS.to_vec()},"page":{"type":"integer","minimum":1,"maximum":1000}}),
             &["view"],
             false
@@ -427,7 +431,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7)
                 ) =>
             {
                 json!({"contents":[{

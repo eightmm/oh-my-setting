@@ -70,7 +70,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex'},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
     }
     if (method === 'ui/message') { host.messages.push(params); result = {isError:host.rejectMessage === true}; }
     if (method === 'tools/call') {
@@ -558,4 +558,55 @@ test('GitHub Projects permission copy requires a typed scope error; other reposi
   assert.match(p.get('git-catalog-status').textContent,/read:project/);
   p.get('git-kind').value='issues'; await p.event('git-kind','change');
   assert.match(p.get('git-catalog').textContent,/Review input boundaries/);
+});
+
+test('connection settings separate host facts, runtime policy, and draft-only harness choice', async () => {
+  const p = await panel(['one'], {}, {host:'Claude Desktop',version:'2.4.1',mode:'inline',readOnly:true});
+  const columns = ['harness','installed','auth','transport','resumePolicy'].map(key => ({key,label:key}));
+  const data = {view:'connections',page:1,columns,status:'ready',rows:[
+    {harness:'pi',installed:false,auth:null,transport:'CodexGateway',resumePolicy:'unsupported'},
+    {harness:'claude',installed:true,auth:'required',dependenciesPresent:true}
+  ]};
+  p.host.tools = {oms_panel_tui_view:() => data};
+  assert.equal(p.calls.some(c => c.name === 'oms_panel_tui_view'), false);
+  p.get('source-details').open = true; p.get('connection-harness').value = 'pi';
+  await p.event('source-details','toggle');
+  assert.match(p.get('connection-host').textContent,/Claude Desktop 2.4.1.*inline/);
+  assert.match(p.get('connection-runtime').textContent,/OMS 연결됨.*읽기 전용/);
+  assert.match(p.get('connection-rows').textContent,/미설치.*미확인.*CodexGateway.*미지원/);
+  assert.equal(p.get('connection-draft').hidden,true);
+  p.get('connection-harness').value = 'claude'; await p.event('connection-harness','change');
+  assert.match(p.get('connection-rows').textContent,/인증 필요/);
+  p.notify({method:'ui/notifications/host-context-changed',params:{displayMode:'fullscreen'}});
+  assert.match(p.get('connection-host').textContent,/fullscreen/);
+  await p.event('connection-draft','click');
+  assert.equal(p.get('launch').elements.main.value,'codex');
+  const q = await panel(['one'], {}, {host:'private-host-sentinel',version:'unknown-private-version'});
+  q.host.tools = {oms_panel_tui_view:() => data};
+  q.get('source-details').open = true; q.get('connection-harness').value = 'claude';
+  await q.event('source-details','toggle');
+  assert.doesNotMatch(q.get('connection-host').textContent,/private|Claude/);
+  await q.event('connection-draft','click');
+  assert.equal(q.get('launch').elements.main.value,'claude'); assert.equal(q.get('launcher').open,true);
+  assert.equal([...p.calls,...q.calls].some(c => c.name === 'oms_start_main'),false);
+});
+
+test('settings page, permission failure and project change discard prior catalog facts', async () => {
+  const p = await panel(['one']);
+  p.host.tools = {oms_panel_tui_view:({view,page}) => ({view,page,status:'ready',columns:[{key:'model',label:'모델'}],
+    rows:[{model:'catalog-page-' + page}],nextPage:page === 1 ? 2 : null,incomplete:true})};
+  p.get('source-details').open = true; p.get('connection-view').value = 'modelcatalog'; await p.event('source-details','toggle');
+  assert.match(p.get('connection-rows').textContent,/catalog-page-1/);
+  await p.event('connection-next','click');
+  assert.match(p.get('connection-rows').textContent,/catalog-page-2/); assert.match(p.get('connection-status').textContent,/일부 조회/);
+  p.host.delayTool = 'oms_panel_tui_view'; await p.event('connection-refresh','click');
+  p.host.tools.oms_panel_snapshot = () => { throw new Error('access revoked'); };
+  await p.event('refresh','click'); p.host.release(); await setImmediate();
+  assert.equal(p.get('connection-rows').textContent,'');
+  assert.match(p.get('connection-runtime').textContent,/조회 실패/);
+  assert.equal(p.get('view').hidden,true);
+  assert.doesNotMatch(p.get('connection-runtime').textContent,/연결됨/);
+  await p.open('input',{arguments:{project:'absent'}});
+  assert.equal(p.get('connection-rows').textContent,'');
+  assert.equal(p.calls.filter(c => c.name === 'oms_start_main').length,0);
 });

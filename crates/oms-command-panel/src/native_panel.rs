@@ -146,6 +146,30 @@ fn main_capability(harness: &str) -> Option<&'static MainCapability> {
         .find(|entry| entry.harness == harness)
 }
 
+/// Registry policy and executable presence only. Neither establishes login or a session.
+pub(super) fn desktop_connections() -> Vec<Value> {
+    MAIN_CAPABILITIES
+        .iter()
+        .map(|cap| {
+            let transport = match cap.transport {
+                MainTransport::Native(_) => "native",
+                MainTransport::CodexGateway => "CodexGateway",
+            };
+            let resume = if cap.resume_refusal.is_some() {
+                "unsupported"
+            } else {
+                "requires verified session"
+            };
+            json!({
+                "harness": cap.harness, "owner": cap.owner, "transport": transport,
+                "installed": which_exists(cap.harness),
+                "dependencies": cap.requires.join(", "), "dependenciesPresent": cap.installed(),
+                "resumePolicy": resume, "accountSelection": cap.supports_account(),
+            })
+        })
+        .collect()
+}
+
 fn required_main_capability(raw: &str) -> Result<&'static MainCapability> {
     main_capability(raw).ok_or_else(|| Error::new("unsupported launch provider"))
 }

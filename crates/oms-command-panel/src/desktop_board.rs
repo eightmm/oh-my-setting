@@ -24,6 +24,9 @@ pub const VIEWS: &[&str] = &[
     "overview",
     "health",
     "providers",
+    "connections",
+    "modelcatalog",
+    "attribution",
     "teams",
     "sessions",
     "plan",
@@ -50,6 +53,9 @@ pub enum DesktopView {
     Overview,
     Health,
     Providers,
+    Connections,
+    ModelCatalog,
+    Attribution,
     Teams,
     Sessions,
     Plan,
@@ -67,6 +73,9 @@ impl DesktopView {
             "overview" => Some(Self::Overview),
             "health" => Some(Self::Health),
             "providers" => Some(Self::Providers),
+            "connections" => Some(Self::Connections),
+            "modelcatalog" => Some(Self::ModelCatalog),
+            "attribution" => Some(Self::Attribution),
             "teams" => Some(Self::Teams),
             "sessions" => Some(Self::Sessions),
             "plan" => Some(Self::Plan),
@@ -85,6 +94,9 @@ impl DesktopView {
             Self::Overview => "overview",
             Self::Health => "health",
             Self::Providers => "providers",
+            Self::Connections => "connections",
+            Self::ModelCatalog => "modelcatalog",
+            Self::Attribution => "attribution",
             Self::Teams => "teams",
             Self::Sessions => "sessions",
             Self::Plan => "plan",
@@ -138,6 +150,40 @@ fn columns_for(view: DesktopView) -> Vec<Column> {
             col("limit", "한도"),
             col("advisory", "참고용"),
             col("action", "권장 조치"),
+        ],
+        DesktopView::Connections => vec![
+            col("harness", "하네스"),
+            col("owner", "디스패치 소유자"),
+            col("transport", "Main 전송 경로"),
+            col("installed", "CLI 설치"),
+            col("dependencies", "실행에 필요한 도구"),
+            col("dependenciesPresent", "도구 모두 발견"),
+            col("resumePolicy", "재개 계약"),
+            col("accountSelection", "계정 선택 계약"),
+            col("version", "확인된 CLI 버전"),
+            col("auth", "인증 준비"),
+            col("observedAt", "PATH 조회 시각"),
+        ],
+        DesktopView::ModelCatalog => vec![
+            col("provider", "공급자"),
+            col("model", "보고된 모델"),
+            col("efforts", "이 모델의 강도"),
+            col("providerEfforts", "공급자 단위 강도"),
+            col("routable", "라우팅 후보"),
+            col("source", "출처"),
+            col("probe", "캐시 탐지 결과"),
+            col("age", "캐시 경과(초)"),
+        ],
+        DesktopView::Attribution => vec![
+            col("attempt", "호출 시도"),
+            col("recorded", "기록 시각"),
+            col("provider", "호출 공급자"),
+            col("requestedModel", "요청 모델"),
+            col("selectedModel", "선택 모델"),
+            col("resolvedEffort", "결정된 강도"),
+            col("selectedEffort", "선택한 강도"),
+            col("servedModel", "응답 모델"),
+            col("modelEvidence", "응답 근거"),
         ],
         DesktopView::Providers => vec![
             col("provider", "공급자"),
@@ -222,6 +268,12 @@ fn columns_for(view: DesktopView) -> Vec<Column> {
             col("provider", "예정 공급자"),
             col("model", "예정 모델"),
             col("effort", "추론 강도"),
+            col("requestedModel", "요청 모델"),
+            col("requestedEffort", "요청 강도"),
+            col("requestedAccount", "요청 별칭"),
+            col("selectedAccount", "예정 별칭"),
+            col("versionEvidence", "캐시 CLI 버전"),
+            col("probeAge", "근거 경과(초)"),
             col("inFlight", "실행 중"),
             col("recentAttempts", "최근 호출"),
             col("issue", "이슈"),
@@ -291,6 +343,9 @@ pub(crate) fn run(
     let response = match view {
         DesktopView::Overview => project_overview(repo, execution, room_id, page, services, stop)?,
         DesktopView::Health => project_health(repo, room_id, page, services, stop)?,
+        DesktopView::Connections => project_connections(page),
+        DesktopView::ModelCatalog => project_catalog(repo, page, services, stop)?,
+        DesktopView::Attribution => project_attribution(repo, page)?,
         DesktopView::Providers => project_providers(repo, page, services, stop)?,
         DesktopView::Teams => project_teams(repo, execution, page, services, stop)?,
         DesktopView::Sessions => project_sessions(repo, room_id, page, services, stop)?,
@@ -726,6 +781,161 @@ fn project_health(
     ]));
 
     Ok(paginate(DesktopView::Health, page, out, true, incomplete))
+}
+
+fn account_alias(v: &Value, key: &str) -> Value {
+    let safe = v[key].as_str().filter(|s| {
+        !s.is_empty()
+            && s.len() <= 80
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    });
+    opt_text_value(safe, 80)
+}
+
+fn project_connections(page: usize) -> BoardResponse {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|t| t.as_secs());
+    let data = crate::native_panel::desktop_connections()
+        .into_iter()
+        .filter_map(|row| {
+            let mut cells = row.as_object()?.clone();
+            cells.insert("observedAt".into(), json!(now));
+            // Cache-only provider reads do not authenticate or execute --version.
+            cells.insert("auth".into(), Value::Null);
+            cells.insert("version".into(), Value::Null);
+            Some(cells)
+        })
+        .collect();
+    paginate(DesktopView::Connections, page, data, true, false)
+}
+
+fn effort_label(value: &Value) -> Value {
+    let Some(list) = value.as_array() else {
+        return Value::Null;
+    };
+    if list.len() > 32 {
+        return Value::Null;
+    }
+    let Some(terms) = list
+        .iter()
+        .map(|v| v.as_str().filter(|s| !s.is_empty() && s.len() <= 40))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Value::Null;
+    };
+    if terms.is_empty() {
+        return Value::Null;
+    }
+    opt_text_value(Some(&terms.join(", ")), 180)
+}
+
+fn project_catalog(
+    repo: &Path,
+    page: usize,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<BoardResponse> {
+    let Some(providers) = read_providers(repo, services, stop)? else {
+        return Ok(unavailable(DesktopView::ModelCatalog, page));
+    };
+    let mut entries = vec![];
+    let mut incomplete = false;
+    'providers: for provider in providers {
+        let Some(catalog) = provider["catalog_models"].as_array() else {
+            incomplete = true;
+            continue;
+        };
+        if catalog.is_empty() && provider["catalog_probe"] != "ok" {
+            incomplete = true;
+        }
+        for model in catalog {
+            if entries.len() > MAX_INPUT_ROWS {
+                break 'providers;
+            }
+            let Some(name) = model.as_str().filter(|s| !s.is_empty()) else {
+                incomplete = true;
+                continue;
+            };
+            entries.push(row_map(vec![
+                ("provider", opt_nonempty_str(&provider, "provider", 48)),
+                ("model", opt_text_value(Some(name), 128)),
+                (
+                    "efforts",
+                    effort_label(&provider["model_effort_scales"][name]),
+                ),
+                ("providerEfforts", effort_label(&provider["effort_values"])),
+                (
+                    "routable",
+                    json!(
+                        provider["routable"]
+                            .as_array()
+                            .map(|values| values.contains(model))
+                    ),
+                ),
+                ("source", json!("oms models · cache")),
+                ("probe", opt_nonempty_str(&provider, "catalog_probe", 32)),
+                ("age", opt_u64(&provider, "catalog_age_seconds")),
+            ]));
+        }
+    }
+    Ok(paginate(
+        DesktopView::ModelCatalog,
+        page,
+        entries,
+        true,
+        incomplete,
+    ))
+}
+
+fn project_attribution(repo: &Path, page: usize) -> Result<BoardResponse> {
+    let Ok(index) = results::index_rows(repo) else {
+        return Ok(unavailable(DesktopView::Attribution, page));
+    };
+    let rows = index
+        .iter()
+        .rev()
+        .filter(|r| {
+            matches!(
+                r["kind"].as_str(),
+                Some("ask" | "review" | "call" | "consult" | "delegate")
+            )
+        })
+        .take(MAX_INPUT_ROWS + 1)
+        .map(|r| {
+            let verified = r["model_attribution"] == "transport";
+            row_map(vec![
+                ("attempt", opt_nonempty_str(r, "attempt_id", 96)),
+                ("recorded", opt_nonempty_str(r, "ts", 48)),
+                ("provider", opt_nonempty_str(r, "provider", 48)),
+                ("requestedModel", opt_nonempty_str(r, "requested_model", 96)),
+                ("selectedModel", opt_nonempty_str(r, "selected_model", 96)),
+                (
+                    "resolvedEffort",
+                    opt_nonempty_str(r, "reasoning_effort", 32),
+                ),
+                (
+                    "selectedEffort",
+                    opt_nonempty_str(r, "selected_reasoning_effort", 32),
+                ),
+                (
+                    "servedModel",
+                    if verified {
+                        opt_nonempty_str(r, "served_model", 96)
+                    } else {
+                        Value::Null
+                    },
+                ),
+                (
+                    "modelEvidence",
+                    opt_nonempty_str(r, "model_attribution", 32),
+                ),
+            ])
+        })
+        .collect();
+    Ok(paginate(DesktopView::Attribution, page, rows, true, false))
 }
 
 fn project_providers(
@@ -1274,6 +1484,30 @@ fn project_routes(
                 ("provider", opt_nonempty_str(choice, "provider", 48)),
                 ("model", opt_nonempty_str(choice, "model", 96)),
                 ("effort", opt_nonempty_str(choice, "effort", 32)),
+                (
+                    "requestedModel",
+                    opt_nonempty_str(&choice["snapshot"], "requested_model", 96),
+                ),
+                (
+                    "requestedEffort",
+                    opt_nonempty_str(&choice["snapshot"], "requested_effort", 32),
+                ),
+                (
+                    "requestedAccount",
+                    account_alias(&choice["snapshot"], "requested_account"),
+                ),
+                (
+                    "selectedAccount",
+                    account_alias(&choice["snapshot"], "selected_account"),
+                ),
+                (
+                    "versionEvidence",
+                    opt_nonempty_str(&choice["snapshot"]["capabilities"], "harness_version", 48),
+                ),
+                (
+                    "probeAge",
+                    opt_u64(&choice["snapshot"]["capabilities"], "probe_age_seconds"),
+                ),
                 ("inFlight", opt_u64(&evidence["recent"], "in_flight")),
                 (
                     "recentAttempts",
@@ -1392,7 +1626,11 @@ mod tests {
                     json!({"tasks":(1..=23).map(|i|json!({"id":format!("task-{i}"),"title":format!("Task {i}"),"state":"ready"})).collect::<Vec<_>>()})
                 }
                 NativeCommand::ProviderCatalog => {
-                    json!({"providers":[{"provider":"codex","installed":true,"catalog_models":[],"routable":["sample-model"]}]})
+                    json!({"providers":[
+                        {"provider":"codex","installed":true,"catalog_models":[],"routable":["sample-model"]},
+                        {"provider":"claude","catalog_models":(1..=23).map(|i|format!("model-{i}")).collect::<Vec<_>>(),
+                         "effort_values":["low","high"],"model_effort_scales":{"model-1":["high"]},"routable":["model-1"]}
+                    ]})
                 }
                 _ => return Err(Error::new("fixture source unavailable")),
             };
@@ -1471,6 +1709,45 @@ mod tests {
         assert!(providers["rows"][0]["defaultModel"].is_null());
         assert_eq!(providers["rows"][0]["modelCount"], 0);
         assert!(providers["rows"][0]["usable"].is_null());
+        let connections = run("connections", "1");
+        let harnesses = connections["rows"].as_array().unwrap();
+        assert_eq!(harnesses.len(), 4);
+        let pi = harnesses.iter().find(|r| r["harness"] == "pi").unwrap();
+        assert_eq!(pi["transport"], "CodexGateway");
+        assert_eq!(pi["owner"], "codex");
+        assert_eq!(pi["resumePolicy"], "unsupported");
+        assert!(pi["auth"].is_null());
+        assert!(
+            harnesses
+                .iter()
+                .any(|r| r["harness"] == "agy" && r["resumePolicy"] == "unsupported")
+        );
+        let catalog = run("modelcatalog", "1");
+        assert_eq!(catalog["nextPage"], 2);
+        assert_eq!(catalog["rows"][0]["efforts"], "high");
+        assert_eq!(catalog["rows"][1]["routable"], false);
+        assert!(catalog["rows"][1]["efforts"].is_null());
+        assert_eq!(catalog["rows"][1]["providerEfforts"], "low, high");
+        assert_eq!(run("modelcatalog", "2")["rows"][2]["model"], "model-23");
+        let index = tmp.0.join(".oms/artifacts");
+        crate::orchestrator::account_binding::test_support::private_dir(&index);
+        let receipt = |source: &str| {
+            json!({"kind":"ask","attempt_id":"a","requested_model":"request",
+            "selected_model":"selected","selected_reasoning_effort":"high","served_model":"observed","model_attribution":source,"body":"private-text-sentinel"})
+        };
+        std::fs::write(
+            index.join("index.jsonl"),
+            format!("{}\n{}\n", receipt("transport"), receipt("ambiguous")),
+        )
+        .unwrap();
+        let attribution = run("attribution", "1");
+        assert!(attribution["rows"][0]["servedModel"].is_null());
+        assert_eq!(attribution["rows"][1]["servedModel"], "observed");
+        assert_eq!(attribution["rows"][1]["requestedModel"], "request");
+        assert_eq!(attribution["rows"][1]["selectedEffort"], "high");
+        assert!(account_alias(&json!({"a":"invalid/user"}), "a").is_null());
+        assert_eq!(account_alias(&json!({"a":"team-a"}), "a"), "team-a");
+        assert!(!attribution.to_string().contains("private-text-sentinel"));
         for args in [
             ["--desktop-view", "sessions", "--room", "other", "--json"],
             ["--desktop-view", "plan", "--page", "1001", "--json"],

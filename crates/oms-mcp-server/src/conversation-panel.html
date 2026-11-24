@@ -239,6 +239,10 @@ header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0
 #git-editor { border: 1px solid var(--main-line); border-radius: var(--r); padding: .7rem .8rem; margin: .6rem 0; }
 #project-records > summary, #alerts > summary { color: var(--ink); }
 @media (prefers-reduced-motion: reduce) { button { transition: none; } }
+.connection-controls { margin-block:.65rem; }
+#source-details .connection-fields { display:grid; grid-template-columns:minmax(6rem,.9fr) minmax(0,1.3fr); gap:.22rem .65rem; margin:.45rem 0; }
+.connection-fields dt { color:var(--muted); }.connection-fields dd { margin:0; overflow-wrap:anywhere; }
+#source-details article + article { border-top:1px solid var(--line); padding-top:.4rem; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -298,11 +302,6 @@ header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0
         <button class="primary" id="start" type="submit">목표 전달</button>
       </fieldset>
     </form></details>
-    <details class="card" id="source-details"><summary>연결 정보</summary>
-      <p class="muted" id="main-scope"></p><p id="main-state"></p>
-      <dl class="identity" id="identity"><dt>작업방</dt><dd id="room"></dd><dt>참여자</dt><dd id="participant"></dd></dl>
-      <p class="project-meta"><span id="branch"></span><time id="updated"></time></p>
-    </details>
     <details class="card" id="project-records">
       <summary id="progress">프로젝트 전체 기록 <span id="approval-idle" class="muted" role="status"></span></summary>
       <dl class="metrics">
@@ -373,6 +372,26 @@ header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0
       <div id="git-match" aria-live="polite"></div><div id="git-catalog" class="rows"></div>
     </section>
   </div>
+    <details class="card" id="source-details"><summary>연결 정보</summary>
+      <p class="muted" id="main-scope"></p><p id="main-state"></p>
+      <dl class="identity" id="identity"><dt>작업방</dt><dd id="room"></dd><dt>참여자</dt><dd id="participant"></dd></dl>
+      <p class="project-meta"><span id="branch"></span><time id="updated"></time></p>
+      <h3>앱과 OMS</h3><p class="muted" id="connection-host"></p><p id="connection-runtime" role="status">OMS 연결 확인 중</p>
+      <details><summary>호스트별 지원과 연결 경로</summary>
+        <p>Codex Desktop은 대화 탭을 제공합니다. CLI와 IDE는 프로젝트의 OMS MCP 도구 또는 로컬 OMS 스킬을 사용합니다.</p>
+        <p>Claude Chat은 원격 HTTPS 커넥터, Desktop은 로컬 stdio도 지원합니다. 사이드 패널은 계정·대화별 배포 대상에 따라 달라집니다. Claude Code의 네이티브 Mod는 별도 기능입니다. 터미널 2.1.287+, Desktop 내 Code 2.1.286+, VS Code 확장 2.1.299+에서는 설정에 따라 지원하며 2.1.304+에서는 플래그가 필요 없습니다.</p>
+        <p>Antigravity App 2.34.0+는 로컬 stdio 또는 구성된 원격 MCP로 패널을 엽니다. CLI와 IDE에서는 텍스트 도구를 사용합니다. 로컬 OMS에는 터널이 필요하지 않습니다.</p>
+      </details>
+      <div class="cluster connection-controls"><label>연결 내역 <select id="connection-view">
+        <option value="connections">하네스와 준비 상태</option><option value="modelcatalog">모델·강도 카탈로그</option>
+        <option value="routes">예상 라우팅 · 계정</option><option value="attribution">실행 응답 근거</option></select></label>
+        <label id="connection-harness-label">하네스 <select id="connection-harness"><option value="codex">Codex</option><option value="claude">Claude</option><option value="agy">AGY</option><option value="pi">Pi</option></select></label>
+        <button type="button" id="connection-refresh">연결 내역 다시 조회</button></div>
+      <p id="connection-note" class="muted"></p><p id="connection-status" role="status"></p>
+      <div id="connection-rows" class="rows"></div>
+      <div class="cluster"><button id="connection-prev" type="button" hidden>이전 페이지</button><button id="connection-next" type="button" hidden>다음 페이지</button>
+      <button id="connection-draft" type="button" hidden>이 하네스로 새 목표 작성</button></div>
+    </details>
 </main>
 <script>
 'use strict';
@@ -396,6 +415,9 @@ const pendingErrors = [];
 let retryStart;
 let contextTypes;
 let canOpenLinks = false, canMessage = false, readOnly = false;
+let hostSurface = '미확인', hostVersion = '', displayMode = '', handshake = false;
+let connectionState = 'OMS 연결 확인 중', connectionReady = false, profileKnown = false, checkedAt = '';
+let connectionPage = 1, connectionNext = null;
 let gitData, gitItem, draftProvider = '', sentBrief, sendingBrief, providerData;
 let gitReady = false, overviewBacklog = false;
 const gitDrafts = new Map();
@@ -529,7 +551,7 @@ window.addEventListener('message', event => {
   if (typeof msg.method === 'string' && (typeof msg.id === 'string' || typeof msg.id === 'number')) {
     const origin = event.origin && event.origin !== 'null' ? event.origin : '*';
     if (msg.method === 'ui/resource-teardown' && !disposed) {
-      disposed = true;
+      disposed = true; el('source-details').hidden = true;
       generation++;
       jobs.clear(); clearChat();
       setBusy(true, true);
@@ -547,6 +569,10 @@ window.addEventListener('message', event => {
     return;
   }
   if (disposed) return;
+  if (msg.method === 'ui/notifications/host-context-changed') {
+    if (msg.params && typeof msg.params === 'object' && 'displayMode' in msg.params) applyDisplayMode(msg.params.displayMode);
+    return;
+  }
   if (msg.method === 'ui/notifications/tool-input') {
     const target = projectArgument(msg.params?.arguments?.project);
     seenInputOrManual = true;
@@ -977,6 +1003,8 @@ function render(d) {
 }
 
 function clearProject() {
+  checkedAt = ''; connectionReady = profileKnown = false; connectionState = '프로젝트 연결 미확인'; hostFacts(); resetConnectionRows();
+  el('connection-status').textContent = ''; el('main-scope').textContent = '';
   el('view').hidden = true;
   jobs.clear(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
   selectedMember = backTarget = olderCursor = tuiNext = undefined; chatRows = [];
@@ -1502,11 +1530,111 @@ function setBusy(value, writing = false) {
   for (const button of el('approvals').querySelectorAll('button')) button.disabled = value;
 }
 
+const surfaceNames = new Map([
+  ['codex desktop','Codex Desktop'],['codex app','Codex 앱'],['codex cli','Codex CLI'],['codex ide','Codex IDE'],
+  ['claude desktop','Claude Desktop'],['claude chat','Claude Chat'],['claude web','Claude Chat'],['claude code','Claude Code'],
+  ['antigravity app','Antigravity App'],['antigravity cli','Antigravity CLI'],['antigravity ide','Antigravity IDE'],
+  ['codex','Codex · 화면 종류 미확인'],['claude','Claude · 화면 종류 미확인'],['antigravity','Antigravity · 화면 종류 미확인']
+]);
+function hostFacts() {
+  el('connection-host').textContent = 'HTML 표시됨 · ' + (handshake ? hostSurface + (hostVersion ? ' ' + hostVersion : '') : '호스트 응답 미확인')
+    + (displayMode ? ' · 표시 모드 ' + displayMode : '') + ' · 사이드 패널·네이티브 Mod·전송 경로(로컬/터널/원격) 미확인';
+  el('connection-runtime').textContent = connectionState + (profileKnown ? (readOnly ? ' · 읽기 전용 프로필' : ' · 대화 제어 프로필') : '') + (checkedAt ? ' · 마지막 조회 ' + checkedAt : '');
+}
+function applyDisplayMode(mode) {
+  displayMode = ['inline','fullscreen','pip'].includes(mode) ? mode : '';
+  hostFacts();
+}
+const settingViews = {
+  connections:'설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다.',
+  modelcatalog:'로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다.',
+  routes:'프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다.',
+  attribution:'선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다.'
+};
+function resetConnectionRows() {
+  jobs.delete('settings'); connectionNext = null;
+  el('connection-rows').replaceChildren();
+  for (const id of ['connection-prev','connection-next','connection-draft']) el(id).hidden = true;
+}
+function connectionField(key, value) {
+  if (value == null) return '미확인';
+  if (key === 'observedAt' && Number.isSafeInteger(value)) {
+    const date = new Date(value * 1000); return Number.isFinite(date.valueOf()) ? date.toISOString() : '미확인';
+  }
+  if (key === 'installed') return value === true ? '설치됨' : value === false ? '미설치' : '미확인';
+  if (key === 'auth') return value === 'required' ? '인증 필요' : value === 'verified' ? '인증 확인' : '미확인';
+  if (typeof value === 'boolean') return value ? '예' : '아니오';
+  if (typeof value !== 'string' && typeof value !== 'number') return '미확인';
+  if (value === 'requires verified session') return '검증된 세션 필요';
+  if (value === 'unsupported') return '미지원';
+  return String(value).slice(0,220);
+}
+function loadConnection(page = 1) {
+  resetConnectionRows(); connectionPage = page;
+  const view = el('connection-view').value || 'connections', harness = el('connection-harness').value || 'codex';
+  const note = el('connection-note'), status = el('connection-status');
+  if (!Object.hasOwn(settingViews,view) || !['codex','claude','agy','pi'].includes(harness)) return;
+  note.textContent = settingViews[view];
+  el('connection-harness-label').hidden = view !== 'connections';
+  if (!connectionReady || disposed) { status.textContent = 'OMS와 프로젝트 연결을 확인한 뒤 조회할 수 있습니다.'; return; }
+  status.textContent = '연결 내역을 확인하는 중…';
+  detailRead('settings','oms_panel_tui_view',{view,page},data => {
+    if (data?.view !== view || data.page !== page || data.status !== 'ready' || !Array.isArray(data.rows) || !Array.isArray(data.columns)) throw new Error();
+    const rows = data.rows.filter(row => view !== 'connections' || row.harness === harness);
+    for (const row of rows) {
+      const article = node('article',''), fields = node('dl','','connection-fields');
+      for (const {key,label} of data.columns) fields.append(node('dt',String(label).slice(0,48)),node('dd',connectionField(key,row[key])));
+      article.append(fields);
+      if (view === 'connections') {
+        const bound = !readOnly && dashboardData?.conversationBinding === 'matched' && dashboardData.conversationMain?.provider === harness;
+        const lines = [
+          ['실행 준비', row.installed === false || row.dependenciesPresent === false ? '필수 도구 누락' : '미확인'],
+          ['관찰', bound ? '현재 대화의 Main 멤버십 확인' : '현재 세션 미확인'],
+          ['대화 제어', readOnly ? '읽기 전용' : '각 요청에서 작업방·권한 확인']
+        ];
+        for (const [label,value] of lines) fields.append(node('dt',label),node('dd',value));
+        const guides = {
+          codex:['Codex 로그인 안내','https://developers.openai.com/codex/auth/'],
+          claude:['Claude 로그인 안내','https://code.claude.com/docs/en/authentication'],
+          agy:['Antigravity 공식 안내','https://antigravity.google/docs/'],
+          pi:['Pi의 CodexGateway 로그인 안내','https://developers.openai.com/codex/auth/']
+        };
+        const [label,url] = guides[harness], link = node('a',label);
+        link.href = url; link.rel = 'noopener noreferrer'; link.target = '_blank';
+        link.addEventListener('click',event => { if (canOpenLinks) { event.preventDefault(); openHostLink(url,status); } });
+        article.append(link);
+        el('connection-draft').hidden = readOnly || row.installed !== true || row.dependenciesPresent !== true;
+      }
+      el('connection-rows').append(article);
+    }
+    connectionNext = Number.isSafeInteger(data.nextPage) && data.nextPage > page && data.nextPage <= 1000 ? data.nextPage : null;
+    status.textContent = page + '페이지 · ' + (rows.length ? rows.length + '건 표시' : '확인된 기록 없음') + (data.incomplete ? ' · 일부 조회' : '');
+    el('connection-prev').hidden = page <= 1; el('connection-next').hidden = connectionNext == null;
+  },() => {
+    status.textContent = '현재 연결 내역을 확인할 수 없습니다. OMS 연결과 프로젝트 권한을 확인하고 다시 조회하세요.';
+    el('connection-prev').hidden = page <= 1;
+  });
+}
+el('source-details').addEventListener('toggle',() => { if (el('source-details').open) { hostFacts(); loadConnection(); } else resetConnectionRows(); });
+for (const id of ['connection-view','connection-harness']) el(id).addEventListener('change',() => loadConnection());
+el('connection-refresh').addEventListener('click',() => connectionReady ? loadConnection(connectionPage) : refresh());
+el('connection-prev').addEventListener('click',() => { if (connectionPage > 1) loadConnection(connectionPage - 1); });
+el('connection-next').addEventListener('click',() => { if (connectionNext != null) loadConnection(connectionNext); });
+el('connection-draft').addEventListener('click',() => {
+  if (readOnly || disposed || !connectionReady || el('connection-draft').hidden) return;
+  el('launch').elements.main.value = el('connection-harness').value || 'codex';
+  showTab('overview'); el('launcher').open = true; el('brief').focus();
+});
+
 async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw new Error('앱 대화에서 OMS 패널을 여세요.');
       const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.3.0'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
+      handshake = true;
+      hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || '호스트 미확인';
+      hostVersion = /^\d+\.\d+\.\d+(?:[.-][A-Za-z0-9.-]{1,20})?$/.test(info?.hostInfo?.version || '') ? info.hostInfo.version : '';
+      applyDisplayMode(info?.hostContext?.displayMode);
       const formats = info?.hostCapabilities?.updateModelContext;
       canOpenLinks = Boolean(info?.hostCapabilities?.openLinks);
       canMessage = Boolean(info?.hostCapabilities?.message?.text);
@@ -1557,12 +1685,18 @@ async function loadStatus(expected, recover = true) {
     el('launcher').hidden = el('git-new').hidden = readOnly;
     const aliases = registry.structuredContent?.projects;
     if (!Array.isArray(aliases)) throw new Error('프로젝트 목록 응답을 읽을 수 없습니다.');
-    if (!chooseProject(aliases)) return;
+    const selected = chooseProject(aliases);
+    profileKnown = typeof registry.structuredContent.readOnly === 'boolean';
+    checkedAt = new Date().toISOString(); connectionState = 'OMS 연결됨 · 프로젝트 선택 필요'; hostFacts();
+    if (!selected) return;
     if (project && (contextKey == null || contextKey === 'null')) updateContext({project});
     const result = await tool('oms_panel_snapshot', {}, expected);
     const dashboard = result.structuredContent?.dashboard || result._meta?.dashboard;
     if (!dashboard) throw new Error('프로젝트 상태 응답을 읽을 수 없습니다.');
+    checkedAt = new Date().toISOString(); connectionReady = true; connectionState = 'OMS 연결됨 · 프로젝트 상태 조회됨'; hostFacts();
     render(dashboard);
+    if (el('source-details').open) loadConnection(connectionPage);
+    if (el('provider-options').open) loadProviderOptions();
     renderConversation(dashboard);
     renderActivity(dashboard);
     loaded.clear();
@@ -1599,6 +1733,10 @@ async function loadStatus(expected, recover = true) {
     }
   } catch (error) {
     if (generation !== expected) return;
+    checkedAt = new Date().toISOString(); connectionReady = profileKnown = false; connectionState = 'OMS 연결 또는 프로젝트 조회 실패'; hostFacts(); resetConnectionRows();
+    for (const id of ['updated','room','participant','main-state','main-scope','branch','provider-rows']) el(id).replaceChildren();
+    jobs.delete('lead-providers'); providerData = undefined; el('provider-status').textContent = '';
+    el('connection-status').textContent = '프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요.';
     el('view').hidden = true;
     el('status').className = 'error';
     el('status').textContent = error.message;

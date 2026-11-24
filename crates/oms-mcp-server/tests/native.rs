@@ -355,7 +355,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v7.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v8.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -378,6 +378,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v4.html"),
         json!("ui://oms/conversation-panel/v5.html"),
         json!("ui://oms/conversation-panel/v6.html"),
+        json!("ui://oms/conversation-panel/v7.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -561,6 +562,27 @@ fn conversation_panel() {
         payload(&c.tool("oms_panel_tui_view", json!({"view":"plan","page":2}))),
         view
     );
+    for name in ["connections", "modelcatalog", "attribution", "routes"] {
+        let page = json!({"view":name,"page":1,"columns":[],"rows":[],"status":"ready"});
+        fixture_settings(&source, json!({"stdout":page.to_string()}));
+        assert_eq!(
+            payload(&c.tool("oms_panel_tui_view", json!({"view":name}))),
+            page
+        );
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "panel",
+                "--repo",
+                repo,
+                "--desktop-view",
+                name,
+                "--page",
+                "1",
+                "--json"
+            ])
+        );
+    }
     bad(
         &c.tool("oms_panel_tui_view", json!({"view":"--launch"})),
         "Unsupported",
