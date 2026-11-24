@@ -3380,7 +3380,7 @@ service or proof of measured CI savings.
 
 `bash scripts/check.sh` runs the repository gate. It includes shell lint,
 skill validation, the native migration inventory check, focused shell
-fixtures and Rust workspace tests. Use Bash 5.0 or later. During development,
+fixtures and the Rust phases hosted CI runs (rustfmt, clippy, workspace tests). Use Bash 5.0 or later. During development,
 run the nearest affected tests. Use `bash scripts/check.sh --preflight` to
 inspect available tools and dependencies, or `bash scripts/check.sh --list-stages`
 to see the selected stages. [Check runner](../scripts/check.sh)
