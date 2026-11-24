@@ -520,7 +520,37 @@ fn run_with_source_writer(
                     }
                 }
                 let mut changed = false;
-                if let Some(outcome) = switch.poll() {
+                if let Some(outcome) = switch.poll(nav.notice.as_deref(), |pending| {
+                    let Some(current) = board.as_ref().and_then(|board| board.scope.as_ref())
+                    else {
+                        return false;
+                    };
+                    let Some(main) = pending.scope.main.as_ref() else {
+                        return false;
+                    };
+                    if !same_footer_scope(current, &pending.scope) {
+                        return false;
+                    }
+                    let Some(session) = crate::native_panel::operator_exit_session(
+                        repo,
+                        &pending.scope.room,
+                        main,
+                        &pending.target,
+                    ) else {
+                        return false;
+                    };
+                    pending.armed
+                        || (target
+                            .sample(repo, services, interrupted)
+                            .is_ok_and(|current| same_footer_scope(&current, &pending.scope))
+                            && oms_panel_core::terminals::provider_session_proof(
+                                services,
+                                repo,
+                                &main.session,
+                                interrupted,
+                            )
+                            .is_ok_and(|current| current == session))
+                }) {
                     nav.notice = Some(outcome);
                     changed = true;
                     refresh = true;
@@ -1246,21 +1276,31 @@ struct BoardScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LiveMain {
-    attempt: String,
-    member: String,
-    owner: String,
-    session: String,
-    window: String,
-    pane: String,
-    pid: u32,
-    birth: String,
+pub(crate) struct LiveMain {
+    pub(crate) attempt: String,
+    pub(crate) member: String,
+    pub(crate) owner: String,
+    pub(crate) session: String,
+    pub(crate) window: String,
+    pub(crate) pane: String,
+    pub(crate) pid: u32,
+    pub(crate) birth: String,
+}
+
+const CLAUDE_EXIT_INSTRUCTION: &str = "Main switch ready · Exit Claude normally in the Main pane";
+
+struct PendingOperatorExit {
+    scope: BoardScope,
+    target: crate::native_panel::MainSwitchTarget,
+    next_probe: Instant,
+    armed: bool,
 }
 
 #[derive(Default)]
 struct MainSwitch {
     selection: Option<(BoardScope, Vec<crate::native_panel::MainSwitchTarget>)>,
     running: Option<Receiver<Result<()>>>,
+    operator_exit: Option<PendingOperatorExit>,
 }
 
 fn legacy_main_switch_source(report: &Value, main: &LiveMain, attempt: &Value) -> bool {
@@ -1386,6 +1426,32 @@ impl MainSwitch {
         }
         crate::native_panel::check_outgoing_main_swap_harness(current)?;
         let current = current.unwrap_or_default();
+        if current == "claude" {
+            let refs = &attempt["refs"];
+            crate::require(
+                !stale_report(report)
+                    && report["collection"]["pending"] != true
+                    && report["room"]["closed"] == false
+                    && report["room"]["successor"].is_null()
+                    && attempt["attempt_id"] == main.attempt
+                    && attempt["tool"] == "panel-main"
+                    && main.owner == "claude"
+                    && refs["panel_role"] == "main"
+                    && refs["panel_room_id"] == scope.room
+                    && refs["panel_wrapper_identity"] == main.birth
+                    && crate::text(refs, "panel_wrapper_pid").parse::<u32>().ok() == Some(main.pid)
+                    && crate::text(refs, "panel_native_pid")
+                        .parse::<u32>()
+                        .is_ok_and(|pid| pid > 0 && pid != main.pid)
+                    && !crate::text(refs, "panel_native_identity").is_empty(),
+                "Current Claude Main lacks verified managed custody; refresh the Board before switching",
+            )?;
+            crate::require(
+                refs[crate::native_panel::CLAUDE_OPERATOR_EXIT_REF]
+                    == crate::native_panel::CLAUDE_OPERATOR_EXIT_VERSION,
+                crate::native_panel::CLAUDE_OPERATOR_EXIT_UPGRADE,
+            )?;
+        }
         let targets = targets(current)?;
         nav.main_switch = Some(navigation::MainSwitchMenu {
             current: current.into(),
@@ -1434,6 +1500,7 @@ impl MainSwitch {
             }
             input::Key::Char('y' | 'Y') if menu.selected.is_some() => {
                 let selected = menu.selected.unwrap();
+                let assisted_exit = menu.current == "claude";
                 let selection = self.selection.take();
                 nav.main_switch = None;
                 let result = (|| {
@@ -1447,7 +1514,20 @@ impl MainSwitch {
                         .get(selected)
                         .ok_or_else(|| Error::new("Main switch selection expired"))?;
                     self.running = Some(submit(&expected, target)?);
-                    Ok(format!("Switching Main to {}", target.harness))
+                    if assisted_exit {
+                        self.operator_exit = Some(PendingOperatorExit {
+                            scope: expected,
+                            target: target.clone(),
+                            next_probe: Instant::now(),
+                            armed: false,
+                        });
+                        Ok(format!(
+                            "Preparing Claude Main switch to {}",
+                            target.harness
+                        ))
+                    } else {
+                        Ok(format!("Switching Main to {}", target.harness))
+                    }
                 })();
                 nav.notice = Some(result.unwrap_or_else(|error: Error| error.message));
                 true
@@ -1456,16 +1536,37 @@ impl MainSwitch {
         }
     }
 
-    fn poll(&mut self) -> Option<String> {
+    fn poll(
+        &mut self,
+        notice: Option<&str>,
+        prove_armed: impl FnOnce(&PendingOperatorExit) -> bool,
+    ) -> Option<String> {
         let message = match self.running.as_ref()?.try_recv() {
             Ok(Ok(())) => "Main switch verified".into(),
             Ok(Err(error)) => error.message,
-            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Empty) => {
+                let pending = self.operator_exit.as_mut()?;
+                let now = Instant::now();
+                if now < pending.next_probe {
+                    return None;
+                }
+                pending.next_probe = now + Duration::from_millis(500);
+                let was_armed = pending.armed;
+                pending.armed = prove_armed(pending);
+                return match (pending.armed, was_armed) {
+                    (true, _) if notice != Some(CLAUDE_EXIT_INSTRUCTION) => {
+                        Some(CLAUDE_EXIT_INSTRUCTION.into())
+                    }
+                    (false, true) => Some("Awaiting verified Main exit".into()),
+                    _ => None,
+                };
+            }
             Err(TryRecvError::Disconnected) => {
                 "Main switch outcome unavailable; check the current Room".into()
             }
         };
         self.running = None;
+        self.operator_exit = None;
         Some(message)
     }
 }
@@ -6350,7 +6451,7 @@ mod tests {
             (
                 MainSwitch {
                     selection: Some((scope.clone(), vec![target])),
-                    running: None,
+                    ..Default::default()
                 },
                 navigation::Navigation {
                     main_switch: Some(menu),
@@ -6602,7 +6703,6 @@ mod tests {
             .unwrap_err()
             .message;
         for (owner, harness, expected) in [
-            ("claude", Some("claude"), expected_refusal.as_str()),
             (
                 "antigravity",
                 Some("agy"),
@@ -6733,7 +6833,132 @@ mod tests {
                 Ok(result)
             }
         ));
-        assert_eq!(flow.poll().as_deref(), Some("Main switch verified"));
+        assert_eq!(
+            flow.poll(None, |_| panic!(
+                "Codex cannot use the operator exit prompt"
+            ))
+            .as_deref(),
+            Some("Main switch verified"),
+        );
+
+        let mut claude = scope.clone();
+        claude.main.as_mut().unwrap().owner = "claude".into();
+        let mut claude_report = report.clone();
+        claude_report["room"]["participants"][1]["provider"] = json!("claude");
+        let attempt = &mut claude_report["room_attempts"]["attempt-old"];
+        attempt["provider"] = json!("claude");
+        let refs = &mut attempt["refs"];
+        refs["panel_harness"] = json!("claude");
+        refs["panel_wrapper_pid"] = json!("52");
+        refs["panel_wrapper_identity"] = json!("start-one");
+        refs["panel_native_pid"] = json!("53");
+        refs["panel_native_identity"] = json!("start-child");
+        let unavailable = !crate::native_panel::claude_assisted_exit_available();
+        let claude_card = super::frame(
+            &claude_report,
+            &navigation::Navigation::default(),
+            (100, 20),
+            &read,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(claude_card.main_switch.is_none(), unavailable);
+        if unavailable {
+            assert_eq!(
+                blocked(&claude, &claude_report),
+                crate::native_panel::CLAUDE_ASSISTED_EXIT_UNAVAILABLE,
+            );
+            return;
+        }
+        assert_eq!(
+            blocked(&claude, &claude_report),
+            crate::native_panel::CLAUDE_OPERATOR_EXIT_UPGRADE,
+        );
+        claude_report["room_attempts"]["attempt-old"]["refs"]
+            [crate::native_panel::CLAUDE_OPERATOR_EXIT_REF] =
+            json!(crate::native_panel::CLAUDE_OPERATOR_EXIT_VERSION);
+        let mut missing = claude_report.clone();
+        missing["room_attempts"]["attempt-old"]["refs"]["panel_native_pid"] = Value::Null;
+        assert!(blocked(&claude, &missing).contains("verified managed custody"));
+        let mut flow = MainSwitch::default();
+        let mut nav = navigation::Navigation::default();
+        flow.open_with(Some(&claude), &claude_report, &mut nav, |current| {
+            assert_eq!(current, "claude");
+            Ok(vec![crate::native_panel::MainSwitchTarget {
+                harness: "codex",
+                model: "fixture-model".into(),
+            }])
+        })
+        .unwrap();
+        let (done, result) = mpsc::channel();
+        assert!(flow.key(&Key::Char('1'), &mut nav, || None, refuse));
+        assert!(flow.key(
+            &Key::Char('Y'),
+            &mut nav,
+            || Some(claude.clone()),
+            |expected, selected| {
+                assert_eq!(expected, &claude);
+                assert_eq!(selected.harness, "codex");
+                assert!(
+                    main_switch_request(
+                        Path::new("/fixture/oms"),
+                        &repo,
+                        &repo,
+                        expected,
+                        selected
+                    )
+                    .is_err()
+                );
+                let request =
+                    main_switch_request(&executable, &staged.0, &repo, expected, selected)?;
+                assert_eq!(
+                    &request.argv[1..5],
+                    &[
+                        "--oms-dispatch".into(),
+                        staged.0.as_os_str().to_owned(),
+                        revision.into(),
+                        "--".into(),
+                    ]
+                );
+                let options = Options::parse(&request.argv[6..])?;
+                assert_eq!(options.get("room"), Some("room-one"));
+                assert_eq!(options.get("swap-main"), Some("codex"));
+                Ok(result)
+            }
+        ));
+        assert_eq!(
+            nav.notice.as_deref(),
+            Some("Preparing Claude Main switch to codex")
+        );
+        assert!(flow.poll(nav.notice.as_deref(), |_| false).is_none());
+        flow.operator_exit.as_mut().unwrap().next_probe = Instant::now();
+        assert_eq!(
+            flow.poll(nav.notice.as_deref(), |pending| same_footer_scope(
+                &pending.scope,
+                &claude
+            ))
+            .as_deref(),
+            Some(CLAUDE_EXIT_INSTRUCTION),
+        );
+        flow.operator_exit.as_mut().unwrap().next_probe = Instant::now();
+        claude.main.as_mut().unwrap().birth = "foreign-start".into();
+        assert_eq!(
+            flow.poll(Some(CLAUDE_EXIT_INSTRUCTION), |pending| same_footer_scope(
+                &pending.scope,
+                &claude
+            ))
+            .as_deref(),
+            Some("Awaiting verified Main exit"),
+        );
+        done.send(Ok(())).unwrap();
+        assert_eq!(
+            flow.poll(None, |_| panic!("Completion takes precedence"))
+                .as_deref(),
+            Some("Main switch verified"),
+        );
+        assert!(flow.operator_exit.is_none());
     }
 
     #[test]
