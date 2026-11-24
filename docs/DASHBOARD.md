@@ -223,9 +223,11 @@ Text clients can request the same pages with `oms_panel_tui_view`, a registered 
 
 ### Claude and Antigravity
 
-The cross-host connection serves the same OMS panel and six read-only tools.
+The cross-host connection serves the same OMS panel and seven read-only tools.
 Choose a registered project to inspect progress, Git and GitHub work, usage,
-or a Board view. A host that supports sending a user message can carry a
+a Board view, or the execution host’s command catalog. `oms_panel_capabilities`
+lists the names and descriptions from `oms list --all`. When it returns
+`nextOffset`, pass that value as `offset` on the same project to continue. A host that supports sending a user message can carry a
 selected item reference into the conversation. Verify assignment and execution
 in that conversation. Private Codex Room history, managed starts and approval
 decisions require the Codex/Work connection.

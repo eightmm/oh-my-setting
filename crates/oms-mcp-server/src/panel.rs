@@ -28,6 +28,7 @@ const USAGE: &str = "oms_panel_usage";
 const CHAT: &str = "oms_panel_chat";
 const GIT: &str = "oms_panel_git_status";
 const VIEW: &str = "oms_panel_tui_view";
+const CAPABILITIES: &str = "oms_panel_capabilities";
 const VIEWS: &[&str] = &[
     "overview",
     "health",
@@ -62,12 +63,26 @@ pub(super) fn runtime_request(request: &Value) -> bool {
         && request["method"] == "tools/call"
         && matches!(
             request["params"]["name"].as_str(),
-            Some(SNAPSHOT | USAGE | CHAT | GIT | VIEW | START | START_STATUS | APPROVALS | DECIDE)
+            Some(
+                SNAPSHOT
+                    | USAGE
+                    | CHAT
+                    | GIT
+                    | VIEW
+                    | CAPABILITIES
+                    | START
+                    | START_STATUS
+                    | APPROVALS
+                    | DECIDE
+            )
         )
 }
 
 fn project_read(name: &str) -> bool {
-    matches!(name, OPEN | PROJECTS | SNAPSHOT | USAGE | GIT | VIEW)
+    matches!(
+        name,
+        OPEN | PROJECTS | SNAPSHOT | USAGE | GIT | VIEW | CAPABILITIES
+    )
 }
 
 pub(super) fn definitions(profile: ToolProfile) -> Value {
@@ -130,6 +145,13 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
             "Read one OMS panel page. connections checks runtime PATH and harness policy, modelcatalog reads cached model and effort evidence, routes previews expected choices, and attribution shows recorded calls. Null means unverified.",
             json!({"project":project,"view":{"type":"string","enum":VIEWS.to_vec()},"page":{"type":"integer","minimum":1,"maximum":1000}}),
             &["view"],
+            false
+        ),
+        make(
+            CAPABILITIES,
+            "Read the public OMS CLI command catalog (oms list --all) for the selected project host. Pass offset from nextOffset if the catalog spans multiple pages.",
+            json!({"project":project,"offset":{"type":"integer","minimum":0,"maximum":10000,"description":"Zero-based command offset when paging a catalog with nextOffset."}}),
+            &[],
             false
         ),
         make(
@@ -467,6 +489,7 @@ impl Server<'_> {
                         "page",
                     ],
                     VIEW => &["project", "view", "page"],
+                    CAPABILITIES => &["project", "offset"],
                     START_STATUS => &["project", "requestId"],
                     START => &["project", "main", "goal", "requestId"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
@@ -534,6 +557,19 @@ impl Server<'_> {
         args: Vec<OsString>,
         allow_partial: bool,
     ) -> PanelResult<(Value, bool)> {
+        let (stdout, partial) = self.panel_output(repo, args, allow_partial)?;
+        Ok((
+            crate::value::from_str(&stdout).map_err(|_| "Unreadable OMS response.")?,
+            partial,
+        ))
+    }
+
+    fn panel_output(
+        &self,
+        repo: &Path,
+        args: Vec<OsString>,
+        allow_partial: bool,
+    ) -> PanelResult<(String, bool)> {
         let request = CommandRequest {
             args: &args,
             cwd: repo,
@@ -598,10 +634,7 @@ impl Server<'_> {
         if output.stdout_bytes > output.stdout.len() {
             return Err("OMS response exceeds the desktop capture limit.".into());
         }
-        Ok((
-            crate::value::from_str(&output.stdout).map_err(|_| "Unreadable OMS response.")?,
-            output.code != 0,
-        ))
+        Ok((output.stdout, output.code != 0))
     }
 
     fn panel_call(&self, name: &str, args: &Value, meta: &Value) -> PanelResult<Value> {
@@ -646,6 +679,9 @@ impl Server<'_> {
             || std::env::var_os("OMS_ROOM_PARTICIPANT").is_some_and(|v| !v.is_empty())
         {
             return Err("This desktop control requires the parent app connection.".into());
+        }
+        if name == CAPABILITIES {
+            return self.panel_capabilities(&repo, args);
         }
         let request_room = || -> PanelResult<String> {
             let key = args["requestId"]
@@ -1022,4 +1058,77 @@ impl Server<'_> {
         }
         Ok(dashboard)
     }
+
+    fn panel_capabilities(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
+        let offset = match args.get("offset") {
+            None => 0usize,
+            Some(v) => v
+                .as_i64()
+                .filter(|n| (0..=10_000).contains(n))
+                .map(|n| n as usize)
+                .ok_or("Invalid command catalog offset.")?,
+        };
+        let (stdout, _) = self.panel_output(repo, vec!["list".into(), "--all".into()], false)?;
+        crate::output::outbound(stdout.as_bytes(), &Value::Null)
+            .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
+        command_catalog(&stdout, offset)
+    }
+}
+
+fn command_name(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !value.ends_with('-')
+        && !value.contains("--")
+}
+
+fn command_catalog(stdout: &str, offset: usize) -> PanelResult<Value> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut commands = Vec::new();
+    // Reserve space for the result envelope and its numeric fields. Each item
+    // also appears escaped inside MCP's text content for non-widget clients.
+    let mut bytes = 512;
+    let mut full = false;
+    for (index, line) in stdout.lines().enumerate() {
+        let (name, description) = line.split_once(' ').ok_or("Unreadable OMS response.")?;
+        let description = description.trim_start_matches(' ');
+        if !command_name(name)
+            || description.is_empty()
+            || description.chars().any(char::is_control)
+            || !names.insert(name)
+        {
+            return Err("Unreadable OMS response.".into());
+        }
+        if names.len() > 10_000 {
+            return Err("OMS command catalog exceeds the pagination limit.".into());
+        }
+        if index < offset || full {
+            continue;
+        }
+        let row = json!({"name":name,"description":description});
+        let json = row.to_string();
+        let size = json.len() + json!(json).to_string().len() + 2;
+        if bytes + size > crate::OUTPUT_LIMIT {
+            if commands.is_empty() {
+                return Err("OMS desktop detail exceeds the response limit.".into());
+            }
+            full = true;
+        } else {
+            bytes += size;
+            commands.push(row);
+        }
+    }
+    let total = names.len();
+    if total == 0 {
+        return Err("Unreadable OMS response.".into());
+    }
+    let count = commands.len();
+    let mut page = json!({"schema":1,"commands":commands,"total":total,"omitted":total-count});
+    if full {
+        page["nextOffset"] = json!(offset + count);
+    }
+    Ok(page)
 }
