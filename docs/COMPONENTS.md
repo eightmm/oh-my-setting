@@ -1298,6 +1298,37 @@ are never pushed with `oms land` (and `patch-land --recover` landings) are not r
 Field names follow the Agent Trace contributor-type vocabulary (`ai`, `human`, `mixed`,
 `unknown`); this is not a claim of compliance with any spec.
 
+`oms land wait --reviewed-head FULL_SHA --request STAMP [--after CURSOR] [--wait-seconds 0..50] [--json]`
+observes one existing private landing receipt from its issuing checkout. Take an immediate
+snapshot, then pass its cursor and a wait duration for the next observation. The cursor
+binds the checkout, request, receipt revision and observed holder. Each waiter samples independently at
+most once a second. Exit 0 reports a local observation, including an unchanged timeout.
+A running receipt without its matching live process and held lock returns immediately
+with `holder-unconfirmed`. The `activity` field distinguishes a free lock, a different
+holder, an ended process and unavailable evidence. A repeated terminal receipt returns
+immediately. If a publisher resumes that exact request, the current holder and previously
+saved outcome are shown together. `awaiting-merge` records PR publication only. The
+observer never queries GitHub, claims a queued request, starts a publisher, or infers a
+merge, closure or installation. Requests queued before their first receipt are unavailable.
+An interrupt exits 130. A missing or untrusted receipt fails without changing any state.
+
+`oms land reconcile --reviewed-head FULL_SHA [--request STAMP] [--remote NAME] [--target BRANCH] [--json]`
+is the observation-only recovery for a PR landing whose reviewed head was merged after the
+target moved, so the delivery ancestor guard refuses a rerun. It writes no receipt, ref,
+status, install, claim, push or merge. It requires a trusted (owner-only, no-follow, bounded)
+saved receipt whose request identity recomputes from this repo, remote, target and gate, then
+a GitHub PR observed `MERGED` with the receipt's number, URL, same-repository head, ref and
+exact head, a merge commit reachable from the live target, and an identical reviewed tree.
+The PR gate links to the actual hosted `test.yml` pull-request run and successful gate job
+on that head and run attempt. If GitHub omits the run’s PR membership after merge, the
+source branch must identify a single PR across all states. The complete hosted job list
+must satisfy the full CI policy. A push run, an unrelated green check, ambiguous PR
+membership, missing local objects, or a different merged tree cannot prove delivery.
+Exit 0 emits `verified` / `same-tree`. The observation carries the saved local gate scope
+(`unknown` for a custom command) separately from hosted CI. A Plan consumer still needs
+its own patch and lease evidence. The command never fetches; receipts outside the scan
+limit can be selected with an explicit request stamp.
+
 `oms land blame-session [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE` prints
 each commit's row or `unrecorded` and a summary (`N ai / N human / N mixed / N unknown / N
 unrecorded`). It is a `land` sub-action, beside `notes`, because the rows are written by
