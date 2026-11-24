@@ -390,6 +390,12 @@ assert.notEqual(execGlyphs[6], execGlyphs[2], 'ready must have a distinct glyph 
   assert.deepEqual([...unk.get('state').children].map(o => o.value).filter(Boolean), ['unknown']);
 }
 assert.notEqual(execPatterns[6], execPatterns[2], 'ready must have a distinct pattern from pending');
+{ // Finished nodes show their outcome, never a blanket Exited.
+  const outcomes = {completed: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown', surprise: 'unknown'};
+  const view = render({kind: 'execution', title: 'x', counts: {}, nodes: Object.keys(outcomes).map((o, i) => ({id: `o${i}`, label: o, kind: 'node', degree: 0, status: 'finished', outcome: o})), edges: []}, {width: 768});
+  assert.deepEqual(view.nodes.map(n => n.attributes['data-state']), Object.values(outcomes));
+  assert.equal(view.nodes[1].querySelector('.oms-graph-glyph').textContent, '×');
+}
 const visibleLegendGlyphs = (view, cls) => new Set(
   view.get('legend').children
     .filter(item => !item.hidden && item.classList.contains(cls))
@@ -912,6 +918,9 @@ const labelOf = el => el.querySelector('.oms-graph-label');
     });
   };
   clean(render(two, {width: 320}), two.nodes, 'two fans at 320');
+  // Large children (degree 60 -> 16 px radius) must also clear each other at every width.
+  const heavy = {...two, nodes: [...files, ...leaves.map(l => ({...l, degree: 60}))]};
+  for (const w of [320, 640, 960]) clean(render(heavy, {width: w}), heavy.nodes, `heavy fans at ${w}`);
   const big = {kind: 'project', title: 'Fan', counts: {}, nodes: [{id: 'hub', label: 'hub.rs', kind: 'file', degree: 90, show_label: true, assurance: 'supported'},
     ...Array.from({length: 90}, (_, i) => ({id: `leaf${i}`, label: `leaf${i}.rs`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}))],
     edges: Array.from({length: 90}, (_, i) => ({source: 'hub', target: `leaf${i}`, relation: 'contains', confidence: 'EXTRACTED'}))};

@@ -540,13 +540,15 @@
     finished: 'exited', done: 'exited', passed: 'accepted', completed: 'accepted',
     error: 'failed', guard_stop: 'failed', orphaned: 'failed', partial: 'stale', degraded: 'stale', unclassified: 'unknown'
   };
+  const OUTCOME_STATE = {completed: 'exited', approved: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown'};
   function statusMeta(row) {
     if (data.kind === 'project') {
       const key = Object.prototype.hasOwnProperty.call(ASSURANCE_META, row.assurance) ? row.assurance : 'unclassified';
       return {key, ...ASSURANCE_META[key], label: t(`as.${key}`)};
     }
     const raw = String(row.status || 'unknown').toLocaleLowerCase();
-    const alias = STATE_ALIAS[raw] || raw;
+    const outcome = String(row.outcome || '').toLocaleLowerCase();
+    const alias = raw === 'finished' && outcome ? (OUTCOME_STATE[outcome] || 'unknown') : (STATE_ALIAS[raw] || raw);
     const key = Object.prototype.hasOwnProperty.call(STATE_META, alias) ? alias : 'unknown';
     return {key, ...STATE_META[key], label: t(`st.${key}`)};
   }
@@ -948,18 +950,20 @@
       if (children.length <= FAN_MIN) return;
       const parent = byId.get(id);
       const slots = [];
+      const cr = children.reduce((acc, c) => Math.max(acc, collideRadius(c)), 0);
+      const step = 2 * cr + 2;
       let placed = 0;
       for (let ring = 0; placed < children.length; ring += 1) {
-        const radius = nodeRadius(parent) + 30 + ring * 22;
-        const count = Math.min(children.length - placed, Math.max(1, Math.floor(2 * Math.PI * radius / 22)));
+        const radius = collideRadius(parent) + cr + 4 + ring * step;
+        const count = Math.min(children.length - placed, Math.max(1, Math.floor(2 * Math.PI * radius / step)));
         for (let i = 0; i < count; i += 1) {
           const angle = 2 * Math.PI * i / count + ring * .6;
           slots.push({child: children[placed + i], dx: Math.cos(angle) * radius, dy: Math.sin(angle) * radius});
         }
         placed += count;
       }
-      slots.forEach(slot => claimed.add(slot.child.id));
-      parent._fan = Math.max(parent._fan || 0, ...slots.map(slot => Math.hypot(slot.dx, slot.dy)));
+      slots.forEach(slot => { claimed.add(slot.child.id); slot.child._hub = parent; });
+      parent._fan = Math.max(parent._fan || 0, ...slots.map(slot => Math.hypot(slot.dx, slot.dy) + cr));
       fans.push({parent, slots});
     });
   })();
@@ -990,6 +994,11 @@
       }
     });
   }
+  // A collision on a fan child moves its hub, so the ring stays rigid; a pinned child moves itself.
+  function mover(row) {
+    while (row._hub && (row.fx === null || row.fx === undefined)) row = row._hub;
+    return row;
+  }
   function collide(strength) {
     let moved = false;
     for (let i = 0; i < nodes.length; i += 1) {
@@ -1003,12 +1012,15 @@
         if (dist >= min) continue;
         if (dist < 1e-6) { dx = rand() - .5; dy = rand() - .5; dist = Math.hypot(dx, dy) || 1; }
         const push = (min - dist) / dist * strength;
-        const aFixed = a.fx !== null && a.fx !== undefined;
-        const bFixed = b.fx !== null && b.fx !== undefined;
+        const ma = mover(a);
+        const mb = mover(b);
+        if (ma === mb) continue;
+        const aFixed = ma.fx !== null && ma.fx !== undefined;
+        const bFixed = mb.fx !== null && mb.fx !== undefined;
         if (aFixed && bFixed) continue;
         const share = aFixed || bFixed ? 1 : .5;
-        if (!aFixed) { a.x -= dx * push * share; a.y -= dy * push * share; }
-        if (!bFixed) { b.x += dx * push * share; b.y += dy * push * share; }
+        if (!aFixed) { ma.x -= dx * push * share; ma.y -= dy * push * share; }
+        if (!bFixed) { mb.x += dx * push * share; mb.y += dy * push * share; }
         moved = true;
       }
     }
@@ -1087,9 +1099,9 @@
       applyFans();
       const moved = collide(1);
       clampToWorld();
-      applyFans();
       if (!moved) break;
     }
+    applyFans();
   }
   function edgePath(row) {
     const a = row.source;
@@ -1889,7 +1901,11 @@
     relabel();
     nodes.forEach(row => {
       row.x *= worldW / previousWorldW; row.y *= worldH / previousWorldH;
-      if (row.fx !== null && row.fx !== undefined) { row.fx *= worldW / previousWorldW; row.fy *= worldH / previousWorldH; }
+      if (row.fx !== null && row.fx !== undefined) {
+        const m = fanPad(row);
+        row.fx = Math.max(m, Math.min(worldW - m, row.fx * worldW / previousWorldW));
+        row.fy = Math.max(m, Math.min(worldH - m, row.fy * worldH / previousWorldH));
+      }
     });
     if (modeChanged) applyFilters();
     paint();
