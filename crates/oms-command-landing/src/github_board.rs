@@ -1,5 +1,5 @@
 //! Read a page of cards or a full read-only drift report from a board linked to this repository.
-use super::super::{digits, plan_issues, spawn, strict, task_issue};
+use super::super::{digits, plan_issue_evidence, spawn, strict, task_issue_evidence};
 use super::{
     Kind, Number, READ_TIMEOUT, Slug, WEB, display, project_error, projects, stable_id,
     valid_cursor, work_item,
@@ -101,6 +101,84 @@ fn board_fields(connection: &V) -> (V, Fields, bool) {
     let partial = !missing.is_empty();
     report.set("missing", V::Arr(missing));
     (report, fields, partial)
+}
+
+/// The browse projection may shorten display labels. A decision uses exact
+/// option names and rejects identities that the schema does not distinguish.
+fn recommendation_schema(connection: &V, fields: &Fields) -> bool {
+    fields.len() == BOARD_FIELDS.len()
+        && fields.values().all(|(id, options)| {
+            let mut matching = connection
+                .get("nodes")
+                .array()
+                .iter()
+                .filter(|field| field.get("id").text() == Some(id));
+            let Some(field) = matching.next() else {
+                return false;
+            };
+            matching.next().is_none()
+                && options.values().collect::<BTreeSet<_>>().len() == options.len()
+                && field.get("options").array().iter().all(|option| {
+                    option
+                        .get("id")
+                        .text()
+                        .and_then(|id| options.get(id))
+                        .map(String::as_str)
+                        == option.get("name").text()
+                })
+        })
+}
+
+fn recommendation(row: &V, node: &V, incomplete: Option<&str>, duplicate: bool) -> V {
+    let class = row.get("class").text().unwrap_or("unknown");
+    let fields = row.get("fields");
+    let values = node.get("fieldValues").get("nodes").array();
+    let issue = node.get("content");
+    let (state, reason) = if duplicate {
+        ("excluded", "duplicate")
+    } else if !matches!(class, "candidate" | "unknown" | "unverified") {
+        ("excluded", class)
+    } else if let Some(reason) = incomplete {
+        ("unverified", reason)
+    } else if row.get("dependencies").text() == Some("unknown") {
+        ("unverified", "dependencies_unknown")
+    } else if class != "candidate"
+        || row.get("incomplete") != &V::Bool(false)
+        || !(issue.get("issueType") == &V::Null
+            || issue
+                .get("issueType")
+                .get("name")
+                .text()
+                .is_some_and(|s| !s.trim().is_empty()))
+        || issue
+            .get("labels")
+            .get("nodes")
+            .array()
+            .iter()
+            .any(|n| n.get("name").text().is_none_or(|s| s.trim().is_empty()))
+    {
+        ("unverified", "item_evidence_incomplete")
+    } else if !BOARD_FIELDS.iter().all(|name| {
+        let selection = fields.get(name);
+        selection.get("optionId").text().is_some()
+            && values.iter().any(|v| {
+                v.get("field").get("id") == selection.get("fieldId")
+                    && v.get("optionId") == selection.get("optionId")
+                    && v.get("name") == selection.get("name")
+            })
+    }) {
+        ("unverified", "field_selection_unverified")
+    } else if fields.get("Status").get("name").text() != Some("Ready") {
+        ("excluded", "status_not_ready")
+    } else if !matches!(
+        fields.get("Priority").get("name").text(),
+        Some("P0" | "P1" | "P2")
+    ) {
+        ("unverified", "priority_unrecognized")
+    } else {
+        ("recommended", "ready_with_priority")
+    };
+    obj([("state", state.into()), ("reason", reason.into())])
 }
 
 fn board_item(node: &V, slug: &Slug, chosen: &Fields) -> V {
@@ -282,6 +360,11 @@ fn resolve_board(
     }))
 }
 
+// A present malformed GraphQL errors member cannot establish a complete response.
+fn response_has_errors(reply: &V) -> bool {
+    reply.has("errors") && !matches!(reply.get("errors"), V::Arr(errors) if errors.is_empty())
+}
+
 enum BoardPageRaw {
     Ok {
         board: V,
@@ -351,7 +434,7 @@ fn fetch_board_raw(
     }
     Ok(BoardPageRaw::Ok {
         board: board.clone(),
-        has_errors: !errors.is_empty(),
+        has_errors: response_has_errors(&v),
         error_reason: err_reason,
     })
 }
@@ -407,16 +490,45 @@ pub(super) fn page(
         return Ok(board_empty("unavailable", Some("partial_response")));
     };
     let planned = c.state(root).ok().filter(|p| p == root).and_then(|state| {
-        let mut linked: BTreeSet<_> = plan_issues(&state, slug)
-            .ok()?
+        let (links, complete) = plan_issue_evidence(&state, slug).ok()?;
+        let mut linked: BTreeSet<_> = links
             .into_iter()
             .map(|(_, issue)| issue.number.to_string())
             .collect();
-        if let Some(issue) = task_issue(&state, slug).ok()? {
+        let (packet, packet_complete) = task_issue_evidence(&state, slug).ok()?;
+        if let Some(issue) = packet {
             linked.insert(issue.number.to_string());
         }
-        Some(linked)
+        Some((linked, complete && packet_complete))
     });
+    let evidence_gap = if has_errors || nodes.len() > 20 {
+        Some("partial_response")
+    } else if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
+        Some("plan_unverified")
+    } else if !recommendation_schema(board.get("fields"), &chosen) {
+        Some("field_schema_unverified")
+    } else {
+        None
+    };
+    // Keep both copies out of recommendations, even when an archived or closed
+    // copy was omitted from browse candidates. This comparison is page-local.
+    let mut issue_numbers = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+    for node in nodes.iter().take(20) {
+        let issue = node.get("content");
+        if issue.get("__typename").text() == Some("Issue")
+            && issue
+                .get("repository")
+                .get("nameWithOwner")
+                .text()
+                .and_then(|s| Slug::parse(s).ok())
+                .is_some_and(|r| r.matches(slug))
+            && let Some(number) = digits(issue.get("number"))
+            && !issue_numbers.insert(number)
+        {
+            duplicates.insert(number);
+        }
+    }
     let mut seen = BTreeSet::new();
     let items: Vec<V> = nodes
         .iter()
@@ -432,7 +544,7 @@ pub(super) fn page(
                     "closed_board"
                 } else if planned
                     .as_ref()
-                    .is_some_and(|links| links.contains(&number))
+                    .is_some_and(|(links, _)| links.contains(&number))
                 {
                     "plan_linked"
                 } else if planned.is_none() || row.get("incomplete") == &V::Bool(true) || has_errors
@@ -451,6 +563,10 @@ pub(super) fn page(
                 };
                 row.set("class", class);
             }
+            let duplicate = row.get("kind").text() == Some("issue")
+                && digits(row.get("number")).is_some_and(|n| duplicates.contains(n));
+            let advice = recommendation(&row, n, evidence_gap, duplicate);
+            row.set("recommendation", advice);
             row
         })
         .collect();
@@ -649,7 +765,7 @@ fn walk_open_work(
             record_reason(&mut reason, err_reason.unwrap_or("partial_response"));
             break;
         };
-        if !errors.is_empty() {
+        if response_has_errors(&v) {
             record_reason(&mut reason, err_reason.unwrap_or("partial_response"));
         }
         if rows.len() > 100 {
@@ -975,8 +1091,8 @@ pub(super) fn drift(
                     excluded_archived += 1;
                 } else {
                     excluded_unknown += 1;
-                    record_reason(&mut board_reason, "partial_response");
                 }
+                record_reason(&mut board_reason, "partial_response");
                 continue;
             };
             let Some(repository) = item
@@ -989,8 +1105,8 @@ pub(super) fn drift(
                     excluded_archived += 1;
                 } else {
                     excluded_unknown += 1;
-                    record_reason(&mut board_reason, "partial_response");
                 }
+                record_reason(&mut board_reason, "partial_response");
                 continue;
             };
             if !repository.matches(slug) {
@@ -1002,6 +1118,8 @@ pub(super) fn drift(
                 if let Some(number) = digits(item.get("number")).and_then(|n| Number::parse(n).ok())
                 {
                     board_present.insert((kind, number));
+                } else {
+                    record_reason(&mut board_reason, "partial_response");
                 }
                 continue;
             }

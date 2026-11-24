@@ -1079,7 +1079,17 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         "#!/usr/bin/env bash\nsource src/main.sh\nrun_app\n",
     )
     .unwrap();
-    for path in ["src/lib.sh", "src/main.sh", "tests/test-app.sh"] {
+    fs::write(
+        indexed.0.join("src/record.rs"),
+        "pub fn inspect(value: usize) -> usize {\n    value\n}\nfn measured(_: [u8; \"literal\".len()]) {}\n",
+    )
+    .unwrap();
+    for path in [
+        "src/lib.sh",
+        "src/main.sh",
+        "src/record.rs",
+        "tests/test-app.sh",
+    ] {
         fs::set_permissions(indexed.0.join(path), fs::Permissions::from_mode(0o600)).unwrap();
     }
     git(&indexed.0, &["add", "."]);
@@ -1128,6 +1138,32 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         "expected EXTRACTED neighbor: {idx_focus}"
     );
 
+    let helper_id = "--node=symbol:src/lib.sh::helper";
+    let (_, helper, _) = run_panel(&indexed.0, &[helper_id]);
+    let detail = &helper["selection"]["definition"];
+    assert_eq!(detail["id"], "symbol:src/lib.sh::helper");
+    assert_eq!(detail["signature"], "helper()");
+    assert_eq!(
+        (&detail["line"], &detail["endLine"]),
+        (&json!(2), &json!(2))
+    );
+    assert!(!helper["nodes"].to_string().contains("helper()"));
+    assert!(idx_focus["selection"].get("definition").is_none());
+    let rust_id = "--node=symbol:src/record.rs::function:inspect";
+    let (_, rust, _) = run_panel(&indexed.0, &[rust_id]);
+    let detail = &rust["selection"]["definition"];
+    assert_eq!(detail["signature"], "pub fn inspect(value: usize) -> usize");
+    assert_eq!(
+        (&detail["line"], &detail["endLine"]),
+        (&json!(1), &json!(3))
+    );
+    let (_, literal, _) = run_panel(
+        &indexed.0,
+        &["--node=symbol:src/record.rs::function:measured"],
+    );
+    assert_eq!(literal["selection"]["status"], "found");
+    assert!(literal["selection"].get("definition").is_none());
+    assert!(!literal.to_string().contains("literal"));
     // Indexed directory drilldown and missing node.
     let (code, idx_dir, _) = run_panel(&indexed.0, &["--node=dir:src"]);
     assert_eq!(code, 0);
@@ -1152,6 +1188,20 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
 
     // Assert zero writes or mtime changes to the index or repo.
     assert_eq!(tree_fingerprint(&indexed.0), before_indexed);
+
+    // Matching manifest versions cannot authorize text from an edited file.
+    fs::write(indexed.0.join("src/lib.sh"), "helper() { echo changed; }\n").unwrap();
+    let (_, edited, _) = run_panel(&indexed.0, &[helper_id]);
+    assert_eq!(edited["selection"]["status"], "found");
+    assert!(edited["selection"].get("definition").is_none());
+
+    let mut stale: Value =
+        serde_json::from_slice(&fs::read(indexed.state().join("manifest.json")).unwrap()).unwrap();
+    stale["parser_version"] = json!(0);
+    indexed.manifest(&stale);
+    let (_, stale, _) = run_panel(&indexed.0, &[rust_id]);
+    assert_eq!(stale["provenance"]["indexFreshness"], "stale");
+    assert!(stale["selection"].get("definition").is_none());
 
     // 7. Large repository scale cap keeps payload bounded under MAX_RESPONSE_BYTES.
     let large = Fixture::empty();

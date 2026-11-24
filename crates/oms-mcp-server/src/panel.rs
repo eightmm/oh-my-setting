@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v11.html";
+const URI: &str = "ui://oms/conversation-panel/v13.html";
+const V12: &str = "ui://oms/conversation-panel/v12.html";
+const V11: &str = "ui://oms/conversation-panel/v11.html";
 const V10: &str = "ui://oms/conversation-panel/v10.html";
 const V9: &str = "ui://oms/conversation-panel/v9.html";
 const V8: &str = "ui://oms/conversation-panel/v8.html";
@@ -494,7 +496,17 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         Ok(data)
     }) {
-        Ok(data) => {
+        Ok(mut data) => {
+            // Selected declarations are for the widget. Sharing a node with the
+            // conversation carries only its existing scoped reference.
+            let definition =
+                if data["kind"] == "oms-panel-project-graph" && data["selection"].is_object() {
+                    data["selection"]
+                        .as_object_mut()
+                        .and_then(|s| s.remove("definition"))
+                } else {
+                    None
+                };
             let mut text = data.to_string();
             if data["kind"] == "oms-panel-project-graph"
                 && text.len() + json!(&text).to_string().len() + 1024 > 60_000
@@ -527,7 +539,11 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                 }
                 text = "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into();
             }
-            json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false})
+            let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false});
+            if let Some(detail) = definition {
+                result["_meta"]["graphDefinition"] = detail;
+            }
+            result
         }
         Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),
     }
@@ -613,7 +629,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12)
                 ) =>
             {
                 json!({"contents":[{
