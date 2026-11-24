@@ -1901,6 +1901,12 @@ fn token_span(call: &Value, limit: usize, columns: usize, boxed: bool) -> Vec<Sp
     token_span_with(call, limit, columns, boxed, true)
 }
 
+/// A known elapsed time; `—` and empty mean unknown.
+fn known_elapsed(call: &Value) -> &str {
+    let elapsed = text(call, "board_elapsed");
+    if elapsed == "—" { "" } else { elapsed }
+}
+
 /// `placeholder` false drops an unknown total's `— tok` so a narrow row can
 /// keep its operation badge.
 fn token_span_with(
@@ -1911,8 +1917,8 @@ fn token_span_with(
     placeholder: bool,
 ) -> Vec<Span> {
     if call["attention_kind"].is_string() {
-        let elapsed = text(call, "board_elapsed");
-        if columns >= 44 && !elapsed.is_empty() && elapsed != "—" && width(elapsed) <= limit {
+        let elapsed = known_elapsed(call);
+        if columns >= 44 && !elapsed.is_empty() && width(elapsed) <= limit {
             return vec![Span::raw(elapsed, limit, Some(SGR_MUTED))];
         }
         return Vec::new();
@@ -1924,7 +1930,7 @@ fn token_span_with(
     let unknown = trimmed.starts_with('—');
     // The unboxed Main on a short board shares the boxed call rows' right edge.
     let edge = if columns >= 44 && !boxed { "  " } else { "" };
-    let elapsed = text(call, "board_elapsed");
+    let elapsed = known_elapsed(call);
     let elapsed =
         (columns >= 56 && !elapsed.is_empty()).then(|| format!("  {:>9}", clip(elapsed, 9)));
     // Counters without a total show separately; no total is invented.
@@ -1974,13 +1980,32 @@ fn token_span_with(
         .collect()
 }
 
-fn provider_groups(calls: &[Value], main: Option<&Value>) -> Vec<usize> {
+fn provider_order(calls: &[Value], main: Option<&Value>) -> Vec<usize> {
     let preferred = main.map_or(0, provider_bucket);
     let mut groups = vec![0, 1, 2];
     if calls.iter().any(|call| provider_bucket(call) == 3) {
         groups.push(3);
     }
     groups.sort_by_key(|group| (*group != preferred, *group));
+    groups
+}
+
+/// Providers with a visible row or a connected lead chat; others get no card.
+fn provider_groups(
+    all: &[Value],
+    calls: &[TreeEntry<'_>],
+    direct: &BTreeSet<(&str, &str)>,
+    main: Option<&Value>,
+    sessions: &Value,
+) -> Vec<usize> {
+    let mut groups = provider_order(all, main);
+    groups.retain(|group| {
+        calls.iter().any(|entry| {
+            provider_bucket(entry.call) == *group && !is_direct_work(entry.call, direct)
+        }) || crate::orchestrator::PROVIDERS
+            .get(*group)
+            .is_some_and(|provider| rows(sessions).iter().any(|s| s.as_str() == Some(provider)))
+    });
     groups
 }
 
@@ -2518,6 +2543,51 @@ fn render_attention_band(
     out
 }
 
+fn attention_pass(v: &Value, attention_calls: &BTreeSet<&str>) -> bool {
+    v["attention_kind"].is_string()
+        || (v["room_only_history"] != true
+            && v["room_only_stale"] != true
+            && (awaiting_review(v)
+                || v["lifecycle_stale"] == true
+                || attention_calls.contains(text(v, "participant"))
+                || [
+                    "waiting_input",
+                    "waiting_approval",
+                    "blocked",
+                    "orphaned",
+                    "failed",
+                    "timed_out",
+                    "abandoned",
+                ]
+                .contains(&text(v, "state"))))
+}
+
+/// Rows the Board could list and how many each stage removed (history,
+/// attention, text), for the empty-board hint.
+fn room_stages(
+    all: &[Value],
+    nav: &navigation::Navigation,
+    main: Option<&Value>,
+    attention_calls: &BTreeSet<&str>,
+) -> (usize, [usize; 3]) {
+    let words = navigation::words(&nav.filter);
+    let mut out = (0, [0; 3]);
+    for v in all
+        .iter()
+        .filter(|v| !main.is_some_and(|main| std::ptr::eq(*v, main)))
+    {
+        out.0 += 1;
+        if collapsed_history(nav, v) || fold_inactive(nav, v) {
+            out.1[0] += 1;
+        } else if nav.attention_only && !attention_pass(v, attention_calls) {
+            out.1[1] += 1;
+        } else if !navigation::matches_words(v, &words) {
+            out.1[2] += 1;
+        }
+    }
+    out
+}
+
 fn visible_from<'a>(
     all: &'a [Value],
     nav: &navigation::Navigation,
@@ -2525,32 +2595,14 @@ fn visible_from<'a>(
     direct: &BTreeSet<(&str, &str)>,
     attention_calls: &BTreeSet<&str>,
 ) -> Vec<&'a Value> {
-    let groups = provider_groups(all, main);
+    let groups = provider_order(all, main);
     let words = navigation::words(&nav.filter);
     let mut filtered: Vec<_> = all
         .iter()
         .filter(|v| !main.is_some_and(|main| std::ptr::eq(*v, main)))
         .filter(|v| !collapsed_history(nav, v) && !fold_inactive(nav, v))
         .filter(|v| navigation::matches_words(v, &words))
-        .filter(|v| {
-            !nav.attention_only
-                || v["attention_kind"].is_string()
-                || (v["room_only_history"] != true
-                    && v["room_only_stale"] != true
-                    && (awaiting_review(v)
-                        || v["lifecycle_stale"] == true
-                        || attention_calls.contains(text(v, "participant"))
-                        || [
-                            "waiting_input",
-                            "waiting_approval",
-                            "blocked",
-                            "orphaned",
-                            "failed",
-                            "timed_out",
-                            "abandoned",
-                        ]
-                        .contains(&text(v, "state"))))
-        })
+        .filter(|v| !nav.attention_only || attention_pass(v, attention_calls))
         .collect();
     if nav.view == View::Auto {
         filtered.sort_by_key(|call| {
@@ -2906,7 +2958,13 @@ fn frame_with_capacity(
             lines.push(line);
         }
     }
-    if columns >= 68 && height >= 18 && !overlay {
+    if columns >= 68
+        && height >= 18
+        && !overlay
+        && calls
+            .iter()
+            .any(|entry| !entry.call["attention_kind"].is_string())
+    {
         optional.push(legend_line(colored, columns));
     }
     if stale {
@@ -3026,17 +3084,26 @@ fn frame_with_capacity(
             }
         }
         main.truncate(main_room);
-        let groups = provider_groups(&all, pinned);
+        let groups = provider_groups(&all, &calls, &direct, pinned, &report["provider_sessions"]);
+        let (room_total, removed) = if calls.is_empty() {
+            room_stages(&all, nav, pinned, &attention_calls)
+        } else {
+            (0, [0; 3])
+        };
         let has_direct = calls
             .iter()
             .any(|entry| is_direct_work(entry.call, &direct));
         // Keep page capacity steady when the direct rows scroll offscreen.
-        let provider_chrome = groups.len() + 1 + 2 * usize::from(has_direct);
+        let provider_chrome =
+            groups.len() + usize::from(!groups.is_empty()) + 2 * usize::from(has_direct);
         let content_start = lines.len() + main.len();
         // On short boards, wrapped notices take precedence over decorative chrome.
         let chrome_start = content_start + if short_board { notices.len() } else { 0 };
+        // A filter that removed every Room row shows the empty-board hint, not cards.
         let provider_view = nav.view == View::Auto
             && use_cards
+            && provider_chrome > 0
+            && !(calls.is_empty() && removed[1] + removed[2] > 0)
             && height.saturating_sub(chrome_start) >= provider_chrome + minimum;
         let activity_chrome = usize::from(!provider_view && chrome_start + 4 < height);
         let bottom_chrome =
@@ -3162,15 +3229,63 @@ fn frame_with_capacity(
                 *row += base;
             }
         } else if capacity > 0 && calls.is_empty() {
-            let empty = if nav.attention_only {
-                "  No attention items"
+            // While the prompt is edited `b` would be typed, so it is not advertised.
+            let stages: Vec<_> = [
+                (
+                    removed[0],
+                    if nav.editing {
+                        "folded history"
+                    } else {
+                        "folded history (Tab all)"
+                    },
+                    if nav.editing { "" } else { "Tab all" },
+                ),
+                (
+                    folded,
+                    if nav.editing {
+                        "folded in tree"
+                    } else {
+                        "folded in tree (Tab changes view)"
+                    },
+                    if nav.editing { "" } else { "Tab view" },
+                ),
+                (
+                    removed[1],
+                    if nav.editing {
+                        "attention filter"
+                    } else {
+                        "attention filter (b shows all)"
+                    },
+                    if nav.editing { "attention" } else { "b all" },
+                ),
+                (removed[2], "text filter (Esc clears)", "Esc clear"),
+            ]
+            .into_iter()
+            .filter(|stage| stage.0 > 0)
+            .collect();
+            let reasons = stages.iter().map(|s| s.1).collect::<Vec<_>>().join(", ");
+            let keys = stages
+                .iter()
+                .map(|s| s.2)
+                .filter(|key| !key.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let long = format!("  0 of {room_total} shown — {reasons}");
+            let empty = if room_total > 0 && !stages.is_empty() {
+                if width(&long) <= inner_width || keys.is_empty() {
+                    long
+                } else {
+                    format!("  0/{room_total} · {keys}")
+                }
+            } else if nav.attention_only {
+                "  No attention items".to_owned()
             } else if pinned.is_some() {
-                "  No visible lead or worker calls"
+                "  No visible lead or worker calls".to_owned()
             } else {
-                "  No recorded calls — press ? for shortcuts or dispatch a worker"
+                "  No recorded calls — press ? for shortcuts or dispatch a worker".to_owned()
             };
             lines.push(card_row_lr(
-                vec![Span::literal(empty, Some(SGR_MUTED))],
+                vec![Span::raw(empty, usize::MAX, Some(SGR_MUTED))],
                 vec![],
                 columns,
                 use_cards,
@@ -3218,6 +3333,10 @@ fn frame_with_capacity(
             }
         }
         let offscreen = calls.len().saturating_sub(capacity.min(calls.len()));
+        // The omission line sits below the card, never inside it.
+        if bottom_chrome && let Some(bottom) = card_bottom(columns, use_cards, colored) {
+            lines.push(bottom);
+        }
         if filtered_out + folded + offscreen + history + inactive > 0 {
             lines.push(render_lr(
                 vec![Span::raw(
@@ -3242,9 +3361,6 @@ fn frame_with_capacity(
                 None,
                 colored,
             ));
-        }
-        if bottom_chrome && let Some(bottom) = card_bottom(columns, use_cards, colored) {
-            lines.push(bottom);
         }
     }
 
@@ -3447,7 +3563,11 @@ fn render_card_row(
         || "Worker".to_owned(),
         |first| format!("{}{}", first.to_uppercase(), role.as_str()),
     );
-    let role = clip(&role, 24);
+    let role_cap = if columns >= 40 {
+        (inner / 3).clamp(10, 24)
+    } else {
+        24
+    };
     let name = if !explicit_worker_alias(call) && display.name == text(call, "title") {
         board_brief(&display.name, &role)
     } else {
@@ -3486,7 +3606,8 @@ fn render_card_row(
             Span::literal(" ", None),
         ]);
     }
-    left.push(Span::raw(&role, 24, Some(role_sgr)));
+    let shown_role = clip(&role, role_cap);
+    left.push(Span::raw(&shown_role, role_cap, Some(role_sgr)));
     if !name.is_empty() || !task.is_empty() {
         let field = if align_roles
             || child && columns >= 56
@@ -3501,7 +3622,7 @@ fn render_card_row(
         } else {
             0
         };
-        let pad = field.saturating_sub(width(&role)) + 1;
+        let pad = field.saturating_sub(width(&shown_role)) + 1;
         left.push(Span {
             plain: " ".repeat(pad),
             sgr: None,
@@ -3519,15 +3640,46 @@ fn render_card_row(
         label_min + 7
     };
     let metadata_limit = left_budget(inner, prefix_width + text_min);
-    let mut right = token_span(
-        call,
-        left_budget(inner, prefix_width + label_min),
-        columns,
-        use_cards,
-    );
-    let (badge, badge_sgr) = call_badge(call);
+    let roomy = left_budget(inner, prefix_width + label_min);
+    let (mut badge, badge_sgr) = call_badge(call);
+    // One rule charges and emits the 2-cell gap; below 40 columns it always does.
+    let shows = |spans: &[Span]| columns < 40 || spans_width(spans) > 0;
+    let mut right;
+    let mut available;
+    if columns >= 40 {
+        // Badge first, then elapsed, then tokens.
+        badge = clip(&badge, roomy);
+        let wide = width(&badge) > metadata_limit;
+        let limit = if wide {
+            0
+        } else {
+            metadata_limit.saturating_sub(width(&badge) + 2)
+        };
+        let elapsed = clip(known_elapsed(call), 9);
+        let spans =
+            |limit, placeholder| token_span_with(call, limit, columns, use_cards, placeholder);
+        right = [
+            spans(roomy, true),
+            spans(roomy, false),
+            spans(limit, true),
+            (columns >= 56 && (1..=limit).contains(&width(&elapsed)))
+                .then(|| Span::raw(&elapsed, limit, Some(SGR_MUTED)))
+                .into_iter()
+                .collect(),
+        ]
+        .into_iter()
+        .find(|spans| (1..=limit).contains(&spans_width(spans)))
+        .unwrap_or_default();
+        available = if wide {
+            roomy
+        } else {
+            metadata_limit.saturating_sub(spans_width(&right) + 2 * usize::from(shows(&right)))
+        };
+    } else {
+        right = token_span(call, roomy, columns, use_cards);
+        available = metadata_limit.saturating_sub(spans_width(&right) + 2);
+    }
     let badge_width = width(&badge);
-    let mut available = metadata_limit.saturating_sub(spans_width(&right) + 2);
     // An operation or stale-event advisory outranks an unknown-total placeholder.
     if badge_width > available && (active_verb(call).is_some() || call["lifecycle_stale"] == true) {
         let compact = token_span_with(
@@ -3554,6 +3706,7 @@ fn render_card_row(
             badge_width
         };
         let badge = format!("{badge}{}", " ".repeat(field.saturating_sub(badge_width)));
+        let gap = if shows(&right) { "  " } else { "" };
         right.splice(
             0..0,
             [
@@ -3561,7 +3714,7 @@ fn render_card_row(
                     plain: badge,
                     sgr: Some(badge_sgr),
                 },
-                Span::literal("  ", None),
+                Span::literal(gap, None),
             ],
         );
     }
@@ -4459,7 +4612,9 @@ fn render_provider_rows(
             ));
         }
     }
-    lines.extend(card_bottom(columns, true, colored));
+    if !groups.is_empty() {
+        lines.extend(card_bottom(columns, true, colored));
+    }
     lines
 }
 
@@ -6138,10 +6293,13 @@ fn render_detail_card(
         ));
     }
     if !title.is_empty() {
-        for part in wrap(title, inner_width.saturating_sub(4).max(1))
-            .into_iter()
-            .take(4)
-        {
+        let wide = inner_width.saturating_sub(4).max(1);
+        let mut parts = wrap(title, wide);
+        if parts.len() > 4 {
+            parts.truncate(4);
+            parts[3] = clip(&format!("{}…", parts[3]), wide);
+        }
+        for part in parts {
             out.push(card_row_lr(
                 vec![Span::raw(part, inner_width, Some(SGR_TEXT))],
                 vec![],
@@ -7306,6 +7464,58 @@ mod tests {
             assert!(!line.contains("Role builder"), "{line}");
             assert_eq!(width(&line), columns);
         }
+        // The state badge is reserved first at every width, under Tree indents and long roles.
+        let event = json!({
+            "title":"Inspect the long role", "provider":"codex", "role":"orchestrator-with-a-long-role",
+            "participant":"call-fixture", "state":"working", "event_tokens":{"total":12500},
+            "board_elapsed":"2m"
+        });
+        let native = json!({
+            "native_child":true, "provider":"codex", "role":"orchestrator-with-a-long-role",
+            "participant":"native-codex-1", "title":"Inspect the long role", "state":"working",
+            "native_response_usage":{"response":{"total_tokens":12_500}}
+        });
+        for call in [&event, &native] {
+            let badge = call_badge(call).0;
+            for prefix in ["", "├─ ", "│  └─ "] {
+                for columns in [40, 44, 56, 60, 80, 120] {
+                    let line =
+                        render_call_row(call, prefix, "", false, columns, columns >= 44, false);
+                    assert!(line.contains(&badge), "{columns}: {line}");
+                    assert_eq!(width(&line), columns, "{line}");
+                }
+            }
+        }
+
+        // Unknown elapsed never replaces a known total or renders as a bare `—`.
+        for role in [
+            "worker",
+            "security-auditor",
+            "orchestrator-with-a-long-role",
+        ] {
+            let call = json!({
+                "title":"Inspect it", "provider":"codex", "role":role, "participant":"call-fixture",
+                "state":"working", "event_tokens":{"total":12500}, "board_elapsed":"—"
+            });
+            for prefix in ["", "├─ "] {
+                for columns in [56, 58, 61, 80] {
+                    let line = render_call_row(&call, prefix, "", false, columns, true, false);
+                    assert!(
+                        !line.contains(" — ")
+                            && !line
+                                .trim_end()
+                                .trim_end_matches('│')
+                                .trim_end()
+                                .ends_with('—'),
+                        "{columns}: {line}"
+                    );
+                    assert_eq!(width(&line), columns, "{line}");
+                    if role == "worker" && prefix.is_empty() {
+                        assert!(line.contains("12.5K"), "{columns}: {line}");
+                    }
+                }
+            }
+        }
 
         let report = json!({"collection":{"ok":true},
             "provider_sessions":["codex", "claude", "antigravity"],
@@ -7664,6 +7874,9 @@ mod tests {
                 .any(|line| line.contains("compare the options")),
             "{narrow_detail:?}"
         );
+        native["title"] = json!(vec!["Research the native panel"; 30].join(" "));
+        let long = render_detail_card(Some(&native), 44, 40, true, false, usize::MAX);
+        assert!(long.iter().any(|line| line.contains("the …")), "{long:?}");
         let main = "att_8aa76df1a6c6415c8ce8d8ef2f639c67";
         let review = "att_0123456789abcdef0123456789abcdef";
         let child = |attempt: &str, tool: &str, alias: &str, role: &str, label: &str| {
@@ -7853,7 +8066,7 @@ mod tests {
         let provider_section = overview
             .split_once("╭─ Codex")
             .map(|(_, rest)| rest)
-            .unwrap_or(&overview);
+            .unwrap_or_default();
         assert!(
             !provider_section.contains("Pending decision")
                 && !overview.contains("Recorded native child"),
@@ -7925,7 +8138,7 @@ mod tests {
             assert!(
                 board.iter().all(|line| width(line) <= columns)
                     && row.trim_end().ends_with("3m ago │")
-                    && width(row) == width(board.iter().find(|l| l.starts_with('├')).unwrap()),
+                    && width(row) == width(board.iter().find(|l| l.starts_with('╭')).unwrap()),
                 "{columns}/{frame_width}: {board:?}"
             );
         }
@@ -9216,16 +9429,22 @@ mod tests {
             searched.contains("AGY task") && searched.contains("[✓ exited]"),
             "{searched}"
         );
-        let empty = frame(
-            &json!({"collection":{"ok":true}}),
-            &navigation::Navigation::default(),
-            80,
-            24,
-            &read,
-        )
-        .join("\n");
-        assert_eq!(empty.matches(" · Activity").count(), 3, "{empty}");
-        assert!(empty.contains("no visible work") && !empty.contains("idle"));
+        for columns in [40, 80] {
+            let empty = frame(
+                &json!({"collection":{"ok":true}}),
+                &navigation::Navigation::default(),
+                columns,
+                24,
+                &read,
+            )
+            .join("\n");
+            // No hollow provider card, and no cause when nothing was recorded.
+            assert!(
+                !empty.contains(" · Activity") && !empty.contains("idle"),
+                "{empty}"
+            );
+            assert!(empty.contains("No recorded calls"), "{empty}");
+        }
         let mut connected = report.clone();
         connected["provider_sessions"] = json!(["codex", "antigravity"]);
         let board = board_frame(
@@ -9253,6 +9472,63 @@ mod tests {
             "{filtered}"
         );
         assert!(filtered.contains("3 filt"), "{filtered}");
+        // An emptied board names only the stages that removed Room rows.
+        let total = 4;
+        // Tree folding is a counted stage; it never leaves a dangling dash.
+        let folded = navigation::Navigation {
+            view: View::Tree,
+            folded: super::calls(&report)
+                .iter()
+                .filter_map(|call| call["participant"].as_str().map(str::to_owned))
+                .collect(),
+            ..Default::default()
+        };
+        let out = frame(&report, &folded, 80, 24, &read).join("\n");
+        if out.contains("0 of") {
+            assert!(
+                out.contains("folded in tree (Tab changes view)") && !out.contains("— \n"),
+                "{out}"
+            );
+        }
+        let hint = |nav: &navigation::Navigation, columns| {
+            frame(&report, nav, columns, 24, &read).join("\n")
+        };
+        let none = navigation::Navigation {
+            filter: "no-such-row".into(),
+            ..Default::default()
+        };
+        let long = format!("0 of {total} shown — text filter (Esc clears)");
+        let out = hint(&none, 80);
+        assert!(
+            out.contains(&long) && !out.contains("attention filter"),
+            "{out}"
+        );
+        let out = hint(&none, 40);
+        assert!(
+            out.contains(&format!("0/{total} · Esc clear"))
+                && !out.contains(&format!("0 of {total} shown")),
+            "{out}"
+        );
+        let both = navigation::Navigation {
+            attention_only: true,
+            ..none.clone()
+        };
+        let out = hint(&both, 120);
+        assert!(
+            out.contains("attention filter (b shows all), text filter (Esc clears)"),
+            "{out}"
+        );
+        let editing = navigation::Navigation {
+            editing: true,
+            ..both
+        };
+        let out = hint(&editing, 120);
+        assert!(
+            out.contains("attention filter,") && !out.contains("b shows all"),
+            "{out}"
+        );
+        let out = hint(&editing, 40);
+        assert!(!out.contains("b all"), "{out}");
         assert!(filtered.contains("Claude · Activity"), "{filtered}");
     }
 
@@ -10075,6 +10351,12 @@ mod tests {
         ] {
             assert!(roster_row(&paint_nav(r, nav, 140)).is_none());
         }
+        // Attention on with no Room rows paints neither roster nor role legend.
+        let none = paint_nav(&report, &attention, 140).lines.join("\n");
+        assert!(
+            !none.contains("Researcher") && !none.contains("■ Main"),
+            "{none}"
+        );
 
         // Roster previews and recorded work use the same flat role column.
         let mut mixed = report.clone();
@@ -10703,7 +10985,9 @@ mod tests {
         // The weekly hit stays on the same single row and covers its text; no row is added.
         let nav = navigation::Navigation::default();
         let read = BTreeMap::new();
-        let plain = frame_styled(&base, &nav, 170, 14, &read, false, false);
+        let mut connected = base.clone();
+        connected["provider_sessions"] = report["provider_sessions"].clone();
+        let plain = frame_styled(&connected, &nav, 170, 14, &read, false, false);
         let lit = frame_styled(&report, &nav, 170, 14, &read, false, false);
         assert_eq!(plain.len(), lit.len(), "{lit:#?}");
         let at = lit
@@ -11191,19 +11475,23 @@ mod tests {
                     "{line}"
                 );
                 assert!(
-                    if columns >= 56 {
+                    if columns >= 40 && !line.ends_with(token) && !line.contains(" tok") {
+                        // The reserved state badge outranks tokens.
+                        line.contains("[⟳ run]")
+                    } else if columns >= 56 {
                         let (prefix, elapsed) = line.rsplit_once(" tok").unwrap();
                         prefix.ends_with(token)
-                            && elapsed.trim() == if id == "worker" { "2m" } else { "—" }
+                            && (elapsed.trim().is_empty()
+                                || id == "worker" && elapsed.trim() == "2m")
                     } else {
                         line.ends_with(token)
                     },
-                    "{line}"
+                    "{columns}: {line}"
                 );
                 assert_eq!(
                     width(line),
                     columns - usize::from(columns >= 44) * 2,
-                    "{line}"
+                    "{columns}: {line}"
                 );
             }
             let (_, builder) = find_row("worker");
@@ -11215,7 +11503,12 @@ mod tests {
             let token_end = |line: &str, numeral: &str| {
                 width(&line[..line.rfind(numeral).unwrap()]) + width(numeral)
             };
-            if wide {
+            let badged = [builder, worker, lead]
+                .iter()
+                .any(|line| line.contains("[⟳ run]"));
+            if badged {
+                // The reserved state badge replaced tokens; nothing to align.
+            } else if wide {
                 // Whole fields share one right edge; the last digit is column-aligned.
                 let last_digit = |line: &str, glyph: char| {
                     let tokens = line.rsplit_once(" tok").map_or(line, |(tokens, _)| tokens);
@@ -13286,7 +13579,10 @@ mod tests {
         assert!(overview.contains("0 calls"), "{overview}");
         assert!(!overview.contains("running"), "{overview}");
         assert!(overview.contains("128 folded (Tab all)"), "{overview}");
-        assert!(overview.contains("no visible work"), "{overview}");
+        assert!(
+            overview.contains("0 of 128 shown — folded history (Tab all)"),
+            "{overview}"
+        );
         assert!(!overview.contains("Stale task"), "{overview}");
         assert!(!overview.contains("Left unbacked"), "{overview}");
 
@@ -14116,7 +14412,7 @@ mod tests {
             assert!(line.contains("[· -]"), "{expected}: {line}");
             assert!(line.contains("— tok"), "{expected}: {line}");
             assert!(
-                line.trim_end_matches(" │").ends_with('—'),
+                line.trim_end_matches(" │").ends_with("— tok"),
                 "{expected}: {line}"
             );
         }
@@ -14620,7 +14916,10 @@ mod tests {
             frame(&report, &navigation::Navigation::default(), 140, 30, &read).join("\n");
         assert!(overview.contains("3 attention"), "{overview}");
         assert!(!overview.contains("running"), "{overview}");
-        assert!(overview.contains("no visible work"), "{overview}");
+        assert!(
+            overview.contains("0 of 10 shown — folded history (Tab all)"),
+            "{overview}"
+        );
         assert!(overview.contains("10 past (Tab all)"), "{overview}");
         assert!(!overview.contains("[⟳ run]"), "{overview}");
 
