@@ -171,6 +171,54 @@ pub fn swap_main_in_room(
         ..e
     })
 }
+#[cfg(target_os = "linux")]
+fn valid_linux_boot_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, &byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
+/// On Linux, a kernel birth string (`<boot_id>:<starttime>`) from a different
+/// boot proves that the process cannot still exist, even if its PID was reused
+/// by another UID after reboot.
+pub(crate) fn linux_boot_changed(birth: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Some((recorded_boot, start)) = birth.split_once(':') else {
+            return false;
+        };
+        if !valid_linux_boot_id(recorded_boot)
+            || start.is_empty()
+            || !start.bytes().all(|b| b.is_ascii_digit())
+        {
+            return false;
+        }
+        let Ok(current) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") else {
+            return false;
+        };
+        let current = current.trim();
+        valid_linux_boot_id(current) && current != recorded_boot
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = birth;
+        false
+    }
+}
+
+pub(crate) fn boot_changed(refs: &Value, kind: &str) -> bool {
+    let birth = refs[format!("panel_{kind}_identity")]
+        .as_str()
+        .unwrap_or_default();
+    linux_boot_changed(birth)
+}
+
 /// Legacy identities have a different encoding: only proven PID absence is
 /// comparable here. A live but differently encoded generation remains unknown.
 pub fn identity_gone(refs: &Value, kind: &str) -> bool {
@@ -188,6 +236,9 @@ pub fn identity_gone(refs: &Value, kind: &str) -> bool {
     };
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
+    }
+    if linux_boot_changed(birth) {
+        return true;
     }
     match NativeIdentity.owner_identity(pid) {
         Err(OwnerError::Exited) => true,
@@ -250,6 +301,23 @@ pub fn release(
     let store = Store::open(repo)?;
     let start = store.transaction("panel-main-start", Duration::from_secs(3))?;
     let session = store.transaction("panel-main-session", Duration::from_secs(3))?;
+    release_locked(repo, attempt, &start, &session, service, stop)
+}
+
+/// Release a provably absent panel-main while the caller already holds the
+/// `panel-main-start` and `panel-main-session` transactions.
+pub fn release_locked(
+    repo: &Path,
+    attempt: &str,
+    start: &crate::Transaction<'_>,
+    session: &crate::Transaction<'_>,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::parent_only()?;
+    crate::identifier(attempt)?;
+    start.check()?;
+    session.check()?;
     let row = query(
         service,
         NativeCommand::Events,
@@ -332,4 +400,163 @@ pub fn classify(repo: &Path, attempts: &[Value], service: &dyn Services) -> Valu
         }
     }
     serde_json::json!({"releasable":releasable,"unverifiable":unverifiable})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::{CommandOutput, ExecutionRequest, PeerExecutor};
+    use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "oms-release-unit-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct FakeReleaseServices {
+        row: RefCell<Value>,
+    }
+    impl PeerExecutor for FakeReleaseServices {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            Err(Error::new("tmux unavailable after reboot"))
+        }
+    }
+    impl Services for FakeReleaseServices {
+        fn command(
+            &self,
+            command: NativeCommand,
+            _: &Path,
+            args: &[OsString],
+            _: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            assert_eq!(command, NativeCommand::Events);
+            if args.first().and_then(|v| v.to_str()) == Some("transition") {
+                let mut row = self.row.borrow_mut();
+                row["state"] = "abandoned".into();
+                row["terminal"] = true.into();
+                row["reason_code"] = REASON.into();
+            }
+            Ok(CommandOutput {
+                stdout: serde_json::to_vec(&*self.row.borrow()).unwrap(),
+                cleanup_complete: true,
+                output_complete: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_reboot_proves_process_and_tmux_host_absence_even_if_pid_reused() {
+        let current = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .unwrap()
+            .trim()
+            .to_owned();
+        let other = if current.starts_with('0') {
+            "11111111-1111-4111-8111-111111111111"
+        } else {
+            "00000000-0000-4000-8000-000000000000"
+        };
+        assert!(linux_boot_changed(&format!("{other}:12345")));
+        assert!(!linux_boot_changed(&format!("{current}:12345")));
+        assert!(!linux_boot_changed("synthetic:12345"));
+        assert!(!linux_boot_changed("darwin:123:456"));
+
+        // PID 1 is owned by root (foreign UID); boot_id mismatch still proves absence.
+        let rebooted_refs = serde_json::json!({
+            "panel_host": "tmux",
+            "panel_pane_id": "%1",
+            "panel_socket_digest": "a".repeat(64),
+            "panel_tmux_server_pid": "1",
+            "panel_tmux_server_identity": format!("{other}:42"),
+            "panel_wrapper_pid": "1",
+            "panel_wrapper_identity": format!("{other}:43"),
+            "panel_native_pid": "1",
+            "panel_native_identity": format!("{other}:44"),
+        });
+        assert!(identity_gone(&rebooted_refs, "tmux_server"));
+        assert!(identity_gone(&rebooted_refs, "wrapper"));
+        assert!(identity_gone(&rebooted_refs, "native"));
+
+        let dir = TempDir::new();
+        let row = serde_json::json!({
+            "attempt_id": "att_11111111111111111111111111111111",
+            "tool": "panel-main",
+            "provider": "codex",
+            "state": "working",
+            "terminal": false,
+            "created_at": "2020-01-01T00:00:00Z",
+            "last_heartbeat_at": "2020-01-01T00:00:00Z",
+            "refs": {
+                "panel_role": "main",
+                "panel_host": "tmux",
+                "panel_pane_id": "%1",
+                "panel_socket_digest": "a".repeat(64),
+                "panel_tmux_server_pid": "1",
+                "panel_tmux_server_identity": format!("{other}:42"),
+                "panel_wrapper_pid": "1",
+                "panel_wrapper_identity": format!("{other}:43"),
+                "panel_native_pid": "1",
+                "panel_native_identity": format!("{other}:44"),
+            }
+        });
+        let svc = FakeReleaseServices {
+            row: RefCell::new(row.clone()),
+        };
+        assert!(crate::host::absent(&dir.0, &row, &svc).unwrap());
+
+        // Pre-fix tmux attempts lacking panel_pane_id still release after a Linux reboot,
+        // but stay unverifiable on the same boot.
+        let mut legacy_tmux = row.clone();
+        legacy_tmux["refs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("panel_pane_id");
+        legacy_tmux["refs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("panel_socket_digest");
+        assert!(crate::host::absent(&dir.0, &legacy_tmux, &svc).unwrap());
+        legacy_tmux["refs"]["panel_wrapper_identity"] = format!("{current}:43").into();
+        assert!(!crate::host::absent(&dir.0, &legacy_tmux, &svc).unwrap());
+
+        // Releasing with already-held start and session locks succeeds without deadlocking.
+        let store = Store::open(&dir.0).unwrap();
+        let start = store
+            .transaction("panel-main-start", Duration::from_secs(1))
+            .unwrap();
+        let session = store
+            .transaction("panel-main-session", Duration::from_secs(1))
+            .unwrap();
+        let stop = AtomicBool::new(false);
+        let released = release_locked(
+            &dir.0,
+            "att_11111111111111111111111111111111",
+            &start,
+            &session,
+            &svc,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(released["state"], "abandoned");
+        assert_eq!(svc.row.borrow()["terminal"], true);
+    }
 }

@@ -154,8 +154,24 @@ pub trait PeerExecutor {
         interrupted: &AtomicBool,
     ) -> Result<CommandOutput>;
 }
+/// A read-only host proof that can also run on the background Board worker.
+pub type WorkspaceGroupResolver =
+    fn(u32, std::time::Instant, &AtomicBool) -> Option<oms_command_plan::services::GroupMembership>;
+
 /// Only these domain services may produce authority. Display snapshots confer none.
 pub trait Services: PeerExecutor {
+    fn workspace_group_resolver(&self) -> Option<WorkspaceGroupResolver> {
+        None
+    }
+    /// Complete host account-database proof for a group writable only by this UID.
+    fn workspace_group(
+        &self,
+        gid: u32,
+        deadline: std::time::Instant,
+        stop: &AtomicBool,
+    ) -> Option<oms_command_plan::services::GroupMembership> {
+        self.workspace_group_resolver()?(gid, deadline, stop)
+    }
     /// Team/source readers share the caller's selected roots. Contextual hosts
     /// can bind them directly; subprocess hosts pass an explicit state locator.
     fn team_contracts(
@@ -381,6 +397,7 @@ pub trait Services: PeerExecutor {
 /// or legacy interpreter fallback is performed. Native read domains are direct.
 pub struct SubcommandServices {
     pub executable: PathBuf,
+    workspace_group: Option<WorkspaceGroupResolver>,
 }
 impl SubcommandServices {
     pub fn sibling() -> Result<Self> {
@@ -390,6 +407,7 @@ impl SubcommandServices {
                 .parent()
                 .ok_or_else(|| Error::new("executable directory unavailable"))?
                 .join("oms"),
+            workspace_group: None,
         })
     }
     pub fn at(executable: PathBuf) -> Result<Self> {
@@ -397,7 +415,14 @@ impl SubcommandServices {
             executable.is_absolute(),
             "OMS adapter executable must be absolute",
         )?;
-        Ok(Self { executable })
+        Ok(Self {
+            executable,
+            workspace_group: None,
+        })
+    }
+    pub fn with_workspace_group(mut self, resolver: Option<WorkspaceGroupResolver>) -> Self {
+        self.workspace_group = resolver;
+        self
     }
 }
 impl PeerExecutor for SubcommandServices {
@@ -491,6 +516,9 @@ impl PeerExecutor for SubcommandServices {
     }
 }
 impl Services for SubcommandServices {
+    fn workspace_group_resolver(&self) -> Option<WorkspaceGroupResolver> {
+        self.workspace_group
+    }
     fn command_context(
         &self,
         command: NativeCommand,

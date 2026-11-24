@@ -260,15 +260,18 @@ impl TerminalInput {
         self.file.write_all(b"\x1b[?1002h").map_err(Error::new)
     }
     pub fn wait(&mut self, duration: Duration) -> Result<Vec<Key>> {
-        self.wait_woken(duration, None).map(|(keys, _)| keys)
+        self.wait_woken(duration, None, None)
+            .map(|(keys, _, _)| keys)
     }
     /// Like [`Self::wait`], also polling the wakeup socket; the flag is true
     /// when a producer woke the watcher (the datagram burst is consumed).
+    /// The additional descriptor is reported ready without consuming it here.
     pub fn wait_woken(
         &mut self,
         duration: Duration,
         wake: Option<&crate::wakeup::Wakeup>,
-    ) -> Result<(Vec<Key>, bool)> {
+        native: Option<rustix::fd::BorrowedFd<'_>>,
+    ) -> Result<(Vec<Key>, bool, bool)> {
         use rustix::event::{PollFd, PollFlags, poll};
         require(
             rustix::termios::tcgetpgrp(&self.file).map_err(Error::new)?
@@ -282,12 +285,19 @@ impl TerminalInput {
         if let Some(fd) = &wake_fd {
             descriptors.push(PollFd::new(fd, PollFlags::IN));
         }
+        let native_index = descriptors.len();
+        if let Some(fd) = &native {
+            descriptors.push(PollFd::new(fd, PollFlags::IN));
+        }
         match poll(&mut descriptors, Some(&timeout)) {
             Ok(_) => {}
-            Err(rustix::io::Errno::INTR) => return Ok((vec![], false)),
+            Err(rustix::io::Errno::INTR) => return Ok((vec![], false, false)),
             Err(e) => return Err(Error::new(e)),
         }
         let readable = descriptors[0].revents().contains(PollFlags::IN);
+        let native_ready = descriptors
+            .get(native_index)
+            .is_some_and(|fd| !fd.revents().is_empty());
         let wake_ready = descriptors
             .get(1)
             .is_some_and(|d| d.revents().contains(PollFlags::IN));
@@ -318,7 +328,7 @@ impl TerminalInput {
         if let Some(key) = self.decoder.expire() {
             output.push(key);
         }
-        Ok((output, woken))
+        Ok((output, woken, native_ready))
     }
 }
 impl Drop for TerminalInput {
