@@ -20,6 +20,7 @@ pub mod landing;
 pub mod managed;
 mod manifest;
 pub mod notes;
+mod reconcile;
 pub mod red;
 pub mod report;
 pub mod review;

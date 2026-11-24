@@ -35,7 +35,7 @@ the embedding UI. A missing Python executable is reported as unavailable
 metadata rather than becoming a native report runtime dependency.
 
 With `Unavailable`, `checkpoint`, `scratch-worktree`, `change-guard`,
-`candidate`, `land status|conflicts|batch-preview|batch-check|notes|blame-session` and plain
+`candidate`, `land status|conflicts|batch-preview|batch-check|reconcile|notes|blame-session` and plain
 `report --dry-run` run locally. `patch-admit` also runs locally (`ADMIT`)
 when no `--plan-task`, `--covers`, `--verify` or `scripts/check.sh` applies;
 under `Unavailable`, `--plan-task` refuses at `Services::plan`, `--covers` at

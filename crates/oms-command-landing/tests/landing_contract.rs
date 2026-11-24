@@ -2187,10 +2187,15 @@ case "$1 $2" in
     if [ -f '{state}.squash' ]; then
       git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
     fi ;;
-  "pr view") printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)" ;;
+  "pr view")
+    if [ -f '{state}.view' ]; then cat '{state}.view'
+    else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
+  "run view") cat "{state}.jobs$3" 2>/dev/null || exit 1 ;;
   "run list")
     if [ "$event" = pull_request ]; then
       printf '[{{"databaseId":99,"status":"completed","conclusion":"{ci}","headSha":"%s"}}]\n' "$commit"
+    elif [ "$event" = push ] && [ -f '{state}.pushci' ]; then
+      printf '[{{"databaseId":98,"status":"completed","conclusion":"{ci}","headSha":"%s"}}]\n' "$commit"
     else echo '[]'; fi ;;
   *) exit 1 ;;
 esac
@@ -2394,6 +2399,343 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
         calls.contains("pr create --repo")
             && calls.contains("--head feat --title")
             && !calls.contains("pr merge"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn land_reconcile_observes_a_merged_pr_after_the_target_moved_and_writes_nothing() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_github_remote("recon");
+    let head = iso.commit_as(&repo, "feat.txt", "feat\n", &["feat: recover", "Reason."]);
+    let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+    let (gh, log) = iso.fake_gh(&bare, "success");
+    // Only transport goes to the isolated bare repo. Identity queries observe
+    // the actual configured GitHub destination for issuance and reconciliation.
+    let public = "https://github.com/owner/recon.git";
+    iso.git(&repo, &["remote", "set-url", "origin", public]);
+    let git = iso.bin.join("git");
+    fs::remove_file(&git).unwrap();
+    fs::write(
+        &git,
+        format!(
+            r#"#!{bash}
+for a in "$@"; do
+    case "$a" in ls-remote|push|fetch)
+        exec '{real_git}' -c 'url.{bare}.insteadOf={public}' "$@";;
+    esac
+done
+exec '{real_git}' "$@"
+"#,
+            bash = which("bash").display(),
+            real_git = which("git").display(),
+            bare = bare.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(which("cat"), iso.bin.join("cat")).unwrap();
+    let fake = fs::read_to_string(&gh)
+        .unwrap()
+        .replace(
+            "https://example.invalid/pull/7",
+            "https://github.com/owner/recon/pull/7",
+        )
+        .replace(
+            "case \"$1 $2\" in",
+            r#"case "$1 $2" in
+  "api --method")
+     case "${!#}" in
+       repos/owner/recon/actions/workflows/test.yml/runs*event=pull_request*) cat "$HOME/gh.run";;
+       repos/owner/recon/actions/runs/99/attempts/1/jobs*) cat "$HOME/gh.jobs";;
+       repos/owner/recon/pulls*) cat "$HOME/gh.pulls";;
+       *) exit 1;;
+     esac ;;"#,
+        );
+    fs::write(&gh, fake).unwrap();
+    let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
+    let args = ["--gate", "true", "--ignore-siblings", "--no-update"];
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 0, "{r:?}");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    let receipt = V::parse(status.as_bytes()).expect("status json");
+    let branch = receipt.get("head_branch").text().unwrap().to_owned();
+    // main moved, then the PR merged with exactly the reviewed tree (PR 469 pattern)
+    let commit = |tree: &str, parent: &str, msg: &str| {
+        iso.git_out(
+            &bare,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit-tree",
+                tree,
+                "-p",
+                parent,
+                "-m",
+                msg,
+            ],
+        )
+    };
+    let moved = commit(&format!("{main_before}^{{tree}}"), &main_before, "moved");
+    let merge = commit(&format!("{head}^{{tree}}"), &moved, "squash");
+    iso.git(&bare, &["update-ref", "refs/heads/main", &merge]);
+    iso.git(&repo, &["fetch", "-q", "origin", "main"]);
+    strip_group_world_write(&repo);
+    let home = iso.home.path();
+    let view = |state: &str, head: &str, cross: bool, merge: &str| {
+        fs::write(
+            home.join("gh.pr.view"),
+            format!(
+                r#"{{"number":7,"state":"{state}","url":"https://github.com/owner/recon/pull/7","statusCheckRollup":[{{"__typename":"CheckRun","name":"gate","conclusion":"SUCCESS","detailsUrl":"https://github.com/owner/recon/actions/runs/99/job/101"}}],"headRefOid":"{head}","headRefName":"{branch}","baseRefName":"main","isCrossRepository":{cross},"mergeCommit":{{"oid":"{merge}"}}}}"#
+            ),
+        )
+        .expect("view");
+    };
+    let job_id = 101;
+    let prefix = "https://github.com/owner/recon/actions/runs/99/job";
+    let run = format!(
+        r#"{{"workflow_runs":[{{"id":99,"run_attempt":1,"head_sha":"{head}","head_branch":"{branch}","status":"completed","conclusion":"success","event":"pull_request","path":".github/workflows/test.yml","repository":{{"full_name":"owner/recon","id":11}},"head_repository":{{"full_name":"owner/recon","id":11}},"pull_requests":[]}}]}}"#
+    );
+    let pulls = format!(
+        r#"[{{"number":7,"head":{{"sha":"{head}","ref":"{branch}","repo":{{"full_name":"owner/recon"}}}},"base":{{"ref":"main","repo":{{"full_name":"owner/recon"}}}}}}]"#
+    );
+    let jobs = ["gate","lint","focused","native (ubuntu-latest, copy)"].iter().enumerate().map(|(n,name)| {
+        let id=job_id+n;
+        format!(r#"{{"id":{id},"run_id":99,"run_attempt":1,"head_sha":"{head}","status":"completed","name":"{name}","conclusion":"success","html_url":"{prefix}/{id}"}}"#)
+    }).collect::<Vec<_>>().join(",");
+    let jobs = format!(r#"{{"total_count":4,"jobs":[{jobs}]}}"#);
+    fs::write(home.join("gh.run"), &run).unwrap();
+    fs::write(home.join("gh.jobs"), &jobs).unwrap();
+    fs::write(home.join("gh.pulls"), &pulls).unwrap();
+    view("MERGED", &head, false, &merge);
+    let reconcile = |extra: &[&str]| {
+        let mut a = vec!["reconcile", "--reviewed-head", head.as_str(), "--json"];
+        a.extend(extra);
+        let r = iso.run_with_services("land", &repo, &a, &env);
+        (r.0, V::parse(r.1.as_bytes()).unwrap_or(V::Null), r)
+    };
+    let observed = || {
+        (
+            iso.run("land", &repo, &["status", "--json"]).1,
+            iso.git_out(&repo, &["for-each-ref"]),
+            iso.git_out(&bare, &["for-each-ref"]),
+            iso.git_out(&repo, &["status", "--porcelain"]),
+        )
+    };
+    let before = observed();
+    // the existing delivery path still refuses the moved target
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_ne!(r.0, 0, "{r:?}");
+    assert!(r.2.contains("remote target is not an ancestor"), "{r:?}");
+    let (code, row, r) = reconcile(&[]);
+    assert_eq!(code, 0, "{r:?}");
+    assert_eq!(row.get("verdict").text(), Some("verified"), "{r:?}");
+    assert_eq!(row.get("reason").text(), Some("same-tree"), "{r:?}");
+    assert_eq!(row.get("writes").text(), Some("none"), "{r:?}");
+    assert_eq!(
+        row.get("merge_commit").text(),
+        Some(merge.as_str()),
+        "{r:?}"
+    );
+    assert_eq!(observed(), before);
+    for (what, reason, setup) in [
+        ("foreign", "pr-foreign-repository", 0),
+        ("moved head", "pr-head-moved", 1),
+        ("open", "pr-not-merged", 2),
+    ] {
+        match setup {
+            0 => view("MERGED", &head, true, &merge),
+            1 => view("MERGED", &merge, false, &merge),
+            _ => view("OPEN", &head, false, &merge),
+        }
+        let (code, row, r) = reconcile(&[]);
+        assert_eq!(code, 1, "{what}: {r:?}");
+        assert_eq!(row.get("verdict").text(), Some("refused"), "{what}: {r:?}");
+        assert_eq!(row.get("reason").text(), Some(reason), "{what}: {r:?}");
+    }
+    view("MERGED", &head, false, &merge);
+    // a conflicting or stale request selection and extra authority are refused
+    let stale = format!("{head}-{}", "0".repeat(24));
+    let (code, row, r) = reconcile(&["--request", &stale]);
+    assert_eq!(
+        (code, row.get("verdict").text()),
+        (1, Some("refused")),
+        "{r:?}"
+    );
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &["reconcile", "--reviewed-head", &head, "--merge"],
+        &env,
+    );
+    assert_eq!(r.0, 2, "{r:?}");
+    let association = format!(
+        r#"[{{"number":7,"head":{{"sha":"{head}","ref":"{branch}","repo":{{"id":11}}}},"base":{{"ref":"main","repo":{{"id":11}}}}}}]"#
+    );
+    let linked = run.replace("[]", &association);
+    fs::write(home.join("gh.run"), &linked).unwrap();
+    fs::remove_file(home.join("gh.pulls")).unwrap();
+    assert_eq!(reconcile(&[]).1.get("reason").text(), Some("same-tree"));
+    fs::write(
+        home.join("gh.run"),
+        linked.replace("\"number\":7", "\"number\":8"),
+    )
+    .unwrap();
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("pr-ci-unverified")
+    );
+    fs::write(home.join("gh.pulls"), &pulls).unwrap();
+    fs::write(home.join("gh.run"), &run).unwrap();
+    for (name, original, altered) in [
+        ("gh.run", &run, run.replace("pull_request\"", "push\"")),
+        ("gh.run", &run, run.replace("test.yml", "other.yml")),
+        ("gh.run", &run, run.replace("owner/recon", "outside/recon")),
+        ("gh.jobs", &jobs, jobs.replace("job/101", "job/999")),
+        (
+            "gh.jobs",
+            &jobs,
+            jobs.replace("run_attempt\":1", "run_attempt\":2"),
+        ),
+        (
+            "gh.pulls",
+            &pulls,
+            format!("[{0},{0}]", &pulls[1..pulls.len() - 1]),
+        ),
+    ] {
+        fs::write(home.join(name), altered).unwrap();
+        let (code, row, r) = reconcile(&[]);
+        assert_eq!(
+            (code, row.get("reason").text()),
+            (1, Some("pr-ci-unverified")),
+            "{r:?}"
+        );
+        fs::write(home.join(name), original).unwrap();
+    }
+    fs::write(home.join("gh.run"), run.replace("success", "cancelled")).unwrap();
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("pr-ci-not-successful")
+    );
+    fs::write(home.join("gh.run"), run.replace("completed", "queued")).unwrap();
+    assert_eq!(reconcile(&[]).1.get("reason").text(), Some("pr-ci-pending"));
+    fs::write(home.join("gh.run"), &run).unwrap();
+    assert_eq!(reconcile(&[]).1.get("verdict").text(), Some("verified"));
+    assert_eq!(observed(), before);
+    iso.git(&repo, &["remote", "set-url", "--push", "origin", public]);
+    iso.git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://github.com/other/recon.git",
+        ],
+    );
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("destination-ambiguous")
+    );
+    iso.git(&repo, &["config", "--unset-all", "remote.origin.pushurl"]);
+    let manifest_path = home.join("never-created-receipt");
+    let refused = iso.run_with_services(
+        "land",
+        &repo,
+        &[
+            "reconcile",
+            "--check-manifest",
+            "missing",
+            "--manifest-receipt",
+            manifest_path.to_str().unwrap(),
+            "--execute-manifest",
+            "--reviewed-head",
+            &head,
+        ],
+        &env,
+    );
+    assert_eq!(refused.0, 2);
+    assert!(!manifest_path.exists());
+    // a different merged tree on a moved base cannot be proven by name
+    let other = commit(&format!("{main_before}^{{tree}}"), &moved, "other");
+    iso.git(&bare, &["update-ref", "refs/heads/main", &other]);
+    iso.git(&repo, &["fetch", "-q", "origin", "main"]);
+    view("MERGED", &head, false, &other);
+    let (code, row, r) = reconcile(&[]);
+    assert_eq!(code, 1, "{r:?}");
+    assert_eq!(row.get("verdict").text(), Some("unverified"), "{r:?}");
+    assert_eq!(
+        row.get("reason").text(),
+        Some("merged-tree-differs"),
+        "{r:?}"
+    );
+    // An observer cannot substitute a local replacement tree for the GitHub merge.
+    iso.git(&repo, &["replace", &other, &head]);
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("merged-tree-differs")
+    );
+    iso.git(&repo, &["replace", "-d", &other]);
+    // Matching first parent + a green run cannot certify an unrelated tree.
+    let direct = commit(
+        &format!("{main_before}^{{tree}}"),
+        &main_before,
+        "unrelated",
+    );
+    iso.git(&bare, &["update-ref", "refs/heads/main", &direct]);
+    iso.git(&repo, &["fetch", "-q", "origin", "main"]);
+    view("MERGED", &head, false, &direct);
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("merged-tree-differs")
+    );
+    // an untrusted receipt is never read
+    let found = Command::new("find")
+        .args([home.to_str().unwrap(), "-name", &format!("{head}-*.json")])
+        .output()
+        .expect("find");
+    let path = String::from_utf8_lossy(&found.stdout).trim().to_owned();
+    assert!(!path.is_empty() && !path.contains('\n'), "{path}");
+    let saved = fs::read(&path).unwrap();
+    for (field, value) in [("state", "running"), ("repo", "elsewhere")] {
+        let mut wrong = V::parse(&saved).unwrap();
+        wrong.set(field, value);
+        fs::write(&path, wrong.json(false).unwrap()).unwrap();
+        assert_eq!(
+            reconcile(&[]).1.get("reason").text(),
+            Some("receipt-identity-mismatch")
+        );
+    }
+    fs::write(&path, &saved).unwrap();
+    let stamp = receipt.get("request").text().unwrap();
+    for index in 0..2048 {
+        fs::write(
+            Path::new(&path)
+                .parent()
+                .unwrap()
+                .join(format!("scan-{index}")),
+            [],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("receipt-scan-limit-use-request")
+    );
+    assert_eq!(
+        reconcile(&["--request", stamp]).1.get("reason").text(),
+        Some("merged-tree-differs")
+    );
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).expect("chmod");
+    let (code, row, r) = reconcile(&["--request", stamp]);
+    assert_eq!(code, 1, "{r:?}");
+    assert_eq!(row.get("reason").text(), Some("receipt-untrusted"), "{r:?}");
+    let calls = fs::read_to_string(log).expect("gh log");
+    assert!(
+        !calls.contains("pr merge") && calls.matches("pr create").count() == 1,
         "{calls}"
     );
 }

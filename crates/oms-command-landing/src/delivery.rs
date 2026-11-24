@@ -69,6 +69,12 @@ pub(crate) fn state_directory(git: &Git<'_>) -> Result<PathBuf> {
         .join("oh-my-setting/land")
         .join(format!("{name}-{crc}-{size}")))
 }
+pub(crate) fn request_stamp(head: &str, parts: &[&str]) -> Result<String> {
+    let request = V::Arr(parts.iter().map(|s| V::from(*s)).collect());
+    let value = oms_command_plan::json::parse(&request.json(false)?)?;
+    let hash = digest(&oms_command_plan::json::default_bytes(&value, true)?);
+    Ok(format!("{head}-{}", &hash[..24]))
+}
 fn save(path: &Path, row: &V, interrupted: &std::sync::atomic::AtomicBool) -> Result<()> {
     let raw = storage::read_external(path, true)?;
     storage::write_external(
@@ -960,6 +966,9 @@ fn land_local(r: &Run<'_>, row: &mut V) -> Result<Output> {
     )
 }
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
+    if o.action("") == "reconcile" {
+        return crate::reconcile::execute(c, o);
+    }
     if o.has("check-manifest") {
         return crate::manifest::execute(c, o);
     }
@@ -1158,10 +1167,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     if mode != Mode::Direct {
         request_parts.extend([mode.name(), head_branch.as_str(), from_sha.as_str()]);
     }
-    let request = V::Arr(request_parts.iter().map(|s| V::from(*s)).collect());
-    let stamp_value = oms_command_plan::json::parse(&request.json(false)?)?;
-    let request_hash = digest(&oms_command_plan::json::default_bytes(&stamp_value, true)?);
-    let stamp = format!("{}-{}", snapshot.head, &request_hash[..24]);
+    let stamp = request_stamp(&snapshot.head, &request_parts)?;
     let receipt = directory.join(format!("{stamp}.json"));
     let _active = storage::lock(&directory.join("active"), c.interrupted)?;
     let holder = obj([

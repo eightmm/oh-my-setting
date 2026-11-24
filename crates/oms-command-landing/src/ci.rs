@@ -246,6 +246,160 @@ pub(crate) fn run_details(c: &Context<'_>, destination: &str, id: &V, sha: &str)
         }
     }
 }
+pub(crate) enum ReconciledCi {
+    Pending,
+    Unsuccessful,
+    Full(V),
+}
+
+/// Verify one exact PR observation. The check rollup only locates the gate job;
+/// its publisher, workflow, event, run attempt, full job set and PR association
+/// come from the authenticated repository-scoped Actions API.
+pub(crate) fn reconciled_pr(
+    c: &Context<'_>,
+    repo: &str,
+    number: &str,
+    sha: &str,
+    branch: &str,
+    target: &str,
+    rollup: &V,
+) -> Result<ReconciledCi> {
+    let prefix = format!("repos/{repo}");
+    let runs = api(
+        c,
+        &format!(
+            "{prefix}/actions/workflows/test.yml/runs?head_sha={sha}&branch={}&event=pull_request&per_page=1",
+            component(branch)
+        ),
+    )?;
+    let [run] = runs.get("workflow_runs").array() else {
+        return Err(Error::new(2, "latest PR workflow run unavailable"));
+    };
+    let id = run.get("id");
+    let attempt = run.get("run_attempt");
+    require(
+        id.integer(true)
+            && attempt.integer(true)
+            && string(run, "path") == ".github/workflows/test.yml"
+            && string(run, "event") == "pull_request"
+            && string(run, "head_sha") == sha
+            && string(run, "head_branch") == branch
+            && string(run.get("repository"), "full_name") == repo
+            && string(run.get("head_repository"), "full_name") == repo,
+        "workflow run identity mismatch",
+    )?;
+    let V::Arr(linked) = run.get("pull_requests") else {
+        return Err(Error::new(2, "missing PR association"));
+    };
+    if linked.is_empty() {
+        // A check rollup can be shared by two PRs using the same head.
+        // GitHub may omit association after merge. Require precisely one PR ever
+        // opened from this head branch in the repository in that case.
+        let owner = repo
+            .split_once('/')
+            .ok_or_else(|| Error::new(2, "invalid repository"))?
+            .0;
+        let pulls = api(
+            c,
+            &format!(
+                "{prefix}/pulls?state=all&head={owner}%3A{}&per_page=2",
+                component(branch)
+            ),
+        )?;
+        let [pr] = pulls.array() else {
+            return Err(Error::new(2, "ambiguous PR association"));
+        };
+        require(
+            pr.get("number").py() == number
+                && string(pr.get("head"), "sha") == sha
+                && string(pr.get("head"), "ref") == branch
+                && string(pr.get("base"), "ref") == target
+                && string(pr.get("head").get("repo"), "full_name") == repo
+                && string(pr.get("base").get("repo"), "full_name") == repo,
+            "unbound PR branch",
+        )?;
+    } else {
+        let [pr] = linked.as_slice() else {
+            return Err(Error::new(2, "ambiguous workflow association"));
+        };
+        require(
+            pr.get("number").py() == number
+                && string(pr.get("head"), "sha") == sha
+                && string(pr.get("head"), "ref") == branch
+                && string(pr.get("base"), "ref") == target
+                && run.get("repository").get("id").integer(true)
+                && pr.get("head").get("repo").get("id") == run.get("repository").get("id")
+                && pr.get("base").get("repo").get("id") == run.get("repository").get("id"),
+            "workflow belongs to another pull request",
+        )?;
+    }
+    let mut detail = obj([
+        ("headSha", sha.into()),
+        ("status", run.get("status").clone()),
+        ("conclusion", run.get("conclusion").clone()),
+    ]);
+    match conclusion(&detail, sha)?.as_str() {
+        "success" => {}
+        "pending" => return Ok(ReconciledCi::Pending),
+        _ => return Ok(ReconciledCi::Unsuccessful),
+    }
+    let response = api(
+        c,
+        &format!(
+            "{prefix}/actions/runs/{}/attempts/{}/jobs?per_page=100",
+            id.py(),
+            attempt.py()
+        ),
+    )?;
+    let V::Arr(jobs) = response.get("jobs") else {
+        return Err(Error::new(2, "CI jobs unavailable"));
+    };
+    require(
+        !jobs.is_empty()
+            && jobs.len() <= 100
+            && response.get("total_count") == &V::from(jobs.len())
+            && jobs.iter().all(|job| {
+                job.get("run_id") == id
+                    && job.get("run_attempt") == attempt
+                    && string(job, "head_sha") == sha
+                    && string(job, "status") == "completed"
+            }),
+        "unbound or incomplete jobs",
+    )?;
+    let mut gates = jobs.iter().filter(|job| string(job, "name") == "gate");
+    let gate = gates
+        .next()
+        .ok_or_else(|| Error::new(2, "stable gate missing"))?;
+    let url = format!(
+        "https://github.com/{repo}/actions/runs/{}/job/{}",
+        id.py(),
+        gate.get("id").py()
+    );
+    require(
+        gates.next().is_none()
+            && gate.get("id").integer(true)
+            && string(gate, "conclusion") == "success"
+            && string(gate, "html_url") == url
+            && rollup.array().len() <= 100
+            && rollup.array().iter().any(|check| {
+                string(check, "__typename") == "CheckRun"
+                    && string(check, "conclusion") == "SUCCESS"
+                    && string(check, "name") == "gate"
+                    && string(check, "detailsUrl") == url
+            }),
+        "PR gate job mismatch",
+    )?;
+    detail.set("jobs", response.get("jobs").clone());
+    require(
+        full_scope(&detail, sha)? == "full",
+        "full CI proof unavailable",
+    )?;
+    Ok(ReconciledCi::Full(obj([
+        ("run_id", id.clone()),
+        ("attempt", attempt.clone()),
+        ("scope", "full".into()),
+    ])))
+}
 fn red(v: &str) -> bool {
     [
         "failure",
