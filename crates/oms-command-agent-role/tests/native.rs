@@ -522,6 +522,8 @@ fn render_matches_canonical_goldens_for_both_providers_and_scopes() {
                     "  - write_to_file".to_string(),
                     "  - run_command".to_string(),
                 ]);
+            } else {
+                lines.push("inheritMcp: false".into());
             }
             lines.extend([
                 "---".to_string(),
@@ -600,6 +602,15 @@ fn every_contract_role_writer_authority_and_surface() {
                     !writable,
                     "{role}"
                 );
+                let frontmatter = output.split("\n---\n").next().unwrap();
+                assert_eq!(
+                    frontmatter
+                        .lines()
+                        .find(|line| line.starts_with("inheritMcp:")),
+                    (!writable).then_some("inheritMcp: false"),
+                    "{role}"
+                );
+                assert!(!frontmatter.contains("inheritCustomizations:"), "{role}");
                 for write_tool in [
                     "  - replace_file_content\n",
                     "  - write_to_file\n",
@@ -647,6 +658,7 @@ fn every_contract_role_writer_authority_and_surface() {
             assert!(!global_out.contains(marker));
             if provider == "antigravity" {
                 assert!(global_out.contains("commandExecutionPolicy: \"off\"\n"));
+                assert!(global_out.contains("inheritMcp: false\n"));
                 assert!(!global_out.contains("replace_file_content"));
                 assert!(!global_out.contains("write_to_file"));
                 assert!(!global_out.contains("run_command"));
@@ -656,6 +668,7 @@ fn every_contract_role_writer_authority_and_surface() {
             assert!(!project_out.contains(marker));
             if provider == "antigravity" {
                 assert!(project_out.contains("commandExecutionPolicy: \"off\"\n"));
+                assert!(project_out.contains("inheritMcp: false\n"));
                 assert!(!project_out.contains("replace_file_content"));
                 assert!(!project_out.contains("write_to_file"));
                 assert!(!project_out.contains("run_command"));

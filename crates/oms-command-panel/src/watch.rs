@@ -3,7 +3,7 @@ use crate::{
     board_refresh::{BoardRefresh, ChatReads, RefreshKey},
     cli::Options,
     commands, input, navigation,
-    orchestrator::{ChatBinding, ObservationGeneration, Observations, Panel},
+    orchestrator::{ChatBinding, DetailUsageSelection, ObservationGeneration, Observations, Panel},
     render,
 };
 use oms_panel_core::{
@@ -97,7 +97,9 @@ fn run_with_source_writer(
     }
     let mut requested = true;
     #[cfg(target_os = "linux")]
-    let mut agy_first_child_wake = crate::wakeup::AgyFirstChildWake::default();
+    let mut agy_first_child_wake = crate::wakeup::FirstChildWake::default();
+    #[cfg(target_os = "linux")]
+    let mut codex_roster_wake = crate::wakeup::FirstChildWake::default();
     let mut deadline = Instant::now();
     let mut scope_sample = None;
     let mut read = attention::load(repo, &room);
@@ -120,8 +122,8 @@ fn run_with_source_writer(
     let mut main_checkout = MainCheckout::default();
     let mut selection_changed = SelectionFence::None;
     let mut switch = MainSwitch::default();
-    let mut pending_agy_detail: Option<AgyDetailUsageRequest> = None;
-    let mut retained_agy_detail: Option<AgyDetailUsageEvidence> = None;
+    let mut pending_detail_usage: Option<DetailUsageRequest> = None;
+    let mut retained_detail_usage: Option<DetailUsageEvidence> = None;
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
@@ -142,9 +144,9 @@ fn run_with_source_writer(
         let mut native_activity_current = false;
         let mut checkout_changed = false;
         let mut scope_changed = false;
-        let mut agy_detail_frame = AgyDetailFrame::Unchanged;
+        let mut detail_usage_frame = DetailUsageFrame::Unchanged;
         let mut checked_agy = None;
-        let mut incoming_agy_detail = None;
+        let mut incoming_detail_usage = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
                 let ready = board.worker.ready();
@@ -158,12 +160,12 @@ fn run_with_source_writer(
                 observations: observations.clone(),
                 footer: main_footer.clone(),
                 agy: chat.as_ref().and_then(AgyDockCheck::new),
-                agy_detail: None,
-                agy_detail_binding: selected_chat
+                detail_usage: None,
+                detail_usage_binding: selected_chat
                     .as_ref()
                     .and_then(|(_, binding)| binding.as_ref())
                     .filter(|binding| {
-                        agy_binding_matches_selection(
+                        detail_binding_matches_selection(
                             binding,
                             &nav,
                             before.as_ref().and_then(|rows| rows.get(nav.selected)),
@@ -172,8 +174,13 @@ fn run_with_source_writer(
                     })
                     .cloned(),
             };
-            let (changed, result, native) =
-                board.update_with_native(live, launch, ready, Some(seed), &mut pending_agy_detail);
+            let (changed, result, native) = board.update_with_native(
+                live,
+                launch,
+                ready,
+                Some(seed),
+                &mut pending_detail_usage,
+            );
             scope_changed = changed;
             accepted_refresh = result.is_some() && board.phase == RefreshPhase::Fresh;
             let rejected_native = native.is_none()
@@ -182,31 +189,36 @@ fn run_with_source_writer(
                     .scope
                     .as_ref()
                     .is_some_and(|scope| scope.main.is_some());
-            agy_detail_frame = if rejected_native || !board.phase.retains_agy_detail() {
-                AgyDetailFrame::Rejected
+            detail_usage_frame = if rejected_native || !board.phase.retains_detail_usage() {
+                DetailUsageFrame::Rejected
             } else if native.is_some() {
-                AgyDetailFrame::Observed
+                DetailUsageFrame::Observed
             } else {
-                AgyDetailFrame::Unchanged
+                DetailUsageFrame::Unchanged
             };
             native_activity_current = board
                 .phase
                 .accepts_native_activity(native.is_some(), changed || checkout_changed);
             #[cfg(target_os = "linux")]
-            if changed || checkout_changed || rejected_native || !board.phase.retains_agy_detail() {
+            if changed || checkout_changed || rejected_native || !board.phase.retains_detail_usage()
+            {
                 agy_first_child_wake.replace(None);
+                codex_roster_wake.replace(None);
             }
             let mut native_projection = None;
             if let Some(reading) = native {
                 #[cfg(target_os = "linux")]
-                agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
+                {
+                    agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
+                    codex_roster_wake.replace(reading.observations.codex_roster_watch());
+                }
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
                     checked_agy = reading.agy;
                 }
                 // A queued same-scope refresh restricts actions, while this
                 // completed and generation-checked reading can still paint.
-                incoming_agy_detail = reading.agy_detail_evidence;
+                incoming_detail_usage = reading.detail_usage_evidence;
                 observations = reading.observations;
                 main_footer = reading.footer;
             } else if rejected_native {
@@ -365,25 +377,25 @@ fn run_with_source_writer(
             selection_changed = SelectionFence::Native;
             nav.detail = false;
         }
-        if pending_agy_detail.as_ref().is_some_and(|pending| {
+        if pending_detail_usage.as_ref().is_some_and(|pending| {
             let visible = render::visible(&report, &nav);
-            !agy_binding_matches_selection(
+            !detail_binding_matches_selection(
                 &pending.binding,
                 &nav,
                 visible.get(nav.selected),
                 &observations,
             )
         }) {
-            pending_agy_detail = None;
+            pending_detail_usage = None;
         }
-        reconcile_agy_detail_evidence(
-            &mut retained_agy_detail,
-            incoming_agy_detail,
+        reconcile_detail_usage_evidence(
+            &mut retained_detail_usage,
+            incoming_detail_usage,
             board.as_ref().and_then(|board| board.scope.as_ref()),
             &report,
             &nav,
             &observations,
-            agy_detail_frame,
+            detail_usage_frame,
             scope_changed,
         );
         settle_main_dock(&mut chat, &report);
@@ -426,7 +438,7 @@ fn run_with_source_writer(
                 crate::layout::reflow(repo, &room, services, interrupted);
                 size = crate::layout::dimensions();
             }
-            let display_report = report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+            let display_report = report_for_frame(&report, &nav, retained_detail_usage.as_ref());
             let frame = frame_with_native_activity(
                 &display_report,
                 &nav,
@@ -481,9 +493,9 @@ fn run_with_source_writer(
             }
             if let Some(terminal) = &mut terminal {
                 #[cfg(target_os = "linux")]
-                let native_fd = agy_first_child_wake.fd();
+                let native_fd = [agy_first_child_wake.fd(), codex_roster_wake.fd()];
                 #[cfg(not(target_os = "linux"))]
-                let native_fd = None;
+                let native_fd = [None; 2];
                 let (keys, woken, _native_ready) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
@@ -496,9 +508,10 @@ fn run_with_source_writer(
                     let idle = board.as_ref().is_some_and(|board| !board.worker.busy());
                     // Settle the current authoritative paint before scheduling
                     // another job from a burst of transcript writes.
-                    let native_woken =
-                        agy_first_child_wake.refresh(_native_ready, idle, Instant::now());
-                    woken || native_woken
+                    let now = Instant::now();
+                    let agy_woken = agy_first_child_wake.refresh(_native_ready[0], idle, now);
+                    let codex_woken = codex_roster_wake.refresh(_native_ready[1], idle, now);
+                    woken || agy_woken || codex_woken
                 };
                 let mut refresh = woken;
                 let mut collect_ready = false;
@@ -974,7 +987,7 @@ fn run_with_source_writer(
                         && nav.detail
                         && row_authority
                         && let Some(req) = board.as_ref().and_then(|board| {
-                            agy_detail_usage_request(
+                            detail_usage_request(
                                 board.scope.as_ref(),
                                 &report,
                                 calls.get(nav.selected),
@@ -982,14 +995,14 @@ fn run_with_source_writer(
                             )
                         })
                     {
-                        pending_agy_detail = Some(req);
+                        pending_detail_usage = Some(req);
                         refresh = true;
                     }
                 }
                 if scope.changed {
-                    pending_agy_detail = None;
-                    retained_agy_detail = None;
-                } else if pending_agy_detail.is_some() || retained_agy_detail.is_some() {
+                    pending_detail_usage = None;
+                    retained_detail_usage = None;
+                } else if pending_detail_usage.is_some() || retained_detail_usage.is_some() {
                     let current_visible;
                     let selected_call = if calls_key.as_ref()
                         == Some(&(nav.filter.clone(), nav.attention_only, nav.view))
@@ -999,25 +1012,25 @@ fn run_with_source_writer(
                         current_visible = render::visible(&report, &nav);
                         current_visible.get(nav.selected)
                     };
-                    if pending_agy_detail.as_ref().is_some_and(|pending| {
-                        !agy_binding_matches_selection(
+                    if pending_detail_usage.as_ref().is_some_and(|pending| {
+                        !detail_binding_matches_selection(
                             &pending.binding,
                             &nav,
                             selected_call,
                             &observations,
                         )
                     }) {
-                        pending_agy_detail = None;
+                        pending_detail_usage = None;
                     }
-                    if retained_agy_detail.as_ref().is_some_and(|retained| {
-                        !agy_binding_matches_selection(
+                    if retained_detail_usage.as_ref().is_some_and(|retained| {
+                        !detail_binding_matches_selection(
                             &retained.binding,
                             &nav,
                             selected_call,
                             &observations,
                         )
                     }) {
-                        retained_agy_detail = None;
+                        retained_detail_usage = None;
                     }
                 }
                 // Opening an owned native transcript uses the shorter revalidation
@@ -1058,7 +1071,7 @@ fn run_with_source_writer(
                     }
                     let size = pane_size(repo, services, interrupted);
                     let display_report =
-                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
                     let frame = frame(
                         &display_report,
                         &nav,
@@ -1093,7 +1106,7 @@ fn run_with_source_writer(
                     && !scope.changed
                 {
                     let display_report =
-                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
                     let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
@@ -1131,7 +1144,7 @@ fn run_with_source_writer(
                     let size = crate::layout::dimensions();
                     last_size = size;
                     let display_report =
-                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
                     let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
@@ -1992,22 +2005,23 @@ impl BoardTarget {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct AgyDetailUsageRequest {
+struct DetailUsageRequest {
     scope: BoardScope,
     binding: ChatBinding,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct AgyDetailUsageEvidence {
+struct DetailUsageEvidence {
     scope: BoardScope,
     binding: ChatBinding,
     response: Value,
     observed_model: Option<String>,
+    claude_version: Option<crate::claude_child_chat::ClaudeChildVersion>,
     requires_group: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum AgyDetailFrame {
+enum DetailUsageFrame {
     Unchanged,
     Observed,
     Rejected,
@@ -2028,31 +2042,28 @@ fn report_has_live_main(report: &Value, main: &LiveMain) -> bool {
         })
 }
 
-fn agy_detail_usage_request(
+fn detail_usage_request(
     scope: Option<&BoardScope>,
     report: &Value,
     call: Option<&Value>,
     observations: &Observations,
-) -> Option<AgyDetailUsageRequest> {
+) -> Option<DetailUsageRequest> {
     let scope = scope?;
     let main = scope.main.as_ref()?;
     if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
         return None;
     }
     let call = call?;
-    if call["native_child"] != true
-        || call["provider"] != "antigravity"
-        || call["native_response_usage"]["response"].is_object()
+    let participant = crate::text(call, "participant");
+    let binding = observations.chat_binding(participant)?;
+    let (provider, _) = binding.detail_target()?;
+    if !detail_usage_missing(call, provider)
+        || (provider == "claude" && observations.claude_version(participant).is_none())
     {
         return None;
     }
-    let participant = crate::text(call, "participant");
-    if participant.is_empty() {
-        return None;
-    }
-    let binding = observations.chat_binding(participant)?;
     binding
-        .matches_agy_detail_scope(
+        .matches_detail_scope(
             &scope.room,
             &main.attempt,
             &main.owner,
@@ -2061,13 +2072,19 @@ fn agy_detail_usage_request(
             &main.birth,
             participant,
         )
-        .then(|| AgyDetailUsageRequest {
+        .then(|| DetailUsageRequest {
             scope: scope.clone(),
             binding: binding.clone(),
         })
 }
 
-fn agy_binding_matches_selection(
+fn detail_usage_missing(call: &Value, provider: &str) -> bool {
+    call["native_child"] == true
+        && call["provider"] == provider
+        && !call["native_response_usage"]["response"].is_object()
+}
+
+fn detail_binding_matches_selection(
     binding: &ChatBinding,
     nav: &navigation::Navigation,
     call: Option<&Value>,
@@ -2079,31 +2096,29 @@ fn agy_binding_matches_selection(
     let Some(call) = call else {
         return false;
     };
-    if call["native_child"] != true
-        || call["provider"] != "antigravity"
-        || call["native_response_usage"]["response"].is_object()
-    {
+    let Some((provider, participant)) = binding.detail_target() else {
         return false;
-    }
-    let participant = crate::text(call, "participant");
-    !participant.is_empty() && observations.chat_binding(participant) == Some(binding)
+    };
+    detail_usage_missing(call, provider)
+        && call["participant"] == participant.as_ref()
+        && observations.chat_binding(participant.as_ref()) == Some(binding)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reconcile_agy_detail_evidence(
-    retained: &mut Option<AgyDetailUsageEvidence>,
-    incoming: Option<AgyDetailUsageEvidence>,
+fn reconcile_detail_usage_evidence(
+    retained: &mut Option<DetailUsageEvidence>,
+    incoming: Option<DetailUsageEvidence>,
     scope: Option<&BoardScope>,
     report: &Value,
     nav: &navigation::Navigation,
     observations: &Observations,
-    frame: AgyDetailFrame,
+    frame: DetailUsageFrame,
     scope_changed: bool,
 ) {
     if retained.is_none() && incoming.is_none() {
         return;
     }
-    if scope_changed || frame == AgyDetailFrame::Rejected || !nav.detail {
+    if scope_changed || frame == DetailUsageFrame::Rejected || !nav.detail {
         *retained = None;
         return;
     }
@@ -2124,21 +2139,18 @@ fn reconcile_agy_detail_evidence(
         *retained = None;
         return;
     };
-    if call["native_child"] != true
-        || call["provider"] != "antigravity"
-        || call["native_response_usage"]["response"].is_object()
-    {
-        *retained = None;
-        return;
-    }
     let participant = crate::text(call, "participant");
-    if participant.is_empty() {
-        *retained = None;
-        return;
-    }
-    let matches = |ev: &AgyDetailUsageEvidence| {
-        same_footer_scope(&ev.scope, scope)
-            && ev.binding.matches_agy_detail_scope(
+    let matches = |ev: &DetailUsageEvidence| {
+        let Some((provider, _)) = ev.binding.detail_target() else {
+            return false;
+        };
+        detail_usage_missing(call, provider)
+            && (provider != "claude"
+                || ev.claude_version.is_some_and(|version| {
+                    observations.claude_detail_version(&ev.binding) == Some(version)
+                }))
+            && same_footer_scope(&ev.scope, scope)
+            && ev.binding.matches_detail_scope(
                 &scope.room,
                 &main.attempt,
                 &main.owner,
@@ -2149,17 +2161,16 @@ fn reconcile_agy_detail_evidence(
             )
             && observations.chat_binding(participant) == Some(&ev.binding)
     };
-    if frame == AgyDetailFrame::Observed
+    if frame == DetailUsageFrame::Observed
         && let Some(ev) = incoming
         && matches(&ev)
     {
         *retained = Some(ev);
         return;
     }
-    if retained
-        .as_ref()
-        .is_some_and(|ev| !matches(ev) || (ev.requires_group && frame == AgyDetailFrame::Observed))
-    {
+    if retained.as_ref().is_some_and(|ev| {
+        !matches(ev) || (ev.requires_group && frame == DetailUsageFrame::Observed)
+    }) {
         *retained = None;
     }
 }
@@ -2167,7 +2178,7 @@ fn reconcile_agy_detail_evidence(
 fn report_for_frame<'a>(
     report: &'a Value,
     nav: &navigation::Navigation,
-    retained: Option<&AgyDetailUsageEvidence>,
+    retained: Option<&DetailUsageEvidence>,
 ) -> std::borrow::Cow<'a, Value> {
     if !nav.detail {
         return std::borrow::Cow::Borrowed(report);
@@ -2175,15 +2186,15 @@ fn report_for_frame<'a>(
     let Some(ev) = retained else {
         return std::borrow::Cow::Borrowed(report);
     };
-    let Some(participant) = ev.binding.agy_participant() else {
+    let Some((provider, participant)) = ev.binding.detail_target() else {
         return std::borrow::Cow::Borrowed(report);
     };
     let mut cloned = report.clone();
     if let Some(rows) = cloned["native_children"].as_array_mut() {
         let mut matching = rows.iter_mut().filter(|row| {
             row["native_child"] == true
-                && row["provider"] == "antigravity"
-                && row["participant"] == participant
+                && row["provider"] == provider
+                && row["participant"] == participant.as_ref()
         });
         if let (Some(row), None) = (matching.next(), matching.next())
             && !row["native_response_usage"]["response"].is_object()
@@ -2207,8 +2218,8 @@ struct NativeSeed {
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
-    agy_detail: Option<AgyDetailUsageRequest>,
-    agy_detail_binding: Option<ChatBinding>,
+    detail_usage: Option<DetailUsageRequest>,
+    detail_usage_binding: Option<ChatBinding>,
 }
 
 struct AgyDockCheck {
@@ -2237,7 +2248,7 @@ pub(crate) struct NativeReading {
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
-    agy_detail_evidence: Option<AgyDetailUsageEvidence>,
+    detail_usage_evidence: Option<DetailUsageEvidence>,
 }
 
 const NATIVE_FIELDS: [&str; 12] = [
@@ -2279,9 +2290,9 @@ fn clear_rejected_native(report: &mut Value) {
 }
 
 impl NativeRequest {
-    fn authorized_agy_detail(&self, report: &Value) -> Option<&AgyDetailUsageRequest> {
+    fn authorized_detail_usage(&self, report: &Value) -> Option<&DetailUsageRequest> {
         let main = self.scope.main.as_ref()?;
-        self.seed.agy_detail.as_ref().filter(|req| {
+        self.seed.detail_usage.as_ref().filter(|req| {
             same_footer_scope(&req.scope, &self.scope)
                 && report["room"]["id"] == self.scope.room
                 && report_has_live_main(report, main)
@@ -2314,21 +2325,25 @@ impl NativeRequest {
         let mut footer = self.seed.footer.clone();
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
-        let agy_detail_req = self.authorized_agy_detail(report);
-        let agy_detail_evidence = panel
+        let detail_usage_req = self.authorized_detail_usage(report);
+        let detail_usage_evidence = panel
             .observe_passively(
                 &mut observations,
                 report,
                 &generation,
-                agy_detail_req.map(|req| &req.binding),
+                DetailUsageSelection {
+                    requested: detail_usage_req.map(|req| &req.binding),
+                    active: self.seed.detail_usage_binding.as_ref(),
+                },
             )
             .and_then(|usage| {
-                let req = agy_detail_req?;
-                Some(AgyDetailUsageEvidence {
+                let req = detail_usage_req?;
+                Some(DetailUsageEvidence {
                     scope: self.scope.clone(),
                     binding: req.binding.clone(),
                     response: usage.response,
                     observed_model: usage.observed_model,
+                    claude_version: usage.claude_version,
                     requires_group: usage.requires_group,
                 })
             });
@@ -2366,7 +2381,7 @@ impl NativeRequest {
             observations,
             footer,
             agy,
-            agy_detail_evidence,
+            detail_usage_evidence,
         })
     }
 }
@@ -2406,7 +2421,7 @@ impl RefreshPhase {
         matches!(self, Self::Pending) && has_reading && !scope_changed
     }
 
-    fn retains_agy_detail(&self) -> bool {
+    fn retains_detail_usage(&self) -> bool {
         matches!(self, Self::Pending | Self::Fresh)
     }
 
@@ -2556,7 +2571,7 @@ struct InteractiveRefresh {
     scope: Option<BoardScope>,
     phase: RefreshPhase,
     deferred_refresh: bool,
-    agy_group_renewal: Option<AgyDetailUsageRequest>,
+    agy_group_renewal: Option<DetailUsageRequest>,
 }
 
 impl InteractiveRefresh {
@@ -2614,22 +2629,22 @@ impl InteractiveRefresh {
         request: bool,
         ready: bool,
         mut seed: Option<NativeSeed>,
-        pending_agy_detail: &mut Option<AgyDetailUsageRequest>,
+        pending_detail_usage: &mut Option<DetailUsageRequest>,
     ) -> (bool, Option<Snapshot>, Option<NativeReading>) {
         let changed = !self.matches(&live);
         let detail_binding = seed
             .as_ref()
-            .and_then(|seed| seed.agy_detail_binding.clone());
+            .and_then(|seed| seed.detail_usage_binding.clone());
         if changed {
             self.quota.cancel();
             self.deferred_refresh = false;
-            *pending_agy_detail = None;
+            *pending_detail_usage = None;
             self.agy_group_renewal = None;
             if let Some(seed) = &mut seed {
                 seed.observations = Observations::default();
                 seed.agy = None;
-                seed.agy_detail = None;
-                seed.agy_detail_binding = None;
+                seed.detail_usage = None;
+                seed.detail_usage_binding = None;
                 seed.footer = MainFooter::default();
             }
         }
@@ -2637,16 +2652,16 @@ impl InteractiveRefresh {
             Ok(scope) => scope,
             Err(error) => {
                 self.scope = None;
-                *pending_agy_detail = None;
+                *pending_detail_usage = None;
                 self.agy_group_renewal = None;
                 self.phase = RefreshPhase::Failed(error.message);
                 return (changed, None, None);
             }
         };
-        if let Some(pending) = pending_agy_detail.as_ref()
+        if let Some(pending) = pending_detail_usage.as_ref()
             && !same_footer_scope(&pending.scope, &scope)
         {
-            *pending_agy_detail = None;
+            *pending_detail_usage = None;
         }
         if self.agy_group_renewal.as_ref().is_some_and(|detail| {
             detail_binding.as_ref() != Some(&detail.binding)
@@ -2657,7 +2672,7 @@ impl InteractiveRefresh {
         if changed || (request && !self.worker.busy()) {
             let mut dispatched = seed.take();
             if let Some(seed) = &mut dispatched {
-                seed.agy_detail = pending_agy_detail
+                seed.detail_usage = pending_detail_usage
                     .take()
                     .or_else(|| self.agy_group_renewal.clone());
             }
@@ -2703,17 +2718,17 @@ impl InteractiveRefresh {
         let rejected_native = native.is_none() && completed.is_some() && scope.main.is_some();
         if rejected_native {
             self.quota.cancel();
-            *pending_agy_detail = None;
+            *pending_detail_usage = None;
             self.agy_group_renewal = None;
         }
         if !changed
             && let Some(evidence) = native
                 .as_ref()
-                .and_then(|reading| reading.agy_detail_evidence.as_ref())
+                .and_then(|reading| reading.detail_usage_evidence.as_ref())
             && detail_binding.as_ref() == Some(&evidence.binding)
             && same_footer_scope(&evidence.scope, &scope)
         {
-            self.agy_group_renewal = evidence.requires_group.then(|| AgyDetailUsageRequest {
+            self.agy_group_renewal = evidence.requires_group.then(|| DetailUsageRequest {
                 scope: evidence.scope.clone(),
                 binding: evidence.binding.clone(),
             });
@@ -2728,7 +2743,7 @@ impl InteractiveRefresh {
                     seed.footer = MainFooter::default();
                     seed.agy = None;
                 }
-                seed.agy_detail = pending_agy_detail
+                seed.detail_usage = pending_detail_usage
                     .take()
                     .or_else(|| self.agy_group_renewal.clone());
             }
@@ -8083,10 +8098,10 @@ mod tests {
     #[test]
     fn agy_detail_usage_request_and_interactive_dispatch() {
         use super::{
-            AgyDetailFrame, AgyDetailUsageEvidence, BoardScope, BoardTarget, InteractiveRefresh,
+            BoardScope, BoardTarget, DetailUsageEvidence, DetailUsageFrame, InteractiveRefresh,
             LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
-            SelectionFence, agy_detail_usage_request, apply_selection_key,
-            reconcile_agy_detail_evidence, report_for_frame,
+            SelectionFence, apply_selection_key, detail_usage_request,
+            reconcile_detail_usage_evidence, report_for_frame,
         };
         use crate::board_refresh::BoardRefresh;
         use crate::input::Key;
@@ -8158,9 +8173,8 @@ mod tests {
             "native_children": [call.clone()]
         });
 
-        let req =
-            agy_detail_usage_request(Some(&current_scope), &report, Some(&call), &observations)
-                .expect("unsampled AGY child under exact scope should request usage");
+        let req = detail_usage_request(Some(&current_scope), &report, Some(&call), &observations)
+            .expect("unsampled AGY child under exact scope should request usage");
         assert_eq!(req.scope, current_scope);
         assert!(req.binding == binding);
 
@@ -8171,7 +8185,7 @@ mod tests {
             "response": {"input_tokens": 1200, "cached_input_tokens": 0, "output_tokens": 40}
         });
         assert!(
-            agy_detail_usage_request(
+            detail_usage_request(
                 Some(&current_scope),
                 &report,
                 Some(&sampled_call),
@@ -8184,7 +8198,7 @@ mod tests {
         let mut codex_call = call.clone();
         codex_call["provider"] = json!("codex");
         assert!(
-            agy_detail_usage_request(
+            detail_usage_request(
                 Some(&current_scope),
                 &report,
                 Some(&codex_call),
@@ -8197,7 +8211,7 @@ mod tests {
         let mut wrong_room = report.clone();
         wrong_room["room"]["id"] = json!("other-room");
         assert!(
-            agy_detail_usage_request(
+            detail_usage_request(
                 Some(&current_scope),
                 &wrong_room,
                 Some(&call),
@@ -8210,15 +8224,14 @@ mod tests {
         let mut wrong_birth = current_scope.clone();
         wrong_birth.main.as_mut().unwrap().birth = "other-birth".into();
         assert!(
-            agy_detail_usage_request(Some(&wrong_birth), &report, Some(&call), &observations)
-                .is_none()
+            detail_usage_request(Some(&wrong_birth), &report, Some(&call), &observations).is_none()
         );
 
         // Wrong participant -> None.
         let mut wrong_child = call.clone();
         wrong_child["participant"] = json!("native-antigravity-other");
         assert!(
-            agy_detail_usage_request(
+            detail_usage_request(
                 Some(&current_scope),
                 &report,
                 Some(&wrong_child),
@@ -8231,7 +8244,7 @@ mod tests {
         let mut terminal_flag = report.clone();
         terminal_flag["room"]["participants"][0]["terminal"] = json!(true);
         assert!(
-            agy_detail_usage_request(
+            detail_usage_request(
                 Some(&current_scope),
                 &terminal_flag,
                 Some(&call),
@@ -8242,7 +8255,7 @@ mod tests {
         let mut terminal_state = report.clone();
         terminal_state["room"]["participants"][0]["state"] = json!("done");
         assert!(
-            agy_detail_usage_request(
+            detail_usage_request(
                 Some(&current_scope),
                 &terminal_state,
                 Some(&call),
@@ -8264,7 +8277,7 @@ mod tests {
         apply_selection_key(&mut nav, &mut selection, &Key::Char('D'), calls.len(), 1);
         assert!(nav.detail);
 
-        let ev = AgyDetailUsageEvidence {
+        let ev = DetailUsageEvidence {
             scope: current_scope.clone(),
             binding: binding.clone(),
             response: json!({
@@ -8274,17 +8287,18 @@ mod tests {
                 "output_tokens": 40
             }),
             observed_model: Some("gemini".into()),
+            claude_version: None,
             requires_group: false,
         };
         let mut retained = None;
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut retained,
             Some(ev.clone()),
             Some(&current_scope),
             &report,
             &nav,
             &observations,
-            AgyDetailFrame::Observed,
+            DetailUsageFrame::Observed,
             false,
         );
         assert!(retained.as_ref() == Some(&ev));
@@ -8294,7 +8308,7 @@ mod tests {
                 .is_none()
         );
         let render_detail =
-            |src: &Value, n: &crate::navigation::Navigation, r: Option<&AgyDetailUsageEvidence>| {
+            |src: &Value, n: &crate::navigation::Navigation, r: Option<&DetailUsageEvidence>| {
                 let display = report_for_frame(src, n, r);
                 super::frame(
                     &display,
@@ -8324,14 +8338,14 @@ mod tests {
         // 2. Next ordinary ambient refresh (incoming = None, raw report still has no
         //    usage on child #4) preserves retained evidence while D stays open under
         //    the same Room/Main/pane-birth/Turn/participant.
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut retained,
             None,
             Some(&current_scope),
             &report,
             &nav,
             &observations,
-            AgyDetailFrame::Unchanged,
+            DetailUsageFrame::Unchanged,
             false,
         );
         assert!(retained.as_ref() == Some(&ev));
@@ -8348,8 +8362,8 @@ mod tests {
         let mut group = ev.clone();
         group.requires_group = true;
         let mut retained_group = Some(group.clone());
-        let refresh_group = |retained: &mut Option<AgyDetailUsageEvidence>, incoming, frame| {
-            reconcile_agy_detail_evidence(
+        let refresh_group = |retained: &mut Option<DetailUsageEvidence>, incoming, frame| {
+            reconcile_detail_usage_evidence(
                 retained,
                 incoming,
                 Some(&current_scope),
@@ -8360,23 +8374,27 @@ mod tests {
                 false,
             );
         };
-        refresh_group(&mut retained_group, None, AgyDetailFrame::Unchanged);
+        refresh_group(&mut retained_group, None, DetailUsageFrame::Unchanged);
         assert!(retained_group.as_ref() == Some(&group));
         let mut renewed = group;
         renewed.response["input_tokens"] = 1300.into();
         refresh_group(
             &mut retained_group,
             Some(renewed.clone()),
-            AgyDetailFrame::Observed,
+            DetailUsageFrame::Observed,
         );
         assert!(retained_group.as_ref() == Some(&renewed));
         assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
 
         // The same row and Turn can survive a revoked membership or ACL change.
-        refresh_group(&mut retained_group, None, AgyDetailFrame::Observed);
+        refresh_group(&mut retained_group, None, DetailUsageFrame::Observed);
         assert!(retained_group.is_none());
         assert!(!render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
-        refresh_group(&mut retained_group, Some(renewed), AgyDetailFrame::Observed);
+        refresh_group(
+            &mut retained_group,
+            Some(renewed),
+            DetailUsageFrame::Observed,
+        );
         assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
 
         // 3a. Closing D or moving selection before an in-flight response lands rejects
@@ -8384,27 +8402,27 @@ mod tests {
         let mut closed_nav = nav.clone();
         closed_nav.detail = false;
         let mut bleed_check = None;
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut bleed_check,
             Some(ev.clone()),
             Some(&current_scope),
             &report,
             &closed_nav,
             &observations,
-            AgyDetailFrame::Observed,
+            DetailUsageFrame::Observed,
             false,
         );
         assert!(bleed_check.is_none());
         let mut other_sel_nav = nav.clone();
         other_sel_nav.selected = 0; // Main row
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut bleed_check,
             Some(ev.clone()),
             Some(&current_scope),
             &report,
             &other_sel_nav,
             &observations,
-            AgyDetailFrame::Observed,
+            DetailUsageFrame::Observed,
             false,
         );
         assert!(bleed_check.is_none());
@@ -8413,14 +8431,14 @@ mod tests {
         //     evidence immediately so stale counters are redacted.
         let new_turn_obs = spy.agy_observations(&child, NEW_TURN);
         let mut stale_turn = retained.clone();
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut stale_turn,
             None,
             Some(&current_scope),
             &report,
             &nav,
             &new_turn_obs,
-            AgyDetailFrame::Unchanged,
+            DetailUsageFrame::Unchanged,
             false,
         );
         assert!(stale_turn.is_none());
@@ -8428,27 +8446,27 @@ mod tests {
         assert!(!redacted.contains("1200 in"), "{redacted}");
 
         let mut on_rejected = retained.clone();
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut on_rejected,
             None,
             Some(&current_scope),
             &report,
             &nav,
             &observations,
-            AgyDetailFrame::Rejected,
+            DetailUsageFrame::Rejected,
             false,
         );
         assert!(on_rejected.is_none());
 
         let mut on_scope_change = retained.clone();
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut on_scope_change,
             None,
             Some(&current_scope),
             &report,
             &nav,
             &observations,
-            AgyDetailFrame::Observed,
+            DetailUsageFrame::Observed,
             true,
         );
         assert!(on_scope_change.is_none());
@@ -8465,14 +8483,14 @@ mod tests {
                 "output_tokens": 90
             }
         });
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut retained,
             None,
             Some(&current_scope),
             &ambient_report,
             &nav,
             &observations,
-            AgyDetailFrame::Observed,
+            DetailUsageFrame::Observed,
             false,
         );
         assert!(retained.is_none());
@@ -8480,7 +8498,7 @@ mod tests {
         assert!(ambient_detail.contains("2500 in"), "{ambient_detail}");
         assert!(!ambient_detail.contains("1200 in"), "{ambient_detail}");
 
-        // InteractiveRefresh::update_with_native dispatches pending agy_detail once
+        // InteractiveRefresh dispatches pending detail usage once
         // (immediately or on follow_up behind a busy worker), does not re-enqueue it,
         // and drops it on scope change.
         struct Collector {
@@ -8555,16 +8573,16 @@ mod tests {
             observations: Observations::default(),
             footer: MainFooter::default(),
             agy: None,
-            agy_detail: None,
-            agy_detail_binding: None,
+            detail_usage: None,
+            detail_usage_binding: None,
         };
         let mut seed = make_seed();
-        seed.agy_detail = Some(req.clone());
+        seed.detail_usage = Some(req.clone());
         let native_request = NativeRequest {
             scope: current_scope.clone(),
             seed,
         };
-        assert!(native_request.authorized_agy_detail(&report).is_some());
+        assert!(native_request.authorized_detail_usage(&report).is_some());
         let mut wrong_owner = report.clone();
         wrong_owner["room_attempts"][MAIN]["provider"] = json!("claude");
         wrong_owner["room"]["participants"][0]["provider"] = json!("claude");
@@ -8572,7 +8590,11 @@ mod tests {
             report: wrong_owner.clone(),
             status: 0,
         }));
-        assert!(native_request.authorized_agy_detail(&wrong_owner).is_none());
+        assert!(
+            native_request
+                .authorized_detail_usage(&wrong_owner)
+                .is_none()
+        );
         let wait_ready = |board: &mut InteractiveRefresh| {
             let deadline = Instant::now() + Duration::from_secs(5);
             while !board.worker.ready() {
@@ -8650,14 +8672,14 @@ mod tests {
             .frame_report(completed, Some(report.clone()), ROOM);
         assert_eq!(retrying["collection"]["pending"], true);
         let mut rejected = Some(ev);
-        reconcile_agy_detail_evidence(
+        reconcile_detail_usage_evidence(
             &mut rejected,
             None,
             board.scope.as_ref(),
             &retrying,
             &nav,
             &observations,
-            AgyDetailFrame::Rejected,
+            DetailUsageFrame::Rejected,
             changed,
         );
         assert!(rejected.is_none());
@@ -8679,7 +8701,7 @@ mod tests {
 
         board.agy_group_renewal = Some(req.clone());
         let mut open = make_seed();
-        open.agy_detail_binding = Some(binding.clone());
+        open.detail_usage_binding = Some(binding.clone());
         let _ = board.update_with_native(
             Ok(current_scope.clone()),
             false,
@@ -8718,6 +8740,160 @@ mod tests {
         );
         answer.send(Err(Error::new("done"))).unwrap();
         wait_ready(&mut board);
+    }
+
+    #[test]
+    fn claude_detail_usage_retains_only_the_selected_transcript_version() {
+        use super::*;
+        use crate::input::Key;
+        use crate::orchestrator::codex_chat_fixture::{BoardSpy, NEW_TURN, TURN};
+
+        const ROOM: &str = "room-fixture";
+        const MAIN: &str = "att_11111111111111111111111111111111";
+        let spy = BoardSpy::new("claude-detail-usage");
+        spy.provider.set("claude");
+        let child = crate::native_children::participant_id("claude", "a1b2c3d4e5f60718");
+        let observations = spy.claude_detail_observations(&child, TURN, 1, true);
+        let binding = observations.chat_binding(&child).unwrap();
+        let pid = std::process::id();
+        let scope = BoardScope {
+            key: RefreshKey::new(binding.repo(), Some(ROOM), Some(MAIN)).unwrap(),
+            room: ROOM.into(),
+            main: Some(LiveMain {
+                attempt: MAIN.into(),
+                member: MAIN.into(),
+                owner: "codex".into(),
+                session: "$1".into(),
+                window: "@1".into(),
+                pane: "%1".into(),
+                pid,
+                birth: oms_panel_core::terminals::process(pid).unwrap().birth,
+            }),
+        };
+        let call = json!({
+            "participant":child,"native_child":true,"provider":"claude","role":"subagent",
+            "state":"working","title":"Selected child"
+        });
+        let mut report = json!({
+            "collection":{"ok": true},
+            "room":{"id":ROOM,"participants":[{"participant":MAIN,"role":"main","provider":"codex",
+                "joined":true,"state":"working","terminal":false}]},
+            "room_attempts":{MAIN:{"attempt_id":MAIN,"provider":"codex","tool":"panel-main","state":"working",
+                "terminal":false,"refs":{"panel_role":"main","panel_room_id":ROOM,"panel_room_participant":MAIN}}},
+            "native_children":[call,{"participant":"native-claude-other","native_child":true,
+                "provider":"claude","role":"subagent","state":"working","title":"Sibling"}],
+        });
+        let mut nav = navigation::Navigation::default();
+        let visible = render::visible(&report, &nav);
+        nav.selected = visible
+            .iter()
+            .position(|row| row["participant"] == child)
+            .unwrap();
+        apply_selection_key(
+            &mut nav,
+            &mut SelectionFence::None,
+            &Key::Char('D'),
+            visible.len(),
+            1,
+        );
+        assert!(nav.detail);
+        let selected = visible.get(nav.selected);
+        assert!(
+            detail_usage_request(Some(&scope), &report, selected, &Observations::default())
+                .is_none()
+        );
+        let request = detail_usage_request(Some(&scope), &report, selected, &observations)
+            .expect("proved Claude locator permits one selected read");
+        assert!(&request.binding == binding);
+
+        let evidence = DetailUsageEvidence {
+            scope: scope.clone(),
+            binding: request.binding,
+            response: json!({"input_tokens":7,"output_tokens":2,"cache_creation_input_tokens":0,
+                "cache_read_input_tokens":0,"total_tokens":9}),
+            observed_model: Some("claude-opus-5-5".into()),
+            claude_version: observations.claude_version(&child),
+            requires_group: false,
+        };
+        let reconcile = |retained: &mut Option<DetailUsageEvidence>,
+                         incoming,
+                         report: &Value,
+                         nav: &navigation::Navigation,
+                         obs: &Observations| {
+            reconcile_detail_usage_evidence(
+                retained,
+                incoming,
+                Some(&scope),
+                report,
+                nav,
+                obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+        };
+        let render = |retained: Option<&DetailUsageEvidence>| {
+            let frame_report = report_for_frame(&report, &nav, retained);
+            render::frame(&frame_report, &nav, 45, 25, &Default::default()).join("\n")
+        };
+        let mut retained = None;
+        reconcile(
+            &mut retained,
+            Some(evidence.clone()),
+            &report,
+            &nav,
+            &observations,
+        );
+        for _ in 0..3 {
+            reconcile(&mut retained, None, &report, &nav, &observations);
+            assert!(
+                retained.is_some(),
+                "same authoritative version preserves selected evidence"
+            );
+        }
+        let shown = render(retained.as_ref());
+        assert!(
+            shown.contains("Last response") && shown.contains("0 cache read"),
+            "{shown}"
+        );
+        assert!(render(None).contains("unreported"));
+        assert!(
+            report["native_children"][0]
+                .get("native_response_usage")
+                .is_none()
+        );
+
+        let later = spy.claude_detail_observations(&child, TURN, 2, true);
+        let new_turn = spy.claude_detail_observations(&child, NEW_TURN, 1, true);
+        let unchecked = spy.claude_detail_observations(&child, TURN, 1, false);
+        assert_eq!(
+            observations.claude_version(&child),
+            unchecked.claude_version(&child)
+        );
+        for observation in [&later, &new_turn, &unchecked, &Observations::default()] {
+            let mut retained = Some(evidence.clone());
+            reconcile(&mut retained, None, &report, &nav, observation);
+            assert!(retained.is_none());
+        }
+        let mut sibling = nav.clone();
+        sibling.selected = visible
+            .iter()
+            .position(|row| row["participant"] == "native-claude-other")
+            .unwrap();
+        reconcile(&mut retained, None, &report, &sibling, &observations);
+        assert!(retained.is_none());
+
+        let duplicate = report["native_children"][0].clone();
+        report["native_children"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(
+            report_for_frame(&report, &nav, Some(&evidence))["native_children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("native_response_usage").is_none())
+        );
     }
 
     #[test]
@@ -9226,6 +9402,48 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback() {
+        private_native_watch_fixture(
+            "watch::tests::agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback",
+            None,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_watch_paints_bound_child_only_rollout() {
+        private_native_watch_fixture(
+            "watch::tests::codex_watch_paints_bound_child_only_rollout",
+            Some(CodexWatchStimulus::Complete),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_watch_retries_after_partial_bound_child_header() {
+        private_native_watch_fixture(
+            "watch::tests::codex_watch_retries_after_partial_bound_child_header",
+            Some(CodexWatchStimulus::Partial),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_watch_paints_verified_recent_creation_in_default_overview() {
+        private_native_watch_fixture(
+            "watch::tests::codex_watch_paints_verified_recent_creation_in_default_overview",
+            Some(CodexWatchStimulus::Overview),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    enum CodexWatchStimulus {
+        Complete,
+        Partial,
+        Overview,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn private_native_watch_fixture(test_name: &str, stimulus: Option<CodexWatchStimulus>) {
         use super::Options;
         use crate::{commands, render};
         use oms_panel_core::{CommandOutput, NativeCommand, Services, SubcommandServices};
@@ -9241,8 +9459,23 @@ mod tests {
         const SEED_ENV: &str = "OMS_TEST_AGY_WATCH_SEED";
         const REPLY_ENV: &str = "OMS_TEST_WATCH_REPLY";
         const WORKER: &str = "wake-worker";
-        const TEST_NAME: &str =
-            "watch::tests::agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback";
+        const OVERVIEW_HISTORY: [&str; 3] =
+            ["Codex archived A", "Codex archived B", "Codex archived C"];
+        const OVERVIEW_CHILD: &str = "Codex new child fixture";
+        const OVERVIEW_PARTIAL_MODEL: &str = "fixture/partial-frame:v2";
+        let codex = stimulus.is_some();
+        let overview = matches!(stimulus, Some(CodexWatchStimulus::Overview));
+        let complete_overview_header = std::cell::Cell::new(false);
+        let timing = matches!(stimulus, Some(CodexWatchStimulus::Complete))
+            .then(|| std::env::var("OMS_TEST_CODEX_ROSTER_TIMING").ok())
+            .flatten();
+        let (trials, socket_fallback): (usize, bool) = match timing.as_deref() {
+            Some("paired") => (20, true),
+            Some("fast") => (1, false),
+            Some("socket") => (1, true),
+            None => (1, true),
+            _ => panic!("invalid Codex fixture timing mode"),
+        };
 
         let reply = std::env::var_os(REPLY_ENV).is_some();
         if reply || std::env::var_os(SEED_ENV).is_some() {
@@ -9402,6 +9635,14 @@ mod tests {
             let options = Options::parse(&commands::strings(&["--watch"])).unwrap();
             let services = SubcommandServices::sibling().unwrap();
             let interrupted = AtomicBool::new(false);
+            if codex {
+                crate::orchestrator::codex_chat_fixture::bind_codex_watch_lead(
+                    &repo,
+                    &std::env::var("OMS_FAKE_ROOM").unwrap(),
+                    &services,
+                    &interrupted,
+                );
+            }
             crate::agy_child_chat::reset_all_agy_counters();
             let result = super::run(&repo, &options, &services, &interrupted).unwrap();
             let foreground = agy_watch_counters();
@@ -9419,11 +9660,11 @@ mod tests {
 
         struct Temp(PathBuf);
         impl Temp {
-            fn new() -> Self {
+            fn new(label: &str) -> Self {
                 let p = std::env::temp_dir()
                     .canonicalize()
                     .unwrap()
-                    .join(format!("oms-agy-watch-pty-{}", std::process::id()));
+                    .join(format!("oms-watch-pty-{label}-{}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&p);
                 std::fs::create_dir(&p).unwrap();
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -9458,8 +9699,20 @@ mod tests {
             walk(root);
         };
 
-        let tmp = Temp::new();
-        let repo = tmp.0.join("repo");
+        let label = match stimulus {
+            None => "agy",
+            Some(CodexWatchStimulus::Complete) => "codex",
+            Some(CodexWatchStimulus::Partial) => "partial",
+            Some(CodexWatchStimulus::Overview) => "overview",
+        };
+        let tmp = Temp::new(label);
+        // A long checkout selects the real five-second no-socket fallback
+        // in the fast smoke. The full timing pairs use the normal socket.
+        let repo = tmp.0.join(if socket_fallback {
+            "repo".into()
+        } else {
+            "r".repeat(99)
+        });
         let wt = tmp.0.join("repo-wt");
         let home = tmp.0.join("home");
         let state = tmp.0.join("state");
@@ -9475,6 +9728,21 @@ mod tests {
             &repo, &home, &state, &bin, &gemini, &app_root, &presence, &brain,
         ] {
             mkdir_p(d);
+        }
+        let codex_home = home.join(".codex");
+        if codex {
+            mkdir_p(&codex_home);
+            let xdg = home.join(".config");
+            mkdir_p(&xdg);
+            let registry_dir = xdg.join("oh-my-setting");
+            mkdir_p(&registry_dir);
+            let registry = registry_dir.join("provider-accounts.json");
+            std::fs::write(
+                &registry,
+                json!({"schema":1,"providers":{"codex":{"accounts":[{"id":"fixture","home":codex_home}]}}}).to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(registry, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
         let run_git = |dir: &Path, args: &[&str]| {
@@ -9519,7 +9787,7 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let fixture_command = || {
             let mut cmd = Command::new(&exe);
-            cmd.args(["--exact", TEST_NAME, "--nocapture"])
+            cmd.args(["--exact", test_name, "--nocapture"])
                 .env_clear()
                 .env("PATH", "/usr/local/bin:/usr/bin:/bin")
                 .env("HOME", &home)
@@ -9555,7 +9823,15 @@ mod tests {
             .arg("-n")
             .arg("-F")
             .arg(&lock_path)
-            .args(["bash", "-c", "exec -a agy bash"])
+            .args([
+                "bash",
+                "-c",
+                if codex {
+                    "exec -a codex bash"
+                } else {
+                    "exec -a agy bash"
+                },
+            ])
             .env_clear()
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("HOME", &home)
@@ -9702,7 +9978,11 @@ elif is list-panes -s -t %2 -F "$SESSION"; then
   window=@4
   if [ -n "${OMS_FAKE_LEAD_WINDOW+x}" ]; then IFS= read -r window < "$OMS_FAKE_LEAD_WINDOW" || :; fi
   if [ "$window" != absent ]; then
-    printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+    if [ -n "${OMS_TEST_CODEX_LEAD:-}" ]; then
+      printf '$1\t%s\t%%3\t%s\t0\t0\t\t\t\t\t%s\tcodex\t%s\t0\t._1_\n' "$window" "$lead_pid" "$room" "$attempt"
+    else
+      printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+    fi
   fi
 elif is display-message -p -t '$1' "$SERVER" ';' show-options -v -t '$1' @oms_panel_repo; then
   repo=${OMS_TEST_REPO?}
@@ -9735,6 +10015,8 @@ elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p 
   printf '%s\n' '└ Models & Quota' 'GEMINI MODELS' 'Weekly Limit Remaining' '[███] 94%' 'Five Hour Limit Remaining' '[███] 86%' 'CLAUDE AND GPT MODELS' 'Weekly Limit Remaining' '[███] 100%'
 elif is capture-pane -p -t %1; then
   printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
+elif [ -n "${OMS_TEST_CODEX_LEAD:-}" ] && { is capture-pane -p -t %3 || is capture-pane -p -J -S -100 -t %3; }; then
+  /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
 elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
   if [ -n "$stall" ] && [ -e "$stall" ]; then
     ticket=$(stall_ticket)
@@ -9815,6 +10097,17 @@ fi
                         }
                     }
                 }
+                if overview {
+                    assert!(
+                        screen.iter().all(|line| {
+                            OVERVIEW_HISTORY.iter().all(|title| !line.contains(title))
+                                && (complete_overview_header.get()
+                                    || !line.contains(OVERVIEW_CHILD))
+                        }),
+                        "unverified child or history flashed in Overview:\n{}",
+                        screen.join("\n")
+                    );
+                }
             }
             updated
         };
@@ -9891,7 +10184,7 @@ fi
             let mut child_in = child_out.try_clone().unwrap();
             let mut pty_cmd = Command::new(&exe);
             pty_cmd
-                .args(["--exact", TEST_NAME, "--nocapture"])
+                .args(["--exact", test_name, "--nocapture"])
                 .env_clear()
                 .env("PATH", &bin)
                 .env("HOME", &home)
@@ -9916,6 +10209,9 @@ fi
                 .stdin(slave.try_clone().unwrap())
                 .stdout(slave)
                 .stderr(Stdio::inherit());
+            if codex {
+                pty_cmd.env("OMS_TEST_CODEX_LEAD", "1");
+            }
             let mut child = pty_cmd.spawn().unwrap();
             std::fs::write(&watch_pid, child.id().to_string()).unwrap();
             // The command holds the last parent copies of the slave.
@@ -9995,6 +10291,219 @@ fi
             let tmux_log = std::fs::read_to_string(&log).unwrap();
             (parsed, tmux_log)
         };
+
+        if codex {
+            std::fs::write(&lead_window, "@3").unwrap();
+            std::fs::write(&prompt_file, format!("› {prompt_line}\n")).unwrap();
+            let controls = timing.is_some();
+            let mut samples = [Vec::new(), Vec::new()];
+            let codex_captures = |command: &str| {
+                std::fs::read_to_string(&log)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| *line == command)
+                    .count()
+            };
+            let primary_captures = || codex_captures("capture-pane -p -t %3");
+            let recent_captures = || codex_captures("capture-pane -p -J -S -100 -t %3");
+            let codex_watch_armed = || {
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .any(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+            };
+            for trial in 0..trials {
+                let order = if trial.is_multiple_of(2) {
+                    [true, false]
+                } else {
+                    [false, true]
+                };
+                for armed in order.into_iter().take(if controls { 2 } else { 1 }) {
+                    let history = "Codex history fixture";
+                    let (next, (child, metadata)) = if overview {
+                        (
+                            OVERVIEW_CHILD,
+                            crate::native_children::seed_codex_overview_rollouts(
+                                &codex_home,
+                                &repo,
+                                turn,
+                                OVERVIEW_HISTORY,
+                                OVERVIEW_CHILD,
+                            ),
+                        )
+                    } else {
+                        let next = "Codex child-only fixture";
+                        (
+                            next,
+                            crate::native_children::seed_codex_watch_rollouts(
+                                &codex_home,
+                                &repo,
+                                turn,
+                                history,
+                                next,
+                            ),
+                        )
+                    };
+                    if child.exists() {
+                        std::fs::remove_file(&child).unwrap();
+                    }
+                    std::fs::set_permissions(
+                        child.parent().unwrap(),
+                        std::fs::Permissions::from_mode(if armed { 0o700 } else { 0o775 }),
+                    )
+                    .unwrap();
+                    let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
+                        wait_for(stream, screen, rx, "bound Codex overview", &mut |lines| {
+                            lines.iter().any(|line| line.contains("@fixture"))
+                                && lines.iter().any(|line| line.contains("[Overview]"))
+                                && (!overview || codex_watch_armed())
+                        });
+                        if !overview {
+                            input.write_all(b"\t").unwrap();
+                            input.flush().unwrap();
+                            wait_for(stream, screen, rx, "bound Codex history", &mut |lines| {
+                                lines.iter().any(|line| line.contains("[All tasks]"))
+                                    && lines.iter().any(|line| line.contains(history))
+                                    && lines.iter().all(|line| !line.contains(next))
+                            });
+                        }
+                        assert_eq!(crate::wakeup::socket_path(&repo).exists(), socket_fallback);
+                        assert_eq!(codex_watch_armed(), armed);
+                        let partial = (overview
+                            || matches!(stimulus, Some(CodexWatchStimulus::Partial)))
+                        .then(|| {
+                            let before = primary_captures();
+                            let recent_before = recent_captures();
+                            if overview {
+                                // The next provider-only refresh changes a
+                                // visible footer while keeping the managed Turn.
+                                let pane = format!(
+                                    "› {prompt_line}\n  {OVERVIEW_PARTIAL_MODEL} high · Context 95% left\n← for agents · ? for shortcuts\n"
+                                );
+                                assert_eq!(
+                                    crate::orchestrator::codex_model_from_chrome(&pane).as_deref(),
+                                    Some(OVERVIEW_PARTIAL_MODEL)
+                                );
+                                std::fs::write(&prompt_file, pane).unwrap();
+                            }
+                            let mut file = std::fs::File::create(&child).unwrap();
+                            let boundary = if overview {
+                                assert!(metadata.ends_with('\n'));
+                                metadata.len() - 1
+                            } else {
+                                metadata.len() / 2
+                            };
+                            let (prefix, rest) = metadata.split_at(boundary);
+                            file.write_all(prefix.as_bytes()).unwrap();
+                            // The second recent capture follows the actual rollout scan.
+                            wait_for(
+                                stream,
+                                screen,
+                                rx,
+                                "partial Codex header scanned",
+                                &mut |lines| {
+                                    assert!(lines.iter().all(|line| !line.contains(next)));
+                                    recent_captures() >= recent_before + 2
+                                        && (!overview
+                                            || lines.iter().any(|line| {
+                                                line.contains(OVERVIEW_PARTIAL_MODEL)
+                                                    && line.contains("@fixture")
+                                            }))
+                                },
+                            );
+                            assert_eq!(primary_captures(), before + 1);
+                            (file, rest)
+                        });
+                        let prior = primary_captures();
+                        let started = Instant::now();
+                        if let Some((mut file, remainder)) = partial {
+                            file.write_all(remainder.as_bytes()).unwrap();
+                            if overview {
+                                complete_overview_header.set(true);
+                            }
+                        } else {
+                            std::fs::write(&child, &metadata).unwrap();
+                        }
+                        let wrote = started.elapsed();
+                        let upper = match (armed, socket_fallback) {
+                            (true, true) => Duration::from_secs(8),
+                            (true, false) => Duration::from_secs(3),
+                            (false, false) => Duration::from_secs(9),
+                            (false, true) => Duration::from_secs(36),
+                        };
+                        let mut capture_at = None;
+                        loop {
+                            if capture_at.is_none() && primary_captures() > prior {
+                                capture_at = Some(started.elapsed());
+                            }
+                            apply_frames(stream, screen);
+                            if screen.iter().any(|line| line.contains(next)) {
+                                break;
+                            }
+                            assert!(
+                                started.elapsed() < upper,
+                                "Codex child paint exceeded {upper:?}"
+                            );
+                            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                                stream.push_str(&String::from_utf8_lossy(&chunk));
+                            }
+                        }
+                        let elapsed = started.elapsed();
+                        let lower = if socket_fallback { 20 } else { 3 };
+                        assert!(
+                            elapsed < upper && (armed || elapsed >= Duration::from_secs(lower))
+                        );
+                        assert_eq!(primary_captures(), prior + 1);
+                        if overview {
+                            assert!(screen.iter().any(|line| line.contains("[Overview]")));
+                            let row = screen.iter().find(|line| line.contains(next)).unwrap();
+                            assert!(
+                                row.contains("unknown") && !row.contains("seen "),
+                                "a fresh header does not prove activity: {row}",
+                            );
+                        }
+                        samples[usize::from(!armed)].push(elapsed);
+                        if controls {
+                            eprintln!(
+                                "CODEX_ROSTER_SAMPLE trial={} watch={} write_us={} paint_us={} capture_us={}",
+                                trial + 1,
+                                armed,
+                                wrote.as_micros(),
+                                elapsed.as_micros(),
+                                capture_at
+                                    .expect("changed frame without a capture")
+                                    .as_micros()
+                            );
+                        }
+                    });
+                    assert!(!calls.contains("UNEXPECTED:"), "{calls}");
+                }
+            }
+            if controls {
+                for (label, group) in ["candidate", "fallback"].into_iter().zip(&mut samples) {
+                    group.sort_unstable();
+                    let percentile =
+                        |pct: usize| group[(group.len() * pct).div_ceil(100) - 1].as_micros();
+                    eprintln!(
+                        "CODEX_ROSTER_SUMMARY mode={} case={label} count={} p50_us={} p95_us={}",
+                        timing.as_deref().unwrap(),
+                        group.len(),
+                        percentile(50),
+                        percentile(95)
+                    );
+                    if label == "candidate" {
+                        assert!(percentile(95) <= 2_000_000);
+                    }
+                }
+            }
+            let _ = holder.kill();
+            let _ = holder.wait();
+            return;
+        }
 
         let mutating_out = Command::new(&fake_tmux)
             .args(["send-keys", "-t", "%4", "Enter"])

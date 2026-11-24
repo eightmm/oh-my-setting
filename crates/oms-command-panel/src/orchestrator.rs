@@ -381,7 +381,11 @@ fn legacy_assignment_root(
 pub struct Observations {
     panes: BTreeMap<String, Observation>,
     chats: BTreeMap<String, ChatBinding>,
+    claude_versions: BTreeMap<String, crate::claude_child_chat::ClaudeChildVersion>,
+    claude_detail_version: Option<(ChatBinding, crate::claude_child_chat::ClaudeChildVersion)>,
     codex_bound_generation: Option<ChatPane>,
+    #[cfg(target_os = "linux")]
+    codex_child_watch: Option<(ChatPane, crate::native_children::CodexWake)>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -391,10 +395,17 @@ pub(crate) struct ChatBinding {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AgySelectedResponseUsage {
+pub(crate) struct SelectedResponseUsage {
     pub(crate) response: Value,
     pub(crate) observed_model: Option<String>,
+    pub(crate) claude_version: Option<crate::claude_child_chat::ClaudeChildVersion>,
     pub(crate) requires_group: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct DetailUsageSelection<'a> {
+    pub(crate) requested: Option<&'a ChatBinding>,
+    pub(crate) active: Option<&'a ChatBinding>,
 }
 
 impl ChatBinding {
@@ -403,15 +414,45 @@ impl ChatBinding {
         &self.pane.repo
     }
 
-    pub(crate) fn agy_participant(&self) -> Option<&str> {
-        let NativeLocator::Antigravity(selected) = &self.locator else {
+    pub(crate) fn detail_target(&self) -> Option<(&'static str, std::borrow::Cow<'_, str>)> {
+        match &self.locator {
+            NativeLocator::Antigravity(child)
+                if !child.participant.is_empty()
+                    && !child.turn.is_empty()
+                    && child.pid == self.pane.lead.pid
+                    && child.birth == self.pane.lead.birth =>
+            {
+                Some((
+                    "antigravity",
+                    std::borrow::Cow::Borrowed(&child.participant),
+                ))
+            }
+            NativeLocator::Claude(child)
+                if !child.turn.is_empty()
+                    && child.pid == self.pane.lead.pid
+                    && child.birth == self.pane.lead.birth =>
+            {
+                Some((
+                    "claude",
+                    crate::native_children::participant_id("claude", &child.agent).into(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn claude_usage_locator(
+        &self,
+        pane: &ChatPane,
+    ) -> Option<&crate::claude_child_chat::ClaudeChildLocator> {
+        let NativeLocator::Claude(child) = &self.locator else {
             return None;
         };
-        (!selected.participant.is_empty()).then_some(selected.participant.as_str())
+        (self.pane == *pane && self.detail_target().is_some()).then_some(child)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn matches_agy_detail_scope(
+    pub(crate) fn matches_detail_scope(
         &self,
         room: &str,
         attempt: &str,
@@ -421,21 +462,17 @@ impl ChatBinding {
         main_birth: &str,
         participant: &str,
     ) -> bool {
-        let NativeLocator::Antigravity(selected) = &self.locator else {
+        let Some((provider, id)) = self.detail_target() else {
             return false;
         };
-        self.pane.provider == "antigravity"
+        self.pane.provider == provider
+            && id == participant
             && self.pane.room == room
             && self.pane.attempt == attempt
             && self.pane.owner == owner
             && self.pane.main.id == main_pane
             && self.pane.main.pid == main_pid
             && self.pane.main.birth == main_birth
-            && selected.pid == self.pane.lead.pid
-            && selected.birth == self.pane.lead.birth
-            && !selected.turn.is_empty()
-            && !participant.is_empty()
-            && selected.participant == participant
     }
 
     fn agy_usage_participant(&self, pane: &ChatPane, shown_turn: &str) -> Option<&str> {
@@ -636,6 +673,21 @@ impl Observations {
         self.chats.get(participant)
     }
 
+    pub(crate) fn claude_version(
+        &self,
+        participant: &str,
+    ) -> Option<crate::claude_child_chat::ClaudeChildVersion> {
+        self.claude_versions.get(participant).copied()
+    }
+
+    pub(crate) fn claude_detail_version(
+        &self,
+        binding: &ChatBinding,
+    ) -> Option<crate::claude_child_chat::ClaudeChildVersion> {
+        let (checked, version) = self.claude_detail_version.as_ref()?;
+        (checked == binding).then_some(*version)
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn agy_first_child_watch(
         &self,
@@ -647,13 +699,28 @@ impl Observations {
             .flatten()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn codex_roster_watch(
+        &self,
+    ) -> Option<std::sync::Arc<crate::native_children::CodexDayWatch>> {
+        self.codex_child_watch
+            .as_ref()
+            .map(|(_, wake)| wake.source.clone())
+    }
+
     pub(crate) fn clear_chats(&mut self) {
         self.chats.clear();
+        self.claude_versions.clear();
+        self.claude_detail_version = None;
     }
 
     pub(crate) fn invalidate_readings(&mut self) {
         self.panes.clear();
         self.clear_chats();
+        #[cfg(target_os = "linux")]
+        {
+            self.codex_child_watch = None;
+        }
     }
 
     fn accept_codex_source(&mut self, pane: &ChatPane, mark: CodexChatMark) -> bool {
@@ -1091,8 +1158,8 @@ impl<'a> Panel<'a> {
         readings: &mut Observations,
         report: &mut Value,
         expected: &ObservationGeneration,
-        selected_agy_usage: Option<&ChatBinding>,
-    ) -> Option<AgySelectedResponseUsage> {
+        selection: DetailUsageSelection<'_>,
+    ) -> Option<SelectedResponseUsage> {
         self.observe_reading(
             readings,
             report,
@@ -1100,7 +1167,7 @@ impl<'a> Panel<'a> {
             &SystemAccountHost,
             crate::claude_lead_usage::bound_claude_lead_weekly,
             Some(expected),
-            selected_agy_usage,
+            selection,
         )
     }
 
@@ -1139,7 +1206,7 @@ impl<'a> Panel<'a> {
             host,
             claude_reader,
             None,
-            None,
+            DetailUsageSelection::default(),
         );
     }
 
@@ -1153,8 +1220,8 @@ impl<'a> Panel<'a> {
         claude_reader: impl Fn(&Owner, &str, f64) -> Option<LeadReading>,
         // Present only for the Board's passive read, which never sends keys.
         expected: Option<&ObservationGeneration>,
-        selected_agy_usage: Option<&ChatBinding>,
-    ) -> Option<AgySelectedResponseUsage> {
+        selection: DetailUsageSelection<'_>,
+    ) -> Option<SelectedResponseUsage> {
         let quota_sources =
             commands::take_codex_quota_receipt(self.repo, self.room, &self.attempt, report);
         let now = oms_panel_core::timestamp() as f64;
@@ -1173,9 +1240,11 @@ impl<'a> Panel<'a> {
             .then(|| Store::open(self.repo).ok())
             .flatten();
         let mut children = Vec::new();
-        let mut selected_agy_usage_result = None;
+        let mut selected_usage_result = None;
         let census = std::cell::OnceCell::new();
         let mut bound_codex = None;
+        #[cfg(target_os = "linux")]
+        let previous_codex_watch = readings.codex_child_watch.take();
         readings.clear_chats();
         let mut codex_chat_pane = self
             .chat_pane_with_host("codex", host)
@@ -1300,10 +1369,31 @@ impl<'a> Panel<'a> {
                 }
                 sample.quota_visible = current.is_some();
                 if provider == "codex" {
-                    if let Some((chat_pane, observed)) = codex_chat_pane
-                        .take()
-                        .and_then(|pane| self.observe_codex_children(pane, report, host))
-                    {
+                    if let Some((chat_pane, observed)) = codex_chat_pane.take().and_then(|pane| {
+                        #[cfg(target_os = "linux")]
+                        let wake = expected
+                            .filter(|generation| {
+                                pane.codex_source == Some(CodexChatSource::Bound)
+                                    && generation.fences(&pane, "codex")
+                            })
+                            .map(|_| crate::native_children::CodexWakeRequest {
+                                previous: previous_codex_watch
+                                    .as_ref()
+                                    .filter(|(previous, _)| *previous == pane)
+                                    .map(|(_, wake)| wake),
+                            });
+                        self.observe_codex_children(
+                            pane,
+                            report,
+                            host,
+                            #[cfg(target_os = "linux")]
+                            wake,
+                        )
+                    }) {
+                        #[cfg(target_os = "linux")]
+                        if let Some(wake) = observed.codex_wake {
+                            readings.codex_child_watch = Some((chat_pane.clone(), wake));
+                        }
                         if chat_current {
                             readings.chats.extend(observed.codex.into_iter().map(
                                 |(participant, locator)| {
@@ -1365,28 +1455,78 @@ impl<'a> Panel<'a> {
                                 .is_none_or(Vec::is_empty);
                     }
                     if provider == "claude" {
-                        let mut located = Vec::new();
-                        let sighting = (provider == "claude" && chat_pane.is_some())
-                            .then(|| {
-                                crate::claude_child_chat::claude_board_children(pane.pid, self.repo)
-                            })
-                            .flatten();
-                        let second = chat_pane
-                            .as_ref()
-                            .filter(|_| {
-                                !located.is_empty()
-                                    || sighting.as_ref().is_some_and(|(_, c)| !c.is_empty())
-                            })
-                            .and_then(|_| self.chat_pane_with_host(provider, host).ok());
+                        use crate::claude_child_chat::ClaudeSelection;
+                        let mut second = None;
+                        let sighting = chat_pane.as_ref().and_then(|chat_pane| {
+                            let selected = selection
+                                .requested
+                                .and_then(|binding| binding.claude_usage_locator(chat_pane))
+                                .map(ClaudeSelection::Read)
+                                .or_else(|| {
+                                    selection
+                                        .active
+                                        .and_then(|binding| binding.claude_usage_locator(chat_pane))
+                                        .map(ClaudeSelection::Recheck)
+                                })
+                                .filter(|_| self.has_live_report_scope(report));
+                            crate::claude_child_chat::claude_board_children(
+                                pane.pid,
+                                self.repo,
+                                selected,
+                                || {
+                                    second = self.chat_pane_with_host(provider, host).ok();
+                                },
+                            )
+                        });
                         if let Some(chat_pane) = chat_pane {
-                            let (rows, claude) = claude_sighting(
+                            let sighting = sighting.map(|sighting| {
+                                if second.as_ref() == Some(&chat_pane)
+                                    && !self.stop.load(Ordering::Acquire)
+                                    && sighting.children.iter().all(|child| {
+                                        child.locator.turn == sighting.turn
+                                            && child.locator.pid == chat_pane.lead.pid
+                                            && child.locator.birth == chat_pane.lead.birth
+                                    })
+                                {
+                                    readings.claude_versions.extend(
+                                        sighting.children.iter().filter_map(|child| {
+                                            Some((
+                                                crate::native_children::participant_id(
+                                                    "claude",
+                                                    &child.locator.agent,
+                                                ),
+                                                child.version?,
+                                            ))
+                                        }),
+                                    );
+                                    if let Some((locator, version)) = sighting.checked {
+                                        readings.claude_detail_version = Some((
+                                            ChatBinding {
+                                                pane: chat_pane.clone(),
+                                                locator: NativeLocator::Claude(locator),
+                                            },
+                                            version,
+                                        ));
+                                    }
+                                    if let Some((version, response)) = sighting.selected {
+                                        selected_usage_result = claude_response_field(&response)
+                                            .map(|field| SelectedResponseUsage {
+                                                response: field,
+                                                observed_model: response.observed_model,
+                                                claude_version: Some(version),
+                                                requires_group: false,
+                                            });
+                                    }
+                                }
+                                (sighting.turn, sighting.children)
+                            });
+                            let (rows, located) = claude_sighting(
                                 std::mem::take(&mut observed.rows),
                                 &chat_pane,
                                 second.as_ref(),
                                 sighting,
                             );
                             observed.rows = rows;
-                            located.extend(claude);
                             if !located.is_empty() && second.as_ref() == Some(&chat_pane) {
                                 readings.chats.extend(located.into_iter().map(
                                     |(participant, locator)| {
@@ -1431,7 +1571,8 @@ impl<'a> Panel<'a> {
                             pane.lead.pid,
                             &pane.lead.birth,
                         );
-                        let selected_participant = selected_agy_usage
+                        let selected_participant = selection
+                            .requested
                             .and_then(|binding| binding.agy_usage_participant(&pane, shown_turn));
                         let private_group = lead_delivery::group_check(self);
                         let pane_current = || {
@@ -1466,7 +1607,7 @@ impl<'a> Panel<'a> {
                                 )
                             },
                         ) {
-                            selected_agy_usage_result = Some(usage);
+                            selected_usage_result = Some(usage);
                         }
                         readings
                             .chats
@@ -1622,7 +1763,7 @@ impl<'a> Panel<'a> {
             );
         }
         report["native_children"] = json!(children);
-        selected_agy_usage_result
+        selected_usage_result
     }
 
     fn pinned_claude_reading(
@@ -2106,6 +2247,7 @@ impl<'a> Panel<'a> {
         pane: ChatPane,
         report: &Value,
         host: &dyn AccountHost,
+        #[cfg(target_os = "linux")] wake: Option<crate::native_children::CodexWakeRequest<'_>>,
     ) -> Option<(ChatPane, crate::native_children::ObservedChildren)> {
         if pane.codex_source != Some(CodexChatSource::Ambient)
             && !self.has_live_report_scope(report)
@@ -2115,9 +2257,19 @@ impl<'a> Panel<'a> {
         let root = self.codex_root(&pane, host)?;
         let terminal = self.capture_recent(&pane.lead.id).ok()?;
         let (home, fd) = root.parts();
-        let mut observed =
-            crate::native_children::observe_codex(&pane.repo, &terminal, home, fd, self.stop)?;
-        if observed.rows.is_empty() || self.stop.load(Ordering::Acquire) {
+        let mut observed = crate::native_children::observe_codex(
+            &pane.repo,
+            &terminal,
+            home,
+            fd,
+            self.stop,
+            #[cfg(target_os = "linux")]
+            wake,
+        )?;
+        let empty = observed.rows.is_empty();
+        #[cfg(target_os = "linux")]
+        let empty = empty && observed.codex_wake.is_none();
+        if empty || self.stop.load(Ordering::Acquire) {
             return None;
         }
         let fresh = self.reload().ok()?;
@@ -2129,6 +2281,14 @@ impl<'a> Panel<'a> {
             || self.stop.load(Ordering::Acquire)
         {
             return None;
+        }
+        #[cfg(target_os = "linux")]
+        if observed
+            .codex_wake
+            .as_ref()
+            .is_some_and(|wake| !wake.source.current())
+        {
+            observed.codex_wake = None;
         }
         strip_native_answers(&mut observed.rows);
         Some((pane, observed))
@@ -6035,23 +6195,25 @@ fn claude_sighting<P: PartialEq>(
 /// A Board row's `native_response_usage`: one response's own counters, never
 /// cumulative, the lead's or context occupancy; clocks as the lead recorded them.
 pub(crate) fn claude_usage_field(usage: &crate::claude_child_chat::ClaudeChildUsage) -> Value {
-    let response = usage.response.as_ref().and_then(|response| {
-        let total = response
-            .usage
-            .iter()
-            .try_fold(0u64, |sum, &n| sum.checked_add(n))?;
-        let mut fields = json!({"message_id": response.id, "timestamp": response.at,
-                                "total_tokens": total});
-        for (key, count) in crate::claude_child_chat::USAGE_KEYS
-            .iter()
-            .zip(response.usage)
-        {
-            fields[*key] = json!(count);
-        }
-        Some(fields)
-    });
+    let response = usage.response.as_ref().and_then(claude_response_field);
     json!({"scope": "latest_child_response", "response": response,
            "spawned_at": usage.spawned_at, "delivered_at": usage.delivered_at})
+}
+
+fn claude_response_field(response: &crate::claude_child_chat::ClaudeResponse) -> Option<Value> {
+    let total = response
+        .usage
+        .iter()
+        .try_fold(0u64, |sum, &n| sum.checked_add(n))?;
+    let mut fields =
+        json!({"message_id": response.id, "timestamp": response.at, "total_tokens": total});
+    for (key, count) in crate::claude_child_chat::USAGE_KEYS
+        .iter()
+        .zip(response.usage)
+    {
+        fields[*key] = json!(count);
+    }
+    Some(fields)
 }
 
 /// Participants of `"antigravity"` `native_child` rows painted exactly once, in
@@ -6090,7 +6252,7 @@ fn agy_usage_sighting(
     shown_turn: &str,
     selected_participant: Option<&str>,
     scan: impl FnOnce(&BTreeSet<String>, Option<&str>) -> Option<crate::agy_child_chat::AgyBoardUsage>,
-) -> Option<AgySelectedResponseUsage> {
+) -> Option<SelectedResponseUsage> {
     if shown_turn.is_empty() || rows.is_empty() {
         return None;
     }
@@ -6150,7 +6312,8 @@ fn agy_usage_sighting(
             detail_response = Some((value, false));
         }
     }
-    detail_response.map(|(response, requires_group)| AgySelectedResponseUsage {
+    detail_response.map(|(response, requires_group)| SelectedResponseUsage {
+        claude_version: None,
         observed_model: response["model"]
             .as_str()
             .and_then(crate::native_children::observed_model)
@@ -6284,6 +6447,34 @@ pub(crate) mod codex_chat_fixture {
     pub(crate) const TURN: &str = "0123456789abcdef0123";
     pub(crate) const NEW_TURN: &str = "abcdef0123456789abcd";
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_codex_watch_lead(
+        repo: &Path,
+        room: &str,
+        services: &dyn Services,
+        stop: &AtomicBool,
+    ) {
+        let host = SystemAccountHost;
+        let panel = Panel::load(repo, room, services, stop).unwrap();
+        let lead = panel.leads.get("codex").expect("fixture Codex lead");
+        let owner = host.process_owner(lead.pid).unwrap();
+        let anchor = panel.binding_anchor("codex", lead, &owner.birth);
+        let receipt = account_binding::resolve_selection(
+            &host,
+            SelectionTarget {
+                role: "orchestrator",
+                provider: "codex",
+                model: "provider-default",
+            },
+            Some("fixture"),
+            &[],
+            oms_panel_core::timestamp(),
+        )
+        .unwrap();
+        account_binding::save_binding(&host, "orchestrator", &anchor, &receipt).unwrap();
+        assert!(account_binding::resolve_codex_chat_home(&host, &anchor).is_some());
+    }
+
     pub(crate) struct BoardSpy {
         repo: PathBuf,
         stop: AtomicBool,
@@ -6393,6 +6584,30 @@ pub(crate) mod codex_chat_fixture {
                 )]),
                 ..Default::default()
             }
+        }
+
+        pub(crate) fn claude_detail_observations(
+            &self,
+            participant: &str,
+            turn: &str,
+            version: i128,
+            checked: bool,
+        ) -> Observations {
+            let mut observations = self.claude_observations(participant, turn);
+            let binding = observations.chats.get_mut(participant).unwrap();
+            let NativeLocator::Claude(locator) = &mut binding.locator else {
+                unreachable!();
+            };
+            locator.pid = binding.pane.lead.pid;
+            locator.birth = binding.pane.lead.birth.clone();
+            let version = crate::claude_child_chat::ClaudeChildVersion::fixture(version);
+            if checked {
+                observations.claude_detail_version = Some((binding.clone(), version));
+            }
+            observations
+                .claude_versions
+                .insert(participant.into(), version);
+            observations
         }
 
         pub(crate) fn claude_locator(
@@ -6822,6 +7037,7 @@ pub(crate) mod tests {
                 title: "t".into(),
                 state: "unknown",
                 usage: None,
+                version: None,
             }
         };
         let (painted, hidden) = (child("a1b2c3d4e5f60718"), child("f0e1d2c3b4a59687"));
@@ -6861,6 +7077,7 @@ pub(crate) mod tests {
             title: "t".into(),
             state,
             usage: Some(read([1, 2, 3, 4])),
+            version: None,
         };
         let collector = vec![json!({"participant": "native-claude-other", "state": "working"})];
         let scan = |other: &str| {
@@ -6979,6 +7196,7 @@ pub(crate) mod tests {
             title: "Audit panel".into(),
             state: "working",
             usage: None,
+            version: None,
         };
 
         // 1. Two distinct live slugs with the same title both project with distinct
@@ -15955,7 +16173,7 @@ pub(crate) mod tests {
                     &host,
                     |_, _, _| None,
                     expected,
-                    None,
+                    DetailUsageSelection::default(),
                 );
                 spy.calls_named("list-panes").len()
             });
@@ -17209,7 +17427,7 @@ pub(crate) mod tests {
                     .agy_usage_participant(&wrong_main, turn)
                     .is_none()
             );
-            assert!(agy_binding.matches_agy_detail_scope(
+            assert!(agy_binding.matches_detail_scope(
                 &live_pane.room,
                 &live_pane.attempt,
                 &live_pane.owner,
@@ -17218,7 +17436,7 @@ pub(crate) mod tests {
                 &live_pane.main.birth,
                 order[3],
             ));
-            assert!(!agy_binding.matches_agy_detail_scope(
+            assert!(!agy_binding.matches_detail_scope(
                 "other-room",
                 &live_pane.attempt,
                 &live_pane.owner,
@@ -17227,7 +17445,7 @@ pub(crate) mod tests {
                 &live_pane.main.birth,
                 order[3],
             ));
-            assert!(!agy_binding.matches_agy_detail_scope(
+            assert!(!agy_binding.matches_detail_scope(
                 &live_pane.room,
                 "att_22222222222222222222222222222222",
                 &live_pane.owner,
@@ -17236,7 +17454,7 @@ pub(crate) mod tests {
                 &live_pane.main.birth,
                 order[3],
             ));
-            assert!(!agy_binding.matches_agy_detail_scope(
+            assert!(!agy_binding.matches_detail_scope(
                 &live_pane.room,
                 &live_pane.attempt,
                 &live_pane.owner,
@@ -17253,7 +17471,7 @@ pub(crate) mod tests {
                     .agy_usage_participant(&live_pane, turn)
                     .is_none()
             );
-            assert!(!codex_binding.matches_agy_detail_scope(
+            assert!(!codex_binding.matches_detail_scope(
                 &live_pane.room,
                 &live_pane.attempt,
                 &live_pane.owner,
@@ -17674,7 +17892,7 @@ pub(crate) mod tests {
                     &host,
                     |_, _, _| None,
                     Some(expected),
-                    None,
+                    DetailUsageSelection::default(),
                 );
                 assert_eq!(crate::agy_child_chat::test_counters(), counters);
                 assert_eq!(crate::agy_child_chat::total_agy_child_reads(), counters.2);
@@ -17727,7 +17945,7 @@ pub(crate) mod tests {
                     &host,
                     |_, _, _| None,
                     expected,
-                    None,
+                    DetailUsageSelection::default(),
                 );
                 assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
                 assert_eq!(
