@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v9.html";
+const URI: &str = "ui://oms/conversation-panel/v10.html";
+const V9: &str = "ui://oms/conversation-panel/v9.html";
 const V8: &str = "ui://oms/conversation-panel/v8.html";
 const V7: &str = "ui://oms/conversation-panel/v7.html";
 const V6: &str = "ui://oms/conversation-panel/v6.html";
@@ -430,7 +431,31 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
         Ok(data)
     }) {
         Ok(data) => {
-            json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
+            let mut text = data.to_string();
+            if data["kind"] == "oms-panel-project-graph"
+                && text.len() + json!(&text).to_string().len() + 1024 > 60_000
+            {
+                let nodes = data["nodes"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let ids = nodes
+                    .iter()
+                    .take(4)
+                    .filter_map(|n| n["id"].as_str())
+                    .map(|id| id.chars().take(80).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                text = format!(
+                    "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
+                    data["status"].as_str().unwrap_or("unknown"),
+                    data["provenance"]["source"].as_str().unwrap_or("unknown"),
+                    nodes.len(),
+                    data["edges"].as_array().map_or(0, Vec::len),
+                    ids
+                );
+            }
+            json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false})
         }
         Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),
     }
@@ -516,7 +541,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9)
                 ) =>
             {
                 json!({"contents":[{
@@ -1143,7 +1168,8 @@ impl Server<'_> {
             USAGE if data["providers"].is_array() && data["attempts"].is_array() => Ok(data),
             GIT if data["git"].is_object() && data["github"].is_object() => Ok(data),
             GRAPH
-                if data["schema"] == 1
+                if data.to_string().len() <= 52_000
+                    && data["schema"] == 1
                     && data["kind"] == "oms-panel-project-graph"
                     && matches!(
                         data["status"].as_str(),

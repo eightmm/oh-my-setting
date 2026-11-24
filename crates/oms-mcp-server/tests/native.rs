@@ -421,6 +421,27 @@ fn cross_host_project_reads() {
             "graph", "project", "panel", "--repo", repo, "--json", "--limit", "40", "--depth", "2"
         ])
     );
+    // The JSON-RPC response itself must fit the host limit, including text fallback.
+    let mut big = sample_graph.clone();
+    big["nodes"] = json!(
+        (0..60)
+            .map(|i| json!({"id":format!("file:{i}"),"label":"x".repeat(600)}))
+            .collect::<Vec<_>>()
+    );
+    fixture_settings(&source, json!({"exit":0,"stdout":big.to_string()}));
+    let page = c.tool(
+        "oms_panel_project_graph",
+        json!({"project":"fixture","limit":60}),
+    );
+    good(&page);
+    assert_eq!(page["result"]["structuredContent"], big);
+    assert!(
+        page["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("60 nodes")
+    );
+    assert!(page.to_string().len() < 60_000);
 }
 fn mcp_app_binding_boundaries() {
     use std::os::unix::fs::PermissionsExt;
@@ -815,7 +836,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v9.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v10.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -840,6 +861,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v6.html"),
         json!("ui://oms/conversation-panel/v7.html"),
         json!("ui://oms/conversation-panel/v8.html"),
+        json!("ui://oms/conversation-panel/v9.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
