@@ -110,9 +110,17 @@ pub fn load(repo: &Path, room: &str) -> BTreeMap<String, String> {
         .map(|(k, (v, _))| (k, v))
         .collect()
 }
+pub(crate) fn plan_task_id<'a>(key: &'a str, task: &'a Value) -> &'a str {
+    [text(task, "id"), text(task, "task_id"), key]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or("")
+}
+
 pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
     let mut items = Vec::new();
     let calls = crate::render::calls(report);
+    let plan_id = text(&report["plan"], "plan_id");
     let mut failing = BTreeSet::new();
     for call in &calls {
         let state = text(call, "state");
@@ -156,6 +164,7 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
             "provider_error",
         ]
         .contains(&class)
+            && crate::render::call_matches_plan_task(call, task, plan_id)
         {
             failing.insert(task.to_owned());
         }
@@ -240,24 +249,43 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
             unread: true,
         });
     }
-    let tasks: Vec<_> = if let Some(v) = report["plan"]["tasks"].as_object() {
-        v.values().collect()
+    let awaiting_admission = rows(&report["awaiting_admission"]);
+    let tasks: Vec<(&str, &Value)> = if let Some(v) = report["plan"]["tasks"].as_object() {
+        v.iter().map(|(k, v)| (k.as_str(), v)).collect()
     } else {
-        rows(&report["plan"]["tasks"]).iter().collect()
+        rows(&report["plan"]["tasks"])
+            .iter()
+            .map(|v| ("", v))
+            .collect()
     };
-    for task in tasks {
-        let id = text(task, "id");
-        if task["status"] == "held" && !failing.contains(id) {
-            let workers: Vec<_> = calls.iter().filter(|v| v["task_id"] == id).collect();
+    for (key, task) in tasks {
+        let id = plan_task_id(key, task);
+        let state = [text(task, "state"), text(task, "status")]
+            .into_iter()
+            .find(|v| !v.is_empty())
+            .unwrap_or("");
+        if matches!(state, "claimed" | "running" | "held")
+            && !id.is_empty()
+            && !failing.contains(id)
+        {
+            let workers: Vec<_> = calls
+                .iter()
+                .filter(|v| crate::render::call_matches_plan_task(v, id, plan_id))
+                .collect();
             if !workers.is_empty()
-                && workers
-                    .iter()
-                    .all(|v| oms_panel_core::state::TERMINAL_STATES.contains(&text(v, "state")))
+                && workers.iter().all(|v| {
+                    oms_panel_core::state::TERMINAL_STATES.contains(&text(v, "state"))
+                        && !awaiting_admission.iter().any(|a| a == &v["participant"])
+                })
             {
+                let stamp = [text(task, "claimed_at"), text(task, "updated")]
+                    .into_iter()
+                    .find(|v| !v.is_empty())
+                    .unwrap_or("");
                 items.push(Item {
                     row_id: ("task".into(), id.into()),
                     cls: "stale".into(),
-                    stamp: text(task, "claimed_at").into(),
+                    stamp: stamp.into(),
                     who: format!("Task {id}"),
                     what: "workers ended, still held".into(),
                     task: Some(id.into()),
