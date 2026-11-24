@@ -361,3 +361,6 @@ pub fn reference_repository(
     }
     resolver.state_repository(&physical, false, interrupted)
 }
+
+mod discovery;
+pub use discovery::{DiscoveryIssue, ScratchDiscovery, VerifiedScratch};
