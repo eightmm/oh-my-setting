@@ -11783,8 +11783,10 @@ fi
         assert!(nav.offset <= after_esc.len().saturating_sub(page));
         assert!(nav.selected >= nav.offset && nav.selected < nav.offset + page);
 
-        // 2. `b` toggle enters attention-only and leaving `b` restores the prior call by
-        //    identity even if rows reordered while in attention-only.
+        // 2. `b` toggle enters attention-only (falling back to row 0 when the selected call
+        //    is not an attention call) and leaving `b` keeps the call selected in attention mode
+        //    even if rows reordered while in attention-only.
+        let blocked_id = ("call-1".to_owned(), "att-1".to_owned());
         send_key(&mut nav, &mut fence, &report, &Key::Char('b'));
         assert!(nav.attention_only);
         assert_eq!((nav.selected, nav.offset), (0, 0));
@@ -11811,11 +11813,139 @@ fi
         let after_b = visible_now(&report, &nav);
         assert_eq!(
             super::call_identity(&after_b[nav.selected]),
-            target_id,
-            "leaving attention-only must restore prior call by identity"
+            blocked_id,
+            "leaving attention-only must keep the currently selected attention call"
         );
         assert!(nav.offset <= after_b.len().saturating_sub(page));
         assert!(nav.selected >= nav.offset && nav.selected < nav.offset + page);
+
+        // 2b. Enter attention-only with a visible blocked call selected: it stays selected
+        //     (reconciled by call identity with clamped offset), not reset to row 0.
+        let multi_report = serde_json::json!({
+            "room": {
+                "id": "room-nav",
+                "participants": [
+                    make_call("call-0", "att-0", "alpha", "working"),
+                    make_call("call-1", "att-1", "beta", "blocked"),
+                    make_call("call-3", "att-3", "delta", "working"),
+                    make_call("call-2", "att-2", "gamma", "blocked"),
+                    make_call("call-4", "att-4", "target", "working"),
+                ]
+            }
+        });
+        let blocked2_id = ("call-2".to_owned(), "att-2".to_owned());
+        let mut multi_nav = crate::navigation::Navigation::default();
+        let mut multi_fence = super::SelectionFence::None;
+        let full_multi = visible_now(&multi_report, &multi_nav);
+        let blocked2_idx = full_multi
+            .iter()
+            .position(|c| super::call_identity(c) == blocked2_id)
+            .unwrap();
+        multi_nav.selected = blocked2_idx;
+        multi_nav.offset = blocked2_idx.saturating_sub(1);
+        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        assert!(multi_nav.attention_only);
+        let att_multi = visible_now(&multi_report, &multi_nav);
+        assert_eq!(att_multi.len(), 2);
+        assert_eq!(
+            super::call_identity(&att_multi[multi_nav.selected]),
+            blocked2_id,
+            "entering attention-only with a visible blocked call selected must keep it selected"
+        );
+        assert_ne!(
+            multi_nav.selected, 0,
+            "fixture should place blocked call after row 0"
+        );
+        assert!(multi_nav.offset <= att_multi.len().saturating_sub(page));
+        assert!(multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page);
+        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        assert!(!multi_nav.attention_only);
+
+        // 2c. Enter attention-only from a non-attention call, move within attention to call X,
+        //     then press `b`: X stays selected (not the stale pre-attention snapshot).
+        let full_before_move = visible_now(&multi_report, &multi_nav);
+        let target_full_idx = full_before_move
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        multi_nav.selected = target_full_idx;
+        multi_nav.offset = target_full_idx.saturating_sub(1);
+        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        assert!(multi_nav.attention_only);
+        assert_eq!((multi_nav.selected, multi_nav.offset), (0, 0));
+        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Down);
+        let att_moved = visible_now(&multi_report, &multi_nav);
+        let moved_id = super::call_identity(&att_moved[multi_nav.selected]);
+        assert_eq!(moved_id, blocked2_id);
+        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        assert!(!multi_nav.attention_only);
+        let after_move_leave = visible_now(&multi_report, &multi_nav);
+        assert_eq!(
+            super::call_identity(&after_move_leave[multi_nav.selected]),
+            moved_id,
+            "leaving attention-only after moving must keep the selected attention call"
+        );
+        assert!(multi_nav.offset <= after_move_leave.len().saturating_sub(page));
+        assert!(multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page);
+
+        // 2d. Enter attention-only with a non-attention call selected when attention list is
+        //     empty: row 0. Leave without moving: the original call is restored.
+        let empty_att_report = serde_json::json!({
+            "room": {
+                "id": "room-nav",
+                "participants": [
+                    make_call("call-0", "att-0", "alpha", "working"),
+                    make_call("call-3", "att-3", "delta", "working"),
+                    make_call("call-4", "att-4", "target", "working"),
+                ]
+            }
+        });
+        let mut empty_nav = crate::navigation::Navigation::default();
+        let mut empty_fence = super::SelectionFence::None;
+        let full_no_att = visible_now(&empty_att_report, &empty_nav);
+        let orig_idx = full_no_att
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        empty_nav.selected = orig_idx;
+        empty_nav.offset = orig_idx.saturating_sub(1);
+        send_key(&mut empty_nav, &mut empty_fence, &empty_att_report, &Key::Char('b'));
+        assert!(empty_nav.attention_only);
+        assert!(visible_now(&empty_att_report, &empty_nav).is_empty());
+        assert_eq!((empty_nav.selected, empty_nav.offset), (0, 0));
+        send_key(&mut empty_nav, &mut empty_fence, &empty_att_report, &Key::Char('b'));
+        assert!(!empty_nav.attention_only);
+        let restored = visible_now(&empty_att_report, &empty_nav);
+        assert_eq!(
+            super::call_identity(&restored[empty_nav.selected]),
+            target_id,
+            "leaving empty attention-only without moving must restore the original call"
+        );
+        assert!(empty_nav.offset <= restored.len().saturating_sub(page));
+        assert!(empty_nav.selected >= empty_nav.offset && empty_nav.selected < empty_nav.offset + page);
+
+        // 2e. Selection fence is preserved across `b` toggles so Enter never opens a
+        //     different call while fenced.
+        let mut fenced_nav = crate::navigation::Navigation::default();
+        let mut active_fence = super::SelectionFence::Changed;
+        send_key(&mut fenced_nav, &mut active_fence, &report, &Key::Char('b'));
+        assert!(fenced_nav.attention_only);
+        assert!(active_fence == super::SelectionFence::Changed);
+        assert_eq!(
+            send_key(&mut fenced_nav, &mut active_fence, &report, &Key::Enter),
+            crate::navigation::Action::None
+        );
+        assert!(active_fence == super::SelectionFence::None);
+        assert!(!fenced_nav.detail);
+
+        // Reselect target_id before testing live refresh reorder below.
+        let before_step3 = visible_now(&report, &nav);
+        let step3_idx = before_step3
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        nav.selected = step3_idx;
+        nav.offset = step3_idx.saturating_sub(1);
 
         // 3. A live refresh that reorders rows keeps the same call selected, updates
         //    viewport offset so the row stays visible, and does not trip the fence.

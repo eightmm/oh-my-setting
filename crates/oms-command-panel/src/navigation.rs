@@ -189,16 +189,34 @@ impl Navigation {
         }
         if !self.editing && *key == Key::Char('b') {
             self.attention_only = !self.attention_only;
+            let after = after_visible(self);
             if self.attention_only {
-                self.selection_before_attention = Some(current_saved);
-                self.selected = 0;
-                self.offset = 0;
+                self.selection_before_attention = Some(current_saved.clone());
+                if let Some(pos) = current_saved
+                    .identity
+                    .as_ref()
+                    .and_then(|id| after.iter().position(|call| call_identity(call) == *id))
+                {
+                    self.selected = pos;
+                    self.offset = current_saved.offset;
+                    self.clamp_selection(after.len(), height);
+                } else {
+                    self.selected = 0;
+                    self.offset = 0;
+                    self.clamp_selection(after.len(), height);
+                }
             } else {
-                let after = after_visible(self);
-                if let Some(saved) = self.selection_before_attention.take() {
+                let saved = self.selection_before_attention.take();
+                if let Some(pos) = current_saved
+                    .identity
+                    .as_ref()
+                    .and_then(|id| after.iter().position(|call| call_identity(call) == *id))
+                {
+                    self.selected = pos;
+                    self.offset = current_saved.offset;
+                    self.clamp_selection(after.len(), height);
+                } else if let Some(saved) = saved {
                     self.restore_saved(saved, &after, height);
-                } else if current_saved.identity.is_some() {
-                    self.restore_saved(current_saved, &after, height);
                 } else {
                     self.selected = 0;
                     self.offset = 0;
@@ -483,7 +501,8 @@ mod tests {
         assert!(nav.offset <= after_cancel.len().saturating_sub(height));
         assert!(nav.selected >= nav.offset && nav.selected < nav.offset + height);
 
-        // Enter attention-only (`b`), then refresh removes call-4 and shrinks the list to 2 rows.
+        // Enter attention-only (`b`) from a non-attention call: falls back to row 0 (call-1),
+        // and leaving keeps the currently selected attention call (call-1) rather than stale call-4.
         report["room"]["participants"] = serde_json::json!([
             make_call("call-1", "att-1", "beta", "blocked"),
             make_call("call-3", "att-3", "delta", "running"),
@@ -506,7 +525,7 @@ mod tests {
         assert!(nav.attention_only);
         assert_eq!((nav.selected, nav.offset), (0, 0));
 
-        // Refresh removes call-4 and shrinks total rows to 2.
+        // Refresh removes call-4 and shrinks total rows to 2; call-1 remains selected in attention.
         let att_before = visible_now(&report, &nav);
         report["room"]["participants"] = serde_json::json!([
             make_call("call-1", "att-1", "beta", "blocked"),
@@ -515,10 +534,57 @@ mod tests {
         let att_after = visible_now(&report, &nav);
         assert!(!nav.reconcile_refresh(&att_before, &att_after, height));
 
-        // Leaving attention-only falls back and clamps both selected and offset to 2 rows.
+        // Leaving attention-only keeps the selected attention call (call-1 at index 0).
         nav.apply_with_calls(
             &Key::Char('b'),
             &att_after,
+            |n| visible_now(&report, n),
+            height,
+        );
+        assert!(!nav.attention_only);
+        let after_att_leave = visible_now(&report, &nav);
+        assert_eq!(
+            call_identity(&after_att_leave[nav.selected]),
+            ("call-1".into(), "att-1".into())
+        );
+        assert_eq!((nav.selected, nav.offset), (0, 0));
+
+        // Enter attention-only when attention list is empty, then refresh removes call-4 and
+        // shrinks total rows to 2: leaving falls back to saved selection clamped to 2 rows.
+        report["room"]["participants"] = serde_json::json!([
+            make_call("call-2", "att-2", "gamma", "running"),
+            make_call("call-3", "att-3", "delta", "running"),
+            make_call("call-4", "att-4", "target", "running"),
+            make_call("call-5", "att-5", "omega", "running"),
+        ]);
+        let before_empty_b = visible_now(&report, &nav);
+        let empty_b_idx = before_empty_b
+            .iter()
+            .position(|c| call_identity(c) == ("call-4".into(), "att-4".into()))
+            .unwrap();
+        nav.selected = empty_b_idx;
+        nav.offset = empty_b_idx;
+        nav.apply_with_calls(
+            &Key::Char('b'),
+            &before_empty_b,
+            |n| visible_now(&report, n),
+            height,
+        );
+        assert!(nav.attention_only);
+        assert!(visible_now(&report, &nav).is_empty());
+        assert_eq!((nav.selected, nav.offset), (0, 0));
+
+        let empty_att_before = visible_now(&report, &nav);
+        report["room"]["participants"] = serde_json::json!([
+            make_call("call-2", "att-2", "gamma", "running"),
+            make_call("call-5", "att-5", "omega", "running"),
+        ]);
+        let empty_att_after = visible_now(&report, &nav);
+        assert!(!nav.reconcile_refresh(&empty_att_before, &empty_att_after, height));
+
+        nav.apply_with_calls(
+            &Key::Char('b'),
+            &empty_att_after,
             |n| visible_now(&report, n),
             height,
         );
