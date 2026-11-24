@@ -77,6 +77,7 @@ impl Args {
                     "provider-timeout",
                     "from-file",
                     "from-issue",
+                    "from-project-issue",
                     "source-sha256",
                     "github",
                     "label",
@@ -106,7 +107,13 @@ impl Args {
                     "issue-source-sha256",
                     "restamp",
                 ],
-                &["allow-verifier-change", "discover", "scope-only", "roadmap"],
+                &[
+                    "with-issue-requirements",
+                    "allow-verifier-change",
+                    "discover",
+                    "scope-only",
+                    "roadmap",
+                ],
             ),
             "plan-run" => (
                 &[],
@@ -183,6 +190,7 @@ impl Args {
                     "restamp",
                 ],
                 &[
+                    "with-issue-requirements",
                     "auto-repair",
                     "retry-known",
                     "allow-verifier-change",
@@ -265,16 +273,16 @@ impl Args {
 pub(crate) fn usage(tool: &str) -> &'static str {
     match tool {
         "intent" => {
-            "Usage: oms intent draft --goal TEXT [--kind feature|bugfix|quick] [--to PROVIDER]\n       oms intent draft (--from-file PATH | --from-issue URL) [--dry-run | --source-sha256 SHA]\n       oms intent issues --github OWNER/REPO --label LABEL [--limit 1..20] [--json]\n       oms intent show [--id ID]\n       oms intent amend --reason TEXT\n       oms intent adopt --id ID [--expected-project-sha256 SHA]\nCandidates are untrusted drafts. Only explicit adopt writes PROJECT.md; a live autopilot receipt refuses a contract swap."
+            "Usage: oms intent draft --goal TEXT [--kind feature|bugfix|quick] [--to PROVIDER]\n       oms intent draft (--from-file PATH | --from-issue URL) [--dry-run | --source-sha256 SHA]\n       oms intent draft --from-project-issue N --dry-run\n       oms intent issues --github OWNER/REPO --label LABEL [--limit 1..20] [--json]\n       oms intent show [--id ID]\n       oms intent amend --reason TEXT\n       oms intent adopt --id ID [--expected-project-sha256 SHA]\nCandidates are untrusted drafts. Only explicit adopt writes PROJECT.md; a live autopilot receipt refuses a contract swap."
         }
         "plan-from-spec" => {
-            "Usage: oms plan-from-spec [--repo PATH] [--to PROVIDER] [--max-tasks 1..12]\n       oms plan-from-spec --apply FILE --expected-proposal-sha256 SHA\n       oms plan-from-spec --restamp FILE --expected-proposal-sha256 SHA --issue REF\n       oms plan-from-spec --validate-spec FILE | --scope-only | --roadmap\nOptions: --allowed PATHS --id-prefix PREFIX --milestone ID --discover\n         --worker-provider PROVIDER --collaboration off|auto\n         --model MODEL --fallback-model MODEL --reasoning-effort E --provider-timeout DUR\n         --issue REF (N, #N or owner/repo#N; same repository as origin) [--issue-source-sha256 SHA]\n         A Project issue source pin comes from intent draft --from-issue URL --dry-run. First apply rechecks OPEN and exact source; complete replay is local.\nGenerated proposals never apply themselves. Apply binds exact reviewed bytes, plan CAS, base, spec and acceptance surface.\nThe harness stamps one issue on the proposal and every task: --issue, else the adopted intent's issue while PROJECT.md is unchanged. GitHub project mode refuses to apply an issue-less proposal; --restamp writes a new stamped copy locally."
+            "Usage: oms plan-from-spec [--repo PATH] [--to PROVIDER] [--max-tasks 1..12]\n       oms plan-from-spec --apply FILE --expected-proposal-sha256 SHA\n       oms plan-from-spec --restamp FILE --expected-proposal-sha256 SHA --issue REF\n       oms plan-from-spec --validate-spec FILE | --scope-only | --roadmap\nOptions: --allowed PATHS --id-prefix PREFIX --milestone ID --discover\n         --worker-provider PROVIDER --collaboration off|auto\n         --model MODEL --fallback-model MODEL --reasoning-effort E --provider-timeout DUR\n         --issue REF (N, #N or owner/repo#N; same repository as origin) [--issue-source-sha256 SHA]\n         --with-issue-requirements opts in to sending that issue title and body to the selected planner and any configured council.\n         Preview a Project issue source pin with intent draft --from-project-issue N --dry-run. First apply rechecks OPEN and exact source; complete replay is local.\nGenerated proposals never apply themselves. Apply binds exact reviewed bytes, plan CAS, base, spec and acceptance surface.\nThe harness stamps one issue on the proposal and every task: --issue, else the adopted intent's issue while PROJECT.md is unchanged. GitHub project mode refuses to apply an issue-less proposal; --restamp writes a new stamped copy locally."
         }
         "plan-run" => {
             "Usage: oms plan-run --to PROVIDER (--id ID | --next) [--repo PATH]\n       oms plan-run --to PROVIDER --parallel [--max-writers 1..16] [--max-review-backlog 1..64] [--repo PATH]\n       oms plan-run --verify-combined --base-ref REF --base-sha SHA --candidates SHAS [--verify-cmd CMD] [--repo PATH]\nOptions: --repair 0..3 --land --auto-repair --retry-known --dry-run\n         --model MODEL --fallback-model MODEL --reasoning-effort E (auto|low|medium|high|xhigh|max|ultra)\n         --allow-verifier-change --allow-floor-change REASON --context-pack FILE\nRuns one preauthorized task; stops in review unless --land explicitly requests admission. Never commits or publishes.\n--parallel (opt-in; one controller per state repository) keeps up to --max-writers (default 2) non-overlapping ready tasks running, refilling each slot as a task ends. Failures release only exact unstarted claims. An unconfirmed running lease needs reconciliation. Landing is serialized. Exit 3: review backlog reached --max-review-backlog and no new task was claimed; 1: a task failed; 130: interrupted; 75: another controller holds the lock. --id and --dry-run are refused."
         }
         "autopilot" => {
-            "Usage: oms autopilot [options] propose|run|status|abandon|reenter|shadow|decide\nOptions: --proposal FILE --expected-proposal-sha256 SHA --repo PATH\n         --planner P --worker P --reviewer P --allowed PATHS --base BRANCH --remote NAME\n         --max-cycles 1..10 --initial-tasks 1..12 --replan-tasks 1..2 --milestones ID,ID\n         --auto-repair --retry-known --allow-verifier-change --allow-floor-change REASON\n         --review-mode shadow|gate|off --collaboration off|auto --draft-pr --discover\n         --provider-timeout DUR --ROLE-timeout DUR --ROLE-model MODEL\n         --ROLE-fallback-model MODEL --ROLE-reasoning-effort E --reason TEXT --session ID\n         propose --issue REF [--issue-source-sha256 SHA]; propose --restamp FILE --expected-proposal-sha256 SHA --issue REF [--issue-source-sha256 SHA]\n         rebinds a proposal-review receipt to a stamped copy and clears blocked: github-issue\n         decide --expected-decision-sha256 SHA --action inspect|propose-revision|wait|resume|stop\n         wait requires --wait-binding FILE --expected-wait-sha256 SHA\nStatus returns a checked next action and exact continuation. Parent agents inspect evidence and review proposals internally; ordinary transitions require no new user approval. Milestones are an initial authorized PROJECT list and share the same owner and lifetime budget.\nExit 4 requires exact proposal review; unsafe stops exit 3. Frozen contracts, parks and exhausted lifetime budgets cannot silently reset."
+            "Usage: oms autopilot [options] propose|run|status|abandon|reenter|shadow|decide\nOptions: --proposal FILE --expected-proposal-sha256 SHA --repo PATH\n         --planner P --worker P --reviewer P --allowed PATHS --base BRANCH --remote NAME\n         --max-cycles 1..10 --initial-tasks 1..12 --replan-tasks 1..2 --milestones ID,ID\n         --auto-repair --retry-known --allow-verifier-change --allow-floor-change REASON\n         --review-mode shadow|gate|off --collaboration off|auto --draft-pr --discover\n         --provider-timeout DUR --ROLE-timeout DUR --ROLE-model MODEL\n         --ROLE-fallback-model MODEL --ROLE-reasoning-effort E --reason TEXT --session ID\n         propose --issue REF [--issue-source-sha256 SHA [--with-issue-requirements]]; propose --restamp FILE --expected-proposal-sha256 SHA --issue REF [--issue-source-sha256 SHA]\n         rebinds a proposal-review receipt to a stamped copy and clears blocked: github-issue\n         decide --expected-decision-sha256 SHA --action inspect|propose-revision|wait|resume|stop\n         wait requires --wait-binding FILE --expected-wait-sha256 SHA\nStatus returns a checked next action and exact continuation. Parent agents inspect evidence and review proposals internally; ordinary transitions require no new user approval. Milestones are an initial authorized PROJECT list and share the same owner and lifetime budget.\nExit 4 requires exact proposal review; unsafe stops exit 3. Frozen contracts, parks and exhausted lifetime budgets cannot silently reset."
         }
         "goal-drive" => {
             "Usage: oms goal-drive [--repo PATH] [--to PROVIDER] [--max-cycles 1..10]\nOptions: --run-id ID --contract-id OWNER_ID --expected-ref REF --auto-repair\n         --retry-known --allow-verifier-change --allow-floor-change REASON\n         --model MODEL --fallback-model MODEL --reasoning-effort E --provider-timeout DUR\n         --campaign FILE [--dry-run|--status]\n         --commit-task ID [--commit-message TEXT]\nDrive an existing approved plan with fresh acceptance and bounded attempts. Every terminal writes a progress receipt; unsafe stops park."

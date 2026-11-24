@@ -384,9 +384,10 @@ pub(crate) fn validate(
     let mode = Mode::load(ctx)?;
     let issue = github::proposal_issue(&mode, proposal)?;
     if let Some(source) = proposal.get("issue_source") {
-        value::keys(source, &["issue", "sha256"], &[])?;
+        value::keys(source, &["issue", "sha256"], &["with_requirements"])?;
         require(
             mode.active.is_some()
+                && source.get("with_requirements").is_none_or(|v| v == true)
                 && issue.as_deref().is_some_and(|i| source["issue"] == i)
                 && value::digest(value::text(source, "sha256")),
             "invalid reviewed Project issue source",
@@ -680,8 +681,9 @@ struct PreparedPropose {
     extra_call_args: Vec<OsString>,
     issue: Option<String>,
     issue_pin: Option<String>,
+    requirements: Option<String>,
 }
-fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
+fn prepare_propose(ctx: &Context<'_>, args: &Args, retained: bool) -> Result<PreparedPropose> {
     require(
         !args.has("expected-proposal-sha256"),
         "expected proposal digest requires --apply",
@@ -767,6 +769,35 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
             .map(|r| String::from_utf8_lossy(r).into_owned())
             .unwrap_or_default()
     );
+    let requirements = if args.flag("with-issue-requirements") {
+        let reference = args.required("issue")?;
+        let pin = pin.ok_or_else(|| {
+            Error::new(
+                2,
+                "--with-issue-requirements requires an explicit issue and source SHA-256",
+            )
+        })?;
+        let source = if retained {
+            github::IssueRequirements::load(ctx, reference, pin)?
+        } else {
+            github::IssueRequirements::fetch(ctx, reference, pin)?
+        };
+        require(
+            ctx.source.read("PROJECT.md", MAX_FILE)? == spec.raw
+                && ctx.git(&["rev-parse", "HEAD"])? == head
+                && ctx.store.optional(ACTIVE, 8 * MAX_FILE)? == old
+                && github::project_issue(ctx, reference)?.to_string() == source.issue,
+            "planning inputs changed during issue requirements read",
+        )?;
+        let document = source.document()?;
+        prompt.push('\n');
+        prompt.push_str(&oms_command_plan::discussion::issue_requirements_block(
+            document,
+        ));
+        Some(document.to_owned())
+    } else {
+        None
+    };
     if args.has("_recovery-path") {
         let reference = json!({"path":args.required("_recovery-path")?,"sha256":args.required("_recovery-sha256")?});
         let recovery = crate::adaptive::evidence(ctx, &reference)?;
@@ -830,13 +861,17 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
         extra_call_args,
         issue,
         issue_pin: pin.map(str::to_owned),
+        requirements,
     })
 }
 pub(crate) fn preflight_propose(ctx: &Context<'_>, args: &Args) -> Result<()> {
-    prepare_propose(ctx, args).map(|_| ())
+    prepare_propose(ctx, args, true).map(|_| ())
 }
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
-    issue_pin(args)?;
+    execute_with(ctx, args, false)
+}
+pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Result<Output> {
+    let pin = issue_pin(args)?;
     if args.has("apply") {
         require(
             !args.has("issue"),
@@ -850,6 +885,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     require(
         modes <= 1,
         "apply, restamp, validate-spec, scope-only and roadmap are separate modes",
+    )?;
+    require(
+        !args.flag("with-issue-requirements") || (pin.is_some() && modes == 0),
+        "--with-issue-requirements is only for generating a new proposal with --issue and --issue-source-sha256",
     )?;
     if args.has("restamp") {
         return restamp(ctx, args);
@@ -915,7 +954,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         out.stderr = spec.warnings().join("\n").into_bytes();
         return Ok(out);
     }
-    let prepared = prepare_propose(ctx, args)?;
+    let prepared = prepare_propose(ctx, args, retained)?;
     let spec = prepared.spec;
     let allowed = prepared.allowed;
     let prefix = prepared.prefix;
@@ -937,12 +976,13 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             .map(std::str::from_utf8)
             .transpose()
             .map_err(|_| Error::new(3, "planning input is not UTF-8"))?;
-        let question = oms_command_plan::discussion::planning_question(
+        let question = oms_command_plan::discussion::planning_question_with_requirements(
             &allowed.iter().map(String::as_str).collect::<Vec<_>>(),
             &head,
             std::str::from_utf8(&spec.raw).unwrap(),
             prior_plan,
             &discovery.as_ref().map(Value::to_string).unwrap_or_default(),
+            prepared.requirements.as_deref(),
         );
         scan(question.as_bytes())?;
         let council_dir = format!(".oms/plan/council-{}", value::random("")?);
@@ -1117,6 +1157,9 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     }
     if let Some(issue) = &prepared.issue {
         github::stamp(&mut proposal, issue, prepared.issue_pin.as_deref());
+        if prepared.requirements.is_some() {
+            proposal["issue_source"]["with_requirements"] = true.into();
+        }
     }
     let awaiting = validate(ctx, &proposal, &spec, max)?.awaiting_issue();
     for (name, digest) in &answer.artifacts {

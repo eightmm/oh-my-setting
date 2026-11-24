@@ -20,6 +20,26 @@ pub fn source_projection(source: &Value, include_text: bool) -> Value {
     out
 }
 pub(crate) fn source(ctx: &Context<'_>, args: &Args) -> Result<Option<Value>> {
+    if args.has("from-project-issue") {
+        require(
+            args.action == "draft"
+                && args.flag("dry-run")
+                && args
+                    .values
+                    .keys()
+                    .all(|k| matches!(k.as_str(), "from-project-issue" | "repo"))
+                && args.flags.len() == 1,
+            "--from-project-issue is a separate, read-only draft --dry-run selector",
+        )?;
+        let number = oms_github::Number::parse(args.required("from-project-issue")?)
+            .map_err(|_| Error::new(2, "invalid Project issue number"))?;
+        let issue = crate::github::project_issue(ctx, &number.get().to_string())?;
+        let row = crate::github::read_project_issue(ctx, &issue)?;
+        return Ok(Some(
+            json!({"kind":"github-issue","reference":format!("https://github.com/{}/issues/{}",issue.slug,number.get()),
+            "revision":row["updated_at"],"sha256":value::hash(value::canonical(&row)?),"bytes":value::text(&row,"title").len()+2+value::text(&row,"body").len(),"state":"open"}),
+        ));
+    }
     if !args.has("from-file") && !args.has("from-issue") {
         require(
             !args.has("source-sha256") && !args.flag("dry-run"),
@@ -72,41 +92,19 @@ pub(crate) fn source(ctx: &Context<'_>, args: &Args) -> Result<Option<Value>> {
             &matched[1], &matched[2], &matched[3]
         );
         let response = ctx.services.read_issue(&endpoint, ctx.interrupted)?;
-        require(
-            response.len() <= 512 * 1024,
-            "GitHub source response exceeds read limit",
-        )?;
-        let row = value::parse(&response)?;
-        require(
-            row.is_object()
-                && row.get("pull_request").is_none()
-                && row["number"].as_u64() == matched[3].parse::<u64>().ok()
-                && row["id"].as_u64().is_some_and(|n| n > 0)
-                && value::text(&row, "html_url").eq_ignore_ascii_case(url),
-            "GitHub response does not identify requested issue",
-        )?;
-        let title = value::text(&row, "title");
-        let updated = value::text(&row, "updated_at");
-        require(
-            !title.is_empty()
-                && title.chars().count() <= 1024
-                && regex::Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-                    .unwrap()
-                    .is_match(updated)
-                && chrono::DateTime::parse_from_rfc3339(updated).is_ok(),
-            "GitHub issue lacks bounded text or revision metadata",
-        )?;
-        let body = if row["body"].is_null() {
-            ""
-        } else {
-            row["body"]
-                .as_str()
-                .ok_or_else(|| Error::new(2, "invalid issue body"))?
-        };
-        let text = format!("{title}\n\n{body}");
+        let number = matched[3]
+            .parse::<u64>()
+            .map_err(|_| Error::new(2, "invalid issue number"))?;
+        let (document, reference) =
+            oms_command_plan::issue_document(&response, url, number, false)?;
+        let frozen = value::from_plan(&document)?;
+        let text = format!(
+            "{}\n\n{}",
+            value::text(&frozen, "title"),
+            value::text(&frozen, "body")
+        );
         source_text(text.as_bytes())?;
-        let frozen = json!({"id": row["id"], "number": row["number"], "url": value::text(&row, "html_url").to_lowercase(), "updated_at": updated, "title": title, "body": body});
-        json!({"kind": "github-issue", "reference": row["html_url"], "revision": updated, "sha256": value::hash(value::canonical(&frozen)?), "bytes": text.len(), "text": text})
+        json!({"kind":"github-issue","reference":reference,"revision":frozen["updated_at"],"sha256":value::hash(value::canonical(&frozen)?),"bytes":text.len(),"text":text})
     };
     if args.has("source-sha256") {
         let expected = args.required("source-sha256")?;
@@ -117,7 +115,7 @@ pub(crate) fn source(ctx: &Context<'_>, args: &Args) -> Result<Option<Value>> {
     }
     Ok(Some(out))
 }
-fn source_text(raw: &[u8]) -> Result<&str> {
+pub(crate) fn source_text(raw: &[u8]) -> Result<&str> {
     require(
         !raw.is_empty() && raw.len() <= MAX_SOURCE,
         "source is empty or exceeds 32 KiB",

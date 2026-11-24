@@ -151,3 +151,108 @@ pub(crate) fn proposal_issue(mode: &Mode, proposal: &Value) -> Result<Option<Str
     )?;
     Ok(Some(issue.to_owned()))
 }
+
+/// Resolve against the physical execution repository and its canonical shared state.
+pub(crate) fn project_issue(ctx: &Context<'_>, raw: &str) -> Result<IssueRef> {
+    let mode = Mode::load(ctx)?;
+    let origin = mode
+        .active
+        .as_ref()
+        .ok_or_else(|| Error::new(2, "same-repository GitHub Project required"))?;
+    let plan = ctx.plan()?;
+    require(
+        plan.context.canonical()
+            && (ctx.repo == ctx.state
+                || plan.git().namespace_path()? == plan.state_git().namespace_path()?),
+        "reviewed issue requires canonical state of this repository",
+    )?;
+    IssueRef::parse(raw, origin).map_err(fail)
+}
+
+pub(crate) fn read_project_issue(ctx: &Context<'_>, issue: &IssueRef) -> Result<Value> {
+    let url = format!(
+        "https://github.com/{}/issues/{}",
+        issue.slug,
+        issue.number.get()
+    );
+    let raw = ctx.services.read_issue(
+        &format!("repos/{}/issues/{}", issue.slug, issue.number.get()),
+        ctx.interrupted,
+    )?;
+    require(
+        project_issue(ctx, &issue.to_string())? == *issue,
+        "project changed during the GitHub issue read",
+    )?;
+    let (frozen, _) = oms_command_plan::issue_document(&raw, &url, issue.number.get(), true)?;
+    let frozen = value::from_plan(&frozen)?;
+    crate::intent::source_text(
+        format!(
+            "{}\n\n{}",
+            value::text(&frozen, "title"),
+            value::text(&frozen, "body")
+        )
+        .as_bytes(),
+    )?;
+    Ok(frozen)
+}
+
+const REQUIREMENTS_DIR: &str = ".oms/plan/reviewed-issue-sources";
+const REQUIREMENTS_LIMIT: usize = 128 * 1024;
+
+pub(crate) struct IssueRequirements {
+    pub issue: String,
+    bytes: Vec<u8>,
+}
+impl IssueRequirements {
+    pub fn fetch(ctx: &Context<'_>, reference: &str, pin: &str) -> Result<Self> {
+        let issue = project_issue(ctx, reference)?;
+        let document = read_project_issue(ctx, &issue)?;
+        let bytes = value::canonical(&document)?;
+        require(
+            value::hash(&bytes) == pin,
+            "reviewed GitHub issue source changed",
+        )?;
+        crate::planning::scan(&bytes)?;
+        Ok(Self {
+            issue: issue.to_string(),
+            bytes,
+        })
+    }
+
+    pub fn retain(&self, ctx: &Context<'_>) -> Result<()> {
+        ctx.store
+            .immutable(REQUIREMENTS_DIR, &self.bytes, ".json", REQUIREMENTS_LIMIT)?;
+        Ok(())
+    }
+
+    pub fn load(ctx: &Context<'_>, reference: &str, pin: &str) -> Result<Self> {
+        require(value::digest(pin), "invalid issue source pin")?;
+        let issue = project_issue(ctx, reference)?;
+        let path = format!("{REQUIREMENTS_DIR}/{pin}.json");
+        let raw = ctx.store.private_read(&path, REQUIREMENTS_LIMIT)?;
+        require(
+            value::hash(&raw) == pin,
+            "retained issue requirements changed",
+        )?;
+        let document = value::parse(&raw)?;
+        let url = format!(
+            "https://github.com/{}/issues/{}",
+            issue.slug,
+            issue.number.get()
+        );
+        require(
+            value::text(&document, "url").eq_ignore_ascii_case(&url)
+                && document["number"].as_u64() == Some(issue.number.get()),
+            "retained issue belongs to another repository or issue",
+        )?;
+        crate::planning::scan(&raw)?;
+        Ok(Self {
+            issue: issue.to_string(),
+            bytes: raw,
+        })
+    }
+
+    pub fn document(&self) -> Result<&str> {
+        std::str::from_utf8(&self.bytes).map_err(|_| Error::new(2, "invalid issue requirements"))
+    }
+}

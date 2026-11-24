@@ -17,7 +17,53 @@ pub struct IssueObservation {
 }
 
 fn valid_revision(s: &str) -> bool {
-    s.len() == 20 && s.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(s).is_ok()
+    s.len() == 20
+        && s.bytes()
+            .zip(b"0000-00-00T00:00:00Z")
+            .all(|(actual, expected)| {
+                if expected.is_ascii_digit() {
+                    actual.is_ascii_digit()
+                } else {
+                    actual == *expected
+                }
+            })
+        && chrono::DateTime::parse_from_rfc3339(s).is_ok()
+}
+
+/// The exact canonical GitHub fields pinned by intent, planning and first admission.
+/// Parsing these bytes grants no evidence of a live fetch.
+pub fn issue_document(
+    raw: &[u8],
+    url: &str,
+    number: u64,
+    require_open: bool,
+) -> Result<(Value, String)> {
+    let row = json::parse_bounded(raw, 512 * 1024)?;
+    require(
+        (!require_open || (row.opt("body").is_some() && row.text("state") == "open"))
+            && row.opt("pull_request").is_none()
+            && row.get("number").int()? == i128::from(number)
+            && u64::try_from(row.get("id").int()?).is_ok_and(|id| id > 0)
+            && row.text("html_url").eq_ignore_ascii_case(url)
+            && valid_revision(row.text("updated_at"))
+            && !row.text("title").is_empty()
+            && row.text("title").chars().count() <= 1024,
+        "reviewed GitHub issue closed or identity/revision changed",
+    )?;
+    let body = if row.get("body") == &Value::Null {
+        ""
+    } else {
+        row.get("body").str()?
+    };
+    let frozen = object([
+        ("id", row.get("id").clone()),
+        ("number", row.get("number").clone()),
+        ("url", string(url.to_ascii_lowercase())),
+        ("updated_at", row.get("updated_at").clone()),
+        ("title", row.get("title").clone()),
+        ("body", string(body)),
+    ]);
+    Ok((frozen, row.text("html_url").to_owned()))
 }
 
 impl Plan<'_> {
@@ -37,32 +83,7 @@ impl Plan<'_> {
         let number: u64 = n.parse().map_err(|_| error("invalid issue number"))?;
         let url = format!("https://github.com/{slug}/issues/{number}");
         let raw = fetch(&format!("repos/{slug}/issues/{number}"))?;
-        let row = json::parse_bounded(&raw, 512 * 1024)?;
-        require(
-            row.opt("body").is_some()
-                && row.text("state") == "open"
-                && row.opt("pull_request").is_none()
-                && row.get("number").int()? == i128::from(number)
-                && row.get("id").int()? > 0
-                && row.text("html_url").eq_ignore_ascii_case(&url)
-                && valid_revision(row.text("updated_at"))
-                && !row.text("title").is_empty()
-                && row.text("title").chars().count() <= 1024,
-            "reviewed GitHub issue closed or identity/revision changed",
-        )?;
-        let body = if row.get("body") == &Value::Null {
-            ""
-        } else {
-            row.get("body").str()?
-        };
-        let frozen = object([
-            ("id", row.get("id").clone()),
-            ("number", row.get("number").clone()),
-            ("url", string(url.to_ascii_lowercase())),
-            ("updated_at", row.get("updated_at").clone()),
-            ("title", row.get("title").clone()),
-            ("body", string(body)),
-        ]);
+        let (frozen, _) = issue_document(&raw, &url, number, true)?;
         require(
             json::hash(&frozen)? == source.text("sha256"),
             "reviewed GitHub issue source changed",
@@ -72,8 +93,8 @@ impl Plan<'_> {
             execution: self.context.execution_repo.clone(),
             state: self.context.state_repo.clone(),
             observed: std::time::Instant::now(),
-            github_id: row.get("id").clone(),
-            revision: row.text("updated_at").to_owned(),
+            github_id: frozen.get("id").clone(),
+            revision: frozen.text("updated_at").to_owned(),
         })
     }
 
@@ -83,10 +104,13 @@ impl Plan<'_> {
     }
 
     fn validate_issue_source(&self, proposal: &Value, source: &Value) -> Result<()> {
-        json::keys(source, &["issue", "sha256"], &[])?;
+        json::keys(source, &["issue", "sha256"], &["with_requirements"])?;
         let issues = crate::engine::Issues::load(self);
         require(
             self.context.canonical()
+                && source
+                    .opt("with_requirements")
+                    .is_none_or(|v| v == &Value::Bool(true))
                 && (self.source.repo() == self.store.repo()
                     || self.git().namespace_path()? == self.state_git().namespace_path()?)
                 && proposal.get("schema").is_int(2)

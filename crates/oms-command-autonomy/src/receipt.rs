@@ -191,8 +191,18 @@ pub fn validate(row: &Value) -> Result<()> {
             "allow_floor_change",
             "collaboration",
         ],
-        &["milestones"],
+        &["milestones", "issue_requirements"],
     )?;
+    if let Some(binding) = contract.get("issue_requirements") {
+        value::keys(binding, &["issue", "sha256"], &[])?;
+        require(
+            binding["issue"].is_string()
+                && binding["issue"] == row["issue"]
+                && binding["sha256"].is_string()
+                && binding["sha256"] == row["issue_source_sha256"],
+            "receipt issue requirements differ from the frozen issue",
+        )?;
+    }
     if let Some(milestones) = contract.get("milestones") {
         let items = milestones
             .as_array()
@@ -369,6 +379,11 @@ fn base(ctx: &Context<'_>, remote: &str, branch: &str) -> Result<String> {
     ))
 }
 fn validate_bound_proposal(ctx: &Context<'_>, row: &Value, proposal: &Value) -> Result<()> {
+    require(
+        row["contract"].get("issue_requirements").is_some()
+            == (proposal["issue_source"]["with_requirements"] == true),
+        "proposal issue requirements mode differs from the frozen owner",
+    )?;
     if row.get("issue_source_sha256").is_some()
         || !value::text(&row["proposal"], "sha256").is_empty()
     {
@@ -1326,6 +1341,9 @@ fn propose_args(args: &Args, row: &Value, remainder: bool) -> Args {
     if let Some(pin) = row["issue_source_sha256"].as_str() {
         planning.set("issue-source-sha256", pin);
     }
+    if row["contract"].get("issue_requirements").is_some() {
+        planning.flags.insert("with-issue-requirements".into());
+    }
     if args.flag("discover") && !remainder {
         planning.flags.insert("discover".into());
     }
@@ -1388,7 +1406,7 @@ fn propose(
         planning::preflight_propose(ctx, &planning)?;
         ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-planning","owner_id":row["owner_id"],
                 "intent_sha256":intent,"recovery_sha256":recovery,"phase":"dispatch-intent","receipt_sha256":value::hash(raw),"ts":value::now()}))?;
-        planning::execute(ctx, &planning)?
+        planning::execute_with(ctx, &planning, true)?
     };
     let text = String::from_utf8_lossy(&out.stdout);
     if args.flag("discover")
@@ -1831,6 +1849,13 @@ fn advance_milestone(
     if adaptive::budget(ctx, row)?["cycles_remaining"] == 0 {
         return park(ctx, row, raw, "cycles-exhausted", output).map(Some);
     }
+    if let Some(binding) = row["contract"].get("issue_requirements") {
+        crate::github::IssueRequirements::load(
+            ctx,
+            value::text(binding, "issue"),
+            value::text(binding, "sha256"),
+        )?;
+    }
     let facts = adaptive::goal_progress(ctx, row)?;
     let packet = json!({"schema":1,"kind":"autopilot-milestone-context","owner_id":row["owner_id"],
         "spec_sha256":row["spec_sha256"],"head":ctx.git(&["rev-parse","HEAD"])?,
@@ -2087,6 +2112,22 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         "issue source pin requires autopilot propose in same-repository GitHub project mode",
     )?;
     let old = ctx.store.optional(RECEIPT, 64 * 1024)?;
+    let wants_requirements = args.flag("with-issue-requirements");
+    if wants_requirements {
+        require(
+            args.action == "propose" && !args.has("restamp") && pin.is_some(),
+            "--with-issue-requirements requires a new proposal with an explicit issue and source SHA-256",
+        )?;
+        if let Some(raw) = old.as_ref() {
+            let row = value::parse(raw)?;
+            live(ctx, &row)?;
+            let canonical = crate::github::project_issue(ctx, args.required("issue")?)?.to_string();
+            require(
+                row["contract"]["issue_requirements"] == json!({"issue":canonical,"sha256":pin}),
+                "cannot add or change issue requirements on an existing autopilot owner",
+            )?;
+        }
+    }
     if args.action == "status" {
         let receipt = old.as_ref().map(|r| value::parse(r)).transpose()?;
         let rows = ctx.rows(PROGRESS)?;
@@ -2181,13 +2222,26 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     } else {
         None
     };
+    let initial_requirements = if wants_requirements && old.is_none() {
+        let initial = fresh(ctx, args)?;
+        let head = ctx.git(&["rev-parse", "HEAD"])?;
+        let plan = ctx.store.optional(ACTIVE, 8 * MAX_FILE)?.map(value::hash);
+        let source = crate::github::IssueRequirements::fetch(
+            ctx,
+            args.required("issue")?,
+            args.required("issue-source-sha256")?,
+        )?;
+        Some((initial, head, plan, source))
+    } else {
+        None
+    };
     // One controller owns the entire foreground run. Receipt writes still use
     // exact byte CAS; a killed owner releases this lock, never its spent cycles.
     let _owner = ctx.lock(".oms/plan/autopilot-controller")?;
     let _receipt = ctx.lock(RECEIPT)?;
     let mut raw = ctx.store.optional(RECEIPT, 64 * 1024)?;
     require(
-        !checked_issue_input || old == raw,
+        (!checked_issue_input && !wants_requirements) || old == raw,
         "autopilot owner or reviewed proposal changed during the GitHub issue check",
     )?;
     let mut row = raw.as_ref().map(|r| value::parse(r)).transpose()?;
@@ -2306,7 +2360,20 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             "autopilot action requires a live receipt",
         )?;
         require(!args.has("restamp"), "no live autopilot receipt to restamp")?;
-        let mut fresh = fresh(ctx, args)?;
+        let (mut fresh, requirements) =
+            if let Some((initial, head, plan, source)) = initial_requirements {
+                live(ctx, &initial)?;
+                require(
+                    ctx.git(&["rev-parse", "HEAD"])? == head
+                        && ctx.store.optional(ACTIVE, 8 * MAX_FILE)?.map(value::hash) == plan
+                        && crate::github::project_issue(ctx, args.required("issue")?)?.to_string()
+                            == source.issue,
+                    "planning inputs changed during issue requirements read",
+                )?;
+                (initial, Some(source))
+            } else {
+                (fresh(ctx, args)?, None)
+            };
         if let Some(pin) = pin {
             // The first durable proposing receipt already owns the reviewed pin,
             // including a restart before the planner reserves its first call.
@@ -2340,6 +2407,14 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             fresh["stage"] = "proposal-review".into();
             fresh["proposal"] = json!({"path": ctx.state.join(snapshot), "sha256": expected});
             mark_issue(ctx, &mut fresh, &proposal)?;
+        }
+        if let Some(source) = requirements {
+            require(
+                source.issue == value::text(&fresh, "issue"),
+                "project changed during issue read",
+            )?;
+            fresh["contract"]["issue_requirements"] = json!({"issue":source.issue,"sha256":pin});
+            source.retain(ctx)?;
         }
         let written = save(ctx, &mut fresh, None)?;
         row = Some(fresh);
@@ -3759,6 +3834,21 @@ mod tests {
             ),
             ("example-org/example-repo#7", pin.as_str(), "r1-")
         );
+        assert!(!replan.flag("with-issue-requirements"));
+        let pinned_contract = contract_digest(&row);
+        row["contract"]["issue_requirements"] = json!({"issue":row["issue"],"sha256":pin});
+        assert_ne!(contract_digest(&row), pinned_contract);
+        for remainder in [false, true] {
+            let args = propose_args(&Args::default(), &row, remainder);
+            assert!(args.flag("with-issue-requirements"));
+            assert_eq!(args.required("issue-source-sha256").unwrap(), pin);
+            assert_eq!(
+                args.required("issue").unwrap(),
+                "example-org/example-repo#7"
+            );
+        }
+        row["contract"]["issue_requirements"]["sha256"] = "ff".repeat(32).into();
+        assert!(validate(&row).is_err());
         row["contract"]["max_cycles"] = 9.into();
         assert_ne!(contract_digest(&row), PYTHON_DIGEST);
     }
