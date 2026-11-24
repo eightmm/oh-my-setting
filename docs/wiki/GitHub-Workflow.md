@@ -1,7 +1,7 @@
 # GitHub Workflow
 
 Work moves from an **issue** to an **OMS plan**, then to a **verified PR**,
-and ends with **merge evidence**. Back to [Home](https://github.com/eightmm/oh-my-setting/blob/main/docs/wiki/Home.md).
+and ends with **merge evidence**. Back to [Home](https://github.com/eightmm/oh-my-setting/wiki).
 
 Source of truth: this page summarizes [CONTRIBUTING.md](https://github.com/eightmm/oh-my-setting/blob/main/CONTRIBUTING.md) and [Verification and release](https://github.com/eightmm/oh-my-setting/blob/main/docs/COMPONENTS.md#verification-and-release), and they win if they differ.
 

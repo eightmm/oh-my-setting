@@ -28,6 +28,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | Reference | For |
 |---|---|
 | [Contributing](../CONTRIBUTING.md) | Scoped checks, publication, style and compatibility |
+| [GitHub Workflow (Wiki)](https://github.com/eightmm/oh-my-setting/wiki/GitHub-Workflow) | From an issue and OMS plan to a verified PR and merge evidence |
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
 | [Graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) | Current Rust/search gaps, five reference projects, reusable implementation packets and retrieval evaluation |

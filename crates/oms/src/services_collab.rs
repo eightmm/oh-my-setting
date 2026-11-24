@@ -242,6 +242,9 @@ pub(crate) fn prelaunch_error(
 
 trait OwnedDuplexConsumer {
     fn check(&self) -> oms_command_peer::Result<()>;
+    fn issuance_stage(&self) -> team_requests::IssuanceStage {
+        team_requests::IssuanceStage::Unavailable
+    }
     fn started(
         &mut self,
         reactor: &mut Reactor,
@@ -382,9 +385,12 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
         observer.started(&reactor, id);
     }
     if let Some(channel) = &mut channel {
-        channel
-            .started(&mut reactor, id)
-            .map_err(|_| "Team channel issuance failed; pending intent retained".to_owned())?;
+        channel.started(&mut reactor, id).map_err(|_| {
+            format!(
+                "Team channel issuance failed; pending intent retained (stage={})",
+                channel.issuance_stage().name()
+            )
+        })?;
     }
     let mut cancelling = false;
     let mut channel_failed = false;
@@ -1133,6 +1139,12 @@ impl oms_command_room::Services for CollabServices<'_> {
 }
 
 impl PanelServices for CollabServices<'_> {
+    fn workspace_group_resolver(&self) -> Option<oms_panel_core::services::WorkspaceGroupResolver> {
+        Some(|gid, deadline, stop| {
+            crate::services_runtime::resolve_group_membership_before(gid, deadline, stop).ok()
+        })
+    }
+
     fn swap_main_host(
         &self,
         repo: &Path,
@@ -3081,17 +3093,27 @@ mod tests {
             PeerExecutor::execute(&host, &request(&["true"], dir.path()), &cancelled).unwrap_err();
         assert_eq!(err.code, 130);
 
-        struct ExpiredChannel;
-        impl OwnedDuplexConsumer for ExpiredChannel {
+        struct FixtureChannel {
+            expired: bool,
+        }
+        impl OwnedDuplexConsumer for FixtureChannel {
             fn check(&self) -> oms_command_peer::Result<()> {
-                Err(oms_command_peer::Error::new(124, "expired channel"))
+                if self.expired {
+                    Err(oms_command_peer::Error::new(124, "expired channel"))
+                } else {
+                    Ok(())
+                }
+            }
+            fn issuance_stage(&self) -> team_requests::IssuanceStage {
+                team_requests::IssuanceStage::PrivatePublication
             }
             fn started(
                 &mut self,
                 _: &mut Reactor,
                 _: oms_supervisor::process::JobId,
             ) -> oms_command_peer::Result<()> {
-                panic!("expired channel started a child")
+                assert!(!self.expired, "expired channel started a child");
+                Err(oms_command_peer::Error::new(75, "private-frame-marker"))
             }
             fn event(
                 &mut self,
@@ -3108,7 +3130,7 @@ mod tests {
         assert!(
             supervise(
                 Job {
-                    channel: Some(&mut ExpiredChannel),
+                    channel: Some(&mut FixtureChannel { expired: true }),
                     ..Job::new(argv, dir.path(), Duration::from_secs(1), 1024)
                 },
                 &stop,
@@ -3119,6 +3141,24 @@ mod tests {
             !marker.exists(),
             "prestart expiry must have no child effect"
         );
+        let error = supervise(
+            Job {
+                channel: Some(&mut FixtureChannel { expired: false }),
+                ..Job::new(
+                    sh("while :; do sleep 1; done"),
+                    dir.path(),
+                    Duration::from_secs(1),
+                    1024,
+                )
+            },
+            &stop,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Team channel issuance failed; pending intent retained (stage=private-publication)"
+        );
+        assert!(!error.contains("private-frame-marker"));
     }
 
     #[test]

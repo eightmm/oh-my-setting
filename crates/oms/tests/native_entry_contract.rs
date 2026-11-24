@@ -3979,6 +3979,24 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     let live_s = std::process::id().to_string();
     let removable = residue(&tmp, "delegate", "dead", &dead_s, &l.repo);
     let delegate_root = residue(&l.f.0.join("wtroot"), "admit", "root", &dead_s, &l.repo);
+    let capture_dir = ".oms/artifacts/output-digest";
+    let managed_root = l.f.0.join("wtroot");
+    let captured = residue(&managed_root, "scratch", "captured", &dead_s, &l.repo);
+    let captures = captured.join("wt-captured").join(capture_dir);
+    std::fs::create_dir_all(&captures).unwrap();
+    let capture = captures.join("20261124T000000Z-100000000000000000000.log");
+    let proof = b"ERROR: focused verifier failed\n";
+    std::fs::write(&capture, proof).unwrap();
+    let unsafe_store = residue(&managed_root, "scratch", "unsafe", &dead_s, &l.repo);
+    let unsafe_ancestor = unsafe_store.join("wt-unsafe/.oms/artifacts");
+    std::fs::create_dir(unsafe_ancestor.parent().unwrap()).unwrap();
+    symlink(l.f.0.join("missing-artifacts"), &unsafe_ancestor).unwrap();
+    // An empty capture store and ignored build cache are not evidence.
+    let clean_worktree = delegate_root.join("wt-root");
+    std::fs::create_dir_all(clean_worktree.join(capture_dir)).unwrap();
+    std::fs::write(l.repo.join(".git/info/exclude"), ".oms/\n/target/\n").unwrap();
+    std::fs::create_dir(clean_worktree.join("target")).unwrap();
+    std::fs::write(clean_worktree.join("target/.rustc_info.json"), "{}\n").unwrap();
     let live = residue(&tmp, "delegate", "live", &live_s, &l.repo);
     let unproven = residue(&tmp, "land", "pid", "notapid", &l.repo);
     let dirty = residue(&tmp, "scratch", "dirty", &dead_s, &l.repo);
@@ -4012,7 +4030,14 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     for path in [&removable, &delegate_root, &ours] {
         assert!(line("would remove", path), "{}: {report}", path.display());
     }
-    for path in [&unproven, &dirty, &foreign, &swapped] {
+    for path in [
+        &unproven,
+        &dirty,
+        &foreign,
+        &swapped,
+        &captured,
+        &unsafe_store,
+    ] {
         assert!(line("kept", path), "{}: {report}", path.display());
     }
     assert!(
@@ -4022,15 +4047,21 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     assert!(report.contains("owned by another repository"), "{report}");
     assert!(report.contains("owner pid is unproven"), "{report}");
     assert!(report.contains("unsafe residue worktree path"), "{report}");
+    assert!(report.contains(&format!("holds {capture_dir}")), "{report}");
+    assert!(
+        report.contains(&format!("{capture_dir} is unsafe or unreadable")),
+        "{report}"
+    );
     assert!(
         !report.contains(&live.display().to_string()) && !report.contains("linked"),
         "{report}"
     );
     assert!(
-        report.ends_with("\ncleanup: 3 removable item(s) found, 4 kept with work\n"),
+        report.ends_with("\ncleanup: 3 removable item(s) found, 6 kept with work\n"),
         "{report}"
     );
     assert!(removable.exists() && ours.symlink_metadata().is_ok());
+    assert_eq!(std::fs::read(&capture).unwrap(), proof);
 
     let (code, _, err) = l.oms_env(&["cleanup", "--apply"], &[("OMS_HARNESS_CHILD", "1")]);
     assert_eq!(code, 2, "{err}");
@@ -4038,7 +4069,7 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
 
     let applied = l.ok(&["cleanup", "--apply"]);
     assert!(
-        applied.ends_with("\ncleanup: removed 3 item(s), 4 kept with work\n"),
+        applied.ends_with("\ncleanup: removed 3 item(s), 6 kept with work\n"),
         "{applied}"
     );
     assert!(!removable.exists() && !delegate_root.exists() && ours.symlink_metadata().is_err());
@@ -4051,9 +4082,18 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         std::fs::read_to_string(dirty.join("wt-dirty/a.txt")).unwrap(),
         "changed\n"
     );
+    assert_eq!(std::fs::read(&capture).unwrap(), proof);
+    assert_eq!(
+        std::fs::read_link(&unsafe_ancestor).unwrap(),
+        l.f.0.join("missing-artifacts")
+    );
     let registered = l.git(&["worktree", "list", "--porcelain"]);
     assert!(
-        !registered.contains("wt-dead") && registered.contains("wt-dirty"),
+        !registered.contains("wt-dead")
+            && !registered.contains("wt-root")
+            && registered.contains("wt-dirty")
+            && registered.contains("wt-captured")
+            && registered.contains("wt-unsafe"),
         "{registered}"
     );
 }
