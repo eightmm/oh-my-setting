@@ -47,7 +47,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. For a fresh Main, choose an installed harness by number or press Enter for the first choice. A new Main can open installed provider orchestrators in background windows. For a verified running Main, Enter selects **Continue current Main**. Choose **Open the Board to switch Main** to focus its Board. A verified managed Codex Main can switch with `s` from there. Run `oms panel --reopen` in the existing window to restore its Board without the picker.
+1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. For a fresh Main, choose an installed harness by number or press Enter for the first choice. A new Main can open installed provider orchestrators in background windows. For a verified running Main, Enter selects **Continue current Main**. Choose the Board option to focus the existing Board. Press `s` there to switch a verified managed Codex Main. Linux hosts with process verification also support assisted Claude switching. Run `oms panel --reopen` in the existing window to restore its Board without the picker.
 2. A landscape tmux window puts the board and its docked orchestrator on the left, with Overall Main on the right. A portrait window stacks the board, docked orchestrator and Overall Main in that order. See [Layout modes and resizing](#layout-modes-and-resizing).
 3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
@@ -136,37 +136,43 @@ model, effort, and account require separate provider evidence.
 
 ### Swap the main
 
-With a verified managed Codex Main, press `s` on the tmux Board to list
-installed alternatives with a resolved model, including AGY when available.
-Choose a number to review the target, then press `Y` to confirm in a separate
-step. Esc cancels the selection. OMS rechecks the Main generation and Room
-selected by the Board before submitting the swap.
+Press `s` on the tmux Board for a verified managed Main that supports
+switching to list installed alternatives with a resolved model. Choose a number
+to review the target, then press `Y` to confirm. Esc cancels the selection.
+OMS rechecks the Main generation and Room before proceeding.
 
-The command form is `oms panel --swap-main HARNESS [--model MODEL]`. A swap
-requires one live managed Codex Main at an empty, idle composer, with
-verifiable lifecycle evidence and Room ownership. An older Codex Main launched
-before that evidence was recorded may need a fresh managed Main. If the
-current Main is AGY, Claude or Pi, use its normal exit and choose the next
-harness from the [startup picker](#default-main-selection).
-[Resume and restart](#resume-and-restart)
+- For Codex, leave its composer empty and idle. OMS can then submit `/exit`.
+  The command form is `oms panel --swap-main HARNESS [--model MODEL]`.
+  An older Codex Main may need a new managed launch if it lacks lifecycle evidence.
+- For Claude, assisted switching requires Linux and access to `/proc` process
+  metadata. Start from the Board and wait for **Main switch ready · Exit Claude
+  normally in the Main pane** before exiting Claude in that pane. OMS waits up
+  to two minutes for the original Main to exit successfully. A Claude Main
+  launched before assisted switching was available needs a new managed launch
+  after a safe handoff.
+- For AGY, Pi, or Claude on hosts without assisted switching, exit normally
+  after handing off work and choose a harness from the
+  [startup picker](#default-main-selection). See
+  [Resume and restart](#resume-and-restart).
 
-OMS prepares the replacement and a bounded handoff from recorded Room state,
-including identifiers and role summaries. It requires proof that the current
-Codex Main exited safely before replacing it in the same managed pane. A successful change has a verified replacement and
-Room lineage. If the panel reports an uncertain outcome, inspect the current
-Room and attempts before trying again. Provider conversations keep their
-separate histories. Proven chats can be opened in their original sessions.
+OMS prepares a bounded handoff from recorded Room state and verifies the old
+Main's exit before launching its replacement in the same pane. If the outcome
+is uncertain, inspect the current Room and attempts before trying again.
+Provider conversations keep separate histories.
 [Original chats and recovery](#original-chats-and-recovery)
 
-OMS refuses to send `/exit` while the current Main attempt owns an unsettled
-Plan Team contract in its Room. An active resource domain also blocks the
-switch if it lists an active Team or pending execution or candidate work for
-that attempt. Settle those contracts and reconcile retained work under the
-current Main before switching. A replacement can launch as Main in an active
-resource domain using its retained Room participant and verified swap history.
-Plan Team registration and operation require a Room participant with the same
-ID as the current Main attempt. After a swap, those IDs differ, so the new Main
-cannot register a Team or take ownership of one from the previous attempt.
+An unsettled Plan Team contract for the current Main blocks the switch.
+Resolve ordinary native assignments owned or adopted by the outgoing Claude
+Main before switching it. During assisted exit, that Main cannot take a new
+ordinary native assignment or adopt existing work. An active resource domain also blocks a switch
+while a Team, pending execution, or candidate work remains for the attempt.
+Settle those contracts and reconcile retained work under the current Main
+before switching. A replacement can launch
+as Main in an active resource domain using its retained Room participant and
+verified swap history. Plan Team registration and operation require a Room
+participant with the same ID as the current Main attempt. After a swap, those
+IDs differ, so the new Main cannot register a Team or take ownership of one
+from the previous attempt.
 
 The replacement keeps the same Room participant, so ordinary Room worker
 results remain available in the [Results reader](#results-reader).
@@ -720,8 +726,10 @@ with the selected Main and its Board, and records the checkout on the session.
 Foreground `oms panel` opens a picker when the managed tmux path is active
 and `OMS_PANEL_MAIN` is unset. For a verified live Main, choice 1 and Enter
 both select **Continue current Main**. Choice 2 focuses the existing Board,
-where a verified managed Codex Main can switch with `s`. It appears as
-**Open the Board** when there are no installed alternatives. For a fresh Main, the picker offers the
+where a verified managed Codex Main can switch with `s`. An eligible managed
+Claude Main on Linux uses the same key. The picker shows **Open the Board**
+when there are no installed alternatives or when the outgoing Claude Main
+lacks host process verification. For a fresh Main, the picker offers the
 installed entries below in this order. Use `--repo PATH` for the checkout
 and `--room ID` for the Room on startup.
 

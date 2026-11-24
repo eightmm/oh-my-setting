@@ -861,7 +861,7 @@ pub(super) fn run(
         panel.leads.contains_key("codex"),
         "open the ordinary Codex lead before binding a task",
     )?;
-    panel.require_codex_assignment_main(panel.repo, attempts)?;
+    panel.require_native_assignment_admission(attempts, tx)?;
     let custody = panel.codex_assignment_custody(host)?;
     // This existing path checks an explicitly selected account without sending.
     panel.execute_with_host_cached(

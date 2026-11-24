@@ -3635,6 +3635,34 @@ impl<'a> Panel<'a> {
         main.ok_or_else(|| Error::new("live Main attempt unavailable"))
     }
 
+    fn require_native_assignment_admission(
+        &self,
+        attempts: &AttemptCache,
+        tx: &Transaction<'_>,
+    ) -> Result<()> {
+        let main = self.require_codex_assignment_main(self.repo, attempts)?;
+        if self.owner != "claude" {
+            return Ok(());
+        }
+        let live = crate::watch::LiveMain {
+            attempt: self.attempt.clone(),
+            member: self.participant.clone(),
+            owner: self.owner.clone(),
+            session: self.session.clone(),
+            window: self.main.window.clone(),
+            pane: self.main.id.clone(),
+            pid: self.main.pid,
+            birth: text(&main["refs"], "panel_wrapper_identity").to_owned(),
+        };
+        crate::native_panel::check_claude_assignment_exit(
+            self.repo,
+            tx,
+            self.room,
+            &live,
+            &self.session_proof,
+        )
+    }
+
     fn require_live_codex_assignment_main(&self, main: Option<&Value>) -> Result<()> {
         require(
             main.is_some_and(|main| {
@@ -5885,6 +5913,7 @@ fn run_with_host(
             panel
         };
         if options.has("native-adopt") {
+            panel.require_native_assignment_admission(&attempts_cache, &tx)?;
             native_succession::adopt(&panel, options, host, &tx)?
         } else if options.has("native-reconcile") {
             native_result::reconcile(&panel, options, host, &attempts_cache, &tx)?
@@ -12135,6 +12164,14 @@ pub(crate) mod tests {
         }
 
         fn write_synthetic_ledger(repo: &Path, extra_attempts: usize) -> String {
+            write_synthetic_ledger_for(repo, extra_attempts, "codex")
+        }
+
+        fn write_synthetic_ledger_for(
+            repo: &Path,
+            extra_attempts: usize,
+            main_owner: &str,
+        ) -> String {
             use std::fmt::Write as _;
             let lifecycle = repo.join(".oms/lifecycle");
             std::fs::create_dir_all(&lifecycle).unwrap();
@@ -12152,7 +12189,7 @@ pub(crate) mod tests {
             }
             writeln!(
                 out,
-                r#"{{"schema":1,"event_id":"aevt_11111111111111111111111100000001","ts":"2026-11-19T00:00:00Z","attempt_id":"{MAIN}","seq":1,"event_type":"attempt.created","provider":"codex","tool":"panel-main","to_state":"queued","actor":{{"kind":"owner","name":"agent-events"}},"refs":{{"panel_role":"main","panel_room_id":"{ROOM}","panel_native_scheduling":"unmanaged"}}}}"#
+                r#"{{"schema":1,"event_id":"aevt_11111111111111111111111100000001","ts":"2026-11-19T00:00:00Z","attempt_id":"{MAIN}","seq":1,"event_type":"attempt.created","provider":"{main_owner}","tool":"panel-main","to_state":"queued","actor":{{"kind":"owner","name":"agent-events"}},"refs":{{"panel_role":"main","panel_room_id":"{ROOM}","panel_native_scheduling":"unmanaged"}}}}"#
             )
             .unwrap();
             writeln!(
@@ -12167,6 +12204,36 @@ pub(crate) mod tests {
             .unwrap();
             std::fs::write(lifecycle.join("events.jsonl"), &out).unwrap();
             out
+        }
+
+        fn write_assisted_exit_fixture(panel: &Panel<'_>, stage: &str, deadline: u64) -> PathBuf {
+            let owner = terminals::process(panel.main.pid).unwrap();
+            let path = panel
+                .repo
+                .join(format!(".oms/handoffs/main-swap-{}.json", panel.attempt));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let receipt = json!({
+                "schema": 1, "stage": stage,
+                "old_attempt": panel.attempt, "room": panel.room, "member": panel.participant,
+                "provider": "codex", "harness": "codex", "model": "fixture-model",
+                "permissions": "native", "session": panel.session_proof,
+                "session_name": "fixture", "window": panel.main.window,
+                "pane": panel.main.id, "old_pid": owner.pid, "old_birth": owner.birth,
+                "controller_pid": owner.pid, "controller_birth": owner.birth,
+                "execution": panel.repo, "handoff": "", "remain_on_exit": null,
+                "operator_exit_deadline_ns": deadline,
+            });
+            std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+            path
+        }
+
+        fn native_assignment_state(repo: &Path, room: &str) -> [Vec<u8>; 3] {
+            [
+                ".oms/plan/tasks.json".to_owned(),
+                ".oms/lifecycle/events.jsonl".to_owned(),
+                format!(".oms/threads/{room}.jsonl"),
+            ]
+            .map(|path| std::fs::read(repo.join(path)).unwrap())
         }
 
         fn append_lifecycle_row(repo: &Path, row: &Value) {
@@ -13571,7 +13638,13 @@ pub(crate) mod tests {
             }
             // Each transport failure is an independent live reservation. Reusing
             // one Lead across these unrelated tasks would violate its contract.
-            for scenario in 0..12 {
+            const CLAUDE_EXIT_CASE: usize = 12;
+            for scenario in 0..=CLAUDE_EXIT_CASE {
+                let outgoing_owner = if scenario == CLAUDE_EXIT_CASE {
+                    "claude"
+                } else {
+                    "codex"
+                };
                 let tmp = TempDir::new("orch-native-case");
                 let repo = private_dir(&tmp.0.join("repo"));
                 let git = |args: &[&str]| {
@@ -13598,8 +13671,9 @@ pub(crate) mod tests {
                     "-qm",
                     "fixture",
                 ]);
-                write_synthetic_ledger(&repo, 0);
+                write_synthetic_ledger_for(&repo, 0, outgoing_owner);
                 let spy = SpyPanel::new(repo.clone());
+                spy.main_owner.set(outgoing_owner);
                 spy.allow_board_queries.set(true);
                 spy.real_events.set(true);
                 spy.canonical_assignment.set(true);
@@ -13620,7 +13694,7 @@ pub(crate) mod tests {
                         "--participant",
                         MAIN,
                         "--provider",
-                        "codex",
+                        outgoing_owner,
                     ]),
                 ] {
                     let output = oms_command_room::run(&args, &repo, &spy.stop);
@@ -13756,6 +13830,45 @@ pub(crate) mod tests {
                     )?;
                     serde_json::from_slice(&output.1).map_err(Error::new)
                 };
+                if scenario == CLAUDE_EXIT_CASE {
+                    let owner = terminals::process(spy.main_pid).unwrap();
+                    let args = commands::strings(&[
+                        "usage",
+                        "--attempt",
+                        MAIN,
+                        "--actor",
+                        "panel-main",
+                        "--ref",
+                        &format!("panel_wrapper_identity={}", owner.birth),
+                    ]);
+                    let out = oms_command_operations::run(
+                        oms_command_operations::App::Events,
+                        &args,
+                        &repo,
+                        &spy.stop,
+                    );
+                    assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+                    let panel = spy.load();
+                    let before = native_assignment_state(&repo, ROOM);
+                    for (stage, deadline) in [
+                        ("operator_exit_armed", u64::MAX),
+                        ("operator_exit_claimed", 0),
+                    ] {
+                        write_assisted_exit_fixture(&panel, stage, deadline);
+                        spy.calls.borrow_mut().clear();
+                        let error = send("native-one", "inspect source").unwrap_err();
+                        assert!(error.message.contains("assisted exit"), "{}", error.message);
+                        assert_eq!(native_assignment_state(&repo, ROOM), before);
+                        assert!(spy.mutating_calls().is_empty());
+                    }
+                    // An expired arm that was never claimed does not block a live Main.
+                    write_assisted_exit_fixture(&panel, "operator_exit_armed", 0);
+                    let accepted = send("native-one", "inspect source").unwrap();
+                    assert_eq!(accepted.0, 0);
+                    let accepted: Value = serde_json::from_slice(&accepted.1).unwrap();
+                    assert_eq!(accepted["status"], "submitted");
+                    continue;
+                }
                 spy.calls.borrow_mut().clear();
                 if scenario == 0 {
                     // Missing criteria fails before any claim or input side effect.
