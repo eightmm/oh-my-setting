@@ -260,7 +260,7 @@ fn repair_feedback(
         terminalize_repair(ctx, id, lease)?;
         return Ok(Some(out));
     }
-    let repaired = show(ctx, id)?;
+    let repaired = show_delegated_review(ctx, id)?;
     require(
         value::text(&repaired, "state") == "review"
             && value::text(&repaired, "lease_id") == lease
@@ -292,6 +292,18 @@ fn show(ctx: &Context<'_>, id: &str) -> Result<Value> {
     let out = ctx.action(&Request::new(Action::EvidenceSnapshot).with("id", id))?;
     require(out.code == 0, "cannot read plan task")?;
     value::parse(&out.stdout)
+}
+fn show_delegated_review(ctx: &Context<'_>, id: &str) -> Result<Value> {
+    let Some(gates) = ctx.gates else {
+        return show(ctx, id);
+    };
+    crate::checkpoint(ctx.interrupted)?;
+    let shown = {
+        let _gate = gates.plan();
+        ctx.plan()?.show_task_with_locked_snapshot(id)?
+    };
+    require(shown.code == 0, "cannot read plan task")?;
+    value::parse(&shown.stdout)
 }
 fn action(ctx: &Context<'_>, kind: Action, id: &str, lease: &str) -> Result<Output> {
     ctx.action(&Request::new(kind).with("id", id).with("lease-id", lease))
@@ -717,7 +729,7 @@ pub(crate) fn run_task(
                 return Ok(output);
             }
         }
-        task = show(ctx, &id)?;
+        task = show_delegated_review(ctx, &id)?;
         require(
             value::text(&task, "state") == "review"
                 && value::text(&task, "lease_id") == lease
@@ -770,7 +782,7 @@ pub(crate) fn run_task(
                 let repair_code = repaired.code;
                 output.append(repaired);
                 if repair_code == 0 {
-                    task = show(ctx, &id)?;
+                    task = show_delegated_review(ctx, &id)?;
                     require(
                         value::text(&task, "state") == "review"
                             && value::text(&task, "lease_id") == lease

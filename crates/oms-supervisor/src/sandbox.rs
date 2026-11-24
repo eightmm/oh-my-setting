@@ -157,6 +157,63 @@ pub fn wrap_command(
     }
 }
 
+/// A verifier executes an acknowledged checkout without seeing host homes,
+/// sockets, or processes. Unlike ordinary workers this profile has no host
+/// root bind and no fallback. The caller supplies the trusted read-only tools.
+#[cfg(target_os = "linux")]
+pub fn isolated_checkout(
+    program: &OsStr,
+    args: &[OsString],
+    checkout: &Path,
+    read_only: &[(PathBuf, PathBuf)],
+) -> Result<(OsString, Vec<OsString>), String> {
+    let binary = ["/usr/bin/bwrap", "/usr/local/bin/bwrap"]
+        .into_iter()
+        .find(|path| executable(Path::new(path)))
+        .ok_or("system bubblewrap is unavailable")?;
+    let mut wrapped: Vec<OsString> = [
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--new-session",
+        "--json-status-fd",
+        "1",
+        "--die-with-parent",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--bind",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    wrapped.extend([checkout.as_os_str().into(), checkout.as_os_str().into()]);
+    for (source, target) in read_only {
+        wrapped.extend([
+            "--ro-bind".into(),
+            source.as_os_str().into(),
+            target.as_os_str().into(),
+        ]);
+    }
+    wrapped.extend([
+        "--chdir".into(),
+        checkout.as_os_str().into(),
+        "--".into(),
+        // Bubblewrap closes the status descriptor before starting its child.
+        // Give the verifier a writable stdout without mixing it with status.
+        "/bin/sh".into(),
+        "-c".into(),
+        "exec \"$@\" >&2".into(),
+        "oms-batch-verifier".into(),
+        program.into(),
+    ]);
+    wrapped.extend_from_slice(args);
+    Ok((binary.into(), wrapped))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

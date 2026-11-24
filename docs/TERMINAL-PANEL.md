@@ -1336,9 +1336,9 @@ users. Every ancestor through the filesystem root must be owned by the current u
 root. An ancestor writable by the group or other users must have the sticky bit.
 
 Refusals name the offending directory and `--home PATH` elsewhere as a fix; the command
-never changes existing permissions automatically. Registration requires verifiable
-ownership, so native Windows Python, which cannot report file owners, refuses it. The
-main home is the parent environment's `CODEX_HOME`, or `~/.codex`. The new home links
+never changes existing permissions automatically. Registration verifies ownership on
+supported hosts. On Windows, run OMS [inside WSL2](INSTALL.md#windows-via-wsl2).
+The main home is the parent environment's `CODEX_HOME`, or `~/.codex`. The new home links
 `AGENTS.md`, `config.toml`, `hooks.json`, `.hook-trust`, `plugins`, `rules`, and
 `skills` to the matching main-home entries. Re-running keeps matching links and existing
 files. Conflicting links are reported; `--repair` replaces only those links.
@@ -1474,6 +1474,18 @@ show Weekly from a local statusline callback verified for its current launch.
 The detail shows callback age and reset. An observation with missing proof or
 an elapsed window leaves Weekly unavailable. This reading stays outside
 account ranking.
+
+For an open Claude or Antigravity lead, use `--orchestrator PROVIDER --task TEXT`
+from the current Main. OMS sends Enter once when it can verify the complete draft
+in the provider composer. A narrow pane, cropped composer or wrap that hides text
+can leave a draft without submitting it. Inspect the provider pane. If Enter was
+withheld, review and submit the draft directly in that pane. If Enter may have
+reached the provider, check the existing conversation before sending again.
+
+A cleared composer reports unverified delivery unless OMS has provider evidence.
+For Antigravity on supported Linux hosts, OMS can confirm the full request from
+the current lead's native conversation even if its user header wraps or scrolls
+out of view. Delivery confirmation is separate from task completion.
 
 From the current Main of an unmanaged room, open one separate Codex lead with
 `oms panel --orchestrator codex --lead alternate --account ID`. The primary Codex
@@ -1689,14 +1701,14 @@ a scoped brief and a verifier.
 
 | Verification path | Default timeout |
 |---|---|
-| Panel `--verify`, patch-admit and patch-land admission | 20m |
-| `oms peer-review --gate` | 20m |
-| Other standalone peer commands | 10m |
+| Patch admission via `oms patch-admit` or `oms patch-land` | 20m per verifier command |
+| Native peer verifier, including the `oms peer-review --gate` verify step | 30m |
+| Panel `--finalize --verify` | 30m |
+| Plan completion verifier | 10m |
 
-Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must
-be positive finite durations up to 24h; zero, malformed and larger values are refused
-before the command runs on both native and Python timeout backends. An empty value keeps
-the caller's default, and fractional durations remain valid.
+Panel finalization accepts `--verify-timeout SECONDS` with a whole number from 1 to
+86,400. The Plan completion verifier reads `OMS_PEER_VERIFY_TIMEOUT`. When set, it
+must be a positive finite duration up to 24h, such as `1.5m`.
 
 #### Heartbeats during verification
 
@@ -2320,6 +2332,204 @@ The per-clone lock serializes callers sharing an integration clone; the plan lea
 compare-and-set remains the authority across clones. Use `patch-land --recover` for
 incomplete application receipts. If finish succeeds but result recording fails, retry
 only `--finalize` after confirming the exact task completion.
+
+### Retain a bound native report
+
+The owning Main can retain a report from a canonical task assigned to its existing
+ordinary Codex lead. First bind the task with
+`oms panel --repo . --room ROOM --orchestrator codex --task-id TASK --task TEXT`.
+New assignments require a bounded task scope and parent verifier, and freeze the
+Plan/task/lease/epoch, Main/Room/attempt, checkout/base and declared role. The role
+defaults to `worker` and does not grant capabilities. Requirement IDs come from the
+registered task; only tasks without such IDs use their ID/title as the fallback
+deliverable. A complete return inventory covers that contract, not every possible
+meaning of the user's request.
+
+Run `oms panel --repo . --results --task-id TASK --json`. The task row's
+`native_assignment.report` supplies `source_template`, `manifest_template` and
+`input_paths`. The two input layers have separate purposes:
+
+1. Fill the typed **source JSON** template with outcome `reported`, `blocked` or
+   `needs-decision`, a summary, every expected requirement ID, changed paths, and
+   claimed checks/evidence. Preserve its identity fields; verification continues to
+   use the frozen parent task's verifier. Each evidence
+   entry names normalized path, exact byte count and SHA-256; a candidate names one
+   of those entries in `candidate_patch`. Write the source at the generated path,
+   `.oms/artifacts/native-inputs/ATTEMPT/round-N/source.json`.
+2. Fill the existing **capture manifest** template with the SHA-256 of those exact
+   source bytes and the same summary. Every source evidence entry must map to its
+   candidate patch or one of at most four verification references. Write it at
+   `.oms/artifacts/native-inputs/ATTEMPT/round-N/manifest.json`.
+
+For example, the capture manifest still has its original shape:
+
+```json
+{
+  "schema": 1,
+  "attempt_id": "ATTEMPT",
+  "binding_sha256": "BINDING_SHA256",
+  "kind": "candidate",
+  "summary": "Candidate and reported verification ready for inspection",
+  "source": {"path": ".oms/artifacts/native-inputs/ATTEMPT/round-1/source.json", "sha256": "SOURCE_SHA256"},
+  "patch": {"path": ".oms/artifacts/native-inputs/ATTEMPT/round-1/candidate.patch", "sha256": "PATCH_SHA256"},
+  "verification": [
+    {"path": ".oms/artifacts/native-inputs/ATTEMPT/round-1/checks.txt", "sha256": "VERIFICATION_SHA256"}
+  ]
+}
+```
+
+Replace the placeholders with the recorded attempt and lowercase SHA-256 digests
+of the exact files. `binding_sha256` is the frozen assignment file's digest. Use
+`"kind": "findings"` and omit `patch` for a read-only return.
+Verification references are optional retained evidence; even text claiming a pass
+or exit zero remains **reported**. Typed evidence resolves from the exact frozen
+Lead checkout; `.oms/artifacts/` evidence resolves from the selected state repo
+and still obeys forbidden scope. The manifest accepts those exact relative paths
+or their bound absolute equivalents. Its source path resolves against `--repo`.
+Inputs must be owned, single-link regular files, without symlink traversal. The
+manifest and typed source are each bounded to 64 KiB, summary to 4096 bytes,
+each verification file to 1 MiB and patch to 16 MiB. Unknown fields, duplicate
+JSON keys, unsafe paths, mismatched evidence inventory and decoded sensitive
+content are refused. Legacy prose assignments retain the 64 KiB manifest limit and
+1 MiB source limit; they do not gain the typed reconciliation contract.
+
+```bash
+oms panel --repo . --room ROOM --orchestrator codex --task-id TASK \
+  --native-result .oms/artifacts/native-inputs/ATTEMPT/round-1/manifest.json
+oms panel --repo . --results --task-id TASK --json
+```
+
+Registration rechecks the original task and lease, parent Main, Room, live pane and
+session generation, account binding, working directory and Git base. Candidate
+paths must fit the canonical task's allowed and forbidden scope. Observed pre-append
+custody, claim, digest or scope drift refuses registration. Room, lease, pane and
+account checks are sampled across separate stores rather than an atomic cross-store
+lock, while the lifecycle append rejects exact Main liveness/currentness or
+child/predecessor changes under the ledger lock; post-append cross-store drift can
+return uncertain publication with possible prior registration requiring
+reconciliation. This command never opens a replacement
+lead, sends native input, changes a task's state, or converts native work into a
+managed delegate.
+
+The existing artifact store retains immutable manifest, source, patch and verification
+snapshots. A checked lifecycle reference publishes the report only after these bytes
+are retained. Retrying the identical manifest reuses the same report and event,
+including after an interruption between retaining snapshots and publication, while
+the original live custody remains valid. A changed typed report in the same round
+requires its next source revision, the previous **source** digest in
+`previous_report_sha256`, and the previous **retained result** digest in both the
+manifest's `previous_sha256` and CLI `--expected-previous-result-sha256 SHA`.
+The returned `result.sha256` identifies that retained result artifact; it is also
+shown as `native_assignment.report.artifact_sha256`. Use this public digest for
+Main decisions and continuation. The first report and identical replay need no
+replacement flag. The generated templates preserve the separate digest fields.
+Legacy revisions keep the existing manifest-only predecessor check.
+
+Main explicitly reviews that result, then either holds the task, requests another
+round, or records review:
+
+```bash
+oms panel --repo . --room ROOM --native-reconcile ATTEMPT \
+  --result-sha256 RESULT_SHA256 --decision request-revision
+oms panel --repo . --room ROOM --orchestrator codex --task-id TASK \
+  --after-native-result RESULT_SHA256 --task 'Address the reviewed gaps'
+```
+
+The other decisions are `blocked` and `reviewed`. Continuation preserves the same
+task, claim and attempt, records a new immutable round packet and retains the prior
+result in history. At most 32 rounds are admitted. An unknown native send is never
+resent automatically. Main review of a candidate can establish canonical Plan
+`review` with the exact lease and captured artifact/patch; run the existing
+`patch-admit`/`patch-land --plan-task` path from a clean integration checkout for
+actual verification and completion. Report commands and claimed checks are never
+executed. A native candidate remains external patch evidence rather than managed
+delegate provenance, and report ingestion/review alone grants no acceptance.
+
+The Plan review freezes both retained evidence digests. Admission and the final
+Plan land/finish fences reject a changed report or patch, while landing can move
+the exact patch bytes into its existing frozen store. Reconciliation cannot adopt
+an older path-only review as an exact native review.
+
+After genuine canonical Plan completion or cancellation, repeating exact-result
+`--native-reconcile ... --decision reviewed` retires the assignment lifecycle and
+Room reservation. The reusable Lead session remains open; this administrative
+retirement supplies no native child-cleanup proof. Results then points to the next
+ready task instead of recommending admission again. Native consumption and
+completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
+permissions `unknown`, and child cleanup `unsupported`.
+
+If a first assignment was interrupted before writing its packet and its frozen
+inputs have changed, the owning Main can explicitly retire the original intent.
+Read `refs.native_intent_sha256` from `oms events show --attempt ATTEMPT --json`.
+
+```bash
+oms panel --repo . --room ROOM --owner codex --native-reconcile ATTEMPT \
+  --intent-sha256 INTENT_SHA256 --decision retire-unsent
+```
+
+This requires the original queued record, the exact Plan claim, a missing packet
+and no assignment member in the Room. It frees the Lead reservation without
+changing the Plan. To assign that task again, explicitly release the exact Plan
+lease and claim a fresh one. Bound, sent and uncertain attempts retain their
+existing reconciliation path.
+
+#### Continue after a Main swap
+
+The successor Main first reads `oms panel --results --task-id TASK --json`. Its
+`adopt` next action supplies the exact current assignment digest and, when present,
+the public retained-result digest:
+
+```bash
+oms panel --repo . --room ROOM --native-adopt ATTEMPT \
+  --assignment-sha256 ASSIGNMENT_SHA256 --result-sha256 RESULT_SHA256
+```
+
+Omit `--result-sha256` only when the current result is absent. Adoption checks the
+ordered canonical Room Main-swap chain and exact target provider/harness/model,
+proves outgoing wrapper and native process generations are absent, and pins the
+fresh Main's session/pane custody. Reusing the same tmux pane is supported; a live,
+unknown or competing old Main is refused. The original ordinary Codex Lead,
+account/home and checkout remain exact. The original account receipt is verified
+through its frozen private anchor rather than reselected for the new Main.
+
+An immutable record is appended under the existing assignment directory. Its
+checked predecessor chain is bounded to 32 transitions. Old packets, report bytes,
+task claimant, lease/epoch, attempt and round stay intact; adoption neither sends
+input nor resets execution or spend identity. Repeating the same adoption is
+idempotent. Import, review, report revision and same-lease continuation then use the
+usual commands above. The Room participant remains stable while Main lifecycle
+attempts change, including when a supported Main provider swap changes the owner.
+
+If the canonical task was already done or cancelled, adoption records retirement
+custody only. It requires the exact frozen task/result and current Main proof, but
+does not claim that the historical Lead or checkout is still live. This permits
+administrative retirement after a legitimate checkout advance and cannot authorize
+new input for that settled task. Retire through exact-result reconciliation, then
+select the next ready task. Native child cleanup remains unconfirmed.
+
+The existing bounded tick reminder uses this checked custodian after adoption and
+freshly verifies its Main process and session. Its dedupe key pins the assignment,
+input/result digest and effective Main attempt, so a cue delivered to the old Main
+does not suppress the new Main's cue for the same unconsumed return. Both cues
+count against the existing daily quota. Retirement-only custody asks for administrative retirement;
+tick does not import a result, select a decision or dispatch another Lead round.
+
+Task, participant and list Results show transport, return claims, Main resolution
+and next action separately. Ordinary typed projection reads at most 20 assignments,
+each with bounded binding/result/source metadata; it does not reopen patch or
+verification bodies. Raw/Transcript and Diff/Files perform the explicit retained
+byte checks. Absent, invalid and unavailable evidence stay distinct. Before the
+first import, a safely observed manifest at the generated input path produces an
+import hint only; its presence is not a report or verification result. The existing
+bounded tick wake can notify an idle eligible Main about pending input or changed
+result/decision, with exact digest deduplication. This bounded reminder enters
+Main's native provider session and may start a model turn. Import, reconciliation
+and Lead dispatch remain explicit Main actions, while approved goal-drive/autopilot
+contracts own their existing bounded automatic execution.
+
+Typed binding currently supports ordinary Codex Leads. Other native providers and
+alternate Codex use managed `--dispatch ROLE --task-id TASK` for canonical work.
+Explicit `--unbound --task TEXT` permits conversation without canonical task credit.
 
 ### Results reader
 
@@ -3103,7 +3313,9 @@ response usage record. Input, output, reasoning and total apply to that
 response. The reasoning count is part of output. Cache read/write and
 reasoning use `?` when zero may represent omitted details. The sample can
 come from an incomplete response or compaction. The reader leaves usage
-unreported when it cannot verify a record.
+unreported when it cannot verify the newest recorded response, including
+invalid or conflicting counters. Replaying an older response does not restore
+its counters; a later distinct valid response can supply a new sample.
 
 The selected call's **Launch receipts** list groups measured counters by
 provider and recorded launch account. `@?` marks an unknown account. The
@@ -3178,10 +3390,9 @@ are excluded from live receiver discovery. Unconfirmed sends never retry
 implicitly, and safe-point delivery still requires a live participating session.
 Incomplete native registry discovery cannot authorize an otherwise apparently
 unique inbox. Collection and room errors stay visible in graph and narrow views.
-The canonical operator suite has an optional `OMS_PANEL_SOAK_SECONDS=30..3600`
-Unix fixture run for sustained watch, addressed delivery, explicit ack, invalid
-cursor and temporary room-loss recovery. It is off in ordinary gates and uses
-fake providers rather than live accounts or GUI delivery.
+The [native watch tests](../crates/oms-command-panel/src/watch.rs) exercise refresh
+and recovery with fixtures. The [Room contract tests](../crates/oms-command-room/tests/room_contract.rs)
+cover addressed delivery and cursor behavior.
 
 Sources: [Codex thread links](https://learn.chatgpt.com/docs/reference/commands#deep-links),
 [Claude CLI to Desktop](https://code.claude.com/docs/en/desktop#coming-from-the-cli).
@@ -3351,45 +3562,25 @@ Native launches propagate the process exit. Existing tools retain patch
 admission, verification and publication authority. No permission bypass,
 automatic patch application, commit, push, installation or new service is added.
 
-The existing operator-tools suite exercises exact role routes through real OMS front
-doors and lifecycle writers using fixture provider executables. It checks model/effort
-arguments, parent links, titles, read/write separation, worktree isolation, returned
-patches, review gates, worker recursion rejection and read-only views. Native PTY and
-real tmux checks cover inline restoration, exact resume, main selection, independent
-sidebars and detach/preservation. Width/height, Korean title wrapping, cached frame
-cadence, changed-row repaint, resize, reduced motion, attribution and unsafe-label tests
-cover the renderer.
+The native [panel integration fixtures](../crates/oms-command-panel/tests/panel_parity.rs)
+cover routing, account conflicts and result views. [Panel core fixtures](../crates/oms-panel-core/tests/parity.rs)
+cover dispatch, acceptance and recovery. The [renderer](../crates/oms-command-panel/src/render.rs)
+and [watch tests](../crates/oms-command-panel/src/watch.rs) cover views, controls and PTY
+refresh. [Peer](../crates/oms-command-peer/tests/peer_contract.rs),
+[Room](../crates/oms-command-room/tests/room_contract.rs) and
+[provider hook](../crates/oms-command-hooks/tests/host_adapter.rs) fixtures cover their
+respective review, message and notifier contracts.
 
-A PTY watch verifies actual incremental animation output without lifecycle writes. The
-lifecycle-events suite covers bounded refs and immutable idempotency. Fixture execution
-does not establish account access or a live main's judgment quality. When a sandbox
-denies Unix sockets, the suite reports socket-dependent sections as skipped and exits
-77; parent verification outside that sandbox remains authoritative. The same operator
-suite covers council routes, durable results, verifier and patch lineage, privacy
-refusal and delivery deduplication/retry after interruption.
+```bash
+cargo test --locked --offline -p oms-command-panel --lib --test panel_parity
+cargo test --locked --offline -p oms-panel-core --lib --test parity
+cargo test --locked --offline -p oms-command-room --test room_contract
+```
 
-The notifier suite covers unloaded and busy receivers, shell wrappers, early events,
-lost acknowledgements and correlated persisted output. The operator suite prints
-per-section and per-shard timings. `ci-status history` shows recent completed CI runs
-and ranked failing jobs/tests. The operator suite also verifies the main hierarchy with
-earlier mains on record, legacy ownership, separate review groups, compact/detail
-budgets, attention filtering, numbered result selection, menu cycling and view
-inheritance in an existing tmux server. Use `tests/operator-tools-smoke.sh
---list-sections` to see focused verification areas: `auto-review` covers the review
-gate, `native-pty` covers terminal lifecycle behavior, and `room-rollover` covers room
-succession; combine independent areas with commas.
-
-`core/room-and-board-rendering` covers board rendering and shared-plan verifier
-warnings; `dispatch-results` covers dispatch and result handling. Size a composed
-`--verify` from its measured section timings: sequential sections add together, and slot
-waiting precedes the verifier clock. Use a finite caller override when that composition
-outlasts the default. Local measurements on 2026-10-31 were 16s for
-`core/room-and-board-rendering`, 422s for `dispatch-results` and 4s for the two selected
-timeout regressions (`test_python_timeout_fallback_bounds_verifier` and
-`test_run_with_timeout_require_refuses_unbounded`).
-
-These scoped runs did not reproduce a 20m budget exhaustion; they do not bound the full
-serial suite or other host loads.
+`oms ci-status history` shows recent CI runs. Use measured timings to size composed
+verifiers, since sequential commands share one timeout. Historical timings from the
+retired operator suite on 2026-10-31 were 16s for Board rendering, 422s for dispatch
+results and 4s for two timeout cases.
 
 
 ## Researcher, scholar and supporting strategies

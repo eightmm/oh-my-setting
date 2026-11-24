@@ -108,6 +108,12 @@ Commands:
                                      claimed_at so a live worker is not reclaimed.
   review --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
                                      Move a claimed/running task to review.
+         [--expected-review-artifact-sha256 SHA --expected-review-patch-sha256 SHA]
+                                     Both digests opt into exact evidence:
+                                     freeze the artifact and patch under the
+                                     reviewed lease. Admission, land and finish
+                                     reject changed bytes. Legacy reviews keep
+                                     their existing path-only contract.
   repair --id ID [--lease-id TOKEN] [--artifact PATH]
                                      Re-enter a reviewed task under the same
                                      lease for one explicitly bounded repair.

@@ -1305,6 +1305,198 @@ fn merged_dependencies_scheduling_and_late_results() {
 }
 
 #[test]
+fn reviewed_evidence_refuses_substitution_and_keeps_exact_frozen_finish() {
+    if isolated("reviewed_evidence_refuses_substitution_and_keeps_exact_frozen_finish") {
+        return;
+    }
+    use oms_command_plan::{Action, Context, Plan, Request, json};
+    let tmp = Tmp::new();
+    let repo = repo(&tmp);
+    let stop = AtomicBool::new(false);
+    let request = Request::new(Action::Init).with("goal", "Bind reviewed evidence");
+    let context = Context::from_environment_at(&request, &repo, &repo, None).unwrap();
+    let plan = Plan::open(context, &Host, &stop).unwrap();
+    plan.execute(&request).unwrap();
+    plan.execute(
+        &Request::new(Action::Add)
+            .with("id", "exact")
+            .with("title", "Exact external candidate")
+            .with("allowed", "a.txt")
+            .with("verify", "true"),
+    )
+    .unwrap();
+    plan.execute(
+        &Request::new(Action::Claim)
+            .with("id", "exact")
+            .with("provider", "codex"),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".oms/artifacts")).unwrap();
+    let artifact = ".oms/artifacts/native-result.json";
+    let patch = ".oms/artifacts/native-candidate.patch";
+    let report = b"Reviewed native result\n";
+    let original =
+        b"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+reviewed\n";
+    fs::write(repo.join(artifact), report).unwrap();
+    fs::write(repo.join(patch), original).unwrap();
+    let lease = plan
+        .load()
+        .unwrap()
+        .task("exact")
+        .unwrap()
+        .text("lease_id")
+        .to_owned();
+    let review = Request::new(Action::Review)
+        .with("id", "exact")
+        .with("lease-id", &lease)
+        .with("artifact", artifact)
+        .with("patch", patch)
+        .with("expected-review-artifact-sha256", json::sha(report))
+        .with("expected-review-patch-sha256", json::sha(original));
+    let claimed = fs::read(repo.join(".oms/plan/tasks.json")).unwrap();
+    for missing in [
+        "expected-review-artifact-sha256",
+        "expected-review-patch-sha256",
+    ] {
+        let mut partial = review.clone();
+        partial.values.remove(missing);
+        assert!(plan.execute(&partial).is_err());
+        assert_eq!(
+            fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+            claimed
+        );
+    }
+    for (field, value) in [
+        ("expected-review-patch-sha256", "invalid".into()),
+        ("expected-review-artifact-sha256", "0".repeat(64)),
+        ("patch", ".oms/artifacts/missing.patch".into()),
+    ] {
+        assert!(plan.execute(&review.clone().with(field, value)).is_err());
+        assert_eq!(
+            fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+            claimed
+        );
+    }
+    plan.execute(&review).unwrap();
+    plan.execute(
+        &Request::new(Action::Repair)
+            .with("id", "exact")
+            .with("lease-id", &lease),
+    )
+    .unwrap();
+    assert!(
+        plan.load()
+            .unwrap()
+            .task("exact")
+            .unwrap()
+            .opt("review_evidence")
+            .is_none()
+    );
+    plan.execute(&review).unwrap();
+    let land = |bytes: &[u8]| {
+        Request::new(Action::Land)
+            .with("id", "exact")
+            .with("lease-id", &lease)
+            .with("expected-review-patch", patch)
+            .with("expected-review-patch-sha256", json::sha(bytes))
+            .with("expected-review-verify", "true")
+            .with("expected-review-executor-id", "")
+            .with("expected-review-executor-soul-sha256", "")
+            .with("expected-review-lease-id", &lease)
+    };
+    let before = fs::read(repo.join(".oms/plan/tasks.json")).unwrap();
+    let snapshot = Request::new(Action::EvidenceSnapshot).with("id", "exact");
+    plan.execute(&snapshot).unwrap();
+    for bad in [json::Value::Null, json::object([])] {
+        let mut malformed = json::parse(&before).unwrap();
+        let mut tasks = malformed.get("tasks").clone();
+        let mut task = tasks.get("exact").clone();
+        task.set("review_evidence", bad).unwrap();
+        tasks.set("exact", task).unwrap();
+        malformed.set("tasks", tasks).unwrap();
+        fs::write(
+            repo.join(".oms/plan/tasks.json"),
+            json::encoded(&malformed).unwrap(),
+        )
+        .unwrap();
+        assert!(plan.execute(&snapshot).is_err());
+        assert!(plan.execute(&land(original)).is_err());
+    }
+    fs::write(repo.join(".oms/plan/tasks.json"), &before).unwrap();
+    let substituted = b"different candidate bytes\n";
+    fs::write(repo.join(patch), substituted).unwrap();
+    assert!(plan.execute(&snapshot).is_err());
+    assert!(
+        plan.execute(&land(substituted)).is_err(),
+        "a newly hashed patch must not replace the bytes bound by the original review"
+    );
+    assert_eq!(fs::read(repo.join(".oms/plan/tasks.json")).unwrap(), before);
+    fs::write(repo.join(patch), original).unwrap();
+    fs::write(repo.join(artifact), b"substituted report\n").unwrap();
+    assert!(plan.execute(&land(original)).is_err());
+    assert_eq!(fs::read(repo.join(".oms/plan/tasks.json")).unwrap(), before);
+    fs::write(repo.join(artifact), report).unwrap();
+    plan.execute(&land(original)).unwrap();
+    let landing = plan.load().unwrap().task("exact").unwrap().clone();
+    let frozen = ".oms/artifacts/frozen.patch";
+    let finish = Request::new(Action::Finish)
+        .with("id", "exact")
+        .with("lease-id", &lease)
+        .with("patch", frozen)
+        .with(
+            "expected-landing-receipt-sha256",
+            json::receipt_digest(&landing).unwrap(),
+        );
+    fs::write(repo.join(frozen), substituted).unwrap();
+    assert!(plan.execute(&finish).is_err());
+    assert_eq!(plan.load().unwrap().task("exact").unwrap(), &landing);
+    fs::write(repo.join(frozen), original).unwrap();
+    plan.execute(&finish).unwrap();
+    let done = plan.load().unwrap().task("exact").unwrap().clone();
+    assert_eq!(done.text("state"), "done");
+    assert_eq!(done.text("patch"), frozen);
+    assert_eq!(done.get("review_evidence"), landing.get("review_evidence"));
+    plan.execute(&snapshot).unwrap();
+    plan.execute(
+        &Request::new(Action::Block)
+            .with("id", "exact")
+            .with("lease-id", &lease)
+            .with("reason", "owner withdrew this task"),
+    )
+    .unwrap();
+    let blocked = plan.load().unwrap().task("exact").unwrap().clone();
+    plan.execute(&snapshot).unwrap();
+    let decision_path = ".oms/artifacts/cancel-decision.md";
+    let decision = b"Owner withdrew the reviewed task\n";
+    fs::write(repo.join(decision_path), decision).unwrap();
+    plan.execute(
+        &Request::new(Action::Cancel)
+            .with("id", "exact")
+            .with("operator-consent", "cancel")
+            .with("expected-state", "blocked")
+            .with("expected-lease-id", &lease)
+            .with(
+                "expected-plan-sha256",
+                json::sha(fs::read(repo.join(".oms/plan/tasks.json")).unwrap()),
+            )
+            .with("expected-task-sha256", json::hash(&blocked).unwrap())
+            .with("decision-artifact", decision_path)
+            .with("expected-decision-artifact-sha256", json::sha(decision))
+            .with("reason", "owner withdrew this task"),
+    )
+    .unwrap();
+    fs::remove_file(repo.join(artifact)).unwrap();
+    fs::remove_file(repo.join(frozen)).unwrap();
+    let cancelled = json::parse(&plan.execute(&snapshot).unwrap().stdout).unwrap();
+    assert_eq!(cancelled.text("state"), "cancelled");
+    assert_eq!(
+        cancelled.get("review_evidence"),
+        landing.get("review_evidence")
+    );
+    assert!(plan.execute(&land(original)).is_err());
+}
+
+#[test]
 fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
     if isolated("panel_acceptance_checks_canonical_claimed_and_running_expiry") {
         return;
@@ -3753,6 +3945,66 @@ fn github_pr_recording_requires_accepted_same_repo_pr_url() {
         0,
     );
     assert_eq!(task("pr-ok").text("pr"), format!("{REPO}#19"));
+
+    // A passed receipt for the same path cannot complete a different exact review.
+    let published = task("pr-ok");
+    let commit = published.get("landing").text("sha");
+    let id = "exact-external-review";
+    let artifact = ".oms/artifacts/exact-external-review.md";
+    let patch = ".oms/artifacts/exact-external-review.patch";
+    let report = b"Reviewed alternative product\n";
+    let reviewed = b"diff --git a/src/pr-ok.txt b/src/pr-ok.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/pr-ok.txt\n@@ -0,0 +1 @@\n+reviewed product\n";
+    fs::write(r.join(artifact), report).unwrap();
+    fs::write(r.join(patch), reviewed).unwrap();
+    assert_eq!(
+        at(&[
+            "add",
+            "--id",
+            id,
+            "--title",
+            id,
+            "--allowed",
+            "src/pr-ok.txt",
+        ])
+        .0,
+        0
+    );
+    assert_eq!(at(&["claim", "--id", id, "--provider", "codex"]).0, 0);
+    let claimed = task(id);
+    let lease = claimed.text("lease_id");
+    let (rc, _, err) = at(&[
+        "review",
+        "--id",
+        id,
+        "--lease-id",
+        lease,
+        "--artifact",
+        artifact,
+        "--patch",
+        patch,
+        "--expected-review-artifact-sha256",
+        &json::sha(report),
+        "--expected-review-patch-sha256",
+        &json::sha(reviewed),
+    ]);
+    assert_eq!(rc, 0, "{err}");
+    let plan_file = r.join(".oms/plan/tasks.json");
+    let before = fs::read(&plan_file).unwrap();
+    let (rc, _, err) = at(&[
+        "finish",
+        "--id",
+        id,
+        "--lease-id",
+        lease,
+        "--landed-commit",
+        commit,
+    ]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(
+        err.contains("exact reviewed evidence requires patch-land"),
+        "{err}"
+    );
+    assert_eq!(fs::read(&plan_file).unwrap(), before);
 
     // 2. Cross-repo PR URL is refused (PR identity omitted).
     land_case(

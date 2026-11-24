@@ -10,6 +10,7 @@ mod config;
 mod doctor;
 mod effects;
 mod fingerprint;
+mod hook_diagnostics;
 mod install;
 mod integrations;
 mod lifecycle_lock;

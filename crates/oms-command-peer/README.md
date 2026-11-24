@@ -81,8 +81,8 @@ reads, malformed JSON, output bounds, cancellation and withholding one source.
 | `board` | Claims, stale recovery, heartbeat, finish/abort, owner-preserving replay and tag validation |
 | `view` | Local result normalization, offline assets, capsules, source-bound metadata and idempotent feedback imports |
 
-Path-scope normalization and bounded glob matching reuse the existing
-`oms-contract-markdown` port of `path_scope.py`.
+Path-scope normalization and bounded glob matching are shared through
+[`oms-contract-markdown`](../oms-contract-markdown/src/scope.rs).
 
 Core execution transports currently cover Codex, Claude, Antigravity, Pi,
 Gemini and Qwen. Other registered transports are refused. Read calls in a Git
@@ -351,10 +351,10 @@ The remaining behavior is still refused or incomplete:
   Native resume uses physical registration and its
   final fence as described above. Prompts-only Antigravity capture is bounded by
   the general 64 MiB reader and is not a streaming history implementation.
-- Remote artifact views still refuse. Legacy `artifact_view.py::ssh_read` uses
-  SSH plus a remote no-follow reader; the requested private curl-config transport
-  is a different interface. Neither transport may silently lose remote no-follow
-  validation. View embedding still needs frozen fixture comparison.
+- [Native artifact views](src/view.rs) refuse remote reads. The retired
+  `artifact_view.py::ssh_read` used a remote no-follow reader. Any future
+  transport must preserve remote no-follow validation. View embedding still needs frozen
+  fixture comparison.
 - Command digest capture remains bounded in memory, and retention is not complete.
   General acquisition remains 64 MiB, threads 16 MiB and native transcripts
   32 MiB; supplied packs and model configuration have their tighter bounds above.
@@ -404,12 +404,16 @@ services. It uses isolated subprocess environments and unique initialized Git
 repositories; no provider executable or online service is needed.
 The owner must still run canonical behavioral suites for full migration parity.
 
-Historical migration sources: `scripts/thread.sh`,
+Current source owners include [thread](src/thread.rs), [review](src/review.rs),
+[context packs](src/context_pack.rs), [session handoff](src/session.rs),
+[ML context](src/ml_context.rs), and [peer requests](src/peer.rs).
+
+Historical migration sources (paths from before native routing): `scripts/thread.sh`,
 `scripts/lib/review_confirm.py`, `scripts/lib/review_since.py`,
 `scripts/lib/red_check.py`, `scripts/lib/answer-quality.py`,
 `scripts/lib/oms_runtime/context_pack.py`, `scripts/lib/oms_sessions/`,
 `scripts/session-handoff.sh`, `scripts/agent-ml-context.sh`,
-`scripts/detect-project-style.sh`, and `scripts/lib/peer-common.sh`.
+`scripts/detect-project-style.sh`, `scripts/lib/peer-common.sh`, and `path_scope.py`.
 The retired Python tests are historical references. Current native fixtures and
 the affected root integration checks supply behavioral evidence; platform, live
 provider and release/install verification remain separate.

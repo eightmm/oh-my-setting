@@ -368,6 +368,182 @@ fn provider_call(
     )
 }
 
+fn native_provider_answer(binary: &std::ffi::OsStr, answer: &[u8]) -> Vec<u8> {
+    use serde_json::{json, to_vec, to_vec_pretty};
+
+    let answer = std::str::from_utf8(answer).unwrap();
+    if binary == "codex" {
+        [
+            json!({"type":"thread.started","thread_id":"fixture"}),
+            json!({"type":"turn.started"}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":answer}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}),
+        ]
+        .into_iter()
+        .flat_map(|row| [to_vec(&row).unwrap(), vec![b'\n']].concat())
+        .collect()
+    } else if binary == "claude" {
+        [
+            json!({"type":"system","subtype":"init"}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":answer}]}}),
+            json!({"type":"result","subtype":"success","is_error":false,"result":answer}),
+        ]
+        .into_iter()
+        .flat_map(|row| [to_vec(&row).unwrap(), vec![b'\n']].concat())
+        .collect()
+    } else {
+        assert_eq!(binary, "agy");
+        to_vec_pretty(
+            &json!({"conversation_id":"native-fixture","status":"SUCCESS","response":answer}),
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn typed_agent_output_requires_terminal_provider_evidence() {
+    provider_isolated(
+        "typed_agent_output_requires_terminal_provider_evidence",
+        "private",
+        || {
+            use oms_command_telemetry::store::usage::{self, Phase};
+
+            struct NativeReport {
+                probe: ProviderProbe,
+                stdout: Vec<u8>,
+                code: i32,
+                complete: bool,
+            }
+            impl Executor for NativeReport {
+                fn execute(
+                    &self,
+                    req: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let git = req.argv[0] == "git";
+                    let mut result = self.probe.execute(req, stop)?;
+                    if !git {
+                        result.stdout.clone_from(&self.stdout);
+                        result.code = self.code;
+                        result.complete = self.complete;
+                    }
+                    Ok(result)
+                }
+            }
+            let answer = b"Native fixture response.";
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            for (provider, binary, failed) in [
+                (
+                    "codex",
+                    "codex",
+                    serde_json::json!({"type":"turn.failed","error":{"message":"fixture failure"}}),
+                ),
+                (
+                    "claude",
+                    "claude",
+                    serde_json::json!({"type":"result","subtype":"error_during_execution",
+                        "is_error":true,"result":"Native fixture response."}),
+                ),
+                (
+                    "antigravity",
+                    "agy",
+                    serde_json::json!({"conversation_id":"native-fixture",
+                        "status":"ERROR","response":"Native fixture response."}),
+                ),
+            ] {
+                let valid = native_provider_answer(binary.as_ref(), answer);
+                let truncated = if provider == "antigravity" {
+                    &valid[..valid.len() - 1]
+                } else {
+                    let terminal_start = valid[..valid.len() - 1]
+                        .iter()
+                        .rposition(|b| *b == b'\n')
+                        .unwrap();
+                    &valid[..=terminal_start]
+                };
+                let corrupt = [valid.as_slice(), b"\n{"].concat();
+                let failed = serde_json::to_vec(&failed).unwrap();
+                let failed = if provider == "antigravity" {
+                    failed
+                } else {
+                    [truncated, &failed, b"\n"].concat()
+                };
+                for (raw, code, complete, expected) in [
+                    (valid.as_slice(), 0, true, 0),
+                    (answer.as_slice(), 0, true, 2),
+                    (truncated, 0, true, 2),
+                    (&failed, 0, true, 2),
+                    (&corrupt, 0, true, 2),
+                    (valid.as_slice(), 1, true, 2),
+                    (valid.as_slice(), 0, false, 2),
+                    (valid.as_slice(), 130, false, 130),
+                ] {
+                    let repo = provider_repo();
+                    let report = NativeReport {
+                        probe: ProviderProbe::default(),
+                        stdout: raw.to_vec(),
+                        code,
+                        complete,
+                    };
+                    let options = args(&[
+                        "--to",
+                        provider,
+                        "--model",
+                        "fixture-model",
+                        "--prompt",
+                        "fixture question",
+                        "--output-json",
+                    ]);
+                    let result = oms_command_peer::run_with_executor(
+                        "agent-call",
+                        &options,
+                        &repo.0,
+                        source,
+                        &STOP,
+                        &report,
+                    );
+                    assert_eq!(
+                        result.0,
+                        expected,
+                        "{provider}/status {code} complete {complete}: {}",
+                        message(&result)
+                    );
+                    assert_eq!(report.probe.calls.lock().unwrap().len(), 1);
+                    if expected == 0 {
+                        let report: serde_json::Value = serde_json::from_slice(&result.1).unwrap();
+                        assert_eq!(report["kind"], "oms-agent-output");
+                        assert_eq!(report["output"]["output_bytes"], answer.len());
+                    } else {
+                        assert!(result.1.is_empty());
+                        assert_eq!(
+                            usage::load(&repo.0).unwrap().calls[0].receipt.phase,
+                            Phase::Unknown
+                        );
+                    }
+                }
+            }
+            let repo = provider_repo();
+            let probe = ProviderProbe::default();
+            let output = oms_command_peer::run_with_executor(
+                "agent-call",
+                &args(&[
+                    "--to",
+                    "pi",
+                    "--prompt",
+                    "fixture question",
+                    "--output-json",
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(output.0, 2, "{}", message(&output));
+            assert!(probe.calls.lock().unwrap().is_empty());
+        },
+    );
+}
+
 #[test]
 fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
     provider_isolated(
@@ -391,7 +567,8 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                     request: Invocation,
                     stop: &AtomicBool,
                 ) -> oms_command_peer::Result<Completed> {
-                    let git = request.argv[0] == "git";
+                    let binary = request.argv[0].clone();
+                    let git = binary == "git";
                     let mut result = self.provider.execute(request, stop)?;
                     if git {
                         return Ok(result);
@@ -428,6 +605,17 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                     }
                     } else if self.mode == "participant-incomplete" && calls.len() == 1 {
                         result.complete = false;
+                    } else if (self.mode == "participant-malformed-initial" && calls.len() == 1)
+                        || (self.mode == "participant-malformed-rebuttal" && calls.len() == 4)
+                    {
+                        result.stdout =
+                            b"A fluent answer missing required discussion sections.".to_vec();
+                    }
+                    if self.mode != "legacy"
+                        && !(planner && self.mode == "planner-no-native-terminal")
+                        && !(synthesis && self.mode == "synthesis-no-native-terminal")
+                    {
+                        result.stdout = native_provider_answer(&binary, &result.stdout);
                     }
                     Ok(result)
                 }
@@ -539,9 +727,90 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 assert_eq!(output.0, 2, "{}", message(&output));
                 assert!(preflight_probe.calls.lock().unwrap().is_empty());
             }
+            let typed_council = |target: &str, host: &dyn Executor| {
+                oms_command_peer::run_with_executor(
+                    "peer-ask",
+                    &args(&[
+                        "--providers",
+                        "codex:model=first,claude:model=second,antigravity:model=third",
+                        "--reasoning-effort",
+                        "high",
+                        "--debate",
+                        "2",
+                        "--deliberation",
+                        "--require-complete",
+                        "--synthesis-json",
+                        "--synthesize",
+                        target,
+                        "--prompt",
+                        "fixture question",
+                    ]),
+                    &preflight_repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    host,
+                )
+            };
+            for (target, reason) in [
+                (
+                    "codex:model=provider-default",
+                    "exact synthesis target model",
+                ),
+                (
+                    "antigravity:model=gemini-pro-orchestrator-argon",
+                    "has fixed effort",
+                ),
+                (
+                    "codex:model=exact-synthesis:account=absent",
+                    "account is unavailable",
+                ),
+                (
+                    "pi:model=exact-synthesis",
+                    "cannot prove native output completion",
+                ),
+            ] {
+                let output = typed_council(target, &preflight_probe);
+                assert_eq!(output.0, 2, "{target}: {}", message(&output));
+                assert!(
+                    message(&output).contains(reason),
+                    "{target}: {}",
+                    message(&output)
+                );
+                assert!(preflight_probe.calls.lock().unwrap().is_empty());
+            }
+            for (mode, target, effort, count, expected) in [
+                ("ok", "codex:model=exact-synthesis", "high", 10, 0),
+                ("ok", "codex:effort=low:model=exact-synthesis", "low", 10, 0),
+                (
+                    "participant-malformed-rebuttal",
+                    "codex:model=exact-synthesis",
+                    "high",
+                    6,
+                    2,
+                ),
+            ] {
+                let host = Host {
+                    provider: ProviderProbe::default(),
+                    mode,
+                    commands: Mutex::new(Vec::new()),
+                    directory: Mutex::new(None),
+                };
+                let output = typed_council(target, &host);
+                assert_eq!(output.0, expected, "{mode}/{target}: {}", message(&output));
+                let calls = host.provider.calls.lock().unwrap();
+                assert_eq!(calls.len(), count);
+                if expected == 0 {
+                    let argv = &calls.last().unwrap().request.argv;
+                    assert_eq!(option_value(argv, "--model").unwrap(), "exact-synthesis");
+                    assert_eq!(
+                        option_value(argv, "-c").unwrap(),
+                        &OsString::from(format!("model_reasoning_effort=\"{effort}\""))
+                    );
+                }
+            }
             let legacy = Host {
                 provider: ProviderProbe::default(),
-                mode: "ok",
+                mode: "legacy",
                 commands: Mutex::new(Vec::new()),
                 directory: Mutex::new(None),
             };
@@ -573,6 +842,9 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 ("ok", "claude", "claude-sonnet-5-5", 0),
                 ("ok", "antigravity", "gemini-pro-orchestrator-argon", 0),
                 ("participant-incomplete", "codex", "gpt-5.6-sol", 2),
+                ("participant-malformed-initial", "codex", "gpt-5.6-sol", 2),
+                ("participant-malformed-rebuttal", "codex", "gpt-5.6-sol", 2),
+                ("synthesis-no-native-terminal", "codex", "gpt-5.6-sol", 2),
                 ("incomplete", "codex", "gpt-5.6-sol", 2),
                 ("refusal", "codex", "gpt-5.6-sol", 2),
                 ("malformed", "codex", "gpt-5.6-sol", 2),
@@ -585,6 +857,7 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 ("planner-refusal", "codex", "gpt-5.6-sol", 2),
                 ("planner-timeout", "codex", "gpt-5.6-sol", 2),
                 ("planner-nonzero", "codex", "gpt-5.6-sol", 2),
+                ("planner-no-native-terminal", "codex", "gpt-5.6-sol", 2),
                 ("planner-cancel", "codex", "gpt-5.6-sol", 130),
             ] {
                 let repo = provider_repo();
@@ -648,6 +921,14 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                     ),
                     "{mode}"
                 );
+                let calls = host.provider.calls.lock().unwrap().len();
+                match mode {
+                    "participant-incomplete" | "participant-malformed-initial" => {
+                        assert_eq!(calls, 3)
+                    }
+                    "participant-malformed-rebuttal" => assert_eq!(calls, 6),
+                    _ => {}
+                }
                 let council = &commands[0];
                 let target = option_value(&council.args, "--synthesize")
                     .unwrap()
@@ -810,7 +1091,15 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 );
                 assert_eq!(host.provider.calls.lock().unwrap().len(), calls_before);
                 let route = serde_json::json!({"model": "fixture-model", "fallback_model": "", "reasoning_effort": "auto", "timeout": "1s"});
-                let receipt = serde_json::json!({"schema":1,"kind":"autopilot-run","stage":"proposal-review","repo":repo.0,"spec_sha256":proposal["spec_sha256"],"providers":{"planner":"codex","worker":"antigravity","reviewer":"claude"},"routing":{"provider_timeout":"1s","planner":route,"worker":route,"reviewer":route},"contract":{"allowed":"src","base":"main","base_sha":proposal["base_sha"],"remote":"origin","max_cycles":1,"initial_tasks":1,"replan_tasks":1,"auto_repair":false,"retry_known":false,"review_mode":"gate","draft_pr":false,"allow_verifier_change":false,"allow_floor_change":"","collaboration":"auto"},"proposal":{"path":path,"sha256":digest},"branch":format!("oms/autopilot-{}", &value::text(&proposal, "spec_sha256")[..12]),"owner_id":format!("owner_{}","a".repeat(32)),"updated":value::now()});
+                let mut planner_route = route.clone();
+                planner_route["model"] = expected_route.model.as_str().into();
+                planner_route["reasoning_effort"] = if expected_route.effort.is_empty() {
+                    "auto"
+                } else {
+                    expected_route.effort.as_str()
+                }
+                .into();
+                let receipt = serde_json::json!({"schema":1,"kind":"autopilot-run","stage":"proposal-review","repo":repo.0,"spec_sha256":proposal["spec_sha256"],"providers":{"planner":planner,"worker":"antigravity","reviewer":"claude"},"routing":{"provider_timeout":"1s","planner":planner_route,"worker":route,"reviewer":route},"contract":{"allowed":"src","base":"main","base_sha":proposal["base_sha"],"remote":"origin","max_cycles":1,"initial_tasks":1,"replan_tasks":1,"auto_repair":false,"retry_known":false,"review_mode":"gate","draft_pr":false,"allow_verifier_change":false,"allow_floor_change":"","collaboration":"auto"},"proposal":{"path":path,"sha256":digest},"branch":format!("oms/autopilot-{}", &value::text(&proposal, "spec_sha256")[..12]),"owner_id":format!("owner_{}","a".repeat(32)),"updated":value::now()});
                 oms_command_autonomy::receipt::validate(&receipt).unwrap();
                 repo.write(
                     ".oms/plan/autopilot-run.json",
