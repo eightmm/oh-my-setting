@@ -360,12 +360,10 @@ pub fn union_effort_scales(scales: &BTreeMap<String, Vec<String>>) -> Vec<String
     ordered
 }
 
-pub fn agy_effort_scales_and_selectors(
-    raw: &str,
-) -> (
-    BTreeMap<String, Vec<String>>,
-    BTreeMap<String, BTreeMap<String, String>>,
-) {
+/// Base model -> effort -> exact catalog selector.
+pub type AgySelectors = BTreeMap<String, BTreeMap<String, String>>;
+
+pub fn agy_effort_scales_and_selectors(raw: &str) -> (BTreeMap<String, Vec<String>>, AgySelectors) {
     let mut seen_selectors = BTreeSet::new();
     let mut selectors = BTreeMap::<String, BTreeMap<String, String>>::new();
     for row in raw.lines().filter_map(agy_catalog_row) {
