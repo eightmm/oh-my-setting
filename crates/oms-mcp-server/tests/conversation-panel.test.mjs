@@ -37,7 +37,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {contexts:[],status:null, failStart:true, replies:[], messages:[], notices:[]};
+  const host = {contexts:[],status:null, failStart:true, replies:[], messages:[], notices:[], tools:options.tools};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -858,7 +858,7 @@ test('Korean and English catalogs match, and every static node and message key r
     src:['git','task','plan','attempts','artifacts','acceptance','conversation'], srcState:['unavailable','partial','ambiguous','stale'],
     sv:['connections','modelcatalog','routes','attribution'], obs:['complete','partial','unknown']};
   for (const [family, members] of Object.entries(families)) for (const member of members) assert.ok(Object.hasOwn(ko, family + '.' + member), family + '.' + member);
-  assert.ok(Buffer.byteLength(html) < 224 * 1024);
+  assert.ok(Buffer.byteLength(html) < 240 * 1024);
 });
 
 for (const [name, options, expected] of [
@@ -915,7 +915,7 @@ test('changing language is instant: no refetch, no reset, draft/focus/side effec
   assert.equal(p.get('view').hidden, false);
   // UI-owned text switches...
   assert.equal(p.get('approvals-heading').textContent, 'Approval requests (1)');
-  assert.equal(p.get('tab-overview').textContent, 'Overview');
+  assert.equal(p.get('tab-overview').textContent, 'Now');
   assert.equal(p.get('goal-heading').textContent, 'Project goal');
   assert.equal(p.get('status').textContent, 'Some status could not be collected.');
   assert.match(p.get('leads').textContent, /Claude Lead.*Working/);
@@ -1134,4 +1134,108 @@ test('a late delivery is reconciled after the preview is dismissed without movin
     }
     assert.equal(p.host.messages.length,1);
   }
+});
+
+const workFixture = () => ({schema:1, omitted:2, availability:'partial', items:[
+  {id:'t1', title:'Same', state:'working', owner:'lead-a', depends:[], issue:'#12', result:'completed', verification:null, revision:null},
+  {id:'t2', title:'Same', state:'done', owner:null, depends:['t1','ghost'], issue:null, result:null, verification:'not_run', revision:'r2'},
+  {id:'t3', title:'Loop A', state:'pending', owner:'lead-a', depends:['t4'], result:null, verification:null, revision:null},
+  {id:'t4', title:'Loop B', state:'review', owner:'lead-b', depends:['t3'], result:null, verification:null, revision:null},
+  {id:'dup', title:'x'}, {id:'dup', title:'y'}, {title:'no id'}]});
+const click = async (p, key) => { p.run(`taskRows.get(${JSON.stringify(key)})`).dispatchEvent(new Event('click')); await setImmediate(); };
+const press = async (p, id, key) => { p.get(id).dispatchEvent(Object.assign(new Event('keydown', {cancelable:true}), {key})); await setImmediate(); };
+
+test('one task detail opens by real id from every primary tab, returns focus and writes nothing', async () => {
+  const p = await panel(['one'], {}, {tools:{oms_panel_work_items:workFixture}});
+  const mark = p.calls.length, contexts = p.host.contexts.length;
+  p.get('brief').value = 'draft goal';
+  const seen = [];
+  for (const [tab, key] of [['overview','now:t1'], ['work','work:t1'], ['results','results:t1'], ['relations','rel-owner:t1'], ['relations','rel-dep:t1']]) {
+    await p.event('tab-' + tab, 'click');
+    await click(p, key);
+    assert.equal(p.run('selectedTask.id'), 't1');
+    assert.equal(p.get('pane-task').hidden, false); assert.equal(p.get('pane-' + tab).hidden, true);
+    assert.equal(p.get('task-heading').focused > 0, true);
+    seen.push(p.get('task-body').textContent);
+    await p.event('task-back', 'click');
+    assert.equal(p.get('pane-task').hidden, true); assert.equal(p.get('pane-' + tab).hidden, false);
+    assert.ok(p.run(`taskRows.get(${JSON.stringify(key)})`).focused > 0, key);
+    await click(p, key); await press(p, 'pane-task', 'Escape');
+    assert.equal(p.get('pane-task').hidden, true);
+  }
+  assert.equal(new Set(seen).size, 1);
+  assert.match(seen[0], /#12/);
+  // Same title, distinct ids; repeated and id-less items never become selectable rows.
+  assert.equal(p.run('taskRows.has("work:t2")'), true); assert.equal(p.run('workData.byId.has("dup")'), false);
+  assert.match(p.get('work-status').textContent, /2개는 표시 범위 밖/); assert.match(p.get('work-status').textContent, /1개/);
+  assert.ok(p.calls.slice(mark).every(c => c.name === 'oms_panel_work_items'));
+  assert.equal(p.host.messages.length, 0); assert.equal(p.host.contexts.length, contexts);
+  assert.equal(p.get('brief').value, 'draft goal');
+});
+
+test('absent evidence is unavailable and relationships keep owner linkage apart from dependency edges', async () => {
+  const p = await panel(['one'], {}, {tools:{oms_panel_work_items:workFixture}});
+  await p.event('tab-work', 'click'); await click(p, 'work:t1');
+  await p.event('task-tab-verification', 'click');
+  assert.match(p.get('task-body').textContent, /검증 근거가 기록되지 않았습니다/);
+  await p.event('task-tab-changes', 'click');
+  assert.match(p.get('task-body').textContent, /결과 완료 기록/); assert.match(p.get('task-body').textContent, /diff가 포함되지 않았습니다/);
+  await p.event('task-tab-history', 'click');
+  assert.match(p.get('task-body').textContent, /확인할 수 없어 표시하지 않습니다/);
+  await p.event('task-back', 'click');
+  await p.event('tab-results', 'click');
+  assert.match(p.get('results-list').textContent, /검증 근거 없음/);
+  await p.event('tab-relations', 'click');
+  assert.match(p.get('owners-list').textContent, /담당 미확인/); assert.doesNotMatch(p.get('owners-list').textContent, /ghost/);
+  assert.match(p.get('owners-note').textContent, /추론하지 않습니다/);
+  assert.match(p.get('deps-list').textContent, /ghost \(목록에 없음\)/);
+  assert.match(p.get('deps-list').textContent, /순환 의존.*t3.*t4|순환 의존.*t4.*t3/);
+});
+
+test('unavailable task inventory leaves counts and relationships unasserted', async () => {
+  const p=await panel(['one'],{}, {locale:'en',tools:{oms_panel_work_items:()=>({schema:1,items:[],omitted:0,availability:'unavailable'})}});
+  assert.match(p.get('now-status').textContent,/unavailable/);
+  assert.doesNotMatch(p.get('now-status').textContent,/0 work items/);assert.equal(p.get('owners-list').textContent,'');
+});
+
+test('tool failure shows unavailable, never a dashboard-derived list', async () => {
+  const p = await panel(['one'], {tasks:3, tasksVerified:1});
+  assert.match(p.get('now-status').textContent, /사용할 수 없습니다/);
+  assert.equal(p.run('taskRows.size'), 0); assert.equal(p.run('workData'), undefined);
+  const q = await panel(['one'], {}, {tools:{oms_panel_work_items:() => ({schema:2, items:[]})}});
+  assert.match(q.get('work-status').textContent, /형식을 확인할 수 없습니다/);
+});
+
+test('selection survives refresh and language change, vanishes honestly, and clears with the project', async () => {
+  let data = workFixture();
+  const p = await panel(['one','two'], {}, {tools:{oms_panel_work_items:() => data}, storage:{getItem:() => null, setItem() {}}});
+  p.get('project-choice').value = 'one'; await p.event('project-choice', 'change');
+  await p.event('tab-work', 'click'); await click(p, 'work:t2');
+  p.get('brief').value = 'keep me';
+  p.get('language-choice').value = 'en'; await p.event('language-choice', 'change');
+  assert.equal(p.run('selectedTask.id'), 't2'); assert.equal(p.get('task-back').textContent, '← Back to list');
+  assert.equal(p.get('tab-overview').textContent, 'Now'); assert.equal(p.get('brief').value, 'keep me');
+  data = {...workFixture(), items:workFixture().items.map(i => i.id === 't2' ? {...i, revision:'r3'} : i)};
+  await p.event('refresh', 'click');
+  assert.match(p.get('task-note').textContent, /r2 → r3/);
+  await p.event('task-tab-verification','click');
+  assert.doesNotMatch(p.get('task-body').textContent,/Verification not run/);assert.match(p.get('task-body').textContent,/Open current version/);
+  data = {...data, items:data.items.filter(i => i.id !== 't2')};
+  await p.event('refresh', 'click');
+  assert.equal(p.run('selectedTask.id'), 't2'); assert.match(p.get('task-note').textContent, /not in the current observation: t2/);
+  p.get('project-choice').value = 'two'; await p.event('project-choice', 'change');
+  assert.equal(p.run('selectedTask'), undefined); assert.equal(p.get('pane-task').hidden, true);
+});
+
+test('primary and secondary tablists each rove with arrows and every v10 view stays reachable', async () => {
+  const p = await panel(['one'], {}, {tools:{oms_panel_work_items:workFixture}});
+  await press(p, 'tab-overview', 'ArrowRight');
+  assert.equal(p.run('currentTab'), 'work'); assert.ok(p.get('tab-work').focused > 0);
+  await press(p, 'tab-work', 'End'); assert.equal(p.run('currentTab'), 'relations');
+  assert.equal(p.get('tab-project').tabIndex, 0);
+  await p.event('tab-project', 'click'); assert.equal(p.get('more-views').open, true);
+  await press(p, 'tab-project', 'ArrowRight'); assert.equal(p.run('currentTab'), 'chat');
+  for (const tab of ['project', 'chat', 'activity', 'usage', 'git']) { await p.event('tab-' + tab, 'click'); assert.equal(p.get('pane-' + tab).hidden, false); }
+  await p.event('tab-overview', 'click');
+  assert.equal(p.get('tab-overview').tabIndex, 0); assert.equal(p.get('tab-project').tabIndex, 0);
 });
