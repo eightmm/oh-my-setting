@@ -572,6 +572,44 @@ pub(super) fn status(c: &Context<'_>, o: &crate::cli::Options) -> crate::Result<
         .and_then(|_| origin(&git).ok())
         .filter(|s| s.owner.len() <= 100 && s.repo.len() <= 100);
     let look_up = o.has("issue") || o.has("pull");
+    if o.has("drift") {
+        crate::require(o.has("project-id"), "--drift requires --project-id NODE_ID")?;
+        crate::require(!o.has("cursor"), "--drift cannot combine with --cursor")?;
+        crate::require(
+            !look_up && !o.has("inventory"),
+            "project cannot combine with issue, pull or inventory",
+        )?;
+        let observed_at = now();
+        let report = board::drift(
+            c,
+            git.repo,
+            slug.as_ref(),
+            o.get("project-id"),
+            &observed_at,
+        )?;
+        return if o.has("json") {
+            Output::json(&obj([
+                ("git", checkout),
+                (
+                    "github",
+                    obj([
+                        (
+                            "repository",
+                            slug.map(|s| s.to_string().into()).unwrap_or(V::Null),
+                        ),
+                        ("observedAt", observed_at.into()),
+                        ("drift", report),
+                    ]),
+                ),
+            ]))
+        } else {
+            Ok(Output::text(board::render_drift(
+                &report,
+                slug.as_ref(),
+                o.get("project-id"),
+            )))
+        };
+    }
     if look_up || o.has("inventory") || o.has("cursor") || o.has("project-id") {
         let (key, detail) = if o.has("project-id") {
             crate::require(
