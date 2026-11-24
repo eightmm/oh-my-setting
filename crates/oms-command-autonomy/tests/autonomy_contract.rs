@@ -1850,6 +1850,7 @@ impl Repo {
     /// example-org/example-repo; `origin` decides whether the mode is active.
     fn github(origin: &str, spec: Option<&str>) -> Self {
         let repo = Self::new();
+        repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
         repo.write("tests/check.sh", "exit 0\n");
         repo.write("tests/ok.sh", "exit 0\n");
         repo.write("src/lib.rs", "pub fn ok() {}\n");
@@ -2385,7 +2386,13 @@ fn project_issue_requirements_bind_preview_generation_council_and_admission() {
     *planner.during_issue_read.lock().unwrap() = Some(Box::new(move || {
         write_private(&project_path, format!("{SPEC}\n").as_bytes())
     }));
+    let reads = planner.issue_reads.load(SeqCst);
     assert_ne!(intake("autopilot", &repo, &planner, &auto_args).0, 0);
+    assert_eq!(planner.issue_reads.load(SeqCst), reads + 1);
+    assert_eq!(
+        fs::read_to_string(repo.0.join("PROJECT.md")).unwrap(),
+        format!("{SPEC}\n")
+    );
     assert!(!owner.exists() && !managed.exists());
     assert_eq!(planner.calls.load(SeqCst), 0);
     repo.write("PROJECT.md", SPEC);
