@@ -935,15 +935,26 @@ fn append_transcript_for_target(
         )));
         return Ok(());
     }
-    for filename in transcript_candidates(target) {
-        if let Some(read) = read_dispatch_transcript(repo, &filename, *remaining_budget) {
+    for candidate in transcript_candidates(target, prefix == "Call") {
+        if let Some((source, read)) = read_dispatch_transcript(repo, &candidate, *remaining_budget)
+        {
             *remaining_budget = remaining_budget.saturating_sub(read.bytes_read);
-            let formatted =
-                format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?;
+            let (formatted, heading, empty_note) = match source {
+                TranscriptSource::DispatchLog => (
+                    format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?,
+                    format!("{prefix} {label}"),
+                    "No transcript events recorded",
+                ),
+                TranscriptSource::DispatchReport => (
+                    format_report_bytes(&read.bytes, read.truncated, read.budget_limited),
+                    format!("{prefix} {label} · dispatch report"),
+                    "No dispatch report content recorded",
+                ),
+            };
             let safe = oms_panel_core::redact(formatted.as_bytes())?;
-            items.push(TextItem::Line(format!("{prefix} {label}")));
+            items.push(TextItem::Line(heading));
             if safe.trim().is_empty() {
-                items.push(TextItem::Line("No transcript events recorded".into()));
+                items.push(TextItem::Line(empty_note.into()));
             } else {
                 items.push(TextItem::Wrapped(safe));
             }
@@ -1027,6 +1038,25 @@ fn resume_offset(old_lines: &[String], offset: usize, new_lines: &[String]) -> u
     new_lines.len().saturating_sub(1)
 }
 
+const DISPATCH_REPORT_SUBDIRS: [&str; 6] =
+    ["delegate", "ask", "advise", "consult", "review", "call"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum TranscriptCandidate {
+    DispatchLog(String),
+    DispatchReport {
+        subdir: &'static str,
+        filename: String,
+        expected_sha256: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptSource {
+    DispatchLog,
+    DispatchReport,
+}
+
 struct ReadTranscript {
     bytes: Vec<u8>,
     bytes_read: usize,
@@ -1034,7 +1064,46 @@ struct ReadTranscript {
     budget_limited: bool,
 }
 
-fn transcript_candidates(call: &Value) -> Vec<String> {
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_report_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('.')
+        && name.ends_with(".md")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn dispatch_report_candidate(call: &Value) -> Option<TranscriptCandidate> {
+    let rel = call.get("artifact").and_then(Value::as_str)?;
+    let rest = rel.strip_prefix(".oms/artifacts/")?;
+    let (subdir_raw, filename) = rest.split_once('/')?;
+    if !is_report_filename(filename) {
+        return None;
+    }
+    let &subdir = DISPATCH_REPORT_SUBDIRS
+        .iter()
+        .find(|&&allowed| allowed == subdir_raw)?;
+    let expected_sha256 = match call.get("artifact_sha256") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if is_sha256_hex(s) => Some(s.to_owned()),
+        _ => return None,
+    };
+    Some(TranscriptCandidate::DispatchReport {
+        subdir,
+        filename: filename.to_owned(),
+        expected_sha256,
+    })
+}
+
+fn transcript_candidates(call: &Value, allow_report_fallback: bool) -> Vec<TranscriptCandidate> {
     let attempt_raws = [
         call.get("attempt_id").and_then(Value::as_str),
         call.get("call_id").and_then(Value::as_str),
@@ -1078,39 +1147,42 @@ fn transcript_candidates(call: &Value) -> Vec<String> {
             }
         }
     }
-    filenames
+    let mut candidates: Vec<TranscriptCandidate> = filenames
+        .into_iter()
+        .map(TranscriptCandidate::DispatchLog)
+        .collect();
+    if allow_report_fallback && let Some(report) = dispatch_report_candidate(call) {
+        candidates.push(report);
+    }
+    candidates
 }
 
-/// Read an owner-scoped dispatch transcript from `.oms/panel-state/dispatch-logs/`
-/// without following symlinks, leaving the repository, or reading provider homes.
-fn read_dispatch_transcript(
+/// Read an owner-scoped, repository-confined file without following symlinks,
+/// accepting hardlinks, leaving the repository, or reading provider homes.
+fn read_confined_file(
     repo: &Path,
+    dirs: &[&str],
     filename: &str,
     max_bytes: usize,
 ) -> Option<ReadTranscript> {
     use rustix::fs::{self, FileType, Mode, OFlags};
 
     let cap = max_bytes.min(TRANSCRIPT_MAX_BYTES);
-    if cap == 0
-        || filename.is_empty()
-        || filename.contains('/')
-        || filename.contains('\0')
-        || !filename.ends_with(".transcript")
-    {
+    if cap == 0 || filename.is_empty() || filename.contains('/') || filename.contains('\0') {
         return None;
     }
     let euid = rustix::process::geteuid().as_raw();
     let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let root_fd = fs::open(
+    let mut cur_fd = fs::open(
         repo,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .ok()?;
-    let oms_fd = fs::openat(&root_fd, ".oms", dir_flags, Mode::empty()).ok()?;
-    let state_fd = fs::openat(&oms_fd, "panel-state", dir_flags, Mode::empty()).ok()?;
-    let logs_fd = fs::openat(&state_fd, "dispatch-logs", dir_flags, Mode::empty()).ok()?;
-    let dir_stat = fs::fstat(&logs_fd).ok()?;
+    for dir in dirs {
+        cur_fd = fs::openat(&cur_fd, *dir, dir_flags, Mode::empty()).ok()?;
+    }
+    let dir_stat = fs::fstat(&cur_fd).ok()?;
     if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory
         || dir_stat.st_uid != euid
         || (dir_stat.st_mode & 0o022) != 0
@@ -1118,7 +1190,7 @@ fn read_dispatch_transcript(
         return None;
     }
     let fd = fs::openat(
-        &logs_fd,
+        &cur_fd,
         filename,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
@@ -1173,6 +1245,67 @@ fn read_dispatch_transcript(
         truncated,
         budget_limited,
     })
+}
+
+/// Read an owner-scoped dispatch transcript from `.oms/panel-state/dispatch-logs/`
+/// or a per-attempt dispatch report under `.oms/artifacts/` without following
+/// symlinks, leaving the repository, or reading provider homes.
+fn read_dispatch_transcript(
+    repo: &Path,
+    candidate: &TranscriptCandidate,
+    max_bytes: usize,
+) -> Option<(TranscriptSource, ReadTranscript)> {
+    match candidate {
+        TranscriptCandidate::DispatchLog(filename) => {
+            if !filename.ends_with(".transcript") {
+                return None;
+            }
+            let read = read_confined_file(
+                repo,
+                &[".oms", "panel-state", "dispatch-logs"],
+                filename,
+                max_bytes,
+            )?;
+            Some((TranscriptSource::DispatchLog, read))
+        }
+        TranscriptCandidate::DispatchReport {
+            subdir,
+            filename,
+            expected_sha256,
+        } => {
+            if !is_report_filename(filename) {
+                return None;
+            }
+            let read =
+                read_confined_file(repo, &[".oms", "artifacts", subdir], filename, max_bytes)?;
+            if let Some(expected) = expected_sha256
+                && !read.truncated
+                && oms_panel_core::digest(&read.bytes) != *expected
+            {
+                return None;
+            }
+            Some((TranscriptSource::DispatchReport, read))
+        }
+    }
+}
+
+fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> String {
+    let raw = String::from_utf8_lossy(bytes);
+    let mut lines: Vec<String> = Vec::new();
+    if truncated {
+        lines.push(
+            if budget_limited {
+                TRANSCRIPT_BUDGET_TRUNCATED_NOTE
+            } else {
+                TRANSCRIPT_TRUNCATED_NOTE
+            }
+            .into(),
+        );
+    }
+    for raw_line in raw.lines() {
+        lines.push(raw_line.trim_end_matches('\r').to_owned());
+    }
+    lines.join("\n")
 }
 
 fn transcript_value_text(value: &Value) -> String {
@@ -2420,6 +2553,238 @@ mod tests {
         assert!(
             !rendered.contains("CALL3_NEVER_READ"),
             "att-3 must not be read after budget exhaustion:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_reads_masked_bounded_dispatch_report_and_prefers_dispatch_log() {
+        let repo = TempRepo::new("transcript-delegate-report");
+        let delegate_dir = repo.0.join(".oms/artifacts/delegate");
+        std::fs::create_dir_all(&delegate_dir).unwrap();
+        std::fs::set_permissions(&delegate_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let secret_like = [
+            ["sk", "-", "live", "_"].concat(),
+            ["1234567890", "abcdefghij", "klmnop"].concat(),
+        ]
+        .concat();
+        let report_rel = ".oms/artifacts/delegate/codex-delegate-run1.md";
+        let report_body = format!(
+            concat!(
+                "# OMS peer-delegate\n\n",
+                "- provider: codex\n\n",
+                "## Output\n\n",
+                "Checked delegate report\n",
+                "{{\"status\":\"ok\"}}\n",
+                "Leaked value {}\n\n",
+                "## Exit\n\n0\n"
+            ),
+            secret_like
+        );
+        let report_path = repo.0.join(report_rel);
+        std::fs::write(&report_path, report_body.as_bytes()).unwrap();
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let report_sha = oms_panel_core::digest(report_body.as_bytes());
+
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [{
+                    "kind": "delegate",
+                    "participant": "call-builder",
+                    "attempt_id": "att-delegate",
+                    "artifact": report_rel,
+                    "artifact_sha256": report_sha,
+                }]
+            }]
+        });
+
+        // Without .oms/panel-state/dispatch-logs/, Transcript reads the per-attempt dispatch report
+        // masked and preserving JSON lines from worker output.
+        let mut reader = Reader {
+            view: View::Transcript,
+            ..Default::default()
+        };
+        let rendered = reader.lines(&repo.0, &report, 120).unwrap().join("\n");
+        assert!(rendered.contains("Checked delegate report"), "{rendered}");
+        assert!(rendered.contains("{\"status\":\"ok\"}"), "{rendered}");
+        assert!(rendered.contains("## Exit"), "{rendered}");
+        assert!(
+            !rendered.contains(TRANSCRIPT_NOT_CAPTURED),
+            "expected report instead of not captured:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&secret_like),
+            "secret leaked:\n{rendered}"
+        );
+
+        // Resize reuses cached report without rereading disk.
+        std::fs::remove_file(&report_path).unwrap();
+        let narrow = reader.lines(&repo.0, &report, 36).unwrap().join("\n");
+        assert!(narrow.contains("Checked delegate report"), "{narrow}");
+        std::fs::write(&report_path, report_body.as_bytes()).unwrap();
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // When a .oms/panel-state/dispatch-logs/ transcript exists, it stays first choice.
+        let logs_dir = repo.0.join(".oms/panel-state/dispatch-logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tx_file = logs_dir.join("att-delegate.transcript");
+        std::fs::write(
+            &tx_file,
+            b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"DISPATCH_LOG_FIRST_CHOICE\"}}\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tx_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let with_log = reader.render(&repo.0, &report, 120).unwrap().join("\n");
+        assert!(with_log.contains("DISPATCH_LOG_FIRST_CHOICE"), "{with_log}");
+        assert!(
+            !with_log.contains("Checked delegate report"),
+            "dispatch-logs must take precedence over dispatch report:\n{with_log}"
+        );
+
+        // Symlink, hardlink, traversal, non-dispatch subdir, digest mismatch, and group-writable
+        // reports are all refused and fall back to not captured.
+        let outside = repo.write_file("outside-report.md", b"OUTSIDE_SECRET_BODY\n");
+        std::os::unix::fs::symlink(&outside, delegate_dir.join("sym-report.md")).unwrap();
+
+        let hard_src = repo.write_file("hard-report.md", b"HARDLINK_SECRET_BODY\n");
+        std::fs::hard_link(&hard_src, delegate_dir.join("hard-report.md")).unwrap();
+
+        let non_dispatch_dir = repo.0.join(".oms/artifacts/panel-results");
+        std::fs::create_dir_all(&non_dispatch_dir).unwrap();
+        std::fs::set_permissions(&non_dispatch_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let non_dispatch_file = non_dispatch_dir.join("result.md");
+        std::fs::write(&non_dispatch_file, b"NON_DISPATCH_BODY\n").unwrap();
+        std::fs::set_permissions(&non_dispatch_file, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+
+        let tampered_file = delegate_dir.join("tampered-report.md");
+        std::fs::write(&tampered_file, b"TAMPERED_BODY\n").unwrap();
+        std::fs::set_permissions(&tampered_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let writable_file = delegate_dir.join("writable-report.md");
+        std::fs::write(&writable_file, b"WRITABLE_BODY\n").unwrap();
+        std::fs::set_permissions(&writable_file, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        let refused_report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T2",
+                "calls": [
+                    { "attempt_id": "att-sym", "artifact": ".oms/artifacts/delegate/sym-report.md" },
+                    { "attempt_id": "att-hard", "artifact": ".oms/artifacts/delegate/hard-report.md" },
+                    { "attempt_id": "att-trav", "artifact": ".oms/artifacts/delegate/../../outside-report.md" },
+                    { "attempt_id": "att-nondisp", "artifact": ".oms/artifacts/panel-results/result.md" },
+                    {
+                        "attempt_id": "att-badsha",
+                        "artifact": ".oms/artifacts/delegate/tampered-report.md",
+                        "artifact_sha256": "0".repeat(64)
+                    },
+                    { "attempt_id": "att-writable", "artifact": ".oms/artifacts/delegate/writable-report.md" },
+                ]
+            }]
+        });
+        let refused = reader.render(&repo.0, &refused_report, 120).unwrap();
+        let refused_text = refused.join("\n");
+        for forbidden in [
+            "OUTSIDE_SECRET_BODY",
+            "HARDLINK_SECRET_BODY",
+            "NON_DISPATCH_BODY",
+            "TAMPERED_BODY",
+            "WRITABLE_BODY",
+        ] {
+            assert!(
+                !refused_text.contains(forbidden),
+                "refused artifact leaked {forbidden}:\n{refused_text}"
+            );
+        }
+        for att in [
+            "att-sym",
+            "att-hard",
+            "att-trav",
+            "att-nondisp",
+            "att-badsha",
+            "att-writable",
+        ] {
+            assert!(
+                refused
+                    .iter()
+                    .any(|l| l.contains(att) && l.contains(TRANSCRIPT_NOT_CAPTURED)),
+                "expected not captured for {att}:\n{refused_text}"
+            );
+        }
+
+        // View byte budget bounds total bytes read across dispatch reports.
+        let r1 = format!(
+            "REPORT1_A_{}\nREPORT1_B_{}\n",
+            "a".repeat(60),
+            "b".repeat(60)
+        );
+        let r2 = format!(
+            "REPORT2_HEAD_{}\nREPORT2_TAIL\nsecret {secret_like}\n",
+            "c".repeat(80)
+        );
+        let r3 = format!("REPORT3_NEVER_READ_{}\n", "d".repeat(60));
+        for (name, body) in [("r1.md", &r1), ("r2.md", &r2), ("r3.md", &r3)] {
+            let p = delegate_dir.join(name);
+            std::fs::write(&p, body.as_bytes()).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let budget_report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T3",
+                "calls": [
+                    {
+                        "attempt_id": "att-r1",
+                        "artifact": ".oms/artifacts/delegate/r1.md",
+                        "artifact_sha256": oms_panel_core::digest(r1.as_bytes()),
+                    },
+                    {
+                        "attempt_id": "att-r2",
+                        "artifact": ".oms/artifacts/delegate/r2.md",
+                        "artifact_sha256": oms_panel_core::digest(r2.as_bytes()),
+                    },
+                    {
+                        "attempt_id": "att-r3",
+                        "artifact": ".oms/artifacts/delegate/r3.md",
+                        "artifact_sha256": oms_panel_core::digest(r3.as_bytes()),
+                    },
+                ]
+            }]
+        });
+        let budget = r1.len() + (r2.len() / 2) + 20;
+        let items = load_transcript_items(&repo.0, &budget_report, budget).unwrap();
+        let budgeted = render_text_items(&items, View::Transcript, 120).join("\n");
+        assert!(budgeted.contains("REPORT1_A_"), "{budgeted}");
+        assert!(budgeted.contains("REPORT1_B_"), "{budgeted}");
+        assert!(
+            budgeted.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE),
+            "expected budget truncation note for att-r2:\n{budgeted}"
+        );
+        assert!(
+            !budgeted.contains("REPORT2_HEAD_"),
+            "att-r2 head should be truncated:\n{budgeted}"
+        );
+        assert!(
+            budgeted.contains("REPORT2_TAIL"),
+            "att-r2 tail should be retained:\n{budgeted}"
+        );
+        assert!(
+            !budgeted.contains(&secret_like),
+            "secret in truncated report tail leaked:\n{budgeted}"
+        );
+        assert!(
+            budgeted.contains("att-r3") && budgeted.contains(TRANSCRIPT_BUDGET_EXHAUSTED_NOTE),
+            "att-r3 should report budget exhaustion:\n{budgeted}"
+        );
+        assert!(
+            !budgeted.contains("REPORT3_NEVER_READ_"),
+            "att-r3 must not be read after budget exhaustion:\n{budgeted}"
         );
     }
 }
