@@ -2562,8 +2562,8 @@ fn attention_pass(v: &Value, attention_calls: &BTreeSet<&str>) -> bool {
                 .contains(&text(v, "state"))))
 }
 
-/// Room rows and how many each stage removed (history, attention, text), for
-/// the empty-board hint. Attention-band rows are not Room rows.
+/// Rows the Board could list and how many each stage removed (history,
+/// attention, text), for the empty-board hint.
 fn room_stages(
     all: &[Value],
     nav: &navigation::Navigation,
@@ -2575,7 +2575,6 @@ fn room_stages(
     for v in all
         .iter()
         .filter(|v| !main.is_some_and(|main| std::ptr::eq(*v, main)))
-        .filter(|v| !v["attention_kind"].is_string())
     {
         out.0 += 1;
         if collapsed_history(nav, v) || fold_inactive(nav, v) {
@@ -3663,7 +3662,7 @@ fn render_card_row(
             spans(roomy, true),
             spans(roomy, false),
             spans(limit, true),
-            (columns >= 56 && !elapsed.is_empty())
+            (columns >= 56 && (1..=limit).contains(&width(&elapsed)))
                 .then(|| Span::raw(&elapsed, limit, Some(SGR_MUTED)))
                 .into_iter()
                 .collect(),
