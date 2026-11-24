@@ -97,6 +97,7 @@ pub struct LineageEntry {
 #[derive(Clone, Copy)]
 pub(crate) enum Carry<'a> {
     No,
+    DesktopOwner(&'a str),
     Replay(Option<&'a str>),
 }
 impl Carry<'_> {

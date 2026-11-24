@@ -88,7 +88,7 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     }
     Ok(values)
 }
-fn status(dir: &Path) -> (&'static str, Option<i64>) {
+pub(super) fn status(dir: &Path) -> (&'static str, Option<i64>) {
     status_with(
         dir,
         || storage::read_run(dir, "status", 4096),
@@ -469,6 +469,10 @@ impl Server<'_> {
         }
     }
     pub(crate) fn start_peer(&self, args: &Value) -> ToolResult {
+        self.start_bound_peer(args, None)
+    }
+
+    pub(crate) fn start_bound_peer(&self, args: &Value, assignment: Option<&str>) -> ToolResult {
         if delegated()
             && !(matches!(args["kind"].as_str(), Some("message" | "ack"))
                 && truthy(&args["participant"]))
@@ -571,6 +575,9 @@ impl Server<'_> {
         let dir_path = repo.join(RUN_ROOT).join(&op);
         let started = storage::now();
         let mut meta = json!({"operation":op,"kind":kind,"targets":targets,"started_at":started,"answer_storage":"operation","cancellation_supported":true,"title":prefix_chars(&prompt.split(crate::whitespace).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "),160)});
+        if let Some(binding) = assignment {
+            meta["panel_assignment"] = json!(binding);
+        }
         if !thread.is_empty() {
             meta["thread"] = json!(thread);
         }
@@ -592,6 +599,9 @@ impl Server<'_> {
                 .join(format!("{thread}.jsonl"))
                 .exists()
             {
+                if assignment.is_some() {
+                    return Err("error: assignment thread already exists".into());
+                }
                 argv.extend(["context", "--require-open"].map(OsString::from));
             } else {
                 argv.extend(["new", "--live", "--topic", "Council"].map(OsString::from));

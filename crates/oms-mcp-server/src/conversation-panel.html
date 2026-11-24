@@ -278,6 +278,15 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
       <h2 id="leads-heading"><span id="work-dot" class="work-dot" aria-hidden="true" hidden></span><span id="lead-scope">Main 아래의 Lead 활동</span></h2><div id="leads" class="leads"></div>
     </section>
     <section class="work-threads" id="work-threads" hidden><h2>다른 작업 대화</h2><div id="thread-rows"></div></section>
+    <details class="card" id="peer-assignment" hidden><summary>읽기 전용 검토 요청</summary>
+      <form id="peer-form"><fieldset id="peer-controls"><legend>이 작업방의 검토자</legend>
+        <label for="peer-provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
+        <label for="peer-task">검토할 내용</label><input id="peer-task" required maxlength="1000" placeholder="확인할 코드나 질문을 입력하세요">
+        <button type="submit">검토자 1회 호출</button>
+      </fieldset></form><p id="peer-status" class="muted" role="status"></p>
+      <div class="cluster"><button id="peer-check" type="button" hidden>요청 상태 확인</button>
+        <button id="peer-chat" type="button" hidden>검토 대화 보기</button><button id="peer-next" type="button" hidden>다른 검토 요청</button></div>
+    </details>
       <details class="card" id="provider-options"><summary>Lead 후보 · Codex, Claude, AGY</summary>
         <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
         <button id="provider-load" type="button">호스트 상태 조회</button>
@@ -419,6 +428,7 @@ const gitDrafts = new Map();
 let contextKey;
 let contextQueue = Promise.resolve();
 const tabs = ['overview','chat','activity','usage','git'];
+let peerRoom, peerRequest, peerMember;
 let currentTab = 'overview', dashboardData, members = [], selectedMember, olderCursor, backTarget, chatRows = [];
 let availableAttempts = [], evidenceId, evidenceSection, evidencePage = 1, evidenceNext, evidenceProofs = {};
 const evidenceNames = {info:'실행 정보', events:'이벤트', files:'변경 파일', diff:'패치', transcript:'기록된 답변'};
@@ -1052,7 +1062,15 @@ function render(d) {
   el('view').hidden = false;
 }
 
+function clearPeer(room) {
+  peerRoom = room; peerRequest = peerMember = undefined;
+  el('peer-assignment').open = false; el('peer-assignment').hidden = !room;
+  el('peer-task').value = ''; el('peer-status').textContent = '';
+  el('peer-controls').disabled = false;
+  for (const id of ['peer-check','peer-chat','peer-next']) el(id).hidden = true;
+}
 function clearProject() {
+  clearPeer();
   checkedAt = ''; connectionReady = profileKnown = false; connectionState = '프로젝트 연결 미확인'; hostFacts(); resetConnectionRows();
   el('connection-status').textContent = ''; el('main-scope').textContent = '';
   el('view').hidden = true;
@@ -1138,7 +1156,7 @@ function isMain(attempt) {
 
 function memberKey(m) { return JSON.stringify([m.room,m.participant]); }
 function memberLabel(m) {
-  return [providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role && 'Room ' + m.role, m.participant, m.joined === false && '참여 종료'].filter(Boolean).join(' · ');
+  return [providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role === 'researcher' ? '연구원' : m.role && 'Room ' + m.role, m.participant, m.joined === false && '참여 종료'].filter(Boolean).join(' · ');
 }
 function clearChat() {
   jobs.delete('chat'); loaded.delete('chat'); olderCursor = undefined; chatRows = [];
@@ -1269,6 +1287,13 @@ function loadChat(before) {
       const result = el('chat-result'); result.replaceChildren();
       if (page.result?.text) result.append(node('h3', '기록된 실행 결과', 'small-title'),
         node('p',[page.result.kind,page.result.attempt,dateLabel(page.result.at),page.result.truncated && '일부 표시'].filter(Boolean).join(' · '),'muted'), node('p',page.result.text,'message'));
+      if (page.assignment && !page.result?.text) {
+        const execution = page.assignment.execution;
+        const state = execution?.state === 'running' ? '검토자가 응답을 작성 중입니다.' :
+          execution?.state === 'done' ? (execution.exit === 0 ? '호출이 끝났습니다. 조회한 기록에 답변이 없습니다.' : '검토 호출이 실패했습니다.') :
+          '검토 요청은 기록되었고 실행 상태는 미확인입니다.';
+        result.append(node('p', state,'muted'));
+      }
       const native = el('chat-native'); native.replaceChildren();
       if (canOpenLinks && page.self === true && m.participant === dashboardData?.conversationMain?.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '')) {
         native.append(action('Codex 원래 대화 열기', () => openHostLink(page.nativeUri,status)));
@@ -1388,7 +1413,60 @@ el('provider-load').addEventListener('click',loadProviderOptions);
 el('provider-options').addEventListener('toggle',() => {
   if (el('provider-options').open && !providerData) loadProviderOptions();
 });
+function peerScope(d) {
+  const m = d?.conversationMain;
+  return !readOnly && d?.conversationBinding === 'matched' && m?.source === 'room-session' && m.state === 'joined' &&
+    m.provider === 'codex' && m.participant && m.incomplete === false ? m.room : undefined;
+}
+async function peerAction(check) {
+  const room = peerScope(dashboardData);
+  if (!room || room !== peerRoom || busy || el('view').hidden || (check ? !peerRequest : peerRequest)) return;
+  const provider = el('peer-provider').value, task = el('peer-task').value.trim();
+  if (!check) {
+    if (!['claude','agy'].includes(provider) || !task || Array.from(task).length > 1000) {el('peer-task').focus(); return;}
+    peerRequest = {room, provider, task, title:Array.from(task).slice(0,24).join(''), requestId:crypto.randomUUID()};
+  }
+  const req = peerRequest, expected = generation, status = el('peer-status');
+  const current = () => generation === expected && peerRequest === req && peerRoom === room;
+  setBusy(true,true); el('peer-controls').disabled = true; el('peer-check').disabled = true;
+  status.textContent = check ? '요청 기록 확인 중…' : '검토 요청을 보내는 중…';
+  try {
+    const result = check ? (await tool('oms_assign_result',{room,requestId:req.requestId},expected))._meta?.assignment :
+      (await tool('oms_assign_provider',req,expected)).structuredContent;
+    if (!current()) return;
+    if (result?.room !== room || result.requestId !== req.requestId) throw new Error('요청 기록이 일치하지 않습니다.');
+    if (check && result.status === 'not_found') {
+      clearPeer(room); el('peer-assignment').open = true; status.textContent = '기록된 요청이 없습니다.'; return;
+    }
+    const wanted = req.provider === 'agy' ? 'antigravity' : req.provider;
+    if (result.role !== 'researcher' || result.provider !== wanted || result.readOnly !== true ||
+        result.participant !== 'ask-' + req.requestId) throw new Error('검토자 기록이 일치하지 않습니다.');
+    if (['started','recorded'].includes(result.status) && result.operation) {
+      peerMember = {room,participant:result.participant,provider:wanted,role:'researcher',joined:true};
+      if (!members.some(m => memberKey(m) === memberKey(peerMember))) members.push(peerMember);
+      renderMemberList();
+      status.textContent = providerName(wanted) + ' 검토 요청 접수 · ' + req.title;
+      el('peer-chat').hidden = el('peer-next').hidden = false;
+    } else {
+      status.textContent = '검토자 시작 여부를 확인하지 못했습니다. 같은 요청의 상태를 확인하세요.';
+    }
+  } catch (error) { if (current()) status.textContent = error.message + ' · 요청 상태를 확인하세요.'; }
+  finally {
+    if (generation === expected) setBusy(false);
+    if (current()) { el('peer-controls').disabled = true; el('peer-check').disabled = false; el('peer-check').hidden = false; }
+  }
+}
+el('peer-form').addEventListener('submit',event => {event.preventDefault(); peerAction(false);});
+el('peer-check').addEventListener('click',() => peerAction(true));
+el('peer-chat').addEventListener('click',() => {if (peerMember && peerRoom === peerScope(dashboardData)) selectMember(peerMember,el('peer-chat'));});
+el('peer-next').addEventListener('click',() => {
+  if (busy || !peerMember || peerRoom !== peerScope(dashboardData)) return;
+  clearPeer(peerRoom); el('peer-assignment').open = true; el('peer-task').focus();
+});
 function renderConversation(d) {
+  const scope = peerScope(d);
+  if (scope !== peerRoom) clearPeer(scope);
+  el('peer-assignment').hidden = !scope;
   const main = d.conversationMain;
   const joined = !readOnly && (!d.conversationBinding || d.conversationBinding === 'matched') && main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
   el('current-scope').textContent = readOnly ? '저장소 Main' : '현재 Main';
@@ -1410,6 +1488,7 @@ function renderConversation(d) {
   el('room-leads').hidden = !joined && !readOnly;
   el('git-send').hidden = !canMessage || (!joined && !readOnly);
   members = joined ? (main.participants || []).filter(m => m.room === main.room && typeof m.participant === 'string' && m.participant) : [];
+  if (peerMember && peerMember.room === scope && !members.some(m => memberKey(m) === memberKey(peerMember))) members.push(peerMember);
   if (joined && !members.some(m => m.participant === main.participant)) members.unshift({room:main.room, participant:main.participant, provider:main.provider, role:'main'});
   if (selectedMember) {
     selectedMember = members.find(m => memberKey(m) === memberKey(selectedMember));
@@ -1576,7 +1655,7 @@ function setBusy(value, writing = false) {
   el('view').ariaBusy = String(value);
   el('refresh').disabled = value;
   el('project-choice').disabled = value && writing;
-  el('controls').disabled = value;
+  el('controls').disabled = value; el('peer-controls').disabled = value || Boolean(peerRequest);
   for (const button of el('approvals').querySelectorAll('button')) button.disabled = value;
 }
 

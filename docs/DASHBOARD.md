@@ -214,6 +214,13 @@ The panel below uses seeded project data.
 
 ![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
 
+In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
+to ask one Claude or AGY researcher a question. Submitting the form invokes the
+selected provider once and can use its allowance. **요청 상태 확인** checks the
+same request ID. **검토 대화 보기** opens the Room handoff and the provider's
+recorded answer. A pending request or missing answer remains visible as such.
+The research request grants no write scope, Lead role or approval.
+
 ### Connection details
 
 Expand **연결 정보** to inspect the current host handshake, display mode, OMS tool profile, and last project check. Opening it reads the runtime host's PATH and Main registry. Selecting Codex, Claude, AGY, or Pi previews that harness. **이 하네스로 새 목표 작성** selects it in the new Main form; submitting the form is a separate action. Pi uses the CodexGateway. AGY and Pi resume are unsupported by the current registry. See the [Main launch registry](../crates/oms-command-panel/src/native_panel.rs).

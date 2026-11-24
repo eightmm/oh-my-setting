@@ -76,7 +76,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -650,4 +650,35 @@ test('overview represents each scoped Lead assignment once and opens its exact m
   assert.equal(p.calls.at(-1).args.participant,'search-lead');
   assert.equal(p.calls.at(-1).args.room,'room');
   assert.match(p.get('chat-members').textContent,/qa/);
+});
+
+test('read-only peer is explicitly requested once, recovered by ID and opened in the exact participant chat',async()=>{
+  const main = {source:'room-session',state:'joined',provider:'codex',room:'work',participant:'main',incomplete:false,participants:[]};
+  const p = await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  assert.equal(p.get('peer-assignment').hidden,false);
+  const starts = () => p.calls.filter(c => c.name === 'oms_assign_provider');
+  assert.equal(starts().length,0);
+  p.host.tools = {oms_assign_provider:()=>{throw new Error('연결 끊김');}};
+  p.get('peer-provider').value='agy'; p.get('peer-task').value='Review project compatibility';
+  await p.event('peer-form','submit'); await p.event('peer-form','submit');
+  assert.equal(starts().length,1);
+  const req=starts()[0].args;
+  assert.equal(req.project,'one'); assert.equal(req.room,'work'); assert.equal(req.provider,'agy');
+  p.host.tools.oms_assign_result = a => ({...a,provider:'antigravity',role:'researcher',readOnly:true,
+    participant:'ask-'+a.requestId,status:'started',operation:'ask-confirmed'});
+  await p.event('peer-check','click');
+  assert.deepEqual({...p.calls.at(-1).args},{room:'work',requestId:req.requestId,project:'one'});
+  p.host.tools.oms_panel_chat = a=>({...a,source:'room',messages:[],result:{kind:'read-only provider',text:'Recorded answer'}});
+  await p.event('peer-chat','click');
+  assert.equal(p.calls.at(-1).args.participant,'ask-'+req.requestId);
+  assert.match(p.get('chat-result').textContent,/Recorded answer/); assert.equal(starts().length,1);
+});
+test('foreign, ambiguous, partially observed, and generic views cannot submit a peer',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'main',incomplete:false};
+  for(const [binding,record,readOnly] of [['unconfirmed',null,false],['ambiguous',main,false],['matched',{...main,incomplete:true},false],['matched',main,true]]){
+    const p=await panel(['one'],{conversationBinding:binding,conversationMain:record},{readOnly});
+    assert.equal(p.get('peer-assignment').hidden,true);
+    p.get('peer-provider').value='claude';p.get('peer-task').value='Inspect'; await p.event('peer-form','submit');
+    assert.equal(p.calls.filter(c=>c.name==='oms_assign_provider').length,0);
+  }
 });

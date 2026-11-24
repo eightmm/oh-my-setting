@@ -320,6 +320,8 @@ fn cross_host_project_reads() {
         "oms_start_main",
         "oms_decide_approval",
         "oms_list_approvals",
+        "oms_assign_provider",
+        "oms_assign_result",
     ] {
         assert_eq!(c.tool(name, json!({}))["error"]["code"], -32602);
     }
@@ -456,13 +458,262 @@ fn mcp_app_binding_boundaries() {
     );
     bad(&ask(&mut reopened, json!({}), json!({})), "OMS_PANEL_REPO");
 }
+// Provider assignment: the Room store is proven in room_contract; here the
+// MCP side must launch exactly once per requestId and trust only the host binding.
+fn desktop_assignment() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let thread = "01900000-0000-7000-8000-0000000000bb";
+    let req = "4d6acd01-bd18-4567-bf69-ea05fb048b27";
+    let record_for = |status: &str, fresh: Option<bool>, operation: Value| {
+        let mut r = json!({"request":req,"room":"r","participant":format!("ask-{req}"),"provider":"claude","role":"researcher",
+            "title":"Find callers","task":"inspect the callers","readOnly":true,"thread":operation,
+            "status":status,"operation":operation});
+        if let Some(f) = fresh {
+            r["fresh"] = json!(f);
+        }
+        r.to_string()
+    };
+    let call = |c: &mut Client, name: &str, args: Value, meta: Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":args,"_meta":meta}),
+        )
+    };
+    let args = json!({"room":"r","requestId":req,"provider":"claude","title":"Find callers","task":"inspect the callers"});
+    let runs = || std::fs::read_dir(repo.join(".oms/artifacts/mcp")).map_or(0, |d| d.count());
+    // No host conversation binding, widget-chosen authority, or extra arguments: nothing runs.
+    bad(
+        &call(&mut c, "oms_assign_provider", args.clone(), json!({})),
+        "bound conversation",
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":"bad"}),
+        ),
+        "bound conversation",
+    );
+    let mut extra = args.clone();
+    extra["thread"] = json!("other");
+    assert_eq!(
+        call(
+            &mut c,
+            "oms_assign_provider",
+            extra,
+            json!({"threadId":thread})
+        )["error"]["code"],
+        -32602
+    );
+    let mut bad_provider = args.clone();
+    bad_provider["provider"] = json!("codex,claude");
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            bad_provider,
+            json!({"threadId":thread}),
+        ),
+        "provider",
+    );
+    assert!(!source.join("last-call.json").exists());
+    assert_eq!(runs(), 0);
+    // A fresh intent launches once and records the returned operation.
+    // The fixture cannot know the generated operation id, so its receipt names another one.
+    fixture_settings(
+        &source,
+        json!({"room":{
+        "desktop-assign":record_for("assigned",Some(true),Value::Null),
+        "desktop-assign-receipt":record_for("started",None,json!("placeholder"))}}),
+    );
+    let first = call(
+        &mut c,
+        "oms_assign_provider",
+        args.clone(),
+        json!({"threadId":thread}),
+    );
+    good(&first);
+    // A mismatching receipt is never trusted: the launch stays unconfirmed.
+    assert_eq!(payload(&first)["status"], "unconfirmed");
+    assert_eq!(runs(), 1, "the provider was launched exactly once");
+    let operation = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    assert_eq!(payload(&first)["operation"], operation);
+    // Let the detached fixture peer finish so it cannot overwrite the command record.
+    until(|| {
+        repo.join(".oms/artifacts/mcp")
+            .join(&operation)
+            .join("status")
+            .is_file()
+    });
+    // A retry observes the recorded intent and never starts another provider.
+    for (status, expected) in [("assigned", "unconfirmed"), ("started", "recorded")] {
+        let op = if status == "started" {
+            json!(operation)
+        } else {
+            Value::Null
+        };
+        fixture_settings(
+            &source,
+            json!({"room":{"desktop-assign":record_for(status,Some(false),op)}}),
+        );
+        let again = call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        );
+        good(&again);
+        assert_eq!(payload(&again)["status"], expected);
+        assert_eq!(payload(&again)["role"], "researcher");
+        assert_eq!(payload(&again)["readOnly"], true);
+        assert_eq!(runs(), 1, "retry never redispatches");
+        assert_eq!(record(&source)["argv"][1], "desktop-assign");
+        let digest = record(&source)["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|v| v == "--conversation-digest")
+            .unwrap();
+        assert_ne!(
+            record(&source)["argv"][digest + 1],
+            thread,
+            "only a digest leaves the process"
+        );
+    }
+    // A Room record for another request, role or thread is never trusted.
+    let mut forged: Value =
+        serde_json::from_str(&record_for("started", Some(false), json!(operation))).unwrap();
+    forged["role"] = json!("main");
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign":forged.to_string()}}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "unrecognized",
+    );
+    assert_eq!(runs(), 1);
+    // The result reader takes the thread only from the Room receipt and exposes its turns.
+    let updates = json!({"schema":1,"thread":operation,"turns":[{"role":"topic","text":"internal topic"},{"role":"answer","provider":"claude","quality":"ok","text":"callers found"},{"role":"answer","provider":"agy","quality":"ok","text":"foreign seat"}],"cursor":"c1","has_more":false});
+    fixture_settings(
+        &source,
+        json!({"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let read = call(
+        &mut c,
+        "oms_assign_result",
+        json!({"room":"r","requestId":req}),
+        json!({"threadId":thread}),
+    );
+    good(&read);
+    assert_eq!(
+        read["result"]["_meta"]["assignment"]["transcript"]["turns"][0]["text"],
+        "callers found"
+    );
+    assert_eq!(read["result"]["_meta"]["assignment"]["role"], "researcher");
+    assert_eq!(payload(&read)["status"], "started");
+    assert!(payload(&read)["transcript"].is_null());
+    assert!(
+        !read["result"]["content"]
+            .to_string()
+            .contains("fixture answer")
+    );
+    assert!(!read.to_string().contains("foreign seat"));
+    // The existing participant reader shows the same turns in its recorded-result slot.
+    let chat = json!({"room":"r","participant":format!("ask-{req}"),"provider":"claude","source":"room","self":false,"messages":[],"nextBefore":null});
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let page = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    good(&page);
+    assert!(page["result"]["content"][0]["text"].as_str().is_some());
+    assert!(
+        page["result"]["_meta"]["chat"]["result"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("fixture answer")
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_result",
+            json!({"room":"r","requestId":req}),
+            json!({}),
+        ),
+        "bound conversation",
+    );
+    let foreign_req = "5d6acd01-bd18-4567-bf69-ea05fb048b27";
+    let mut foreign: Value =
+        serde_json::from_str(&record_for("started", None, json!(operation))).unwrap();
+    foreign["request"] = json!(foreign_req);
+    foreign["participant"] = json!(format!("ask-{foreign_req}"));
+    fixture_settings(
+        &source,
+        json!({"updates":updates.to_string(),"room":{"desktop-assign-status":foreign.to_string()}}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_result",
+            json!({"room":"r","requestId":foreign_req}),
+            json!({"threadId":thread}),
+        ),
+        "does not match",
+    );
+    // Delegated workers and the read-only app profile have no assignment authority.
+    let before = runs();
+    let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
+    bad(
+        &call(
+            &mut worker,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "parent app",
+    );
+    let mut app = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    assert_eq!(
+        call(
+            &mut app,
+            "oms_assign_provider",
+            args,
+            json!({"threadId":thread})
+        )["error"]["code"],
+        -32602
+    );
+    assert_eq!(runs(), before);
+}
 fn conversation_panel() {
     let t = Temp::new();
     let source = t.source();
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 11);
+    assert_eq!(tools.as_array().unwrap().len(), 13);
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
@@ -3320,6 +3571,19 @@ fn fake_oms() {
         println!("thread: fixture-thread");
         return;
     }
+    if args.first().is_some_and(|v| v == "room")
+        && let Some(out) = args
+            .get(1)
+            .and_then(|v| v.to_str())
+            .and_then(|a| cfg["room"][a].as_str())
+    {
+        print!("{out}");
+        return;
+    }
+    if args.iter().any(|v| v == "updates") && cfg["updates"].is_string() {
+        print!("{}", cfg["updates"].as_str().unwrap());
+        return;
+    }
     if cfg["hold"] == true {
         until(|| source.join("release").exists());
     }
@@ -3783,7 +4047,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 33] = [
+    let cases: [(&str, fn()); 34] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -3792,6 +4056,7 @@ fn main() {
         ("cross_host_project_reads", cross_host_project_reads),
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
+        ("desktop_assignment", desktop_assignment),
         ("environment_authority", environment_authority),
         ("boundary_limits", boundary_limits),
         ("canonical_protocol_cases", canonical_protocol_cases),
