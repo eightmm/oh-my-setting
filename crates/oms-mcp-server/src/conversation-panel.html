@@ -20,7 +20,7 @@
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; color: var(--ink); background: var(--bg); font: 13.5px/1.5 Inter, system-ui, "Noto Sans CJK KR", "Malgun Gothic", sans-serif; overflow-wrap: anywhere; -webkit-font-smoothing: antialiased; }
+body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Noto Sans CJK KR", system-ui, sans-serif; overflow-wrap: anywhere; -webkit-font-smoothing: antialiased; }
 main { max-width: 42rem; margin: auto; padding: 0 clamp(.75rem, 3vw, 1.1rem) 1.5rem; }
 h1, h2, h3, h4, p, ul, dl, dd, fieldset, legend { margin: 0; padding: 0; }
 h1 { font-size: .95rem; letter-spacing: -.02em; font-weight: 750; }
@@ -58,7 +58,6 @@ fieldset legend { margin-bottom: .45rem; color: var(--muted); font-size: .8rem; 
 #brief:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent); }
 .primary { background: var(--brand); color: var(--on-brand); border-color: var(--brand); font-weight: 650; min-height: 2.3rem; padding-inline: 1.1rem; }
 #start { width: 100%; }
-.lead p + p { margin-top: .25rem; }
 .evidence, .history { margin-top: .7rem; }
 .history summary { cursor: pointer; font-weight: 600; }
 .metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: .5rem; margin: .65rem 0; }
@@ -75,8 +74,6 @@ ul { list-style: none; }
 .tabs button[aria-selected="false"]:hover { background: var(--tint); border-color: transparent; }
 .meta-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .6rem; align-items: start; }
 .link-action { background: transparent; color: var(--brand); border-color: var(--main-line); font-size: .8rem; font-weight: 650; }
-.lead .link-action { margin-top: .35rem; }
-.lead h4 button { padding: 0; min-height: 1.6rem; border: none; background: transparent; text-align: left; }
 #current-main label { cursor: pointer; }
 .usage-window { display: grid; grid-template-columns: minmax(0,1fr) minmax(3rem,7rem); gap: .4rem; align-items: center; }
 meter { width: 100%; accent-color: var(--brand); }
@@ -170,11 +167,6 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 .leads-region h2 { font-size: .72rem; letter-spacing: .06em; color: var(--muted); font-weight: 650; }
 .leads { display: grid; grid-template-columns: 1fr; gap: 0; margin-top: .2rem; }
 .leads > p { padding-top: .4rem; }
-.lead { margin-top: .4rem; padding: .45rem 0 0; }
-.lead h4 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .17rem; font-size: .88rem; }
-.lead h4 small { margin-left: auto; font: .72rem/1.4 var(--mono); }
-.lead h4 .link-action { min-height: 1.5rem; margin: 0; color: var(--ink); font-size: .88rem; }
-.lead p { color: var(--muted); font-size: .78rem; }
 .plan-strip { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; padding-block: .5rem; }
 .plan-strip strong { font-variant-numeric: tabular-nums; }
 #plan-marker { width: .85rem; height: .85rem; border-radius: 100%; background: conic-gradient(var(--brand) var(--verified),var(--line) 0); mask-image: radial-gradient(circle,transparent 44%,black 48%); }
@@ -189,13 +181,6 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 .work-threads button strong, .work-threads button small { display: block; }
 .work-threads button small { margin-top: .1rem; color: var(--muted); font-size: .75rem; font-weight: 500; }
 .work-threads button > span:last-child { color: var(--muted); }
-.team-main { display: flex; gap: .65rem; align-items: center; }
-.team-main .avatar { width: 2.4rem; height: 2.4rem; font-size: .88rem; border-radius: .55rem; }
-.main-card { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--brand); border-radius: var(--r); padding: .8rem .9rem; margin-top: 0; }
-.team-chips { display: flex; flex-wrap: wrap; margin: .5rem 0 .2rem; gap: .35rem; }
-.team-chips button { display: inline-flex; gap: .3rem; align-items: center; font-size: .76rem; font-weight: 550; min-height: 1.7rem; border-radius: 999px; padding: .12rem .55rem .12rem .2rem; max-width: 100%; }
-#header-main { color: var(--brand); font-size: .68rem; min-height: 1.35rem; padding: 0 .45rem; border-radius: 999px; border-color: var(--main-line); }
-#header-main::before { content: ''; display: inline-block; width: .3rem; height: .3rem; background: currentColor; border-radius: 50%; margin: 0 .28rem .1rem 0; }
 #pane-chat, #pane-activity, #pane-usage, #pane-git { border-top: 0; }
 @media (max-width: 28rem) {
   main { padding-inline: .65rem; }
@@ -205,7 +190,6 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
   #goal { font-size: 1.1rem; }
   #scope { float: none; margin-left: 0; }
   .project-meta { width: 100%; }
-  .team-main .avatar { width: 2rem; height: 2rem; }
   .meta-row .link-action { max-width: 6.5rem; }
   .main-card { padding: .65rem .7rem; }
 }
@@ -220,19 +204,31 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 #git-catalog details { border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
 #git-catalog button,#git-content .draft-action { margin-top: .35rem; }
 #goal-card { border-top: 0; }
-.goal-actions { margin-top: .65rem; }
 header { display: flex; flex-wrap: nowrap; gap: .45rem; }
 header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0; margin-right: auto; }
 #project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #scope { margin: 0; flex: 0 1 auto; }#project-choice { max-width: min(9rem,24vw); }#refresh { flex-shrink: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
-.goal-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
-#header-main { display: inline-flex; align-items: center; gap: .35rem; min-height: 1.7rem; padding: .12rem .52rem .12rem .2rem; font-size: .76rem; }
-#header-main::before { display: none; }#header-main::after { content: '›'; color: var(--muted); }
-#current-main { margin: 0; font-size: .8rem; }
-.lead { display: grid; grid-template-columns: minmax(5.6rem,.8fr) minmax(0,1.6fr) minmax(2.65rem,auto); gap: .5rem; align-items: baseline; padding: .46rem 0; margin: 0; }
-.lead h4,.lead p { margin: 0; }.lead p { color: var(--ink); font-size: .84rem; }
-.lead-state { font-size: .74rem; text-align: right; color: var(--muted); }.lead-state::before { content: ''; display: inline-block; vertical-align: .08rem; width: .33rem; height: .33rem; border-radius: 50%; margin-right: .3rem; background: var(--muted); }.lead-state.observed::before { background: var(--info); }
+.main-line { display:flex; gap:.6rem; align-items:center; min-height:2.1rem; color:var(--muted); font-size:.76rem; }
+#header-main { display:inline-flex; align-items:center; gap:.35rem; min-height:1.8rem; border:0; padding:0 .3rem; background:transparent; color:var(--ink); font-weight:650; }
+#header-main::after { content:'›'; color:var(--muted); }
+#current-main { margin:0; font-size:.8rem; }
+#goal-card { margin:.65rem 0 .85rem; padding:.85rem .95rem .7rem; background:var(--surface); border:1px solid var(--line); border-radius:.7rem; }
+#goal-card h2,.leads-region h2,.work-threads h2 { font-size:.78rem; letter-spacing:0; }
+h2,h3,.work-title strong,#goal { word-break:keep-all; overflow-wrap:anywhere; text-wrap:pretty; }
+#goal { text-wrap:balance; font-size:1.08rem; line-height:1.5; margin:.25rem 0 .6rem; }
+#plan-strip { border-top:1px solid var(--line); margin-top:.63rem; padding:.45rem 0 0; }
+#approval-card.awaiting-action { margin-top:.8rem; }
+.leads-region { padding:.25rem 0 .7rem; border:0; }
+.leads { margin-top:.45rem; gap:.35rem; }
+.lead { width:100%; display:grid; grid-template-columns:1.8rem minmax(0,1fr) auto auto; gap:.55rem; align-items:center; text-align:left; padding:.52rem .65rem; margin:0; background:var(--surface); border:1px solid var(--line); border-radius:.55rem; }
+button.lead:hover,button.lead:focus-visible { background:var(--tint); }
+.lead .avatar { width:1.65rem; height:1.65rem; border-radius:.48rem; }
+.work-title { display:grid; gap:.05rem; }.work-title small,.lead-state { color:var(--muted); font-size:.72rem; }.work-title strong { font-size:.88rem; font-weight:650; }
+.lead-state { text-align:right; }.lead-state::before { content:''; display:inline-block; vertical-align:.08rem; width:.32rem; height:.32rem; border-radius:50%; margin-right:.3rem; background:var(--muted); }.lead-state.observed::before { background:var(--info); }
+.arrow { color:var(--muted); }
+#overview-backlog { display:flex; width:100%; align-items:center; justify-content:space-between; padding:.48rem 0; margin:.2rem 0 .45rem; font-size:.84rem; min-height:2.1rem; color:var(--muted); text-align:left; border:0; background:transparent; }
+#overview-backlog:hover { color:var(--ink); } #overview-backlog span { color:var(--muted); }
 @media (max-width: 28rem) { main { padding-inline: .92rem; } }
 @media (max-width: 23rem) { header h1 { position: absolute; clip-path: inset(50%); }#project { font-size: .94rem; }#refresh { padding-inline: .18rem; } }
 
@@ -256,6 +252,7 @@ header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0
   <p id="status" role="status">OMS 연결 중…</p>
   <p id="receipt" role="status"></p>
   <div id="view" hidden>
+    <div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" type="button" hidden></button><span id="current-main" class="muted"></span></div>
     <nav class="tabs" role="tablist" aria-label="프로젝트 보기">
       <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview">개요</button>
       <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1">대화</button>
@@ -264,30 +261,28 @@ header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0
       <button id="tab-git" role="tab" aria-selected="false" aria-controls="pane-git" tabindex="-1">Git · PR</button>
     </nav>
     <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
-    <section class="card" id="goal-card" aria-labelledby="goal-heading">
-      <div class="goal-head"><h2 id="goal-heading" class="section-label">프로젝트 목표</h2>
-        <button id="header-main" type="button" hidden></button><span id="current-main" class="muted"></span></div><p id="goal"></p>
-      <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
-      <div class="cluster goal-actions"><button type="button" class="primary" id="overview-backlog">GitHub 열린 작업 전체 맡기기</button></div>
-    </section>
     <section id="approval-card" class="card" aria-labelledby="approvals-heading">
       <h2 id="approvals-heading">승인 요청</h2><p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
     </section>
     <details class="card" id="alerts"><summary>확인이 필요한 항목</summary><ul id="attention"></ul>
       <button type="button" id="attention-open">주의 항목 자세히 보기</button></details>
+    <section class="card" id="goal-card" aria-labelledby="goal-heading">
+      <h2 id="goal-heading" class="section-label">프로젝트 목표</h2><p id="goal"></p>
+      <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
+      <div id="plan-strip" class="plan-strip" aria-label="프로젝트 작업 검증" hidden>
+        <span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted">계획 작업 검증</span>
+        <button id="plan-open" type="button">계획 보기 ›</button>
+      </div>
+    </section>
     <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
       <h2 id="leads-heading"><span id="work-dot" class="work-dot" aria-hidden="true" hidden></span><span id="lead-scope">Main 아래의 Lead 활동</span></h2><div id="leads" class="leads"></div>
     </section>
-    <section class="work-threads" id="work-threads" hidden><h2>작업 대화</h2><div id="thread-rows"></div></section>
+    <section class="work-threads" id="work-threads" hidden><h2>다른 작업 대화</h2><div id="thread-rows"></div></section>
       <details class="card" id="provider-options"><summary>Lead 후보 · Codex, Claude, AGY</summary>
         <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
         <button id="provider-load" type="button">호스트 상태 조회</button>
       </details>
-    <section id="plan-strip" class="card plan-strip" aria-label="프로젝트 작업 검증" hidden>
-      <span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted">계획 작업 검증</span>
-      <button id="plan-open" type="button">계획 보기 ›</button>
-    </section>
-    <div id="team-region" hidden><div id="team-chips" class="team-chips" aria-label="참여자 대화"></div></div>
+    <button type="button" id="overview-backlog">GitHub 열린 작업 전체 맡기기 <span aria-hidden="true">↗</span></button>
     <details id="launcher" class="card"><summary>별도 Main에 새 목표 전달</summary>
     <form id="launch">
       <fieldset id="controls"><legend>새 Main 선택</legend>
@@ -1073,8 +1068,8 @@ function clearProject() {
   for (const id of ['git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status']) el(id).replaceChildren();
   el('git-number').value = ''; el('git-goal').value = ''; el('git-provider').value = '';
   el('approval-card').className = 'card'; el('approval-card').hidden = false;
-  for (const id of ['thread-rows','team-chips','approval-idle']) el(id).replaceChildren();
-  for (const id of ['work-threads','team-region','plan-strip','acceptance-bar','header-main']) el(id).hidden = true;
+  for (const id of ['thread-rows','approval-idle']) el(id).replaceChildren();
+  for (const id of ['work-threads','plan-strip','acceptance-bar','header-main']) el(id).hidden = true;
   showTab('overview'); tabScroll.clear();
   updateContext(null);
   retryStart = undefined;
@@ -1348,21 +1343,16 @@ function paintAvatar(element, person) {
   element.setAttribute('aria-hidden','true');
 }
 function renderTeam(d) {
-  const chips = el('team-chips'), threads = el('thread-rows');
-  chips.replaceChildren(); threads.replaceChildren();
-  el('team-region').hidden = !members.length;
+  const threads = el('thread-rows');
+  threads.replaceChildren();
+  const active = d.activeAttempts || [];
+  const shown = active.filter(a => isLead(a) && a.room === d.conversationMain?.room);
   const seen = new Set();
-  const history = [...(d.activeAttempts || []),...(d.attempts || [])];
-  for (const person of members) {
-    const chip = action('',() => selectMember(person,chip));
-    const avatar = node('span',''); paintAvatar(avatar,person);
-    chip.append(avatar,node('span',person.participant));
-    chip.setAttribute('aria-label',memberLabel(person) + ' 대화 열기'); chips.append(chip);
-  }
+  const history = [...active,...(d.attempts || [])];
   for (const record of history) {
     if (!record.task || !record.participant || seen.has(record.participant)) continue;
     const member = members.find(m => m.room === record.room && m.participant === record.participant);
-    if (!member) continue;
+    if (!member || shown.some(a => a.participant === member.participant && a.task === record.task)) continue;
     seen.add(member.participant);
     const row = action('',() => selectMember(member,row));
     const dot = node('span','',(d.activeAttempts || []).includes(record) ? 'thread-dot thread-open' : 'thread-dot');
@@ -1401,6 +1391,7 @@ el('provider-options').addEventListener('toggle',() => {
 function renderConversation(d) {
   const main = d.conversationMain;
   const joined = !readOnly && (!d.conversationBinding || d.conversationBinding === 'matched') && main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
+  el('current-scope').textContent = readOnly ? '저장소 Main' : '현재 Main';
   const current = el('current-main');
   current.hidden = Boolean(joined);
   current.textContent = joined ? '' : 'Main 미확인';
@@ -1411,7 +1402,7 @@ function renderConversation(d) {
   el('participant').textContent = joined ? main.participant : '미확인';
   el('identity').hidden = !joined;
   el('main-scope').textContent = readOnly ? '저장소에 기록된 Main' : '이 대화의 Main';
-  el('lead-scope').textContent = readOnly ? '저장소의 Lead 활동' : 'Main 아래의 Lead 활동';
+  el('lead-scope').textContent = readOnly ? '저장소의 Lead 활동' : '작업방 Lead';
   if (readOnly) {
     current.textContent = d.main?.provider ? providerName(d.main.provider) + ' Main' : 'Main 미확인';
     el('main-state').textContent = d.main ? [stateLabel(d.main.state),d.main.room].filter(Boolean).join(' · ') : '저장소 실행 기록에서 Main을 확인할 수 없습니다.';
@@ -1446,17 +1437,21 @@ function renderConversation(d) {
     return;
   }
   for (const lead of roomLeads) {
-    const card = node('article','','lead'), heading = node('h4','');
-    const assignee = providerName(lead.provider) + ' Lead';
     const member = members.find(m => m.participant === lead.participant);
-    if (member) {
-      const link = action(assignee,() => selectMember(member,link));
-      link.setAttribute('aria-label',memberLabel(member) + ' 대화 보기'); heading.append(link);
-    } else heading.append(node('span',assignee));
-    const task = node('p',[lead.task || lead.id || '작업 미확인',readOnly && lead.room].filter(Boolean).join(' · '));
+    const card = member ? action('',() => selectMember(member,card)) : node('article','');
+    card.className = 'lead';
+    const assignee = providerName(lead.provider) + ' Lead';
+    const avatar = node('span',''); paintAvatar(avatar,lead);
+    const text = node('span','','work-title');
+    text.append(node('small',assignee),node('strong',[lead.task || lead.id || '작업 미확인',readOnly && lead.room].filter(Boolean).join(' · ')));
     const state = node('small',stateLabel(lead.state) || '상태 미확인','lead-state');
     if (['working','verifying','starting','in_review'].includes(lead.state)) state.className += ' observed';
-    card.append(heading,task,state); cards.append(card);
+    card.append(avatar,text,state);
+    if (member) {
+      card.setAttribute('aria-label',assignee + ' · ' + (lead.task || lead.id || '') + ' · ' + member.participant + ' 대화 열기');
+      const arrow = node('span','›','arrow'); arrow.setAttribute('aria-hidden','true'); card.append(arrow);
+    }
+    cards.append(card);
   }
 }
 

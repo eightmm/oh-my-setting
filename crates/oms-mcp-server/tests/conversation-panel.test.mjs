@@ -634,3 +634,20 @@ test('Project pages use the linked board ID, expose field hints and only offer a
   assert.doesNotMatch(rows.textContent,/작업 목표 작성/);assert.equal(next.hidden,true);assert.equal(back.hidden,false);
   assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>c.name==='oms_start_main'));
 });
+
+test('overview represents each scoped Lead assignment once and opens its exact member; other members remain in chat',async()=>{
+  const lead={room:'room',participant:'search-lead',provider:'codex',role:'worker'};
+  const run={...lead,role:'lead',task:'수정 작업',state:'verifying'};
+  const advisor={room:'room',participant:'qa',provider:'claude',role:'reviewer'};
+  const p=await panel(['one'],{conversationBinding:'matched',active:1,
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'room',participant:'owner',participants:[lead,advisor]},
+    activeAttempts:[run],attempts:[run,{...advisor,task:'검토 기록',state:'done'}]});
+  p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]})};
+  assert.match(p.get('leads').textContent,/Codex Lead수정 작업검증 중/);
+  assert.doesNotMatch(p.get('thread-rows').textContent,/수정 작업/);
+  assert.match(p.get('thread-rows').textContent,/검토 기록/);
+  p.get('leads').children[0].dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.calls.at(-1).args.participant,'search-lead');
+  assert.equal(p.calls.at(-1).args.room,'room');
+  assert.match(p.get('chat-members').textContent,/qa/);
+});
