@@ -1599,7 +1599,8 @@ function clearChat() {
   clearEvidence(); availableAttempts = []; el('chat-evidence').hidden = true;
 }
 let reviewAttachment;
-const sentReviews = new Set();
+// An unconfirmed delivery can be reopened for copying. Retain its send lock.
+const sentReviews = new Map();
 function clearReviewAttachment() {
   reviewAttachment = undefined;
   el('review-share').hidden = el('review-preview').hidden = true;
@@ -1620,8 +1621,7 @@ function prepareReviewAttachment(page, member) {
   clearReviewAttachment();
   reviewAttachment = {key,room:member.room,participant:member.participant,provider:member.provider,operation,text,partial:page.result.truncated === true};
   el('review-share').hidden = false;
-  el('review-choose').disabled = sentReviews.has(key);
-  if (sentReviews.has(key)) put('review-share-status',() => t('share.already'));
+  dismissReview(false);
 }
 function currentReview(item) {
   return currentTab === 'chat' && item && item === reviewAttachment && item.room === peerScope(dashboardData) &&
@@ -1629,19 +1629,24 @@ function currentReview(item) {
 }
 el('review-choose').addEventListener('click',() => {
   const item = reviewAttachment;
-  if (!currentReview(item) || sentReviews.has(item.key)) return;
+  const state = item && sentReviews.get(item.key);
+  if (!currentReview(item) || (state && state !== 'unknown')) return;
   el('review-text').value = item.text;
   el('review-preview').hidden = false;
-  el('review-submit').hidden = !canMessage; el('review-submit').disabled = false;
+  const unknown = state === 'unknown';
+  el('review-cancel').disabled = false;
+  el('review-submit').hidden = !canMessage || unknown; el('review-submit').disabled = false;
   el('review-choose').hidden = true;
-  put('review-share-status',() => [t(item.partial ? 'share.partial' : 'share.preview',{p:providerName(item.provider)}),!canMessage && t('share.manual')].filter(Boolean).join(' '));
+  if (unknown) put('review-share-status',() => t('share.unknown'));
+  else put('review-share-status',() => [t(item.partial ? 'share.partial' : 'share.preview',{p:providerName(item.provider)}),!canMessage && t('share.manual')].filter(Boolean).join(' '));
   el('review-text').focus();
 });
 function dismissReview(focus) {
   el('review-preview').hidden = true; el('review-choose').hidden = false; el('review-text').value = '';
-  const locked = reviewAttachment && sentReviews.has(reviewAttachment.key);
-  el('review-choose').disabled = Boolean(locked);
-  if (locked) put('review-share-status',() => t('share.already'));
+  const state = reviewAttachment && sentReviews.get(reviewAttachment.key);
+  const locked = state === 'sent' || state === 'pending';
+  el('review-choose').disabled = locked;
+  if (state) put('review-share-status',() => t({sent:'share.already',pending:'share.sending',unknown:'share.unknown'}[state]));
   else el('review-share-status').textContent = '';
   if (focus) (locked ? el('chat-title') : el('review-choose')).focus();
 }
@@ -1663,30 +1668,36 @@ el('review-copy').addEventListener('click',async () => {
 el('review-submit').addEventListener('click',async () => {
   const item = reviewAttachment;
   if (!currentReview(item) || !canMessage || el('review-preview').hidden || sentReviews.has(item.key)) return;
-  sentReviews.add(item.key);
+  sentReviews.set(item.key,'pending');
   el('review-submit').disabled = el('review-cancel').disabled = true;
   put('review-share-status',() => t('share.sending'));
+  let acknowledgedInPreview = false;
   try {
     const r = await request('ui/message',{role:'user',content:[{type:'text',text:item.text}]});
     if (!r || typeof r !== 'object') throw Error();
     const rejected = r.isError === true;
-    if (rejected) sentReviews.delete(item.key);
-    if (!currentReview(item)) return;
+    if (rejected) sentReviews.delete(item.key); else sentReviews.set(item.key,'sent');
+    if (!currentReview(item) || el('review-preview').hidden) return;
     if (rejected) {
       el('review-submit').disabled = false;
       put('review-share-status',() => t('share.rejected'));
     } else {
       el('review-preview').hidden = true; el('review-text').value = ''; el('review-choose').hidden = false; el('review-choose').disabled = true;
+      acknowledgedInPreview = true;
       put('review-share-status',() => t('share.sent'));
+      el('chat-title').focus({preventScroll:true});
     }
   } catch (error) {
-    if (error.hostRejected) sentReviews.delete(item.key);
+    if (error.hostRejected) sentReviews.delete(item.key); else sentReviews.set(item.key,'unknown');
     if (currentReview(item)) {
       el('review-submit').disabled = !error.hostRejected;
       put('review-share-status',() => t(error.hostRejected ? 'share.rejected' : 'share.unknown'));
     }
   } finally {
-    if (currentReview(item)) el('review-cancel').disabled = false;
+    if (reviewAttachment?.key === item.key) {
+      el('review-cancel').disabled = false;
+      if (el('review-preview').hidden && !acknowledgedInPreview) dismissReview(false);
+    }
   }
 });
 
