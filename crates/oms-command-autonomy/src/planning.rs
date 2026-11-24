@@ -235,10 +235,16 @@ pub(crate) fn validate(
             "acceptance_files",
             "tasks",
         ],
-        &["issue", "discussion"],
+        &["issue", "discussion", "issue_source"],
     )?;
     require(
-        proposal["schema"].as_u64() == Some(1) && proposal["kind"] == "agent-plan-proposal",
+        proposal["schema"].as_u64()
+            == Some(if proposal.get("issue_source").is_some() {
+                2
+            } else {
+                1
+            })
+            && proposal["kind"] == "agent-plan-proposal",
         "proposal does not match exact reviewed schema",
     )?;
     require(
@@ -376,11 +382,32 @@ pub(crate) fn validate(
         }
     }
     let mode = Mode::load(ctx)?;
+    let issue = github::proposal_issue(&mode, proposal)?;
+    if let Some(source) = proposal.get("issue_source") {
+        value::keys(source, &["issue", "sha256"], &[])?;
+        require(
+            mode.active.is_some()
+                && issue.as_deref().is_some_and(|i| source["issue"] == i)
+                && value::digest(value::text(source, "sha256")),
+            "invalid reviewed Project issue source",
+        )?;
+    }
     Ok(Checked {
-        issue: github::proposal_issue(&mode, proposal)?,
+        issue,
         replay,
         active: mode.active.is_some(),
     })
+}
+pub(crate) fn issue_pin(args: &Args) -> Result<Option<&str>> {
+    if !args.has("issue-source-sha256") {
+        return Ok(None);
+    }
+    let sha = args.required("issue-source-sha256")?;
+    require(
+        args.has("issue") && value::digest(sha),
+        "--issue-source-sha256 requires --issue and a reviewed lower-case SHA-256",
+    )?;
+    Ok(Some(sha))
 }
 fn pending(path: &str, sha: &str, verb: &str) -> String {
     format!(
@@ -401,6 +428,7 @@ pub(crate) fn restamp_file(
     path: &Path,
     expected: &str,
     raw_issue: &str,
+    pin: Option<&str>,
 ) -> Result<(String, String, String)> {
     ctx.parent()?;
     require(
@@ -429,7 +457,7 @@ pub(crate) fn restamp_file(
         "plan changed after proposal generation; propose again",
     )?;
     let issue = Mode::load(ctx)?.canonical(raw_issue)?;
-    github::stamp(&mut proposal, &issue);
+    github::stamp(&mut proposal, &issue, pin);
     require(
         validate(ctx, &proposal, &spec, 12)?.issue.as_deref() == Some(issue.as_str()),
         "restamped proposal lost its issue",
@@ -461,12 +489,84 @@ fn restamp(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         &path,
         args.required("expected-proposal-sha256")?,
         args.required("issue")?,
+        issue_pin(args)?,
     )?;
     Ok(Output::text(format!(
         "plan-from-spec: restamped {issue} -> {path}\nplan-from-spec: proposal sha256: {sha}\nreview the list, then: oms plan-from-spec --apply {path} --expected-proposal-sha256 {sha}"
     )))
 }
+/// Check the exact reviewed bytes before acquiring either the autopilot controller
+/// or the Plan writer. Only the native transaction may decide a replay is complete.
+pub(crate) fn observe_issue(
+    ctx: &Context<'_>,
+    path: &Path,
+    sha: &str,
+) -> Result<Option<oms_command_plan::IssueObservation>> {
+    let raw = ctx.bytes(path, MAX_FILE)?;
+    require(
+        value::digest(sha) && value::hash(&raw) == sha,
+        "proposal bytes changed after review",
+    )?;
+    let p = value::parse(&raw)?;
+    if p.get("issue_source").is_none() {
+        return Ok(None);
+    }
+    ctx.parent()?;
+    let spec = contract(ctx)?;
+    let checked = validate(ctx, &p, &spec, 12)?;
+    let plan = ctx.plan()?;
+    let snapshot = plan.load()?;
+    let tasks = p["tasks"].as_array().unwrap();
+    if tasks
+        .iter()
+        .any(|t| snapshot.task(value::text(t, "id")).is_ok())
+    {
+        require(
+            checked.replay
+                && tasks.iter().all(|t| {
+                    snapshot
+                        .task(value::text(t, "id"))
+                        .is_ok_and(|row| row.get("issue_intake").text("proposal_sha256") == sha)
+                }),
+            "partial or different reviewed issue intake already occupies task ids",
+        )?;
+        return Ok(None);
+    }
+    require(
+        snapshot
+            .raw
+            .as_deref()
+            .map(value::hash)
+            .as_deref()
+            .unwrap_or("absent")
+            == p["plan_sha256"].as_str().unwrap_or(""),
+        "plan changed after proposal review",
+    )?;
+    let proof = plan.observe_issue(&raw, |endpoint| {
+        ctx.services
+            .read_issue(endpoint, ctx.interrupted)
+            .map_err(|e| oms_command_plan::Error {
+                code: e.code,
+                message: e.message,
+            })
+    })?;
+    Ok(Some(proof))
+}
+
 pub(crate) fn apply(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    ctx.parent()?;
+    let proof = observe_issue(
+        ctx,
+        &args.path("apply", &ctx.repo),
+        args.required("expected-proposal-sha256")?,
+    )?;
+    apply_observed(ctx, args, proof)
+}
+pub(crate) fn apply_observed(
+    ctx: &Context<'_>,
+    args: &Args,
+    proof: Option<oms_command_plan::IssueObservation>,
+) -> Result<Output> {
     ctx.parent()?;
     require(
         !args.has("issue"),
@@ -550,7 +650,13 @@ pub(crate) fn apply(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         )
         .with("max-tasks", args.number("max-tasks", 6, 1, 12)?.to_string());
     req.repo = Some(ctx.repo.clone());
-    ctx.action(&req)?;
+    if proof.is_some() {
+        crate::checkpoint(ctx.interrupted)?;
+        let _gate = ctx.gates.map(crate::storage::Gates::plan);
+        ctx.plan()?.with_issue_observation(proof).execute(&req)?;
+    } else {
+        ctx.action(&req)?;
+    }
     Ok(Output::text(format!(
         "plan-from-spec: {} task(s) applied; parent-agent next: oms goal-drive",
         proposal["tasks"].as_array().unwrap().len()
@@ -573,6 +679,7 @@ struct PreparedPropose {
     wall: std::time::Duration,
     extra_call_args: Vec<OsString>,
     issue: Option<String>,
+    issue_pin: Option<String>,
 }
 fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
     require(
@@ -584,11 +691,16 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
     spec.confirmed()?;
     spec.planner_budget()?;
     let mode = Mode::load(ctx)?;
+    let pin = issue_pin(args)?;
     let issue = if args.has("issue") {
         Some(mode.canonical(args.required("issue")?)?)
     } else {
         mode.adopted(ctx, &spec.sha256)?
     };
+    require(
+        pin.is_none() || mode.active.is_some(),
+        "source pin requires same-repository GitHub project mode",
+    )?;
     let max = args.number("max-tasks", 6, 1, 12)?;
     let prefix = args.text("id-prefix")?.to_owned();
     require(
@@ -717,12 +829,20 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
         wall,
         extra_call_args,
         issue,
+        issue_pin: pin.map(str::to_owned),
     })
 }
 pub(crate) fn preflight_propose(ctx: &Context<'_>, args: &Args) -> Result<()> {
     prepare_propose(ctx, args).map(|_| ())
 }
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    issue_pin(args)?;
+    if args.has("apply") {
+        require(
+            !args.has("issue"),
+            "--issue is stamped at propose or restamp, never at apply",
+        )?;
+    }
     let modes = ["apply", "restamp", "validate-spec", "scope-only", "roadmap"]
         .iter()
         .filter(|m| args.has(m))
@@ -996,7 +1116,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         collaboration_tasks(tasks, &worker)?;
     }
     if let Some(issue) = &prepared.issue {
-        github::stamp(&mut proposal, issue);
+        github::stamp(&mut proposal, issue, prepared.issue_pin.as_deref());
     }
     let awaiting = validate(ctx, &proposal, &spec, max)?.awaiting_issue();
     for (name, digest) in &answer.artifacts {

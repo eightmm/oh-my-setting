@@ -30,6 +30,7 @@ pub fn immutable_view(row: &Value) -> Value {
             "branch",
             "diagnostic",
             "issue",
+            "issue_source_sha256",
             "blocked",
             "adaptive",
         ] {
@@ -101,13 +102,25 @@ pub fn validate(row: &Value) -> Result<()> {
             "owner_id",
             "updated",
         ],
-        &["diagnostic", "issue", "blocked", "adaptive"],
+        &[
+            "diagnostic",
+            "issue",
+            "issue_source_sha256",
+            "blocked",
+            "adaptive",
+        ],
     )?;
     adaptive::validate_state(row)?;
     if let Some(issue) = row.get("issue") {
         require(
             issue.as_str().is_some_and(crate::github::shaped),
             "receipt issue must be owner/repo#N",
+        )?;
+    }
+    if let Some(pin) = row.get("issue_source_sha256") {
+        require(
+            row.get("issue").is_some() && pin.as_str().is_some_and(value::digest),
+            "invalid receipt issue source pin",
         )?;
     }
     if let Some(blocked) = row.get("blocked") {
@@ -356,6 +369,17 @@ fn base(ctx: &Context<'_>, remote: &str, branch: &str) -> Result<String> {
     ))
 }
 fn validate_bound_proposal(ctx: &Context<'_>, row: &Value, proposal: &Value) -> Result<()> {
+    if row.get("issue_source_sha256").is_some()
+        || !value::text(&row["proposal"], "sha256").is_empty()
+    {
+        require(
+            row.get("issue_source_sha256") == proposal["issue_source"].get("sha256")
+                && row
+                    .get("issue_source_sha256")
+                    .is_none_or(|_| row["issue"] == proposal["issue_source"]["issue"]),
+            "proposal differs from the receipt issue source pin",
+        )?;
+    }
     let contract = &row["contract"];
     if contract["collaboration"] != "auto" {
         return planning::validate_discussion(ctx, proposal, None);
@@ -1021,6 +1045,11 @@ fn save(ctx: &Context<'_>, row: &mut Value, old: Option<&[u8]>) -> Result<Vec<u8
             before.get("issue").is_none() || before.get("issue") == row.get("issue"),
             "outer receipt issue changed",
         )?;
+        require(
+            before.get("issue_source_sha256") == row.get("issue_source_sha256")
+                || before.get("issue").is_none() && before.get("issue_source_sha256").is_none(),
+            "outer receipt issue source changed",
+        )?;
         if before["proposal"] != row["proposal"] {
             let restamped = before["stage"] == "proposal-review"
                 && row["stage"] == "proposal-review"
@@ -1294,6 +1323,9 @@ fn propose_args(args: &Args, row: &Value, remainder: bool) -> Args {
     if let Some(issue) = row["issue"].as_str() {
         planning.set("issue", issue);
     }
+    if let Some(pin) = row["issue_source_sha256"].as_str() {
+        planning.set("issue-source-sha256", pin);
+    }
     if args.flag("discover") && !remainder {
         planning.flags.insert("discover".into());
     }
@@ -1426,6 +1458,9 @@ fn propose(
 fn mark_issue(ctx: &Context<'_>, row: &mut Value, proposal: &Value) -> Result<bool> {
     let spec = planning::contract(ctx)?;
     let checked = planning::validate(ctx, proposal, &spec, 12)?;
+    if let Some(pin) = proposal["issue_source"]["sha256"].as_str() {
+        row["issue_source_sha256"] = pin.into();
+    }
     let blocked = checked.awaiting_issue();
     if let Some(issue) = checked.issue {
         row["issue"] = issue.into();
@@ -1449,8 +1484,16 @@ fn restamp(ctx: &Context<'_>, args: &Args, row: &mut Value, raw: &[u8]) -> Resul
             && supplied == Path::new(value::text(&row["proposal"], "path")),
         "restamp must name the receipt's exact bound proposal",
     )?;
-    let (path, sha, issue) =
-        planning::restamp_file(ctx, &supplied, expected, args.required("issue")?)?;
+    let (path, sha, issue) = planning::restamp_file(
+        ctx,
+        &supplied,
+        expected,
+        args.required("issue")?,
+        planning::issue_pin(args)?,
+    )?;
+    if let Some(pin) = planning::issue_pin(args)? {
+        row["issue_source_sha256"] = pin.into();
+    }
     row["proposal"] = json!({"path": path, "sha256": sha});
     row["issue"] = issue.into();
     if let Some(map) = row.as_object_mut() {
@@ -2037,6 +2080,12 @@ fn decide(
 }
 
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    let pin = planning::issue_pin(args)?;
+    require(
+        pin.is_none()
+            || args.action == "propose" && crate::github::Mode::load(ctx)?.active.is_some(),
+        "issue source pin requires autopilot propose in same-repository GitHub project mode",
+    )?;
     let old = ctx.store.optional(RECEIPT, 64 * 1024)?;
     if args.action == "status" {
         let receipt = old.as_ref().map(|r| value::parse(r)).transpose()?;
@@ -2104,11 +2153,43 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     } else {
         None
     };
+    let mut checked_issue_input = false;
+    let issue_observation = if args.action == "run" && args.has("proposal") {
+        let expected = args.required("expected-proposal-sha256")?;
+        let supplied = args.path("proposal", &ctx.repo);
+        let bytes = ctx.bytes(&supplied, MAX_FILE)?;
+        require(
+            value::hash(&bytes) == expected,
+            "proposal differs from the exact parent-reviewed binding",
+        )?;
+        let proposal = value::parse(&bytes)?;
+        if proposal.get("issue_source").is_some() {
+            if let Some(before) = old.as_deref() {
+                let row = value::parse(before)?;
+                live(ctx, &row)?;
+                options_match(args, &row)?;
+                require(
+                    row["proposal"]["sha256"] == expected,
+                    "proposal differs from the exact parent-reviewed binding",
+                )?;
+            }
+            checked_issue_input = true;
+            planning::observe_issue(ctx, &supplied, expected)?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     // One controller owns the entire foreground run. Receipt writes still use
     // exact byte CAS; a killed owner releases this lock, never its spent cycles.
     let _owner = ctx.lock(".oms/plan/autopilot-controller")?;
     let _receipt = ctx.lock(RECEIPT)?;
     let mut raw = ctx.store.optional(RECEIPT, 64 * 1024)?;
+    require(
+        !checked_issue_input || old == raw,
+        "autopilot owner or reviewed proposal changed during the GitHub issue check",
+    )?;
     let mut row = raw.as_ref().map(|r| value::parse(r)).transpose()?;
     let resuming_existing = row.is_some();
     if args.action == "decide" {
@@ -2226,6 +2307,14 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         )?;
         require(!args.has("restamp"), "no live autopilot receipt to restamp")?;
         let mut fresh = fresh(ctx, args)?;
+        if let Some(pin) = pin {
+            // The first durable proposing receipt already owns the reviewed pin,
+            // including a restart before the planner reserves its first call.
+            fresh["issue"] = crate::github::Mode::load(ctx)?
+                .canonical(args.required("issue")?)?
+                .into();
+            fresh["issue_source_sha256"] = pin.into();
+        }
         let claim = legacy_claim_refusal(&ctx.state.join(".oms/plan"), &fresh, std::process::id());
         require(claim.is_empty(), claim)?;
         if args.action == "run" && (args.has("proposal") || args.has("expected-proposal-sha256")) {
@@ -2317,10 +2406,14 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             let issue = crate::github::Mode::load(ctx)?.canonical(args.required("issue")?)?;
             if row.get("issue").is_none() {
                 row["issue"] = issue.as_str().into();
+                if let Some(pin) = pin {
+                    row["issue_source_sha256"] = pin.into();
+                }
                 raw = save(ctx, &mut row, Some(&raw))?;
             }
             require(
-                value::text(&row, "issue") == issue,
+                value::text(&row, "issue") == issue
+                    && pin.is_none_or(|sha| row["issue_source_sha256"] == sha),
                 "the receipt already binds a different issue",
             )?;
         }
@@ -2468,7 +2561,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     }
     let applied_proposal = pending_apply.is_some();
     if let Some(apply_args) = pending_apply {
-        planning::apply(ctx, &apply_args)?;
+        planning::apply_observed(ctx, &apply_args, issue_observation)?;
     }
     if let Some(record) = reenter_record.take() {
         commit_reenter(ctx, &row, record)?;
@@ -3654,14 +3747,17 @@ mod tests {
         row["proposal"] = json!({"path": "", "sha256": ""});
         row["issue"] = "example-org/example-repo#7".into();
         assert_eq!(contract_digest(&row), PYTHON_DIGEST);
-        // A remainder replan inherits the receipt's issue.
+        let pin = "ab".repeat(32);
+        row["issue_source_sha256"] = pin.clone().into();
+        // A remainder replan inherits the same source as the initial tranche.
         let replan = propose_args(&Args::default(), &row, true);
         assert_eq!(
             (
                 replan.text("issue").unwrap(),
+                replan.text("issue-source-sha256").unwrap(),
                 replan.text("id-prefix").unwrap()
             ),
-            ("example-org/example-repo#7", "r1-")
+            ("example-org/example-repo#7", pin.as_str(), "r1-")
         );
         row["contract"]["max_cycles"] = 9.into();
         assert_ne!(contract_digest(&row), PYTHON_DIGEST);

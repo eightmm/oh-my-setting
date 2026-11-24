@@ -109,13 +109,19 @@ pub(crate) fn refuse_provider_issue(extracted: &Value) -> Result<()> {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     require(
-        extracted.get("issue").is_none() && tasks.iter().all(|t| t.get("issue").is_none()),
+        ["issue", "issue_source", "issue_intake"].iter().all(|key| {
+            extracted.get(*key).is_none() && tasks.iter().all(|t| t.get(*key).is_none())
+        }),
         "planner output must not carry an issue; the harness stamps the reviewed issue",
     )
 }
 
 /// Set the issue on the proposal and on every task.
-pub(crate) fn stamp(proposal: &mut Value, issue: &str) {
+pub(crate) fn stamp(proposal: &mut Value, issue: &str, pin: Option<&str>) {
+    if let Some(sha) = pin {
+        proposal["schema"] = 2.into();
+        proposal["issue_source"] = serde_json::json!({"issue":issue,"sha256":sha});
+    }
     proposal["issue"] = issue.into();
     if let Some(tasks) = proposal["tasks"].as_array_mut() {
         for task in tasks {
