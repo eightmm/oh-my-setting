@@ -534,7 +534,11 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.1');
+  for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
+    const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
+  }
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
