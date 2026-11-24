@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v10.html";
+const URI: &str = "ui://oms/conversation-panel/v11.html";
+const V10: &str = "ui://oms/conversation-panel/v10.html";
 const V9: &str = "ui://oms/conversation-panel/v9.html";
 const V8: &str = "ui://oms/conversation-panel/v8.html";
 const V7: &str = "ui://oms/conversation-panel/v7.html";
@@ -25,6 +26,7 @@ const V2: &str = "ui://oms/conversation-panel/v2.html";
 const OPEN: &str = "oms_open_panel";
 const PROJECTS: &str = "oms_list_projects";
 const SNAPSHOT: &str = "oms_panel_snapshot";
+const WORK_ITEMS: &str = "oms_panel_work_items";
 const USAGE: &str = "oms_panel_usage";
 const CHAT: &str = "oms_panel_chat";
 const GIT: &str = "oms_panel_git_status";
@@ -69,6 +71,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
             request["params"]["name"].as_str(),
             Some(
                 SNAPSHOT
+                    | WORK_ITEMS
                     | USAGE
                     | CHAT
                     | GIT
@@ -88,7 +91,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
 fn project_read(name: &str) -> bool {
     matches!(
         name,
-        OPEN | PROJECTS | SNAPSHOT | USAGE | GIT | GRAPH | VIEW | CAPABILITIES
+        OPEN | PROJECTS | SNAPSHOT | WORK_ITEMS | USAGE | GIT | GRAPH | VIEW | CAPABILITIES
     )
 }
 
@@ -185,6 +188,13 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         make(
             SNAPSHOT,
             "Read project progress, recorded Main and provider activity.",
+            scope.clone(),
+            &[],
+            false
+        ),
+        make(
+            WORK_ITEMS,
+            "Read bounded, strictly read-only task-focused work items for the selected project from the canonical plan and verified result bindings.",
             scope.clone(),
             &[],
             false
@@ -316,6 +326,60 @@ fn alias(value: &str) -> bool {
         && value
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+}
+fn valid_work_items_receipt(data: &Value) -> bool {
+    let keys = [
+        "id",
+        "title",
+        "state",
+        "owner",
+        "depends",
+        "issue",
+        "result",
+        "verification",
+        "revision",
+    ];
+    let id = |s: &str| {
+        (1..=96).contains(&s.len())
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    };
+    let nullable = |v: &Value, max: usize| {
+        v.is_null()
+            || v.as_str()
+                .is_some_and(|s| s.chars().count() <= max && !s.chars().any(char::is_control))
+    };
+    data.as_object().is_some_and(|obj| obj.keys().count() == 4)
+        && data["schema"] == 1
+        && data["omitted"].as_i64().is_some_and(|n| n >= 0)
+        && matches!(
+            data["availability"].as_str(),
+            Some("ready" | "partial" | "unavailable")
+        )
+        && data["items"].as_array().is_some_and(|items| {
+            items.len() <= 64
+                && items.iter().all(|row| {
+                    row.as_object().is_some_and(|obj| {
+                        obj.keys().count() == keys.len() && keys.iter().all(|k| obj.contains_key(k))
+                    }) && row["id"].as_str().is_some_and(id)
+                        && nullable(&row["title"], 160)
+                        && nullable(&row["issue"], 140)
+                        && nullable(&row["state"], 32)
+                        && nullable(&row["result"], 32)
+                        && nullable(&row["verification"], 32)
+                        && (row["owner"].is_null() || row["owner"].as_str().is_some_and(id))
+                        && (row["revision"].is_null()
+                            || row["revision"].as_str().is_some_and(|s| {
+                                s.len() == 64
+                                    && s.bytes()
+                                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                            }))
+                        && (row["depends"].is_null()
+                            || row["depends"].as_array().is_some_and(|deps| {
+                                deps.len() <= 32 && deps.iter().all(|v| v.as_str().is_some_and(id))
+                            }))
+                })
+        })
 }
 fn valid_graph_node_id(value: &str) -> bool {
     if value == "dir:." {
@@ -541,7 +605,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10)
                 ) =>
             {
                 json!({"contents":[{
@@ -557,7 +621,7 @@ impl Server<'_> {
                 }
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
-                    OPEN | APPROVALS | SNAPSHOT | USAGE => &["project"],
+                    OPEN | APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
                         "kind",
@@ -888,6 +952,13 @@ impl Server<'_> {
                 "--desktop-usage".into(),
                 "--json".into(),
             ],
+            WORK_ITEMS => vec![
+                "panel".into(),
+                "--repo".into(),
+                path,
+                "--desktop-work-items".into(),
+                "--json".into(),
+            ],
             GIT => {
                 let mut cmd = vec![
                     "github".into(),
@@ -1166,6 +1237,22 @@ impl Server<'_> {
                 Ok(data)
             }
             USAGE if data["providers"].is_array() && data["attempts"].is_array() => Ok(data),
+            WORK_ITEMS => {
+                if self.panel_repo(args)? != repo {
+                    return Err(BINDING.into());
+                }
+                if !valid_work_items_receipt(&data) {
+                    return Err(
+                        "OMS returned an unrecognized receipt. Refresh project status before retrying."
+                            .into(),
+                    );
+                }
+                let encoded = data.to_string();
+                if encoded.len() + json!(&encoded).to_string().len() + 1024 > crate::OUTPUT_LIMIT {
+                    return Err("OMS desktop detail exceeds the response limit.".into());
+                }
+                Ok(data)
+            }
             GIT if data["git"].is_object() && data["github"].is_object() => Ok(data),
             GRAPH
                 if data.to_string().len() <= 52_000
