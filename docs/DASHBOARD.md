@@ -215,6 +215,22 @@ The panel below uses seeded project data.
 
 ![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
 
+In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
+to ask one Claude or AGY researcher a question. Submitting the form invokes the
+selected provider once and can use its allowance. **요청 상태 확인** checks the
+same request ID. **검토 대화 보기** opens the Room handoff and the provider's
+recorded answer. A pending request or missing answer remains visible as such.
+The research request grants no write scope, Lead role or approval.
+To share an answer, choose **Attach review result** (검토 결과 첨부), review the
+displayed text, then send it to the current conversation or copy it. Canceling
+the preview leaves the answer private. When a host lacks message support or
+declines the request, the preview still offers copying.
+
+Use the header’s **한국어 / English** selector to change panel labels immediately.
+The panel preserves drafts and the selected project. It prefers a saved choice,
+then a supported host or browser language, and defaults to Korean. Recorded
+answers and evidence retain their original text.
+
 ### Project map and command directory
 
 The project map loads from the selected checkout as soon as the host confirms the project. Open **Explore** to follow nodes, inspect the source and bounds, or search the repository. Git containment describes folders and files. Indexed links distinguish extracted, inferred and ambiguous relationships. Reading the map leaves the index unchanged.

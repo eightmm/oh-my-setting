@@ -54,6 +54,8 @@ const START: &str = "oms_start_main";
 const START_STATUS: &str = "oms_start_status";
 const APPROVALS: &str = "oms_list_approvals";
 const DECIDE: &str = "oms_decide_approval";
+const ASSIGN: &str = "oms_assign_provider";
+const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
 type PanelResult<T> = Result<T, String>;
 
@@ -74,6 +76,8 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | START_STATUS
                     | APPROVALS
                     | DECIDE
+                    | ASSIGN
+                    | ASSIGN_RESULT
             )
         )
 }
@@ -93,7 +97,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
                 write: bool| {
         json!({"name":name,"description":description,
           "inputSchema":{"type":"object","properties":properties,"required":required.to_vec(),"additionalProperties":false},
-          "annotations":{"readOnlyHint":!write,"destructiveHint":write,"idempotentHint":!write,"openWorldHint":name == START},
+          "annotations":{"readOnlyHint":!write,"destructiveHint":write,"idempotentHint":!write,"openWorldHint":matches!(name, START | ASSIGN)},
           "_meta":{"ui":{"visibility":["app","model"]}}})
     };
     let project = json!({"type":"string","description":"Exact alias from oms_list_projects when the host has a project map."});
@@ -197,6 +201,25 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
             "Read the exact scope questions sent by the Main to the app user.",
             scope,
             &[],
+            false
+        ),
+        make(
+            ASSIGN,
+            "Assign one read-only Claude or AGY provider conversation to this conversation's own Room. Reuse the original requestId for a retry; a retry never starts another provider.",
+            json!({
+               "project":project,"room":ident,"requestId":{"type":"string","format":"uuid"},
+               "provider":{"type":"string","enum":["claude","agy"]},
+               "title":{"type":"string","minLength":1,"maxLength":120},
+               "task":{"type":"string","minLength":1,"maxLength":4000}
+            }),
+            &["room", "requestId", "provider", "title", "task"],
+            true
+        ),
+        make(
+            ASSIGN_RESULT,
+            "Read the assignment record and returned provider conversation for an original requestId.",
+            json!({"project":project,"room":ident,"requestId":{"type":"string","format":"uuid"},"after":{"type":"string","maxLength":1024}}),
+            &["room", "requestId"],
             false
         ),
         make(
@@ -522,6 +545,8 @@ impl Server<'_> {
                     VIEW => &["project", "view", "page"],
                     START_STATUS => &["project", "requestId"],
                     START => &["project", "main", "goal", "requestId"],
+                    ASSIGN => &["project", "room", "requestId", "provider", "title", "task"],
+                    ASSIGN_RESULT => &["project", "room", "requestId", "after"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
                     _ => return error(id, -32602, "unknown desktop tool"),
                 };
@@ -541,7 +566,27 @@ impl Server<'_> {
                     &params["_meta"]
                 };
                 let result = self.panel_call(name, args, meta);
-                if name == CHAT {
+                if name == ASSIGN_RESULT {
+                    match result {
+                        Ok(data)
+                            if crate::output::outbound(
+                                data.to_string().as_bytes(),
+                                &Value::Null,
+                            )
+                            .is_ok() =>
+                        {
+                            let mut result = response(Ok(
+                                json!({"room":data["room"],"requestId":data["requestId"],"status":data["status"]}),
+                            ));
+                            result["_meta"]["assignment"] = data;
+                            result
+                        }
+                        Ok(_) => response(Err(
+                            "OMS withheld this assignment during its outbound scan.".into(),
+                        )),
+                        Err(e) => response(Err(e)),
+                    }
+                } else if name == CHAT {
                     match result {
                         Ok(mut data) => {
                             if data["self"] == true
@@ -635,8 +680,16 @@ impl Server<'_> {
                     "The approval question changed. Refresh the approval list.",
                 ),
                 (
+                    "conversation is not the owner",
+                    "The current conversation is not the confirmed Main of that Room.",
+                ),
+                (
+                    "assignment needs",
+                    "The assignment needs a supported provider, title, task and request UUID.",
+                ),
+                (
                     "message id conflicts",
-                    "The question already has a different decision.",
+                    "That question or request already has different recorded content.",
                 ),
                 (
                     "invalid project repository",
@@ -711,6 +764,9 @@ impl Server<'_> {
                 .ok_or("A lowercase UUID requestId is required.")?;
             Ok(format!("oms-app-{key}"))
         };
+        if name == ASSIGN || name == ASSIGN_RESULT {
+            return self.assignment(&repo, name, args, meta);
+        }
         let argv = match name {
             CHAT => {
                 let thread = meta["threadId"]
@@ -1057,6 +1113,8 @@ impl Server<'_> {
                 && data["source"] == "room"
                 && data["messages"].is_array() =>
             {
+                let mut data = data;
+                self.attach_assignment_result(&repo, args, meta, &mut data);
                 Ok(data)
             }
             USAGE if data["providers"].is_array() && data["attempts"].is_array() => Ok(data),
@@ -1126,6 +1184,322 @@ impl Server<'_> {
                     .into(),
             ),
         }
+    }
+
+    fn assignment_argv(
+        action: &str,
+        repo: &Path,
+        room: &str,
+        request: &str,
+        digest: &str,
+        extra: &[(&str, &str)],
+    ) -> Vec<OsString> {
+        let mut argv: Vec<OsString> = vec![
+            "room".into(),
+            action.into(),
+            "--repo".into(),
+            repo.as_os_str().into(),
+            "--id".into(),
+            room.into(),
+            "--conversation-digest".into(),
+            digest.into(),
+            "--request".into(),
+            request.into(),
+        ];
+        for (flag, value) in extra {
+            argv.extend([OsString::from(*flag), OsString::from(*value)]);
+        }
+        argv.push("--json".into());
+        argv
+    }
+
+    /// Provider assignment for the Room owned by this exact bound conversation.
+    /// Authority is the host `threadId` plus the Room's own joined-owner proof;
+    /// the widget supplies only a Room name and a request id.
+    fn assignment(
+        &self,
+        repo: &Path,
+        name: &str,
+        args: &Value,
+        meta: &Value,
+    ) -> PanelResult<Value> {
+        let thread = meta["threadId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("Open this control from the Room owner's bound conversation.")?;
+        let digest = crate::storage::hash(thread)[..32].to_owned();
+        let room = args["room"]
+            .as_str()
+            .filter(|v| {
+                (1..=160).contains(&v.len())
+                    && v.as_bytes()[0].is_ascii_alphanumeric()
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            })
+            .ok_or("Invalid Room.")?;
+        let request = args["requestId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("A lowercase UUID requestId is required.")?;
+        let binding = crate::storage::hash(json!([digest, room, request]).to_string());
+        let check = |data: &Value| -> PanelResult<()> {
+            if data["request"] == request
+                && data["room"] == room
+                && data["participant"] == format!("ask-{request}")
+                && data["role"] == "researcher"
+                && data["readOnly"] == true
+                && matches!(data["provider"].as_str(), Some("claude" | "antigravity"))
+                && match data["status"].as_str() {
+                    Some("assigned") => data["operation"].is_null() && data["thread"].is_null(),
+                    Some("started") => {
+                        data["operation"] == data["thread"]
+                            && data["operation"].as_str().is_some_and(crate::operation)
+                    }
+                    _ => false,
+                }
+            {
+                Ok(())
+            } else {
+                Err(
+                    "OMS returned an unrecognized assignment record. Refresh before retrying."
+                        .into(),
+                )
+            }
+        };
+        let summary = |data: &Value, status: &str| {
+            json!({"status":status,"requestId":request,"room":data["room"],"participant":data["participant"],
+              "provider":data["provider"],"role":"researcher","readOnly":true,"title":data["title"],
+              "thread":data["thread"],"operation":data["operation"]})
+        };
+        if name == ASSIGN_RESULT {
+            let after = args
+                .get("after")
+                .map_or(Some(""), Value::as_str)
+                .ok_or("Invalid cursor.")?;
+            let (data, _) = self.panel_exec(
+                repo,
+                Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[]),
+                false,
+            )?;
+            if data["request"] == request && data["status"] == "not_found" {
+                return Ok(json!({"room":room,"requestId":request,"status":"not_found"}));
+            }
+            check(&data)?;
+            let mut out = summary(&data, data["status"].as_str().unwrap_or("assigned"));
+            out["task"] = data["task"].clone();
+            if data["status"] == "started" {
+                let op = data["operation"].as_str().unwrap_or_default();
+                let dir = crate::storage::Directory::run(repo, op, false)
+                    .map_err(|_| "The recorded assignment operation is unavailable.")?;
+                let proof = crate::storage::meta(&dir.path);
+                if proof["operation"] != op
+                    || proof["thread"] != op
+                    || proof["kind"] != "ask"
+                    || proof["panel_assignment"] != binding
+                    || proof["targets"] != json!([data["provider"]])
+                {
+                    return Err("The recorded operation does not match this assignment.".into());
+                }
+                let (state, exit) = crate::peer::status(&dir.path);
+                out["execution"] = json!({"state":state,"exit":exit});
+                out["transcript"] = self.provider_thread(
+                    repo,
+                    op,
+                    data["provider"].as_str().unwrap_or_default(),
+                    after,
+                );
+            }
+            return Ok(out);
+        }
+        let provider = args["provider"]
+            .as_str()
+            .filter(|v| matches!(*v, "claude" | "agy"))
+            .ok_or("Unsupported read-only provider.")?;
+        let clean_line = |key: &str, limit: usize| -> PanelResult<&str> {
+            args[key]
+                .as_str()
+                .filter(|v| {
+                    !v.trim().is_empty()
+                        && v.len() <= limit
+                        && (key == "task" || !v.chars().any(char::is_control))
+                })
+                .ok_or_else(|| format!("Invalid {key}."))
+        };
+        let title = clean_line("title", 120)?;
+        let task = clean_line("task", 4000)?;
+        for field in [title, task] {
+            crate::output::outbound(field.as_bytes(), &Value::Null)
+                .map_err(|_| "Assignment withheld by the OMS outbound scan.")?;
+        }
+        let (data, _) = self.panel_exec(
+            repo,
+            Self::assignment_argv(
+                "desktop-assign",
+                repo,
+                room,
+                request,
+                &digest,
+                &[
+                    ("--provider", provider),
+                    ("--label", title),
+                    ("--text", task),
+                ],
+            ),
+            false,
+        )?;
+        check(&data)?;
+        if data["provider"]
+            != if provider == "agy" {
+                "antigravity"
+            } else {
+                "claude"
+            }
+            || data["task"] != task
+            || data["title"] != title
+        {
+            return Err("The request does not match the recorded assignment.".into());
+        }
+        if data["fresh"] != true {
+            // A recorded intent without a receipt may already have launched; its
+            // acknowledgment is unknown, so it is never dispatched again.
+            return Ok(summary(
+                &data,
+                if data["status"] == "started" {
+                    "recorded"
+                } else {
+                    "unconfirmed"
+                },
+            ));
+        }
+        let unconfirmed = |data: &Value| summary(data, "unconfirmed");
+        let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+        let launched = self.start_bound_peer(
+            &json!({
+                "repo":path,"kind":"ask","prompt":task,"providers":provider,
+                "debate_rounds":0,"include_memory":false,"include_task":false
+            }),
+            Some(&binding),
+        );
+        let Some(launched) = launched
+            .ok()
+            .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
+            .filter(|v| v["started"] == true && v["thread"] == v["operation"])
+        else {
+            return Ok(unconfirmed(&data));
+        };
+        let Some(operation) = launched["operation"]
+            .as_str()
+            .filter(|v| crate::operation(v))
+        else {
+            return Ok(unconfirmed(&data));
+        };
+        let recorded = self.panel_exec(
+            repo,
+            Self::assignment_argv(
+                "desktop-assign-receipt",
+                repo,
+                room,
+                request,
+                &digest,
+                &[("--operation", operation)],
+            ),
+            false,
+        );
+        match recorded {
+            Ok((receipt, _)) if check(&receipt).is_ok() && receipt["operation"] == operation => {
+                Ok(summary(&receipt, "started"))
+            }
+            _ => {
+                let mut out = unconfirmed(&data);
+                out["operation"] = json!(operation);
+                Ok(out)
+            }
+        }
+    }
+
+    /// Bounded, read-only turns of the exact thread the Room receipt names.
+    fn provider_thread(&self, repo: &Path, thread: &str, provider: &str, after: &str) -> Value {
+        let Some(path) = repo.to_str() else {
+            return Value::Null;
+        };
+        self.peer_result(&json!({"repo":path,"thread":thread,"after":after}))
+            .ok()
+            .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
+            .filter(|v| v["thread"] == thread)
+            .and_then(|v| {
+                let rows = v["turns"].as_array()?;
+                let turns = rows
+                    .iter()
+                    .filter(|r| {
+                        r["role"] == "answer"
+                            && r["provider"] == provider
+                            && r["quality"] == "ok"
+                            && r["text"].is_string()
+                    })
+                    .map(|r| json!({"role":provider,"text":r["text"],"at":r["ts"]}))
+                    .collect::<Vec<_>>();
+                Some(json!({"turns":turns,"cursor":v["cursor"],"hasMore":v["has_more"]}))
+            })
+            .unwrap_or(Value::Null)
+    }
+
+    /// Show an assigned provider's returned turns in the reader's existing
+    /// recorded-result slot; Room messages keep their own `room` source.
+    fn attach_assignment_result(&self, repo: &Path, args: &Value, meta: &Value, data: &mut Value) {
+        let Some(request) = args["participant"]
+            .as_str()
+            .and_then(|p| p.strip_prefix("ask-"))
+            .filter(|r| uuid(r))
+        else {
+            return;
+        };
+        if !data["result"].is_null() {
+            return;
+        }
+        let Ok(result) = self.assignment(
+            repo,
+            ASSIGN_RESULT,
+            &json!({"room":args["room"],"requestId":request}),
+            meta,
+        ) else {
+            return;
+        };
+        data["assignment"] = json!({"state":result["status"],"execution":result["execution"],"title":result["title"]});
+        if result["execution"]["state"] == "done"
+            && result["execution"]["exit"] == 0
+            && let Some(path) = repo.to_str()
+            && let Ok(raw) = self.peer_result(&json!({"repo":path,"operation":result["operation"]}))
+            && let Some(proof) = raw.as_str().and_then(|v| crate::value::from_str(v).ok())
+            && proof["answer_details"]
+                .as_array()
+                .is_some_and(|a| a.len() == 1 && a[0]["exit"] == "0")
+            && let Some(answer) = proof["answer"].as_str().filter(|s| !s.is_empty())
+        {
+            let cut: String = answer.chars().take(6000).collect();
+            data["result"] = json!({"kind":"read-only provider","attempt":result["operation"],"text":cut,"truncated":cut.len()<answer.len() || proof["answer_truncated"]==true, "at":Value::Null});
+            return;
+        }
+        let turns = result["transcript"]["turns"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if turns.is_empty() {
+            return;
+        }
+        let text = turns
+            .iter()
+            .map(|t| {
+                format!(
+                    "{}: {}",
+                    t["role"].as_str().unwrap_or("provider"),
+                    t["text"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let cut: String = text.chars().take(6000).collect();
+        data["result"] = json!({"kind":"read-only provider","attempt":result["operation"],
+          "text":cut,"truncated":cut.len() < text.len(),"at":Value::Null});
     }
 
     pub(super) fn panel_snapshot(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {

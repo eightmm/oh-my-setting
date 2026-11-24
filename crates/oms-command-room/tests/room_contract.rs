@@ -630,3 +630,204 @@ fn missing_services_fail_closed() {
         );
     });
 }
+#[test]
+fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
+    isolated(
+        "desktop_assignment_is_owner_proofed_idempotent_and_unforgeable",
+        || {
+            use sha2::{Digest, Sha256};
+            let repo = Repo::new();
+            let thread = "01900000-0000-7000-8000-0000000000aa";
+            let digest = format!("{:x}", Sha256::digest(thread.as_bytes()))[..32].to_owned();
+            let other = "f".repeat(32);
+            let req = "4d6acd01-bd18-4567-bf69-ea05fb048b27";
+            success(run(
+                &repo,
+                &["new", "--id", "ask-room", "--participant", "owner"],
+            ));
+            success(run(
+                &repo,
+                &[
+                    "join",
+                    "--id",
+                    "ask-room",
+                    "--participant",
+                    "owner",
+                    "--provider",
+                    "codex",
+                    "--role",
+                    "main",
+                    "--native-session",
+                    thread,
+                ],
+            ));
+            let assign = |d: &str, provider: &str, text: &str| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        d,
+                        "--request",
+                        req,
+                        "--provider",
+                        provider,
+                        "--label",
+                        "Find callers",
+                        "--text",
+                        text,
+                    ],
+                )
+            };
+            // Foreign or unbound conversations, unsupported providers: nothing is written.
+            let log = repo.0.join(".oms/threads/ask-room.jsonl");
+            let before = fs::read(&log).unwrap();
+            assert_eq!(assign(&other, "codex", "task").0, 2);
+            assert_eq!(assign(&digest, "pi", "task").0, 2);
+            assert_eq!(assign(&digest, "codex", "task").0, 2);
+            assert!(success(assign(&digest, "claude", "task")).flag("fresh"));
+            let first = std::fs::read(&log).unwrap();
+            assert_ne!(first, before);
+            let again = success(assign(&digest, "claude", "task"));
+            assert_eq!(
+                fs::read(&log).unwrap(),
+                first,
+                "duplicate intent appends nothing"
+            );
+            assert_eq!(again.text("status"), "assigned");
+            assert_eq!(again.text("role"), "researcher");
+            assert!(again.flag("readOnly"));
+            assert!(!again.flag("fresh"));
+            assert_eq!(
+                assign(&digest, "claude", "different task").0,
+                2,
+                "same request, other content"
+            );
+            let status = |d: &str| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        d,
+                        "--request",
+                        req,
+                    ],
+                )
+            };
+            assert_eq!(status(&other).0, 2);
+            assert_eq!(success(status(&digest)).text("operation"), "");
+            let terminal = oms_command_room::Attempt {
+                attempt_id: "owner".into(),
+                tool: "panel-main".into(),
+                provider: "codex".into(),
+                state: "done".into(),
+                terminal: true,
+                reason_code: None,
+                created_at: String::new(),
+                refs: oms_command_room::value::obj([("panel_room_id", "ask-room".into())]),
+            };
+            assert_eq!(
+                run_with_services(
+                    &args(&[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        &digest,
+                        "--request",
+                        req
+                    ]),
+                    &repo.0,
+                    &STOP,
+                    &FixtureServices(&[terminal])
+                )
+                .0,
+                2
+            );
+            let receipt = |d: &str, op: &str| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign-receipt",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        d,
+                        "--request",
+                        req,
+                        "--operation",
+                        op,
+                    ],
+                )
+            };
+            assert_eq!(receipt(&other, "ask-1").0, 2);
+            let started = success(receipt(&digest, "ask-20261124T000000Z-abcd"));
+            assert_eq!(started.text("status"), "started");
+            assert_eq!(started.text("operation"), "ask-20261124T000000Z-abcd");
+            assert_eq!(started.text("thread"), "ask-20261124T000000Z-abcd");
+            assert_eq!(receipt(&digest, "ask-other").0, 2, "receipt is write-once");
+            // A participant or worker session cannot write the trusted association,
+            // and a second bound conversation cannot claim the Room.
+            let forged = |participant: Option<&str>, child: bool, id: &str, text: &str| {
+                let session = oms_command_room::Session {
+                    participant: participant.map(str::to_owned),
+                    child,
+                    ..Default::default()
+                };
+                let core =
+                    oms_command_room::Room::open(&repo.0, session, &EMPTY, &STOP, false, false)
+                        .unwrap();
+                core.send(
+                    "ask-room",
+                    oms_command_room::Send {
+                        sender: "owner",
+                        recipient: &format!("ask-{req}"),
+                        text,
+                        kind: "status",
+                        reply_to: None,
+                        message_id: Some(id),
+                        linked: true,
+                        quiet: false,
+                    },
+                )
+            };
+            let foreign = "5d6acd01-bd18-4567-bf69-ea05fb048b27";
+            let text = format!("operation foreign-op thread oms-assign-{foreign}");
+            assert!(forged(Some("owner"), false, &format!("dispatch-{foreign}"), &text).is_err());
+            assert!(forged(None, true, &format!("dispatch-{foreign}"), &text).is_err());
+            assert!(
+                forged(None, false, &format!("dispatch-{foreign}"), &text).is_err(),
+                "no matching assignment"
+            );
+            assert!(forged(None, false, &format!("assign-{foreign}"), "task").is_err());
+            let read = oms_command_room::Room::open(
+                &repo.0,
+                Default::default(),
+                &EMPTY,
+                &STOP,
+                false,
+                false,
+            )
+            .unwrap();
+            let chat = read
+                .desktop_chat("ask-room", &format!("ask-{req}"), &digest, None)
+                .unwrap();
+            let texts = chat
+                .list("messages")
+                .iter()
+                .map(|m| m.text("kind").to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                texts,
+                ["handoff", "status"],
+                "assignment is readable through the Room reader"
+            );
+            assert_eq!(chat.text("provider"), "claude");
+        },
+    );
+}

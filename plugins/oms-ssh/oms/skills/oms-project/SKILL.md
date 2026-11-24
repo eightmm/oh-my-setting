@@ -19,6 +19,13 @@ before any action.
   workflow. Verify the assignment and its receipt. Choosing a lead or sending
   an issue/PR reference into chat does not by itself start a managed Main or
   establish execution. Report the handoff as pending until acknowledged.
+- If the user explicitly requests one read-only Claude or AGY review from the
+  current verified Codex Main, call `oms_assign_provider` with the exact Room,
+  one provider, a title, the task, and a fresh lowercase UUID. This starts one
+  provider conversation and enrolls a researcher. Report its real receipt.
+  For a missing or uncertain receipt, read `oms_assign_result` with the same
+  project, Room and UUID. Never reissue an uncertain launch with a new UUID.
+  The panel's participant conversation displays the recorded provider answer.
 - For a request to handle **all open issues and PRs**, page both
   `inventory: "issues"` and `inventory: "pullRequests"` on
   `oms_panel_git_status` for the selected project. Omit `cursor` for the
