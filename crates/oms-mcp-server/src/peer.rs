@@ -1154,7 +1154,7 @@ pub(crate) fn owner(arguments: &[OsString]) -> io::Result<()> {
             "delegated worker cannot own a peer launch",
         ));
     }
-    PathBuf::from(&arguments[0]).canonicalize()?;
+    let source = PathBuf::from(&arguments[0]).canonicalize()?;
     let repo = PathBuf::from(&arguments[1]).canonicalize()?;
     let op = arguments[2]
         .to_str()
@@ -1169,14 +1169,20 @@ pub(crate) fn owner(arguments: &[OsString]) -> io::Result<()> {
     }
     rustix::process::setsid()?;
     let pin = arguments.get(3).map(PathBuf::from);
-    let result = owner_run(pin.as_deref(), &repo, op, &dir);
+    let result = owner_run(pin.as_deref(), &source, &repo, op, &dir);
     if let Err(e) = &result {
         eprintln!("error: native peer owner: {e}");
         let _ = dir.atomic("status", b"1\n");
     }
     result
 }
-fn owner_run(pin: Option<&Path>, repo: &Path, op: &str, dir: &Directory) -> io::Result<()> {
+fn owner_run(
+    pin: Option<&Path>,
+    source: &Path,
+    repo: &Path,
+    op: &str,
+    dir: &Directory,
+) -> io::Result<()> {
     fn fail(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
         io::Error::other(e)
     }
@@ -1317,7 +1323,18 @@ fn owner_run(pin: Option<&Path>, repo: &Path, op: &str, dir: &Directory) -> io::
     }
     dir.atomic("pid", format!("{}\n", std::process::id()).as_bytes())
         .map_err(fail)?;
-    let mut child = Command::new(program)
+    let mut cmd = Command::new(&program);
+    // The staged native CLI validates its manifest, revision and its own executable
+    // before entering provider verbs. Preserve this proof in the detached owner.
+    if let Some(revision) = program.parent().and_then(Path::file_name)
+        && source.join("target/oms-native").join(revision).join("oms") == program
+    {
+        cmd.arg("--oms-dispatch")
+            .arg(source)
+            .arg(revision)
+            .arg("--");
+    }
+    let mut child = cmd
         .args(argv)
         .current_dir(repo)
         .env("OMS_PEER_CANCEL_DIR", &dir.path)

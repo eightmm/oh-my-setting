@@ -1066,7 +1066,7 @@ function clearPeer(room) {
   peerRoom = room; peerRequest = peerMember = undefined;
   el('peer-assignment').open = false; el('peer-assignment').hidden = !room;
   el('peer-task').value = ''; el('peer-status').textContent = '';
-  el('peer-controls').disabled = false;
+  el('peer-controls').disabled = busy;
   for (const id of ['peer-check','peer-chat','peer-next']) el(id).hidden = true;
 }
 function clearProject() {
