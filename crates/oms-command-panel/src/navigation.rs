@@ -10,6 +10,8 @@ pub struct Navigation {
     pub attention_only: bool,
     pub filter: String,
     pub filter_before_edit: Option<String>,
+    pub selection_before_edit: Option<(usize, usize)>,
+    pub selection_before_attention: Option<(usize, usize)>,
     pub editing: bool,
     pub detail: bool,
     pub health: bool,
@@ -47,24 +49,32 @@ impl Navigation {
             match key {
                 Key::Escape => {
                     self.filter = self.filter_before_edit.take().unwrap_or_default();
+                    if let Some((selected, offset)) = self.selection_before_edit.take() {
+                        self.selected = selected;
+                        self.offset = offset;
+                    }
                     self.editing = false;
                 }
                 Key::Enter => {
                     self.filter_before_edit = None;
+                    self.selection_before_edit = None;
                     self.editing = false;
                 }
                 Key::Backspace => {
-                    self.filter.pop();
+                    if self.filter.pop().is_some() {
+                        self.selected = 0;
+                        self.offset = 0;
+                    }
                 }
                 Key::Char(c) if !c.is_control() => {
                     if self.filter.chars().count() < 40 {
                         self.filter.push(*c);
+                        self.selected = 0;
+                        self.offset = 0;
                     }
                 }
                 _ => return self.movement(key, count, height),
             }
-            self.selected = 0;
-            self.offset = 0;
             return Action::None;
         }
         match key {
@@ -74,6 +84,7 @@ impl Navigation {
             Key::Char('c') => return Action::Council,
             Key::Char('/') if !self.detail => {
                 self.filter_before_edit = Some(self.filter.clone());
+                self.selection_before_edit = Some((self.selected, self.offset));
                 self.editing = true;
             }
             Key::Escape => {
@@ -89,7 +100,17 @@ impl Navigation {
             Key::Tab => self.view = self.view.next(),
             Key::Char('b') => {
                 self.attention_only = !self.attention_only;
-                self.selected = 0;
+                if self.attention_only {
+                    self.selection_before_attention = Some((self.selected, self.offset));
+                    self.selected = 0;
+                    self.offset = 0;
+                } else if let Some((selected, offset)) = self.selection_before_attention.take() {
+                    self.selected = selected;
+                    self.offset = offset;
+                } else {
+                    self.selected = 0;
+                    self.offset = 0;
+                }
             }
             Key::Char('k') => self.health = !self.health,
             Key::Char('?') | Key::Function(12) => self.help = !self.help,
@@ -113,6 +134,22 @@ impl Navigation {
         }
         Action::None
     }
+    /// Clamp `selected` to `[0, count)` and reconcile `offset` so the selection
+    /// stays inside a `height`-row viewport without leaving trailing blank rows.
+    pub fn clamp_selection(&mut self, count: usize, height: usize) {
+        let page = height.max(1);
+        self.selected = self.selected.min(count.saturating_sub(1));
+        if self.selected < self.offset {
+            self.offset = self.selected;
+        }
+        if self.selected >= self.offset.saturating_add(page) {
+            self.offset = self.selected.saturating_sub(page - 1);
+        }
+        let max_offset = count.saturating_sub(page);
+        if self.offset > max_offset {
+            self.offset = max_offset;
+        }
+    }
     fn movement(&mut self, key: &Key, count: usize, height: usize) -> Action {
         let page = height.max(1);
         match key {
@@ -128,13 +165,7 @@ impl Navigation {
             Key::Scroll(n) => self.selected = self.selected.saturating_add(*n as usize),
             _ => {}
         }
-        self.selected = self.selected.min(count.saturating_sub(1));
-        if self.selected < self.offset {
-            self.offset = self.selected;
-        }
-        if self.selected >= self.offset.saturating_add(page) {
-            self.offset = self.selected.saturating_sub(page - 1);
-        }
+        self.clamp_selection(count, height);
         Action::None
     }
 }
@@ -239,21 +270,82 @@ mod tests {
         nav.apply(&Key::Backspace, 5, 2);
         nav.apply(&Key::Backspace, 5, 2);
         nav.apply(&Key::Char('z'), 5, 2);
-        nav.apply(&Key::Escape, 5, 2);
+        // Even if the in-progress filter currently matches 0 rows, Esc restores
+        // both the committed filter and the pre-edit selection/scroll position.
+        nav.apply(&Key::Escape, 0, 2);
         assert_eq!(nav.filter, "éx");
         assert!(!nav.editing);
-        assert_eq!((nav.selected, nav.offset), (0, 0));
+        assert_eq!((nav.selected, nav.offset), (3, 2));
 
+        // Moving selection with arrows while editing survives Enter commit.
         nav.apply(&Key::Char('/'), 5, 2);
         nav.apply(&Key::Backspace, 5, 2);
+        nav.apply(&Key::Down, 5, 2);
+        nav.apply(&Key::Down, 5, 2);
+        assert_eq!((nav.selected, nav.offset), (2, 1));
         nav.apply(&Key::Enter, 5, 2);
         assert_eq!(nav.filter, "é");
+        assert!(!nav.editing);
+        assert_eq!((nav.selected, nav.offset), (2, 1));
 
         nav.apply(&Key::Escape, 5, 2);
         assert!(nav.filter.is_empty());
+        nav.selected = 4;
+        nav.offset = 3;
         nav.apply(&Key::Char('/'), 5, 2);
         nav.apply(&Key::Char('z'), 5, 2);
         nav.apply(&Key::Escape, 5, 2);
         assert!(nav.filter.is_empty());
+        assert_eq!((nav.selected, nav.offset), (4, 3));
+    }
+
+    #[test]
+    fn attention_toggle_and_clamp_keep_selection_and_offset_consistent() {
+        let mut nav = Navigation {
+            selected: 5,
+            offset: 4,
+            ..Default::default()
+        };
+        // Entering attention-only resets both selected and offset together.
+        nav.apply(&Key::Char('b'), 10, 3);
+        assert!(nav.attention_only);
+        assert_eq!((nav.selected, nav.offset), (0, 0));
+
+        // Leaving attention-only restores the pre-toggle position.
+        nav.apply(&Key::Char('b'), 2, 3);
+        assert!(!nav.attention_only);
+        assert_eq!((nav.selected, nav.offset), (5, 4));
+
+        // Toggling off when started in attention-only resets offset with selected.
+        let mut started_attention = Navigation {
+            attention_only: true,
+            selected: 4,
+            offset: 3,
+            ..Default::default()
+        };
+        started_attention.apply(&Key::Char('b'), 6, 2);
+        assert!(!started_attention.attention_only);
+        assert_eq!(
+            (started_attention.selected, started_attention.offset),
+            (0, 0)
+        );
+
+        // Refresh reconciliation clamping brings stale offset back into bounds.
+        let mut shrunk = Navigation {
+            selected: 8,
+            offset: 7,
+            ..Default::default()
+        };
+        shrunk.selected = 1;
+        shrunk.clamp_selection(3, 4);
+        assert_eq!((shrunk.selected, shrunk.offset), (1, 0));
+
+        let mut moved_down = Navigation {
+            selected: 7,
+            offset: 1,
+            ..Default::default()
+        };
+        moved_down.clamp_selection(10, 3);
+        assert_eq!((moved_down.selected, moved_down.offset), (7, 5));
     }
 }
