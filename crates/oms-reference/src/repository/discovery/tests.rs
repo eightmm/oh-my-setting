@@ -1,12 +1,12 @@
 use super::*;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 
-struct Fixture {
+pub(super) struct Fixture {
     root: PathBuf,
-    resolver: Resolver,
+    pub(super) resolver: Resolver,
 }
 impl Fixture {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let tmp = fs::canonicalize(std::env::temp_dir()).unwrap();
         let root = (0u32..)
             .find_map(|i| {
@@ -30,14 +30,14 @@ impl Fixture {
             },
         }
     }
-    fn repo(&self, name: &str) -> PathBuf {
+    pub(super) fn repo(&self, name: &str) -> PathBuf {
         let repo = self.root.join(name);
         fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "initial"]);
         repo
     }
-    fn scratch(&self, origin: &Path, name: &str) -> PathBuf {
+    pub(super) fn scratch(&self, origin: &Path, name: &str) -> PathBuf {
         let parent = self
             .resolver
             .managed_root
@@ -66,7 +66,7 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
-fn git(dir: &Path, args: &[&str]) {
+pub(super) fn git(dir: &Path, args: &[&str]) {
     let mut cmd = Command::new("git");
     for (key, _) in std::env::vars_os() {
         if key.as_bytes().starts_with(b"GIT_") {

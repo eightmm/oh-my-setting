@@ -50,6 +50,12 @@ pub struct ScratchDiscovery {
     pub incomplete: Option<DiscoveryIssue>,
 }
 
+#[derive(Clone, Copy)]
+enum CandidateOrder {
+    Path,
+    RecentLedger,
+}
+
 struct Snapshot<'a> {
     deadline: Instant,
     interrupted: &'a AtomicBool,
@@ -270,7 +276,7 @@ impl Proof {
         physical(&current)
     }
 
-    fn linked(&mut self, checkout: &Path, common: &Path) -> Checked<()> {
+    fn linked(&mut self, checkout: &Path, common: &Path) -> Checked<PathBuf> {
         self.dir(checkout)?;
         let worktrees = common.join("worktrees");
         self.dir(&worktrees)?;
@@ -289,7 +295,7 @@ impl Proof {
         if self.pointer_to(&admin, &relative)? != common {
             return Err(Changed);
         }
-        Ok(())
+        Ok(admin)
     }
     fn check(&self) -> Checked<()> {
         if let Some(parent) = &self.private {
@@ -323,6 +329,8 @@ pub struct VerifiedScratch {
     id: String,
     binding: Arc<Proof>,
     registration: Proof,
+    checkout: PathBuf,
+    git_dir: PathBuf,
 }
 impl fmt::Debug for VerifiedScratch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -348,7 +356,7 @@ fn registration(
     managed: &Path,
     registered: &BTreeSet<PathBuf>,
     checkout: &Path,
-) -> Checked<(Proof, String)> {
+) -> Checked<(Proof, String, PathBuf)> {
     let parent = managed_scratch_parent(checkout).ok_or(Changed)?;
     if parent.parent() != Some(managed) || !registered.contains(checkout) {
         return Err(Changed);
@@ -369,7 +377,7 @@ fn registration(
     if origin != primary {
         proof.linked(origin, common)?;
     }
-    proof.linked(checkout, common)?;
+    let git_dir = proof.linked(checkout, common)?;
     let mut hash = Sha256::new();
     hash.update(b"oms-verified-scratch-v1\0");
     hash.update(primary.as_os_str().as_bytes());
@@ -391,7 +399,7 @@ fn registration(
         }
     }
     proof.check()?;
-    Ok((proof, format!("{:x}", hash.finalize())))
+    Ok((proof, format!("{:x}", hash.finalize()), git_dir))
 }
 
 impl Resolver {
@@ -418,6 +426,16 @@ impl Resolver {
         scan: &Snapshot<'_>,
         window: usize,
     ) -> Checked<ScratchDiscovery> {
+        self.discover_sources(shared, scan, window, CandidateOrder::Path)
+            .map(|(discovery, _, _)| discovery)
+    }
+    fn discover_sources(
+        &self,
+        shared: &Path,
+        scan: &Snapshot<'_>,
+        window: usize,
+        order: CandidateOrder,
+    ) -> Checked<(ScratchDiscovery, Arc<Proof>, PathBuf)> {
         scan.check()?;
         if self.child {
             return Err(OutsideScope);
@@ -509,9 +527,17 @@ impl Resolver {
         }
         binding.check()?;
         let binding = Arc::new(binding);
-        let mut candidates = registry.paths.iter().filter(|path| {
-            managed_scratch_parent(path).is_some_and(|parent| parent.parent() == Some(&managed))
-        });
+        let mut candidates: Vec<_> = registry
+            .paths
+            .iter()
+            .filter(|path| {
+                managed_scratch_parent(path).is_some_and(|parent| parent.parent() == Some(&managed))
+            })
+            .collect();
+        if matches!(order, CandidateOrder::RecentLedger) {
+            lifecycle::prioritize(&mut candidates, &managed, &binding, scan)?;
+        }
+        let mut candidates = candidates.into_iter();
         let mut out = ScratchDiscovery::default();
         while let Some(path) = candidates.next() {
             let reason = match scan.check() {
@@ -528,8 +554,10 @@ impl Resolver {
                 break;
             }
             match registration(&primary, &common, &managed, &registry.paths, path) {
-                Ok((registration, id)) => out.checkouts.push(VerifiedScratch {
+                Ok((registration, id, git_dir)) => out.checkouts.push(VerifiedScratch {
                     id,
+                    checkout: path.to_owned(),
+                    git_dir,
                     binding: Arc::clone(&binding),
                     registration,
                 }),
@@ -546,9 +574,15 @@ impl Resolver {
         if out.incomplete.is_none() && out.unverified > 0 {
             out.incomplete = Some(UnverifiedRegistration);
         }
-        Ok(out)
+        Ok((out, binding, common))
     }
 }
+
+mod lifecycle;
+pub use lifecycle::{
+    AttemptHead, LifecycleObservation, LifecycleScope, LifecycleSource, ObservedAttempt,
+    SourceKind, SourceStatus,
+};
 
 #[cfg(test)]
 mod tests;

@@ -363,4 +363,7 @@ pub fn reference_repository(
 }
 
 mod discovery;
-pub use discovery::{DiscoveryIssue, ScratchDiscovery, VerifiedScratch};
+pub use discovery::{
+    AttemptHead, DiscoveryIssue, LifecycleObservation, LifecycleScope, LifecycleSource,
+    ObservedAttempt, ScratchDiscovery, SourceKind, SourceStatus, VerifiedScratch,
+};
