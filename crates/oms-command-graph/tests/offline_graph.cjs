@@ -77,6 +77,8 @@ function render(data, options = {}) {
       return false;
     }
     matches(selector) {
+      const attr = selector.match(/^\[([\w-]+)\]$/);
+      if (attr) return Object.prototype.hasOwnProperty.call(this.attributes, attr[1]);
       if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
       return this.tagName.toLowerCase() === selector.toLowerCase();
     }
@@ -145,6 +147,8 @@ function render(data, options = {}) {
     if (cls) item.setAttribute('class', cls[1]);
     const kindKey = attrs.match(/\bdata-kind-key="([^"]*)"/);
     if (kindKey) item.setAttribute('data-kind-key', kindKey[1]);
+    const legendKey = attrs.match(/\bdata-legend="([^"]*)"/);
+    if (legendKey) item.setAttribute('data-legend', legendKey[1]);
     if (/\bhidden\b/.test(attrs)) item.hidden = true;
     const glyphMatch = inner.match(/<i\b([^>]*)>([^<]*)<\/i>([\s\S]*)/);
     if (glyphMatch) {
@@ -166,7 +170,8 @@ function render(data, options = {}) {
   document.createTextNode = text => ({textContent: text});
   const frames = [];
   let rafCalls = 0;
-  const context = {document, window: {matchMedia: () => ({matches: !options.motion})}, navigator: {},
+  const context = {document, window: {matchMedia: () => ({matches: !options.motion}), openai: options.openai}, navigator: {languages: options.languages || ['en-US']},
+    localStorage: options.stored ? {getItem: key => key === 'oms.panel.language' ? options.stored : null} : undefined,
     Option: function(text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     ResizeObserver: class {
       constructor(callback) { this.callback = callback; resizeCallback = callback; }
@@ -185,7 +190,7 @@ function render(data, options = {}) {
     if (resizeCallback) resizeCallback([{contentRect: {width: nextWidth}}]);
     drain();
   };
-  return {root, svg, get: suffix => root.querySelector(`#@@ROOT@@-${suffix}`), nodes, viewport, document, resize, drain,
+  return {root, svg, stage, get: suffix => root.querySelector(`#@@ROOT@@-${suffix}`), nodes, viewport, document, resize, drain,
     rafCalls: () => rafCalls, pendingFrames: () => frames.length, rafBeforeFirstFrames};
 }
 
@@ -343,7 +348,7 @@ const execView = render(richExec, {width: 768});
 assert.equal(execView.get('legend').hidden, false, 'execution graph must also show status/kind legend');
 const execGlyphs = execView.nodes.map(n => n.querySelector('.oms-graph-glyph').textContent);
 const execPatterns = execView.nodes.map(n => n.attributes['data-pattern']);
-assert.deepEqual(execGlyphs.slice(0, 6), ['▶', '✕', '○', '✓', '⏸', '⏸']);
+assert.deepEqual(execGlyphs.slice(0, 6), ['▶', '×', '·', '✓', '!', '!']);
 assert.notEqual(execGlyphs[6], execGlyphs[2], 'ready must have a distinct glyph from pending');
 assert.notEqual(execPatterns[6], execPatterns[2], 'ready must have a distinct pattern from pending');
 const visibleLegendGlyphs = (view, cls) => new Set(
@@ -468,11 +473,14 @@ assert.match(invalid.get('error').textContent, /No graph data/);
 assert.match(invalid.get('summary').textContent, /No data/i);
 assert.match(invalid.get('visible').textContent, /No data/i);
 assert.equal(invalid.get('copy').disabled, true);
-assert.equal(invalid.svg.hidden, true);
+assert.equal(invalid.stage.hidden, true, 'no blank canvas box without data');
 
 const templatePlaceholder = render({nodes: [], edges: [], display: {resource_template: true}});
-assert.equal(templatePlaceholder.get('error').hidden, false);
-assert.match(templatePlaceholder.get('error').textContent, /No graph data/);
+assert.equal(templatePlaceholder.get('error').hidden, true, 'an unpopulated template is a calm status, not an alert');
+assert.equal(templatePlaceholder.get('notice').hidden, false);
+assert.match(templatePlaceholder.get('notice').textContent, /No graph data/);
+assert.match(template.match(/<div id="@@ROOT@@-notice"[^>]*>/)[0], /role="status"/);
+assert.match(template.match(/<div id="@@ROOT@@-error"[^>]*>/)[0], /role="alert"/);
 
 const partialTruncated = render({
   kind: 'project',
@@ -573,6 +581,183 @@ for (const kind of ['project', 'execution']) {
   view.nodes[2].fire('click'); view.drain();
   assert.notDeepEqual(camera(view), settled);
   assert.deepEqual(positions(view), startPositions, 'camera moves do not move nodes');
+}
+
+// 7. Design round 2: labels, edge groups, vocabulary, language, filters, empty state, rings, hubs.
+const radiusOf = degree => Math.max(9, Math.min(14, 8 + Math.sqrt(degree || 0)));
+const labelOf = el => el.querySelector('.oms-graph-label');
+{ // AUD-02: labels centred below the node, collisions hidden, full text in <title> and the selection card.
+  const long = 'a_very_long_module_name_that_gets_truncated.rs';
+  const data = chain('project', 40);
+  data.nodes.forEach((row, i) => { row.show_label = true; row.label = i === 3 ? long : `module_${i}.rs`; });
+  const view = render(data, {width: 768});
+  const cam = camera(view); const pts = positions(view);
+  view.nodes.forEach(n => {
+    const label = labelOf(n);
+    assert.equal(label.attributes['text-anchor'], 'middle');
+    assert.match(label.attributes.transform, /^translate\(0,[\d.]+\) scale\([\d.]+\)$/);
+  });
+  const boxes = view.nodes.map((n, i) => ({i, hidden: labelOf(n).classList.contains('is-hidden'), text: labelOf(n).textContent}))
+    .filter(b => !b.hidden).map(b => {
+      const half = (b.text.length * 6.4 + 6) / 2; const cx = cam.x + pts[b.i].x * cam.k;
+      const top = cam.y + (pts[b.i].y + radiusOf(data.nodes[b.i].degree)) * cam.k + 4;
+      return [cx - half, top, cx + half, top + 14];
+    });
+  assert.ok(boxes.length > 0 && boxes.length < view.nodes.length, 'some labels are hidden because they would collide');
+  for (let a = 0; a < boxes.length; a += 1) for (let b = a + 1; b < boxes.length; b += 1) {
+    const [p, q] = [boxes[a], boxes[b]];
+    assert.ok(p[2] <= q[0] || q[2] <= p[0] || p[3] <= q[1] || q[3] <= p[1], `visible labels ${a} and ${b} must not overlap`);
+  }
+  assert.equal(labelOf(view.nodes[3]).textContent.endsWith('…'), true, 'long labels are truncated');
+  assert.equal(view.nodes[3].querySelector('title').textContent, long, 'the node <title> carries the full label');
+  assert.equal(view.nodes[0].querySelector('title').textContent, '', 'untruncated labels need no <title>');
+  const hiddenIndex = view.nodes.findIndex(n => labelOf(n).classList.contains('is-hidden'));
+  view.nodes[hiddenIndex].fire('pointerenter');
+  assert.equal(labelOf(view.nodes[hiddenIndex]).classList.contains('is-hidden'), false, 'hover reveals a colliding label');
+  view.nodes[hiddenIndex].fire('pointerleave');
+  assert.equal(labelOf(view.nodes[hiddenIndex]).classList.contains('is-hidden'), true);
+  view.nodes[hiddenIndex].fire('click');
+  assert.equal(labelOf(view.nodes[hiddenIndex]).classList.contains('is-hidden'), false, 'selected label always shows');
+  view.nodes[3].fire('click');
+  assert.ok(view.get('detail').textContent.includes(long), 'the selection card shows the full label');
+  const shown = () => view.nodes.filter(n => !labelOf(n).classList.contains('is-hidden')).length;
+  const atFit = shown();
+  for (let i = 0; i < 4; i += 1) view.get('zoom-in').fire('click');
+  assert.ok(shown() > atFit, `zooming in reveals labels (${atFit} -> ${shown()})`);
+}
+{ // AUD-03: ownership vs dependency edges.
+  const data = model('project', 4);
+  data.edges = [
+    {source: 'n0', target: 'n1', relation: 'contains', confidence: 'EXTRACTED'},
+    {source: 'n0', target: 'n2', relation: 'imports', confidence: 'EXTRACTED'},
+    {source: 'n2', target: 'n3', relation: 'tested_by', confidence: 'INFERRED'}
+  ];
+  const view = render(data);
+  const edges = view.viewport.children[0].children;
+  assert.deepEqual(edges.map(e => e.attributes['data-relation-group']), ['ownership', 'dependency', 'dependency']);
+  assert.equal(edges[0].attributes['marker-end'], undefined, 'ownership has no arrowhead');
+  assert.match(edges[1].attributes['marker-end'], /^url\(#/);
+  assert.doesNotMatch(edges[0].attributes.d, /Q/, 'ownership is a straight line');
+  assert.match(edges[1].attributes.d, /Q/, 'dependency is curved');
+  view.nodes[0].fire('click');
+  assert.equal(edges[0].attributes['marker-end'], undefined, 'selection highlight keeps ownership arrowless');
+  const legendItems = view.get('legend').children.filter(item => !item.hidden).map(item => item.getAttribute('data-legend'));
+  assert.ok(legendItems.includes('ownership') && legendItems.includes('dependency'), 'legend lists both edge groups');
+  assert.match(css, /data-relation-group="ownership"\][^}]*stroke-width:\s*2\.6/);
+  assert.match(css, /data-relation-group="dependency"\][^}]*stroke-width:\s*1\.2/);
+  const noOwnership = render(model('project', 2));
+  assert.ok(!noOwnership.get('legend').children.some(item => !item.hidden && item.getAttribute('data-legend') === 'ownership'));
+}
+{ // AUD-04: one state vocabulary; legend and node colours share one token; symbol kind is not a status glyph.
+  assert.doesNotMatch(css, /data-status=/, 'styling keys off the shared state, not raw status strings');
+  assert.match(css, /--oms-st:/);
+  const exec = {kind: 'execution', title: 'x', counts: {}, edges: [], nodes: [
+    ['running', '▶', 'Running'], ['active', '▶', 'Running'], ['verifying', '⟳', 'Verifying'], ['in_review', '⚑', 'In review'],
+    ['waiting_approval', '!', 'Needs you'], ['blocked', '!', 'Blocked'], ['ready', '▷', 'Ready'], ['queued', '·', 'Pending'],
+    ['done', '✓', 'Exited'], ['completed', '✓', 'Verified'], ['error', '×', 'Failed'], ['timed_out', '◷', 'Timed out'],
+    ['partial', '~', 'Stale'], ['unknown', '?', 'Unknown']
+  ].map(([status], i) => ({id: `s${i}`, label: `S${i}`, kind: i === 0 ? 'function' : 'node', degree: 0, status, show_label: true}))};
+  const vocabulary = [['running', '▶', 'Running'], ['active', '▶', 'Running'], ['verifying', '⟳', 'Verifying'], ['in_review', '⚑', 'In review'],
+    ['waiting_approval', '!', 'Needs you'], ['blocked', '!', 'Blocked'], ['ready', '▷', 'Ready'], ['queued', '·', 'Pending'],
+    ['done', '✓', 'Exited'], ['completed', '✓', 'Verified'], ['error', '×', 'Failed'], ['timed_out', '◷', 'Timed out'],
+    ['partial', '~', 'Stale'], ['unknown', '?', 'Unknown']];
+  const view = render(exec);
+  view.nodes.forEach((n, i) => {
+    assert.equal(n.querySelector('.oms-graph-glyph').textContent, vocabulary[i][1], vocabulary[i][0]);
+    assert.ok(n.attributes['aria-label'].includes(vocabulary[i][2]), `${vocabulary[i][0]} -> ${vocabulary[i][2]}`);
+  });
+  const legendText = view.get('legend').children.filter(item => !item.hidden).map(item => item.textContent).join('|');
+  for (const word of ['Running', 'Verifying', 'In review', 'Needs you', 'Blocked', 'Ready', 'Pending', 'Exited', 'Verified', 'Failed', 'Timed out', 'Stale', 'Unknown']) {
+    assert.ok(legendText.includes(word), `legend explains ${word}`);
+  }
+  assert.match(view.nodes[0].querySelector('.oms-graph-glyph').textContent, /▶/);
+  assert.match(view.get('badges').textContent + view.get('node').children.map(o => o.textContent).join(''), /ƒ function/, 'symbol kind glyph is ƒ');
+  assert.ok(!script(template).includes('○'), 'the pending glyph is no longer overloaded as a kind glyph');
+  assert.match(legendBlock(template), /data-kind="symbol"[^>]*>ƒ</);
+}
+{ // AUD-05: ko/en negotiation (stored > host locale > navigator > ko) and a host-neutral ask button.
+  const data = model('project', 3);
+  const ko = render(data, {languages: ['ko-KR']});
+  assert.equal(ko.get('search-label').textContent, '노드 검색');
+  assert.equal(ko.get('ask').textContent, '대화에 보내기');
+  assert.equal(ko.get('zoom-out').textContent, '축소');
+  assert.equal(ko.get('relation').children[0].textContent, '모든 관계');
+  assert.match(ko.get('summary').textContent, /^노드 3\/3/);
+  assert.match(ko.get('filters-summary').textContent, /^필터 · 0개 적용$/);
+  assert.equal(ko.root.attributes.lang, 'ko');
+  assert.equal(render(data, {languages: ['en-GB', 'ko']}).get('ask').textContent, 'Send to chat');
+  assert.equal(render(data, {languages: []}).get('search-label').textContent, '노드 검색', 'no signal falls back to Korean');
+  assert.equal(render(data, {languages: ['en-US'], openai: {locale: 'ko_KR'}}).get('search-label').textContent, '노드 검색', 'host locale beats navigator');
+  assert.equal(render(data, {languages: ['ko-KR'], openai: {locale: 'en-US'}, stored: 'en'}).get('search-label').textContent, 'Search nodes', 'stored choice wins');
+  assert.equal(render(data, {languages: ['ko-KR'], stored: 'fr'}).get('search-label').textContent, '노드 검색', 'unknown stored language is ignored');
+  for (const [name, html] of [['graph.html', template], ['project-graph.html', mcp]]) assert.doesNotMatch(html, /Send to Codex/, `${name} ask button is host-neutral`);
+  const koExec = render({kind: 'execution', title: 'x', counts: {}, edges: [], nodes: [{id: 'a', label: 'A', kind: 'node', degree: 0, status: 'failed', show_label: true}]}, {languages: ['ko']});
+  assert.match(koExec.nodes[0].attributes['aria-label'], /실패/);
+  assert.equal(render({nodes: null, edges: []}, {languages: ['ko']}).get('error').textContent, '이 화면에 전달된 그래프 데이터가 없습니다.');
+}
+{ // AUD-07: only search (and task scope) above the canvas; filters in a collapsed disclosure; legend below, only present encodings.
+  for (const html of [template, mcp]) {
+    const primary = html.match(/id="[^"]*-primary"[\s\S]*?<\/div>/)[0];
+    assert.match(primary, /-search"/); assert.match(primary, /-scope"/);
+    assert.doesNotMatch(primary, /-(relation|confidence|state|change|node)"/);
+    const details = html.match(/<details class="oms-graph-filters"[^>]*>/)[0];
+    assert.doesNotMatch(details, /\bopen\b/, 'the filter disclosure is collapsed by default');
+    const drawer = html.match(/<details class="oms-graph-filters"[\s\S]*?<\/details>/)[0];
+    for (const id of ['relation', 'confidence', 'state', 'change', 'node']) assert.match(drawer, new RegExp(`-${id}"`));
+    assert.ok(html.indexOf('class="oms-graph-stage"') < html.indexOf('class="oms-graph-legend'), 'the legend sits below the canvas');
+  }
+  const view = render(richProject, {width: 768});
+  assert.equal(view.get('filters-summary').textContent, 'Filters · 0 active');
+  view.get('state').value = 'supported'; view.get('state').fire('change');
+  view.get('relation').value = 'calls'; view.get('relation').fire('change');
+  assert.equal(view.get('filters-summary').textContent, 'Filters · 2 active');
+  assert.equal(view.get('scope-wrap').hidden, false, 'task scope stays above the canvas when active');
+  const onlyRunning = render({kind: 'execution', title: 'x', counts: {}, edges: [], nodes: [{id: 'a', label: 'A', kind: 'node', degree: 0, status: 'running', show_label: true}]});
+  const shownKeys = onlyRunning.get('legend').children.filter(item => !item.hidden).map(item => item.getAttribute('data-legend'));
+  assert.deepEqual(shownKeys, ['running', 'symbol'], 'only encodings present in the nodes are listed');
+}
+{ // AUD-09: calm empty state.
+  for (const data of [model('project', 0), {nodes: [], edges: [], display: {resource_template: true}}, {nodes: null, edges: []}]) {
+    const view = render(data);
+    assert.equal(view.stage.hidden, true, 'no blank canvas box');
+    for (const id of ['search', 'relation', 'confidence', 'state', 'zoom-out', 'reset', 'zoom-in', 'clear', 'copy']) assert.equal(view.get(id).disabled, true, `${id} is disabled when empty`);
+    assert.equal(view.get('draft-wrap').hidden, true, 'the empty draft is hidden');
+    assert.equal(view.get('selection').hidden, true);
+  }
+  const empty = render(model('project', 0));
+  assert.equal(empty.get('error').textContent, '', 'an empty graph is a status, never an alert');
+  assert.equal(empty.get('notice').classList.contains('is-empty'), true);
+  assert.match(css, /oms-graph-notice\.is-empty[^}]*dashed/);
+  const populated = render(model('project', 3));
+  assert.equal(populated.stage.hidden, false); assert.equal(populated.get('search').disabled, false); assert.equal(populated.get('draft-wrap').hidden, false);
+}
+{ // AUD-15: focus ring outside a halo, selection ring inside it, change as a corner badge rather than a ring.
+  const view = render(richProject, {width: 768});
+  const f1 = view.nodes[0];
+  const r = radiusOf(3);
+  assert.equal(Number(f1.querySelector('.oms-graph-focus-ring').attributes.r), r + 10);
+  assert.equal(Number(f1.querySelector('.oms-graph-focus-halo').attributes.r), r + 10);
+  assert.equal(Number(f1.querySelector('.oms-graph-select-ring').attributes.r), r + 5);
+  assert.equal(f1.querySelector('.oms-graph-change-ring'), null, 'no competing change ring');
+  assert.equal(f1.querySelector('.oms-graph-change-badge').querySelector('text').textContent, 'Δ');
+  assert.equal(view.nodes[1].querySelector('.oms-graph-change-badge').querySelector('text').textContent, '~');
+  assert.match(css, /focus-visible \.oms-graph-focus-halo \{ stroke: var\(--oms-bg\)/);
+  assert.match(css, /data-change="changed"\] \.oms-graph-change-badge/);
+}
+{ // Hubs: 90 leaves around one hub never overlap, stay inside the fitted view, and the layout is deterministic.
+  const star = {kind: 'project', title: 'Star', counts: {}, nodes: [{id: 'hub', label: 'hub.rs', kind: 'file', degree: 90, show_label: true, assurance: 'supported'},
+    ...Array.from({length: 90}, (_, i) => ({id: `leaf${i}`, label: `leaf${i}.rs`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}))],
+    edges: Array.from({length: 90}, (_, i) => ({source: 'hub', target: `leaf${i}`, relation: 'imports', confidence: 'EXTRACTED'}))};
+  for (const width of [390, 768, 1280]) {
+    const view = render(star, {width});
+    const pts = positions(view); const radii = star.nodes.map(n => radiusOf(n.degree));
+    for (let i = 0; i < pts.length; i += 1) for (let j = i + 1; j < pts.length; j += 1) {
+      assert.ok(Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) >= radii[i] + radii[j], `star nodes ${i},${j} overlap at width ${width}`);
+    }
+    const cam = camera(view); const h = Number(view.svg.attributes.viewBox.split(' ')[3]);
+    for (const p of pts) assert.ok(cam.x + p.x * cam.k >= 0 && cam.x + p.x * cam.k <= width && cam.y + p.y * cam.k >= 0 && cam.y + p.y * cam.k <= h, 'fit view contains the settled hub graph');
+    assert.deepEqual(positions(render(star, {width})), pts, 'hub layout is deterministic');
+  }
 }
 
 console.log('offline renderer: layouts (320/768/1024), non-color kind/status, keyboard/focus, selection persistence, empty/partial/truncated states and template parity passed');

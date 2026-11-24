@@ -935,7 +935,7 @@ and assurance filters can reveal weak areas. A task view opens at its
 changed/impacted views are explicit controls. Search, node selection, keyboard
 zoom/reset, zoom/pan, drag, and semantic label reveal stay local to the
 fragment. Selecting a node fills and focuses an editable instruction draft;
-the user may revise it before the explicit `Send to Codex` action, or use the
+the user may revise it before the explicit `Send to chat` action, or use the
 clipboard fallback when the host bridge is absent. An escaped text-node listing
 remains usable by assistive technology and when D3 cannot load. The draft
 retains the current user request, identifies the selected node as untrusted
