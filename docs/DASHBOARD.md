@@ -211,9 +211,9 @@ chat. `oms_start_status` looks up the original project and request UUID.
 while launch remains unconfirmed. `recorded` returns the matching attempt
 and its state.
 
-This overview shows the OMS checkout’s Git-tracked directories in a 570-pixel Chromium test host. The compact preview ends before the project goal.
+This 570-pixel Chromium capture uses a local example project with three recorded plan tasks, two claimed owners and one prerequisite. The panel read the project through the generic MCP Apps profile.
 
-![OMS overview showing the crates, scripts and docs directories and project exploration controls](assets/oms-chat-panel.png)
+![OMS Now view showing the project goal, claimed tasks, result availability and project map](assets/oms-chat-panel.png)
 
 In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
 to ask one Claude or AGY researcher a question. Submitting the form invokes the
@@ -230,6 +230,12 @@ Use the header’s **한국어 / English** selector to change panel labels immed
 The panel preserves drafts and the selected project. It prefers a saved choice,
 then a supported host or browser language, and defaults to Korean. Recorded
 answers and evidence retain their original text.
+
+### Tasks and results
+
+**Now** shows the project goal, pending decisions, active tasks and recorded results. **Work**, **Results** and **Relationships** open the same task detail by task ID. Owner groups show recorded assignments. Prerequisites appear separately, including cycles or references outside the retrieved page. **More** opens the map, chat, activity, metrics and Git views.
+
+The read-only `oms_panel_work_items` tool projects the selected project’s plan and bound results. The detail version identifies a work record and its evidence. If that version changes during refresh, reopen the current version to review it. The panel distinguishes completed work, accepted results, failed or unrun verification, and missing evidence. The history link opens project-wide activity.
 
 ### Project map and command directory
 
