@@ -3198,6 +3198,32 @@ fn owner_validation() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner"));
     assert!(!Command::new(&binary).output().unwrap().status.success());
     for (i,launch)in[json!({}),json!({"kind":"write"}),json!({"kind":"consult","targets":["--help"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}),json!({"kind":"consult","targets":[],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{"include_task":1}})].into_iter().enumerate(){let op=format!("consult-20200101T000000Z-{i:08x}");let dir=run_dir(&repo,&op,json!({}),None);std::fs::write(dir.join("launch.json"),launch.to_string()).unwrap();let output=Command::new(&binary).args([source.as_os_str(),repo.as_os_str(),std::ffi::OsStr::new(&op),source.join("bin/oms").as_os_str()]).env("PATH","").env("OMS_HARNESS_CHILD","0").env("OMS_HARNESS_DELEGATE_DEPTH","0").output().unwrap();assert!(!output.status.success());assert_eq!(std::fs::read_to_string(dir.join("status")).unwrap(),"1\n");assert!(!source.join("last-call.json").exists());}
+    let revision = "1".repeat(40);
+    let stages = source.join("target/oms-native");
+    let staged = exec_file(&stages.join(&revision), 0o755);
+    let op = "ask-20200101T000000Z-eeeeeeee";
+    let dir = run_dir(&repo, op, json!({}), None);
+    std::fs::write(dir.join("launch.json"),json!({"kind":"ask","targets":["claude"],"thread":op,"new_thread":false,"debate_rounds":0,"context_options":{}}).to_string()).unwrap();
+    let output = Command::new(&binary)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            op.as_ref(),
+            staged.as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let args = record(&stages)["argv"].as_array().unwrap().clone();
+    assert_eq!(
+        args[..5],
+        json!(["--oms-dispatch", source, revision, "--", "peer-ask"])
+            .as_array()
+            .unwrap()[..]
+    );
     fixture_settings(&source, json!({"gate":true}));
     let mut c = Client::new(&source, &repo, false, true, false);
     let started = c.tool("oms_peer_start", json!({"kind":"consult","prompt":"hold"}));
