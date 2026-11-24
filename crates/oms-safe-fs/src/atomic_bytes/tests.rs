@@ -908,6 +908,34 @@ fn atomic_overlapping_transactions_detect_second_publication() {
     assert_eq!(names(&f.0), [OsString::from("file")]);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn private_create_rejects_late_collision_without_overwriting() {
+    let f = Fixture::new();
+    let path = f.0.join("file");
+    let mut root = Root::open(&f.0).unwrap();
+    root.private_ancestry = Some(Vec::new());
+    let result = root.mutate_with_publication(
+        Path::new("file"),
+        MutationOptions {
+            expected_exists: Some(false),
+            ..options()
+        },
+        |_| Ok::<_, Infallible>(b"new".to_vec()),
+        |stage| {
+            if stage == Stage::Rename {
+                std::fs::write(&path, b"concurrent").unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            Ok(())
+        },
+        true,
+    );
+    assert_eq!(result, Err(refused(ByteError::ExistenceMismatch)));
+    assert_eq!(std::fs::read(&path).unwrap(), b"concurrent");
+    assert_eq!(names(&f.0), [OsString::from("file")]);
+}
+
 #[test]
 fn private_registry_byte_policy_and_mode_races() {
     let f = Fixture::new();

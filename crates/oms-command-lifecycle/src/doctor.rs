@@ -1381,7 +1381,9 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
 }
 fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
     let expected = crate::integrations::expected(paths)?;
-    let value = r::value(&paths.claude_settings()?)?;
+    let value = paths.claude_settings().and_then(|path| r::value(&path));
+    let configuration_read = value.is_ok();
+    let value = value.unwrap_or(Value::Null);
     let mut rows = Vec::new();
     for s in expected["surfaces"].as_array().unwrap() {
         let event = s["event"].as_str().unwrap();
@@ -1402,7 +1404,9 @@ fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
             format!(
                 "{event} {}: {}",
                 s["script"].as_str().unwrap(),
-                if matches {
+                if !configuration_read {
+                    "configuration unavailable"
+                } else if matches {
                     "registered"
                 } else {
                     "missing or drifted"
@@ -1545,7 +1549,9 @@ pub(crate) fn run(
     } else if options.has("--sandbox") {
         sandbox(paths, options, flag)?
     } else if options.has("--surfaces") {
-        surfaces(paths)?
+        let mut rows = surfaces(paths)?;
+        crate::hook_diagnostics::append(paths, &mut rows)?;
+        rows
     } else if options.has("--tool-lock") {
         tool_lock(paths)?
     } else {

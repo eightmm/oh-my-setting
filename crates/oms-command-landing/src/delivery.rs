@@ -175,7 +175,7 @@ fn finish(path: &Path, row: &mut V, state: &str, message: &str, c: &Context<'_>)
     row.set("message", message);
     save(path, row, c.interrupted)?;
     Ok(Output {
-        code: i32::from(!matches!(state, "passed" | "pr-opened")),
+        code: i32::from(!matches!(state, "passed" | "awaiting-merge")),
         stdout: format!("land: {message}\nreceipt: {}\n", path.display()).into_bytes(),
         stderr: vec![],
     })
@@ -211,6 +211,7 @@ struct Run<'a> {
     ci_wait: u64,
     head_branch: &'a str,
     from_sha: &'a str,
+    motivation: &'a str,
 }
 /// Runs the gate in a detached sandbox at the exact HEAD (local-merge: at the
 /// merge result). `Some` is a finished failure; nothing has been published.
@@ -326,7 +327,60 @@ fn open_pr(r: &Run<'_>, repo_arg: &str) -> Result<Option<V>> {
     )?;
     Ok(rows.array().first().cloned())
 }
-fn pr_text(base: &str, r: &Run<'_>) -> Result<(String, String)> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BranchDelete {
+    Allow,
+    SkipDependentPr,
+    SkipUnverified,
+}
+impl BranchDelete {
+    fn allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+    fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Allow => None,
+            Self::SkipDependentPr => Some("open-dependent-pr"),
+            Self::SkipUnverified => Some("dependent-pr-check-unverified"),
+        }
+    }
+    fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::Allow => None,
+            Self::SkipDependentPr => Some("branch kept: open dependent PR targets head branch"),
+            Self::SkipUnverified => Some("branch kept: dependent PR check unverified"),
+        }
+    }
+}
+fn dependent_pr_delete_guard(r: &Run<'_>, repo_arg: &str) -> Result<BranchDelete> {
+    match ci::gh(
+        r.c,
+        &[
+            "pr",
+            "list",
+            "--repo",
+            repo_arg,
+            "--state",
+            "open",
+            "--base",
+            r.head_branch,
+            "--json",
+            "number",
+            "--limit",
+            "1",
+        ],
+        Duration::from_secs(30),
+    ) {
+        Ok(V::Arr(rows)) if rows.is_empty() => Ok(BranchDelete::Allow),
+        Ok(V::Arr(_)) => Ok(BranchDelete::SkipDependentPr),
+        Ok(_) => Ok(BranchDelete::SkipUnverified),
+        Err(_) => {
+            crate::check(r.c.interrupted)?;
+            Ok(BranchDelete::SkipUnverified)
+        }
+    }
+}
+fn pr_text(base: &str, r: &Run<'_>, scope: &str) -> Result<(String, String)> {
     let range = format!("{base}..{}", r.snapshot.head);
     let log = r
         .git
@@ -346,11 +400,13 @@ fn pr_text(base: &str, r: &Run<'_>) -> Result<(String, String)> {
         title += &format!(" (+{} more)", count - 1);
     }
     let body = format!(
-        "Landed by `oms land --pr`.\n\nCommits ({count}):\n{}\n\nLocal gate passed on exact head {}.\n",
+        "## Summary\n{}\n\n## Motivation\n{}\n\n## Verification\n- Local gate `{}` passed (scope {scope}) on exact head {}\n- `oms land` checks CI on this exact head; merge only with explicit `--merge`\n",
         log.lines()
             .map(|l| format!("- {l}"))
             .collect::<Vec<_>>()
             .join("\n"),
+        r.motivation,
+        r.gate,
         r.snapshot.head
     );
     crate::safe(title.as_bytes())?;
@@ -379,7 +435,7 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
     }
     let repo_arg = ci::query_repo(r.destination)?;
     let method = o.value("merge-method", "squash");
-    let (title, body) = pr_text(base, r)?;
+    let (title, body) = pr_text(base, r, &string(row.get("gate"), "scope"))?;
     row.set("head_branch", head_branch);
     save(r.receipt, row, c.interrupted)?;
     {
@@ -512,24 +568,6 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
                 ("scope", "unknown".into()),
             ]),
         );
-        row.set(
-            "merge",
-            obj([
-                ("state", "SKIPPED".into()),
-                ("reason", "ci-wait-zero".into()),
-            ]),
-        );
-        row.set(
-            "update",
-            obj([("rc", "skipped".into()), ("reason", "ci-wait-zero".into())]),
-        );
-        return finish(
-            r.receipt,
-            row,
-            "pr-opened",
-            "pull request opened/updated; merge skipped because --ci-wait=0",
-            c,
-        );
     } else {
         let deadline = Instant::now() + Duration::from_secs(r.ci_wait);
         let mut successful = None;
@@ -599,26 +637,41 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         ci_row.set("scope", ci_scope);
         row.set("ci", ci_row);
     }
+    if !o.has("merge") {
+        row.set("merge", obj([("state", "not-requested".into())]));
+        row.set(
+            "update",
+            obj([
+                ("rc", "skipped".into()),
+                ("reason", "awaiting-merge".into()),
+            ]),
+        );
+        let message = format!(
+            "pull request #{number} open: {}; CI {}; not merged \u{2014} pass --merge only when the user asked to merge",
+            string(&pr, "url"),
+            string(row.get("ci"), "conclusion")
+        );
+        return finish(r.receipt, row, "awaiting-merge", &message, c);
+    }
+    let delete_branch = dependent_pr_delete_guard(r, &repo_arg)?;
     let flag = format!("--{method}");
-    let merge_state = obj([("method", method.into()), ("state", "requested".into())]);
+    let mut merge_state = obj([
+        ("method", method.into()),
+        ("state", "requested".into()),
+        ("delete_branch", delete_branch.allowed().into()),
+    ]);
+    if let Some(reason) = delete_branch.skip_reason() {
+        merge_state.set("delete_branch_skipped", reason);
+    }
     row.set("merge", merge_state);
     save(r.receipt, row, c.interrupted)?;
     // A neutral cwd keeps `--delete-branch` from touching this checkout.
-    let merged = gh_exec(
-        r,
-        &scratch.path,
-        &[
-            "pr",
-            "merge",
-            &number,
-            "--repo",
-            &repo_arg,
-            &flag,
-            "--delete-branch",
-            "--match-head-commit",
-            &snapshot.head,
-        ],
-    )?;
+    let mut merge_args = vec!["pr", "merge", &number, "--repo", &repo_arg, &flag];
+    if delete_branch.allowed() {
+        merge_args.push("--delete-branch");
+    }
+    merge_args.extend(["--match-head-commit", &snapshot.head]);
+    let merged = gh_exec(r, &scratch.path, &merge_args)?;
     if merged.code != 0 {
         return finish(
             r.receipt,
@@ -648,14 +701,16 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         ),
         Err(_) => (String::from("UNKNOWN"), "".into()),
     };
-    row.set(
-        "merge",
-        obj([
-            ("method", method.into()),
-            ("state", state.clone().into()),
-            ("commit", commit),
-        ]),
-    );
+    let mut merge_row = obj([
+        ("method", method.into()),
+        ("state", state.clone().into()),
+        ("commit", commit),
+        ("delete_branch", delete_branch.allowed().into()),
+    ]);
+    if let Some(reason) = delete_branch.skip_reason() {
+        merge_row.set("delete_branch_skipped", reason);
+    }
+    row.set("merge", merge_row);
     save(r.receipt, row, c.interrupted)?;
     if state != "MERGED" {
         return finish(
@@ -691,13 +746,33 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         .text()
         .unwrap_or("")
         .to_owned();
+    // A new merge commit carries the CI verdict of the PR head only when it
+    // holds the same tree directly on top of the base this land checked.
+    let mut covered = merge_commit.is_empty() || merge_commit == snapshot.head;
+    if !covered && (crate::hex(&merge_commit, 40) || crate::hex(&merge_commit, 64)) {
+        let rev = |spec: String| git.text(&["rev-parse", "--verify", "--quiet", &spec]).ok();
+        let tree_equal = rev(format!("{merge_commit}^{{tree}}"))
+            .is_some_and(|t| Some(t) == rev(format!("{}^{{tree}}", snapshot.head)));
+        let mut merge_row = row.get("merge").clone();
+        merge_row.set("tree_equal", tree_equal);
+        row.set("merge", merge_row);
+        covered = tree_equal
+            && rev(format!("{merge_commit}^1")).as_deref() == Some(base)
+            && git
+                .succeeds(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &merge_commit,
+                    &format!("refs/remotes/{}/{target}", r.remote),
+                ])
+                .unwrap_or(false);
+    }
     if o.has("no-update") {
         row.set(
             "update",
             obj([("rc", "skipped".into()), ("reason", "disabled".into())]),
         );
-    } else if !merge_commit.is_empty() && merge_commit != snapshot.head {
-        // GitHub built a new commit (squash/merge); CI above covered only the PR head.
+    } else if !covered {
         row.set(
             "update",
             obj([
@@ -727,15 +802,58 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         );
     }
     save(r.receipt, row, c.interrupted)?;
-    let mut output = finish(
-        r.receipt,
-        row,
-        "passed",
-        &format!("merged PR #{number} ({method}) after exact-SHA CI"),
-        c,
-    )?;
+    let message = match delete_branch.notice() {
+        Some(notice) => format!("merged PR #{number} ({method}) after exact-SHA CI ({notice})"),
+        None => format!("merged PR #{number} ({method}) after exact-SHA CI"),
+    };
+    let mut output = finish(r.receipt, row, "passed", &message, c)?;
     tail(r, &mut output)?;
     Ok(output)
+}
+/// `oms/<type>/<slug>` from a `<type>: <description>` subject, else `oms/land-<sha12>`.
+fn default_head_branch(subject: &str, head: &str) -> String {
+    const TYPES: [&str; 8] = [
+        "feat", "fix", "refactor", "chore", "docs", "test", "perf", "ci",
+    ];
+    if let Some((kind, description)) = subject.split_once(": ")
+        && TYPES.contains(&kind)
+    {
+        let mut slug = String::new();
+        for c in description.chars() {
+            if c.is_ascii_alphanumeric() {
+                slug.push(c.to_ascii_lowercase());
+            } else if !slug.is_empty() && !slug.ends_with('-') {
+                slug.push('-');
+            }
+        }
+        slug.truncate(48);
+        let slug = slug.trim_end_matches('-');
+        if !slug.is_empty() {
+            return format!("oms/{kind}/{slug}");
+        }
+    }
+    format!("oms/land-{}", &head[..12])
+}
+/// Every changed path is Markdown and at most two lines changed; binary refuses.
+fn trivial_docs(git: &Git<'_>, base: &str, head: &str) -> Result<bool> {
+    let raw = git.run(&["diff", "--numstat", "-z", "--no-renames", base, head])?;
+    let mut lines = 0u64;
+    for record in raw.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let record = String::from_utf8_lossy(record);
+        let mut fields = record.splitn(3, '\t');
+        let (Some(Ok(added)), Some(Ok(deleted)), Some(path)) = (
+            fields.next().map(str::parse::<u64>),
+            fields.next().map(str::parse::<u64>),
+            fields.next(),
+        ) else {
+            return Ok(false);
+        };
+        if !path.ends_with(".md") {
+            return Ok(false);
+        }
+        lines += added + deleted;
+    }
+    Ok(lines <= 2)
 }
 fn global_git_config() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -849,6 +967,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "notes" => return crate::notes::execute(c, o),
         "blame-session" => return crate::attribution::blame(c, o),
         "conflicts" => return conflicts(c, o),
+        "batch-preview" | "batch-check" => return crate::batch_preview::execute(c, o),
         "" | "status" => {}
         _ => return Err(Error::new(2, "unknown land action")),
     }
@@ -862,8 +981,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     parent()?;
     let env_mode = std::env::var("OMS_LAND_MODE").unwrap_or_default();
     require(
-        ["", "direct", "pr", "auto"].contains(&env_mode.as_str()),
-        "OMS_LAND_MODE must be pr, auto or direct",
+        ["", "direct", "pr"].contains(&env_mode.as_str()),
+        "OMS_LAND_MODE must be pr or direct",
     )?;
     let ci_wait = o
         .value("ci-wait", "2700")
@@ -906,24 +1025,37 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "land requires one push destination",
     )?;
     let branch = git.text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let auto_pr = env_mode == "auto"
-        && branch != "HEAD"
-        && branch != target
-        && ci::query_repo(&destination).is_ok_and(|s| s.starts_with("github.com/"));
+    let github = ci::query_repo(&destination).is_ok_and(|s| s.starts_with("github.com/"));
     let mode = if local_merge {
         Mode::LocalMerge
-    } else if o.has("pr") || env_mode == "pr" || auto_pr {
+    } else if o.has("pr") {
         Mode::Pr
-    } else {
+    } else if o.has("direct") {
         Mode::Direct
+    } else if env_mode == "pr" {
+        Mode::Pr
+    } else if env_mode == "direct" || !github {
+        Mode::Direct
+    } else {
+        Mode::Pr
     };
     require(
-        mode == Mode::Pr || !(o.has("head-branch") || o.has("merge-method")),
-        "--head-branch and --merge-method apply to --pr only",
+        mode == Mode::Pr || !(o.has("head-branch") || o.has("merge") || o.has("why")),
+        "--head-branch, --merge and --why apply to pull-request mode only",
     )?;
     require(
         mode != Mode::Pr || !o.has("ci-full"),
-        "--ci-full is not supported with --pr",
+        "--ci-full is not supported in pull-request mode",
+    )?;
+    require(
+        mode != Mode::Pr || !o.has("merge") || ci_wait > 0,
+        "--merge needs --ci-wait above zero",
+    )?;
+    require(
+        mode != Mode::Pr
+            || o.has("merge")
+            || !(o.has("handoff-receipt-to") || o.has("sync-shared")),
+        "--handoff-receipt-to and --sync-shared need --merge in pull-request mode",
     )?;
     let mut head_branch = String::new();
     let mut from_sha = String::new();
@@ -933,7 +1065,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         } else if branch != "HEAD" && branch != target {
             branch.clone()
         } else {
-            format!("oms/land-{}", &snapshot.head[..12])
+            default_head_branch(
+                &git.text(&["log", "-1", "--format=%s", &snapshot.head])?,
+                &snapshot.head,
+            )
         };
         require(
             head_branch != target && !head_branch.starts_with('-'),
@@ -976,14 +1111,52 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         return Err(Error::new(2, "no default gate; pass --gate CMD"));
     };
     crate::safe(gate.as_bytes())?;
+    let base = if mode == Mode::LocalMerge {
+        String::new()
+    } else {
+        let base = crate::review::remote_tip(&git, &destination, target)?
+            .ok_or_else(|| Error::new(2, "remote target is absent"))?;
+        require(
+            git.succeeds(&["merge-base", "--is-ancestor", &base, &snapshot.head])?,
+            "remote target is not an ancestor; rebase before land",
+        )?;
+        base
+    };
+    let mut motivation = String::new();
+    if base != snapshot.head && mode == Mode::Direct && github {
+        require(
+            trivial_docs(&git, &base, &snapshot.head)?,
+            format!(
+                "direct land to {target} is limited to a docs-only change of at most 2 lines; land without --direct to open a pull request"
+            ),
+        )?;
+    } else if base != snapshot.head && mode == Mode::Pr {
+        motivation = if o.has("why") {
+            o.get("why").trim().to_owned()
+        } else {
+            git.text(&[
+                "log",
+                "--format=%b%x00",
+                "--max-count=50",
+                &format!("{base}..{}", snapshot.head),
+            ])?
+            .split('\0')
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+        };
+        require(
+            !motivation.is_empty(),
+            "a pull request needs a motivation: pass --why TEXT or write a commit body",
+        )?;
+        crate::safe(motivation.as_bytes())?;
+    }
+    // Merge choices stay out of the identity: a later `--merge` resumes the
+    // awaiting-merge receipt and reuses its exact-head gate.
     let mut request_parts = vec![destination.trim(), remote, target, &gate];
     if mode != Mode::Direct {
-        request_parts.extend([
-            mode.name(),
-            head_branch.as_str(),
-            from_sha.as_str(),
-            o.value("merge-method", "squash"),
-        ]);
+        request_parts.extend([mode.name(), head_branch.as_str(), from_sha.as_str()]);
     }
     let request = V::Arr(request_parts.iter().map(|s| V::from(*s)).collect());
     let stamp_value = oms_command_plan::json::parse(&request.json(false)?)?;
@@ -1040,17 +1213,6 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         row
     };
     save(&receipt, &row, c.interrupted)?;
-    let base = if mode == Mode::LocalMerge {
-        String::new()
-    } else {
-        let base = crate::review::remote_tip(&git, &destination, target)?
-            .ok_or_else(|| Error::new(2, "remote target is absent"))?;
-        require(
-            git.succeeds(&["merge-base", "--is-ancestor", &base, &snapshot.head])?,
-            "remote target is not an ancestor; rebase before land",
-        )?;
-        base
-    };
     let ctx = Run {
         c,
         o,
@@ -1067,6 +1229,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         ci_wait,
         head_branch: &head_branch,
         from_sha: &from_sha,
+        motivation: &motivation,
     };
     if let Some(failed) = gate_phase(&ctx, &mut row)? {
         return Ok(failed);

@@ -110,11 +110,15 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "file",
                 "head-branch",
                 "merge-method",
+                "why",
                 "check-manifest",
                 "manifest-receipt",
+                "expected-preview-sha256",
             ],
             &[
                 "pr",
+                "direct",
+                "merge",
                 "local-merge",
                 "wait",
                 "ci-full",
@@ -225,9 +229,49 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         )?;
     }
     if tool == "land" {
+        let action = out.action("");
+        if matches!(action, "batch-preview" | "batch-check") {
+            let verify = action == "batch-check";
+            require(
+                out.values.keys().all(|key| {
+                    ["repo", "base", "json"].contains(&key.as_str())
+                        || verify && key == "expected-preview-sha256"
+                }) && out
+                    .values
+                    .get("base")
+                    .is_some_and(|values| values.len() == 1)
+                    && out
+                        .values
+                        .get("repo")
+                        .is_none_or(|values| values.len() == 1),
+                if verify {
+                    "land batch-check requires one --base and accepts only --expected-preview-sha256, --repo and --json"
+                } else {
+                    "land batch-preview requires one --base and accepts only --repo and --json"
+                },
+            )?;
+            require(
+                !verify
+                    || (out
+                        .values
+                        .get("expected-preview-sha256")
+                        .is_some_and(|v| v.len() == 1)
+                        && crate::hex(out.get("expected-preview-sha256"), 64)),
+                "land batch-check requires one exact --expected-preview-sha256",
+            )?;
+            return Ok(out);
+        }
         require(
-            !(out.has("pr") && out.has("local-merge")),
-            "--pr and --local-merge are mutually exclusive",
+            !out.has("expected-preview-sha256"),
+            "--expected-preview-sha256 is only accepted by land batch-check",
+        )?;
+        require(
+            ["pr", "direct", "local-merge"]
+                .iter()
+                .filter(|k| out.has(k))
+                .count()
+                <= 1,
+            "--pr, --direct and --local-merge are mutually exclusive",
         )?;
         require(
             !out.has("local-merge") || out.has("from"),
@@ -239,6 +283,10 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
             "--merge-method must be squash, merge or rebase",
         )?;
         require(
+            !out.has("merge-method") || out.has("merge"),
+            "--merge-method requires --merge",
+        )?;
+        require(
             out.has("check-manifest") == out.has("manifest-receipt"),
             "--check-manifest and --manifest-receipt PATH are required together",
         )?;
@@ -248,8 +296,11 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         )?;
         require(
             !out.has("check-manifest")
-                || (out.words.is_empty() && !out.has("pr") && !out.has("local-merge")),
-            "--check-manifest cannot be combined with a land action, --pr or --local-merge",
+                || (out.words.is_empty()
+                    && !out.has("pr")
+                    && !out.has("direct")
+                    && !out.has("local-merge")),
+            "--check-manifest cannot be combined with a land action, --pr, --direct or --local-merge",
         )?;
     }
     Ok(out)
@@ -263,7 +314,8 @@ pub(crate) fn usage(tool: &str) -> Option<&'static str> {
             "Usage: oms patch-land [--patch FILE | --plan-task ID] [--repo PATH] [--verify CMD] [--recover] [--request-approval | --approval ID --approval-token GRANT --approval-version N] [--ml] [--allow-verifier-change] [--allow-test-reduction] [--allow-restructure] [--allow-floor-change REASON] [--accept-salvaged] [--accept-encoding-loss]\n"
         }
         "land" => {
-            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land --pr [--head-branch NAME] [--merge-method squash|merge|rebase] [land options]\n       oms land --local-merge --from REF [land options]\n       (OMS_LAND_MODE=pr|auto|direct selects the mode when neither --pr nor --local-merge is given)\n       oms land --check-manifest FILE --manifest-receipt PATH [--execute-manifest]  (multi-repo: verify, or fast-forward with --execute-manifest; exit 3 = partial hold)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n"
+            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land [--pr] [--why TEXT] [--head-branch NAME] [--merge [--merge-method squash|merge|rebase]] [land options]\n       oms land --direct [land options]\n       oms land --local-merge --from REF [land options]\n       (default: a GitHub destination opens a pull request and leaves it unmerged unless --merge; other destinations push directly. --direct to GitHub is limited to a docs-only change of at most 2 lines. OMS_LAND_MODE=pr|direct selects the mode when no mode flag is given)\n       oms land --check-manifest FILE --manifest-receipt PATH [--execute-manifest]  (multi-repo: verify, or fast-forward with --execute-manifest; exit 3 = partial hold)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n       oms land batch-preview --base REF REF... [--repo PATH] [--json]
+       oms land batch-check --base REF --expected-preview-sha256 SHA256 REF... [--repo PATH] [--json]\n"
         }
         "change-guard" => {
             "Usage: oms change-guard [--repo PATH] [--file PATH] [--allow PATH] [--deny PATH] [--from-task] [--strict] <begin|check|end|status>\n"

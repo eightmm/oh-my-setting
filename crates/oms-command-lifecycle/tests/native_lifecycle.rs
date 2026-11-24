@@ -2979,6 +2979,222 @@ fn run_fixture_cron(root: &Path) -> String {
     fs::read_to_string(root.join("scheduled-environment")).unwrap()
 }
 
+fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks: &[u8]) {
+    let home = root.join("home");
+    let config = home.join(".codex/config.toml");
+    let settings = home.join(".claude/settings.json");
+    let original_config = fs::read(&config).unwrap();
+    let original_settings = fs::read(&settings).unwrap();
+    let codex = root.join("bin/codex");
+    let original_codex = fs::read(&codex).unwrap();
+    fs::write(
+        &codex,
+        "#!/bin/sh\nprintf invoked > \"$HOME/doctor-provider-invoked\"\nexit 1\n",
+    )
+    .unwrap();
+    let report = || {
+        let out = call("doctor", &["--surfaces", "--json"], source, host);
+        serde_json::from_slice::<Value>(&out.1)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.2)))
+    };
+    let diagnostic = |value: &Value| {
+        value["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["section"] == "codex hook diagnostics")
+            .unwrap()
+            .clone()
+    };
+    let baseline = report();
+    let guards: Vec<_> = baseline["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["section"] == "main write guard")
+        .collect();
+    assert_eq!(guards.len(), 4);
+    assert_eq!(guards[0]["provider"], "claude");
+    assert_eq!(guards[0]["registration"], "registered");
+    assert_eq!(
+        guards[0]["file_tool_coverage"],
+        json!(["Edit", "Write", "MultiEdit", "NotebookEdit"])
+    );
+    for row in &guards {
+        assert_eq!(row["shell_write_enforcement"], "unsupported");
+        assert_eq!(row["effective_running_main"], "unknown");
+    }
+    for row in &guards[1..] {
+        assert_eq!(row["registration"], "unsupported");
+        assert_eq!(row["file_tool_coverage"], json!([]));
+    }
+    assert_eq!(diagnostic(&baseline)["trace"]["status"], "missing");
+    assert_eq!(
+        diagnostic(&baseline)["configuration"]["plugin_configuration"],
+        "not_declared"
+    );
+    let cache = home.join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/1.0.0");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("hooks.json"), hooks).unwrap();
+    fs::write(
+        &config,
+        "[plugins.\"oh-my-setting@oh-my-setting-local\"]\nenabled = true\n",
+    )
+    .unwrap();
+    let configured = diagnostic(&report());
+    assert_eq!(
+        configured["configuration"]["plugin_configuration"],
+        "declared_enabled"
+    );
+    assert_eq!(
+        configured["configuration"]["generated_hooks"],
+        "matches_expected"
+    );
+    assert_eq!(configured["configuration"]["runtime_loading"], "unverified");
+    assert_eq!(
+        configured["configuration"]["native_inventory"],
+        "not_probed"
+    );
+    assert_eq!(configured["trace"]["diagnosis"], "no_callback_evidence");
+    write(&cache.join("hooks.json"), &json!({"hooks":{}}));
+    assert_eq!(
+        diagnostic(&report())["configuration"]["generated_hooks"],
+        "drifted"
+    );
+
+    let trace = source.join(".oms/hooks/codex-trace.jsonl");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(trace.parent().unwrap())
+        .unwrap();
+    fs::set_permissions(source.join(".oms"), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut rows = Vec::new();
+    for (id, handler, phase, outcome) in [
+        (1, "resume-hook", "exit", Some("returned")),
+        (2, "turn-guard", "exit", Some("internal_failure")),
+        (3, "skill-router", "rejected", Some("input_oversize")),
+        (4, "telemetry-hook", "received", None),
+        (5, "precompact-handoff", "entry", None),
+        (6, "syntax-guard-hook", "exit", Some("nonzero")),
+    ] {
+        let mut row = json!({"schema":1,"nonce":format!("{id:032x}"),"handler":handler,
+            "received_at":"2026-11-23T12:00:00Z","event":"unknown","phase":"received",
+            "ignored_payload":"private-fixture-marker"});
+        rows.push(row.clone());
+        if phase != "received" && phase != "rejected" {
+            row["phase"] = json!("entry");
+            rows.push(row.clone());
+        }
+        if let Some(outcome) = outcome {
+            row["phase"] = json!("exit");
+            row["outcome"] = json!(outcome);
+            row["elapsed_us"] = json!(10);
+            if phase != "rejected" {
+                row["inner_exit"] = json!(if outcome == "nonzero" { 2 } else { 0 });
+            }
+            rows.push(row);
+        }
+    }
+    let raw = rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+    fs::write(&trace, &raw).unwrap();
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
+    let before = fs::metadata(&trace).unwrap();
+    // Match a normal CI /tmp ancestor even on hosts whose /tmp is private.
+    // The checkout and its diagnostic paths remain owned, without group/world write.
+    let parent_permissions = fs::metadata(root).unwrap().permissions();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o1777)).unwrap();
+    let observed = diagnostic(&report());
+    fs::set_permissions(root, fs::Permissions::from_mode(0o777)).unwrap();
+    let unprotected_ancestor = diagnostic(&report());
+    fs::set_permissions(root, parent_permissions).unwrap();
+    assert_eq!(unprotected_ancestor["trace"]["status"], "unavailable");
+    let after = fs::metadata(&trace).unwrap();
+    assert_eq!(
+        (before.ino(), before.mtime(), before.mtime_nsec()),
+        (after.ino(), after.mtime(), after.mtime_nsec())
+    );
+    assert_eq!(fs::read(&trace).unwrap(), raw.as_bytes());
+    assert_eq!(observed["trace"]["status"], "read");
+    assert_eq!(observed["trace"]["attempts"], 6);
+    assert_eq!(
+        observed["trace"]["counts"],
+        json!({"returned":1,"handler_nonzero":1,
+        "handler_internal_failure":1,"before_handler_failure":1,"received_without_entry":1,
+        "entry_without_exit":1,"invalid_attempts":0})
+    );
+    assert_eq!(
+        observed["trace"]["handlers"]["turn-guard"]["handler_internal_failure"],
+        1
+    );
+    assert_eq!(observed["trace"]["active_session"], "unknown");
+    assert_eq!(observed["trace"]["provider_loading"], "unverified");
+    assert!(!observed.to_string().contains("private-fixture-marker"));
+    assert!(!observed.to_string().contains("2026-11-23"));
+    let text = String::from_utf8(success(call("doctor", &["--surfaces"], source, host))).unwrap();
+    assert!(text.contains("turn-guard handler_internal_failure=1"));
+    assert!(text.contains("retained evidence cannot prove current account/session delivery"));
+    // Shared ancestors are allowed; unsafe local diagnostic storage is not.
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
+    let hardlink = trace.with_extension("copy");
+    fs::hard_link(&trace, &hardlink).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::remove_file(hardlink).unwrap();
+    let hooks_directory = trace.parent().unwrap();
+    let hooks_permissions = fs::metadata(hooks_directory).unwrap().permissions();
+    fs::set_permissions(hooks_directory, fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::set_permissions(hooks_directory, hooks_permissions).unwrap();
+    let moved_hooks = hooks_directory.with_file_name("other-hooks");
+    fs::rename(hooks_directory, &moved_hooks).unwrap();
+    symlink(&moved_hooks, hooks_directory).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::remove_file(hooks_directory).unwrap();
+    fs::rename(moved_hooks, hooks_directory).unwrap();
+    let checkout_permissions = fs::metadata(source).unwrap().permissions();
+    fs::set_permissions(source, fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::set_permissions(source, checkout_permissions).unwrap();
+    // A conflicting repeat and a truncated row cannot become clean success evidence.
+    fs::write(&trace, format!("{raw}{}\n{{", rows[0])).unwrap();
+    let invalid = diagnostic(&report());
+    assert_eq!(invalid["trace"]["diagnosis"], "incomplete_evidence");
+    assert_eq!(invalid["trace"]["counts"]["returned"], 0);
+    assert_eq!(invalid["trace"]["invalid_records"], 2);
+    fs::remove_file(&trace).unwrap();
+    symlink(&settings, &trace).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::remove_file(&trace).unwrap();
+    fs::write(&trace, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::remove_file(&trace).unwrap();
+    fs::remove_file(&settings).unwrap();
+    let missing_settings = report();
+    assert_eq!(missing_settings["status"], "failed");
+    assert_eq!(diagnostic(&missing_settings)["trace"]["status"], "missing");
+    assert!(
+        missing_settings["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["provider"] == "claude" && row["registration"] == "unavailable")
+    );
+    assert!(!home.join("doctor-provider-invoked").exists());
+    fs::write(&codex, original_codex).unwrap();
+    fs::write(&settings, original_settings).unwrap();
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&config, original_config).unwrap();
+    fs::remove_dir_all(cache).unwrap();
+    fs::remove_dir(trace.parent().unwrap()).unwrap();
+    fs::remove_dir(source.join(".oms")).unwrap();
+}
+
 #[test]
 fn native_configuration_and_services() {
     if let Some(root) = std::env::var_os("OMS_LIFECYCLE_SCHEDULER_PATHS_FIXTURE") {
@@ -3361,6 +3577,7 @@ esac
     )))
     .unwrap();
     assert!(!report.to_string().contains("missing or drifted"));
+    doctor_hook_evidence(&source, &root, &host, &payload);
     success(call("install-claude-hooks", &["--remove"], &source, &host));
     let removed = read(&settings);
     assert!(removed.to_string().contains("custom-hook"));

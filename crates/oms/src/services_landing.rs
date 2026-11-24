@@ -1127,6 +1127,31 @@ fn dirty_reason(worktree: &Path, interrupted: &AtomicBool) -> Option<String> {
         Err(e) => unreadable(e),
     }
 }
+const OUTPUT_DIGEST_DIR: &str = ".oms/artifacts/output-digest";
+
+/// Check only the capture store. An inaccessible or replaced component
+/// cannot prove that forcing worktree removal would preserve its evidence.
+fn has_output_digest(worktree: &Path) -> rustix::io::Result<bool> {
+    use rustix::fs::{Dir, Mode, OFlags, open, openat};
+    use rustix::io::Errno;
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir = open(worktree, flags, Mode::empty())?;
+    for component in OUTPUT_DIGEST_DIR.split('/') {
+        dir = match openat(&dir, component, flags, Mode::empty()) {
+            Ok(child) => child,
+            Err(Errno::NOENT) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+    }
+    for entry in Dir::new(dir)? {
+        if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn keep_reason(
     kind: &str,
     fields: &std::collections::BTreeMap<String, String>,
@@ -1201,7 +1226,11 @@ fn keep_reason(
             }
         }
     }
-    None
+    match has_output_digest(worktree) {
+        Ok(false) => None,
+        Ok(true) => Some(format!("holds {OUTPUT_DIGEST_DIR}")),
+        Err(_) => Some(format!("{OUTPUT_DIGEST_DIR} is unsafe or unreadable")),
+    }
 }
 /// Classify one dead residue directory. `Ok(Some(worktree))` is a validated
 /// registered worktree, `Ok(None)` a directory without one; `Err` keeps it.

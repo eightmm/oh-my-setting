@@ -188,8 +188,10 @@ pub(crate) struct BoardRefresh {
 }
 
 impl BoardRefresh {
-    pub(crate) fn start() -> Result<Self> {
-        Self::spawn_with(|| {
+    pub(crate) fn start(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
+    ) -> Result<Self> {
+        Self::spawn_with_group(workspace_group, || {
             Ok(BoardCollector {
                 commands: SubcommandServices::sibling()?,
                 events: EventsProjectionCache::new(),
@@ -197,7 +199,15 @@ impl BoardRefresh {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_with<T: Services>(
+        factory: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<Self> {
+        Self::spawn_with_group(None, factory)
+    }
+
+    fn spawn_with_group<T: Services>(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
         factory: impl FnOnce() -> Result<T> + Send + 'static,
     ) -> Result<Self> {
         let (sender, jobs) = mpsc::channel::<Job>();
@@ -225,7 +235,9 @@ impl BoardRefresh {
                         .as_ref()
                         .zip(result.as_mut().ok())
                         .and_then(|(native, (snapshot, sources))| {
-                            let adapter = SubcommandServices::sibling().ok()?;
+                            let adapter = SubcommandServices::sibling()
+                                .ok()?
+                                .with_workspace_group(workspace_group);
                             native.observe(
                                 snapshot,
                                 sources,
@@ -433,18 +445,29 @@ fn collect(
 ) -> Result<(Snapshot, CodexQuotaSources)> {
     let key = &job.request.key;
     require(key.current_repo(), "Board state repository changed")?;
-    let (mut snapshot, sources) = commands::snapshot_for(
+    let (mut snapshot, sources, write_slots) = commands::snapshot_for(
         &job.session,
         &key.repo,
         key.room.as_deref(),
         key.main.as_deref(),
         &SnapshotReads { service, key },
         stop,
+        true,
     )?;
     require(
         key.current_repo() && key.matches(&snapshot),
         "Board refresh scope changed",
     )?;
+    // This view belongs to the interactive collector, not the public snapshot.
+    snapshot.report["board_write_slots"] = write_slots.map_or(serde_json::Value::Null, |slots| {
+        serde_json::json!({
+            "used": slots.active + slots.awaiting + slots.unconfirmed,
+            "limit": oms_panel_core::dispatch::effective_wip_limit(),
+            "active": slots.active,
+            "awaiting": slots.awaiting,
+            "unconfirmed": slots.unconfirmed,
+        })
+    });
     if let (Some(attempt), Some(path)) = (&key.main, &key.launch_path)
         && snapshot.status == 0
         && snapshot.report["collection"]["ok"] == true
@@ -606,6 +629,15 @@ impl PeerExecutor for ChatReads<'_> {
 }
 
 impl Services for ChatReads<'_> {
+    fn workspace_group(
+        &self,
+        gid: u32,
+        deadline: Instant,
+        stop: &AtomicBool,
+    ) -> Option<oms_command_plan::services::GroupMembership> {
+        self.0.workspace_group(gid, deadline, stop)
+    }
+
     fn command(
         &self,
         command: NativeCommand,
@@ -732,6 +764,7 @@ mod tests {
                 .env("HOME", &home.0)
                 .env("XDG_CACHE_HOME", home.0.join("cache"))
                 .env("OMS_ROOM_ID", "room-ambient")
+                .env("OMS_PANEL_WIP_LIMIT", "13")
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
@@ -750,6 +783,17 @@ mod tests {
         let ledger = repo.join(".oms/lifecycle/events.jsonl");
         std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
         std::fs::write(&ledger, b"generation").unwrap();
+        let reservations = repo.join(".oms/artifacts/panel-dispatch/reservations.json");
+        std::fs::create_dir_all(reservations.parent().unwrap()).unwrap();
+        std::fs::write(
+            &reservations,
+            json!({"schema":1,"calls":{"call-orphan":{
+                "room":"room-current","main_attempt":"attempt-current",
+                "state":"reserved","route":{"access":"write"}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
         let receipt_log = repo.join(".oms/usage/receipts.jsonl");
         std::fs::create_dir_all(receipt_log.parent().unwrap()).unwrap();
         let receipt = json!({
@@ -830,6 +874,15 @@ mod tests {
         answer.send(Ok(room_state.clone())).unwrap();
         let accepted = reply(&mut worker, &current).unwrap();
         assert_eq!(accepted.status, 0);
+        assert!(
+            accepted.report["room_dispatches"]
+                .get("call-orphan")
+                .is_none()
+        );
+        assert_eq!(
+            accepted.report["board_write_slots"],
+            json!({"used":1,"limit":13,"active":0,"awaiting":0,"unconfirmed":1})
+        );
         assert_eq!(
             accepted.report["board_receipt_tokens"]["attempt-current"]["total"],
             0

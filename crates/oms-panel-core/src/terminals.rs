@@ -17,6 +17,9 @@ pub fn process(pid: u32) -> Result<Owner> {
         .map_err(|_| Error::new("native process generation unavailable"))
 }
 pub fn process_gone(owner: &Owner) -> bool {
+    if crate::release::linux_boot_changed(&owner.birth) {
+        return true;
+    }
     match NativeIdentity.owner_identity(owner.pid) {
         Ok(current) => current != *owner,
         Err(OwnerError::Exited) => true,
