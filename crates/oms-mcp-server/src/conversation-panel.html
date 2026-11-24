@@ -3407,7 +3407,7 @@ async function initialize() {
       canCompose = Boolean(canMessage && extension && typeof extension === 'object' && !Array.isArray(extension));
       if (formats?.text || formats?.structuredContent) contextTypes = formats;
       send({method:'ui/notifications/initialized', params:{}});
-      if (!autoExpanded && displayMode === 'inline') { const m = expandMode(); if (m) { autoExpanded = true; requestDisplayMode(m); } }
+      if (!autoExpanded && (displayMode === 'inline' || !displayMode)) { const m = expandMode(); if (m) { autoExpanded = true; requestDisplayMode(m); } }
     })().catch(error => { initializing = undefined; throw error; });
   }
   return initializing;
