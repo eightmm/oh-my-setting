@@ -141,6 +141,16 @@ fn fixture_root(
     claude: Option<&str>,
     xdg: Option<&str>,
 ) -> PathBuf {
+    fixture_root_with_homes(parent, owner, ppid, None, claude, xdg)
+}
+fn fixture_root_with_homes(
+    parent: Parent,
+    owner: &str,
+    ppid: Option<i32>,
+    codex: Option<&str>,
+    claude: Option<&str>,
+    xdg: Option<&str>,
+) -> PathBuf {
     let raw = PathBuf::from(std::env::var_os(ROOT).unwrap());
     let refuse = |why: &str| -> ! {
         panic!(
@@ -203,9 +213,11 @@ fn fixture_root(
         }
     }
     for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR"] {
-        let want = claude
-            .filter(|_| key == "CLAUDE_CONFIG_DIR")
-            .map(|c| raw.join(c));
+        let want = match key {
+            "CODEX_HOME" => codex.map(|c| raw.join(c)),
+            "CLAUDE_CONFIG_DIR" => claude.map(|c| raw.join(c)),
+            _ => None,
+        };
         if std::env::var_os(key).map(PathBuf::from) != want {
             refuse(&format!("{key} must be {want:?}"));
         }
@@ -1931,14 +1943,14 @@ fn write_login_stubs(root: &Path) {
         s
     };
     let codex_script = format!(
-        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'codex-status|%s|%s|%s\\n' \"$*\" \"$CODEX_HOME\" \"$leaked\" >> \"$log\"\n  [ -e \"$CODEX_HOME/ok\" ]\n  exit $?\nfi\nprintf 'codex-login|%s|%s|%s\\n' \"$*\" \"$CODEX_HOME\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CODEX_OUT\\n'\nprintf 'STUB_CODEX_ERR\\n' >&2\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  mkdir -p \"$CODEX_HOME\"\n  : > \"$CODEX_HOME/ok\"\nfi\nexit 0\n",
+        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\ndir=\"${{CODEX_HOME:-$HOME/.codex}}\"\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'codex-status|%s|%s|%s\\n' \"$*\" \"${{CODEX_HOME-UNSET}}\" \"$leaked\" >> \"$log\"\n  if [ -e \"$HOME/status-code\" ]; then\n    read code < \"$HOME/status-code\"\n    exit \"$code\"\n  fi\n  [ -e \"$dir/ok\" ]\n  exit $?\nfi\nprintf 'codex-login|%s|%s|%s\\n' \"$*\" \"${{CODEX_HOME-UNSET}}\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CODEX_OUT\\n'\nprintf 'STUB_CODEX_ERR\\n' >&2\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  : > \"$dir/ok\"\nfi\nexit 0\n",
         check_vars(&codex_overrides)
     );
     let claude_script = format!(
-        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'claude-status|%s|%s|%s\\n' \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$leaked\" >> \"$log\"\n  [ -e \"$CLAUDE_CONFIG_DIR/ok\" ]\n  exit $?\nfi\nprintf 'claude-login|%s|%s|%s\\n' \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CLAUDE_OUT\\n'\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  mkdir -p \"$CLAUDE_CONFIG_DIR\"\n  : > \"$CLAUDE_CONFIG_DIR/ok\"\nfi\nexit 0\n",
+        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\ndir=\"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'claude-status|%s|%s|%s\\n' \"$*\" \"${{CLAUDE_CONFIG_DIR-UNSET}}\" \"$leaked\" >> \"$log\"\n  if [ -e \"$HOME/status-code\" ]; then\n    read code < \"$HOME/status-code\"\n    exit \"$code\"\n  fi\n  [ -e \"$dir/ok\" ]\n  exit $?\nfi\nprintf 'claude-login|%s|%s|%s\\n' \"$*\" \"${{CLAUDE_CONFIG_DIR-UNSET}}\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CLAUDE_OUT\\n'\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  : > \"$dir/ok\"\nfi\nexit 0\n",
         check_vars(&claude_overrides)
     );
-    let agy_script = "#!/bin/sh\nlog=\"$HOME/login-trace.log\"\nprintf 'agy-login|%s|%s|%s|%s\\n' \"$#\" \"$*\" \"$CODEX_HOME\" \"$CLAUDE_CONFIG_DIR\" >> \"$log\"\nprintf 'STUB_AGY_OUT\\n'\nexit 0\n";
+    let agy_script = "#!/bin/sh\nlog=\"$HOME/login-trace.log\"\nprintf 'agy-login|%s|%s|%s|%s\\n' \"$#\" \"$*\" \"${CODEX_HOME-UNSET}\" \"${CLAUDE_CONFIG_DIR-UNSET}\" >> \"$log\"\nprintf 'STUB_AGY_OUT\\n'\nexit 0\n";
     for (name, body) in [
         ("codex", codex_script.as_str()),
         ("claude", claude_script.as_str()),
@@ -2046,14 +2058,10 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             let lines: Vec<&str> = trace.lines().collect();
             let codex_work = codex_main.join("accounts/work");
             let claude_work = claude_main.join("accounts/work");
+            // Default home leaves CODEX_HOME / CLAUDE_CONFIG_DIR unset when ambient is unset.
+            assert!(lines.contains(&"codex-login|login|UNSET|"), "{trace}");
             assert!(
-                lines.contains(&format!("codex-login|login|{}|", codex_main.display()).as_str()),
-                "{trace}"
-            );
-            assert!(
-                lines.contains(
-                    &format!("codex-status|login status|{}|", codex_main.display()).as_str()
-                ),
+                lines.contains(&"codex-status|login status|UNSET|"),
                 "{trace}"
             );
             assert!(
@@ -2062,14 +2070,13 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             );
             assert!(
                 lines.contains(
-                    &format!("claude-login|auth login|{}|", claude_main.display()).as_str()
+                    &format!("codex-status|login status|{}|", codex_work.display()).as_str()
                 ),
                 "{trace}"
             );
+            assert!(lines.contains(&"claude-login|auth login|UNSET|"), "{trace}");
             assert!(
-                lines.contains(
-                    &format!("claude-status|auth status|{}|", claude_main.display()).as_str()
-                ),
+                lines.contains(&"claude-status|auth status|UNSET|"),
                 "{trace}"
             );
             assert!(
@@ -2078,7 +2085,89 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
                 ),
                 "{trace}"
             );
-            assert!(lines.contains(&"agy-login|0|||"), "{trace}");
+            assert!(
+                lines.contains(
+                    &format!("claude-status|auth status|{}|", claude_work.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(lines.contains(&"agy-login|0||UNSET|UNSET"), "{trace}");
+
+            // Ambient CODEX_HOME / CLAUDE_CONFIG_DIR are kept intact for default home and
+            // overridden only for registered :ID homes.
+            let ambient_codex = root.join("ambient-codex");
+            let ambient_claude = root.join("ambient-claude");
+            mk(&ambient_codex).unwrap();
+            mk(&ambient_claude).unwrap();
+            fs::remove_file(root.join("home/login-trace.log")).unwrap();
+            let ambient_out = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "login_ambient_home_preserved_child",
+                    "--nocapture",
+                ])
+                .env(ROOT, root)
+                .env("HOME", root.join("home"))
+                .env("XDG_CONFIG_HOME", root.join("home/.config"))
+                .env("PATH", root.join("bin"))
+                .env("CODEX_HOME", &ambient_codex)
+                .env("CLAUDE_CONFIG_DIR", &ambient_claude)
+                .output()
+                .unwrap();
+            assert!(
+                ambient_out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&ambient_out.stdout),
+                String::from_utf8_lossy(&ambient_out.stderr)
+            );
+            let ambient_trace = fs::read_to_string(root.join("home/login-trace.log")).unwrap();
+            let ambient_lines: Vec<&str> = ambient_trace.lines().collect();
+            assert!(
+                ambient_lines
+                    .contains(&format!("codex-login|login|{}|", ambient_codex.display()).as_str()),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("codex-status|login status|{}|", ambient_codex.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines
+                    .contains(&format!("codex-login|login|{}|", codex_work.display()).as_str()),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("codex-status|login status|{}|", codex_work.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("claude-login|auth login|{}|", ambient_claude.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("claude-status|auth status|{}|", ambient_claude.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("claude-login|auth login|{}|", claude_work.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("claude-status|auth status|{}|", claude_work.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
 
             // Unverified login returns exit 1 and "not signed in".
             fs::remove_file(codex_work.join("ok")).unwrap();
@@ -2087,6 +2176,23 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             assert_eq!(res.0, 1, "{res:?}");
             assert!(res.1.contains("codex:work: not signed in"), "{}", res.1);
             assert!(!res.1.contains("STUB_CODEX_OUT"), "{}", res.1);
+
+            // Timed-out (124) and interrupted (130) status checks report unknown with a
+            // distinct non-zero exit code, never "not signed in".
+            for (code, needle) in [("124", "timed out"), ("130", "interrupted")] {
+                fs::write(root.join("home/status-code"), format!("{code}\n")).unwrap();
+                let res = connect(root, &["--login", "codex:work"]);
+                assert!(
+                    res.0 != 0 && res.0 != 1,
+                    "code {code} must return distinct unknown exit: {res:?}"
+                );
+                assert!(
+                    res.1.contains("codex:work: unknown:") && res.1.contains(needle),
+                    "{res:?}"
+                );
+                assert!(!res.1.contains("not signed in"), "{res:?}");
+            }
+            fs::remove_file(root.join("home/status-code")).unwrap();
 
             // Missing CLI binary reports a clear error naming the binary.
             for (provider, bin) in [
@@ -2102,6 +2208,29 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             assert_eq!(snapshot(&config(root)), cfg_before);
         },
     );
+}
+
+#[test]
+fn login_ambient_home_preserved_child() {
+    if std::env::var_os(ROOT).is_none() {
+        return;
+    }
+    let root = fixture_root_with_homes(
+        TEMP_PARENT,
+        "login_spawns_provider_strips_overrides_and_refuses_invalid",
+        None,
+        Some("ambient-codex"),
+        Some("ambient-claude"),
+        None,
+    );
+    let out = ok(&root, &["--login", "codex"]);
+    assert!(out.contains("codex: signed in"), "{out}");
+    let out = ok(&root, &["--login", "codex:work"]);
+    assert!(out.contains("codex:work: signed in"), "{out}");
+    let out = ok(&root, &["--login", "claude"]);
+    assert!(out.contains("claude: signed in"), "{out}");
+    let out = ok(&root, &["--login", "claude:work"]);
+    assert!(out.contains("claude:work: signed in"), "{out}");
 }
 
 #[test]

@@ -2916,29 +2916,16 @@ fn allow_board_action(
 
 const LOGIN_FALLBACK_COMMAND: &str = "oms connect-services --login-menu";
 
-fn login_command_argv(source: &Path) -> Vec<std::ffi::OsString> {
-    let mut cmd = Vec::new();
-    if let Some(entry) = crate::executable::resolve(source) {
-        if entry.script {
-            cmd.push("bash".into());
-        }
-        cmd.push(entry.path.as_os_str().into());
-        if !entry.script
-            && let Some((dispatch_source, rev)) =
-                crate::native_panel::staged_dispatch_args(source, &entry.path)
-        {
-            cmd.extend(commands::strings(&[
-                "--oms-dispatch",
-                &dispatch_source,
-                &rev,
-                "--",
-            ]));
-        }
-    } else {
-        cmd.push("oms".into());
-    }
+fn login_command_argv_for(
+    source: &Path,
+    entry: Option<&crate::executable::Entry>,
+) -> Option<Vec<std::ffi::OsString>> {
+    let mut cmd: Vec<std::ffi::OsString> = crate::native_panel::entry_prefix_for(source, entry?)
+        .into_iter()
+        .map(Into::into)
+        .collect();
     cmd.extend(commands::strings(&["connect-services", "--login-menu"]));
-    cmd
+    Some(cmd)
 }
 
 fn login_tmux_session(
@@ -2970,9 +2957,32 @@ fn open_login_window(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> String {
+    open_login_window_with_entry(
+        repo,
+        source,
+        crate::executable::resolve(source).as_ref(),
+        session_hint,
+        caller_pane,
+        services,
+        interrupted,
+    )
+}
+
+fn open_login_window_with_entry(
+    repo: &Path,
+    source: &Path,
+    entry: Option<&crate::executable::Entry>,
+    session_hint: Option<&str>,
+    caller_pane: Option<&str>,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+) -> String {
+    let Some(login_argv) = login_command_argv_for(source, entry) else {
+        return format!("Run: {LOGIN_FALLBACK_COMMAND} (oms unavailable)");
+    };
     let Some(session) = login_tmux_session(repo, session_hint, caller_pane, services, interrupted)
     else {
-        return format!("No tmux session; run: {LOGIN_FALLBACK_COMMAND}");
+        return format!("Run: {LOGIN_FALLBACK_COMMAND} (no tmux session)");
     };
     let mut argv = commands::strings(&[
         "new-window",
@@ -2983,13 +2993,10 @@ fn open_login_window(
         "-c",
     ]);
     argv.push(repo.as_os_str().into());
-    argv.extend(login_command_argv(source));
+    argv.extend(login_argv);
     match oms_panel_core::terminals::tmux(services, repo, &argv, interrupted) {
         Ok(_) => "Sign-in window opened".into(),
-        Err(err) => format!(
-            "Cannot open sign-in window ({}); run: {LOGIN_FALLBACK_COMMAND}",
-            err.message
-        ),
+        Err(err) => format!("Run: {LOGIN_FALLBACK_COMMAND} (tmux: {})", err.message),
     }
 }
 
@@ -12452,6 +12459,14 @@ fi
         let stop = AtomicBool::new(false);
         let repo = Path::new("repo-fixture");
         let source = Path::new("");
+        let bin_entry = crate::executable::Entry {
+            path: std::path::PathBuf::from("oms-fixture-bin"),
+            script: false,
+        };
+        let script_entry = crate::executable::Entry {
+            path: std::path::PathBuf::from("scripts/oms"),
+            script: true,
+        };
 
         // Direct session hint spawns `tmux new-window -t $3: -n login -c <repo> <oms...> connect-services --login-menu`.
         let tmux = LoginTmux {
@@ -12459,7 +12474,15 @@ fi
             session_reply: None,
             fail_new_window: false,
         };
-        let notice = super::open_login_window(repo, source, Some("$3"), None, &tmux, &stop);
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            Some("$3"),
+            None,
+            &tmux,
+            &stop,
+        );
         assert_eq!(notice, "Sign-in window opened");
         let calls = tmux.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -12468,7 +12491,7 @@ fi
             .map(|v| v.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            &argv[..8],
+            argv,
             [
                 "tmux",
                 "new-window",
@@ -12477,12 +12500,46 @@ fi
                 "-n",
                 "login",
                 "-c",
-                "repo-fixture"
+                "repo-fixture",
+                "oms-fixture-bin",
+                "connect-services",
+                "--login-menu"
             ]
         );
+
+        // Script entry reuses native_panel::entry_prefix_for (prepends `bash`).
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: None,
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&script_entry),
+            Some("$3"),
+            None,
+            &tmux,
+            &stop,
+        );
+        assert_eq!(notice, "Sign-in window opened");
+        let calls = tmux.calls.lock().unwrap();
         assert_eq!(
-            &argv[argv.len() - 2..],
-            ["connect-services", "--login-menu"]
+            calls[0],
+            commands::strings(&[
+                "tmux",
+                "new-window",
+                "-t",
+                "$3:",
+                "-n",
+                "login",
+                "-c",
+                "repo-fixture",
+                "bash",
+                "scripts/oms",
+                "connect-services",
+                "--login-menu",
+            ])
         );
 
         // Falls back to querying session from TMUX_PANE when no session hint is given.
@@ -12491,7 +12548,15 @@ fi
             session_reply: Some("$7"),
             fail_new_window: false,
         };
-        let notice = super::open_login_window(repo, source, None, Some("%5"), &tmux, &stop);
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            None,
+            Some("%5"),
+            &tmux,
+            &stop,
+        );
         assert_eq!(notice, "Sign-in window opened");
         let calls = tmux.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
@@ -12501,29 +12566,59 @@ fi
         );
         assert_eq!(calls[1][3], "$7:");
 
-        // Without any tmux session, returns fallback notice naming the command.
+        // Unavailable executable does not open a window and reports the fallback command first.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: Some("$7"),
+            fail_new_window: false,
+        };
+        let notice =
+            super::open_login_window_with_entry(repo, source, None, Some("$3"), None, &tmux, &stop);
+        assert!(
+            notice.starts_with("Run: oms connect-services --login-menu"),
+            "{notice}"
+        );
+        assert!(tmux.calls.lock().unwrap().is_empty());
+
+        // Without any tmux session, returns fallback notice naming the command first.
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: None,
             fail_new_window: false,
         };
-        let notice = super::open_login_window(repo, source, None, None, &tmux, &stop);
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            None,
+            None,
+            &tmux,
+            &stop,
+        );
         assert!(
-            notice.contains("oms connect-services --login-menu"),
+            notice.starts_with("Run: oms connect-services --login-menu"),
             "{notice}"
         );
         assert!(tmux.calls.lock().unwrap().is_empty());
 
-        // When tmux new-window fails, returns notice naming the fallback command.
+        // When tmux new-window fails, puts the command first so it survives a 40-column wrap.
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: None,
             fail_new_window: true,
         };
-        let notice = super::open_login_window(repo, source, Some("$3"), None, &tmux, &stop);
-        assert!(
-            notice.contains("oms connect-services --login-menu"),
-            "{notice}"
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            Some("$3"),
+            None,
+            &tmux,
+            &stop,
+        );
+        assert_eq!(
+            notice,
+            "Run: oms connect-services --login-menu (tmux: tmux failed)"
         );
     }
 }

@@ -5149,7 +5149,7 @@ pub(crate) fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String,
     Some((canon_source.to_string_lossy().into_owned(), rev.to_owned()))
 }
 
-fn entry_prefix_for(source: &Path, entry: &crate::executable::Entry) -> Vec<String> {
+pub(crate) fn entry_prefix_for(source: &Path, entry: &crate::executable::Entry) -> Vec<String> {
     let mut prefix = Vec::new();
     if entry.script {
         prefix.push("bash".into());

@@ -138,10 +138,14 @@ impl Drop for ChildGroup {
 }
 
 /// Pipes are nonblocking; cancellation and deadlines cover the child process group.
-pub(crate) fn capture(
+pub(crate) fn capture(command: Command, interrupted: &AtomicBool, seconds: u64) -> Result<Output> {
+    capture_timeout(command, interrupted, Duration::from_secs(seconds))
+}
+
+pub(crate) fn capture_timeout(
     mut command: Command,
     interrupted: &AtomicBool,
-    seconds: u64,
+    timeout: Duration,
 ) -> Result<Output> {
     use rustix::process::Pid;
     use std::os::unix::process::CommandExt;
@@ -211,9 +215,7 @@ pub(crate) fn capture(
             Ok(false)
         }
         loop {
-            if interrupted.load(Ordering::Relaxed)
-                || start.elapsed() >= Duration::from_secs(seconds)
-            {
+            if interrupted.load(Ordering::Relaxed) || start.elapsed() >= timeout {
                 if !group.reaped {
                     let _ = group.finish();
                 }
