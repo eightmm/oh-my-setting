@@ -166,8 +166,9 @@ For **this conversation’s Main**, Codex supplies the current thread ID on each
 MCP tool call. OMS checks whether that thread is enrolled as the Codex owner
 of an open Room in the selected repository. A matching Room identifies the
 Main for this chat. Opening or refreshing the panel only reads existing
-membership. Choosing a provider and submitting a goal explicitly starts a
-separate managed Main. Project-wide attempt and acceptance counts retain
+membership. To continue an enrolled Main, give it work in the current chat.
+It can use a Lead from the same provider. An explicitly requested new managed
+Main gets a separate Room and launch receipt. Project-wide attempt and acceptance counts retain
 their repository scope. If OMS cannot establish a single match, the panel
 leaves this conversation’s Main unconfirmed.
 
@@ -212,6 +213,37 @@ and its state.
 The panel below uses seeded project data.
 
 ![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
+
+### Claude and Antigravity
+
+The cross-host connection serves the same OMS panel and six read-only tools.
+Choose a registered project to inspect progress, Git and GitHub work, usage,
+or a Board view. A host that supports sending a user message can carry a
+selected item reference into the conversation. Verify assignment and execution
+in that conversation. Private Codex Room history, managed starts and approval
+decisions require the Codex/Work connection.
+
+| Surface | How to connect and open OMS |
+| --- | --- |
+| Antigravity App 2.34.0 or newer | Install the [OMS panel plugin directory](../plugins/oms-app) globally for workspace-wide availability. Once enabled under **Customizations**, choose **OMS** in the side-panel **+ → Plugins** menu or open the full-page view from **Plugins**. [Antigravity plugins](https://antigravity.google/docs/plugins/) · [MCP Apps](https://antigravity.google/docs/mcp-apps) |
+| Claude Desktop | Add the `oms-panel` entry from the [stdio configuration](../plugins/oms-app/mcp_config.json) under `mcpServers` in Claude Desktop’s local developer configuration. Restart Claude Desktop and ask “Open OMS”. Claude selects an inline or expanded view, or a side panel for eligible organizations and conversations. [Local testing](https://github.com/modelcontextprotocol/ext-apps/blob/main/docs/testing-mcp-apps.md) · [Claude display modes](https://claude.com/docs/connectors/building/mcp-apps/display-modes) |
+| Antigravity CLI/IDE and Claude Code text sessions | Use the same MCP tools to request the project list and status in chat. Claude Code accepts the stdio file through `--mcp-config`. [Antigravity MCP](https://antigravity.google/docs/ide-mcp) · [Claude Code MCP](https://code.claude.com/docs/en/mcp) |
+| Claude on the web | Custom connectors need a reachable HTTPS MCP service. The checked-in connection uses stdio over SSH. The global Artifacts launcher additionally depends on connector and organization eligibility. [Remote connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) · [Claude entry points](https://claude.com/docs/connectors/building/mcp-apps/entry-points) |
+
+The plugin uses the desktop’s existing OpenSSH connection to the `oms-runtime`
+alias. The OMS version on that host must support `OMS_MCP_TOOL_PROFILE=mcp-app`.
+Register the projects once on that host as described below. On a machine that
+already runs OMS, the local stdio entry can instead run the absolute installed
+`oms` executable with `args: ["mcp-server"]` and
+`env: {"OMS_MCP_TOOL_PROFILE":"mcp-app"}`. The generic profile reads the
+configured alias catalog or an operator-pinned `OMS_PANEL_REPO`.
+
+For “handle all open issues and PRs”, a Main pages both inventories in the
+selected repository through `oms_panel_git_status`. Each page returns its
+continuation cursor. Available Project boards add context; the initial Git
+tab only shows samples. The Main reconciles work already in progress, assigns
+Leads, verifies outcomes and reports any blocked items. Selecting an issue in
+the panel hands its reference to the conversation after user confirmation.
 
 ### If the tab fails before the OMS heading appears
 

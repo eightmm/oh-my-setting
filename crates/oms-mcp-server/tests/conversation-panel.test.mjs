@@ -22,12 +22,13 @@ class Element extends EventTarget {
   prepend(...children) { this.children.unshift(...children); }
   setAttribute(name,value) { this.attributes.set(name,value); }
   focus() {}
+  select() { this.selected = true; }
   replaceChildren(...children) { this.children = children; }
   querySelectorAll() { return []; }
   setCustomValidity() {}
 }
 
-async function panel(projects, dashboard = {}) {
+async function panel(projects, dashboard = {}, options = {}) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const get = id => elements.get(id);
   get('launch').elements = {main:{value:'codex'}};
@@ -35,7 +36,7 @@ async function panel(projects, dashboard = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {status:null, failStart:true, replies:[]};
+  const host = {status:null, failStart:true, replies:[], messages:[], notices:[]};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -45,7 +46,7 @@ async function panel(projects, dashboard = {}) {
     calls.push({name, args});
     if (host.tools?.[name]) return host.tools[name](args);
     switch (name) {
-      case 'oms_list_projects': return {projects};
+      case 'oms_list_projects': return {projects,readOnly:options.readOnly};
       case 'oms_panel_snapshot': return {dashboard:{project:args.project, ...dashboard}};
       case 'oms_list_approvals': return {approvals:[]};
       case 'oms_start_main':
@@ -65,8 +66,13 @@ async function panel(projects, dashboard = {}) {
   window.parent = {postMessage(message) {
     const {id, method, params} = message;
     if (!method) { host.replies.push(JSON.parse(JSON.stringify(message))); return; }
-    if (id == null) return;
+    if (id == null) { host.notices.push(method); return; }
     let result = {};
+    if (method === 'ui/initialize') {
+      host.initialize = params;
+      result = {hostInfo:{name:options.host || 'Codex'},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
+    }
+    if (method === 'ui/message') { host.messages.push(params); result = {isError:host.rejectMessage === true}; }
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
@@ -238,12 +244,12 @@ test('active Lead cards, past executions and repository verification use their o
     operations:[{kind:'verify', artifactId:'check-17', status:'failed', exit:1}]
   });
   const cards = p.get('leads').textContent;
-  assert.match(cards, /Claude Lead작업 중 · live-task/);
+  assert.match(cards, /Claude Leadlive-task작업 중/);
   assert.doesNotMatch(cards, /Codex Lead|old-task|unrelated/);
   assert.match(p.get('activity').textContent, /old-task · room-one/);
   assert.equal(p.get('room').textContent, 'room-one');
   assert.equal(p.get('participant').textContent, 'chat-owner');
-  assert.equal(p.get('current-main').textContent, 'Codex Main');
+  assert.match(p.get('header-main').textContent,/Codex Main$/);
   assert.match(p.get('main-state').textContent, /작업방 목록 일부 조회/);
   assert.match(p.get('repo-team').textContent, /AGY Lead · room-two · unrelated/);
   assert.match(p.get('repo-team').textContent, /Pi Main · room-two/);
@@ -276,7 +282,7 @@ test('a reserved launch and an incomplete Lead sample cannot confirm a different
   p.get('brief').value = 'Another task';
   await p.event('launch', 'submit');
   assert.match(p.get('receipt').textContent, /별도 Main 시작 요청 접수됨/);
-  assert.equal(p.get('current-main').textContent, 'Codex Main');
+  assert.match(p.get('header-main').textContent,/Codex Main$/);
   assert.equal(p.get('room').textContent, 'conversation-room');
 });
 
@@ -306,7 +312,7 @@ test('scoped chat navigation reads private bodies, paginates backwards and prese
   const chat = args => ({...args, source:'room',messages:[{seq:args.before ? 1 : 4,text:args.before ? 'earlier' : 'latest'}],nextBefore:args.before ? null : 4});
   p.host.tools = {oms_panel_chat:chat};
   assert.ok(!p.calls.some(c => c.name === 'oms_panel_chat'));
-  await p.event('main-chat','click');
+  await p.event('header-main','click');
   assert.equal(p.get('pane-chat').hidden,false);
   assert.deepEqual(p.calls.at(-1).args.project,'one');
   assert.match(p.get('chat-messages').textContent,/latest/);
@@ -324,7 +330,7 @@ test('a project change discards a pending private result and clears selected mem
   p.get('project-choice').value = 'one'; await p.event('project-choice','change');
   p.host.tools = {oms_panel_chat:args => ({...args,source:'room',messages:[{seq:1,text:'old private result'}]})};
   p.host.delayTool = 'oms_panel_chat';
-  await p.event('main-chat','click');
+  await p.event('header-main','click');
   p.get('project-choice').value = 'two'; await p.event('project-choice','change');
   p.host.release(); await setImmediate();
   assert.equal(p.get('project').textContent,'two');
@@ -376,7 +382,7 @@ test('private attempt detail requires the selected actor, attempt and original s
     evidence:a.section && {attempt:returnedId || a.attempt,section:a.section,page:a.page,source:'indexed-patch',
       lines:[a.section+' '+a.page],proofs:{diff:'initial'},digest:a.section === 'diff' ? patch : null,
       nextPage:a.section === 'diff' && a.page===1 ? 2 : null}})};
-  await p.event('main-chat','click');
+  await p.event('header-main','click');
   assert.equal(p.calls.at(-1).args.section,undefined);
   p.get('evidence-attempt').value='a1'; await p.event('evidence-attempt','change');
   assert.equal(p.get('evidence-lines').textContent,'info 1');
@@ -435,7 +441,7 @@ test('overview opens only bound work conversations, labels confirmed Main, and r
     activeAttempts:[{...member,task:'Test changes',state:'verifying'},{...member,room:'another',task:'Wrong room'}],
     attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}});
   p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]}),oms_panel_tui_view:args=>({...args,status:'ready',columns:[],rows:[]})};
-  assert.equal(p.get('header-main').textContent,'Codex Main'); assert.equal(p.get('header-main').hidden,false);
+  assert.match(p.get('header-main').textContent,/Codex Main$/); assert.equal(p.get('header-main').hidden,false);
   assert.equal(p.get('plan-ratio').textContent,'0 / 3'); assert.equal(p.get('acceptance-bar').value,1);
   const threads=p.get('thread-rows'); assert.equal(threads.children.length,1); assert.match(threads.textContent,/Test changes.*검증 중/);
   threads.children[0].dispatchEvent(new Event('click')); await setImmediate();
@@ -447,4 +453,109 @@ test('overview opens only bound work conversations, labels confirmed Main, and r
   const unknown = await panel(['one'],{tasks:4,tasksVerified:null,acceptance:{available:true,total:0,verified:0}});
   assert.equal(unknown.get('header-main').hidden,true); assert.equal(unknown.get('plan-strip').hidden,true);
   assert.equal(unknown.get('acceptance-bar').hidden,true); assert.equal(unknown.get('work-threads').hidden,true);
+});
+
+const openItem = {kind:'issue',number:9,title:'Review input boundaries',state:'OPEN',url:'https://github.com/org/repo/issues/9'};
+const workData = {git:{available:true,branch:'main'},github:{repository:'org/repo',status:'unavailable',work:{
+  issues:{status:'available',incomplete:true,items:[openItem]},pullRequests:{status:'available',items:[]},
+  projects:{status:'available',items:[{number:2,title:'Release',state:'OPEN',items:[openItem]}]}}}};
+const matchedMain={source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner'};
+async function pickIssue(p) {
+  p.host.tools={oms_panel_git_status:()=>workData};
+  await p.event('tab-git','click');
+  p.get('git-kind').value='issues'; await p.event('git-kind','change');
+  const card=p.get('git-catalog').children[0];
+  card.children.at(-1).dispatchEvent(new Event('click')); await setImmediate();
+}
+
+test('Git issue is an editable Lead request, and only an explicit send posts it to a matched Main', async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
+  await pickIssue(p);
+  assert.match(p.get('git-catalog-status').textContent,/일부 조회/);
+  p.get('git-provider').value='codex'; await p.event('git-provider','change');
+  assert.match(p.get('git-goal').value,/Codex Lead.*org\/repo\/issues\/9/);
+  p.get('git-goal').value+=' 변경 범위를 정리해 주세요.'; await p.event('git-goal','input');
+  assert.equal(p.host.messages.length,0); assert.equal(p.calls.some(c=>c.name==='oms_start_main'),false);
+  await p.event('git-send','click'); await p.event('git-send','click');
+  assert.equal(p.host.messages.length,1); assert.equal(p.host.messages[0].content[0].text,p.get('git-goal').value);
+  assert.match(p.get('git-editor-status').textContent,/배정 요청을 전달/);
+  await p.event('git-new','click'); assert.equal(p.get('brief').value,p.get('git-goal').value);
+  assert.ok(p.get('launcher').open); assert.equal(p.calls.some(c=>c.name==='oms_start_main'),false);
+});
+
+test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
+  const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.3.0');
+  assert.equal(p.get('view').hidden,true);
+  await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
+  assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
+  assert.equal(p.get('header-main').hidden,true); await pickIssue(p);
+  assert.equal(p.get('git-new').hidden,true); assert.equal(p.get('git-send').textContent,'현재 대화에 공유');
+  assert.equal(p.host.messages.length,0); await p.event('git-send','click'); assert.equal(p.host.messages.length,1);
+  assert.match(p.get('git-editor-status').textContent,/공유했습니다/);
+  await p.event('git-new','click'); await p.event('launch','submit');
+  assert.equal(p.calls.some(c=>['oms_start_main','oms_start_status','oms_list_approvals','oms_panel_chat','oms_decide_approval'].includes(c.name)),false);
+});
+
+test('number lookup rejects mismatched resources, supports verified older items, and board rows stay project scoped', async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain}); await pickIssue(p);
+  assert.equal(p.get('git-send').hidden,true); await p.event('git-copy','click'); assert.equal(p.get('git-goal').selected,true);
+  let item={...openItem,number:2,url:'https://github.com/other/repo/issues/2'};
+  p.host.tools.oms_panel_git_status=()=>({github:{repository:'org/repo',lookup:{status:'available',item}}});
+  p.get('git-number').value='2'; await p.event('git-find','submit');
+  assert.match(p.get('git-match').textContent,/확인할 수 없습니다/);
+  item={...item,url:'https://github.com/org/repo/issues/2'};
+  await p.event('git-find','submit'); assert.equal(p.calls.at(-1).args.kind,'issue'); assert.equal(p.calls.at(-1).args.number,2);
+  p.get('git-match').children.at(-1).dispatchEvent(new Event('click')); await setImmediate();
+  assert.match(p.get('git-goal').value,/org\/repo\/issues\/2/);
+  p.get('git-kind').value='projects'; await p.event('git-kind','change');
+  assert.match(p.get('git-catalog').textContent,/Release.*Review input boundaries.*작업 목표 작성/);
+});
+
+test('provider availability and active Codex Lead are independent from Codex Main identity', async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain,activeAttempts:[
+    {provider:'codex',role:'lead',room:'r',task:'Review',participant:'other',state:'working'},
+    {provider:'claude',role:'lead',room:'other',task:'Elsewhere',state:'working'}]});
+  p.host.tools={oms_panel_tui_view:()=>({view:'providers',page:1,status:'ready',rows:[
+    {provider:'codex',installed:true,usable:true},{provider:'claude',installed:true},{provider:'antigravity',usable:false}]})};
+  assert.match(p.get('header-main').textContent,/Codex Main$/); assert.match(p.get('leads').textContent,/Codex LeadReview작업 중/);
+  assert.doesNotMatch(p.get('leads').textContent,/Elsewhere/); await p.event('provider-load','click');
+  assert.match(p.get('provider-rows').textContent,/Codex Lead호스트 사용 가능.*Claude Lead설치됨 · 사용 가능 여부 미확인.*AGY Lead호스트 사용 불가/);
+});
+
+test('partial lists allow a scoped whole-backlog brief and stale items cannot be sent or launched as fresh', async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
+  await pickIssue(p); await p.event('git-backlog','click');
+  assert.match(p.get('git-goal').value,/https:\/\/github.com\/org\/repo 저장소.*모든 열린 이슈와 PR.*마지막 페이지.*기존 PR.*의존성.*검증 근거/);
+  assert.doesNotMatch(p.get('git-goal').value,/Review input boundaries/);
+  assert.equal(p.host.messages.length,0); assert.equal(p.calls.some(c=>c.name==='oms_start_main'),false);
+  await p.event('git-send','click'); assert.equal(p.host.messages.length,1);
+  await pickIssue(p);
+  p.host.tools.oms_panel_git_status=()=>({...workData,github:{...workData.github,work:{issues:{status:'available',items:[]}}}});
+  await p.event('refresh','click');
+  assert.equal(p.get('git-new').disabled,true); assert.equal(p.get('git-send').disabled,true);
+  await p.event('git-new','click'); await p.event('git-send','click');
+  assert.equal(p.host.messages.length,1); assert.equal(p.get('brief').value,'');
+});
+
+test('first-fold whole-backlog action discovers the repository on demand and stays in the draft', async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
+  p.host.tools={oms_panel_git_status:()=>workData};
+  assert.ok(!p.calls.some(c=>c.name==='oms_panel_git_status'));
+  await p.event('overview-backlog','click');
+  assert.equal(p.get('pane-git').hidden,false); assert.equal(p.get('git-editor').hidden,false);
+  assert.match(p.get('git-goal').value,/org\/repo.*oms_panel_git_status.*nextCursor/);
+  assert.equal(p.host.messages.length,0); assert.equal(p.calls.some(c=>c.name==='oms_start_main'),false);
+});
+
+test('GitHub Projects permission copy requires a typed scope error; other repository collections remain available', async () => {
+  const p=await panel(['one']); let permission;
+  p.host.tools={oms_panel_git_status:()=>({...workData,github:{...workData.github,work:{...workData.github.work,
+    projects:{status:'unavailable',reason:permission,items:[]}}}})};
+  await p.event('tab-git','click'); p.get('git-kind').value='projects'; await p.event('git-kind','change');
+  assert.doesNotMatch(p.get('git-catalog-status').textContent,/read:project/);
+  permission='insufficient_scope'; await p.event('refresh','click');
+  assert.match(p.get('git-catalog-status').textContent,/read:project/);
+  p.get('git-kind').value='issues'; await p.event('git-kind','change');
+  assert.match(p.get('git-catalog').textContent,/Review input boundaries/);
 });

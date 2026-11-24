@@ -1,0 +1,9 @@
+{
+  "name": "oms-panel",
+  "version": "0.3.0",
+  "description": "Open the OMS project dashboard and read project, GitHub, usage and Board status on a connected OMS host.",
+  "displayName": "OMS",
+  "suggestedPrompts": [
+    "Open the OMS panel for my project."
+  ]
+}

@@ -12,7 +12,27 @@ Check the selected project with `oms_panel_snapshot` before submitting work.
 An ambiguous project, connection error or rejected binding needs attention
 before any action.
 
-- For a goal, use the user's chosen Main (`codex`, `claude`, `agy`, or `pi`).
+- When the snapshot identifies this conversation’s Main, carry out the user’s
+  goal in its existing Room and selected checkout. Inspect enrolled leads and
+  their live assignments. A Codex Main can assign a Codex Lead. Reuse the
+  applicable lead or dispatch through the existing Room’s authorized lead
+  workflow. Verify the assignment and its receipt. Choosing a lead or sending
+  an issue/PR reference into chat does not by itself start a managed Main or
+  establish execution. Report the handoff as pending until acknowledged.
+- For a request to handle **all open issues and PRs**, page both
+  `inventory: "issues"` and `inventory: "pullRequests"` on
+  `oms_panel_git_status` for the selected project. Omit `cursor` for the
+  first page, then pass each `github.inventory.nextCursor` until exhausted.
+  Follow up with the host's authorized repository-scoped tooling as needed. Track both kinds by repository, type and number. Consult
+  accessible Project fields, linked work, assignees, checks and existing
+  branches. The panel shows bounded samples and visible Projects metadata.
+  Reconcile those samples against the complete inventory; mark missing scopes
+  and inaccessible Projects explicitly. Group related work under the current
+  Main, preserve user changes and active assignments, and continue through
+  implementation and verification. Recheck remaining open items and report
+  per-item results, links and concrete external blockers. Merge or close only
+  with the required authority.
+- For an explicitly requested new managed Main, use the user's chosen Main (`codex`, `claude`, `agy`, or `pi`).
   If they left the choice open, offer those choices. Pass the goal and its
   constraints as a single line to `oms_start_main` with a fresh lowercase UUID
   as `requestId`. Report the receipt's Room and attempt. If a start response is
@@ -23,7 +43,9 @@ before any action.
 - For progress, use `oms_panel_snapshot` and describe recorded work, including
   any unavailable status. A launch receipt alone does not establish that a
   lead completed its assignment.
-- For branch, PR and checks, call `oms_panel_git_status` on demand. For
+- For branch, GitHub items and checks, call `oms_panel_git_status` on demand.
+  For a chosen item, send its paired `kind` (`issue` or `pull`) and positive
+  `number` on the same project. Review the returned item before dispatch. For
   provider and attempt usage use `oms_panel_usage`. For a native Board
   section, call `oms_panel_tui_view` with its view and page. For messages
   shared with an enrolled Main, open the panel and select the participant

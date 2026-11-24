@@ -235,6 +235,7 @@ fn environment_profile() {
         (Some(std::ffi::OsString::from("core")), true),
         (Some("full".into()), true),
         (Some("chatgpt-panel".into()), true),
+        (Some("mcp-app".into()), true),
         (Some("".into()), false),
         (Some("invalid".into()), false),
         (Some(std::ffi::OsString::from_vec(vec![255])), false),
@@ -249,6 +250,99 @@ fn environment_profile() {
         assert_eq!(result.status.success(), ok, "{:?}", result);
     }
 }
+fn cross_host_project_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    for (host, extensions) in [
+        ("generic-tools", json!({})),
+        (
+            "claude",
+            json!({"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}),
+        ),
+        (
+            "antigravity",
+            json!({"io.modelcontextprotocol/ui":{},"com.google.antigravity/ui":{"entrypoints":["aux_pane","global"]}}),
+        ),
+    ] {
+        let init=c.call("initialize",json!({"protocolVersion":"2025-11-25","capabilities":{"extensions":extensions},"clientInfo":{"name":host,"version":"1"}}));
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+        assert!(
+            init["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("oms_panel_snapshot")
+        );
+        let listed = c.call("tools/list", json!({}));
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 6);
+        let opener = tools
+            .iter()
+            .find(|t| t["name"] == "oms_open_panel")
+            .unwrap();
+        assert_eq!(
+            opener["_meta"]["openai/ui"]["entrypoints"][0]["type"],
+            "global"
+        );
+        assert_eq!(
+            opener["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+            json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
+        );
+        let uri = &opener["_meta"]["ui"]["resourceUri"];
+        let view = c.call("resources/read", json!({"uri":uri}));
+        assert!(
+            view["result"]["contents"][0]["text"].as_str()
+                == Some(include_str!("../src/conversation-panel.html"))
+        );
+        assert_eq!(
+            view["result"]["contents"][0]["mimeType"],
+            "text/html;profile=mcp-app"
+        );
+        assert_eq!(
+            view["result"]["contents"][0]["_meta"]["ui"]["preferredDisplayMode"],
+            "fullscreen"
+        );
+        assert_eq!(
+            payload(&c.tool("oms_open_panel", json!({})))["readOnly"],
+            true
+        );
+    }
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({})))["binding"],
+        "unbound"
+    );
+    bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
+    for name in [
+        "oms_panel_chat",
+        "oms_start_main",
+        "oms_decide_approval",
+        "oms_list_approvals",
+    ] {
+        assert_eq!(c.tool(name, json!({}))["error"]["code"], -32602);
+    }
+    let dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let map = dir.join("desktop-projects.json");
+    std::fs::write(&map, json!({"fixture":repo}).to_string()).unwrap();
+    std::fs::set_permissions(map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({}))),
+        json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
+    );
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","conversationMain":null}});
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
+    let reply=c.call("tools/call",json!({"name":"oms_panel_snapshot","arguments":{"project":"fixture"},"_meta":{"threadId":"00000000-0000-4000-8000-000000000001"}}));
+    assert_eq!(payload(&reply)["dashboard"]["project"], "fixture");
+    assert!(
+        !record(&source)["argv"]
+            .to_string()
+            .contains("conversation-digest")
+    );
+    assert!(!record(&source)["argv"].to_string().contains("00000000-"));
+}
 fn conversation_panel() {
     let t = Temp::new();
     let source = t.source();
@@ -261,7 +355,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v6.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v7.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -275,6 +369,7 @@ fn conversation_panel() {
     };
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
+    assert!(current["text"].as_str() == Some(include_str!("../src/conversation-panel.html")));
     assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
     for historical_uri in [
         json!("ui://oms/conversation-panel/v1.html"),
@@ -282,6 +377,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v3.html"),
         json!("ui://oms/conversation-panel/v4.html"),
         json!("ui://oms/conversation-panel/v5.html"),
+        json!("ui://oms/conversation-panel/v6.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -488,6 +584,65 @@ fn conversation_panel() {
         fixture_settings(&source, json!({"stdout":body.to_string()}));
         assert_eq!(payload(&c.tool(name, json!({}))), body);
         assert_eq!(record(&source)["argv"], argv);
+    }
+    let lookup = json!({"git":{},"github":{"lookup":{"status":"closed","item":null}}});
+    fixture_settings(&source, json!({"stdout":lookup.to_string()}));
+    for (kind, flag) in [("issue", "--issue"), ("pull", "--pull")] {
+        assert_eq!(
+            payload(&c.tool("oms_panel_git_status", json!({"kind":kind,"number":447}))),
+            lookup
+        );
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "github",
+                "panel-status",
+                "--repo",
+                repo,
+                "--json",
+                flag,
+                "447"
+            ])
+        );
+    }
+    fixture_settings(
+        &source,
+        json!({"stdout":json!({"git":{},"github":{"inventory":{"kind":"issues","items":[],"nextCursor":null}}}).to_string()}),
+    );
+    let page = c.tool(
+        "oms_panel_git_status",
+        json!({"inventory":"issues","cursor":"abc.foo="}),
+    );
+    assert_eq!(payload(&page)["github"]["inventory"]["kind"], "issues");
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "github",
+            "panel-status",
+            "--repo",
+            repo,
+            "--json",
+            "--inventory",
+            "issues",
+            "--cursor",
+            "abc.foo="
+        ])
+    );
+    for args in [
+        json!({"kind":"issue"}),
+        json!({"number":2}),
+        json!({"kind":"pr","number":2}),
+        json!({"kind":"issue","number":"--repo"}),
+        json!({"kind":"issue","number":10000000000i64}),
+        json!({"inventory":"other"}),
+        json!({"cursor":"abc"}),
+        json!({"inventory":"issues","cursor":"x y"}),
+        json!({"inventory":"issues","kind":"issue","number":1}),
+    ] {
+        assert_eq!(
+            c.tool("oms_panel_git_status", args)["result"]["isError"],
+            true
+        );
     }
     let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
     fixture_settings(
@@ -3453,7 +3608,9 @@ fn main() {
         let full = args[4] == "full";
         let tasks = args[5] == "1";
         let mut fixture_config = pinned(Path::new(&args[2]), config(full, tasks));
-        if args[4] == "chatgpt-panel" {
+        if args[4] == "mcp-app" {
+            fixture_config.profile = ToolProfile::McpApp;
+        } else if args[4] == "chatgpt-panel" {
             fixture_config.profile = ToolProfile::ChatGptPanel;
         }
         if Path::new(&args[2]).join("fixture-owner").is_file() {
@@ -3470,12 +3627,13 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 31] = [
+    let cases: [(&str, fn()); 32] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
         ("owner_validation", owner_validation),
         ("environment_profile", environment_profile),
+        ("cross_host_project_reads", cross_host_project_reads),
         ("conversation_panel", conversation_panel),
         ("environment_authority", environment_authority),
         ("boundary_limits", boundary_limits),

@@ -3251,9 +3251,21 @@ impl GhRepo {
 printf '%s\n' "$*" >> '{log}'
 dir='{dir}' method=GET endpoint= body=
 args=("$@")
-if [ "$1 $2" = "pr list" ]; then
-  [ -f "$dir/panel-prs" ] || exit 1
-  printf '%s\n' "$(<"$dir/panel-prs")"
+case "$1 $2" in
+  "pr list") panel=panel-prs ;;
+  "issue list") panel=panel-issues ;;
+  "issue view"|"pr view") panel=panel-lookup ;;
+  "api graphql")
+    case "$*" in
+      *'work:issues('*|*'work:pullRequests('*) panel=panel-inventory ;;
+      *) panel=panel-projects ;;
+    esac ;;
+  *) panel= ;;
+esac
+if [ -n "$panel" ]; then
+  [ -f "$dir/$panel" ] || exit 1
+  printf '%s\n' "$(<"$dir/$panel")"
+  if [ -f "$dir/$panel-failed" ]; then exit 1; fi
   exit 0
 fi
 for ((i = 0; i < ${{#args[@]}}; i++)); do
@@ -4281,7 +4293,7 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
     let old = "a".repeat(40);
     let row = |n: i32, branch: &str, oid: &str, fork: bool| {
         format!(
-            r#"{{"number":{n},"title":"Team PR","state":"OPEN","isDraft":false,"headRefName":"{branch}","baseRefName":"main","headRefOid":"{oid}","isCrossRepository":{fork},"statusCheckRollup":[{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}},{{"__typename":"StatusContext","state":"PENDING"}},{{"__typename":"StatusContext","context":"lint","state":"FAILURE"}},{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"}}],"url":"https://example.invalid/private"}}"#
+            r#"{{"number":{n},"title":"Team PR","state":"OPEN","isDraft":false,"headRefName":"{branch}","baseRefName":"main","headRefOid":"{oid}","isCrossRepository":{fork},"statusCheckRollup":[{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}},{{"__typename":"StatusContext","state":"PENDING"}},{{"__typename":"StatusContext","context":"lint","state":"FAILURE"}},{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"}}],"url":"https://github.com/example-org/example-repo/pull/{n}"}}"#
         )
     };
     let prs = [
@@ -4292,10 +4304,17 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
         row(5, "unrelated", &head, false),
     ];
     fs::write(r.dir.join("panel-prs"), format!("[{}]", prs.join(","))).unwrap();
+    fs::write(r.dir.join("panel-issues"), r#"[{"number":3,"title":"Open issue","state":"OPEN","url":"https://github.com/example-org/example-repo/issues/3","body":"private text"},{"number":4,"title":"Foreign issue","state":"OPEN","url":"https://github.com/elsewhere/project/issues/4"}]"#).unwrap();
+    let board_reply = r#"{"data":{"repository":{"nameWithOwner":"EXAMPLE-org/example-repo","projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[{"number":4,"title":"Board","url":"https://github.com/orgs/example-org/projects/4","closed":false,"owner":{"__typename":"Organization","login":"example-org"},"items":{"pageInfo":{"hasNextPage":true},"nodes":[{"type":"PULL_REQUEST","content":{"__typename":"PullRequest","number":2,"state":"OPEN","title":"Linked work","url":"https://github.com/example-org/example-repo/pull/2","repository":{"nameWithOwner":"example-org/example-repo"}}},{"type":"ISSUE","content":{"__typename":"Issue","number":1,"state":"OPEN","title":"Foreign issue","url":"https://github.com/elsewhere/project/issues/1","repository":{"nameWithOwner":"elsewhere/project"}}},{"type":"REDACTED","content":null}]}}]}}}}"#;
+    fs::write(r.dir.join("panel-projects"), board_reply).unwrap();
     let get = |path: &Path| {
         let (code, out, err) = r.run_in(&iso, path, &["panel-status", "--json"]);
         assert_eq!(code, 0, "{err}");
-        assert!(!out.contains("example.invalid") && !out.contains("secret-filename"));
+        assert!(
+            !["Foreign issue", "private text", "secret-filename"]
+                .iter()
+                .any(|text| out.contains(text))
+        );
         V::parse(out.as_bytes()).unwrap()
     };
     fs::write(r.repo.join("secret-filename"), "private").unwrap();
@@ -4305,6 +4324,34 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
     assert!(matches!(data.get("git").get("ahead"), V::Null));
     let github = data.get("github");
     assert_eq!(github.get("status").text(), Some("available"));
+    let work = github.get("work");
+    let issues = work.get("issues");
+    assert_eq!(issues.get("status").text(), Some("available"));
+    assert_eq!(issues.get("items").array().len(), 1);
+    assert_eq!(issues.get("incomplete"), &V::Bool(true));
+    let picker = work.get("pullRequests");
+    assert_eq!(picker.get("status").text(), Some("available"));
+    assert_eq!(
+        picker.get("items").array().len(),
+        5,
+        "includes fork and other-branch PRs"
+    );
+    assert_eq!(picker.get("incomplete"), &V::Bool(false));
+    let projects = work.get("projects");
+    assert_eq!(projects.get("status").text(), Some("available"));
+    let boards = projects.get("items").array();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(
+        boards[0].get("url").text(),
+        Some("https://github.com/orgs/example-org/projects/4")
+    );
+    assert_eq!(boards[0].get("incomplete"), &V::Bool(true));
+    let contents = boards[0].get("items").array();
+    assert_eq!(contents.len(), 1);
+    assert_eq!(
+        contents[0].get("url").text(),
+        Some("https://github.com/example-org/example-repo/pull/2")
+    );
     let rows = github.get("pullRequests").array();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get("scope").text(), Some("checkout"));
@@ -4324,6 +4371,102 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
     for key in ["passed", "failed", "pending", "other"] {
         assert!(matches!(rows[1].get("checks").get(key),V::Num(n) if n=="1"));
     }
+    let issue_page = r#"{"data":{"repository":{"nameWithOwner":"example-org/example-repo","work":{"pageInfo":{"hasNextPage":true,"endCursor":"cGFnZTE="},"nodes":[{"number":3,"title":"Scoped issue","url":"https://github.com/example-org/example-repo/issues/3","state":"OPEN"}]}}}}"#;
+    fs::write(r.dir.join("panel-inventory"), issue_page).unwrap();
+    let inventory = |collection: &str, after: Option<&str>| {
+        let mut args = vec!["panel-status", "--inventory", collection];
+        if let Some(s) = after {
+            args.extend(["--cursor", s]);
+        }
+        r.run(&iso, &args)
+    };
+    let (code, page, err) = inventory("issues", None);
+    assert_eq!(code, 0, "{err}");
+    let first = V::parse(page.as_bytes())
+        .unwrap()
+        .get("github")
+        .get("inventory")
+        .clone();
+    assert_eq!(first.get("items").array().len(), 1);
+    let cursor = first.get("nextCursor").text().unwrap();
+    assert_ne!(inventory("pullRequests", Some(cursor)).0, 0);
+    assert_ne!(inventory("issues", Some("--help")).0, 0);
+    let repeated = V::parse(inventory("issues", Some(cursor)).1.as_bytes()).unwrap();
+    let repeated = repeated.get("github").get("inventory");
+    assert_eq!(repeated.get("nextCursor"), &V::Null);
+    assert_eq!(repeated.get("incomplete"), &V::Bool(true));
+    let last = issue_page
+        .replace("true", "false")
+        .replace("/issues/3", "/issues/8")
+        .replace(r#""number":3"#, r#""number":8"#);
+    fs::write(r.dir.join("panel-inventory"), &last).unwrap();
+    let (code, page, err) = inventory("issues", Some(cursor));
+    assert_eq!(code, 0, "{err}");
+    let page = V::parse(page.as_bytes()).unwrap();
+    let page = page.get("github").get("inventory");
+    assert_eq!(
+        page.get("items").array()[0].get("number"),
+        &V::Num("8".into())
+    );
+    assert_eq!(page.get("incomplete"), &V::Bool(false));
+    assert_eq!(page.get("nextCursor"), &V::Null);
+    fs::write(
+        r.dir.join("panel-inventory"),
+        last.replace("/issues/8", "/pull/8"),
+    )
+    .unwrap();
+    let page = V::parse(inventory("pullRequests", None).1.as_bytes()).unwrap();
+    assert_eq!(
+        page.get("github").get("inventory").get("items").array()[0]
+            .get("kind")
+            .text(),
+        Some("pull")
+    );
+    let lookup = |kind: &str, no: &str| {
+        let (code, out, err) = r.run(&iso, &["panel-status", "--json", kind, no]);
+        assert_eq!(code, 0, "{err}");
+        assert!(!out.contains("extra body"));
+        V::parse(out.as_bytes())
+            .unwrap()
+            .get("github")
+            .get("lookup")
+            .clone()
+    };
+    let issue = r#"{"number":447,"title":"Older task","url":"https://github.com/example-org/example-repo/issues/447","state":"OPEN","body":"extra body"}"#;
+    fs::write(r.dir.join("panel-lookup"), issue).unwrap();
+    assert_eq!(
+        lookup("--issue", "447").get("item").get("title").text(),
+        Some("Older task")
+    );
+    assert_eq!(
+        lookup("--issue", "446").get("status").text(),
+        Some("unavailable")
+    );
+    assert_eq!(
+        lookup("--pull", "447").get("status").text(),
+        Some("unavailable")
+    );
+    for (payload, status) in [
+        (issue.replace("OPEN", "CLOSED"), "closed"),
+        (issue.replace("example-org", "foreign"), "unavailable"),
+    ] {
+        fs::write(r.dir.join("panel-lookup"), payload).unwrap();
+        let data = lookup("--issue", "447");
+        assert_eq!(data.get("status").text(), Some(status));
+        assert_eq!(data.get("item"), &V::Null);
+    }
+    let pr = issue.replace("/issues/", "/pull/");
+    fs::write(r.dir.join("panel-lookup"), pr).unwrap();
+    assert_eq!(
+        lookup("--pull", "447").get("status").text(),
+        Some("available")
+    );
+    for args in [
+        vec!["panel-status", "--issue", "0"],
+        vec!["panel-status", "--issue", "2", "--pull", "3"],
+    ] {
+        assert_ne!(r.run(&iso, &args).0, 0);
+    }
     let data = get(&linked);
     assert_eq!(data.get("git").get("branch").text(), Some("feature"));
     assert!(matches!(data.get("git").get("dirty"), V::Bool(false)));
@@ -4332,6 +4475,52 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
             .get("scope")
             .text(),
         Some("checkout")
+    );
+    fs::write(
+        r.dir.join("panel-projects"),
+        board_reply.replace("EXAMPLE-org/example-repo", "other/project"),
+    )
+    .unwrap();
+    assert_eq!(
+        get(&r.repo)
+            .get("github")
+            .get("work")
+            .get("projects")
+            .get("status")
+            .text(),
+        Some("unavailable")
+    );
+    fs::write(r.dir.join("panel-projects"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
+    fs::write(r.dir.join("panel-projects-failed"), "").unwrap();
+    let denied = get(&r.repo);
+    let denied = denied.get("github").get("work").get("projects");
+    assert_eq!(denied.get("status").text(), Some("unavailable"));
+    assert_eq!(denied.get("reason").text(), Some("insufficient_scope"));
+    fs::remove_file(r.dir.join("panel-projects")).unwrap();
+    let data = get(&r.repo);
+    let work = data.get("github").get("work");
+    assert_eq!(
+        work.get("projects").get("status").text(),
+        Some("unavailable")
+    );
+    assert_eq!(work.get("issues").get("status").text(), Some("available"));
+    assert_eq!(
+        work.get("pullRequests").get("status").text(),
+        Some("available")
+    );
+    // Several large Unicode titles and check names share one MCP response budget.
+    let long_label = "🧪".repeat(160);
+    let check =
+        format!(r#"{{"__typename":"StatusContext","state":"PENDING","context":"{long_label}"}}"#);
+    let wide = (1..=9).map(|id| format!(r#"{{"number":{id},"title":"{long_label}","state":"OPEN","isDraft":false,"headRefName":"main","baseRefName":"main","headRefOid":"{head}","isCrossRepository":false,"statusCheckRollup":[{}],"url":"https://github.com/example-org/example-repo/pull/{id}"}}"#, [check.as_str();6].join(","))).collect::<Vec<_>>();
+    fs::write(r.dir.join("panel-prs"), format!("[{}]", wide.join(","))).unwrap();
+    let bounded = get(&r.repo);
+    let github = bounded.get("github");
+    assert!(bounded.json(false).unwrap().len() < 52_000);
+    assert_eq!(github.get("incomplete"), &V::Bool(true));
+    assert!(
+        !github.get("pullRequests").array().is_empty()
+            && github.get("pullRequests").array().len() < 8
     );
     fs::write(r.dir.join("panel-prs"), "[]").unwrap();
     assert!(
@@ -4347,9 +4536,23 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
         Some("unavailable")
     );
     let calls = r.calls();
-    assert!(calls.lines().all(|s| s.starts_with(
-        "pr list --repo github.com/example-org/example-repo --state open --limit 51 --json "
-    )));
+    for call in calls.lines() {
+        assert!(
+            call.starts_with(
+                "pr list --repo github.com/example-org/example-repo --state open --limit 51 --json "
+            ) || ["issue view 447", "issue view 446", "pr view 447"].iter().any(|s|
+                call == format!("{s} --repo github.com/example-org/example-repo --json number,title,url,state"))
+              || call
+                == "issue list --repo github.com/example-org/example-repo --state open --limit 13 --json number,title,url,state"
+                || (call.starts_with("api graphql --hostname github.com -f query=query(")
+                    && ((call.contains("projectsV2(first:6)") && call.contains("items(first:8)")
+                         && call.ends_with("-f owner=example-org -f name=example-repo"))
+                       || ((call.contains("work:issues(first:12") || call.contains("work:pullRequests(first:12"))
+                         && call.contains("orderBy:{field:CREATED_AT,direction:ASC}")
+                         && (call.ends_with("-f owner=example-org -f name=example-repo") || call.ends_with("-f name=example-repo -f after=cGFnZTE="))))),
+            "{call}"
+        );
+    }
     let nested = r.repo.join("nested-project");
     fs::create_dir_all(nested.join(".oms")).unwrap();
     let (code, out, err) = r.run(

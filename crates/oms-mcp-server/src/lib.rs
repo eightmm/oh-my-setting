@@ -27,7 +27,8 @@ pub(crate) const PAGE_BYTES: usize = 16 * 1024;
 pub(crate) const RUN_ROOT: &str = ".oms/artifacts/mcp";
 const MODERN: &str = "2026-07-28";
 const FALLBACK: &str = "2025-06-18";
-const PROTOCOLS: [&str; 3] = [MODERN, FALLBACK, "2025-03-26"];
+const PROTOCOLS: &[&str] = &[MODERN, FALLBACK, "2025-03-26"];
+const PANEL_PROTOCOLS: &[&str] = &[MODERN, "2025-11-25", FALLBACK, "2025-03-26"];
 const META_PROTOCOL: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXTENSION: &str = "io.modelcontextprotocol/tasks";
@@ -55,6 +56,12 @@ pub enum ToolProfile {
     Core,
     Full,
     ChatGptPanel,
+    McpApp,
+}
+impl ToolProfile {
+    fn is_panel(self) -> bool {
+        matches!(self, Self::ChatGptPanel | Self::McpApp)
+    }
 }
 
 /// Immutable process configuration; it confers no request or worker authority.
@@ -75,6 +82,7 @@ impl Config {
             Err(std::env::VarError::NotPresent) | Ok("core") => ToolProfile::Core,
             Ok("full") => ToolProfile::Full,
             Ok("chatgpt-panel") => ToolProfile::ChatGptPanel,
+            Ok("mcp-app") => ToolProfile::McpApp,
             _ => return Err("error: unknown OMS_MCP_TOOL_PROFILE"),
         };
         Ok(Self {
@@ -99,8 +107,8 @@ pub(crate) fn tools() -> &'static [Value] {
         .as_slice()
 }
 fn definitions(profile: ToolProfile) -> Value {
-    if profile == ToolProfile::ChatGptPanel {
-        return panel::definitions();
+    if profile.is_panel() {
+        return panel::definitions(profile);
     }
     Value::Array(tools().iter().filter(|t| profile == ToolProfile::Full || CORE.contains(&t["name"].as_str().unwrap())).map(|t| {
         let mut d = json!({"name":t["name"], "description":t["description"], "inputSchema":{"type":"object","properties":t["properties"],"required":t.get("required").cloned().unwrap_or_else(|| json!([]))}});
@@ -311,18 +319,23 @@ impl<'a> Server<'a> {
             .canonicalize()
             .map_err(|e| format!("error: invalid repository path: {e}"))?)
     }
+    fn supported_protocols(&self) -> &'static [&'static str] {
+        if self.config.profile.is_panel() {
+            PANEL_PROTOCOLS
+        } else {
+            PROTOCOLS
+        }
+    }
     fn protocol(&self, params: &Value) -> &'static str {
-        PROTOCOLS
-            .into_iter()
+        self.supported_protocols()
+            .iter()
+            .copied()
             .find(|p| Some(*p) == meta(params)[META_PROTOCOL].as_str())
             .unwrap_or(self.protocol)
     }
     fn capabilities(&self, protocol: &str) -> Value {
         let mut c = json!({"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}});
-        if self.config.profile != ToolProfile::ChatGptPanel
-            && self.config.tasks_extension
-            && protocol == MODERN
-        {
+        if !self.config.profile.is_panel() && self.config.tasks_extension && protocol == MODERN {
             c["extensions"] = json!({EXTENSION:{}});
         }
         c
@@ -384,10 +397,13 @@ impl<'a> Server<'a> {
         }
         let params = &message["params"];
         if let Some(p) = meta(params)[META_PROTOCOL].as_text()
-            && !p.as_str().is_some_and(|p| PROTOCOLS.contains(&p))
+            && !p
+                .as_str()
+                .is_some_and(|p| self.supported_protocols().contains(&p))
         {
             let mut v = error(id, -32022, "Unsupported protocol version");
-            v["error"]["data"] = json!({"supported":PROTOCOLS,"requested":p.prefix(64)});
+            v["error"]["data"] =
+                json!({"supported":self.supported_protocols(),"requested":p.prefix(64)});
             return Some(v);
         }
         let invalid_params = || error(id, -32602, "invalid params: expected object");
@@ -396,21 +412,29 @@ impl<'a> Server<'a> {
                 if !params.is_null() && !params.is_object() {
                     return Some(invalid_params());
                 }
-                json!({"resultType":"complete","supportedVersions":PROTOCOLS,"capabilities":self.capabilities(MODERN),"_meta":{"io.modelcontextprotocol/serverInfo":self.info},"ttlMs":300_000,"cacheScope":"private"})
+                json!({"resultType":"complete","supportedVersions":self.supported_protocols(),"capabilities":self.capabilities(MODERN),"_meta":{"io.modelcontextprotocol/serverInfo":self.info},"ttlMs":300_000,"cacheScope":"private"})
             }
             "initialize" => {
                 if !params.is_null() && !params.is_object() {
                     return Some(invalid_params());
                 }
-                self.protocol = PROTOCOLS
-                    .into_iter()
+                self.protocol = self
+                    .supported_protocols()
+                    .iter()
+                    .copied()
                     .find(|p| Some(*p) == params["protocolVersion"].as_str())
                     .unwrap_or(FALLBACK);
-                self.complete(json!({"protocolVersion":self.protocol,"capabilities":self.capabilities(self.protocol),"serverInfo":self.info}),params,false)
+                let mut result = json!({"protocolVersion":self.protocol,"capabilities":self.capabilities(self.protocol),"serverInfo":self.info});
+                if self.config.profile == ToolProfile::McpApp {
+                    result["instructions"] = json!(
+                        "Open OMS with oms_open_panel. In a text client, use oms_list_projects, then oms_panel_snapshot with the selected alias for project progress. These tools read host-configured OMS projects."
+                    );
+                }
+                self.complete(result, params, false)
             }
             "ping" => self.complete(json!({}), params, false),
             "tools/list" => self.complete(json!({"tools":self.definitions}), params, true),
-            _ if self.config.profile == ToolProfile::ChatGptPanel => {
+            _ if self.config.profile.is_panel() => {
                 return Some(self.panel_request(id, method, params));
             }
             "resources/list" => {
@@ -679,7 +703,7 @@ impl Server<'_> {
         reader: &mut impl BufRead,
         writer: &mut (impl Write + Send),
     ) -> io::Result<()> {
-        if self.config.profile != ToolProfile::ChatGptPanel {
+        if !self.config.profile.is_panel() {
             let stop = self.interrupted;
             return serve_server(&mut self, stop, reader, writer);
         }

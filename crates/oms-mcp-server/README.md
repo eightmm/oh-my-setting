@@ -1,6 +1,6 @@
 # Native MCP component
 
-This crate implements the native persistent stdio server and 32 OMS tools.
+This crate implements the native persistent stdio server and 33 OMS tools.
 At source revision `f9a695ea` (2026-11-18), the root executable already connects
 it through `serve_with_services`; lifecycle integration registers the installed
 absolute `oms` executable with the `mcp-server` argument. The private
@@ -21,10 +21,12 @@ exercised by the documentation audit.
 The [desktop plugin](../../docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
 uses the dedicated `chatgpt-panel` profile. It provides the conversation UI,
 project selection, Main launch, runtime status and pending approval decisions.
-The server enforces its own method and tool allowlist on direct calls.
+The `mcp-app` profile reuses this UI for Claude and Antigravity and exposes
+six project-read tools. The operator binds an alias catalog or pins a project.
+Both panel profiles enforce their tool allowlists on direct requests.
 
-Core discovery lists 13 tools and full discovery lists 32. Both profiles accept
-the same 32 tool names through `tools/call`, subject to their request and child
+Core discovery lists 14 tools and full discovery lists 33. Both profiles accept
+the same 33 tool names through `tools/call`, subject to their request and child
 restrictions; discovery is not authorization. There is one graph UI resource and
 no prompt API. `oms_output_read` is registered in both profiles and accepts the
 `read_arguments` returned by output-digest. Its in-process adapter uses the

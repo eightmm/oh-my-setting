@@ -1,7 +1,7 @@
 //! Project-scoped RPC surface for the desktop app. The host owns repository
 //! bindings; tool arguments can only select an alias from that configuration.
 use crate::value::Value;
-use crate::{CommandRequest, MIME, Server, error, reply};
+use crate::{CommandRequest, MIME, Server, ToolProfile, error, reply};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::{
@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v6.html";
+const URI: &str = "ui://oms/conversation-panel/v7.html";
+const V6: &str = "ui://oms/conversation-panel/v6.html";
 const V5: &str = "ui://oms/conversation-panel/v5.html";
 const V4: &str = "ui://oms/conversation-panel/v4.html";
 const V3: &str = "ui://oms/conversation-panel/v3.html";
@@ -60,7 +61,11 @@ pub(super) fn runtime_request(request: &Value) -> bool {
         )
 }
 
-pub(super) fn definitions() -> Value {
+fn project_read(name: &str) -> bool {
+    matches!(name, OPEN | PROJECTS | SNAPSHOT | USAGE | GIT | VIEW)
+}
+
+pub(super) fn definitions(profile: ToolProfile) -> Value {
     let make = |name: &str,
                 description: &str,
                 properties: Value,
@@ -81,8 +86,14 @@ pub(super) fn definitions() -> Value {
         false,
     );
     opener["_meta"]["ui"]["resourceUri"] = json!(URI);
+    opener["_meta"]["com.google.antigravity/ui"] =
+        json!({"entrypoints":[{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}]});
     opener["_meta"]["openai/outputTemplate"] = json!(URI);
-    opener["_meta"]["openai/ui"] = json!({"entrypoints":[{"type":"thread"}]});
+    opener["_meta"]["openai/ui"] = if profile == ToolProfile::McpApp {
+        json!({"entrypoints":[{"type":"global"}]})
+    } else {
+        json!({"entrypoints":[{"type":"thread"}]})
+    };
     let ident = json!({"type":"string","pattern":"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$"});
     let mut chat = make(
         CHAT,
@@ -92,7 +103,7 @@ pub(super) fn definitions() -> Value {
         false,
     );
     chat["_meta"]["ui"]["visibility"] = json!(["app"]);
-    json!([
+    let all = json!([
         opener,
         chat,
         make(
@@ -104,8 +115,8 @@ pub(super) fn definitions() -> Value {
         ),
         make(
             GIT,
-            "Read Git working tree and matching GitHub pull request status.",
-            scope.clone(),
+            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one.",
+            json!({"project":project,"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
             &[],
             false
         ),
@@ -164,7 +175,19 @@ pub(super) fn definitions() -> Value {
             &["id", "version", "digest", "decision"],
             true
         )
-    ])
+    ]);
+    if profile == ToolProfile::McpApp {
+        Value::Array(
+            all.as_array()
+                .unwrap()
+                .iter()
+                .filter(|t| t["name"].as_str().is_some_and(project_read))
+                .cloned()
+                .collect(),
+        )
+    } else {
+        all
+    }
 }
 
 impl CommandRequest<'_> {
@@ -336,6 +359,11 @@ impl Server<'_> {
             let id = args["project"].as_str().ok_or(BINDING)?;
             Some(map.get(id).ok_or(BINDING)?.clone())
         };
+        // A generic stdio process may start in the plugin installation directory.
+        // Only an enrolled host project or an exact host pin binds its public reads.
+        if self.config.profile == ToolProfile::McpApp && pin.is_none() {
+            return Err(BINDING.into());
+        }
         let repo = if let Some(pin) = pin {
             if !pin.is_absolute()
                 || pin.canonicalize().map_err(|_| BINDING)? != pin
@@ -397,19 +425,26 @@ impl Server<'_> {
                 json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
             }
             "resources/read"
-                if matches!(params["uri"].as_str(), Some(URI | V1 | V2 | V3 | V4 | V5)) =>
+                if matches!(
+                    params["uri"].as_str(),
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6)
+                ) =>
             {
                 json!({"contents":[{
                     "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
-                    "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}
+                    "_meta":{"ui":{"preferredDisplayMode":"fullscreen","csp":{"connectDomains":[],"resourceDomains":[]}}}
                 }]})
             }
             "resources/read" => return error(id, -32602, "unknown panel resource"),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
+                if self.config.profile == ToolProfile::McpApp && !project_read(name) {
+                    return error(id, -32602, "unknown project read tool");
+                }
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
-                    OPEN | APPROVALS | SNAPSHOT | GIT | USAGE => &["project"],
+                    OPEN | APPROVALS | SNAPSHOT | USAGE => &["project"],
+                    GIT => &["project", "kind", "number", "inventory", "cursor"],
                     CHAT => &[
                         "project",
                         "room",
@@ -433,7 +468,14 @@ impl Server<'_> {
                 }) {
                     return error(id, -32602, "unknown or invalid desktop tool arguments");
                 }
-                let result = self.panel_call(name, args, &params["_meta"]);
+                // Other hosts use their own session IDs. Only the Codex adapter supplies
+                // the per-call binding used to enter a private OMS Room.
+                let meta = if self.config.profile == ToolProfile::McpApp {
+                    &Value::Null
+                } else {
+                    &params["_meta"]
+                };
+                let result = self.panel_call(name, args, meta);
                 if name == CHAT {
                     match result {
                         Ok(mut data) => {
@@ -566,15 +608,22 @@ impl Server<'_> {
             } else {
                 "unbound"
             };
-            return Ok(
-                json!({"projects":projects.into_keys().collect::<Vec<_>>(),"binding":binding}),
-            );
+            let mut result =
+                json!({"projects":projects.into_keys().collect::<Vec<_>>(),"binding":binding});
+            if self.config.profile == ToolProfile::McpApp {
+                result["readOnly"] = json!(true);
+            }
+            return Ok(result);
         }
         if name == OPEN {
             if args.get("project").is_some() {
                 self.panel_repo(args)?;
             }
-            return Ok(json!({"panel":"OMS","project":args["project"]}));
+            let mut result = json!({"panel":"OMS","project":args["project"]});
+            if self.config.profile == ToolProfile::McpApp {
+                result["readOnly"] = json!(true);
+            }
+            return Ok(result);
         }
         let repo = self.panel_repo(args)?;
         let path = repo.as_os_str().to_owned();
@@ -666,13 +715,50 @@ impl Server<'_> {
                 "--desktop-usage".into(),
                 "--json".into(),
             ],
-            GIT => vec![
-                "github".into(),
-                "panel-status".into(),
-                "--repo".into(),
-                path,
-                "--json".into(),
-            ],
+            GIT => {
+                let mut cmd = vec![
+                    "github".into(),
+                    "panel-status".into(),
+                    "--repo".into(),
+                    path,
+                    "--json".into(),
+                ];
+                if args.get("inventory").is_some() || args.get("cursor").is_some() {
+                    if args.get("kind").is_some() || args.get("number").is_some() {
+                        return Err("Choose an inventory or an exact reference.".into());
+                    }
+                    let collection = args["inventory"]
+                        .as_str()
+                        .filter(|s| matches!(*s, "issues" | "pullRequests"))
+                        .ok_or("Invalid GitHub collection.")?;
+                    cmd.extend(["--inventory".into(), collection.into()]);
+                    if let Some(cursor) = args.get("cursor") {
+                        let value = cursor
+                            .as_str()
+                            .filter(|s| {
+                                !s.is_empty()
+                                    && s.len() <= 500
+                                    && s.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || b"+/=._-".contains(&b)
+                                    })
+                            })
+                            .ok_or("Invalid GitHub cursor.")?;
+                        cmd.extend(["--cursor".into(), value.into()]);
+                    }
+                } else if args.get("kind").is_some() || args.get("number").is_some() {
+                    let flag = match args["kind"].as_str() {
+                        Some("issue") => "--issue",
+                        Some("pull") => "--pull",
+                        _ => return Err("Select an issue or pull request and its number.".into()),
+                    };
+                    let number = args["number"]
+                        .as_i64()
+                        .filter(|n| (1..=9_999_999_999).contains(n))
+                        .ok_or("Invalid issue or pull request number.")?;
+                    cmd.extend([flag.into(), number.to_string().into()]);
+                }
+                cmd
+            }
             VIEW => {
                 let view = args["view"]
                     .as_str()

@@ -72,7 +72,8 @@ impl Kind {
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let action = o.action("");
     let allowed: &[&str] = match action {
-        "status" | "panel-status" => &["repo", "json"],
+        "status" => &["repo", "json"],
+        "panel-status" => &["repo", "json", "issue", "pull", "inventory", "cursor"],
         "refresh" => &["repo", "issue", "pull", "linked", "ttl-s"],
         "adopt-merged" => &["repo", "limit", "apply", "expected-sha256", "ttl-s"],
         "post-evidence" => &["repo", "issue", "pull", "yes"],
@@ -370,18 +371,14 @@ fn status(
     Ok(out)
 }
 
-/// One bounded, non-interactive `gh` run; a cancelled child is exit 130.
-fn run(c: &Context<'_>, root: &Path, args: &[&str]) -> Result<crate::git::Execution> {
-    let out = spawn(c, root, args)?;
-    if out.code == 130 {
-        return Err(Error::new(130, "interrupted"));
-    }
-    Ok(out)
-}
-
 /// The raw run: Err(130) means no child was started, while a started child
 /// that was cancelled returns Ok with code 130.
-fn spawn(c: &Context<'_>, root: &Path, args: &[&str]) -> Result<crate::git::Execution> {
+fn spawn(
+    c: &Context<'_>,
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<crate::git::Execution> {
     let bin = std::env::var_os("OMS_GH_BIN").unwrap_or_else(|| OsString::from("gh"));
     // `git::process` strips only GIT_*, so terminal forcing and pagers are
     // neutralized by override: gh ignores an empty GH_FORCE_TTY and
@@ -399,15 +396,7 @@ fn spawn(c: &Context<'_>, root: &Path, args: &[&str]) -> Result<crate::git::Exec
     let argv = std::iter::once(bin)
         .chain(args.iter().map(OsString::from))
         .collect();
-    process(
-        root,
-        argv,
-        None,
-        Duration::from_secs(30),
-        c.interrupted,
-        &env,
-    )
-    .map_err(|e| {
+    process(root, argv, None, timeout, c.interrupted, &env).map_err(|e| {
         if e.code == 130 {
             e
         } else {
@@ -418,7 +407,14 @@ fn spawn(c: &Context<'_>, root: &Path, args: &[&str]) -> Result<crate::git::Exec
 
 /// A successful `gh` call whose stdout must be bounded strict JSON.
 fn gh(c: &Context<'_>, root: &Path, args: &[&str]) -> Result<V> {
-    let out = run(c, root, args)?;
+    gh_with_timeout(c, root, args, Duration::from_secs(30))
+}
+
+fn gh_with_timeout(c: &Context<'_>, root: &Path, args: &[&str], timeout: Duration) -> Result<V> {
+    let out = spawn(c, root, args, timeout)?;
+    if out.code == 130 {
+        return Err(Error::new(130, "interrupted"));
+    }
     require(out.code != 124, "gh timed out")?;
     require(
         out.code == 0,
@@ -1154,6 +1150,7 @@ fn post(c: &Context<'_>, o: &Options, root: &Path, state: &Path, git: &Git<'_>) 
         &[
             "api", "--method", "POST", "-H", ACCEPT, &endpoint, "-f", &field,
         ],
+        Duration::from_secs(30),
     ) {
         Ok(out) if out.code == 0 => strict(&out.stdout)
             .ok()

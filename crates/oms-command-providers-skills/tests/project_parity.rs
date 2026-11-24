@@ -954,6 +954,27 @@ fn desktop_marketplaces_package_the_same_project_workflow() {
     }
     // Each transport is a self-contained import, including on Windows.
     assert_eq!(workflows[0], workflows[1]);
+    let app = root.join("plugins/oms-app");
+    let manifest = load(app.join("plugin.json"));
+    assert_eq!(
+        manifest["version"],
+        load(root.join("plugins/oms/plugin.json"))["version"]
+    );
+    let servers = load(app.join("mcp_config.json"));
+    let server = &servers["mcpServers"]["oms-panel"];
+    assert_eq!(servers["mcpServers"].as_object().unwrap().len(), 1);
+    assert_eq!(server["command"], "ssh");
+    let args = server["args"].as_array().unwrap();
+    assert_eq!(
+        args[..args.len() - 1],
+        load(root.join("plugins/oms-ssh/oms/mcp.json"))["mcpServers"]["oms-panel"]["args"]
+            .as_array()
+            .unwrap()[..args.len() - 1]
+    );
+    assert_eq!(
+        args.last().unwrap(),
+        "exec env OMS_MCP_TOOL_PROFILE=mcp-app ~/.local/bin/oms mcp-server"
+    );
 }
 
 #[test]
