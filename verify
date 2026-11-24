@@ -15,7 +15,7 @@ usage: ./verify [--seed N] [-h|--help]
 Run the fail-fast 4-phase verification pipeline:
   1. type              cargo +1.99.1 check --workspace --all-targets --locked
   2. architecture_lint bash scripts/check.sh --lint-only
-  3. unit_integration  cargo +1.99.1 test --workspace --locked
+  3. unit_integration  OMS_VERIFY_DEFER_CORE_E2E=1 cargo +1.99.1 test --workspace --locked
   4. core_e2e          cargo +1.99.1 test --locked -p oms --test verify_smoke verify_core_e2e -- --exact --nocapture
 EOF
 }
@@ -34,6 +34,7 @@ case "$SEED" in ''|*[!0-9]*) echo "error: --seed must be an unsigned integer: $S
 unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH OMS_AGENT OMS_ROOM \
   OMS_ROOM_ID OMS_ROOM_REPO OMS_ROOM_PARTICIPANT OMS_TASK_ID OMS_ATTEMPT_ID \
   OMS_STATE_REPO OMS_BUILD_CACHE_RETENTION_HOURS OMS_VERIFY_REPORT OMS_VERIFY_SEED \
+  OMS_VERIFY_DEFER_CORE_E2E \
   CODEX_THREAD_ID CODEX_SANDBOX CLAUDECODE CLAUDE_CODE_ENTRYPOINT \
   ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY \
   GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -64,7 +65,8 @@ run_stage() {
 
 run_stage type cargo +1.99.1 check --workspace --all-targets "${CARGO_FLAGS[@]}"
 run_stage architecture_lint bash "$ROOT/scripts/check.sh" --lint-only
-run_stage unit_integration cargo +1.99.1 test --workspace "${CARGO_FLAGS[@]}"
+# Defer verify_core_e2e during the workspace test pass so it runs once in stage 4.
+run_stage unit_integration env OMS_VERIFY_DEFER_CORE_E2E=1 cargo +1.99.1 test --workspace "${CARGO_FLAGS[@]}"
 
 REPORT="$VERIFY_TMP/core-e2e-report.json"
 e2e_rc=0
