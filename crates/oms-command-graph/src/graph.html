@@ -1146,9 +1146,22 @@
     const perFrame = nodes.length > 150 ? 1 : 2;
     for (let index = 0; index < perFrame && remaining > 0 && alpha > MIN_ALPHA; index += 1) tick();
     paint();
-    if (remaining > 0 && alpha > MIN_ALPHA) { simRaf = requestAnimationFrame(frame); return; }
+    clearTimeout(simTimer); simTimer = 0;
+    if (remaining > 0 && alpha > MIN_ALPHA) { scheduleSim(); return; }
     relax(); alpha = 0; remaining = 0; paint();
     if (!userMoved) fitAll();
+  }
+  // Animation frames may never arrive (hidden or throttled pages): a stalled simulation finishes synchronously.
+  let simTimer = 0;
+  function cancelFrame(id) { if (id && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id); }
+  function scheduleSim() {
+    if (!simRaf) simRaf = requestAnimationFrame(frame);
+    clearTimeout(simTimer);
+    simTimer = setTimeout(() => {
+      simTimer = 0; cancelFrame(simRaf); simRaf = 0;
+      runSync(alpha, remaining);
+      if (!userMoved) fitAll();
+    }, FRAME_FALLBACK_MS);
   }
   // Settle after a (re)layout or a drag: animated by frames, or fully computed up front under reduced motion.
   function settle(startAlpha, budget) {
@@ -1159,7 +1172,7 @@
     }
     alpha = Math.max(alpha, startAlpha);
     remaining = Math.max(remaining, budget);
-    if (!simRaf) simRaf = requestAnimationFrame(frame);
+    scheduleSim();
   }
 
   // ---- Camera: eased fit / focus / zoom, pan and wheel zoom ----
@@ -1168,12 +1181,15 @@
   const cam = {x: 0, y: 0, k: 1};
   let camAnim = null;
   let camRaf = 0;
+  let camTimer = 0;
+  let camPlaced = false;
+  const FRAME_FALLBACK_MS = 100;
   let userMoved = false;
   const clampK = k => Math.max(MIN_K, Math.min(MAX_K, k));
   const labelTier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
   function setCam(x, y, k) {
     const tierChanged = labelTier(zoomScale) !== labelTier(k);
-    cam.x = x; cam.y = y; cam.k = k; zoomScale = k;
+    cam.x = x; cam.y = y; cam.k = k; zoomScale = k; camPlaced = true;
     viewport.attr('transform', `translate(${round3(x)},${round3(y)}) scale(${round3(k)})`);
     if (tierChanged) applyFilters();
     else if (Math.abs(Math.log(k / labelK)) > .04) placeLabels();
@@ -1182,6 +1198,7 @@
   function stepCam(ts) {
     camRaf = 0;
     if (!camAnim) return;
+    clearTimeout(camTimer); camTimer = 0;
     const now = stamp(ts);
     if (camAnim.start === null) camAnim.start = now;
     const t = Math.min(1, (now - camAnim.start) / camAnim.ms);
@@ -1190,17 +1207,26 @@
     const to = camAnim.to;
     setCam(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e, from.k + (to.k - from.k) * e);
     if (t >= 1) camAnim = null;
-    else camRaf = requestAnimationFrame(stepCam);
+    else { camRaf = requestAnimationFrame(stepCam); armCamFallback(); }
   }
   function animateCam(to, ms) {
     const target = {x: to.x, y: to.y, k: clampK(to.k)};
-    if (reducedMotion() || !(ms > 0)) {
-      camAnim = null;
+    if (reducedMotion() || !(ms > 0) || !camPlaced) {
+      camAnim = null; clearTimeout(camTimer); camTimer = 0;
       setCam(target.x, target.y, target.k);
       return;
     }
     camAnim = {from: {x: cam.x, y: cam.y, k: cam.k}, to: target, ms, start: null};
     if (!camRaf) camRaf = requestAnimationFrame(stepCam);
+    armCamFallback();
+  }
+  // If no frame arrives within the fallback, commit the end transform instead of waiting.
+  function armCamFallback() {
+    clearTimeout(camTimer);
+    camTimer = setTimeout(() => {
+      camTimer = 0; cancelFrame(camRaf); camRaf = 0;
+      if (camAnim) { const to = camAnim.to; camAnim = null; setCam(to.x, to.y, to.k); }
+    }, FRAME_FALLBACK_MS);
   }
   const camGoal = () => camAnim ? camAnim.to : cam;
   function zoomAt(px, py, factor, ms) {
@@ -1704,7 +1730,7 @@
       row.fy = Math.max(PAD, Math.min(worldH - PAD, (p.y - cam.y) / cam.k + gesture.dy));
       row.x = row.fx; row.y = row.fy;
       if (reducedMotion()) paint();
-      else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); if (!simRaf) simRaf = requestAnimationFrame(frame); }
+      else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); scheduleSim(); }
     }
   });
   const endPointer = event => {
@@ -1806,6 +1832,7 @@
   selectNode(selectedId);
   applyFilters();
   paint();
+  fitAll(0);
   settle(1, TICK_CAP);
 })();
 </script>

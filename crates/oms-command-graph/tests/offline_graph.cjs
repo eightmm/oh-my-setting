@@ -169,6 +169,7 @@ function render(data, options = {}) {
   document.createElement = tag => new Element(tag);
   document.createTextNode = text => ({textContent: text});
   const frames = [];
+  const timers = new Map(); let timerId = 0;
   let rafCalls = 0;
   const context = {document, window: {innerWidth: options.innerWidth, innerHeight: options.innerHeight, matchMedia: () => ({matches: !options.motion}), openai: options.openai}, navigator: {languages: options.languages || ['en-US']},
     localStorage: options.stored ? {getItem: key => key === 'oms.panel.language' ? options.stored : null} : undefined,
@@ -177,7 +178,9 @@ function render(data, options = {}) {
       constructor(callback) { this.callback = callback; resizeCallback = callback; }
       observe() { if (!options.noObserverFire) frames.push(() => this.callback([{contentRect: {width: currentWidth}}])); }
     },
-    requestAnimationFrame: callback => { rafCalls += 1; return frames.push(callback); }};
+    requestAnimationFrame: callback => { rafCalls += 1; return options.noRaf ? rafCalls : frames.push(callback); },
+    setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
+    clearTimeout: id => { timers.delete(id); }};
   let clock = 0;
   const drain = () => { let guard = 0; while (frames.length && guard++ < 5000) { clock += 16.7; frames.shift()(clock); } };
   if (options.initWidth) stage.getBoundingClientRect = () => ({width: options.initWidth, height: 0});
@@ -192,6 +195,7 @@ function render(data, options = {}) {
     drain();
   };
   return {root, svg, stage, get: suffix => root.querySelector(`#@@ROOT@@-${suffix}`), nodes, viewport, document, resize, drain,
+    flushTimers: () => { for (let n = 0; n < 50 && timers.size; n += 1) { const [id, fn] = timers.entries().next().value; timers.delete(id); fn(); } },
     rafCalls: () => rafCalls, pendingFrames: () => frames.length, rafBeforeFirstFrames};
 }
 
@@ -830,6 +834,27 @@ const labelOf = el => el.querySelector('.oms-graph-label');
   const early = render(model('project', 5), {initWidth: 370, noObserverFire: true});
   assert.ok(early.nodes.every(n => !('opacity' in n.attributes) && !/opacity:\s*0\b/.test(n.attributes.style || '')), 'nodes carry no hidden opacity');
   assert.match(css, /@keyframes @@ROOT@@-pop \{ from \{ transform: scale\(\.6\); \} \}/, 'entry keyframe never starts invisible');
+}
+
+{ // Round 7: the camera and settle never wait on animation frames.
+  for (const [count, w] of [[100, 370], [200, 370], [100, 1280]]) {
+    const view = render(model('project', count), {motion: true, noRaf: true, initWidth: w, innerWidth: w + 20, innerHeight: 844, noObserverFire: true});
+    const check = label => {
+      const c = camera(view);
+      const [, vw, vh] = view.svg.attributes.viewBox.match(/^0 0 (\d+) (\d+)$/).map(Number);
+      for (const p of positions(view)) {
+        const sx = c.x + p.x * c.k; const sy = c.y + p.y * c.k;
+        assert.ok(sx >= 0 && sx <= vw && sy >= 0 && sy <= vh, `${label}: node (${sx},${sy}) inside ${vw}x${vh}`);
+      }
+      return c;
+    };
+    const first = check('init without frames');
+    assert.ok(first.k > 0 && first.k <= 1.25);
+    view.flushTimers(); check('after fallback');
+    view.get('zoom-in').fire('click');
+    const before = camera(view).k; view.flushTimers();
+    assert.ok(Math.abs(camera(view).k - Math.min(5, before * 1.35)) < 1e-2 || camera(view).k > before, 'zoom commits without frames');
+  }
 }
 
 console.log('offline renderer: layouts (320/768/1024), non-color kind/status, keyboard/focus, selection persistence, empty/partial/truncated states and template parity passed');
