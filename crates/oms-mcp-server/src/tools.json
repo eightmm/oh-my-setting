@@ -684,7 +684,7 @@
       "node"
     ],
     "positional": "node",
-    "positional_pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$",
+    "positional_pattern": "^[A-Za-z0-9][^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\\\]*$",
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
