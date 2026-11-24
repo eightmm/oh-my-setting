@@ -20,7 +20,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--ink); background: var(--bg); font: 15px/1.52 Inter, system-ui, sans-serif; overflow-wrap: anywhere; }
-main { max-width: 48rem; margin: auto; padding: clamp(.85rem, 4vw, 2rem); }
+main { max-width: 68rem; margin: auto; padding: clamp(.85rem, 4vw, 2rem); }
 h1, h2, h3, p, ul, dl, dd, fieldset, legend { margin: 0; padding: 0; }
 h1 { font-size: 1.45rem; letter-spacing: -.045em; }
 h2, legend { font-size: 1rem; font-weight: 700; }
@@ -41,11 +41,21 @@ header { padding-bottom: .95rem; border-bottom: 1px solid var(--line); }
 #status:not(:empty), #receipt:not(:empty) { margin-top: .85rem; }
 .error { color: var(--error); }
 #receipt { white-space: pre-wrap; }
-#project { margin-top: 1.1rem; font-size: 1.35rem; letter-spacing: -.035em; }
+#project { font-size: 1.07rem; letter-spacing: -.025em; }
+.project-line { margin-top: .9rem; }
+.project-line time { margin-left: auto; }
 #branch, time, .muted, dt { color: var(--muted); font-size: .83rem; }
 .card, .lead { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: .85rem; padding: 1rem; }
 .card { margin-top: 1rem; }
 .main-card { border-color: var(--main-line); background: var(--tint); }
+#current-main { font-size: clamp(1.4rem, 3vw, 1.8rem); line-height: 1.3; margin: .22rem 0 .4rem; }
+.identity { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .18rem .8rem; margin-top: .75rem; }
+.identity dt { align-self: baseline; }
+.identity dd { font-size: .88rem; }
+.columns { display: grid; grid-template-columns: minmax(0,1fr); }
+@media (min-width: 50rem) { .columns { grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); gap: 1rem; align-items: start; } }
+details > summary { cursor: pointer; font-weight: 650; }
+#launch { margin-top: .8rem; }
 fieldset { border: 0; min-width: 0; }
 .choices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .25rem; margin: .65rem 0 .85rem; }
 .choice { position: relative; text-align: center; }
@@ -56,12 +66,11 @@ fieldset { border: 0; min-width: 0; }
 .choice input:disabled + span { opacity: .6; }
 #brief { display: block; width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: .55rem; min-height: 2.9rem; padding: .6rem .7rem; margin: .35rem 0 .65rem; }
 .primary { background: var(--brand); color: var(--on-brand); border-color: var(--brand); font-weight: 650; }
-.leads-region { padding-top: 1.1rem; position: relative; }
-.leads-region::before { content: ''; position: absolute; left: 50%; top: 0; height: 1.1rem; border-left: 1px solid var(--main-line); }
+.leads-region { margin-top: .95rem; padding-top: .75rem; border-top: 1px solid var(--main-line); }
 .leads { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%, 9rem),1fr)); gap: .45rem; }
 .lead { padding: .65rem .75rem; }
-.leads-region h2 { margin-bottom: .45rem; }
-.lead h3 { margin-bottom: .16rem; }
+.leads-region > h3 { margin-bottom: .45rem; }
+.lead h4 { margin: 0 0 .16rem; }
 .lead p + p { margin-top: .3rem; }
 .evidence, .history { margin-top: .8rem; }
 .history summary { cursor: pointer; font-weight: 650; }
@@ -69,7 +78,14 @@ fieldset { border: 0; min-width: 0; }
 .metrics div { padding-left: .6rem; border-left: 2px solid var(--line); }
 dd { font-weight: 650; font-variant-numeric: tabular-nums; }
 ul { list-style: none; }
-.entry { justify-content: space-between; padding: .45rem 0; border-top: 1px solid var(--line); }
+.entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; padding: .45rem 0; border-top: 1px solid var(--line); }
+.entry > strong { font-size: .83rem; }
+.entry small { display: block; color: var(--muted); }
+@media (max-width: 28rem) {
+  .leads { grid-template-columns: 1fr; }
+  .lead { padding: .5rem .65rem; }
+  .entry { grid-template-columns: minmax(0,1fr); gap: .15rem; }
+}
 .approval { padding: .8rem 0; }
 .approval + .approval { border-top: 1px solid var(--line); }
 .approval summary { cursor: pointer; white-space: pre-wrap; }
@@ -77,7 +93,6 @@ ul { list-style: none; }
 .approval code { font-size: .8rem; }
 .review { color: var(--warm); background: var(--warm-bg); }
 [hidden] { display: none !important; }
-footer { margin: .65rem .05rem 0; }
 </style>
 </head>
 <body>
@@ -92,10 +107,19 @@ footer { margin: .65rem .05rem 0; }
   <p id="status" role="status">OMS 연결 중…</p>
   <p id="receipt" role="status"></p>
   <div id="view" hidden>
-    <h2 id="project"></h2><p id="branch"></p>
-    <form class="card main-card" id="launch">
-      <fieldset id="controls"><legend>Overall Main</legend>
-        <p class="muted" id="current-main"></p>
+    <div class="cluster project-line"><h2 id="project"></h2><p id="branch"></p><time id="updated"></time></div>
+    <section class="card main-card" aria-labelledby="current-main">
+      <p class="muted">현재 대화의 Overall Main</p><h2 id="current-main"></h2><p id="main-state"></p>
+      <dl class="identity" id="identity">
+        <dt>작업방</dt><dd id="room"></dd><dt>참여자</dt><dd id="participant"></dd>
+      </dl>
+      <section class="leads-region" id="room-leads" aria-labelledby="leads-heading">
+        <h3 id="leads-heading">이 작업방의 Lead</h3><div id="leads" class="leads"></div>
+      </section>
+    </section>
+    <details id="launcher" class="card"><summary>별도 Main에 새 목표 전달</summary>
+    <form id="launch">
+      <fieldset id="controls"><legend>새 Main 선택</legend>
         <div class="choices">
           <label class="choice"><input type="radio" name="main" value="codex" checked><span>Codex</span></label>
           <label class="choice"><input type="radio" name="main" value="claude"><span>Claude</span></label>
@@ -106,29 +130,28 @@ footer { margin: .65rem .05rem 0; }
         <input id="brief" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요.">
         <button class="primary" id="start" type="submit">목표 전달</button>
       </fieldset>
-    </form>
-    <section class="leads-region" aria-labelledby="leads-heading">
-      <h2 id="leads-heading">프로젝트 전체 Lead</h2><div id="leads" class="leads"></div>
+    </form></details>
+    <div class="columns">
+    <section class="card" aria-labelledby="approvals-heading">
+      <h2 id="approvals-heading">프로젝트 승인 대기</h2><p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
     </section>
     <section class="card" aria-labelledby="progress">
-      <h2 id="progress">프로젝트 전체 진행 상황</h2><p id="room" class="muted"></p>
+      <h2 id="progress">프로젝트 전체 기록</h2>
       <dl class="metrics">
-        <div><dt>진행 중 시도</dt><dd id="active"></dd></div>
+        <div><dt>종료 기록 없는 시도</dt><dd id="active"></dd></div>
         <div><dt>계획된 작업</dt><dd id="tasks"></dd></div>
         <div><dt>현재 상태</dt><dd id="taskStatus"></dd></div>
       </dl>
       <h3>기록된 목표</h3><p id="goal"></p>
       <div class="evidence">
         <h3>검증 현황</h3><p id="criteria"></p><p id="reviews" class="muted"></p>
-        <h3 class="evidence">최근 보관된 결과물</h3><ul id="operations"></ul>
       </div>
+      <details class="history"><summary>프로젝트 Main·Lead 기록</summary><ul id="repo-team"></ul></details>
+      <details class="history"><summary>최근 보관된 결과물</summary><ul id="operations"></ul></details>
       <details class="history"><summary>최근 실행 기록</summary><ul id="activity"></ul></details>
-      <ul id="attention" aria-label="확인이 필요한 항목"></ul>
+      <details class="history" id="alerts"><summary>확인이 필요한 항목</summary><ul id="attention"></ul></details>
     </section>
-    <section class="card" aria-labelledby="approvals-heading">
-      <h2 id="approvals-heading">승인 대기</h2><div id="approvals"></div>
-    </section>
-    <footer><time id="updated"></time></footer>
+    </div>
   </div>
 </main>
 <script>
@@ -272,6 +295,7 @@ function render(d) {
     li.append(node('span', item.summary), node('strong', item.count ?? ''));
     list.append(li);
   }
+  el('alerts').hidden = !d.attention?.length;
   const date = new Date(d.updated);
   el('updated').textContent = d.updated && Number.isFinite(date.getTime()) ? '최근 조회 ' + date.toLocaleString() : '';
   el('status').textContent = d.degraded ? '일부 상태를 수집하지 못했습니다.' : '';
@@ -283,9 +307,10 @@ function clearProject() {
   updateContext(null);
   retryStart = undefined;
   el('launch').reset();
+  el('launcher').open = false;
   el('brief').setCustomValidity('');
   el('receipt').className = '';
-  for (const id of ['receipt','project','branch','room','goal','current-main','active','tasks','taskStatus','updated','approvals','leads','criteria','reviews','operations','activity','attention']) {
+  for (const id of ['receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
     el(id).replaceChildren();
   }
 }
@@ -336,28 +361,62 @@ function chooseProject(aliases) {
   return false;
 }
 
-function renderActivity(d) {
-  el('room').textContent = d.currentRoom ? '연결된 작업방 · ' + d.currentRoom : '연결된 작업방 미확인';
-  el('current-main').textContent = d.main?.provider
-    ? ['현재 Main', names[d.main.provider] || d.main.provider, d.main.state || '상태 미확인', d.main.room].filter(Boolean).join(' · ')
-    : '현재 Main 확인 안 됨';
-  const attempts = d.attempts || [], active = d.activeAttempts || [];
-  const complete = Array.isArray(d.activeAttempts) && d.active === active.length;
-  const providers = new Set(['codex', 'claude', 'agy']);
-  if ([...active, ...attempts].some(attempt => attempt.provider === 'pi')) providers.add('pi');
+function isLead(attempt) {
+  return attempt.role === 'lead' || (!attempt.role && attempt.tool === 'panel-native-assignment');
+}
+
+function isMain(attempt) {
+  return attempt.role === 'main' || attempt.tool === 'panel-main';
+}
+
+function renderConversation(d) {
+  const main = d.conversationMain;
+  const joined = main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
+  el('current-main').textContent = joined ? names[main.provider] + ' Main' : 'Main 미확인';
+  el('main-state').textContent = joined
+    ? '작업방 소유자로 참여 중' + (main.incomplete ? ' · 작업방 목록 일부 조회' : '')
+    : '이 대화와 연결된 작업방 소유자를 확인할 수 없습니다.';
+  el('room').textContent = joined ? main.room : '미확인';
+  el('participant').textContent = joined ? main.participant : '미확인';
+  el('identity').hidden = !joined;
+  el('room-leads').hidden = !joined;
   const cards = el('leads');
   cards.replaceChildren();
-  for (const provider of providers) {
+  if (!joined) return;
+  const active = d.activeAttempts || [];
+  const complete = Array.isArray(d.activeAttempts) && d.active === active.length;
+  const roomLeads = active.filter(attempt => attempt.room === main.room && isLead(attempt));
+  if (!roomLeads.length) {
+    cards.append(node('p', complete ? '미종료 Lead 기록 없음' : '조회한 기록에서 이 작업방의 Lead를 확인하지 못했습니다.', 'muted'));
+    return;
+  }
+  const providerName = attempt => names[attempt.provider] || attempt.provider || '공급자 미확인';
+  for (const provider of new Set(roomLeads.map(providerName))) {
     const card = node('article', '', 'lead');
-    const leads = active.filter(attempt => names[attempt.provider] === names[provider] &&
-      (attempt.role === 'lead' || (!attempt.role && attempt.tool === 'panel-native-assignment')));
-    card.append(node('h3', names[provider] + ' Lead'));
-    if (!leads.length) card.append(node('p', complete ? '진행 중인 Lead 없음' : '진행 여부 미확인', 'muted'));
-    for (const lead of leads) {
-      card.append(node('p', [lead.state || '상태 미확인', lead.task || lead.id, lead.room || '작업방 미확인'].filter(Boolean).join(' · '), 'muted'));
+    card.append(node('h4', provider + ' Lead'));
+    for (const lead of roomLeads.filter(attempt => providerName(attempt) === provider)) {
+      card.append(node('p', [lead.state || '상태 미확인', lead.task || lead.id].filter(Boolean).join(' · '), 'muted'));
     }
     cards.append(card);
   }
+}
+
+function renderActivity(d) {
+  const attempts = d.attempts || [];
+  const team = el('repo-team');
+  team.replaceChildren();
+  const members = (d.activeAttempts || []).filter(row => isMain(row) || isLead(row));
+  if (d.main && !members.some(row => row.id === d.main.id && row.tool === d.main.tool &&
+    row.room === d.main.room && row.provider === d.main.provider)) members.unshift(d.main);
+  for (const member of members) {
+    const item = node('li', '', 'entry');
+    const role = member === d.main || isMain(member) ? 'Main' : 'Lead';
+    const name = names[member.provider] || member.provider || '공급자 미확인';
+    item.append(node('span', [name + ' ' + role, member.room || '작업방 미확인', member.task].filter(Boolean).join(' · ')),
+      node('strong', member.state || '상태 미확인'));
+    team.append(item);
+  }
+  if (!members.length) team.append(node('li', '조회한 기록에서 Main·Lead 미확인', 'muted'));
   const activity = el('activity');
   activity.replaceChildren();
   for (const attempt of attempts) {
@@ -380,12 +439,13 @@ function renderActivity(d) {
   operations.replaceChildren();
   for (const operation of d.operations || []) {
     const item = node('li', '', 'entry');
-    const label = [operation.kind || '결과물', names[operation.provider] || operation.provider, operation.artifactId].filter(Boolean);
+    const label = node('span', [operation.kind || '결과물', names[operation.provider] || operation.provider].filter(Boolean).join(' · '));
+    if (operation.artifactId) label.append(node('small', operation.artifactId));
     const stamp = Date.parse(operation.updated);
-    if (Number.isFinite(stamp)) label.push(new Date(stamp).toLocaleString());
+    if (Number.isFinite(stamp)) label.append(node('small', new Date(stamp).toLocaleString()));
     const outcome = [operation.status || '상태 미확인'];
     if (operation.exit != null) outcome.push('종료 코드 ' + operation.exit);
-    item.append(node('span', label.join(' · ')), node('strong', outcome.join(' · ')));
+    item.append(label, node('strong', outcome.join(' · ')));
     operations.append(item);
   }
   if (!d.operations?.length) operations.append(node('li', reviews?.available === true ? '최근 보관된 결과물 없음' : '최근 결과물 미확인', 'muted'));
@@ -410,6 +470,7 @@ function renderApprovals(rows, incomplete) {
     for (const decision of ['approve', 'deny']) {
       const button = node('button', decision === 'approve' ? '이 요청 승인' : '이 요청 거절', decision === 'approve' ? 'review' : '');
       button.type = 'button';
+      button.disabled = busy;
       button.addEventListener('click', () => mutate(
         () => tool('oms_decide_approval', {id:row.id, version:row.version, digest:row.digest, decision}),
         result => {
@@ -428,10 +489,11 @@ function renderApprovals(rows, incomplete) {
   }
 }
 
-function setBusy(value) {
+function setBusy(value, writing = false) {
   busy = value;
+  el('view').ariaBusy = String(value);
   el('refresh').disabled = value;
-  el('project-choice').disabled = value;
+  el('project-choice').disabled = value && writing;
   el('controls').disabled = value;
   for (const button of el('approvals').querySelectorAll('button')) button.disabled = value;
 }
@@ -461,7 +523,7 @@ async function recoverStart(expected) {
     }
     if (result.status === 'reserved' && result.room === room && result.attempt == null) {
       el('receipt').className = '';
-      el('receipt').textContent = '시작 요청 접수됨 · ' + result.room;
+      el('receipt').textContent = '별도 Main 시작 요청 접수됨 · ' + result.room;
       return 'reserved';
     }
     if (result.status === 'recorded' && result.room === room && result.provider === main &&
@@ -479,7 +541,9 @@ async function recoverStart(expected) {
 
 async function loadStatus(expected, recover = true) {
   el('status').className = '';
-  el('status').textContent = '프로젝트 상태를 확인하는 중…';
+  el('status').textContent = el('updated').textContent
+    ? '이전 조회 결과를 표시하고 있습니다. 새 상태를 확인하는 중…'
+    : '대화의 Main과 프로젝트 상태를 확인하는 중…';
   try {
     await initialize();
     const registry = await tool('oms_list_projects', {}, expected);
@@ -491,7 +555,9 @@ async function loadStatus(expected, recover = true) {
     const dashboard = result.structuredContent?.dashboard || result._meta?.dashboard;
     if (!dashboard) throw new Error('프로젝트 상태 응답을 읽을 수 없습니다.');
     render(dashboard);
+    renderConversation(dashboard);
     renderActivity(dashboard);
+    el('approval-progress').textContent = '승인 목록을 확인하는 중…';
     try {
       const response = await tool('oms_list_approvals', {}, expected);
       const approvals = response.structuredContent?.approvals;
@@ -499,6 +565,8 @@ async function loadStatus(expected, recover = true) {
       renderApprovals(approvals, response.structuredContent.incomplete);
     } catch (error) {
       if (expected === generation) el('approvals').replaceChildren(node('p', error.message, 'error'));
+    } finally {
+      if (expected === generation) el('approval-progress').textContent = '';
     }
     if (expected === generation && recover && retryStart) {
       try { await recoverStart(expected); }
@@ -526,7 +594,7 @@ async function refresh() {
 
 async function mutate(action, onSuccess, expected = generation, recoverAfter = () => true) {
   if (busy || expected !== generation || el('view').hidden) return;
-  setBusy(true);
+  setBusy(true, true);
   el('receipt').className = '';
   el('receipt').textContent = '요청을 처리하는 중…';
   try {
@@ -548,6 +616,8 @@ el('launch').addEventListener('submit', event => {
   if (busy || el('view').hidden) return;
   const goal = el('brief').value.trim();
   if (!goal || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
+    el('launcher').open = true;
+    el('brief').focus();
     el('brief').setCustomValidity('목표를 한 줄로 1~2,000자 입력하세요.');
     el('brief').reportValidity();
     return;
@@ -584,7 +654,7 @@ el('launch').addEventListener('submit', event => {
 });
 el('brief').addEventListener('input', () => el('brief').setCustomValidity(''));
 el('project-choice').addEventListener('change', () => {
-  if (busy) return;
+  if (el('project-choice').disabled) return;
   seenInputOrManual = true;
   switchProject(projectArgument(el('project-choice').value || null));
 });

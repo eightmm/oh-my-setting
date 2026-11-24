@@ -261,7 +261,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v2.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v3.html");
     let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
     assert_eq!(resources.as_array().unwrap().len(), 1);
     assert_eq!(resources[0]["uri"], *uri);
@@ -271,11 +271,15 @@ fn conversation_panel() {
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
     assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
-    let historical_uri = json!("ui://oms/conversation-panel/v1.html");
-    let historical = read(&mut c, &historical_uri);
-    assert_eq!(historical["uri"], historical_uri);
-    assert_eq!(historical["text"], current["text"]);
-    assert_eq!(historical["mimeType"], current["mimeType"]);
+    for historical_uri in [
+        json!("ui://oms/conversation-panel/v1.html"),
+        json!("ui://oms/conversation-panel/v2.html"),
+    ] {
+        let historical = read(&mut c, &historical_uri);
+        assert_eq!(historical["uri"], historical_uri);
+        assert_eq!(historical["text"], current["text"]);
+        assert_eq!(historical["mimeType"], current["mimeType"]);
+    }
     assert_eq!(
         c.call(
             "resources/read",
@@ -326,6 +330,65 @@ fn conversation_panel() {
         );
         assert!(regular.tool("oms_start_main", json!({}))["error"].is_object());
     }
+    let thread = "01900000-0000-7000-8000-000000000001";
+    let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
+    fixture_settings(
+        &source,
+        json!({"stdout":snapshot.to_string(),"binding":{"conversationBinding":"matched","conversationMain":expected_main}}),
+    );
+    for mut client in [
+        Client::new(&source, &repo, false, false, false),
+        Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref()),
+    ] {
+        let snapshot = |client: &mut Client, metadata: Value| {
+            client.call(
+                "tools/call",
+                json!({"name":"oms_panel_snapshot","arguments":{},"_meta":metadata}),
+            )
+        };
+        let observed = snapshot(&mut client, json!({"threadId":thread}));
+        assert_eq!(
+            payload(&observed)["dashboard"]["conversationMain"],
+            expected_main
+        );
+        assert!(!observed.to_string().contains(thread));
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(thread.as_bytes()));
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "dashboard",
+                "--repo",
+                repo,
+                "--json",
+                "--panel-snapshot",
+                "--conversation-digest",
+                &digest[..32]
+            ])
+        );
+        for invalid in [
+            json!({"sessionId":thread}),
+            json!({"threadId":"bad"}),
+            json!({}),
+        ] {
+            let unbound = snapshot(&mut client, invalid);
+            assert!(payload(&unbound)["dashboard"]["conversationMain"].is_null());
+            assert_eq!(
+                record(&source)["argv"],
+                json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
+            );
+        }
+    }
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
+    let partial = c.call(
+        "tools/call",
+        json!({"name":"oms_panel_snapshot","_meta":{"threadId":thread}}),
+    );
+    assert_eq!(payload(&partial)["dashboard"]["project"], "demo");
+    assert_eq!(
+        payload(&partial)["dashboard"]["conversationBinding"],
+        "unconfirmed"
+    );
     let mut worker = Client::with_depth(&source, &repo, "core", false, false, "1".as_ref());
     bad(
         &worker.tool("oms_panel_snapshot", json!({"repo":source})),
@@ -2741,6 +2804,16 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if args.iter().any(|v| v == "--conversation-digest") {
+        let mut report: Value = serde_json::from_str(cfg["stdout"].as_str().unwrap()).unwrap();
+        report["dashboard"]["conversationBinding"] = cfg["binding"]["conversationBinding"]
+            .as_str()
+            .unwrap_or("unconfirmed")
+            .into();
+        report["dashboard"]["conversationMain"] = cfg["binding"]["conversationMain"].clone();
+        println!("{report}");
+        return;
+    }
     if args.first().is_some_and(|s| {
         s.to_str()
             .is_some_and(|s| ["consult", "advise", "peer-ask"].contains(&s))

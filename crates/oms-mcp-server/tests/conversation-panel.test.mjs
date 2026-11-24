@@ -60,6 +60,11 @@ async function panel(projects, dashboard = {}) {
     if (method === 'tools/call') {
       try { result = {structuredContent:tool(params.name, params.arguments)}; }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
+      if (params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) {
+        host.delay = null;
+        host.release = () => notify({id, result});
+        return;
+      }
     }
     queueMicrotask(() => notify({id, result}));
   }};
@@ -171,10 +176,13 @@ test('an unrelated successful result can open a project while another open is ou
 
 test('active Lead cards, past executions and repository verification use their own records', async () => {
   const p = await panel(['one'], {
-    scope:'repository', currentRoom:'room-one', active:2,
+    scope:'repository', currentRoom:'room-two', active:3,
+    main:{provider:'pi', room:'room-two'},
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'room-one', participant:'chat-owner', incomplete:true},
     activeAttempts:[
-      {provider:'claude', role:'lead', task:'live-task', room:'room-two', state:'working'},
-      {provider:'codex', role:'advisor', tool:'peer-review', state:'working'}
+      {provider:'claude', role:'lead', task:'live-task', room:'room-one', state:'working'},
+      {provider:'agy', role:'lead', task:'unrelated', room:'room-two', state:'working'},
+      {provider:'codex', role:'advisor', tool:'peer-review', room:'room-one', state:'working'}
     ],
     attempts:[{provider:'codex', role:'lead', task:'old-task', room:'room-one', state:'done'}],
     acceptance:{available:true, verified:1, total:3, complete:false},
@@ -182,23 +190,64 @@ test('active Lead cards, past executions and repository verification use their o
     operations:[{kind:'verify', artifactId:'check-17', status:'failed', exit:1}]
   });
   const cards = p.get('leads').textContent;
-  assert.match(cards, /Claude Leadworking · live-task · room-two/);
-  assert.match(cards, /Codex Lead진행 중인 Lead 없음/);
-  assert.doesNotMatch(cards, /old-task/);
+  assert.match(cards, /Claude Leadworking · live-task/);
+  assert.doesNotMatch(cards, /Codex Lead|old-task|unrelated/);
   assert.match(p.get('activity').textContent, /old-task · room-one/);
-  assert.match(p.get('room').textContent, /room-one/);
+  assert.equal(p.get('room').textContent, 'room-one');
+  assert.equal(p.get('participant').textContent, 'chat-owner');
+  assert.equal(p.get('current-main').textContent, 'Codex Main');
+  assert.match(p.get('main-state').textContent, /작업방 목록 일부 조회/);
+  assert.match(p.get('repo-team').textContent, /AGY Lead · room-two · unrelated/);
+  assert.match(p.get('repo-team').textContent, /Pi Main · room-two/);
   assert.match(p.get('criteria').textContent, /1 \/ 3개 · 미완료/);
   assert.match(p.get('reviews').textContent, /보관된 리뷰 기록 · 통과 2 · 실패 1 · 판정 없음 0/);
-  assert.match(p.get('operations').textContent, /verify · check-17failed · 종료 코드 1/);
+  assert.match(p.get('operations').textContent, /verifycheck-17failed · 종료 코드 1/);
 });
 
 test('unbound partial snapshots leave unseen activity and absent verification unknown', async () => {
-  const p = await panel(['one'], {active:9, activeAttempts:[], currentRoom:null,
+  const p = await panel(['one'], {active:9, activeAttempts:[{tool:'panel-main', provider:'agy', room:'room-two', state:'starting'}],
+    currentRoom:'another-room', main:null,
     acceptance:{available:false}, reviews:{available:false}, degraded:true});
-  assert.match(p.get('leads').textContent, /진행 여부 미확인/);
-  assert.match(p.get('room').textContent, /작업방 미확인/);
+  assert.equal(p.get('current-main').textContent, 'Main 미확인');
+  assert.equal(p.get('room-leads').hidden, true);
+  assert.equal(p.get('identity').hidden, true);
+  assert.equal(p.get('room').textContent, '미확인');
+  assert.match(p.get('repo-team').textContent, /AGY Main · room-two/);
   assert.match(p.get('status').textContent, /일부 상태/);
   assert.match(p.get('criteria').textContent, /완료 기준 미확인/);
   assert.match(p.get('reviews').textContent, /리뷰 기록 미확인/);
   assert.match(p.get('operations').textContent, /결과물 미확인/);
+});
+
+test('a reserved launch and an incomplete Lead sample cannot confirm a different chat identity', async () => {
+  const p = await panel(['one'], {active:9, activeAttempts:[],
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'conversation-room', participant:'owner'}});
+  assert.match(p.get('leads').textContent, /Lead를 확인하지 못했습니다/);
+  p.host.status = 'reserved';
+  p.get('launch').elements.main.value = 'claude';
+  p.get('brief').value = 'Another task';
+  await p.event('launch', 'submit');
+  assert.match(p.get('receipt').textContent, /별도 Main 시작 요청 접수됨/);
+  assert.equal(p.get('current-main').textContent, 'Codex Main');
+  assert.equal(p.get('room').textContent, 'conversation-room');
+});
+
+test('a slow refresh keeps the previous timestamp and lets the user change projects safely', async () => {
+  const p = await panel(['one','two'], {updated:'2026-11-24T08:00:00Z'});
+  p.get('project-choice').value = 'one';
+  await p.event('project-choice', 'change');
+  const timestamp = p.get('updated').textContent;
+  p.host.delay = 'one';
+  await p.event('refresh', 'click');
+  assert.equal(p.get('view').ariaBusy, 'true');
+  assert.match(p.get('status').textContent, /이전 조회 결과/);
+  assert.equal(p.get('updated').textContent, timestamp);
+  assert.equal(p.get('project-choice').disabled, false);
+  p.get('project-choice').value = 'two';
+  await p.event('project-choice', 'change');
+  p.host.release();
+  await setImmediate();
+  assert.equal(p.get('project').textContent, 'two');
+  assert.equal(p.get('view').ariaBusy, 'false');
+  assert.equal(p.get('launcher').open, false);
 });

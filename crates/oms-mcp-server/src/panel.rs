@@ -12,8 +12,9 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v2.html";
-const LEGACY_URI: &str = "ui://oms/conversation-panel/v1.html";
+const URI: &str = "ui://oms/conversation-panel/v3.html";
+const V1: &str = "ui://oms/conversation-panel/v1.html";
+const V2: &str = "ui://oms/conversation-panel/v2.html";
 const OPEN: &str = "oms_open_panel";
 const PROJECTS: &str = "oms_list_projects";
 const SNAPSHOT: &str = "oms_panel_snapshot";
@@ -327,7 +328,7 @@ impl Server<'_> {
             "resources/list" => {
                 json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
             }
-            "resources/read" if matches!(params["uri"].as_str(), Some(URI | LEGACY_URI)) => {
+            "resources/read" if matches!(params["uri"].as_str(), Some(URI | V1 | V2)) => {
                 json!({"contents":[{
                     "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
                     "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}
@@ -352,7 +353,7 @@ impl Server<'_> {
                 }) {
                     return error(id, -32602, "unknown or invalid desktop tool arguments");
                 }
-                response(self.panel_call(name, args))
+                response(self.panel_call(name, args, &params["_meta"]))
             }
             _ => return error(id, -32601, "method not found"),
         };
@@ -426,7 +427,7 @@ impl Server<'_> {
         ))
     }
 
-    fn panel_call(&self, name: &str, args: &Value) -> PanelResult<Value> {
+    fn panel_call(&self, name: &str, args: &Value, meta: &Value) -> PanelResult<Value> {
         if name == PROJECTS {
             if crate::delegated() {
                 return Err("A delegated worker cannot enumerate desktop projects.".into());
@@ -455,7 +456,7 @@ impl Server<'_> {
         let repo = self.panel_repo(args)?;
         let path = repo.as_os_str().to_owned();
         if name == SNAPSHOT {
-            return Ok(json!({"dashboard":self.panel_snapshot(&repo)?}));
+            return Ok(json!({"dashboard":self.panel_snapshot(&repo, meta)?}));
         }
         if crate::delegated()
             || std::env::var_os("OMS_ROOM_PARTICIPANT").is_some_and(|v| !v.is_empty())
@@ -611,18 +612,23 @@ impl Server<'_> {
         }
     }
 
-    pub(super) fn panel_snapshot(&self, repo: &Path) -> PanelResult<Value> {
-        let (report, partial) = self.panel_exec(
-            repo,
-            vec![
-                "dashboard".into(),
-                "--repo".into(),
-                repo.as_os_str().into(),
-                "--json".into(),
-                "--panel-snapshot".into(),
-            ],
-            true,
-        )?;
+    pub(super) fn panel_snapshot(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
+        let mut argv = vec![
+            "dashboard".into(),
+            "--repo".into(),
+            repo.as_os_str().into(),
+            "--json".into(),
+            "--panel-snapshot".into(),
+        ];
+        // Codex supplies threadId on each call, outside model/widget arguments.
+        // Only its native consumer hash leaves this process; it grants no authority.
+        if let Some(thread) = meta["threadId"].as_str().filter(|v| uuid(v)) {
+            argv.extend([
+                "--conversation-digest".into(),
+                crate::storage::hash(thread)[..32].into(),
+            ]);
+        }
+        let (report, partial) = self.panel_exec(repo, argv, true)?;
         if report["kind"] != "oms-panel-snapshot"
             || report["schema"] != 1
             || !report["dashboard"].is_object()

@@ -162,6 +162,15 @@ acceptance counts, and inbox attention. Only attribute a row to a Main or Lead
 when records link them. Provider-native workers without a record have unknown
 status. Ask again in the same chat to refresh.
 
+For **this conversation’s Main**, Codex supplies the current thread ID on each
+MCP tool call. OMS checks whether that thread is enrolled as the Codex owner
+of an open Room in the selected repository. A matching Room identifies the
+Main for this chat. Opening or refreshing the panel only reads existing
+membership. Choosing a provider and submitting a goal explicitly starts a
+separate managed Main. Project-wide attempt and acceptance counts retain
+their repository scope. If OMS cannot establish a single match, the panel
+leaves this conversation’s Main unconfirmed.
+
 ### How the panel reaches the runtime
 
 | Surface | Data and control path |

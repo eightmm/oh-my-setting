@@ -1279,7 +1279,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
 }
 /// Compact public columns before command capture. Omit oversized strings whole
 /// so that the MCP outbound scanner never receives a credential prefix.
-pub(super) fn panel_snapshot(report: &Value) -> Value {
+pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
     fn label(v: &Value, bytes: usize) -> Value {
         match v.str() {
             Ok(s) if !s.is_empty() && s.len() <= bytes && !s.chars().any(char::is_control) => {
@@ -1351,6 +1351,17 @@ pub(super) fn panel_snapshot(report: &Value) -> Value {
     let reviews = report.get("reviews");
     let dashboard = object([
         ("scope", string("repository")),
+        (
+            "conversationMain",
+            conversation.get("conversationMain").clone(),
+        ),
+        (
+            "conversationBinding",
+            conversation
+                .opt("conversationBinding")
+                .cloned()
+                .unwrap_or_else(|| string("unconfirmed")),
+        ),
         ("currentRoom", current_room),
         ("project", label(report.get("repo").get("name"), 255)),
         ("branch", label(report.get("repo").get("branch"), 255)),
@@ -2092,7 +2103,7 @@ mod panel_snapshot_tests {
             .set("plan", object([("private", string(&raw))]))
             .unwrap();
         report.set("goal", object([("text", string(raw))])).unwrap();
-        let projected = panel_snapshot(&report);
+        let projected = panel_snapshot(&report, &Value::Null);
         let d = projected.get("dashboard");
         assert_eq!(d.text("scope"), "repository");
         assert_eq!(d.text("currentRoom"), "room-b");
@@ -2112,7 +2123,7 @@ mod panel_snapshot_tests {
         let wire = String::from_utf8(crate::json::encoded(&projected).unwrap()).unwrap();
         assert!(wire.len() < 4096 && !wire.contains("private"));
         report.set("attention", object([])).unwrap();
-        let unbound = panel_snapshot(&report);
+        let unbound = panel_snapshot(&report, &Value::Null);
         assert_eq!(unbound.get("dashboard").get("currentRoom"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("main").text("id"), "main-1");
         let mut attempts = report.get("attempts").clone();
@@ -2128,7 +2139,7 @@ mod panel_snapshot_tests {
         report
             .set("goal", object([("text", string(&goal))]))
             .unwrap();
-        let ambiguous = panel_snapshot(&report);
+        let ambiguous = panel_snapshot(&report, &Value::Null);
         assert_eq!(ambiguous.get("dashboard").get("main"), &Value::Null);
         assert_eq!(ambiguous.get("dashboard").text("goal"), goal);
     }

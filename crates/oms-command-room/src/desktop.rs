@@ -8,6 +8,13 @@ use crate::{Error, Result, Room};
 
 pub(crate) const PARTICIPANT: &str = "oms-desktop";
 
+/// An existing panel-main lifecycle row for read-only conversation matching.
+pub struct ConversationPanelAttempt<'a> {
+    pub room: &'a str,
+    pub participant: &'a str,
+    pub terminal: bool,
+}
+
 impl Room<'_> {
     fn desktop_request(&self, room: &Value, question: &Value) -> Result<Option<Value>> {
         let owner = room.text("owner");
@@ -49,6 +56,81 @@ impl Room<'_> {
         ]);
         item.set("digest", crate::digest(&encode(&binding, false, true)?));
         Ok(Some(item))
+    }
+
+    /// Read a positive native-session membership. Unlike mail routing, this
+    /// observation grants no authority and need not claim that the Room is unique.
+    pub fn conversation_main<'a>(
+        &self,
+        consumer: &str,
+        panel_mains: impl IntoIterator<Item = ConversationPanelAttempt<'a>>,
+    ) -> Result<Value> {
+        if !hex(consumer, 32) {
+            return Err(Error::new("invalid conversation binding digest"));
+        }
+        let mut result = obj([
+            ("conversationMain", Value::Null),
+            ("conversationBinding", "unconfirmed".into()),
+        ]);
+        let (mut rooms, incomplete) = self.discover()?;
+        // The pointer only hints at another log when bounded discovery omits it.
+        // Verify its participant, owner and native binding exactly as for every candidate.
+        if incomplete
+            && let Some(store) = &self.store
+            && let Ok((raw, _)) = store.threads.read(std::ffi::OsStr::new("CURRENT"), 4096)
+            && let Some(id) = std::str::from_utf8(&raw)
+                .ok()
+                .and_then(|v| v.split_whitespace().next())
+            && identifier(id, "room").is_ok()
+            && !rooms.iter().any(|r| r.text("id") == id)
+            && let Ok(state) = self.records(id).and_then(|rows| crate::project(&rows))
+            && self.published_room(&state).unwrap_or(false)
+        {
+            rooms.push(state);
+        }
+        let matches = |r: &&Value| {
+            !r.flag("closed")
+                && !r.flag("sealed")
+                && r["successor"].is_null()
+                && r.list("participants").iter().any(|p| {
+                    p.flag("joined")
+                        && p.text("provider") == "codex"
+                        && p.text("role") == "main"
+                        && p.text("participant") == r.text("owner")
+                        && p.text("consumer") == consumer
+                })
+        };
+        let mut candidates = rooms.iter().filter(matches);
+        let Some(room) = candidates.next() else {
+            return Ok(result);
+        };
+        if candidates.next().is_some() {
+            result.set("conversationBinding", "ambiguous");
+            return Ok(result);
+        }
+        // A terminal panel attempt supersedes its Room's still-joined display
+        // membership. Read the full producer projection, outside the dashboard's recent window.
+        for attempt in panel_mains {
+            if attempt.terminal
+                && attempt.participant == room.text("owner")
+                && self.same_room(attempt.room, room.text("id"))?
+            {
+                return Ok(result);
+            }
+        }
+        result.set("conversationBinding", "matched");
+        result.set(
+            "conversationMain",
+            obj([
+                ("provider", "codex".into()),
+                ("room", room["id"].clone()),
+                ("participant", room["owner"].clone()),
+                ("source", "room-session".into()),
+                ("state", "joined".into()),
+                ("incomplete", incomplete.into()),
+            ]),
+        );
+        Ok(result)
     }
 
     pub(crate) fn desktop_start_status(&self, room: &str) -> Result<Value> {

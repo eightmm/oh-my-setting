@@ -486,7 +486,8 @@ impl<'a> Server<'a> {
                                 "Delegated workers may read only their own repository.".into()
                             );
                         }
-                        self.panel_snapshot(&repo).map_err(ToolError::from)
+                        self.panel_snapshot(&repo, meta(params))
+                            .map_err(ToolError::from)
                     });
                     let value = match result {
                         Ok(dashboard) => panel::response(Ok(json!({"dashboard":dashboard}))),

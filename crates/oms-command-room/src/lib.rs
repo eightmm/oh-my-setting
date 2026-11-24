@@ -28,6 +28,7 @@ mod cli;
 mod core;
 mod cursor;
 mod desktop;
+pub use desktop::ConversationPanelAttempt;
 mod model;
 mod relay;
 mod services;

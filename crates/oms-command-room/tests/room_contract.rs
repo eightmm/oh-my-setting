@@ -234,6 +234,114 @@ fn room_lifecycle_and_cursor() {
                 ],
             ));
         }
+        use sha2::{Digest, Sha256};
+        let synthetic_thread = "01900000-0000-7000-8000-000000000001";
+        let consumer = format!("{:x}", Sha256::digest(synthetic_thread.as_bytes()));
+        let consumer = &consumer[..32];
+        let chat = |selector: &str, attempts: &[oms_command_room::Attempt]| {
+            let room = oms_command_room::Room::open(
+                &repo.0,
+                Default::default(),
+                &EMPTY,
+                &STOP,
+                false,
+                false,
+            )
+            .unwrap();
+            room.conversation_main(
+                selector,
+                attempts
+                    .iter()
+                    .map(|a| oms_command_room::ConversationPanelAttempt {
+                        room: a.refs.text("panel_room_id"),
+                        participant: a.refs.text("panel_room_participant"),
+                        terminal: a.terminal,
+                    }),
+            )
+            .unwrap()
+        };
+        assert!(chat(consumer, &[])["conversationMain"].is_null());
+        success(run(
+            &repo,
+            &[
+                "bind",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "owner",
+                "--native-session",
+                synthetic_thread,
+            ],
+        ));
+        let log = repo.0.join(".oms/threads/room-fixture.jsonl");
+        let before = fs::read(&log).unwrap();
+        let linked = chat(consumer, &[]);
+        assert_eq!(linked["conversationMain"].text("room"), "room-fixture");
+        assert_eq!(linked["conversationMain"].text("participant"), "owner");
+        assert_eq!(linked["conversationMain"].text("state"), "joined");
+        assert_eq!(fs::read(&log).unwrap(), before);
+        assert!(chat(&"0".repeat(32), &[])["conversationMain"].is_null());
+        let mut terminated = history[16].clone();
+        terminated.refs.set("panel_room_participant", "owner");
+        terminated.refs.set("panel_room_id", "room-fixture");
+        let mut attempts = vec![terminated];
+        attempts.extend(vec![history[0].clone(); 20]);
+        assert!(chat(consumer, &attempts)["conversationMain"].is_null());
+        // A damaged unrelated log makes discovery partial without withdrawing a proven membership.
+        let bad_room = repo.0.join(".oms/threads/unrelated-fixture.jsonl");
+        fs::write(&bad_room, b"bad\n").unwrap();
+        assert!(chat(consumer, &[])["conversationMain"].flag("incomplete"));
+        // An incomplete unrelated scan and a pointer to an unfinished rollover
+        // must not publish a Room before its canonical predecessor does.
+        let core =
+            oms_command_room::Room::open(&repo.0, Default::default(), &EMPTY, &STOP, false, false)
+                .unwrap();
+        let unpublished = oms_command_room::successor_id("room-fixture");
+        core.create(
+            Some(&unpublished),
+            "pending rollover",
+            None,
+            None,
+            Some("room-fixture"),
+        )
+        .unwrap();
+        let state = core.status("room-fixture", true).unwrap();
+        core.carry(&state, &unpublished, false).unwrap();
+        let current = fs::read_to_string(repo.0.join(".oms/threads/CURRENT")).unwrap();
+        assert_eq!(
+            current.split_whitespace().next(),
+            Some(unpublished.as_str())
+        );
+        assert_eq!(
+            chat(consumer, &[])["conversationMain"].text("room"),
+            "room-fixture"
+        );
+        fs::remove_file(bad_room).unwrap();
+        success(run(
+            &repo,
+            &[
+                "join",
+                "--id",
+                reserved_room,
+                "--participant",
+                "other",
+                "--role",
+                "main",
+                "--provider",
+                "codex",
+                "--native-session",
+                synthetic_thread,
+            ],
+        ));
+        assert_eq!(chat(consumer, &[]).text("conversationBinding"), "ambiguous");
+        success(run(
+            &repo,
+            &["close", "--id", reserved_room, "--participant", "other"],
+        ));
+        assert_eq!(
+            chat(consumer, &[])["conversationMain"].text("room"),
+            "room-fixture"
+        );
         let call = |action: &str, more: &[&str]| {
             let mut values = vec![
                 action,
