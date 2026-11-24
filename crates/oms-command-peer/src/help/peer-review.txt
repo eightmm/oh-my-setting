@@ -17,12 +17,12 @@ Plain review persists seat answers as artifacts.
 With --gate, enforce and record the typed gate outcome.
 
 verdicts: inspect the latest review run's artifacts and print one line per
-provider — pass, fail, or incomplete (artifact has no exit section, e.g. the
-run died mid-flight). For --debate runs each provider's FINAL round artifact
-is used. Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable; 2 takes
-precedence over 1 (a died provider means the round must be re-run before any
-fail is meaningful). Dry-run artifacts have no exit section and therefore
-always read as incomplete.
+provider — pass, fail, timed out, interrupted, or incomplete (artifact has no
+exit section, e.g. the run died mid-flight). For --debate runs each provider's
+FINAL round artifact is used. Exit 0 all pass, 1 any fail, 2
+incomplete/undeterminable; 2 takes precedence over 1 (a died provider means the
+round must be re-run before any fail is meaningful). Dry-run artifacts have no
+exit section and therefore always read as incomplete.
 
 advise: print how deep to review the tracked diff against --base (default
 HEAD): none, single, gate+security or council, with the reasons (risk paths,

@@ -357,6 +357,45 @@ pub(crate) fn timeout(args: &Args, tool: &str) -> Result<u64> {
         .ok_or_else(|| Error::new(2, "timeout must be a positive bounded duration"))?;
     Ok((value * scale).ceil() as u64)
 }
+pub(crate) const LARGE_DIFF_BYTES: usize = 16 * 1024;
+pub(crate) fn diff_budget() -> usize {
+    std::env::var("OMS_PROMPT_DIFF_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(65536)
+}
+pub(crate) fn format_duration(secs: u64) -> String {
+    if secs > 0 && secs.is_multiple_of(3600) {
+        format!("{}h", secs / 3600)
+    } else if secs > 0 && secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+pub(crate) fn rounded_secs(duration: std::time::Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_millis() >= 500)
+}
+pub(crate) fn timeout_message(timeout_secs: u64, diff_bytes: usize) -> String {
+    let duration = format_duration(timeout_secs);
+    if diff_bytes >= LARGE_DIFF_BYTES {
+        format!(
+            "timed out after {duration} (diff is {diff_bytes} bytes; consider raising OMS_PEER_TIMEOUT)"
+        )
+    } else {
+        format!("timed out after {duration}")
+    }
+}
+pub(crate) fn is_interrupted_line(line: &str) -> bool {
+    matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "interrupted"
+            | "error: interrupted"
+            | "operation interrupted"
+            | "error: operation interrupted"
+    )
+}
 pub(crate) fn dry(args: &Args, tool: &str) -> bool {
     let variable = match tool {
         "peer-ask" => "OH_MY_SETTING_ASK_DRY_RUN",
@@ -492,7 +531,7 @@ pub(crate) fn prompt(
         body.push_str("Repository context: omitted.\n");
     }
     if include_diff {
-        let base = args.value("base", "HEAD");
+        let base = args.value("_review-base", args.value("base", "HEAD"));
         if base.starts_with('-') {
             return fail("invalid diff base");
         }
@@ -514,11 +553,7 @@ pub(crate) fn prompt(
             )?;
             captured.as_slice()
         };
-        let budget = std::env::var("OMS_PROMPT_DIFF_BYTES")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(65536);
+        let budget = diff_budget();
         if args.has("gate") && diff.len() > budget {
             return fail(
                 "blocking gate requires the complete diff within OMS_PROMPT_DIFF_BYTES; split the change or raise the budget",
@@ -556,6 +591,9 @@ pub(crate) struct Seat {
     pub complete: bool,
     pub quality: String,
     pub round: usize,
+    pub elapsed: std::time::Duration,
+    pub timeout_secs: u64,
+    pub diff_bytes: usize,
 }
 pub(crate) fn index(repo: &Path, row: &V, context: &Context<'_>) -> Result<()> {
     storage::append(
@@ -678,6 +716,7 @@ pub(crate) fn call(
         context.interrupted,
     )
     .map_err(publication_error("artifact write"))?;
+    let diff_bytes = args.get("_review-diff-bytes").parse::<usize>().unwrap_or(0);
     if dry(args, tool) || args.has("export-only") {
         return Ok(Seat {
             target: target.clone(),
@@ -688,6 +727,9 @@ pub(crate) fn call(
             complete: false,
             quality: "empty".into(),
             round,
+            elapsed: std::time::Duration::ZERO,
+            timeout_secs: timeout(args, tool).unwrap_or(0),
+            diff_bytes,
         });
     }
     let before = process::git(context, repo, &["diff", "--binary", "HEAD", "--"]);
@@ -766,13 +808,15 @@ pub(crate) fn call(
         .1
         .to_string_lossy()
         .into_owned();
+    let timeout_secs = timeout(args, tool)?;
+    let call_started = std::time::Instant::now();
     let result = providers::execute_with_fallback_env(
         &mut route,
         args.get("fallback-model"),
         body,
         workdir,
         false,
-        timeout(args, tool)?,
+        timeout_secs,
         repo,
         &usage_env,
         context,
@@ -786,7 +830,7 @@ pub(crate) fn call(
             complete: false,
             cleanup_complete: None,
             owned_cleanup: None,
-            elapsed: std::time::Duration::ZERO,
+            elapsed: call_started.elapsed(),
         },
     };
     if let Some(id) = live_attempt {
@@ -889,11 +933,40 @@ pub(crate) fn call(
     } else {
         "truncated".into()
     };
+    let timed_out = !result.complete && result.code == 124;
+    let interrupted_seat = !result.complete && result.code == 130;
+    let mut diagnostics = Vec::new();
+    if timed_out {
+        diagnostics.extend_from_slice(
+            format!("error: {}\n", timeout_message(timeout_secs, diff_bytes)).as_bytes(),
+        );
+        // Strip bare interruption lines emitted when a timed-out child handles SIGTERM/SIGINT.
+        let redacted = safety::redact(&result.stderr)?;
+        for line in String::from_utf8_lossy(&redacted).lines() {
+            if line.trim().is_empty() || is_interrupted_line(line) {
+                continue;
+            }
+            diagnostics.extend_from_slice(line.as_bytes());
+            diagnostics.push(b'\n');
+        }
+    } else if interrupted_seat {
+        diagnostics.extend_from_slice(b"error: interrupted\n");
+        let redacted = safety::redact(&result.stderr)?;
+        for line in String::from_utf8_lossy(&redacted).lines() {
+            if line.trim().is_empty() || is_interrupted_line(line) {
+                continue;
+            }
+            diagnostics.extend_from_slice(line.as_bytes());
+            diagnostics.push(b'\n');
+        }
+    } else if !result.stderr.is_empty() {
+        diagnostics.extend_from_slice(&safety::redact(&result.stderr)?);
+    }
     let mut bytes = header.into_bytes();
     bytes.extend_from_slice(format!("\n## Output\n\n{answer}\n").as_bytes());
-    if !result.stderr.is_empty() {
+    if !diagnostics.is_empty() {
         bytes.extend_from_slice(b"\n## Diagnostics\n\n");
-        bytes.extend_from_slice(&safety::redact(&result.stderr)?);
+        bytes.extend_from_slice(&diagnostics);
     }
     if result.complete {
         bytes.extend_from_slice(format!("\n## Exit\n\n{}\n", result.code).as_bytes());
@@ -961,6 +1034,9 @@ pub(crate) fn call(
         complete: result.complete,
         quality,
         round,
+        elapsed: result.elapsed,
+        timeout_secs,
+        diff_bytes,
     })
 }
 pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<Output> {
@@ -1174,10 +1250,19 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     }
     let run = run_id()?;
     let captured = if tool == "peer-review" {
-        Some(crate::review::scope(args, &repo, context)?)
+        crate::review::pin_base(&mut resolved, &repo, context)?;
+        let scoped = crate::review::scope(&resolved, &repo, context)?;
+        let diff_bytes = if resolved.has("no-diff") {
+            0
+        } else {
+            scoped.1.len().min(diff_budget())
+        };
+        resolved.set_value("_review-diff-bytes", diff_bytes.to_string());
+        Some(scoped)
     } else {
         None
     };
+    let args = &resolved;
     let body = prompt(
         tool,
         args,
