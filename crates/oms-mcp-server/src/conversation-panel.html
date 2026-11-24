@@ -291,13 +291,13 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     <div class="wordmark"><span class="brand" aria-hidden="true"><i></i><i></i><i></i><i></i></span><h1>OMS</h1><strong id="project"></strong></div>
     <div id="scope" hidden><label for="project-choice" class="sr-only" data-i18n="project">프로젝트</label><select id="project-choice"></select></div>
     <select id="language-choice" aria-label="언어 (Language)" data-i18n-attr="aria-label:language"><option value="ko" lang="ko">한국어</option><option value="en" lang="en">English</option></select>
-    <button id="refresh" type="button" disabled data-i18n="refresh">새로고침</button>
+    <button id="refresh" disabled data-i18n="refresh">새로고침</button>
   </header>
   <p id="status" role="status">OMS 연결 중…</p>
   <p id="receipt" role="status"></p>
   <noscript><p class="muted" lang="ko">이 호스트에서 패널 UI를 실행할 수 없으면 텍스트 MCP 도구(oms_list_projects, oms_panel_snapshot) 또는 CLI(oms dashboard)로 같은 관측 리비전과 상태를 확인하세요.</p><p class="muted" lang="en">If this host cannot run the panel UI, use the text MCP tools (oms_list_projects, oms_panel_snapshot) or the CLI (oms dashboard) to check the same observation revision and status.</p></noscript>
   <div id="view" hidden>
-    <div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" type="button" hidden></button><span id="current-main" class="muted"></span></div>
+    <div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" hidden></button><span id="current-main" class="muted"></span></div>
     <nav class="tabs" id="tabs-primary" role="tablist" aria-label="프로젝트 보기" data-i18n-attr="aria-label:tabs">
       <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview" data-i18n="tab.overview">지금</button>
       <button id="tab-work" role="tab" aria-selected="false" aria-controls="pane-work" tabindex="-1" data-i18n="tab.work">작업</button>
@@ -319,7 +319,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     </section>
     <p id="approval-idle" class="approval-idle muted" role="status"></p>
     <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
-      <button type="button" id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
+      <button id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
     <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
       <h2 id="leads-heading" class="section-head"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><div id="leads" class="leads"></div>
     </section>
@@ -329,11 +329,11 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
       <div id="now-active" class="rows"></div>
     </section>
     <section class="card" id="goal-card" aria-labelledby="goal-heading">
-      <h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button type="button" id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
+      <h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
       <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
       <div id="plan-strip" class="plan-strip" aria-label="프로젝트 작업 검증" data-i18n-attr="aria-label:planStrip" hidden>
         <span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted" data-i18n="planVerified">계획 작업 검증</span>
-        <button id="plan-open" type="button" data-i18n="planOpen">계획 보기 ›</button>
+        <button id="plan-open" data-i18n="planOpen">계획 보기 ›</button>
       </div>
     </section>
     <section class="card" id="latest-results" aria-labelledby="now-results-heading">
@@ -350,13 +350,13 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
         <button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
       </fieldset></form><p id="peer-status" class="muted" role="status"></p>
       <div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
-        <button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
+        <button id="peer-repair" type="button" hidden data-i18n="peer.repair">작업방에 실행 기록 연결</button><button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
     </details>
       <details class="card" id="provider-options"><summary data-i18n="providerOptions">Lead 후보 · Codex, Claude, AGY</summary>
         <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
-        <button id="provider-load" type="button" data-i18n="providerLoad">호스트 상태 조회</button>
+        <button id="provider-load" data-i18n="providerLoad">호스트 상태 조회</button>
       </details>
-    <button type="button" id="overview-backlog"><span data-i18n="backlog">GitHub 열린 작업 전체 맡기기</span> <span aria-hidden="true">↗</span></button>
+    <button id="overview-backlog"><span data-i18n="backlog">GitHub 열린 작업 전체 맡기기</span> <span aria-hidden="true">↗</span></button>
     <details id="launcher" class="card"><summary data-i18n="launcher">별도 Main에 새 목표 전달</summary>
     <form id="launch">
       <fieldset id="controls"><legend data-i18n="chooseMain">새 Main 선택</legend>
@@ -387,7 +387,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
         </section>
     </details>
     <section class="map-preview" id="map-preview" aria-labelledby="map-title">
-      <div class="map-heading"><h2 id="map-title"></h2><div><button type="button" class="map-link" id="feature-open"></button> <button type="button" class="map-link" id="map-open"></button></div></div>
+      <div class="map-heading"><h2 id="map-title"></h2><div><button class="map-link" id="feature-open"></button> <button class="map-link" id="map-open"></button></div></div>
       <div class="map-field" id="map-field" hidden><div class="map-parents" id="map-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="map-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="map-parent-list"></ul></div><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children" data-relation-group="ownership"></ul><div class="map-deps" id="map-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="map-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="map-dep-list"></ul></div></div>
       <p role="status" id="map-status"></p>
     </section>
@@ -404,7 +404,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
       <section aria-labelledby="deps-heading" data-relation-group="dependency"><h3 id="deps-heading" data-i18n="w.deps">작업 의존성</h3><p id="deps-note" class="muted"></p><div id="deps-list" class="rows"></div></section>
     </section>
     <section class="card" id="pane-task" aria-labelledby="task-heading" hidden>
-      <div class="detail-title"><button id="task-back" data-i18n="w.back" type="button">← 목록으로</button><h2 id="task-heading" tabindex="-1"></h2></div>
+      <div class="detail-title"><button id="task-back" data-i18n="w.back">← 목록으로</button><h2 id="task-heading" tabindex="-1"></h2></div>
       <p id="task-note" class="muted" role="status"></p>
       <div id="task-tabs" class="tabs" role="tablist" aria-label="작업 상세 구분" data-i18n-attr="aria-label:taskSections">
         <button id="task-tab-overview" role="tab" aria-selected="true" aria-controls="task-body" data-i18n="task.overview">요약</button>
@@ -415,36 +415,36 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
       <div id="task-body" role="tabpanel" tabindex="0"></div>
     </section>
     <section id="pane-project" role="tabpanel" aria-labelledby="tab-project" hidden>
-      <section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading"></h2><button id="graph-reload" type="button" class="map-link"></button></div>
+      <section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading"></h2><button id="graph-reload" class="map-link"></button></div>
         <nav class="explorer-bar" id="graph-path"></nav>
         <label class="sr-only" id="graph-filter-label" for="graph-filter"></label><input class="explorer-filter" id="graph-filter" type="search">
-        <div class="explorer-options"><button type="button" id="graph-search"></button> <label id="graph-confidence-label" for="graph-confidence"></label> <select id="graph-confidence"><option value="recorded" id="graph-recorded"></option><option value="all" id="graph-all"></option></select></div>
+        <div class="explorer-options"><button id="graph-search"></button> <label id="graph-confidence-label" for="graph-confidence"></label> <select id="graph-confidence"><option value="recorded" id="graph-recorded"></option><option value="all" id="graph-all"></option></select></div>
         <div id="explore-map" class="map-field detail-map" hidden><div class="map-parents" id="explore-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="explore-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="explore-parent-list"></ul></div><span class="map-focus" id="explore-root"></span><div class="detail-map-groups"><ul class="map-row" id="explore-children" data-relation-group="ownership"></ul><div class="map-deps" id="explore-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="explore-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="explore-dep-list"></ul></div></div></div>
-        <button type="button" id="graph-attach" hidden></button><span id="graph-attached" role="status" class="explorer-status"></span>
-        <p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button type="button" id="graph-more" hidden></button>
+        <button id="graph-attach" hidden></button><span id="graph-attached" role="status" class="explorer-status"></span>
+        <p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button id="graph-more" hidden></button>
       </section>
       <section class="explorer-view" aria-labelledby="feature-title"><h2 id="feature-title"></h2><div id="feature-links" class="feature-links"></div>
         <label for="feature-filter" id="feature-filter-label" class="sr-only"></label><input class="explorer-filter" id="feature-filter" type="search">
-        <p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" type="button" hidden></button>
-        <section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label"></label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button type="button" id="feature-native" hidden></button><button type="button" id="feature-send"></button><button type="button" id="feature-dismiss"></button></div><p id="feature-outcome" role="status"></p></section>
+        <p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" hidden></button>
+        <section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label"></label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button id="feature-native" hidden></button><button id="feature-send"></button><button id="feature-dismiss"></button></div><p id="feature-outcome" role="status"></p></section>
       </section>
     </section>
     <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
-      <div class="detail-title"><h2 data-i18n="chatHeading">작업방 대화</h2><button id="chat-back" type="button" data-i18n="chatBack" hidden>이전 보기로</button></div>
+      <div class="detail-title"><h2 data-i18n="chatHeading">작업방 대화</h2><button id="chat-back" data-i18n="chatBack" hidden>이전 보기로</button></div>
       <div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자" data-i18n-attr="aria-label:chatMembers"></div>
         <div><h3 id="chat-title"></h3><p id="chat-status" class="muted" role="status"></p>
-          <button id="chat-older" type="button" data-i18n="chatOlder" hidden>이전 메시지</button>
+          <button id="chat-older" data-i18n="chatOlder" hidden>이전 메시지</button>
           <ol class="messages" id="chat-messages" aria-label="시간순 작업방 메시지" data-i18n-attr="aria-label:chatMessages" tabindex="0"></ol>
           <div id="chat-result"></div>
           <div id="review-share" hidden>
-            <button type="button" id="review-choose" data-i18n="share.choose">검토 결과 첨부</button>
+            <button id="review-choose" data-i18n="share.choose">검토 결과 첨부</button>
             <div id="review-preview" hidden>
               <label for="review-text" data-i18n="share.label">선택한 답변</label>
               <textarea id="review-text" readonly rows="5"></textarea>
               <div class="cluster">
-                <button type="button" id="review-submit" data-i18n="share.send">현재 대화로 보내기</button>
-                <button type="button" id="review-copy" data-i18n="share.copy">답변 복사</button>
-                <button type="button" id="review-cancel" data-i18n="share.cancel">취소</button>
+                <button id="review-submit" data-i18n="share.send">현재 대화로 보내기</button>
+                <button id="review-copy" data-i18n="share.copy">답변 복사</button>
+                <button id="review-cancel" data-i18n="share.cancel">취소</button>
               </div>
             </div>
             <p id="review-share-status" role="status" class="muted"></p>
@@ -454,7 +454,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
             <label for="evidence-attempt" data-i18n="evidenceCall">기록된 호출</label> <select id="evidence-attempt"></select>
             <div id="evidence-actions" class="cluster"></div>
             <p id="evidence-status" role="status" class="muted"></p><pre id="evidence-lines" hidden></pre>
-            <div class="cluster"><button id="evidence-prev" type="button" data-i18n="evidencePrev" hidden>근거 이전 페이지</button><button id="evidence-next" type="button" data-i18n="evidenceNext" hidden>근거 다음 페이지</button></div>
+            <div class="cluster"><button id="evidence-prev" data-i18n="evidencePrev" hidden>근거 이전 페이지</button><button id="evidence-next" data-i18n="evidenceNext" hidden>근거 다음 페이지</button></div>
           </section>
         </div>
       </div>
@@ -468,7 +468,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
         <optgroup label="실행" data-i18n-attr="label:tui.run"><option value="routes" data-i18n="tui.routes">경로</option><option value="workspaces" data-i18n="tui.workspaces">워크스페이스</option><option value="jobs" data-i18n="tui.jobs">작업</option><option value="past" data-i18n="tui.past">지난 실행</option></optgroup>
       </select></div><p id="tui-status" role="status" class="muted"></p>
       <div id="tui-rows" class="table-wrap" role="region" aria-label="선택한 OMS TUI 기록" data-i18n-attr="aria-label:tuiRegion" tabindex="0"></div>
-      <div class="cluster"><button id="tui-prev" type="button" data-i18n="prevPage" hidden>이전 페이지</button><button id="tui-next" type="button" data-i18n="nextPage" hidden>다음 페이지</button></div></section>
+      <div class="cluster"><button id="tui-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="tui-next" data-i18n="nextPage" hidden>다음 페이지</button></div></section>
       <h3 class="small-title" data-i18n="timeline">명령·작업 타임라인</h3><ul id="command-list"></ul>
     </section>
     <section class="card" id="pane-usage" role="tabpanel" aria-labelledby="tab-usage" tabindex="0" hidden>
@@ -477,14 +477,16 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     </section>
     <section class="card" id="pane-git" role="tabpanel" aria-labelledby="tab-git" hidden>
       <h2>Git · GitHub PR</h2><p id="git-local"></p><p id="git-status" class="muted" role="status"></p>
-      <button type="button" class="link-action" id="git-backlog" data-i18n="gitBacklog" hidden>열린 작업 전체를 Main에 맡기기</button>
+      <button class="link-action" id="git-backlog" data-i18n="gitBacklog" hidden>열린 작업 전체를 Main에 맡기기</button>
       <section id="git-editor" class="card" aria-label="GitHub 항목 작업 목표" data-i18n-attr="aria-label:gitEditor" hidden>
-        <h3 id="git-item"></h3><label for="git-provider" data-i18n="gitAssignee">배정 요청 대상</label>
+        <h3 id="git-item"></h3>
+        <button id="issue-review" hidden data-i18n="git.review">이슈 버전 확인</button>
+        <p id="issue-evidence" role="status" class="muted" style="white-space:pre-line;overflow-wrap:anywhere"></p><label for="git-provider" data-i18n="gitAssignee">배정 요청 대상</label>
         <select id="git-provider"><option value="" data-i18n="gitAuto">Main이 Lead 선택</option><option value="codex">Codex Lead</option>
           <option value="claude">Claude Lead</option><option value="agy">AGY Lead</option></select>
         <label for="git-goal" data-i18n="gitGoalLabel">대화에 전달할 목표</label><textarea id="git-goal" rows="3" maxlength="2000"></textarea>
-        <div class="cluster"><button type="button" id="git-compose" hidden></button><button type="button" class="primary" id="git-send" hidden></button>
-          <button type="button" id="git-copy" data-i18n="gitCopy">목표 복사</button><button type="button" id="git-new" data-i18n="gitNew">별도 Main 목표로 사용</button></div>
+        <div class="cluster"><button id="git-compose" hidden></button><button class="primary" id="git-send" hidden></button>
+          <button id="git-copy" data-i18n="gitCopy">목표 복사</button><button id="git-new" data-i18n="gitNew">별도 Main 목표로 사용</button></div>
         <p class="muted" id="git-editor-status" role="status"></p>
       </section>
       <label class="git-filter" for="git-kind"><span data-i18n="gitView">GitHub 보기</span> <select id="git-kind">
@@ -514,11 +516,11 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
         <option value="connections" data-i18n="cv.connections">하네스와 준비 상태</option><option value="modelcatalog" data-i18n="cv.modelcatalog">모델·강도 카탈로그</option>
         <option value="routes" data-i18n="cv.routes">예상 라우팅 · 계정</option><option value="attribution" data-i18n="cv.attribution">실행 응답 근거</option></select></label>
         <label id="connection-harness-label"><span data-i18n="harness">하네스</span> <select id="connection-harness"><option value="codex">Codex</option><option value="claude">Claude</option><option value="agy">AGY</option><option value="pi">Pi</option></select></label>
-        <button type="button" id="connection-refresh" data-i18n="connectionRefresh">연결 내역 다시 조회</button></div>
+        <button id="connection-refresh" data-i18n="connectionRefresh">연결 내역 다시 조회</button></div>
       <p id="connection-note" class="muted"></p><p id="connection-status" role="status"></p>
       <div id="connection-rows" class="rows"></div>
-      <div class="cluster"><button id="connection-prev" type="button" data-i18n="prevPage" hidden>이전 페이지</button><button id="connection-next" type="button" data-i18n="nextPage" hidden>다음 페이지</button>
-      <button id="connection-draft" type="button" data-i18n="connectionDraft" hidden>이 하네스로 새 목표 작성</button></div>
+      <div class="cluster"><button id="connection-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="connection-next" data-i18n="nextPage" hidden>다음 페이지</button>
+      <button id="connection-draft" data-i18n="connectionDraft" hidden>이 하네스로 새 목표 작성</button></div>
     </details>
 </main>
 <script>
@@ -558,13 +560,9 @@ function putAttr(target, name, fn) {
   map.set(name, fn); attrBinds.set(e, map);
 }
 function applyStatic() {
-  if (!document.querySelectorAll) return;
-  for (const e of document.querySelectorAll('[data-i18n]')) e.textContent = t(e.getAttribute('data-i18n'));
-  for (const e of document.querySelectorAll('[data-i18n-attr]')) {
-    for (const pair of e.getAttribute('data-i18n-attr').split(';')) {
-      const [name, key] = pair.split(':');
-      e.setAttribute(name, t(key));
-    }
+  for (const [element,key,attribute] of staticLabels) {
+    if (attribute) element.setAttribute(attribute, t(key));
+    else element.textContent = t(key);
   }
 }
 function relocalize() {
@@ -614,7 +612,7 @@ peer.assign |  | Request a read-only review
 peer.legend |  | Reviewer for this room
 peer.provider |  | Provider
 peer.prompt |  | Review request
-peer.hint | 확인할 코드나 질문을 입력하세요 | Enter the code to check or a question
+peer.hint |  | Enter the code to check or a question
 peer.start |  | Call one reviewer
 peer.proof |  | Your Main membership in this Room is confirmed. Requesting a review checks ownership across Rooms before calling the reviewer.
 peer.inventory | 작업방 목록을 모두 확인할 수 없어 배정 권한을 검증하지 못했습니다. 같은 요청의 상태를 다시 확인할 수 있습니다. | OMS could not verify assignment authority because the Room inventory is incomplete. You can check the same request again.
@@ -634,6 +632,8 @@ peer.error | {error} · 요청 상태를 확인하세요. | {error} · Check thi
 peer.working | 검토자가 응답을 작성 중입니다. | The reviewer is preparing an answer.
 peer.empty | 호출이 끝났습니다. 조회한 기록에 답변이 없습니다. | The call ended. No answer was found in the records retrieved.
 peer.failed | 검토 호출이 실패했습니다. | The review call failed.
+peer.repair |  | Link operation to Room
+peer.recovered | 검토 실행 기록을 찾았습니다. 이 작업방에 연결하려면 확인하세요. | Review operation found. Confirm to link it to this Room.
 peer.unconfirmed | 검토 요청은 기록되었고 실행 상태는 미확인입니다. | Review request recorded. Execution status is unconfirmed.
 share.choose |  | Attach review result
 share.label |  | Selected answer
@@ -650,7 +650,7 @@ share.sent | 선택한 답변을 현재 대화로 보냈습니다. | Selected an
 share.rejected | 호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다. | The host declined to send the answer. You can copy it instead.
 share.unknown | 호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요. | Delivery is unconfirmed. Check the conversation before copying the answer.
 title | OMS · 프로젝트 제어 | OMS · Project control
-language | 언어 (Language) | Language (언어)
+language |  | Language (언어)
 project |  | Project
 refresh |  | Refresh
 unknown | 미확인 | Unknown
@@ -663,8 +663,8 @@ projectDefault | OMS 프로젝트 | OMS project
 selectProject | 프로젝트 선택 | Select a project
 draft | 초안 | Draft
 pageN | {page}페이지 | Page {page}
-prevPage | 이전 페이지 | Previous page
-nextPage | 다음 페이지 | Next page
+prevPage |  | Previous page
+nextPage |  | Next page
 closed | 패널이 닫혔습니다. | The panel was closed.
 timeout | 응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요. | The request timed out. Refresh to check the result.
 hostFail | 앱이 요청을 처리하지 못했습니다. | The app could not process the request.
@@ -674,22 +674,22 @@ linkFail | 앱에서 링크를 열 수 없습니다. | The app cannot open the l
 openApp | 앱 대화에서 OMS 패널을 여세요. | Open the OMS panel from an app conversation.
 tab.chat |  | Chat
 tab.activity |  | Activity
-tabs | 프로젝트 보기 | Project views
+tabs |  | Project views
 tab.overview |  | Now
 tab.work |  | Work
 tab.results |  | Results
 tab.relations |  | Relationships
 tab.usage |  | Metrics
-tabsMore | 더 보기 화면 | More views
+tabsMore |  | More views
 moreViews |  | More · Project map · Chat · Metrics · Git
-taskSections | 작업 상세 구분 | Task detail sections
+taskSections |  | Task detail sections
 task.overview |  | Summary
 task.changes |  | Changes
 task.verification |  | Verification
 task.history |  | History
-w.back | ← 목록으로 | ← Back to list
-w.now | 진행 중인 작업 | Work in progress
-w.nowResults | 작업 결과 | Task results
+w.back |  | ← Back to list
+w.now |  | Work in progress
+w.nowResults |  | Task results
 w.owners |  | Owner linkage
 w.deps |  | Task dependencies
 w.loading | 작업 목록을 읽는 중… | Reading work items…
@@ -744,7 +744,7 @@ alerts |  | Items needing attention
 alerts.count | {n}건 | {n} items
 alertsOpen |  | View attention items
 goalHeading |  | Project goal
-planStrip | 프로젝트 작업 검증 | Project task verification
+planStrip |  | Project task verification
 planVerified |  | Planned tasks verified
 planOpen |  | View plan ›
 map.parent |  | Parent
@@ -756,7 +756,7 @@ backlog |  | Hand all open GitHub work to Main
 launcher |  | Send a new goal to a separate Main
 chooseMain |  | Choose a new Main
 briefLabel |  | New work goal
-briefPlaceholder | Main이 Lead들과 수행할 목표를 입력하세요. | Enter the goal Main will pursue with its Leads.
+briefPlaceholder |  | Enter the goal Main will pursue with its Leads.
 start |  | Send goal
 records |  | Full project record
 metricActive |  | Attempts without a closing record
@@ -766,20 +766,20 @@ historyTeam |  | Project Main and Lead records
 historyOps |  | Recently stored artifacts
 historyRuns |  | Recent executions
 chatHeading |  | Room conversation
-chatBack | 이전 보기로 | Back to previous view
-chatMembers | 대화 참여자 | Conversation participants
-chatOlder | 이전 메시지 | Earlier messages
-chatMessages | 시간순 작업방 메시지 | Room messages in time order
-evidenceRegion | 호출별 실행 근거 | Execution evidence by call
+chatBack |  | Back to previous view
+chatMembers |  | Conversation participants
+chatOlder |  | Earlier messages
+chatMessages |  | Room messages in time order
+evidenceRegion |  | Execution evidence by call
 evidenceCall |  | Recorded call
-evidencePrev | 근거 이전 페이지 | Previous evidence page
-evidenceNext | 근거 다음 페이지 | Next evidence page
+evidencePrev |  | Previous evidence page
+evidenceNext |  | Next evidence page
 activityHeading |  | Project activity
 tuiLabel |  | OMS TUI details
 tui.choose |  | Choose a view
-tui.runtime | 런타임 | Runtime
-tui.collab | 협업 | Collaboration
-tui.run | 실행 | Execution
+tui.runtime |  | Runtime
+tui.collab |  | Collaboration
+tui.run |  | Execution
 tui.overview |  | Overview
 tui.health |  | Health
 tui.providers |  | Providers
@@ -796,11 +796,11 @@ tui.routes |  | Routes
 tui.workspaces |  | Workspaces
 tui.jobs |  | Jobs
 tui.past |  | Past runs
-tuiRegion | 선택한 OMS TUI 기록 | Selected OMS TUI records
+tuiRegion |  | Selected OMS TUI records
 timeline |  | Command and job timeline
 usageHeading |  | Token usage
-gitBacklog | 열린 작업 전체를 Main에 맡기기 | Hand all open work to Main
-gitEditor | GitHub 항목 작업 목표 | GitHub item work goal
+gitBacklog |  | Hand all open work to Main
+gitEditor |  | GitHub item work goal
 gitAssignee |  | Assign request to
 gitAuto |  | Main chooses the Lead
 gitGoalLabel |  | Goal to send to the conversation
@@ -830,7 +830,7 @@ cv.routes |  | Expected routing · accounts
 cv.attribution |  | Execution response evidence
 harness |  | Harness
 connectionRefresh |  | Reload connection details
-connectionDraft | 이 하네스로 새 목표 작성 | Draft a new goal with this harness
+connectionDraft |  | Draft a new goal with this harness
 sv.connections | 설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다. | Installation is checked on the PATH of the host running OMS. Authentication and actual runnability are checked separately.
 sv.modelcatalog | 로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다. | Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.
 sv.routes | 프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다. | Expected routing for the project's next call. Only confirmed logical aliases are shown for accounts.
@@ -879,6 +879,10 @@ git.ahead | 앞섬 {n} | Ahead {n}
 git.behind | 뒤처짐 {n} | Behind {n}
 git.prefix | {p} Lead에게 다음 작업을 배정해 주세요.  | Please assign the following work to the {p} Lead.\x20
 git.prefixAny | 담당 Lead를 정해 다음 작업을 배정해 주세요.  | Please choose a Lead and assign the following work.\x20
+git.review |  | Review issue version
+git.reading | 이슈 버전을 확인하고 있습니다… | Checking the issue version…
+git.proof | 열린 이슈 · 수정 시각 {rev} | Open issue · Updated {rev}
+git.noProof | 선택한 이슈의 버전을 확인할 수 없습니다. | Could not verify the selected issue version.
 git.draft | 작업 목표 작성 | Draft work goal
 git.draftAria | {label} 작업 목표 작성 | {label}: draft work goal
 git.editorHint | 대화로 보내면 Main이 이 목표로 작업을 시작할 수 있습니다. | Once sent to the conversation, Main can start working on this goal.
@@ -1198,10 +1202,19 @@ for (const line of catalogRows.split('\n')) {
   if (ko) MSG.ko[key] = ko;
   if (en) MSG.en[key] = en;
 }
-// Preserve the first-paint Korean labels as the static translation source.
-for (const e of document.querySelectorAll('[data-i18n]')) {
-  const key = e.getAttribute('data-i18n');
-  MSG.ko[key] ??= e.textContent;
+// The first-paint markup owns the Korean text, including accessible names.
+const staticLabels = [];
+for (const element of document.querySelectorAll('[data-i18n]')) {
+  const key = element.getAttribute('data-i18n');
+  MSG.ko[key] ??= element.textContent;
+  staticLabels.push([element,key]);
+}
+for (const element of document.querySelectorAll('[data-i18n-attr]')) {
+  for (const pair of element.getAttribute('data-i18n-attr').split(';')) {
+    const [attribute,key] = pair.split(':');
+    MSG.ko[key] ??= element.getAttribute(attribute);
+    staticLabels.push([element,key,attribute]);
+  }
 }
 const pending = new Map();
 let sequence = 0;
@@ -1243,9 +1256,6 @@ const jobs = new Map(), loaded = new Set(), tabScroll = new Map(), approvalState
 let explorerBound = false, graphData, graphError = '', graphTrail = [], graphQuery = '', graphLimit = 40;
 let catalog = [], catalogTotal = null, catalogError = '', commandRows = 8, draftCommand = '';
 const choice = (ko,en) => lang === 'en' ? en : ko;
-function explorerButton(label, action, classes) {
-  const b = node('button',label,classes); b.type = 'button'; b.addEventListener('click',action); return b;
-}
 function preserveExplorerFocus() {
   const key=document.activeElement?.getAttribute?.('data-explorer-key');
   return () => {
@@ -1315,9 +1325,9 @@ function paintGraph(loading = false) {
   const rootName = dashboardData?.project || project || choice('저장소','Repository');
   const rootLabel = graphTrail.at(-1)?.label || rootName;
   const crumbs = el('graph-path'); crumbs.replaceChildren();
-  const root = explorerButton(rootName,() => goToLevel(0),'current');root.setAttribute('data-explorer-key','root'); root.disabled = !graphTrail.length; crumbs.append(root);
+  const root = action(rootName,() => goToLevel(0),'current');root.setAttribute('data-explorer-key','root'); root.disabled = !graphTrail.length; crumbs.append(root);
   for (const [i,step] of graphTrail.entries()) {
-    const crumb = explorerButton(step.label,() => goToLevel(i+1),'current');
+    const crumb = action(step.label,() => goToLevel(i+1),'current');
     crumb.setAttribute('data-explorer-key','crumb:'+step.id);
     if (i === graphTrail.length-1) crumb.setAttribute('aria-current','location');
     crumbs.append(node('span','›'),crumb);
@@ -1365,7 +1375,7 @@ function paintGraph(loading = false) {
     const compact=location!=='list',title=r.label||r.path||r.id;
     const relations=linksFor(r.id).map(l=>graphLink(l.edge,l.direction)),extras=relations.length>1?' +'+(relations.length-1):'';
     const size=Number.isSafeInteger(r.file_count)&&r.file_count>0?choice('파일 '+formatCount(r.file_count)+'개',formatCount(r.file_count)+(r.file_count===1?' file':' files')):'';
-    const description=[graphKind(r.kind),size].filter(Boolean).join(' · '),button=explorerButton('',()=>enterNode(r),compact?'map-node':'explorer-item');
+    const description=[graphKind(r.kind),size].filter(Boolean).join(' · '),button=action('',()=>enterNode(r),compact?'map-node':'explorer-item');
     const rest=Number.isSafeInteger(r.omitted_children)&&r.omitted_children>0?choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children'):'';
     button.title=[r.path||title,description,...relations,rest].filter(Boolean).join(' · ');
     button.setAttribute('aria-label',button.title);button.setAttribute('data-explorer-key',location+':'+r.id);
@@ -1377,7 +1387,7 @@ function paintGraph(loading = false) {
   function depItem(r,location){
     const title=r.label||r.path||r.id,depLinks=linksFor(r.id).filter(l=>!ownershipRelations.has(l.edge.relation)),first=depLinks[0];
     const arrow=first?.direction==='out'?'→':first?.direction==='in'?'←':'↻',relations=depLinks.map(l=>graphLink(l.edge,l.direction));
-    const b=explorerButton('',()=>enterNode(r),'map-dep-chip');
+    const b=action('',()=>enterNode(r),'map-dep-chip');
     b.setAttribute('data-relation-group','dependency');b.setAttribute('data-direction',first?.direction||'out');b.setAttribute('data-explorer-key',location+':'+r.id);
     b.title=[r.path||title,...relations].filter(Boolean).join(' · ');b.setAttribute('aria-label',b.title);
     const a=node('span',arrow,'dep-arrow');a.setAttribute('aria-hidden','true');
@@ -1482,12 +1492,12 @@ function readCatalog(offset = 0) {
 function paintFeatures() {
   const links=el('feature-links'), list=el('feature-list'); links.replaceChildren(); list.replaceChildren();
   for(const [name,ko,en,open] of featureRoutes) {
-    const button=explorerButton(choice(ko,en),open);button.setAttribute('data-explorer-key','route:'+name);links.append(button);
+    const button=action(choice(ko,en),open,'');button.setAttribute('data-explorer-key','route:'+name);links.append(button);
   }
   const q=el('feature-filter').value.trim().toLocaleLowerCase();
   const rows=catalog.filter(c=>[c.name,c.description,commandKorean[c.name]].some(v=>v?.toLocaleLowerCase().includes(q)));
   for(const c of rows.slice(0,commandRows)) {
-    const b=explorerButton('',()=>editFeature(c),'explorer-item'), t=node('span','');
+    const b=action('',()=>editFeature(c),'explorer-item'), t=node('span','');
     b.setAttribute('data-explorer-key','command:'+c.name);
     t.append(node('strong','oms '+c.name),node('small',choice(commandKorean[c.name] || c.description,c.description)));
     b.append(t,node('span','›','muted'));const li=node('li','');li.append(b);list.append(li);
@@ -1571,14 +1581,17 @@ function showTab(tab, focus = false, origin) {
   loadTab(tab);
 }
 
-for (const list of tabLists) for (const [index, tab] of list.entries()) {
-  const button = el('tab-' + tab);
-  button.addEventListener('click', () => showTab(tab));
-  button.addEventListener('keydown', event => {
-    const dest = {ArrowRight:(index + 1) % list.length, ArrowLeft:(index + list.length - 1) % list.length, Home:0, End:list.length - 1}[event.key];
-    if (dest !== undefined) { event.preventDefault(); showTab(list[dest], true); }
-  });
+function bindTabs(items, prefix, select) {
+  for (const [index, name] of items.entries()) {
+    const button = el(prefix + name), count = items.length;
+    button.addEventListener('click', () => select(name));
+    button.addEventListener('keydown', event => {
+      const next = {ArrowRight:(index + 1) % count, ArrowLeft:(index + count - 1) % count, Home:0, End:count - 1}[event.key];
+      if (next !== undefined) { event.preventDefault(); select(items[next], true); }
+    });
+  }
 }
+for (const list of tabLists) bindTabs(list, 'tab-', showTab);
 
 // Task-centered navigation. Every view reads the same oms_panel_work_items projection and opens
 // one shared detail by the item's own id; labels are display text only and never identify a task.
@@ -1775,15 +1788,11 @@ function paintTaskDetail() {
   dl.append(...fields);
   el('task-body').replaceChildren(...(fields.length ? [dl] : []), ...body);
 }
-for (const [index, name] of detailSections.entries()) {
-  const button = el('task-tab-' + name);
-  const choose = (next, focus) => { taskSection = next; paintTaskDetail(); if (focus) el('task-tab-' + next).focus(); };
-  button.addEventListener('click', () => choose(name));
-  button.addEventListener('keydown', event => {
-    const dest = {ArrowRight:(index + 1) % 4, ArrowLeft:(index + 3) % 4, Home:0, End:3}[event.key];
-    if (dest !== undefined) { event.preventDefault(); choose(detailSections[dest], true); }
-  });
-}
+bindTabs(detailSections, 'task-tab-', (name, focus) => {
+  taskSection = name;
+  paintTaskDetail();
+  if (focus) el('task-tab-' + name).focus();
+});
 el('task-back').addEventListener('click', () => closeTask(true));
 el('pane-task').addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeTask(true); } });
 
@@ -1822,7 +1831,7 @@ function loadTab(tab, force = false) {
   if (tab !== 'usage' && tab !== 'git') return;
   if (!force && (jobs.has(tab) || loaded.has(tab))) return;
   const status = el(tab + '-status');
-  if (tab === 'git') { gitReady = false; updateSendButton(); }
+  if (tab === 'git') { gitReady = false; resetIssueReview(); updateSendButton(); }
   put(status, () => t(tab === 'git' ? 'git.loading' : 'usage.loading'));
   detailRead(tab, tab === 'git' ? 'oms_panel_git_status' : 'oms_panel_usage', {}, data => {
     status.textContent = '';
@@ -2009,8 +2018,8 @@ function dateLabel(stamp) {
   const ms = typeof stamp === 'number' ? stamp * 1000 : Date.parse(stamp);
   return Number.isFinite(ms) ? new Date(ms).toLocaleString(locale()) : '';
 }
-function action(text, fn) {
-  const button = node('button', text, 'link-action');
+function action(text, fn, className = 'link-action') {
+  const button = node('button', text, className);
   button.type = 'button'; button.addEventListener('click', fn);
   return button;
 }
@@ -2058,7 +2067,27 @@ function gitAction(kind,item) {
   putAttr(button,'aria-label',() => t('git.draftAria',{label:label()}));
   return button;
 }
+function resetIssueReview() {
+  jobs.delete('issue-review'); put('issue-evidence',() => '');
+}
+el('issue-review').addEventListener('click',() => {
+  const item = gitItem, source = gitData;
+  if (!gitReady || item?.kind !== 'issue' || item.stale || jobs.has('issue-review')) return;
+  const button = el('issue-review');
+  button.disabled = true; put('issue-evidence',() => t('git.reading'));
+  detailRead('issue-review','oms_panel_git_status',{issuePreview:item.number},data => {
+    if (item !== gitItem || source !== gitData || !gitReady || item.stale) return;
+    const v = data?.issuePreview;
+    const slug = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9_.-]+)\/issues\//.exec(v?.reference)?.[1];
+    if (v?.kind !== 'github-issue' || v.state !== 'open' || !slug || slug.toLowerCase() !== source.github.repository.toLowerCase() ||
+        v.reference !== 'https://github.com/' + slug + '/issues/' + item.number ||
+        !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(v.revision) || !/^[0-9a-f]{64}$/.test(v.sha256)) throw uiError('git.noProof');
+    put('issue-evidence',() => [t('git.proof',{rev:v.revision}),v.reference,'SHA-256 '+v.sha256].join('\n'));
+    button.disabled = false;
+  },() => { put('issue-evidence',() => t('git.noProof')); button.disabled = false; });
+});
 function editGitGoal(item,body) {
+  resetIssueReview();
   const saved = gitDrafts.get(item.url);
   draftProvider = saved?.provider || ''; gitItem = item;
   put('git-item', item.label);
@@ -2224,7 +2253,7 @@ el('git-find').addEventListener('submit',event => {
     result.replaceChildren();
     if (button) { result.append(node('p',item.title),button); }
     else if (gitItem?.number === number && gitItem.kind === kind) {
-      gitItem.stale = true; updateSendButton();
+      gitItem.stale = true; resetIssueReview(); updateSendButton();
       const note = () => found?.status === 'closed' ? t('git.closed') : t('git.notOpenNow');
       put(result, note); put('git-editor-status', note);
     }
@@ -2236,6 +2265,9 @@ function rememberGitGoal() {
   updateSendButton();
 }
 function updateSendButton() {
+  const review = el('issue-review');
+  review.hidden = gitItem?.kind !== 'issue';
+  review.disabled = !gitReady || Boolean(gitItem?.stale) || jobs.has('issue-review');
   const main = dashboardData?.conversationMain;
   const send = el('git-send');
   const bound = !readOnly && !el('header-main').hidden;
@@ -2479,7 +2511,7 @@ function clearPeer(room) {
   el('peer-assignment').open = false; el('peer-assignment').hidden = !room;
   el('peer-task').value = ''; el('peer-status').textContent = '';
   el('peer-controls').disabled = busy;
-  for (const id of ['peer-check','peer-chat','peer-next']) el(id).hidden = true;
+  for (const id of ['peer-check','peer-repair','peer-chat','peer-next']) el(id).hidden = true;
 }
 function clearProject() {
   workData = selectedTask = taskOrigin = undefined; workError = ''; taskOpen = false; taskSection = 'overview'; taskRows.clear(); approvalState.clear();
@@ -2488,7 +2520,7 @@ function clearProject() {
   el('goal-expand').setAttribute('aria-expanded','false');
   clearPeer(); clearReviewAttachment();
   checkedAt = ''; connectionReady = profileKnown = false; connectionState = 'conn.unknownProject'; hostFacts(); resetConnectionRows();
-  jobs.clear(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
+  jobs.clear(); resetIssueReview(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
   selectedMember = backTarget = olderCursor = tuiNext = undefined; chatRows = [];
   clearEvidence(); availableAttempts = [];
   members = []; tuiPages = []; el('tui-view').value = '';
@@ -2824,6 +2856,24 @@ function loadChat(before) {
           (execution.exit === 0 ? 'peer.empty' : 'peer.failed') : 'peer.unconfirmed';
         result.append(node('p', () => t(key),'muted'));
       }
+      if (page.assignment?.state === 'recovered' && m.room === peerScope(dashboardData,true) &&
+          typeof page.assignment.task === 'string' && typeof page.assignment.title === 'string' && /^ask-[a-f0-9-]{36}$/.test(m.participant)) {
+        const scope = generation;
+        result.append(node('p',() => t('peer.recovered'),'muted'),action(() => t('peer.repair'), async () => {
+          if (busy || scope !== generation || currentTab !== 'chat' || selectedMember?.participant !== m.participant ||
+              m.room !== peerScope(dashboardData,true)) return;
+          setBusy(true,true);
+          try {
+            const {structuredContent:r} = await tool('oms_assign_provider',{room:m.room,requestId:m.participant.slice(4),repairOnly:true,
+              provider:m.provider === 'antigravity' ? 'agy' : m.provider,task:page.assignment.task,title:page.assignment.title},scope);
+            if (scope === generation && currentTab === 'chat' && selectedMember?.participant === m.participant) {
+              if (!['started','recorded'].includes(r?.status) || r.room !== m.room || r.participant !== m.participant) throw uiError('peer.unknown');
+              loadChat();
+            }
+          } catch (e) {if (scope === generation && currentTab === 'chat' && selectedMember?.participant === m.participant) put(status,() => e.message);}
+          finally {if (scope === generation) setBusy(false);}
+        }));
+      }
       const native = el('chat-native'); native.replaceChildren();
       if (canOpenLinks && page.self === true && m.participant === dashboardData?.conversationMain?.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '')) {
         native.append(action(() => t('chat.native'), () => openHostLink(page.nativeUri,status)));
@@ -2949,21 +2999,21 @@ function peerScope(d, allowPartial = false) {
   return !readOnly && d?.conversationBinding === 'matched' && m?.source === 'room-session' && m.state === 'joined' &&
     m.provider === 'codex' && m.participant && (m.incomplete === false || (allowPartial && m.incomplete === true)) ? m.room : undefined;
 }
-async function peerAction(check) {
+async function peerAction(check, repair = false) {
   const room = peerScope(dashboardData,true);
-  if (!room || room !== peerRoom || busy || el('view').hidden || (check ? !peerRequest : peerRequest)) return;
+  if (!room || room !== peerRoom || busy || el('view').hidden || ((check || repair) ? !peerRequest : peerRequest) || (repair && el('peer-repair').hidden)) return;
   const provider = el('peer-provider').value, task = el('peer-task').value.trim();
-  if (!check) {
+  if (!check && !repair) {
     if (!['claude','agy'].includes(provider) || !task || Array.from(task).length > 1000) {el('peer-task').focus(); return;}
     peerRequest = {room, provider, task, title:Array.from(task).slice(0,24).join(''), requestId:crypto.randomUUID()};
   }
   const req = peerRequest, expected = generation, status = el('peer-status');
   const current = () => generation === expected && peerRequest === req && peerRoom === room;
-  setBusy(true,true); el('peer-controls').disabled = true; el('peer-check').disabled = true;
+  el('peer-repair').hidden = true; setBusy(true,true); el('peer-controls').disabled = true; el('peer-check').disabled = true;
   put(status,() => t(check ? 'peer.reading' : 'peer.sending'));
   try {
     const result = check ? (await tool('oms_assign_result',{room,requestId:req.requestId},expected))._meta?.assignment :
-      (await tool('oms_assign_provider',req,expected)).structuredContent;
+      (await tool('oms_assign_provider',repair ? {...req,repairOnly:true} : req,expected)).structuredContent;
     if (!current()) return;
     if (result?.room !== room || result.requestId !== req.requestId) throw uiError('peer.mismatch');
     if (check && result.status === 'not_found') {
@@ -2972,12 +3022,13 @@ async function peerAction(check) {
     const wanted = req.provider === 'agy' ? 'antigravity' : req.provider;
     if (result.role !== 'researcher' || result.provider !== wanted || result.readOnly !== true ||
         result.participant !== 'ask-' + req.requestId) throw uiError('peer.badActor');
-    if (['started','recorded'].includes(result.status) && result.operation) {
+    if ((['started','recorded'].includes(result.status) || (check && result.status === 'recovered')) && result.operation) {
       peerMember = {room,participant:result.participant,provider:wanted,role:'researcher',joined:true};
       if (!members.some(m => memberKey(m) === memberKey(peerMember))) members.push(peerMember);
       renderMemberList();
-      put(status,() => t('peer.accepted',{p:providerName(wanted),title:req.title}));
-      el('peer-chat').hidden = el('peer-next').hidden = false;
+      const recovered = result.status === 'recovered';
+      put(status,() => recovered ? t('peer.recovered') : t('peer.accepted',{p:providerName(wanted),title:req.title}));
+      el('peer-chat').hidden = false; el('peer-repair').hidden = !recovered; el('peer-next').hidden = recovered;
     } else {
       put(status,() => t('peer.unknown'));
     }
@@ -2991,6 +3042,7 @@ async function peerAction(check) {
 }
 el('peer-form').addEventListener('submit',event => {event.preventDefault(); peerAction(false);});
 el('peer-check').addEventListener('click',() => peerAction(true));
+el('peer-repair').addEventListener('click',() => peerAction(false,true));
 el('peer-chat').addEventListener('click',() => {if (peerMember && peerRoom === peerScope(dashboardData,true)) selectMember(peerMember,el('peer-chat'));});
 el('peer-next').addEventListener('click',() => {
   if (busy || !peerMember || peerRoom !== peerScope(dashboardData,true)) return;
@@ -3319,7 +3371,7 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw uiError('openApp');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.1'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.2'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || {k:'surf.unknown'};
       hostLocale = typeof info?.hostContext?.locale === 'string' ? info.hostContext.locale : '';

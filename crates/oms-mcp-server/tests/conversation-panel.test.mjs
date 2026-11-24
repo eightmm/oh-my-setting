@@ -517,6 +517,39 @@ async function pickIssue(p) {
   card.children.at(-1).dispatchEvent(new Event('click')); await setImmediate();
 }
 
+test('explicit open issue review shows fixed localized evidence separately from the draft and discards stale reads', async () => {
+  const p=await panel(['one','two'],{},{readOnly:true,message:true});
+  p.get('project-choice').value='one'; await p.event('project-choice','change');
+  await pickIssue(p);
+  const evidence=p.get('issue-evidence'), draft=p.get('git-goal');
+  const pin={kind:'github-issue',state:'open',reference:'https://github.com/Org/rEpO/issues/9',revision:'2026-11-24T09:00:00Z',sha256:'a'.repeat(64),bytes:30};
+  let source={...pin};
+  p.host.tools.oms_panel_git_status=args=>args.issuePreview?{issuePreview:source}:workData;
+  assert.equal(p.calls.some(c=>c.args.issuePreview),false);
+  draft.value='내가 쓴 지시'; await p.event('git-goal','input');
+  await p.event('issue-review','click');
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',issuePreview:9});
+  assert.match(evidence.textContent,/열린 이슈/);
+  for(const field of [pin.reference,pin.revision,pin.sha256]) assert.ok(evidence.textContent.includes(field));
+  await choose(p,'en'); assert.match(evidence.textContent,/Open issue/); assert.equal(draft.value,'내가 쓴 지시');
+  for(const reference of ['https://github.com/other/repo/issues/9',pin.reference+'?id=9',
+      pin.reference+'#comment',pin.reference.replace('/issues/','/ISSUES/'),pin.reference.replace('/9','/09')]){
+    source={...pin,reference};
+    await p.event('issue-review','click'); assert.match(evidence.textContent,/Could not verify/);
+    assert.ok(!evidence.textContent.includes(pin.sha256));
+  }
+  source={...pin}; p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click'); const old=p.host.release;
+  await p.event('refresh','click'); source={...pin,sha256:'b'.repeat(64)}; await p.event('issue-review','click'); old(); await setImmediate();
+  assert.ok(evidence.textContent.includes(source.sha256)); assert.ok(!evidence.textContent.includes(pin.sha256));
+  p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click'); const itemReply=p.host.release;
+  await p.event('git-backlog','click'); itemReply(); await setImmediate();
+  assert.equal(evidence.textContent,''); assert.equal(p.get('issue-review').hidden,true);
+  await pickIssue(p); p.host.tools.oms_panel_git_status=args=>args.issuePreview?{issuePreview:source}:workData;
+  p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click');
+  await p.open('input',{arguments:{project:'two'}}); p.host.release(); await setImmediate();
+  assert.equal(evidence.textContent,''); assert.equal(p.host.messages.length,0);
+  assert.deepEqual([...new Set(p.calls.map(c=>c.name))].sort(),['oms_list_projects','oms_panel_git_status','oms_panel_project_graph','oms_panel_snapshot','oms_panel_work_items']);
+});
 test('Git issue is an editable Lead request, and only an explicit send posts it to a matched Main', async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   await pickIssue(p);
@@ -534,7 +567,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.1');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.2');
   for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
     const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
     assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
@@ -1132,6 +1165,22 @@ test('read-only peer is explicitly requested once, recovered by ID and opened in
   assert.equal(p.calls.at(-1).args.participant,'ask-'+req.requestId);
   assert.match(p.get('chat-result').textContent,/Recorded answer/); assert.equal(starts().length,1);
 });
+test('checking an unlinked operation is read-only and repairing reuses the immutable request',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'owner',incomplete:false};
+  const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  const answer=(req,status)=>({...req,status,role:'researcher',participant:'ask-'+req.requestId,readOnly:true,operation:'ask-confirmed'});
+  p.host.tools={oms_assign_provider:a=>answer(a,a.repairOnly?'started':'unconfirmed'),oms_assign_result:a=>answer({...a,provider:'claude'},'recovered')};
+  p.get('peer-provider').value='claude';p.get('peer-task').value='Original review';
+  await p.event('peer-form','submit');const original=p.calls.at(-1).args;
+  await p.event('peer-check','click');
+  await choose(p,'en');assert.match(p.get('peer-status').textContent,/operation found/);
+  await choose(p,'ko');assert.match(p.get('peer-status').textContent,/실행 기록을 찾/);
+  assert.equal(p.get('peer-repair').hidden,false);assert.equal(p.get('peer-chat').hidden,false);
+  assert.equal(p.calls.filter(c=>c.name==='oms_assign_provider').length,1);
+  p.get('peer-task').value='Changed draft';
+  await p.event('peer-repair','click');assert.deepEqual({...p.calls.at(-1).args},{...original,repairOnly:true});
+  assert.equal(p.get('peer-repair').hidden,true);
+});
 test('partial exact membership checks authority only on request and keeps its ID after a bounded refusal',async()=>{
   const main={source:'room-session',state:'joined',provider:'codex',room:'observed',participant:'owner',incomplete:true};
   const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
@@ -1175,6 +1224,21 @@ async function reviewedPanel(options = {}, response = {}) {
   await setImmediate();
   return p;
 }
+
+test('reopening an unlinked researcher permits only an explicit repair of that Room request',async()=>{
+  const assignment={state:'recovered',title:'Title',task:'Full original task'};
+  const p=await reviewedPanel({}, {assignment});
+  const writes=()=>p.calls.filter(c=>c.name==='oms_assign_provider');
+  assert.equal(writes().length,0);await choose(p,'en');
+  const button=p.get('chat-result').children.find(b=>b.textContent==='Link operation to Room');
+  assert.ok(button);
+  p.host.tools.oms_assign_provider=a=>({...a,participant:reviewMember.participant,status:'recorded'});
+  button.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...writes()[0].args},{project:'one',room:reviewMember.room,requestId:reviewMember.participant.slice(4),
+    provider:'claude',task:assignment.task,title:assignment.title,repairOnly:true});
+  await p.event('tab-overview','click');button.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(writes().length,1);assert.equal(p.host.messages.length,0);
+});
 
 test('review preview and cancel are local, translate instantly, and share only the selected answer once',async()=>{
   const p = await reviewedPanel({message:true});

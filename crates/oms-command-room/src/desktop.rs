@@ -510,6 +510,7 @@ impl Room<'_> {
             ("role", member.map_or(Value::Null, |p| p["role"].clone())),
             ("title", member.map_or(Value::Null, |p| p["label"].clone())),
             ("task", task["text"].clone()),
+            ("assignedAt", task["ts"].clone()),
             ("readOnly", true.into()),
             ("thread", Value::Null),
             ("status", "assigned".into()),
@@ -594,8 +595,7 @@ impl Room<'_> {
         consumer: &str,
         request: &str,
     ) -> Result<Value> {
-        self.assignment_owner(id, consumer, request)?;
-        let state = crate::project(&self.records(id)?)?;
+        let state = self.assignment_owner(id, consumer, request)?;
         Ok(self.assignment_receipt(&state, request, None))
     }
 

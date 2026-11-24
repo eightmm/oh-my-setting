@@ -8,7 +8,7 @@ use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
@@ -1677,8 +1677,10 @@ fn intent_issues_lists_labeled_candidates_read_only() {
 /// intent acceptance; every other service stays unavailable.
 struct Planner {
     repo: PathBuf,
+    during_issue_read: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     answer: std::sync::Mutex<String>,
     calls: std::sync::atomic::AtomicUsize,
+    issue_reads: std::sync::atomic::AtomicUsize,
 }
 impl oms_command_plan::Services for Planner {
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
@@ -1711,6 +1713,35 @@ impl oms_command_plan::Services for Planner {
     }
 }
 impl Services for Planner {
+    fn resolve_route(
+        &self,
+        _: &Path,
+        assignment: &serde_json::Value,
+        _: &str,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<oms_command_autonomy::services::ModelRoute> {
+        Ok(oms_command_autonomy::services::ModelRoute {
+            provider: value::text(assignment, "provider").into(),
+            model_class: "fixture".into(),
+            primary: "fixture-model".into(),
+            fallback: String::new(),
+            effort: "auto".into(),
+            fallback_effort: "auto".into(),
+        })
+    }
+    fn read_issue(&self, endpoint: &str, _: &AtomicBool) -> oms_command_autonomy::Result<Vec<u8>> {
+        self.issue_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            endpoint,
+            "repos/example-org/example-repo/issues/7" | "repos/example-org/example-repo/issues/8"
+        ));
+        if let Some(hook) = self.during_issue_read.lock().unwrap().take() {
+            hook();
+        }
+        fs::read(self.repo.join(".oms/issue-response"))
+            .map_err(|_| oms_command_autonomy::Error::new(2, "issue unavailable"))
+    }
     fn state_repository(
         &self,
         work: &Path,
@@ -1723,16 +1754,24 @@ impl Services for Planner {
         call: &Invocation,
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
-        assert_eq!(call.tool, "agent-call");
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let option = |key: &str| {
+            call.args
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .and_then(|pair| pair[1].to_str())
+                .unwrap_or("")
+        };
+        if call.tool == "peer-ask" {
+            let (report, files) = council_fixture(option("--prompt"));
+            let dir = Path::new(option("--artifact-dir"));
+            for (name, bytes) in files {
+                write_private(&dir.join(name), &bytes);
+            }
+            return Ok((0, report, vec![]));
+        }
+        assert_eq!(call.tool, "agent-call");
         if call.args.iter().any(|arg| arg == "--output-json") {
-            let option = |key: &str| {
-                call.args
-                    .windows(2)
-                    .find(|pair| pair[0] == key)
-                    .and_then(|pair| pair[1].to_str())
-                    .unwrap_or("")
-            };
             let provider = option("--to");
             let model = if option("--model").is_empty() {
                 "fixture-model"
@@ -1742,7 +1781,16 @@ impl Services for Planner {
             let run = format!("fixture-{n}");
             let name = format!("{provider}-answer-{run}.md");
             let path = Path::new(option("--artifact-dir")).join(&name);
-            let answer = self.answer.lock().unwrap().clone();
+            let mut answer = self.answer.lock().unwrap().clone();
+            if answer == "grounded-fixture" {
+                let title = if option("--prompt").contains(r#""body":"Require audited red pixels""#)
+                {
+                    "Verify audited red pixels"
+                } else {
+                    "Issue requirements absent"
+                };
+                answer = ANSWER.replace("one", title);
+            }
             let mut raw = format!("# OMS agent-call\n\n- provider: {provider}\n- model: {model}\n- run: {run}\n- round: 0\n\n## Prompt\n\n{}\n\n## Output\n\n", option("--prompt")).into_bytes();
             let start = raw.len();
             raw.extend_from_slice(answer.as_bytes());
@@ -1802,6 +1850,7 @@ impl Repo {
     /// example-org/example-repo; `origin` decides whether the mode is active.
     fn github(origin: &str, spec: Option<&str>) -> Self {
         let repo = Self::new();
+        repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
         repo.write("tests/check.sh", "exit 0\n");
         repo.write("tests/ok.sh", "exit 0\n");
         repo.write("src/lib.rs", "pub fn ok() {}\n");
@@ -1821,8 +1870,10 @@ impl Repo {
     fn planner(&self, answer: &str) -> Planner {
         Planner {
             repo: self.0.clone(),
+            during_issue_read: Default::default(),
             answer: std::sync::Mutex::new(answer.into()),
             calls: 0.into(),
+            issue_reads: 0.into(),
         }
     }
 }
@@ -2233,6 +2284,602 @@ fn github_issue_intake_is_stamped_only_by_the_harness() {
         );
         assert_eq!(out.contains(pending), carried.is_none(), "{out}");
     }
+}
+
+#[test]
+fn project_issue_requirements_bind_preview_generation_council_and_admission() {
+    if scrubbed_child("project_issue_requirements_bind_preview_generation_council_and_admission") {
+        return;
+    }
+    use std::sync::atomic::Ordering::SeqCst;
+    let repo = Repo::github(ORIGIN, Some(SPEC));
+    let planner = repo.planner("grounded-fixture");
+    let url = "https://github.com/example-org/example-repo/issues/7";
+    let issue = json!({"id":57,"number":7,"html_url":url,"state":"open","title":"Feature",
+        "updated_at":"2026-01-01T00:00:00Z","body":"Require audited red pixels"});
+    let respond =
+        |v: &serde_json::Value| repo.write(".oms/issue-response", value::pretty(v).unwrap());
+    let preview = || {
+        intake(
+            "intent",
+            &repo,
+            &planner,
+            &[
+                "draft",
+                "--repo",
+                repo.0.to_str().unwrap(),
+                "--from-project-issue",
+                "7",
+                "--dry-run",
+            ],
+        )
+    };
+    respond(&issue);
+    let (code, data, err) = preview();
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(planner.issue_reads.load(SeqCst), 1);
+    let selected = value::parse(data.as_bytes()).unwrap();
+    assert!(!data.contains("pixels") && !data.contains("Feature"));
+    let pin = selected["source"]["sha256"].as_str().unwrap();
+    let (code, legacy, err) = intake(
+        "intent",
+        &repo,
+        &planner,
+        &["draft", "--from-issue", url, "--dry-run"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let mut expected = value::parse(legacy.as_bytes()).unwrap();
+    expected["source"]["state"] = "open".into();
+    assert_eq!(expected, selected);
+    assert_eq!(
+        selected["source"]["bytes"],
+        "Feature\n\nRequire audited red pixels".len()
+    );
+    assert_eq!(planner.calls.load(SeqCst), 0);
+    assert!(!repo.0.join(".oms/intents").exists());
+
+    let options = [
+        "--issue",
+        "7",
+        "--issue-source-sha256",
+        pin,
+        "--with-issue-requirements",
+    ];
+    let mut auto_args = vec!["propose", "--base", "main"];
+    auto_args.extend(options);
+    let owner = repo.0.join(".oms/plan/autopilot-run.json");
+    let managed = repo
+        .0
+        .join(".oms/plan/reviewed-issue-sources")
+        .join(format!("{pin}.json"));
+    for (key, invalid) in [
+        ("state", json!("closed")),
+        ("pull_request", json!({})),
+        (
+            "html_url",
+            json!("https://github.com/foreign/repo/issues/7"),
+        ),
+        ("body", json!("stale content")),
+    ] {
+        let mut wrong = issue.clone();
+        wrong[key] = invalid;
+        respond(&wrong);
+        if key != "body" {
+            assert_ne!(preview().0, 0);
+        }
+        assert_ne!(intake("autopilot", &repo, &planner, &auto_args).0, 0);
+        assert!(!owner.exists() && !managed.exists());
+        assert_eq!(planner.calls.load(SeqCst), 0);
+    }
+    repo.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/foreign/repo.git",
+    ]);
+    let reads = planner.issue_reads.load(SeqCst);
+    assert_ne!(preview().0, 0);
+    assert_eq!(planner.issue_reads.load(SeqCst), reads);
+    repo.git(&["remote", "set-url", "origin", ORIGIN]);
+    respond(&issue);
+    let project_path = repo.0.join("PROJECT.md");
+    *planner.during_issue_read.lock().unwrap() = Some(Box::new(move || {
+        write_private(&project_path, format!("{SPEC}\n").as_bytes())
+    }));
+    let reads = planner.issue_reads.load(SeqCst);
+    assert_ne!(intake("autopilot", &repo, &planner, &auto_args).0, 0);
+    assert_eq!(planner.issue_reads.load(SeqCst), reads + 1);
+    assert_eq!(
+        fs::read_to_string(repo.0.join("PROJECT.md")).unwrap(),
+        format!("{SPEC}\n")
+    );
+    assert!(!owner.exists() && !managed.exists());
+    assert_eq!(planner.calls.load(SeqCst), 0);
+    repo.write("PROJECT.md", SPEC);
+    let reads = planner.issue_reads.load(SeqCst);
+    let mut council = options.to_vec();
+    council.extend(["--collaboration", "auto"]);
+    let (code, out, err) = intake("plan-from-spec", &repo, &planner, &council);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(planner.issue_reads.load(SeqCst), reads + 1);
+    let (path, digest) = printed(&out);
+    let proposal = json_file(&path);
+    assert_eq!(proposal["tasks"][0]["title"], "Verify audited red pixels");
+    assert_eq!(
+        proposal["issue_source"],
+        json!({"issue":ISSUE,"sha256":pin,"with_requirements":true})
+    );
+    let manifest = json_file(
+        repo.0
+            .join(proposal["discussion"]["path"].as_str().unwrap()),
+    );
+    let question =
+        fs::read_to_string(repo.0.join(manifest["question"]["path"].as_str().unwrap())).unwrap();
+    assert!(question.contains(r#""body":"Require audited red pixels""#));
+    assert!(question.contains("untrusted project data"));
+    assert!(!managed.exists());
+    let apply = |p: &str, sha: &str| {
+        intake(
+            "plan-from-spec",
+            &repo,
+            &planner,
+            &["--apply", p, "--expected-proposal-sha256", sha],
+        )
+    };
+    let active = repo.0.join(".oms/plan/tasks.json");
+    for flag in [serde_json::Value::Null, json!(false), json!("true")] {
+        let mut modified = proposal.clone();
+        if flag.is_null() {
+            modified["issue_source"]
+                .as_object_mut()
+                .unwrap()
+                .remove("with_requirements");
+        } else {
+            modified["issue_source"]["with_requirements"] = flag;
+        }
+        let raw = value::pretty(&modified).unwrap();
+        repo.write(".oms/plan/modified.json", &raw);
+        assert_ne!(apply(".oms/plan/modified.json", &value::hash(&raw)).0, 0);
+        assert!(!active.exists());
+    }
+    let mut foreign = proposal.clone();
+    foreign["issue_source"]["sha256"] = "a".repeat(64).into();
+    let raw = value::pretty(&foreign).unwrap();
+    repo.write(".oms/plan/modified.json", &raw);
+    let (code, _, err) = apply(".oms/plan/modified.json", &value::hash(&raw));
+    assert_ne!(code, 0);
+    assert!(err.contains("discussion question differs"), "{err}");
+
+    let reads = planner.issue_reads.load(SeqCst);
+    let (code, out, err) = intake("autopilot", &repo, &planner, &auto_args);
+    assert_eq!(code, 4, "{err}");
+    assert_eq!(planner.issue_reads.load(SeqCst), reads + 1);
+    let (owned_path, _) = printed(&out);
+    let recorded = json_file(&owner);
+    assert_eq!(
+        recorded["contract"]["issue_requirements"],
+        json!({"issue":ISSUE,"sha256":pin})
+    );
+    assert_eq!(
+        json_file(owned_path)["tasks"][0]["title"],
+        "Verify audited red pixels"
+    );
+    assert_eq!(value::hash(fs::read(&managed).unwrap()), pin);
+    assert_eq!(
+        fs::metadata(&managed).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Recover the exact private boundary after the owner save but before its first dispatch.
+    let mut initial = recorded.clone();
+    initial["stage"] = "proposing".into();
+    initial["proposal"] = json!({"path":"","sha256":""});
+    write_private(&owner, &value::pretty(&initial).unwrap());
+    let progress = repo.0.join(".oms/plan/progress.jsonl");
+    fs::remove_file(&progress).unwrap();
+    fs::remove_file(repo.0.join(".oms/issue-response")).unwrap();
+    let original = fs::read(&managed).unwrap();
+    write_private(&managed, b"{}");
+    let reads = planner.issue_reads.load(SeqCst);
+    let calls = planner.calls.load(SeqCst);
+    let resume = || intake("autopilot", &repo, &planner, &["propose"]);
+    let (code, _, err) = resume();
+    assert_ne!(code, 0);
+    assert!(err.contains("retained issue requirements changed"), "{err}");
+    assert_eq!(planner.calls.load(SeqCst), calls);
+    assert!(!progress.exists());
+    write_private(&managed, &original);
+    let (code, out, err) = resume();
+    assert_eq!(code, 4, "{err}");
+    assert_eq!(planner.issue_reads.load(SeqCst), reads);
+    let resumed = json_file(printed(&out).0);
+    assert_eq!(resumed["issue_source"], proposal["issue_source"]);
+    assert_eq!(resumed["tasks"], proposal["tasks"]);
+    assert_eq!(json_file(&owner)["owner_id"], recorded["owner_id"]);
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "abandon",
+            "--reason",
+            "fixture verifies approved native plan separately",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let mut closed = issue.clone();
+    closed["state"] = "closed".into();
+    respond(&closed);
+    assert_ne!(apply(&path, &digest).0, 0);
+    assert!(!active.exists());
+    let mut observed = issue.clone();
+    for invalid in [
+        url.replace("/issues/", "/ISSUES/"),
+        url.replace("https://github.com/", "HTTPS://GITHUB.COM/"),
+    ] {
+        observed["html_url"] = invalid.as_str().into();
+        respond(&observed);
+        assert_ne!(preview().0, 0, "{invalid}");
+        assert_ne!(apply(&path, &digest).0, 0, "{invalid}");
+        assert!(!active.exists());
+        let (code, data, err) = intake(
+            "intent",
+            &repo,
+            &planner,
+            &["draft", "--from-issue", url, "--dry-run"],
+        );
+        assert_eq!(code, 0, "{err}");
+        let legacy = value::parse(data.as_bytes()).unwrap();
+        assert_eq!(legacy["source"]["reference"], invalid);
+        assert_eq!(legacy["source"]["sha256"], pin);
+    }
+    observed["html_url"] = "https://github.com/Example-Org/EXAMPLE-repo/issues/7".into();
+    respond(&observed);
+    let (code, data, err) = preview();
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(value::parse(data.as_bytes()).unwrap(), selected);
+    let (code, _, err) = apply(&path, &digest);
+    assert_eq!(code, 0, "{err}");
+    let saved = fs::read(&active).unwrap();
+    fs::remove_file(&managed).unwrap();
+    fs::remove_file(repo.0.join(".oms/issue-response")).unwrap();
+    let reads = planner.issue_reads.load(SeqCst);
+    let (code, _, err) = apply(&path, &digest);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(planner.issue_reads.load(SeqCst), reads);
+    assert_eq!(fs::read(active).unwrap(), saved);
+    assert_eq!(
+        fs::read(repo.0.join("PROJECT.md")).unwrap(),
+        SPEC.as_bytes()
+    );
+}
+
+#[test]
+fn reviewed_project_issue_checks_each_proposal_on_first_admission() {
+    if scrubbed_child("reviewed_project_issue_checks_each_proposal_on_first_admission") {
+        return;
+    }
+    let repo = Repo::github(ORIGIN, Some(SPEC));
+    let planner = repo.planner(ANSWER);
+    let issue_url = "https://github.com/example-org/example-repo/issues/7";
+    let open = json!({"id":57,"number":7,"html_url":issue_url,"state":"open","title":"Feature",
+        "updated_at":"2026-01-01T00:00:00Z","body":"One requirement"});
+    let respond =
+        |v: &serde_json::Value| repo.write(".oms/issue-response", value::pretty(v).unwrap());
+    respond(&open);
+    let (code, preview, err) = intake(
+        "intent",
+        &repo,
+        &planner,
+        &["draft", "--from-issue", issue_url, "--dry-run"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let preview = value::parse(preview.as_bytes()).unwrap();
+    let source_sha = preview["source"]["sha256"].as_str().unwrap();
+    assert!(preview["trusted"] == false && !repo.0.join(".oms/intents").exists());
+    assert_eq!(planner.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let mut generated = value::parse(ANSWER.as_bytes()).unwrap();
+    let mut next = generated["tasks"][0].clone();
+    next["id"] = "t2".into();
+    next["depends"] = json!(["t1"]);
+    generated["tasks"].as_array_mut().unwrap().push(next);
+    *planner.answer.lock().unwrap() = generated.to_string();
+    fs::remove_file(repo.0.join(".oms/issue-response")).unwrap();
+    let (code, out, err) = intake(
+        "plan-from-spec",
+        &repo,
+        &planner,
+        &["--issue", "#7", "--issue-source-sha256", source_sha],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (path, sha) = printed(&out);
+    let proposal = json_file(&path);
+    assert_eq!(proposal["schema"], 2);
+    assert_eq!(
+        proposal["issue_source"],
+        json!({"issue": ISSUE,"sha256":source_sha})
+    );
+    assert_eq!(
+        fs::read(repo.0.join("PROJECT.md")).unwrap(),
+        SPEC.as_bytes()
+    );
+    let direct = |path: &str, sha: &str| {
+        oms_command_plan::run_with_services(
+            &[
+                "apply-proposal",
+                "--proposal",
+                path,
+                "--expected-proposal-sha256",
+                sha,
+                "--expected-plan-sha256",
+                "absent",
+                "--goal",
+                "test native contracts",
+                "--accept",
+                "bash tests/check.sh",
+                "--accept-files",
+                "tests/check.sh",
+                "--allowed-envelope",
+                "src",
+            ]
+            .map(OsString::from),
+            &repo.0,
+            &AtomicBool::new(false),
+            &planner,
+        )
+    };
+    let (code, _, err) = direct(&path, &sha);
+    assert_ne!(code, 0);
+    assert!(
+        String::from_utf8_lossy(&err).contains("first issue intake requires"),
+        "{err:?}"
+    );
+    let active = repo.0.join(".oms/plan/tasks.json");
+    let apply = || {
+        intake(
+            "plan-from-spec",
+            &repo,
+            &planner,
+            &["--apply", &path, "--expected-proposal-sha256", &sha],
+        )
+    };
+    for options in [
+        vec!["--issue-source-sha256", source_sha],
+        vec!["--issue", "7", "--issue-source-sha256", "bad"],
+    ] {
+        let count = proposals(&repo);
+        assert_ne!(intake("plan-from-spec", &repo, &planner, &options).0, 0);
+        assert_eq!(proposals(&repo), count);
+    }
+    respond(&open);
+    repo.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/fork-owner/example-repo.git",
+    ]);
+    assert_ne!(apply().0, 0);
+    assert!(!active.exists());
+    repo.git(&["remote", "set-url", "origin", ORIGIN]);
+    let project_path = repo.0.join("PROJECT.md");
+    *planner.during_issue_read.lock().unwrap() = Some(Box::new(move || {
+        write_private(&project_path, format!("{SPEC}\n").as_bytes())
+    }));
+    assert_ne!(apply().0, 0);
+    assert!(!active.exists());
+    repo.write("PROJECT.md", SPEC);
+    for (key, changed) in [
+        ("state", "closed"),
+        ("updated_at", "2026-01-02T00:00:00Z"),
+        ("body", "different"),
+        (
+            "html_url",
+            "https://github.com/foreign-owner/example-repo/issues/7",
+        ),
+    ] {
+        let mut invalid = open.clone();
+        invalid[key] = changed.into();
+        respond(&invalid);
+        assert_ne!(apply().0, 0);
+        assert!(!active.exists());
+    }
+    fs::remove_file(repo.0.join(".oms/issue-response")).unwrap();
+    assert_ne!(apply().0, 0);
+    assert!(!active.exists());
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "run",
+            "--proposal",
+            &path,
+            "--expected-proposal-sha256",
+            &sha,
+        ],
+    );
+    assert_ne!(code, 0, "{err}");
+    assert!(!repo.0.join(".oms/plan/autopilot-run.json").exists());
+    respond(&open);
+    repo.git(&["checkout", "--detach", "HEAD"]);
+    let (code, out, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "propose",
+            "--base",
+            "main",
+            "--issue",
+            "7",
+            "--issue-source-sha256",
+            source_sha,
+        ],
+    );
+    assert_eq!(code, 4, "{err}");
+    let (saved, saved_sha) = printed(&out);
+    let receipt = repo.0.join(".oms/plan/autopilot-run.json");
+    let before = fs::read(&receipt).unwrap();
+    let mut concurrent = before.clone();
+    concurrent.push(b' ');
+    let changing = receipt.clone();
+    let writer = concurrent.clone();
+    *planner.during_issue_read.lock().unwrap() =
+        Some(Box::new(move || write_private(&changing, &writer)));
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "run",
+            "--proposal",
+            &saved,
+            "--expected-proposal-sha256",
+            &saved_sha,
+        ],
+    );
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("owner or reviewed proposal changed"), "{err}");
+    assert_eq!(fs::read(&receipt).unwrap(), concurrent);
+    assert!(!active.exists());
+    write_private(&receipt, &before);
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "abandon",
+            "--reason",
+            "fixture scopes native replay separately",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = apply();
+    assert_eq!(code, 0, "{err}");
+    let accepted = fs::read(&active).unwrap();
+    assert_eq!(
+        json_file(&active)["tasks"]["t1"]["issue_intake"]["proposal_sha256"],
+        sha
+    );
+    fs::remove_file(repo.0.join(".oms/issue-response")).unwrap();
+    let (code, _, err) = apply();
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = direct(&path, &sha);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    assert_eq!(
+        json_file(&active)["tasks"]["t1"]["issue_intake"]["github_id"],
+        57
+    );
+    assert_eq!(
+        json_file(&active)["tasks"]["t1"]["issue_intake"]["revision"],
+        open["updated_at"]
+    );
+    assert_eq!(fs::read(&active).unwrap(), accepted);
+    let mut lookalike = fs::read(&path).unwrap();
+    lookalike.push(b' ');
+    repo.write(".oms/plan/lookalike.json", &lookalike);
+    let (code, _, err) = intake(
+        "plan-from-spec",
+        &repo,
+        &planner,
+        &[
+            "--apply",
+            ".oms/plan/lookalike.json",
+            "--expected-proposal-sha256",
+            &value::hash(&lookalike),
+        ],
+    );
+    assert_ne!(code, 0, "{err}");
+    assert_eq!(fs::read(&active).unwrap(), accepted);
+    let mut partial = value::parse(&accepted).unwrap();
+    partial["tasks"].as_object_mut().unwrap().remove("t2");
+    let partial = value::pretty(&partial).unwrap();
+    write_private(&active, &partial);
+    assert_ne!(apply().0, 0);
+    assert_eq!(fs::read(&active).unwrap(), partial);
+    write_private(&active, &accepted);
+    let mut other = open.clone();
+    other["number"] = 8.into();
+    other["id"] = 61.into();
+    let next_url = "https://github.com/example-org/example-repo/issues/8";
+    other["html_url"] = next_url.into();
+    respond(&other);
+    let (code, preview, err) = intake(
+        "intent",
+        &repo,
+        &planner,
+        &["draft", "--from-issue", next_url, "--dry-run"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let second = value::parse(preview.as_bytes()).unwrap();
+    let pin = second["source"]["sha256"].as_str().unwrap();
+    *planner.answer.lock().unwrap() = ANSWER.replace("t1", "t3");
+    let (code, out, err) = intake("autopilot", &repo, &planner, &["propose", "--base", "main"]);
+    assert_eq!(code, 4, "{err}");
+    let (pending, reviewed) = printed(&out);
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "propose",
+            "--restamp",
+            &pending,
+            "--expected-proposal-sha256",
+            &reviewed,
+            "--issue",
+            "8",
+            "--issue-source-sha256",
+            pin,
+        ],
+    );
+    assert_eq!(code, 4, "{err}");
+    let waiting = json_file(&receipt);
+    assert_eq!(waiting["issue_source_sha256"], pin);
+    let next = waiting["proposal"]["path"].as_str().unwrap();
+    let digest = waiting["proposal"]["sha256"].as_str().unwrap();
+    // Materialize the recovery boundary: native Plan CAS succeeded but its
+    // controller still owns the original proposal-review receipt.
+    let (code, _, err) = intake(
+        "plan-from-spec",
+        &repo,
+        &planner,
+        &["--apply", next, "--expected-proposal-sha256", digest],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json_file(&receipt), waiting);
+    let committed = fs::read(&active).unwrap();
+    fs::remove_file(repo.0.join(".oms/issue-response")).unwrap();
+    // Stop the fixture immediately after the controller records approval;
+    // the scoped name conflict prevents launch without a synthetic writer.
+    repo.git(&["branch", "oms", "HEAD"]);
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &planner,
+        &[
+            "run",
+            "--proposal",
+            next,
+            "--expected-proposal-sha256",
+            digest,
+        ],
+    );
+    assert_ne!(code, 0, "{err}");
+    assert_eq!(json_file(&receipt)["stage"], "approved", "{err}");
+    assert_eq!(json_file(&receipt)["owner_id"], waiting["owner_id"]);
+    assert_eq!(fs::read(&active).unwrap(), committed);
+    assert_eq!(
+        json_file(&active)["tasks"]["t1"]["issue_intake"]["source"],
+        proposal["issue_source"]
+    );
+    assert_eq!(
+        json_file(&active)["tasks"]["t3"]["issue_intake"]["source"]["sha256"],
+        pin
+    );
+    assert_eq!(
+        fs::read(repo.0.join("PROJECT.md")).unwrap(),
+        SPEC.as_bytes()
+    );
 }
 
 #[test]
