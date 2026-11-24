@@ -921,12 +921,22 @@ const labelOf = el => el.querySelector('.oms-graph-label');
   // Large children (degree 60 -> 16 px radius) must also clear each other at every width.
   const heavy = {...two, nodes: [...files, ...leaves.map(l => ({...l, degree: 60}))]};
   for (const w of [320, 640, 960]) clean(render(heavy, {width: w}), heavy.nodes, `heavy fans at ${w}`);
-  { // Nested fans: file -> 30 classes, one class -> 30 methods; no body pair overlaps at any width.
-    const cls = Array.from({length: 30}, (_, i) => ({id: `c${i}`, label: `c${i}`, kind: 'file', degree: i ? 1 : 31, show_label: false, assurance: 'supported'}));
-    const meth = Array.from({length: 30}, (_, i) => ({id: `m${i}`, label: `m${i}`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}));
-    const nested = {kind: 'project', title: 'Nest', counts: {}, nodes: [{id: 'f', label: 'f.rs', kind: 'file', degree: 30, show_label: true, assurance: 'supported'}, ...cls, ...meth],
-      edges: [...cls.map(c => ({source: 'f', target: c.id, relation: 'contains', confidence: 'EXTRACTED'})), ...meth.map(m => ({source: 'c0', target: m.id, relation: 'contains', confidence: 'EXTRACTED'}))]};
-    for (const w of [320, 640, 960]) clean(render(nested, {width: w}), nested.nodes, `nested fans at ${w}`);
+  // Nested fans: file -> classes, some classes -> methods. No body pair overlaps and the fitted view holds every node.
+  const nest = (classes, subs, methods) => {
+    const cls = Array.from({length: classes}, (_, i) => ({id: `c${i}`, label: `c${i}`, kind: 'file', degree: i < subs ? methods + 1 : 1, show_label: false, assurance: 'supported'}));
+    const meth = Array.from({length: subs * methods}, (_, i) => ({id: `m${i}`, label: `m${i}`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}));
+    return {kind: 'project', title: 'Nest', counts: {}, nodes: [{id: 'f', label: 'f.rs', kind: 'file', degree: classes, show_label: true, assurance: 'supported'}, ...cls, ...meth],
+      edges: [...cls.map(c => ({source: 'f', target: c.id, relation: 'contains', confidence: 'EXTRACTED'})),
+        ...meth.map((m, i) => ({source: `c${Math.floor(i / methods)}`, target: m.id, relation: 'contains', confidence: 'EXTRACTED'}))]};
+  };
+  for (const [classes, subs, methods] of [[30, 1, 30], [25, 3, 35], [99, 1, 100]]) {
+    const graph = nest(classes, subs, methods);
+    for (const w of [320, 640, 960]) {
+      const view = render(graph, {width: w});
+      clean(view, graph.nodes, `nested ${classes}/${subs}/${methods} at ${w}`);
+      const cam = camera(view); const h = Number(view.svg.attributes.viewBox.split(' ')[3]);
+      for (const p of positions(view)) assert.ok(cam.x + p.x * cam.k >= 0 && cam.x + p.x * cam.k <= w && cam.y + p.y * cam.k >= 0 && cam.y + p.y * cam.k <= h, `nested ${classes}/${subs}/${methods}: fit view holds every node at ${w}`);
+    }
   }
   const big = {kind: 'project', title: 'Fan', counts: {}, nodes: [{id: 'hub', label: 'hub.rs', kind: 'file', degree: 90, show_label: true, assurance: 'supported'},
     ...Array.from({length: 90}, (_, i) => ({id: `leaf${i}`, label: `leaf${i}.rs`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}))],

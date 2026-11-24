@@ -911,7 +911,7 @@
       height = worldH;
     }
     const fanSpan = 2 * (PAD + fans.reduce((acc, fan) => Math.max(acc, fan.parent._fan), 0));
-    worldW = Math.max(worldW, fanSpan); worldH = Math.max(worldH, fanSpan);
+    worldW = Math.max(worldW, Math.ceil(fanSpan)); worldH = Math.max(worldH, Math.ceil(fanSpan));
     if (!narrow) height = worldH;
     svg.attr('viewBox', `0 0 ${width} ${height}`).attr('data-world', `${worldW}x${worldH}`);
     // The svg box equals the viewBox in CSS px, so 1 world unit is 1 px at k=1 and nothing is letterboxed.
@@ -944,7 +944,7 @@
       if (!kids.has(row.source.id)) kids.set(row.source.id, []);
       kids.get(row.source.id).push(row.target);
     });
-    // Bottom-up: a parent whose children fan themselves is built after them, so it reserves their whole rings.
+    // Bottom-up: a child that fans itself stays a free force node carrying its own ring, not a parent slot.
     const heights = new Map();
     const heightOf = (id, seen = new Set()) => {
       if (heights.has(id)) return heights.get(id);
@@ -956,18 +956,17 @@
       return h;
     };
     [...kids.entries()].sort((a, b) => heightOf(a[0]) - heightOf(b[0]) || b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1)).forEach(([id, list]) => {
-      const children = [...new Map(list.filter(c => !claimed.has(c.id) && c.id !== id).map(c => [c.id, c])).values()]
+      const children = [...new Map(list.filter(c => !claimed.has(c.id) && c.id !== id && !c._fan).map(c => [c.id, c])).values()]
         .sort((a, b) => (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
       if (children.length <= FAN_MIN) return;
       const parent = byId.get(id);
       const slots = [];
-      const footprint = c => c._fan || collideRadius(c);
-      const cr = children.reduce((acc, c) => Math.max(acc, footprint(c)), 0);
+      const cr = children.reduce((acc, c) => Math.max(acc, collideRadius(c)), 0);
       const step = 2 * cr + 2;
       let placed = 0;
       for (let ring = 0; placed < children.length; ring += 1) {
         const radius = collideRadius(parent) + cr + 4 + ring * step;
-        const count = Math.min(children.length - placed, Math.max(1, Math.floor(2 * Math.PI * radius / step)));
+        const count = Math.min(children.length - placed, Math.max(1, Math.floor(Math.PI / Math.asin(Math.min(1, step / (2 * radius))))));
         for (let i = 0; i < count; i += 1) {
           const angle = 2 * Math.PI * i / count + ring * .6;
           slots.push({child: children[placed + i], dx: Math.cos(angle) * radius, dy: Math.sin(angle) * radius});
@@ -980,7 +979,7 @@
     });
   })();
   function applyFans() {
-    fans.slice().reverse().forEach(({parent, slots}) => slots.forEach(({child, dx, dy}) => {
+    fans.forEach(({parent, slots}) => slots.forEach(({child, dx, dy}) => {
       if (child.fx !== null && child.fx !== undefined) return;
       child.x = parent.x + dx; child.y = parent.y + dy; child.vx = 0; child.vy = 0;
     }));
