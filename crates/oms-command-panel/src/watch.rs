@@ -369,7 +369,14 @@ fn run_with_source_writer(
         }
         if let Some(before) = before {
             let after = render::visible(&report, &nav);
-            reconcile_selection(&before, &after, &mut nav, &mut selection_changed);
+            let page = key_page(
+                &report,
+                &nav,
+                last_size,
+                interactive.then_some(split.painted_rows),
+                &read,
+            );
+            reconcile_selection_with_page(&before, &after, &mut nav, &mut selection_changed, page);
         }
         if let Some((participant, binding)) = selected_chat
             && observations.chat_binding(&participant) != binding.as_ref()
@@ -790,8 +797,6 @@ fn run_with_source_writer(
                         }
                         continue;
                     }
-                    let identity = calls.get(nav.selected).map(call_identity);
-                    let old_view = nav.view;
                     let was_detail = nav.detail;
                     let page = key_page(
                         &report,
@@ -814,22 +819,15 @@ fn run_with_source_writer(
                         deny_row_action(&mut nav);
                         navigation::Action::None
                     } else {
-                        apply_selection_key(
+                        apply_board_key(
                             &mut nav,
                             &mut selection_changed,
                             &key,
-                            calls.len(),
+                            &report,
+                            &calls,
                             page,
                         )
                     };
-                    if nav.view != old_view {
-                        let reordered = render::visible(&report, &nav);
-                        if let Some(index) = identity.and_then(|id| {
-                            reordered.iter().position(|call| call_identity(call) == id)
-                        }) {
-                            nav.selected = index;
-                        }
-                    }
                     let action =
                         allow_board_action(&mut nav, action, action_scope_current, row_authority);
                     match action {
@@ -4137,34 +4135,40 @@ enum SelectionFence {
     Native,
 }
 
-fn reconcile_selection(
+fn reconcile_selection_with_page(
     before: &[Value],
     after: &[Value],
     nav: &mut navigation::Navigation,
     changed: &mut SelectionFence,
+    page: usize,
 ) {
-    if let Some(selected) = before.get(nav.selected)
-        && !after
-            .iter()
-            .any(|call| call_identity(call) == call_identity(selected))
-    {
-        if native_chat_child(selected) {
+    let selected_native = before.get(nav.selected).is_some_and(native_chat_child);
+    if nav.reconcile_refresh(before, after, page) {
+        if selected_native {
             *changed = SelectionFence::Native;
         } else if *changed == SelectionFence::None {
             *changed = SelectionFence::Changed;
         }
         nav.detail = false;
     }
-    nav.selected = preserve_selection(before, after, nav.selected);
 }
 
-fn apply_selection_key(
+#[cfg(test)]
+fn reconcile_selection(
+    before: &[Value],
+    after: &[Value],
+    nav: &mut navigation::Navigation,
+    changed: &mut SelectionFence,
+) {
+    reconcile_selection_with_page(before, after, nav, changed, 1);
+}
+
+fn apply_selection_fence(
     nav: &mut navigation::Navigation,
     changed: &mut SelectionFence,
     key: &input::Key,
     count: usize,
-    page: usize,
-) -> navigation::Action {
+) -> Option<navigation::Action> {
     const RETRY_DETAIL: &str = "selection changed; press D again for Call Detail";
     let direct_detail = *key == input::Key::Char('D') && !nav.editing;
     if *changed != SelectionFence::None
@@ -4179,14 +4183,14 @@ fn apply_selection_key(
             "selection changed; press Enter again to open".into()
         });
         *changed = SelectionFence::None;
-        return navigation::Action::None;
+        return Some(navigation::Action::None);
     }
     if direct_detail {
         nav.detail = count > 0;
         if nav.notice.as_deref() == Some(RETRY_DETAIL) {
             nav.notice = None;
         }
-        return navigation::Action::None;
+        return Some(navigation::Action::None);
     }
     if matches!(
         key,
@@ -4200,9 +4204,38 @@ fn apply_selection_key(
     ) {
         *changed = SelectionFence::None;
     }
+    None
+}
+
+fn apply_board_key(
+    nav: &mut navigation::Navigation,
+    changed: &mut SelectionFence,
+    key: &input::Key,
+    report: &Value,
+    before: &[Value],
+    page: usize,
+) -> navigation::Action {
+    if let Some(action) = apply_selection_fence(nav, changed, key, before.len()) {
+        return action;
+    }
+    nav.apply_with_calls(key, before, |n| render::visible(report, n), page)
+}
+
+#[cfg(test)]
+fn apply_selection_key(
+    nav: &mut navigation::Navigation,
+    changed: &mut SelectionFence,
+    key: &input::Key,
+    count: usize,
+    page: usize,
+) -> navigation::Action {
+    if let Some(action) = apply_selection_fence(nav, changed, key, count) {
+        return action;
+    }
     nav.apply(key, count, page)
 }
 
+#[cfg(test)]
 fn preserve_selection(before: &[Value], after: &[Value], selected: usize) -> usize {
     before
         .get(selected)
@@ -11667,5 +11700,337 @@ fi
 
         let _ = holder.kill();
         let _ = holder.wait();
+    }
+
+    #[test]
+    fn board_key_and_refresh_paths_reconcile_selection_by_call_identity() {
+        use crate::input::Key;
+        let make_call = |id: &str, attempt: &str, title: &str, state: &str| {
+            serde_json::json!({
+                "participant": id,
+                "attempt": attempt,
+                "attempt_id": attempt,
+                "title": title,
+                "role": "worker",
+                "provider": "codex",
+                "state": state,
+            })
+        };
+        let mut report = serde_json::json!({
+            "room": {
+                "id": "room-nav",
+                "participants": [
+                    make_call("call-0", "att-0", "alpha", "working"),
+                    make_call("call-1", "att-1", "beta", "blocked"),
+                    make_call("call-2", "att-2", "gamma", "working"),
+                    make_call("call-3", "att-3", "delta", "working"),
+                    make_call("call-4", "att-4", "target", "working"),
+                ]
+            }
+        });
+        let page = 2;
+        let mut nav = crate::navigation::Navigation::default();
+        let mut fence = super::SelectionFence::None;
+        let visible_now = |rep: &serde_json::Value, n: &crate::navigation::Navigation| {
+            crate::render::visible(rep, n)
+        };
+        let send_key = |nav: &mut crate::navigation::Navigation,
+                        fence: &mut super::SelectionFence,
+                        rep: &serde_json::Value,
+                        key: &Key| {
+            let before = visible_now(rep, nav);
+            super::apply_board_key(nav, fence, key, rep, &before, page)
+        };
+
+        let initial = visible_now(&report, &nav);
+        let target_id = ("call-4".to_owned(), "att-4".to_owned());
+        let target_idx = initial
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        nav.selected = target_idx;
+        nav.offset = target_idx.saturating_sub(1);
+
+        // 1. Esc after editing a filter restores the prior call by identity even if
+        //    a live refresh shifts rows while editing, and clamps viewport offset.
+        send_key(&mut nav, &mut fence, &report, &Key::Char('/'));
+        send_key(&mut nav, &mut fence, &report, &Key::Char('z'));
+        assert!(visible_now(&report, &nav).is_empty());
+
+        let pre_edit_refresh = visible_now(&report, &nav);
+        report["room"]["participants"] = serde_json::json!([
+            make_call("call-1", "att-1", "beta", "blocked"),
+            make_call("call-4", "att-4", "target", "working"),
+            make_call("call-3", "att-3", "delta", "working"),
+        ]);
+        let post_edit_refresh = visible_now(&report, &nav);
+        super::reconcile_selection_with_page(
+            &pre_edit_refresh,
+            &post_edit_refresh,
+            &mut nav,
+            &mut fence,
+            page,
+        );
+
+        send_key(&mut nav, &mut fence, &report, &Key::Escape);
+        let after_esc = visible_now(&report, &nav);
+        assert!(!nav.editing && nav.filter.is_empty());
+        assert_eq!(
+            super::call_identity(&after_esc[nav.selected]),
+            target_id,
+            "Esc after filter edit must restore prior call"
+        );
+        assert!(nav.offset <= after_esc.len().saturating_sub(page));
+        assert!(nav.selected >= nav.offset && nav.selected < nav.offset + page);
+
+        // 2. `b` toggle enters attention-only (falling back to row 0 when the selected call
+        //    is not an attention call) and leaving `b` keeps the call selected in attention mode
+        //    even if rows reordered while in attention-only.
+        let blocked_id = ("call-1".to_owned(), "att-1".to_owned());
+        send_key(&mut nav, &mut fence, &report, &Key::Char('b'));
+        assert!(nav.attention_only);
+        assert_eq!((nav.selected, nav.offset), (0, 0));
+
+        let pre_att_refresh = visible_now(&report, &nav);
+        report["room"]["participants"] = serde_json::json!([
+            make_call("call-3", "att-3", "delta", "working"),
+            make_call("call-0", "att-0", "alpha", "working"),
+            make_call("call-1", "att-1", "beta", "blocked"),
+            make_call("call-4", "att-4", "target", "working"),
+        ]);
+        let post_att_refresh = visible_now(&report, &nav);
+        super::reconcile_selection_with_page(
+            &pre_att_refresh,
+            &post_att_refresh,
+            &mut nav,
+            &mut fence,
+            page,
+        );
+        assert!(fence == super::SelectionFence::None);
+
+        send_key(&mut nav, &mut fence, &report, &Key::Char('b'));
+        assert!(!nav.attention_only);
+        let after_b = visible_now(&report, &nav);
+        assert_eq!(
+            super::call_identity(&after_b[nav.selected]),
+            blocked_id,
+            "leaving attention-only must keep the currently selected attention call"
+        );
+        assert!(nav.offset <= after_b.len().saturating_sub(page));
+        assert!(nav.selected >= nav.offset && nav.selected < nav.offset + page);
+
+        // 2b. Enter attention-only with a visible blocked call selected: it stays selected
+        //     (reconciled by call identity with clamped offset), not reset to row 0.
+        let multi_report = serde_json::json!({
+            "room": {
+                "id": "room-nav",
+                "participants": [
+                    make_call("call-0", "att-0", "alpha", "working"),
+                    make_call("call-1", "att-1", "beta", "blocked"),
+                    make_call("call-3", "att-3", "delta", "working"),
+                    make_call("call-2", "att-2", "gamma", "blocked"),
+                    make_call("call-4", "att-4", "target", "working"),
+                ]
+            }
+        });
+        let blocked2_id = ("call-2".to_owned(), "att-2".to_owned());
+        let mut multi_nav = crate::navigation::Navigation::default();
+        let mut multi_fence = super::SelectionFence::None;
+        let full_multi = visible_now(&multi_report, &multi_nav);
+        let blocked2_idx = full_multi
+            .iter()
+            .position(|c| super::call_identity(c) == blocked2_id)
+            .unwrap();
+        multi_nav.selected = blocked2_idx;
+        multi_nav.offset = blocked2_idx.saturating_sub(1);
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
+        assert!(multi_nav.attention_only);
+        let att_multi = visible_now(&multi_report, &multi_nav);
+        assert_eq!(att_multi.len(), 2);
+        assert_eq!(
+            super::call_identity(&att_multi[multi_nav.selected]),
+            blocked2_id,
+            "entering attention-only with a visible blocked call selected must keep it selected"
+        );
+        assert_ne!(
+            multi_nav.selected, 0,
+            "fixture should place blocked call after row 0"
+        );
+        assert!(multi_nav.offset <= att_multi.len().saturating_sub(page));
+        assert!(
+            multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page
+        );
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
+        assert!(!multi_nav.attention_only);
+
+        // 2c. Enter attention-only from a non-attention call, move within attention to call X,
+        //     then press `b`: X stays selected (not the stale pre-attention snapshot).
+        let full_before_move = visible_now(&multi_report, &multi_nav);
+        let target_full_idx = full_before_move
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        multi_nav.selected = target_full_idx;
+        multi_nav.offset = target_full_idx.saturating_sub(1);
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
+        assert!(multi_nav.attention_only);
+        assert_eq!((multi_nav.selected, multi_nav.offset), (0, 0));
+        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Down);
+        let att_moved = visible_now(&multi_report, &multi_nav);
+        let moved_id = super::call_identity(&att_moved[multi_nav.selected]);
+        assert_eq!(moved_id, blocked2_id);
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
+        assert!(!multi_nav.attention_only);
+        let after_move_leave = visible_now(&multi_report, &multi_nav);
+        assert_eq!(
+            super::call_identity(&after_move_leave[multi_nav.selected]),
+            moved_id,
+            "leaving attention-only after moving must keep the selected attention call"
+        );
+        assert!(multi_nav.offset <= after_move_leave.len().saturating_sub(page));
+        assert!(
+            multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page
+        );
+
+        // 2d. Enter attention-only with a non-attention call selected when attention list is
+        //     empty: row 0. Leave without moving: the original call is restored.
+        let empty_att_report = serde_json::json!({
+            "room": {
+                "id": "room-nav",
+                "participants": [
+                    make_call("call-0", "att-0", "alpha", "working"),
+                    make_call("call-3", "att-3", "delta", "working"),
+                    make_call("call-4", "att-4", "target", "working"),
+                ]
+            }
+        });
+        let mut empty_nav = crate::navigation::Navigation::default();
+        let mut empty_fence = super::SelectionFence::None;
+        let full_no_att = visible_now(&empty_att_report, &empty_nav);
+        let orig_idx = full_no_att
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        empty_nav.selected = orig_idx;
+        empty_nav.offset = orig_idx.saturating_sub(1);
+        send_key(
+            &mut empty_nav,
+            &mut empty_fence,
+            &empty_att_report,
+            &Key::Char('b'),
+        );
+        assert!(empty_nav.attention_only);
+        assert!(visible_now(&empty_att_report, &empty_nav).is_empty());
+        assert_eq!((empty_nav.selected, empty_nav.offset), (0, 0));
+        send_key(
+            &mut empty_nav,
+            &mut empty_fence,
+            &empty_att_report,
+            &Key::Char('b'),
+        );
+        assert!(!empty_nav.attention_only);
+        let restored = visible_now(&empty_att_report, &empty_nav);
+        assert_eq!(
+            super::call_identity(&restored[empty_nav.selected]),
+            target_id,
+            "leaving empty attention-only without moving must restore the original call"
+        );
+        assert!(empty_nav.offset <= restored.len().saturating_sub(page));
+        assert!(
+            empty_nav.selected >= empty_nav.offset && empty_nav.selected < empty_nav.offset + page
+        );
+
+        // 2e. Selection fence is preserved across `b` toggles so Enter never opens a
+        //     different call while fenced.
+        let mut fenced_nav = crate::navigation::Navigation::default();
+        let mut active_fence = super::SelectionFence::Changed;
+        send_key(&mut fenced_nav, &mut active_fence, &report, &Key::Char('b'));
+        assert!(fenced_nav.attention_only);
+        assert!(active_fence == super::SelectionFence::Changed);
+        assert_eq!(
+            send_key(&mut fenced_nav, &mut active_fence, &report, &Key::Enter),
+            crate::navigation::Action::None
+        );
+        assert!(active_fence == super::SelectionFence::None);
+        assert!(!fenced_nav.detail);
+
+        // Reselect target_id before testing live refresh reorder below.
+        let before_step3 = visible_now(&report, &nav);
+        let step3_idx = before_step3
+            .iter()
+            .position(|c| super::call_identity(c) == target_id)
+            .unwrap();
+        nav.selected = step3_idx;
+        nav.offset = step3_idx.saturating_sub(1);
+
+        // 3. A live refresh that reorders rows keeps the same call selected, updates
+        //    viewport offset so the row stays visible, and does not trip the fence.
+        nav.detail = true;
+        let before_reorder = visible_now(&report, &nav);
+        let selected_before = super::call_identity(&before_reorder[nav.selected]);
+        assert_eq!(selected_before, target_id);
+        let old_index = nav.selected;
+        report["room"]["participants"] = serde_json::json!([
+            make_call("call-4", "att-4", "target", "working"),
+            make_call("call-3", "att-3", "delta", "working"),
+            make_call("call-2", "att-2", "gamma", "working"),
+            make_call("call-1", "att-1", "beta", "blocked"),
+            make_call("call-0", "att-0", "alpha", "working"),
+        ]);
+        let after_reorder = visible_now(&report, &nav);
+        super::reconcile_selection_with_page(
+            &before_reorder,
+            &after_reorder,
+            &mut nav,
+            &mut fence,
+            page,
+        );
+        assert_ne!(nav.selected, old_index, "fixture should actually move row");
+        assert_eq!(
+            super::call_identity(&after_reorder[nav.selected]),
+            target_id,
+            "refresh reorder must keep the same call selected"
+        );
+        assert!(nav.selected >= nav.offset && nav.selected < nav.offset + page);
+        assert!(fence == super::SelectionFence::None);
+        assert!(nav.detail);
+
+        // 4. Starting in attention-only and pressing `b` preserves the selected call.
+        let mut started_att = crate::navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        let mut att_fence = super::SelectionFence::None;
+        send_key(&mut started_att, &mut att_fence, &report, &Key::Char('b'));
+        assert!(!started_att.attention_only);
+        let full = visible_now(&report, &started_att);
+        assert_eq!(
+            super::call_identity(&full[started_att.selected]),
+            ("call-1".to_owned(), "att-1".to_owned())
+        );
+        assert!(
+            started_att.selected >= started_att.offset
+                && started_att.selected < started_att.offset + page
+        );
     }
 }
