@@ -199,12 +199,11 @@ impl FeedbackMock {
         );
         self.plan(repo, &["claim", "--id", id, "--provider", "codex"]);
         let task = self.plan(repo, &["show", "--id", id]);
-        fs::write(
-            repo.join(".oms/worker-artifact"),
+        write_private(
+            &repo.join(".oms/worker-artifact"),
             b"retained worker report\n",
-        )
-        .unwrap();
-        fs::write(repo.join(".oms/worker-patch"), b"retained worker patch\n").unwrap();
+        );
+        write_private(&repo.join(".oms/worker-patch"), b"retained worker patch\n");
         self.plan(
             repo,
             &[
@@ -446,16 +445,14 @@ impl Services for FeedbackMock {
                 assert_eq!(binding["lease_id"], task["lease_id"]);
                 assert_eq!(binding["lease_epoch"], task["lease_epoch"]);
                 assert_eq!(binding["task_sha256"], task["task_sha256"]);
-                fs::write(
-                    call.cwd.join(".oms/repaired-artifact"),
+                write_private(
+                    &call.cwd.join(".oms/repaired-artifact"),
                     b"retained repair report\n",
-                )
-                .unwrap();
-                fs::write(
-                    call.cwd.join(".oms/repaired-patch"),
+                );
+                write_private(
+                    &call.cwd.join(".oms/repaired-patch"),
                     b"retained repair patch\n",
-                )
-                .unwrap();
+                );
                 use oms_command_plan::{Action, Context, DelegateBinding, Plan, Request};
                 let request = Request::new(Action::Start)
                     .with("id", id.as_str())
@@ -533,7 +530,8 @@ fn feedback_repair_requires_authority_and_keeps_admission_caps_and_repeated_fail
     }
     let mock = FeedbackMock::new("normal");
     let repo = mock.fixture();
-    assert_eq!(mock.run(&repo, "one", false).0, 1);
+    let initial = mock.run(&repo, "one", false);
+    assert_eq!(initial.0, 1, "{}", String::from_utf8_lossy(&initial.2));
     assert_eq!(FeedbackMock::count(&mock.reads), 0);
     assert_eq!(FeedbackMock::count(&mock.sends), 0);
     assert!(!repo.0.join(".oms/feedback/repairs.jsonl").exists());
