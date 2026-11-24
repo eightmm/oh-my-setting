@@ -11843,7 +11843,12 @@ fi
             .unwrap();
         multi_nav.selected = blocked2_idx;
         multi_nav.offset = blocked2_idx.saturating_sub(1);
-        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
         assert!(multi_nav.attention_only);
         let att_multi = visible_now(&multi_report, &multi_nav);
         assert_eq!(att_multi.len(), 2);
@@ -11857,8 +11862,15 @@ fi
             "fixture should place blocked call after row 0"
         );
         assert!(multi_nav.offset <= att_multi.len().saturating_sub(page));
-        assert!(multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page);
-        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        assert!(
+            multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page
+        );
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
         assert!(!multi_nav.attention_only);
 
         // 2c. Enter attention-only from a non-attention call, move within attention to call X,
@@ -11870,14 +11882,24 @@ fi
             .unwrap();
         multi_nav.selected = target_full_idx;
         multi_nav.offset = target_full_idx.saturating_sub(1);
-        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
         assert!(multi_nav.attention_only);
         assert_eq!((multi_nav.selected, multi_nav.offset), (0, 0));
         send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Down);
         let att_moved = visible_now(&multi_report, &multi_nav);
         let moved_id = super::call_identity(&att_moved[multi_nav.selected]);
         assert_eq!(moved_id, blocked2_id);
-        send_key(&mut multi_nav, &mut multi_fence, &multi_report, &Key::Char('b'));
+        send_key(
+            &mut multi_nav,
+            &mut multi_fence,
+            &multi_report,
+            &Key::Char('b'),
+        );
         assert!(!multi_nav.attention_only);
         let after_move_leave = visible_now(&multi_report, &multi_nav);
         assert_eq!(
@@ -11886,7 +11908,9 @@ fi
             "leaving attention-only after moving must keep the selected attention call"
         );
         assert!(multi_nav.offset <= after_move_leave.len().saturating_sub(page));
-        assert!(multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page);
+        assert!(
+            multi_nav.selected >= multi_nav.offset && multi_nav.selected < multi_nav.offset + page
+        );
 
         // 2d. Enter attention-only with a non-attention call selected when attention list is
         //     empty: row 0. Leave without moving: the original call is restored.
@@ -11909,11 +11933,21 @@ fi
             .unwrap();
         empty_nav.selected = orig_idx;
         empty_nav.offset = orig_idx.saturating_sub(1);
-        send_key(&mut empty_nav, &mut empty_fence, &empty_att_report, &Key::Char('b'));
+        send_key(
+            &mut empty_nav,
+            &mut empty_fence,
+            &empty_att_report,
+            &Key::Char('b'),
+        );
         assert!(empty_nav.attention_only);
         assert!(visible_now(&empty_att_report, &empty_nav).is_empty());
         assert_eq!((empty_nav.selected, empty_nav.offset), (0, 0));
-        send_key(&mut empty_nav, &mut empty_fence, &empty_att_report, &Key::Char('b'));
+        send_key(
+            &mut empty_nav,
+            &mut empty_fence,
+            &empty_att_report,
+            &Key::Char('b'),
+        );
         assert!(!empty_nav.attention_only);
         let restored = visible_now(&empty_att_report, &empty_nav);
         assert_eq!(
@@ -11922,7 +11956,9 @@ fi
             "leaving empty attention-only without moving must restore the original call"
         );
         assert!(empty_nav.offset <= restored.len().saturating_sub(page));
-        assert!(empty_nav.selected >= empty_nav.offset && empty_nav.selected < empty_nav.offset + page);
+        assert!(
+            empty_nav.selected >= empty_nav.offset && empty_nav.selected < empty_nav.offset + page
+        );
 
         // 2e. Selection fence is preserved across `b` toggles so Enter never opens a
         //     different call while fenced.
