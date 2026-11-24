@@ -238,11 +238,13 @@ metadata/content files are mode 0600, and listing is bounded to 1,000 entries.
 Room-lineage reconciliation is capped at 32 MiB. All paths reject symlink traversal
 and queue state must remain ignored and untracked.
 
-`python3 -m unittest discover -s tests -p test_inputs.py -v` exercises these new
-public entrypoints with real temporary Git repositories, real room sends and
-acknowledgments, and a fake tmux limited to read operations. Coverage includes exact
-source digests and drift, immutable references, edit/reorder/cancel behavior,
-boundary and digest checks, concurrent delivery, uncertainty before and after a
-real append, message conflicts, owner/participant changes, rollover receipts,
-feedback validation/idempotency, and child/symlink/secret/size boundaries. The
-suite invokes no real provider CLI or external messaging service.
+Run the native [attachment and input queue suite](../crates/oms-command-input/tests/attachments.rs).
+
+```bash
+cargo +1.99.1 test --locked --offline -p oms-command-input --test attachments
+```
+
+The suite exercises bounded sources and drift, edit/reorder/cancel operations,
+delivery and reconciliation, participant identity and room rollover, feedback
+deduplication, and symlink and lock boundaries. It uses disposable repositories,
+native Room operations, and fake tmux for terminal capture.

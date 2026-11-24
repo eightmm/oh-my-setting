@@ -8,8 +8,9 @@ Original concept review: 2026-11-18, source
 [`189bfdaa`](https://github.com/eightmm/oh-my-setting/commit/189bfdaa28b6b628f0d4d50a4ca3d0df28396b88).
 The role, Main capability and verification-planning corrections below were
 checked against `8527cd07` on 2026-11-22 and again against `051fd3ea` on
-2026-11-23. The queue's
-[dated source review](ORCHESTRATOR-WORK-QUEUE.md#8-2026-11-22-재대조와-작은-통합-단위)
+2026-11-23. The native assignment and Main swap boundaries below were corrected
+against `afbf42b2` on 2026-11-23. The queue's
+[latest source review](ORCHESTRATOR-WORK-QUEUE.md#9-2026-11-23-claude-피드백-38개와-현재-source의-대조)
 separates implemented slices from the remaining work; it is not a new full audit.
 This page owns feature scope; the [implementation queue](ORCHESTRATOR-WORK-QUEUE.md)
 owns the remaining work and its admission conditions. Earlier CP/TM/MR/UX/NF
@@ -98,10 +99,19 @@ Here, the historical `Direct work` label groups assigned workers; it does not
 authorize the team Main to edit repository files.
 This display correction does not change dispatch, key/mouse targets or ownership,
 and does not implement common task cards or the assignment bridge.
-Native `--orchestrator --task` sends text rather than producing the same
-task/lease/result binding as managed dispatch. The unimplemented native
-assignment/result bridge is specified by
-[#285 P0-B](https://github.com/eightmm/oh-my-setting/pull/285).
+Native `--orchestrator PROVIDER --task TEXT` without `--task-id` sends an
+unbound task prompt. The explicit Codex path
+`--orchestrator codex --task-id ID --task TEXT` uses the
+[native assignment producer](../crates/oms-command-panel/src/native_assignment.rs):
+it validates or claims the current Main's canonical Plan task, binds its lease,
+attempt, checkout and Room participant, and records a durable send intent before
+input submission. Repeated or uncertain sends reuse that intent; unknown delivery
+does not cause an automatic resend. The existing ordinary Codex Lead is required.
+Its receipt still reports consumption and task completion as unconfirmed,
+write isolation as unmanaged and child cleanup as unsupported. Result artifacts,
+verifier evidence, common task-card consumption and acceptance remain the next
+[#285 P0-B](https://github.com/eightmm/oh-my-setting/pull/285) slices; the other
+providers do not inherit this bound assignment capability from the text path.
 Reuse its Plan/operations/Room/result writers and TM-06A/B/C consumers; do not add
 another queue, task database or scheduler. General native conversation remains an
 unbound session without mandatory Plan/Team registration. Task cards link existing
@@ -191,12 +201,22 @@ a universal permission rule. The current schema-2 router and role restrictions
 remain in force until a versioned consumer migration. See
 [model selection](TEAM-ORCHESTRATION-MODEL-TIERS.md#5-선택-순서와-재현성).
 
-Main swapping is also a capability, not a property of the model picker. The
-native host currently keeps the unsupported `swap_main_host` default in
-[CollabServices](../crates/oms/src/services_collab.rs). Keep current sessions
-stable; CC-09's host work needs a concrete handoff requirement and lifecycle
-evidence. A core/Fake fixture or a quota reading does not establish native swap
-support or an automatic replacement policy.
+Main swapping is also a capability, not a property of the model picker. The live
+[CollabServices](../crates/oms/src/services_collab.rs) overrides the generic
+unsupported default and calls
+[`native_panel::swap_main_host`](../crates/oms-command-panel/src/native_panel.rs).
+The current physical transition requires the outgoing session to be the Room's
+one OMS-managed Codex Main: a live recorded `panel-main` attempt whose tmux
+pane and verified native wrapper/process custody match it, with an empty idle
+composer. A legacy or pre-custody Main is refused and must be reopened. The
+target must be an installed Main capability whose admission resolves exactly the
+requested configured model. Its guarded handoff
+preserves the owned Room and execution checkout, and carries forward the recorded
+permission mode unless the explicit `OMS_PANEL_MAIN_PERMISSIONS=native` override applies.
+This implements a bounded native path, not every provider-to-provider swap.
+Non-Codex outgoing shutdown and ownership transfer remain CC-09 work with
+provider-specific lifecycle evidence. A quota reading grants no automatic swap
+authority; source wiring alone is not a live host verification result.
 
 ## Durable observations and budgets
 
@@ -274,3 +294,66 @@ The review covers the current entrypoint/owner map, seven Team documents, all
 40 follow-up packets and the decisive native callers. It is not a proof that
 every workspace function is redundant or equivalent. No transport or state
 store is removed on the basis of missing usage telemetry.
+
+## Native assignment return contracts
+
+The ordinary Codex bound-task path now shares a checked
+[assignment/return contract](../crates/oms-panel-core/src/native_contract.rs)
+between the sender, existing native result capture and Results projection. New
+assignments require explicit scope and a parent verifier, freeze exact
+Plan/task/lease/epoch/Main/Room/attempt/checkout/base identity, and preserve
+registered requirement IDs. A declared role defaults to `worker` and grants no
+capabilities. Task ID/title is only the fallback when registered IDs are absent;
+inventory coverage does not prove all user prose or task semantics are satisfied.
+
+The [existing capture owner](../crates/oms-panel-core/src/native_results.rs) retains
+the typed source plus every referenced patch/verification snapshot. Strict bounded
+parsing, decoded outbound checks and directional scope validation precede capture.
+Legacy prose reports remain advisory. Same-byte replay is idempotent; a changed
+typed report requires the exact previous retained-result digest at the CLI and
+manifest boundary, with a separate source revision chain. No report command is run
+and no claimed check establishes verification, acceptance or cleanup.
+
+[Main reconciliation](../crates/oms-command-panel/src/native_result.rs) records
+`request-revision`, `blocked` or `reviewed` against an exact retained result.
+Continuation creates an immutable next round under the same claim/attempt. A
+reviewed candidate may enter canonical Plan review, then uses the existing external
+patch admission/landing and genuine completion receipts. Canonical done/cancelled
+tasks permit administrative assignment/Room retirement without closing the Lead
+session or claiming child cleanup.
+
+[Results](../crates/oms-panel-core/src/results.rs) supplies source/manifest templates,
+input paths and structured next actions in task, participant and list views, with at
+most 20 bounded typed metadata reads. Unimported input presence is advisory; the
+existing [tick wake](../crates/oms-panel-core/src/tick.rs) only notifies an eligible
+idle Main. Main still chooses import, reconciliation and continuation; approved
+goal-drive/autopilot remains the existing bounded automatic executor. There is no
+new scheduler, permission default, native session control or completion authority.
+Other native providers use managed task dispatch until their bound adapters exist;
+explicit unbound conversations receive no canonical task credit. The practical
+[two-layer return workflow](TERMINAL-PANEL.md#retain-a-bound-native-report) documents
+the public result digest separately from the source digest and remaining limits.
+
+## Native Main succession
+
+[Explicit adoption](../crates/oms-command-panel/src/native_succession.rs) connects a
+canonical Main swap to an existing typed native assignment. A bounded
+[immutable custody chain](../crates/oms-panel-core/src/native_succession.rs) retains
+the original Plan claimant/lease, assignment attempt, packet/report digests, round
+and account identity. The producer proves the ordered canonical swap target and
+outgoing wrapper/native process absence, then freshly validates successor Main
+and the existing ordinary Codex Lead/account/checkout. Same-Room membership alone
+does not grant authority. The old Main cannot continue mutating the assignment.
+
+Results provides an exact `--native-adopt` action before import, reconciliation,
+revision or continuation by the successor. Same-byte replay is idempotent and a
+new round carries the checked custody digest without rewriting its predecessor.
+Stable Room participant and Main lifecycle attempt are frozen separately for new
+assignments, so the successor can claim a new task after retiring the previous one.
+Canonical done/cancelled work permits retirement-only adoption after checkout
+advance; it supplies no permission to reopen execution or prove child cleanup.
+Adoption adds no claim, input submission, budget reset or acceptance authority.
+The existing tick reminder follows the checked successor with fresh process and
+session proof. Wake deduplication includes the current Main attempt as well as the
+original assignment and input/result digest; daily quota and result identity
+are preserved. Retirement-only custody emits administrative guidance only.

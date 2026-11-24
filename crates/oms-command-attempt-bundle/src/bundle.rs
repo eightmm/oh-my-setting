@@ -197,6 +197,17 @@ fn artifacts(root: &Root, attempt: &V) -> V {
     shown.sort_by_key(|r| r.default("ts", "").py());
     section(ARTIFACTS, shown)
 }
+fn ledger_fingerprint(row: &V) -> Option<&str> {
+    let key = if row.has("observed_fingerprint") {
+        if row.get("event").text() != Some("verified") || row.has("fingerprint") {
+            return None;
+        }
+        "observed_fingerprint"
+    } else {
+        "fingerprint"
+    };
+    row.get(key).text().filter(|s| !s.trim().is_empty())
+}
 fn reference_verification(row: &V) -> Option<V> {
     let evidence = row.get("verification");
     let digest = |value: &V| {
@@ -204,7 +215,11 @@ fn reference_verification(row: &V) -> Option<V> {
             .text()
             .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
     };
-    if evidence.get("scope").text() != Some("agent-task-reference-v1")
+    if !matches!(row.get("schema"), V::Num(schema) if schema == "2")
+        || row.get("agent").text().is_none_or(|a| a.trim().is_empty())
+        || row.get("ts").text().is_none_or(|ts| ts.trim().is_empty())
+        || ledger_fingerprint(row).is_none()
+        || evidence.get("scope").text() != Some("agent-task-reference-v1")
         || evidence.get("action").text() != Some("verification-rerun")
         || !evidence.get("active_task_id").text().is_some_and(id)
         || !["snapshot_attempt_id", "outcome_attempt_id"]
@@ -273,7 +288,10 @@ fn failures(root: &Root, attempt: &V, cwd: &Path) -> V {
         let window = matches!((stamp(row.get("ts")), first, last), (Some(t), Some(first), Some(last)) if t >= first && t <= last);
         if exact || window {
             let mut item = obj([("line", (i + 1).into())]);
-            for k in ["ts", "fingerprint", "kind", "event", "exit", "agent"] {
+            if let Some(fp) = ledger_fingerprint(row) {
+                item.set("fingerprint", V::from(fp).short(80));
+            }
+            for k in ["ts", "kind", "event", "exit", "agent"] {
                 if row.has(k) {
                     let v = row.get(k).short(80);
                     if v != V::Null {

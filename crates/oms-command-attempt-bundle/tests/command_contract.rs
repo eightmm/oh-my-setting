@@ -368,9 +368,10 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
     // unrelated or legacy records never acquire that correlation.
     let digest = "a".repeat(64);
     let exact = format!(
-        r#"{{"ts":"2026-01-02T00:00:00Z","event":"verified","fingerprint":"exact","verification":{{"scope":"agent-task-reference-v1","active_task_id":"task-one","action":"verification-rerun","snapshot_attempt_id":"snapshot-one","snapshot_sha256":"{digest}","outcome_attempt_id":"attempt1","outcome_sha256":"{digest}","command_sha256":"{digest}","result":"accepted","verified_state":"tree-one","prior_failures":["{digest}"]}}}}"#
+        r#"{{"schema":2,"ts":"2026-01-02T00:00:00Z","agent":"codex","event":"verified","observed_fingerprint":"exact","verification":{{"scope":"agent-task-reference-v1","active_task_id":"task-one","action":"verification-rerun","snapshot_attempt_id":"snapshot-one","snapshot_sha256":"{digest}","outcome_attempt_id":"attempt1","outcome_sha256":"{digest}","command_sha256":"{digest}","result":"accepted","verified_state":"tree-one","prior_failures":["{digest}"]}}}}"#
     );
     let other = exact
+        .replace("observed_fingerprint", "fingerprint")
         .replace("2026-01-02T00:00:00Z", "2026-01-01T00:00:01Z")
         .replace("\"exact\"", "\"other\"")
         .replace("\"task-one\"", "\"task-other\"")
@@ -378,10 +379,15 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
     let malformed = exact
         .replace("\"snapshot-one\"", "null")
         .replace("\"exact\"", "\"invalid\"");
+    // Exact IDs without the canonical schema are legacy/unknown input.
+    let unschemed = other
+        .replace("\"schema\":2,", "")
+        .replace("\"other\"", "\"unschemed\"")
+        .replace("\"other-attempt\"", "\"attempt1\"");
     let legacy = r#"{"ts":"2026-01-01T00:00:01Z","event":"fail","fingerprint":"legacy"}"#;
     fs::write(
         f.0.join(".oms/failures.jsonl"),
-        format!("{exact}\n{other}\n{malformed}\n{legacy}\n"),
+        format!("{exact}\n{other}\n{malformed}\n{unschemed}\n{legacy}\n"),
     )
     .unwrap();
     let (code, out, err) = f.call(&["--json"]);
@@ -390,6 +396,7 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
     assert!(body.contains("\"fingerprint\": \"exact\""), "{body}");
     assert!(body.contains("\"fingerprint\": \"other\""));
     assert!(body.contains("\"fingerprint\": \"legacy\""));
+    assert!(body.contains("\"fingerprint\": \"unschemed\""));
     assert!(!body.contains("\"fingerprint\": \"invalid\""));
     assert_eq!(
         body.matches("\"correlation\": \"native-reference-attempt\"")
@@ -399,7 +406,7 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
     assert_eq!(
         body.matches("\"correlation\": \"time-window-only\"")
             .count(),
-        2
+        3
     );
     assert!(body.contains("neither proves a repair cause or current verification"));
     assert!(body.contains("\"outcome_sha256\""));
@@ -413,7 +420,13 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
         .join("\n");
     let malformed_nearby = malformed.replace("2026-01-02T00:00:00Z", "2026-01-01T00:00:01Z");
     for event in ["verified", "resolved"] {
-        let accepted = exact.replace("\"verified\"", &format!("\"{event}\""));
+        let accepted = if event == "resolved" {
+            exact
+                .replace("\"verified\"", "\"resolved\"")
+                .replace("observed_fingerprint", "fingerprint")
+        } else {
+            exact.clone()
+        };
         fs::write(
             f.0.join(".oms/failures.jsonl"),
             format!("{nearby}\n{other}\n{malformed_nearby}\n{accepted}\n"),

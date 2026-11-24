@@ -18,6 +18,8 @@
 //! non-Linux hosts; if a Linux caller cannot guarantee exclusive child
 //! ownership, the supervisor fails closed rather than weakening containment.
 use oms_command_graph::Error as GraphError;
+#[cfg(target_os = "linux")]
+use oms_command_landing::services::{BatchVerification, VerificationOutcome};
 use oms_command_landing::services::{
     Execution as LandingExecution, PublicationGuard, PublicationScan, VerifyRequest,
 };
@@ -226,6 +228,57 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
                 });
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn batch_verification_result(child: Child) -> BatchVerification {
+    let complete = |raw: &[u8]| {
+        const STATUS_LIMIT: usize = 4096;
+        if raw.len() > STATUS_LIMIT {
+            return false;
+        }
+        let Some(raw) = raw.strip_suffix(b"\n") else {
+            return false;
+        };
+        let mut frames = raw.split(|byte| *byte == b'\n');
+        let (Some(start), Some(exit), None) = (frames.next(), frames.next(), frames.next()) else {
+            return false;
+        };
+        let (Ok(start), Ok(exit)) = (
+            serde_json::from_slice::<Value>(start),
+            serde_json::from_slice::<Value>(exit),
+        ) else {
+            return false;
+        };
+        // Bubblewrap can publish child-pid before mount setup. Only its
+        // terminal frame distinguishes a command exit from a setup error.
+        start["child-pid"].as_u64().is_some_and(|pid| pid > 0)
+            && exit.as_object().is_some_and(|row| row.len() == 1)
+            && exit["exit-code"].as_i64() == Some(i64::from(child.code))
+    };
+    let outcome = match (
+        child.cancelled,
+        child.timed_out,
+        child.output_limited,
+        child.code,
+    ) {
+        (true, _, _, _) => VerificationOutcome::Cancelled,
+        (_, true, _, _) => VerificationOutcome::TimedOut,
+        (_, _, true, _) => VerificationOutcome::OutputLimited,
+        (_, _, _, 125..=127) => VerificationOutcome::Unavailable,
+        _ if !complete(&child.stdout) => VerificationOutcome::Unavailable,
+        (_, _, _, 0) => VerificationOutcome::Passed,
+        _ => VerificationOutcome::Failed,
+    };
+    BatchVerification {
+        outcome,
+        verifier_exit: matches!(
+            outcome,
+            VerificationOutcome::Passed | VerificationOutcome::Failed
+        )
+        .then_some(child.code),
+        elapsed: child.elapsed,
     }
 }
 
@@ -1111,6 +1164,113 @@ impl oms_command_landing::Services for ControlServices<'_> {
             stderr: child.stderr,
             elapsed: child.elapsed,
         })
+    }
+    #[cfg(target_os = "linux")]
+    fn supervise_batch(
+        &self,
+        request: &VerifyRequest,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<BatchVerification> {
+        let unavailable =
+            || oms_command_landing::Error::unavailable("isolated Linux batch verification");
+        if self.scope != Scope::WholeTree {
+            return Err(unavailable());
+        }
+        let (program, args) = request.argv.split_first().ok_or_else(unavailable)?;
+        let state = request.cwd.join(".git");
+        let private_home = state.join("batch-home");
+        let private_tmp = state.join("batch-tmp");
+        let cargo = state.join("batch-cargo");
+        let rustup = state.join("batch-rustup");
+        for directory in [&private_home, &private_tmp, &cargo, &rustup] {
+            std::fs::create_dir(directory)?;
+        }
+        let mut mounts: Vec<_> = [
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/lib32",
+            "/etc/ld.so.cache",
+            "/etc/alternatives",
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/nsswitch.conf",
+            "/etc/os-release",
+            "/etc/localtime",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .map(|path| (path.clone(), path))
+        .collect();
+        let host_home = std::env::home_dir().ok_or_else(unavailable)?;
+        let mut mount_cache = |name, default: &str, target: &Path, items: &[&str]| {
+            let root = std::env::var_os(name)
+                .filter(|value| Path::new(value).is_absolute())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| host_home.join(default));
+            if let Ok(root) = root.canonicalize() {
+                for item in items {
+                    if let Ok(source) = root.join(item).canonicalize()
+                        && source.starts_with(&root)
+                    {
+                        mounts.push((source, target.join(item)));
+                    }
+                }
+            }
+        };
+        mount_cache(
+            "CARGO_HOME",
+            ".cargo",
+            &cargo,
+            &[
+                "bin/cargo",
+                "bin/rustup",
+                "bin/rustc",
+                "bin/rustfmt",
+                "bin/rustdoc",
+                "bin/clippy-driver",
+                "bin/cargo-clippy",
+                "bin/cargo-fmt",
+                "registry/cache",
+                "registry/index",
+                "registry/src",
+                "git/db",
+                "git/checkouts",
+            ],
+        );
+        mount_cache("RUSTUP_HOME", ".rustup", &rustup, &["toolchains"]);
+        let (wrapper, arguments) =
+            oms_supervisor::sandbox::isolated_checkout(program, args, &request.cwd, &mounts)
+                .map_err(|_| unavailable())?;
+        let argv = std::iter::once(wrapper).chain(arguments).collect();
+        let path = std::env::join_paths([
+            cargo.join("bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .map_err(|_| unavailable())?;
+        let environment = vec![
+            ("PATH".into(), path),
+            ("HOME".into(), private_home.into_os_string()),
+            ("TMPDIR".into(), private_tmp.into_os_string()),
+            ("CARGO_HOME".into(), cargo.into_os_string()),
+            ("RUSTUP_HOME".into(), rustup.into_os_string()),
+            ("CARGO_NET_OFFLINE".into(), "true".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ];
+        let mut spawn = Spawn::new(self.scope, argv, request.wall, VERIFY_OUTPUT_LIMIT)
+            .cwd(&request.cwd)
+            .environment(environment);
+        spawn.clear_environment = true;
+        let child = self
+            .run_supervised(spawn, interrupted)
+            .map_err(|_| unavailable())?;
+        Ok(batch_verification_result(child))
     }
     /// The worker lowers `RLIMIT_AS` for its whole process lifetime, so it only
     /// ever runs in a dedicated re-executed child; this parent's limits are
@@ -2929,6 +3089,60 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn batch_bubblewrap_status_discriminates_real_exit_and_setup_refusal() {
+        let checkout = Tmp::new();
+        let mut mounts: Vec<_> = ["/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache"]
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .map(|path| (path.clone(), path))
+            .collect();
+        let run = |mounts: &[(PathBuf, PathBuf)], script: &str| -> Option<Child> {
+            let (wrapper, arguments) = oms_supervisor::sandbox::isolated_checkout(
+                std::ffi::OsStr::new("/bin/sh"),
+                &osv(&["-c", script]),
+                checkout.path(),
+                mounts,
+            )
+            .ok()?;
+            let argv = std::iter::once(wrapper).chain(arguments).collect();
+            let mut spawn = Spawn::new(Scope::ProcessGroup, argv, Duration::from_secs(5), 4096)
+                .cwd(checkout.path());
+            spawn.clear_environment = true;
+            Some(run_child(spawn, &AtomicBool::new(false)).unwrap())
+        };
+        let Some(probe) = run(&mounts, "exit 0") else {
+            eprintln!("system bubblewrap unavailable; status fixture skipped");
+            return;
+        };
+        if probe.code != 0 {
+            eprintln!("bubblewrap namespaces unavailable; status fixture skipped");
+            return;
+        }
+        assert_eq!(
+            batch_verification_result(probe).outcome,
+            VerificationOutcome::Passed
+        );
+        let child = run(&mounts, "printf 'private fixture output'; exit 1").unwrap();
+        assert_eq!(child.code, 1);
+        assert_eq!(child.stderr, b"private fixture output");
+        let status = batch_verification_result(child);
+        assert_eq!(status.outcome, VerificationOutcome::Failed);
+        assert_eq!(status.verifier_exit, Some(1));
+
+        mounts.push((
+            checkout.path().join("missing-mount"),
+            "/missing-mount".into(),
+        ));
+        let child = run(&mounts, "exit 1").unwrap();
+        assert_eq!(child.code, 1);
+        let status = batch_verification_result(child);
+        assert_eq!(status.outcome, VerificationOutcome::Unavailable);
+        assert_eq!(status.verifier_exit, None);
+    }
+
     #[test]
     fn publication_scan_runs_in_child_and_keeps_parent_limit() {
         let repo = Tmp::repo(&[("a.txt", "one\n")]);
@@ -3439,9 +3653,22 @@ mod tests {
             } else {
                 None
             };
+            // Exercise the real issuance boundary while the adapter waits for
+            // its hello. This fixture-owned lock grants no session authority.
+            let issuance_store = (mode == "protocol-issuance-blocked")
+                .then(|| oms_panel_core::terminals::controller_store(&repo, true).unwrap());
+            let issuance_lock = issuance_store.as_ref().map(|store| {
+                store
+                    .lock_at(
+                        Path::new("team-request-issuance.lock"),
+                        Duration::from_secs(1),
+                    )
+                    .unwrap()
+            });
             let output = oms_command_peer::run_with_executor(
                 "peer-ask", &args, &repo, source, &stop, &collab,
             );
+            drop(issuance_lock);
             if let Some(handler) = handler {
                 signal_hook::low_level::unregister(handler);
             }
@@ -3474,39 +3701,53 @@ mod tests {
             let success = mode == "protocol-positive"
                 || mode == "protocol-fragment"
                 || mode == "protocol-proposal-positive";
-            if success && output.0 != 0 {
-                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
-                    .unwrap()
-                    .flatten()
-                {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        let text = String::from_utf8_lossy(&bytes);
-                        if let Some((_, diagnostic)) = text.split_once("## Diagnostics") {
-                            eprintln!("fixture diagnostics: {diagnostic}");
-                        }
-                    }
-                }
-            }
+            let stdout = String::from_utf8_lossy(&output.1);
+            let stderr = String::from_utf8_lossy(&output.2);
+            let diagnostic = || {
+                stdout
+                    .lines()
+                    .next()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .and_then(|artifact| {
+                        artifact
+                            .split_once("\n## Diagnostics\n\n")
+                            .map(|(_, body)| body.to_owned())
+                    })
+                    .unwrap_or_else(|| stderr.clone().into_owned())
+            };
             if success {
-                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+                assert_eq!(output.0, 0, "{mode:?}: {}", diagnostic());
             } else {
-                assert_ne!(output.0, 0, "invalid protocol succeeded");
+                assert_ne!(output.0, 0, "{mode:?}: invalid protocol succeeded");
             }
-            assert!(!String::from_utf8_lossy(&output.1).contains("nonce"));
-            assert!(!String::from_utf8_lossy(&output.2).contains("nonce"));
-            if mode == "protocol-partial" {
-                let mut seen = String::from_utf8_lossy(&output.2).into_owned();
-                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
-                    .unwrap()
-                    .flatten()
-                {
-                    seen.push_str(&String::from_utf8_lossy(
-                        &std::fs::read(entry.path()).unwrap_or_default(),
-                    ));
+            assert!(!stdout.contains("nonce"));
+            assert!(!stderr.contains("nonce"));
+            let (required, forbidden): (&[&str], &[&str]) = match mode.to_str().unwrap() {
+                "protocol-lost" | "protocol-proposal-lost" => {
+                    (&["channel-unconsumed-response"], &["protocol-failed"])
                 }
+                "protocol-conflict" | "protocol-proposal-conflict" => (
+                    &["protocol-failed"],
+                    &["channel-no-request", "channel-unconsumed-response"],
+                ),
+                "protocol-early" | "protocol-unsupported" => {
+                    (&["protocol-failed", "channel-no-request"], &[])
+                }
+                "protocol-partial" => (&["channel-partial-frame"], &[]),
+                "protocol-issuance-blocked" => (
+                    &[
+                        "Team channel issuance failed; pending intent retained (stage=issuance-lock)",
+                    ],
+                    &[],
+                ),
+                _ => (&[], &[]),
+            };
+            if !required.is_empty() {
+                let seen = diagnostic();
                 assert!(
-                    seen.contains("channel-partial-frame"),
-                    "partial-frame cue not delivered"
+                    required.iter().all(|cue| seen.contains(cue))
+                        && forbidden.iter().all(|cue| !seen.contains(cue)),
+                    "{mode:?}: unexpected channel phase: {seen}"
                 );
             }
             return;
@@ -4587,7 +4828,9 @@ session=$(field session)
 nonce=$(field nonce)
 generation=$(num connection_generation)
 binding=$(field binding_sha256)
-expiry=${OMS_TEAM_REQUEST_EXPIRY:-$(num expires_at)}
+hello_expiry=$(num expires_at)
+expiry=${OMS_TEAM_REQUEST_EXPIRY:-$hello_expiry}
+[ "$expiry" -le "$hello_expiry" ]
 case "$prompt" in *protocol-wrong*) nonce=wrong;; esac
 printf '{"schema":1,"kind":"hello","session":"%s","nonce":"%s","connection_generation":%s}\n' "$session" "$nonce" "$generation"
 case "$prompt" in *protocol-cancel*) kill -USR1 "$PPID"; while :; do sleep 1; done;; *protocol-timeout*) while :; do sleep 1; done;; esac
@@ -4597,8 +4840,12 @@ for sequence in 1 2; do
   case "$prompt" in *protocol-unsupported*) action=request_dispatch;; esac
   text=bounded-blocker
   case "$prompt:$sequence" in *protocol-conflict*:2) text=changed;; esac
-  request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"report-one","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$action" "$text" "$expiry")
   request_id=report-one
+  case "$prompt" in
+    *protocol-early*) request_id=report-early;;
+    *protocol-fragment*) request_id=report-fragment;;
+  esac
+  request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"%s","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$request_id" "$action" "$text" "$expiry")
   case "$prompt" in *protocol-proposal-*)
     request_id=proposal-one
     case "$prompt" in
@@ -4620,8 +4867,8 @@ for sequence in 1 2; do
     request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":2,"request_id":"%s","action":"propose_tasks","summary":"Bounded-decomposition","expected_task_sha256":"%s","tasks":[{"id":"%s","title":"%s","allowed":["%s"],"depends":%s}],"expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$request_id" "$task_sha" "$proposed_id" "$proposed_title" "$allowed" "$depends" "$expiry")
     ;;
   esac
+  case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"%s","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence" "$request_id";; esac
   case "$prompt" in *protocol-fragment*) printf '%s' "$request" | cut -c 1-20 | tr -d '\n'; sleep 0.02; printf '%s\n' "$request" | cut -c 21-;; *) printf '%s\n' "$request";; esac
-  case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence";; esac
   IFS= read -r response || exit 3
   case "$response" in *'"response"'*) :;; *) exit 4;; esac
   case "$prompt" in *protocol-lost*|*protocol-proposal-lost*) exit 0;; esac
@@ -4668,11 +4915,8 @@ done
             .to_owned();
         let task_before = json::hash(updated.get("tasks")).unwrap();
         let physical_before = physical::load(repo.as_path(), &stop).unwrap().len();
-        let report_expiry = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 12;
+        let mut report_expiry = None;
+        let mut report_count = 1;
         for mode in [
             "protocol-positive",
             "protocol-lost",
@@ -4686,8 +4930,13 @@ done
             "protocol-partial",
             "protocol-unsupported",
         ] {
-            let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
-                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN",mode).env("OMS_TEAM_REQUEST_EXPIRY",report_expiry.to_string()).env("OMS_TEAM_REQUEST_SPEC",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", mode).env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &head).env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team").env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters);
+            if matches!(mode, "protocol-lost" | "protocol-conflict") {
+                child.env("OMS_TEAM_REQUEST_EXPIRY", report_expiry.as_ref().unwrap());
+            }
+            let status = child.status().unwrap();
             assert!(status.success(), "native Team protocol case {mode} failed");
             let current_room = oms_command_room::Room::open(
                 repo.as_path(),
@@ -4713,11 +4962,34 @@ done
             assert_eq!(json::hash(ledger.get("tasks")).unwrap(), task_before);
             let record = ledger.get("teams").get("team-a");
             assert!(record.get("request_schema").is_int(2));
+            let requests = record.get("requests").array().unwrap();
+            if mode == "protocol-fragment" {
+                report_count += 1;
+                let fragment = requests.last().unwrap();
+                assert_eq!(
+                    fragment.get("request").text("request_id"),
+                    "report-fragment"
+                );
+                assert_eq!(fragment.get("outcome").text("status"), "recorded");
+            }
             assert_eq!(
-                record.get("requests").array().unwrap().len(),
-                1,
-                "replay cannot create another report"
+                requests.len(),
+                report_count,
+                "unexpected report effect for {mode}"
             );
+            if mode == "protocol-positive" {
+                let request = &requests[0];
+                assert_eq!(request.get("request").text("request_id"), "report-one");
+                assert_eq!(request.get("outcome").text("status"), "recorded");
+                report_expiry = Some(
+                    request
+                        .get("request")
+                        .get("expires_at")
+                        .int()
+                        .unwrap()
+                        .to_string(),
+                );
+            }
         }
         assert_eq!(
             physical::load(repo.as_path(), &stop).unwrap().len(),
@@ -4769,7 +5041,7 @@ done
             let record = ledger.get("teams").get("team-a");
             assert_eq!(
                 record.get("requests").array().unwrap().len(),
-                if index == 0 { 1 } else { 2 },
+                report_count + usize::from(index > 0),
                 "proposal replay/invalid input must not create another effect"
             );
             assert!(
@@ -4822,7 +5094,7 @@ done
                 .unwrap();
                 assert_eq!(
                     with_requests["requests"].as_array().unwrap().len(),
-                    if index == 0 { 1 } else { 2 }
+                    report_count + 1
                 );
                 assert_eq!(
                     std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
@@ -4857,6 +5129,28 @@ done
                 .get("team-a")
                 .get("requests")
                 .clone();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", "protocol-issuance-blocked")
+            .env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &head)
+            .env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team")
+            .env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters)
+            .status().unwrap();
+        assert!(status.success(), "blocked Team issuance diagnostic failed");
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 21,
+            "failed issuance must not resend the provider"
+        );
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "failed issuance cannot publish a Team request"
+        );
         spec["generation"] = 5.into();
         spec["previous_sha256"] = head.clone().into();
         std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
@@ -5323,7 +5617,7 @@ done
             &osv(&[
                 "show",
                 "--fingerprint",
-                resolved.text("fingerprint"),
+                resolved.text("observed_fingerprint"),
                 "--json",
             ]),
             repo.path(),
@@ -5447,7 +5741,13 @@ done
         let resolve_manually = || {
             let (code, _, err) = oms_command_state::run(
                 "fail-ledger",
-                &osv(&["resolve", "--cmd", command]),
+                &osv(&[
+                    "resolve",
+                    "--cmd",
+                    command,
+                    "--how",
+                    "operator handled failure",
+                ]),
                 repo.path(),
                 &stop,
             );
@@ -5509,10 +5809,29 @@ done
         verify(&mut task, 0);
         let latest = rows().pop().unwrap();
         assert_eq!(latest.text("event"), "verified");
+        assert!(
+            latest.opt("fingerprint").is_none(),
+            "legacy memory must not reopen the manual resolution"
+        );
+        assert_eq!(
+            latest.text("observed_fingerprint"),
+            reset.text("fingerprint")
+        );
         assert!(matches!(
             latest.get("verification").get("prior_failures"),
             oms_command_plan::json::Value::Null
         ));
+        let (code, out, err) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["show", "--fingerprint", reset.text("fingerprint"), "--json"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let shown: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(shown["failure"]["resolved"], true);
+        assert_eq!(shown["failure"]["how"], reset.text("how"));
+        assert!(shown["failure"].get("resolution_verification").is_none());
         assert!(candidates().is_empty());
         assert!(status(&mut task).contains("verification: fresh"));
     }

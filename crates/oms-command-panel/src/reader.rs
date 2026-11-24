@@ -143,6 +143,60 @@ impl Reader {
                     View::Summary => {}
                 }
             }
+            // Native reports remain a separate evidence surface. They never
+            // become delegate calls or supply implement/verify exit statuses.
+            let native = &task["native_assignment"]["report"];
+            if native["status"] == "reported" {
+                out.extend(render::wrap(
+                    &format!(
+                        "Native {} report · owner imported · acceptance ineligible",
+                        text(native, "result_kind")
+                    ),
+                    width,
+                ));
+                match self.view {
+                    View::Diff | View::Files => {
+                        if native["patch"].is_object() {
+                            let row = serde_json::json!({"patch":native["patch"]["path"],
+                                "patch_sha256":native["patch"]["sha256"]});
+                            let patch = oms_panel_core::results::verified_patch(&store, &row)?;
+                            if self.view == View::Files {
+                                for change in oms_panel_core::files::patch_changes(&patch)? {
+                                    out.push(format!(
+                                        "{} +{} -{}",
+                                        change.path, change.added, change.removed
+                                    ));
+                                }
+                            } else {
+                                out.extend(render::wrap(&oms_panel_core::redact(&patch)?, width));
+                            }
+                        }
+                    }
+                    View::Raw | View::Transcript => {
+                        for (i, reference) in std::iter::once(&native["source"])
+                            .chain(rows(&native["verification"]).iter())
+                            .enumerate()
+                        {
+                            if i > 0 {
+                                out.push(format!(
+                                    "Reported verification evidence {i} · no certified verdict"
+                                ));
+                            }
+                            let row = serde_json::json!({"artifact":reference["path"],
+                                "artifact_sha256":reference["sha256"]});
+                            let raw = oms_panel_core::results::indexed_artifact(&store, &row)?;
+                            out.extend(render::wrap(&oms_panel_core::redact(&raw)?, width));
+                        }
+                    }
+                    View::Events | View::Info => out.extend(render::value_lines(native, width)),
+                    View::Summary => {}
+                }
+            } else if native["status"] == "unavailable" {
+                out.extend(render::wrap(
+                    &format!("Native report unavailable: {}", text(native, "issue")),
+                    width,
+                ));
+            }
         }
         if out.is_empty() {
             out.push("No recorded evidence for this view".into());

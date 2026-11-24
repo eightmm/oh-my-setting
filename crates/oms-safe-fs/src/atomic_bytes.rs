@@ -537,6 +537,36 @@ impl Root {
         self.mutate_with(path, options, transform, |_| Ok(()))
     }
 
+    /// Publish complete private bytes under a name that must not exist, even
+    /// when a competing writer creates it at the moment of publication.
+    pub fn create_private(
+        &self,
+        path: &Path,
+        body: &[u8],
+        maximum: usize,
+    ) -> Result<(), MutationError<std::convert::Infallible>> {
+        if self.private_ancestry.is_none() {
+            return Err(ByteError::Unsafe.into());
+        }
+        self.mutate_with_publication(
+            path,
+            MutationOptions {
+                read: ByteReadOptions {
+                    missing_ok: true,
+                    max_bytes: 0,
+                },
+                create_parent: true,
+                max_output: maximum,
+                expected_exists: Some(false),
+                ..Default::default()
+            },
+            |_| Ok(body.to_vec()),
+            |_| Ok(()),
+            true,
+        )
+        .map(|_| ())
+    }
+
     /// Persists the directory entry of an existing destination through the same
     /// pinned, no-follow ancestry as `atomic_mutate`; it never creates anything.
     /// The leaf must currently be a safe regular file: missing is `Missing`,
@@ -565,7 +595,18 @@ impl Root {
         path: &Path,
         options: MutationOptions,
         transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
+        hook: impl FnMut(Stage) -> Result<(), Errno>,
+    ) -> Result<MutationOutcome, MutationError<E>> {
+        self.mutate_with_publication(path, options, transform, hook, false)
+    }
+
+    fn mutate_with_publication<E>(
+        &self,
+        path: &Path,
+        options: MutationOptions,
+        transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
         mut hook: impl FnMut(Stage) -> Result<(), Errno>,
+        exclusive: bool,
     ) -> Result<MutationOutcome, MutationError<E>> {
         let anchor = Anchor::open(self, path, options.create_parent, &mut hook)?;
         let (old, before) = anchor.read(options.read, &mut hook)?;
@@ -636,14 +677,31 @@ impl Root {
         }
         // From<ByteError> always means BeforePublication. Every fallible operation
         // from here must map its explicit phase; never add a bare ? after rename.
-        hook(Stage::Rename)
-            .and_then(|()| {
-                fs::renameat(anchor.parent(), &temp.name, anchor.parent(), anchor.name())
-            })
-            .map_err(|error| MutationError::Storage {
-                phase: MutationPhase::PublicationUncertain,
-                error: ByteError::Io(error),
-            })?;
+        let publication = hook(Stage::Rename).and_then(|()| {
+            if exclusive {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                return fs::renameat_with(
+                    anchor.parent(),
+                    &temp.name,
+                    anchor.parent(),
+                    anchor.name(),
+                    fs::RenameFlags::NOREPLACE,
+                );
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                return Err(Errno::NOTSUP);
+            }
+            fs::renameat(anchor.parent(), &temp.name, anchor.parent(), anchor.name())
+        });
+        match publication {
+            Ok(()) => {}
+            Err(Errno::EXIST) if exclusive => return Err(ByteError::ExistenceMismatch.into()),
+            Err(error) => {
+                return Err(MutationError::Storage {
+                    phase: MutationPhase::PublicationUncertain,
+                    error: ByteError::Io(error),
+                });
+            }
+        }
         temp.published = true;
         directory_sync(hook(Stage::BeforeDirectorySync).and_then(|()| fs::fsync(anchor.parent())))
             .map_err(|error| MutationError::Storage {

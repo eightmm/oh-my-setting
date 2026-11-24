@@ -14,7 +14,7 @@ use std::{
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -22,6 +22,71 @@ use std::{
 
 pub type Validator<'a> = dyn FnMut(&[V], Option<&V>) -> Result<()> + 'a;
 pub type CheckedAppend = fn(&Path, V, &AtomicBool, &mut Validator<'_>) -> Result<V>;
+
+const MONITOR_READY_TIMEOUT: Duration = Duration::from_millis(1500);
+const MONITOR_READY_ERROR: &str = "reference monitor did not become ready";
+
+#[derive(Clone, Copy)]
+enum StartupPhase {
+    AwaitingThread,
+    ThreadStarted,
+    HeartbeatStarted,
+    LifecycleLockAcquired,
+    LifecycleProjectionReady,
+    HeartbeatWritten,
+    ReadinessPublished,
+}
+
+impl StartupPhase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::AwaitingThread => "awaiting-thread",
+            Self::ThreadStarted => "thread-started",
+            Self::HeartbeatStarted => "initial-heartbeat-started",
+            Self::LifecycleLockAcquired => "lifecycle-lock-acquired",
+            Self::LifecycleProjectionReady => "lifecycle-projection-ready",
+            Self::HeartbeatWritten => "initial-heartbeat-written",
+            Self::ReadinessPublished => "readiness-published",
+        }
+    }
+}
+
+struct StartupDiagnostics {
+    started: Instant,
+    last: Mutex<(StartupPhase, Duration)>,
+}
+
+impl StartupDiagnostics {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last: Mutex::new((StartupPhase::AwaitingThread, Duration::ZERO)),
+        }
+    }
+
+    fn record(&self, phase: StartupPhase) {
+        if let Ok(mut last) = self.last.try_lock() {
+            *last = (phase, self.started.elapsed().min(MONITOR_READY_TIMEOUT));
+        }
+    }
+
+    fn timeout_message(&self) -> String {
+        let Ok(last) = self.last.try_lock().map(|last| *last) else {
+            return MONITOR_READY_ERROR.into();
+        };
+        format!(
+            "{MONITOR_READY_ERROR} (last_phase={}, phase_elapsed_ms={})",
+            last.0.name(),
+            last.1.as_millis()
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Appender {
+    Injected(CheckedAppend),
+    Native,
+}
 
 /// Uses the operations producer's own lock and fresh projection. The callback
 /// executes before idempotent reuse or append and must not reacquire that lock.
@@ -38,8 +103,9 @@ pub fn native_checked_append(
 pub struct Protocol {
     helper: String,
     identity: Arc<dyn IdentitySource>,
-    checked: CheckedAppend,
+    appender: Appender,
     controller: Option<Controller>,
+    startup: Option<Arc<StartupDiagnostics>>,
 }
 impl Protocol {
     /// Explicit service injection: the trusted caller owns authentication and
@@ -56,8 +122,9 @@ impl Protocol {
         Ok(Self {
             helper: helper_sha256,
             identity,
-            checked,
+            appender: Appender::Injected(checked),
             controller: None,
+            startup: None,
         })
     }
     /// Retains one native executing-image snapshot with injected process and
@@ -80,19 +147,35 @@ impl Protocol {
         Ok(Self {
             helper,
             identity,
-            checked,
+            appender: Appender::Injected(checked),
             controller: Some(controller),
+            startup: None,
         })
     }
     pub fn production() -> Result<Self> {
         Self::production_with_controller(Controller::capture_current()?)
     }
     pub fn production_with_controller(controller: Controller) -> Result<Self> {
-        Self::with_controller(
-            controller,
-            Arc::new(crate::process::NativeIdentity),
-            native_checked_append,
-        )
+        Ok(Self {
+            helper: controller.digest()?.to_owned(),
+            identity: Arc::new(crate::process::NativeIdentity),
+            appender: Appender::Native,
+            controller: Some(controller),
+            startup: None,
+        })
+    }
+
+    /// A single foreground caller and its monitor clone share these diagnostics.
+    /// The readiness file and owner checks still decide whether startup succeeds.
+    pub fn with_startup_diagnostics(mut self) -> Self {
+        self.startup = Some(Arc::new(StartupDiagnostics::new()));
+        self
+    }
+
+    fn record_startup(&self, phase: StartupPhase) {
+        if let Some(startup) = &self.startup {
+            startup.record(phase);
+        }
     }
     pub fn controller(&self) -> Option<&Controller> {
         self.controller.as_ref()
@@ -262,6 +345,17 @@ impl Protocol {
         expected: &str,
         interrupted: &AtomicBool,
     ) -> Result<bool> {
+        self.pulse_with_startup(repo, channel, expected, interrupted, None)
+    }
+
+    fn pulse_with_startup(
+        &self,
+        repo: &Path,
+        channel: &Path,
+        expected: &str,
+        interrupted: &AtomicBool,
+        startup: Option<&StartupDiagnostics>,
+    ) -> Result<bool> {
         let (initial, _) = self.read(repo, channel, expected)?;
         let attempt = text(&initial, "attempt")?;
         let event = events::new_event(
@@ -315,7 +409,26 @@ impl Protocol {
                 acquired.store(true, Ordering::Relaxed);
                 validate(rows, current)
             };
-            (self.checked)(repo, event, flag, &mut checked)
+            match (self.appender, startup) {
+                (Appender::Injected(append), _) => append(repo, event, flag, &mut checked),
+                (Appender::Native, None) => native_checked_append(repo, event, flag, &mut checked),
+                (Appender::Native, Some(startup)) => events::append_lifecycle_checked_observed(
+                    repo,
+                    event,
+                    flag,
+                    &mut checked,
+                    |phase| {
+                        startup.record(match phase {
+                            events::CheckedAppendPhase::LockAcquired => {
+                                StartupPhase::LifecycleLockAcquired
+                            }
+                            events::CheckedAppendPhase::ProjectionReady => {
+                                StartupPhase::LifecycleProjectionReady
+                            }
+                        });
+                    },
+                ),
+            }
         });
         match result {
             Ok(_) => Ok(true),
@@ -340,12 +453,21 @@ impl Protocol {
         interrupted: &AtomicBool,
         in_process: bool,
     ) -> Result<()> {
+        self.record_startup(StartupPhase::ThreadStarted);
         let (initial, _) = self.read(repo, channel, expected)?;
         self.caller(initial.get("binding"), in_process)
             .map_err(|_| "reference monitor belongs to another writer")?;
-        if !self.pulse(repo, channel, expected, interrupted)? {
+        self.record_startup(StartupPhase::HeartbeatStarted);
+        if !self.pulse_with_startup(
+            repo,
+            channel,
+            expected,
+            interrupted,
+            self.startup.as_deref(),
+        )? {
             return Err("reference operation ended before monitor startup".into());
         }
+        self.record_startup(StartupPhase::HeartbeatWritten);
         let (scope, _) = self.read(repo, channel, expected)?;
         let pending = auxiliary(channel, ".ready.pending");
         let (raw, info) = storage::regular(&pending, 0, 1)?;
@@ -380,6 +502,7 @@ impl Protocol {
         }
         fs::remove_file(&pending).map_err(|e| e.to_string())?;
         storage::sync_directory(root)?;
+        self.record_startup(StartupPhase::ReadinessPublished);
         let mut next_pulse = Instant::now() + Duration::from_secs(10);
         let mut next_owner = Instant::now() + Duration::from_secs(1);
         loop {
@@ -448,7 +571,7 @@ impl Protocol {
         interrupted: &AtomicBool,
         in_process: bool,
     ) -> Result<String> {
-        let deadline = Instant::now() + Duration::from_millis(1500);
+        let deadline = Instant::now() + MONITOR_READY_TIMEOUT;
         loop {
             checkpoint(interrupted)?;
             let (scope, _) = self.read(repo, channel, expected)?;
@@ -490,7 +613,10 @@ impl Protocol {
                 }
             }
             if Instant::now() >= deadline {
-                return Err("reference monitor did not become ready".into());
+                return Err(self.startup.as_ref().map_or_else(
+                    || MONITOR_READY_ERROR.into(),
+                    |startup| startup.timeout_message(),
+                ));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -990,4 +1116,43 @@ pub fn task_operation_with_controller(
     let protocol = Protocol::production_with_controller(controller)
         .map_err(|error| oms_command_task::Error::new(1, error))?;
     task_operation(protocol, repo, target, interrupted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_timeout_reports_last_confirmed_phase_with_bounded_timing() {
+        let startup = StartupDiagnostics {
+            started: Instant::now() - MONITOR_READY_TIMEOUT,
+            ..StartupDiagnostics::new()
+        };
+        assert_eq!(
+            startup.timeout_message(),
+            format!("{MONITOR_READY_ERROR} (last_phase=awaiting-thread, phase_elapsed_ms=0)")
+        );
+        for (phase, name) in [
+            (StartupPhase::HeartbeatStarted, "initial-heartbeat-started"),
+            (
+                StartupPhase::LifecycleLockAcquired,
+                "lifecycle-lock-acquired",
+            ),
+            (
+                StartupPhase::LifecycleProjectionReady,
+                "lifecycle-projection-ready",
+            ),
+        ] {
+            startup.record(phase);
+            assert_eq!(
+                startup.timeout_message(),
+                format!(
+                    "{MONITOR_READY_ERROR} (last_phase={name}, phase_elapsed_ms={})",
+                    MONITOR_READY_TIMEOUT.as_millis()
+                )
+            );
+        }
+        let _writing = startup.last.lock().unwrap();
+        assert_eq!(startup.timeout_message(), MONITOR_READY_ERROR);
+    }
 }

@@ -1,9 +1,9 @@
 # Native lifecycle and approval operations
 
-This crate implements the canonical `scripts/lib/agent-events.py` operations.
-It invokes no legacy command or interpreter. The existing native
-`oms-command-attempt-bundle` handles bundle selectors, including its existing
-abbreviations and transcript path handling.
+This crate implements [`oms agent-events`](src/events.rs) and
+[`oms approval-inbox`](src/approvals.rs). The native
+`oms-command-attempt-bundle` handles bundle selectors, abbreviations, and
+transcript path handling.
 
 ## Parent integration contract
 
@@ -44,8 +44,8 @@ grant material. Grants are returned only by an explicit successful decision.
 
 No memory/journal/provider/scheduler service is called by these canonical
 operations, so this producer needs no callbacks to those other domains.
-The parent must wire both public verbs and replace internal Python imports and
-subprocess adapters. Known consumers include:
+The root CLI wires both public verbs to this crate. The original migration
+inventory recorded these former Python consumers and shell entry points.
 
 - `attempt-runner.py`: `new_event`, `append_lifecycle`, `create_attempt`,
   `read_rows`, event/spec paths, and projection.
@@ -64,18 +64,13 @@ the reservation actor. Attempt ownership is a wrapper fence, as exercised by
 `tests/patch-land-approval-smoke.sh`'s attempt-bound approval cases. Room
 membership, worker text, and event records grant no authority.
 
-This standalone crate has its own temporary workspace and lockfile. Root
-workspace registration, unified lockfile, native selector/main wiring, source
-inventory, release/install/CI and public docs remain parent integration work.
-No changes to those files are included. The admitted bundle crate still owns
-its independent read-only bundle projection; shared-core extraction across
-that crate, if desired by the parent, cannot be done within this scope.
-
 ## Source and mode checklist
 
-Canonical source anchors refer to `scripts/lib/agent-events.py`.
+The line ranges record the original porting anchors in the retired
+`scripts/lib/agent-events.py`. Current command owners are [events](src/events.rs)
+and [approvals](src/approvals.rs).
 
-| Native command | Options after the subcommand | Canonical anchor |
+| Native command | Options after the subcommand | Historical anchor |
 | --- | --- | --- |
 | events start | `--provider`, `--tool`, `--task-id`, `--run-id`, `--parent-attempt-id`, repeated `--ref`, `--max-wall-seconds`, `--max-tokens`, `--max-cost-microusd`, `--idempotency-key`, repeated `--then`, `--then-actor`, `--then-actor-kind` | 899–1043, 2134–2152 |
 | events transition | `--attempt`, `--state`, `--expected-state`, `--expected-seq`, repeated `--ref`, `--reason-code`, `--actor-kind`, `--actor`, `--idempotency-key`, repeated `--then` | 1046–1074, 2154–2166 |

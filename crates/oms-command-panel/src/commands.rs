@@ -501,8 +501,9 @@ pub(crate) fn snapshot(
         options.get("owner-attempt"),
         services,
         stop,
+        false,
     )
-    .map(|(snapshot, _)| snapshot)
+    .map(|(snapshot, _, _)| snapshot)
 }
 pub(crate) fn snapshot_with(
     session: &Session,
@@ -513,13 +514,14 @@ pub(crate) fn snapshot_with(
 ) -> Result<state::Snapshot> {
     clear_codex_quota_receipt();
     let main = options.get("owner-attempt");
-    let (snapshot, sources) = snapshot_for(
+    let (snapshot, sources, _) = snapshot_for(
         session,
         repo,
         room(options).as_deref(),
         main,
         services,
         stop,
+        false,
     )?;
     if options.has("watch") && !options.has("log") {
         publish_codex_quota_receipt(repo, main, &snapshot, sources);
@@ -534,9 +536,20 @@ pub(crate) fn snapshot_for(
     main_attempt: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<(state::Snapshot, metrics::CodexQuotaSources)> {
-    let mut snapshot =
-        state::snapshot_with_cache(repo, room_id, services, stop, Some(session.attempt_cache()))?;
+    include_write_slots: bool,
+) -> Result<(
+    state::Snapshot,
+    metrics::CodexQuotaSources,
+    Option<oms_panel_core::dispatch::WriteSlots>,
+)> {
+    let (mut snapshot, write_slots) = state::snapshot_with_write_slots(
+        repo,
+        room_id,
+        services,
+        stop,
+        session.attempt_cache(),
+        main_attempt.filter(|_| include_write_slots),
+    )?;
     let calls = crate::render::calls(&snapshot.report);
     let tasks: Vec<_> = calls
         .iter()
@@ -602,7 +615,7 @@ pub(crate) fn snapshot_for(
             snapshot.report["main_token_observation"] = tokens;
         }
     }
-    Ok((snapshot, quota_sources))
+    Ok((snapshot, quota_sources, write_slots))
 }
 
 fn unix_now() -> f64 {
@@ -661,6 +674,8 @@ pub(crate) fn resolve_repositories(
         || options.has("launch")
         || options.has("spawn-main")
         || options.has("orchestrator")
+        || options.has("native-reconcile")
+        || options.has("native-adopt")
         || options.has("focus-orchestrator")
         || options.has("reopen")
         || options.has("swap-main")
@@ -803,6 +818,10 @@ pub(crate) fn run_mode(
             ..Error::new("repository required")
         })?;
         return crate::native_panel::run(&repo, source, options, services, stop);
+    }
+    if options.has("native-reconcile") || options.has("native-adopt") {
+        let repo = repo_opt.ok_or_else(|| Error::new("repository required"))?;
+        return crate::orchestrator::run(&repo, "codex", options, services, stop);
     }
     if let Some(provider) = options
         .get("orchestrator")
@@ -1922,7 +1941,7 @@ fn acceptance_output(request: &results::AcceptRequest, accepted: &Value) -> Stri
                 shell_quote(text(accepted, "patch_sha256"))));
         }
     }
-    result.push_str(&format!("Next: oms land --repo {execution}\nThen: oms panel --finalize --repo {execution} --landed-commit <full head SHA that oms land pushed>\n"));
+    result.push_str(&format!("Next: oms land --repo {execution} (opens a pull request; add --merge only when the user asked to merge)\nThen, once merged: oms panel --finalize --repo {execution} --landed-commit <full head SHA that oms land pushed>\n"));
     result
 }
 
@@ -3562,6 +3581,285 @@ mod tests {
             session
                 .observe_main_model_with(&dir.0, &report, locate)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn sessions_preserves_waiting_and_unknown_parity_across_custodian_and_age_cases() {
+        use super::{Value, rows, strings, text};
+        let now = oms_panel_core::timestamp();
+        let main_attempt = json!({
+            "attempt_id": "att-main",
+            "tool": "panel-main",
+            "provider": "codex",
+            "state": "working",
+            "terminal": false,
+            "created_at": now - 60,
+            "refs": {
+                "panel_room_id": "room-demo",
+                "panel_role": "main",
+                "panel_room_participant": "main-1"
+            }
+        });
+        let report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-demo",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "joined": true,
+                        "joined_at": now - 60
+                    },
+                    {
+                        "participant": "live-res",
+                        "role": "worker",
+                        "provider": "codex",
+                        "joined": true
+                    },
+                    {
+                        "participant": "live-queued",
+                        "role": "worker",
+                        "provider": "claude",
+                        "state": "queued",
+                        "joined": true,
+                        "joined_at": now - 30
+                    },
+                    {
+                        "participant": "live-wait",
+                        "role": "worker",
+                        "provider": "antigravity",
+                        "state": "waiting_input",
+                        "joined": true,
+                        "joined_at": now - 30
+                    },
+                    {
+                        "participant": "undated-queued",
+                        "role": "worker",
+                        "provider": "codex",
+                        "state": "queued",
+                        "joined": true
+                    },
+                    {
+                        "participant": "left-queued",
+                        "role": "worker",
+                        "provider": "claude",
+                        "state": "queued",
+                        "joined": false,
+                        "joined_at": now - 30
+                    },
+                    {
+                        "participant": "undated-unk",
+                        "role": "worker",
+                        "provider": "antigravity",
+                        "state": "unknown",
+                        "joined": true
+                    },
+                    {
+                        "participant": "ancient-queued",
+                        "role": "worker",
+                        "provider": "codex",
+                        "state": "queued",
+                        "joined": true,
+                        "joined_at": now - 600
+                    },
+                    {
+                        "participant": "stale-cust-disp",
+                        "role": "worker",
+                        "provider": "claude",
+                        "state": "queued",
+                        "joined": true,
+                        "joined_at": now - 30
+                    },
+                    {
+                        "participant": "ancient-old-cust",
+                        "role": "worker",
+                        "provider": "codex",
+                        "state": "queued",
+                        "joined": true,
+                        "joined_at": now - 600
+                    }
+                ]
+            },
+            "room_attempts": {
+                "att-main": main_attempt,
+                "main-1": main_attempt,
+                "att-old-main": {
+                    "attempt_id": "att-old-main",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "done",
+                    "terminal": true,
+                    "created_at": now - 900,
+                    "updated_at": now - 600,
+                    "refs": {
+                        "panel_room_id": "room-demo",
+                        "panel_role": "main",
+                        "panel_room_participant": "main-1"
+                    }
+                }
+            },
+            "room_dispatches": {
+                "live-res": {
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-main",
+                    "state": "reserved",
+                    "created_at": now - 30
+                },
+                "stale-cust-disp": {
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-old-main",
+                    "state": "running",
+                    "created_at": now - 30
+                },
+                "ancient-old-cust": {
+                    "room": "room-demo",
+                    "main": "main-1",
+                    "main_attempt": "att-old-main",
+                    "state": "running",
+                    "created_at": now - 600
+                }
+            }
+        });
+
+        let query_ids = |rep: &Value, state_filter: &str| -> std::collections::BTreeSet<String> {
+            let opts = Options::parse(&strings(&["--sessions", "--json", "--state", state_filter]))
+                .unwrap();
+            let out = super::sessions(rep, &opts).unwrap();
+            let payload: Value = serde_json::from_slice(&out.1).unwrap();
+            rows(&payload["sessions"])
+                .iter()
+                .map(|row| text(row, "participant").to_owned())
+                .collect()
+        };
+        let visible_ids = |rep: &Value| -> std::collections::BTreeSet<String> {
+            crate::render::visible(rep, &crate::navigation::Navigation::default())
+                .into_iter()
+                .map(|row| text(&row, "participant").to_owned())
+                .collect()
+        };
+
+        let auto = visible_ids(&report);
+        assert!(auto.contains("live-res"), "{auto:?}");
+        assert!(auto.contains("live-queued"), "{auto:?}");
+        assert!(auto.contains("live-wait"), "{auto:?}");
+        for folded in [
+            "undated-queued",
+            "left-queued",
+            "undated-unk",
+            "ancient-queued",
+            "stale-cust-disp",
+            "ancient-old-cust",
+        ] {
+            assert!(!auto.contains(folded), "{folded} leaked: {auto:?}");
+        }
+
+        let waiting = query_ids(&report, "waiting");
+        for expected in [
+            "live-queued",
+            "live-wait",
+            "undated-queued",
+            "left-queued",
+            "stale-cust-disp",
+        ] {
+            assert!(waiting.contains(expected), "{expected}: {waiting:?}");
+        }
+        assert!(!waiting.contains("ancient-queued"), "{waiting:?}");
+        assert!(!waiting.contains("ancient-old-cust"), "{waiting:?}");
+        assert!(!waiting.contains("undated-unk"), "{waiting:?}");
+
+        let unknown = query_ids(&report, "unknown");
+        assert!(unknown.contains("ancient-queued"), "{unknown:?}");
+        assert!(unknown.contains("ancient-old-cust"), "{unknown:?}");
+        assert!(unknown.contains("undated-unk"), "{unknown:?}");
+
+        let mut no_main = report.clone();
+        no_main["room_attempts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("att-main");
+        no_main["room_attempts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("main-1");
+        let mut closed = report.clone();
+        closed["room"]["closed"] = json!(true);
+
+        for (label, rep) in [("no_main", &no_main), ("closed", &closed)] {
+            let rep_auto = visible_ids(rep);
+            assert!(!rep_auto.contains("live-res"), "{label}: {rep_auto:?}");
+            assert!(!rep_auto.contains("live-queued"), "{label}: {rep_auto:?}");
+            assert!(
+                !rep_auto.contains("ancient-queued"),
+                "{label}: {rep_auto:?}"
+            );
+
+            let rep_waiting = query_ids(rep, "waiting");
+            for expected in ["live-queued", "undated-queued", "left-queued"] {
+                assert!(
+                    rep_waiting.contains(expected),
+                    "{label} {expected}: {rep_waiting:?}"
+                );
+            }
+            assert!(
+                !rep_waiting.contains("ancient-queued"),
+                "{label}: {rep_waiting:?}"
+            );
+
+            let rep_unknown = query_ids(rep, "unknown");
+            assert!(
+                rep_unknown.contains("ancient-queued"),
+                "{label}: {rep_unknown:?}"
+            );
+            assert!(
+                rep_unknown.contains("undated-unk"),
+                "{label}: {rep_unknown:?}"
+            );
+        }
+
+        let mut closed_question = closed.clone();
+        closed_question["room"]["participants"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "participant": "closed-question-queued",
+                "role": "worker",
+                "provider": "codex",
+                "state": "queued",
+                "joined": true,
+                "joined_at": now - 600
+            }));
+        closed_question["room"]["open_questions"] = json!([
+            {
+                "sender": "closed-question-queued",
+                "recipient": "main-1",
+                "text": "Need decision before exit"
+            }
+        ]);
+        let closed_q_auto = visible_ids(&closed_question);
+        assert!(
+            !closed_q_auto.contains("closed-question-queued"),
+            "{closed_q_auto:?}"
+        );
+        let closed_q_call = crate::render::calls(&closed_question)
+            .into_iter()
+            .find(|row| row["participant"] == "closed-question-queued")
+            .unwrap();
+        assert_eq!(closed_q_call["room_only_stale"], true, "{closed_q_call}");
+        assert!(
+            query_ids(&closed_question, "waiting").contains("closed-question-queued"),
+            "closed-question-queued must remain waiting in --sessions"
+        );
+        assert!(
+            !query_ids(&closed_question, "unknown").contains("closed-question-queued"),
+            "closed-question-queued must not turn unknown in --sessions"
         );
     }
 }

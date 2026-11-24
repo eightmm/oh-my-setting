@@ -90,12 +90,14 @@ fn run_with_source_writer(
         managed: false,
     };
     let mut board = (options.has("watch") && max_count.is_none() && terminal.is_some())
-        .then(InteractiveRefresh::start)
+        .then(|| InteractiveRefresh::start(services.workspace_group_resolver()))
         .transpose()?;
     if board.is_some() {
         room.clear();
     }
     let mut requested = true;
+    #[cfg(target_os = "linux")]
+    let mut agy_first_child_wake = crate::wakeup::AgyFirstChildWake::default();
     let mut deadline = Instant::now();
     let mut scope_sample = None;
     let mut read = attention::load(repo, &room);
@@ -118,6 +120,8 @@ fn run_with_source_writer(
     let mut main_checkout = MainCheckout::default();
     let mut selection_changed = SelectionFence::None;
     let mut switch = MainSwitch::default();
+    let mut pending_agy_detail: Option<AgyDetailUsageRequest> = None;
+    let mut retained_agy_detail: Option<AgyDetailUsageEvidence> = None;
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
@@ -135,8 +139,12 @@ fn run_with_source_writer(
                 )
             });
         let mut accepted_refresh = false;
+        let mut native_activity_current = false;
         let mut checkout_changed = false;
+        let mut scope_changed = false;
+        let mut agy_detail_frame = AgyDetailFrame::Unchanged;
         let mut checked_agy = None;
+        let mut incoming_agy_detail = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
                 let ready = board.worker.ready();
@@ -150,9 +158,23 @@ fn run_with_source_writer(
                 observations: observations.clone(),
                 footer: main_footer.clone(),
                 agy: chat.as_ref().and_then(AgyDockCheck::new),
+                agy_detail: None,
+                agy_detail_binding: selected_chat
+                    .as_ref()
+                    .and_then(|(_, binding)| binding.as_ref())
+                    .filter(|binding| {
+                        agy_binding_matches_selection(
+                            binding,
+                            &nav,
+                            before.as_ref().and_then(|rows| rows.get(nav.selected)),
+                            &observations,
+                        )
+                    })
+                    .cloned(),
             };
             let (changed, result, native) =
-                board.update_with_native(live, launch, ready, Some(seed));
+                board.update_with_native(live, launch, ready, Some(seed), &mut pending_agy_detail);
+            scope_changed = changed;
             accepted_refresh = result.is_some() && board.phase == RefreshPhase::Fresh;
             let rejected_native = native.is_none()
                 && result.is_some()
@@ -160,12 +182,31 @@ fn run_with_source_writer(
                     .scope
                     .as_ref()
                     .is_some_and(|scope| scope.main.is_some());
+            agy_detail_frame = if rejected_native || !board.phase.retains_agy_detail() {
+                AgyDetailFrame::Rejected
+            } else if native.is_some() {
+                AgyDetailFrame::Observed
+            } else {
+                AgyDetailFrame::Unchanged
+            };
+            native_activity_current = board
+                .phase
+                .accepts_native_activity(native.is_some(), changed || checkout_changed);
+            #[cfg(target_os = "linux")]
+            if changed || checkout_changed || rejected_native || !board.phase.retains_agy_detail() {
+                agy_first_child_wake.replace(None);
+            }
             let mut native_projection = None;
             if let Some(reading) = native {
+                #[cfg(target_os = "linux")]
+                agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
                     checked_agy = reading.agy;
                 }
+                // A queued same-scope refresh restricts actions, while this
+                // completed and generation-checked reading can still paint.
+                incoming_agy_detail = reading.agy_detail_evidence;
                 observations = reading.observations;
                 main_footer = reading.footer;
             } else if rejected_native {
@@ -324,6 +365,27 @@ fn run_with_source_writer(
             selection_changed = SelectionFence::Native;
             nav.detail = false;
         }
+        if pending_agy_detail.as_ref().is_some_and(|pending| {
+            let visible = render::visible(&report, &nav);
+            !agy_binding_matches_selection(
+                &pending.binding,
+                &nav,
+                visible.get(nav.selected),
+                &observations,
+            )
+        }) {
+            pending_agy_detail = None;
+        }
+        reconcile_agy_detail_evidence(
+            &mut retained_agy_detail,
+            incoming_agy_detail,
+            board.as_ref().and_then(|board| board.scope.as_ref()),
+            &report,
+            &nav,
+            &observations,
+            agy_detail_frame,
+            scope_changed,
+        );
         settle_main_dock(&mut chat, &report);
         let owner = board
             .as_ref()
@@ -364,8 +426,9 @@ fn run_with_source_writer(
                 crate::layout::reflow(repo, &room, services, interrupted);
                 size = crate::layout::dimensions();
             }
-            let frame = frame(
-                &report,
+            let display_report = report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+            let frame = frame_with_native_activity(
+                &display_report,
                 &nav,
                 size,
                 &read,
@@ -373,6 +436,7 @@ fn run_with_source_writer(
                 interactive.then_some(&mut split),
                 chat.as_mut(),
                 weekly.overlay(weekly_phase),
+                native_activity_current,
             );
             provider_rows = frame.provider_rows;
             worker_rows = frame.worker_rows;
@@ -416,12 +480,26 @@ fn run_with_source_writer(
                 break;
             }
             if let Some(terminal) = &mut terminal {
-                let (keys, woken) = terminal.wait_woken(
+                #[cfg(target_os = "linux")]
+                let native_fd = agy_first_child_wake.fd();
+                #[cfg(not(target_os = "linux"))]
+                let native_fd = None;
+                let (keys, woken, _native_ready) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
                         .min(Duration::from_millis(100)),
                     wake.as_ref(),
+                    native_fd,
                 )?;
+                #[cfg(target_os = "linux")]
+                let woken = {
+                    let idle = board.as_ref().is_some_and(|board| !board.worker.busy());
+                    // Settle the current authoritative paint before scheduling
+                    // another job from a burst of transcript writes.
+                    let native_woken =
+                        agy_first_child_wake.refresh(_native_ready, idle, Instant::now());
+                    woken || native_woken
+                };
                 let mut refresh = woken;
                 let mut collect_ready = false;
                 let mut scope = InputScope {
@@ -473,7 +551,7 @@ fn run_with_source_writer(
                                     .then(|| target.sample(repo, services, interrupted).ok())
                                     .flatten()
                             },
-                            |scope, target| start_main_switch(repo, scope, target),
+                            |scope, target| start_main_switch(repo, source, scope, target),
                         ) {
                             changed = true;
                             break;
@@ -671,6 +749,7 @@ fn run_with_source_writer(
                     }
                     let identity = calls.get(nav.selected).map(call_identity);
                     let old_view = nav.view;
+                    let was_detail = nav.detail;
                     let page = key_page(
                         &report,
                         &nav,
@@ -890,6 +969,56 @@ fn run_with_source_writer(
                         navigation::Action::None => {}
                     }
                     card_replaces_main_dock(&nav, &mut chat);
+                    if direct_detail
+                        && !was_detail
+                        && nav.detail
+                        && row_authority
+                        && let Some(req) = board.as_ref().and_then(|board| {
+                            agy_detail_usage_request(
+                                board.scope.as_ref(),
+                                &report,
+                                calls.get(nav.selected),
+                                &observations,
+                            )
+                        })
+                    {
+                        pending_agy_detail = Some(req);
+                        refresh = true;
+                    }
+                }
+                if scope.changed {
+                    pending_agy_detail = None;
+                    retained_agy_detail = None;
+                } else if pending_agy_detail.is_some() || retained_agy_detail.is_some() {
+                    let current_visible;
+                    let selected_call = if calls_key.as_ref()
+                        == Some(&(nav.filter.clone(), nav.attention_only, nav.view))
+                    {
+                        calls.get(nav.selected)
+                    } else {
+                        current_visible = render::visible(&report, &nav);
+                        current_visible.get(nav.selected)
+                    };
+                    if pending_agy_detail.as_ref().is_some_and(|pending| {
+                        !agy_binding_matches_selection(
+                            &pending.binding,
+                            &nav,
+                            selected_call,
+                            &observations,
+                        )
+                    }) {
+                        pending_agy_detail = None;
+                    }
+                    if retained_agy_detail.as_ref().is_some_and(|retained| {
+                        !agy_binding_matches_selection(
+                            &retained.binding,
+                            &nav,
+                            selected_call,
+                            &observations,
+                        )
+                    }) {
+                        retained_agy_detail = None;
+                    }
                 }
                 // Opening an owned native transcript uses the shorter revalidation
                 // cadence even when this frame began with the event-backed deadline.
@@ -914,7 +1043,10 @@ fn run_with_source_writer(
                         Err(e) => nav.notice = Some(e.message),
                     }
                 }
-                if refresh || collect_ready || scope.changed {
+                let recollect = refresh || collect_ready || scope.changed;
+                // Once invalidated, later redraws of this report keep the pending cue.
+                native_activity_current &= scope.accepts_native_activity_redraw(recollect);
+                if recollect {
                     clear_private_weekly(&mut report);
                     if let Some(observation) = report.get_mut("main_model_observation") {
                         retain_main_model(observation);
@@ -925,8 +1057,10 @@ fn run_with_source_writer(
                         crate::layout::reflow(repo, &room, services, interrupted);
                     }
                     let size = pane_size(repo, services, interrupted);
+                    let display_report =
+                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
                     let frame = frame(
-                        &report,
+                        &display_report,
                         &nav,
                         size,
                         &read,
@@ -958,8 +1092,10 @@ fn run_with_source_writer(
                     || ((detail_repaint || scope.checkout_repaint) && !dock_moved))
                     && !scope.changed
                 {
-                    let frame = frame(
-                        &report,
+                    let display_report =
+                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+                    let frame = frame_with_native_activity(
+                        &display_report,
                         &nav,
                         last_size,
                         &read,
@@ -967,6 +1103,7 @@ fn run_with_source_writer(
                         interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase.awaiting(refresh || collect_ready)),
+                        native_activity_current,
                     );
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
@@ -982,7 +1119,7 @@ fn run_with_source_writer(
                     )?;
                     output.flush().map_err(Error::new)?;
                 }
-                if refresh || collect_ready || scope.changed {
+                if recollect {
                     requested = refresh;
                     break;
                 }
@@ -993,8 +1130,10 @@ fn run_with_source_writer(
                     }
                     let size = crate::layout::dimensions();
                     last_size = size;
-                    let frame = frame(
-                        &report,
+                    let display_report =
+                        report_for_frame(&report, &nav, retained_agy_detail.as_ref());
+                    let frame = frame_with_native_activity(
+                        &display_report,
                         &nav,
                         size,
                         &read,
@@ -1002,6 +1141,7 @@ fn run_with_source_writer(
                         interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase),
+                        native_activity_current,
                     );
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
@@ -1030,7 +1170,7 @@ fn run_with_source_writer(
 }
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const EVENT_BACKED_FALLBACK: Duration = Duration::from_secs(30);
+pub(crate) const EVENT_BACKED_FALLBACK: Duration = Duration::from_secs(30);
 
 fn refresh_interval(event_backed: bool, fresh: bool, bounded_retry: bool) -> Duration {
     if event_backed && fresh && !bounded_retry {
@@ -1067,6 +1207,10 @@ struct InputScope {
 }
 
 impl InputScope {
+    fn accepts_native_activity_redraw(&self, recollect: bool) -> bool {
+        self.current && !self.checkout_repaint && !recollect
+    }
+
     fn observe(
         &mut self,
         board: &InteractiveRefresh,
@@ -1192,16 +1336,54 @@ impl MainSwitch {
             && attempt["terminal"] == false
             && attempt["state"] == "working"
             && oms_panel_core::state::main_participant(attempt) == main.member;
-        if current && legacy_main_switch_source(report, main, attempt) {
+        if !current {
+            let live_state = (attempt["attempt_id"] == main.attempt
+                && attempt["provider"] == main.owner
+                && attempt["terminal"] == false
+                && oms_panel_core::state::main_participant(attempt) == main.member)
+                .then(|| attempt["state"].as_str())
+                .flatten()
+                .filter(|state| {
+                    *state != "working" && oms_panel_core::state::LIVE_STATES.contains(state)
+                });
+            if let Some(state) = live_state {
+                return Err(Error::new(format!(
+                    "Current Main is {state}; wait until it is working to switch"
+                )));
+            }
+            return Err(Error::new(
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ));
+        }
+        if legacy_main_switch_source(report, main, attempt) {
             return Err(Error::new(
                 "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main.",
             ));
         }
-        crate::require(
-            current && attempt["refs"]["panel_host"] == "tmux",
-            "Current Main is unavailable for a managed switch",
-        )?;
+        match attempt["refs"]["panel_host"].as_str() {
+            Some("tmux") => {}
+            Some("inline") => {
+                return Err(Error::new(
+                    "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+                ));
+            }
+        }
+        if attempt["refs"]["panel_native_scheduling"] == "campaign" {
+            return Err(Error::new(
+                "Main swap is unavailable during a managed campaign",
+            ));
+        }
         let current = attempt["refs"]["panel_harness"].as_str();
+        if current == Some("agy") && main.owner == "antigravity" {
+            return Err(Error::new(
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ));
+        }
         crate::native_panel::check_outgoing_main_swap_harness(current)?;
         let current = current.unwrap_or_default();
         let targets = targets(current)?;
@@ -1290,11 +1472,12 @@ impl MainSwitch {
 
 fn start_main_switch(
     repo: &Path,
+    source: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
 ) -> Result<Receiver<Result<()>>> {
     let services = oms_panel_core::SubcommandServices::sibling()?;
-    let request = main_switch_request(&services.executable, repo, scope, target)?;
+    let request = main_switch_request(&services.executable, source, repo, scope, target)?;
     let (completed, result) = mpsc::channel();
     // The canonical host owns lifecycle reconciliation once submitted. Closing
     // this display neither retries the transition nor sends a second request.
@@ -1328,6 +1511,7 @@ fn start_main_switch(
 
 fn main_switch_request(
     executable: &Path,
+    source: &Path,
     repo: &Path,
     scope: &BoardScope,
     target: &crate::native_panel::MainSwitchTarget,
@@ -1337,11 +1521,18 @@ fn main_switch_request(
         .as_ref()
         .ok_or_else(|| Error::new("No current Main verified"))?;
     crate::require(
-        executable.is_absolute() && executable.file_name().is_some_and(|name| name == "oms"),
+        executable.is_absolute()
+            && rustix::fs::access(executable, rustix::fs::Access::EXEC_OK).is_ok(),
         "Canonical OMS dispatcher unavailable",
     )?;
+    let (source, revision) = crate::native_panel::staged_dispatch_args(source, executable)
+        .ok_or_else(|| Error::new("Canonical staged OMS dispatcher unavailable"))?;
     let mut argv = vec![
         executable.as_os_str().into(),
+        "--oms-dispatch".into(),
+        source.into(),
+        revision.into(),
+        "--".into(),
         "panel".into(),
         "--repo".into(),
         repo.as_os_str().into(),
@@ -1800,11 +1991,224 @@ impl BoardTarget {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct AgyDetailUsageRequest {
+    scope: BoardScope,
+    binding: ChatBinding,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AgyDetailUsageEvidence {
+    scope: BoardScope,
+    binding: ChatBinding,
+    response: Value,
+    observed_model: Option<String>,
+    requires_group: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgyDetailFrame {
+    Unchanged,
+    Observed,
+    Rejected,
+}
+
+fn report_has_live_main(report: &Value, main: &LiveMain) -> bool {
+    let attempt = &report["room_attempts"][&main.attempt];
+    let member = crate::rows(&report["room"]["participants"])
+        .iter()
+        .find(|row| row["participant"] == main.member);
+    attempt["provider"] == main.owner
+        && oms_panel_core::state::main_participant(attempt) == main.member
+        && member.is_some_and(|row| {
+            row["terminal"] != true
+                && !row["state"]
+                    .as_str()
+                    .is_some_and(|state| oms_panel_core::state::TERMINAL_STATES.contains(&state))
+        })
+}
+
+fn agy_detail_usage_request(
+    scope: Option<&BoardScope>,
+    report: &Value,
+    call: Option<&Value>,
+    observations: &Observations,
+) -> Option<AgyDetailUsageRequest> {
+    let scope = scope?;
+    let main = scope.main.as_ref()?;
+    if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
+        return None;
+    }
+    let call = call?;
+    if call["native_child"] != true
+        || call["provider"] != "antigravity"
+        || call["native_response_usage"]["response"].is_object()
+    {
+        return None;
+    }
+    let participant = crate::text(call, "participant");
+    if participant.is_empty() {
+        return None;
+    }
+    let binding = observations.chat_binding(participant)?;
+    binding
+        .matches_agy_detail_scope(
+            &scope.room,
+            &main.attempt,
+            &main.owner,
+            &main.pane,
+            main.pid,
+            &main.birth,
+            participant,
+        )
+        .then(|| AgyDetailUsageRequest {
+            scope: scope.clone(),
+            binding: binding.clone(),
+        })
+}
+
+fn agy_binding_matches_selection(
+    binding: &ChatBinding,
+    nav: &navigation::Navigation,
+    call: Option<&Value>,
+    observations: &Observations,
+) -> bool {
+    if !nav.detail {
+        return false;
+    }
+    let Some(call) = call else {
+        return false;
+    };
+    if call["native_child"] != true
+        || call["provider"] != "antigravity"
+        || call["native_response_usage"]["response"].is_object()
+    {
+        return false;
+    }
+    let participant = crate::text(call, "participant");
+    !participant.is_empty() && observations.chat_binding(participant) == Some(binding)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_agy_detail_evidence(
+    retained: &mut Option<AgyDetailUsageEvidence>,
+    incoming: Option<AgyDetailUsageEvidence>,
+    scope: Option<&BoardScope>,
+    report: &Value,
+    nav: &navigation::Navigation,
+    observations: &Observations,
+    frame: AgyDetailFrame,
+    scope_changed: bool,
+) {
+    if retained.is_none() && incoming.is_none() {
+        return;
+    }
+    if scope_changed || frame == AgyDetailFrame::Rejected || !nav.detail {
+        *retained = None;
+        return;
+    }
+    let Some(scope) = scope else {
+        *retained = None;
+        return;
+    };
+    let Some(main) = scope.main.as_ref() else {
+        *retained = None;
+        return;
+    };
+    if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
+        *retained = None;
+        return;
+    }
+    let visible = render::visible(report, nav);
+    let Some(call) = visible.get(nav.selected) else {
+        *retained = None;
+        return;
+    };
+    if call["native_child"] != true
+        || call["provider"] != "antigravity"
+        || call["native_response_usage"]["response"].is_object()
+    {
+        *retained = None;
+        return;
+    }
+    let participant = crate::text(call, "participant");
+    if participant.is_empty() {
+        *retained = None;
+        return;
+    }
+    let matches = |ev: &AgyDetailUsageEvidence| {
+        same_footer_scope(&ev.scope, scope)
+            && ev.binding.matches_agy_detail_scope(
+                &scope.room,
+                &main.attempt,
+                &main.owner,
+                &main.pane,
+                main.pid,
+                &main.birth,
+                participant,
+            )
+            && observations.chat_binding(participant) == Some(&ev.binding)
+    };
+    if frame == AgyDetailFrame::Observed
+        && let Some(ev) = incoming
+        && matches(&ev)
+    {
+        *retained = Some(ev);
+        return;
+    }
+    if retained
+        .as_ref()
+        .is_some_and(|ev| !matches(ev) || (ev.requires_group && frame == AgyDetailFrame::Observed))
+    {
+        *retained = None;
+    }
+}
+
+fn report_for_frame<'a>(
+    report: &'a Value,
+    nav: &navigation::Navigation,
+    retained: Option<&AgyDetailUsageEvidence>,
+) -> std::borrow::Cow<'a, Value> {
+    if !nav.detail {
+        return std::borrow::Cow::Borrowed(report);
+    }
+    let Some(ev) = retained else {
+        return std::borrow::Cow::Borrowed(report);
+    };
+    let Some(participant) = ev.binding.agy_participant() else {
+        return std::borrow::Cow::Borrowed(report);
+    };
+    let mut cloned = report.clone();
+    if let Some(rows) = cloned["native_children"].as_array_mut() {
+        let mut matching = rows.iter_mut().filter(|row| {
+            row["native_child"] == true
+                && row["provider"] == "antigravity"
+                && row["participant"] == participant
+        });
+        if let (Some(row), None) = (matching.next(), matching.next())
+            && !row["native_response_usage"]["response"].is_object()
+        {
+            if let Some(model) = &ev.observed_model
+                && row.get("observed_model").is_none()
+            {
+                row["observed_model"] = json!(model);
+            }
+            row["native_response_usage"] = json!({
+                "scope": "latest_child_response",
+                "response": ev.response,
+            });
+        }
+    }
+    std::borrow::Cow::Owned(cloned)
+}
+
 struct NativeSeed {
     target: BoardTarget,
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
+    agy_detail: Option<AgyDetailUsageRequest>,
+    agy_detail_binding: Option<ChatBinding>,
 }
 
 struct AgyDockCheck {
@@ -1833,14 +2237,16 @@ pub(crate) struct NativeReading {
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
+    agy_detail_evidence: Option<AgyDetailUsageEvidence>,
 }
 
-const NATIVE_FIELDS: [&str; 11] = [
+const NATIVE_FIELDS: [&str; 12] = [
     "native_children",
     "native_dock",
     "provider_sessions",
     "provider_models",
     "provider_activity",
+    "provider_delivery",
     "provider_accounts",
     "provider_status",
     "claude_local_weekly",
@@ -1873,6 +2279,15 @@ fn clear_rejected_native(report: &mut Value) {
 }
 
 impl NativeRequest {
+    fn authorized_agy_detail(&self, report: &Value) -> Option<&AgyDetailUsageRequest> {
+        let main = self.scope.main.as_ref()?;
+        self.seed.agy_detail.as_ref().filter(|req| {
+            same_footer_scope(&req.scope, &self.scope)
+                && report["room"]["id"] == self.scope.room
+                && report_has_live_main(report, main)
+        })
+    }
+
     pub(crate) fn observe(
         &self,
         snapshot: &mut Snapshot,
@@ -1899,7 +2314,24 @@ impl NativeRequest {
         let mut footer = self.seed.footer.clone();
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
-        panel.observe_passively(&mut observations, report, &generation);
+        let agy_detail_req = self.authorized_agy_detail(report);
+        let agy_detail_evidence = panel
+            .observe_passively(
+                &mut observations,
+                report,
+                &generation,
+                agy_detail_req.map(|req| &req.binding),
+            )
+            .and_then(|usage| {
+                let req = agy_detail_req?;
+                Some(AgyDetailUsageEvidence {
+                    scope: self.scope.clone(),
+                    binding: req.binding.clone(),
+                    response: usage.response,
+                    observed_model: usage.observed_model,
+                    requires_group: usage.requires_group,
+                })
+            });
         report["native_dock"] = json!(panel.docked());
         footer.project(Some(&self.scope), true, report, Instant::now(), |scope| {
             target.read_footer(repo, services, stop, scope)
@@ -1934,6 +2366,7 @@ impl NativeRequest {
             observations,
             footer,
             agy,
+            agy_detail_evidence,
         })
     }
 }
@@ -1941,6 +2374,7 @@ impl NativeRequest {
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshPhase {
     Pending,
+    RetryingAfterFailure,
     Fresh,
     Failed(String),
 }
@@ -1964,6 +2398,18 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 }
 
 impl RefreshPhase {
+    fn pending(&self) -> bool {
+        matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
+    fn accepts_native_activity(&self, has_reading: bool, scope_changed: bool) -> bool {
+        matches!(self, Self::Pending) && has_reading && !scope_changed
+    }
+
+    fn retains_agy_detail(&self) -> bool {
+        matches!(self, Self::Pending | Self::Fresh)
+    }
+
     fn frame_report(
         &self,
         snapshot: Option<Snapshot>,
@@ -1971,7 +2417,7 @@ impl RefreshPhase {
         room: &str,
     ) -> Value {
         // Render hides a failed read's AGY roster; pending must not relabel it.
-        if *self == Self::Pending
+        if self.pending()
             && let Some(previous) = previous.as_mut().filter(|report| stale_report(report))
             && let Some(activity) = previous
                 .get_mut("provider_activity")
@@ -1985,7 +2431,7 @@ impl RefreshPhase {
             let mut current = snapshot.report;
             // A display-only result has no pane reads of its own. Retain the
             // same-scope observations so its native rows keep their identity.
-            if *self == Self::Pending {
+            if self.pending() {
                 let mut previous = match previous {
                     Some(Value::Object(previous)) => previous,
                     _ => Default::default(),
@@ -1994,6 +2440,7 @@ impl RefreshPhase {
                     "provider_sessions",
                     "provider_models",
                     "provider_activity",
+                    "provider_delivery",
                     "provider_accounts",
                     "provider_status",
                     "native_children",
@@ -2018,9 +2465,17 @@ impl RefreshPhase {
     }
 
     fn report(&self, mut report: Value) -> Value {
+        // A pending frame can carry a proof only from the current scope.
+        // Erase known failures before relabeling a held report as pending.
+        if stale_report(&report)
+            || matches!(self, Self::RetryingAfterFailure | Self::Failed(_))
+            || report.get("board_write_slots").is_none()
+        {
+            report["board_write_slots"] = Value::Null;
+        }
         match self {
             Self::Fresh => {}
-            Self::Pending => {
+            Self::Pending | Self::RetryingAfterFailure => {
                 // The visible data describes the last successful read. The
                 // pending flag and private phase prevent acting on it.
                 report["collection"] = json!({"ok":true,"pending":true});
@@ -2101,16 +2556,20 @@ struct InteractiveRefresh {
     scope: Option<BoardScope>,
     phase: RefreshPhase,
     deferred_refresh: bool,
+    agy_group_renewal: Option<AgyDetailUsageRequest>,
 }
 
 impl InteractiveRefresh {
-    fn start() -> Result<Self> {
+    fn start(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
+    ) -> Result<Self> {
         Ok(Self {
-            worker: BoardRefresh::start()?,
+            worker: BoardRefresh::start(workspace_group)?,
             quota: QuotaCompletion::default(),
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         })
     }
 
@@ -2145,7 +2604,7 @@ impl InteractiveRefresh {
         request: bool,
         ready: bool,
     ) -> (bool, Option<Snapshot>) {
-        let (changed, snapshot, _) = self.update_with_native(live, request, ready, None);
+        let (changed, snapshot, _) = self.update_with_native(live, request, ready, None, &mut None);
         (changed, snapshot)
     }
 
@@ -2155,14 +2614,22 @@ impl InteractiveRefresh {
         request: bool,
         ready: bool,
         mut seed: Option<NativeSeed>,
+        pending_agy_detail: &mut Option<AgyDetailUsageRequest>,
     ) -> (bool, Option<Snapshot>, Option<NativeReading>) {
         let changed = !self.matches(&live);
+        let detail_binding = seed
+            .as_ref()
+            .and_then(|seed| seed.agy_detail_binding.clone());
         if changed {
             self.quota.cancel();
             self.deferred_refresh = false;
+            *pending_agy_detail = None;
+            self.agy_group_renewal = None;
             if let Some(seed) = &mut seed {
                 seed.observations = Observations::default();
                 seed.agy = None;
+                seed.agy_detail = None;
+                seed.agy_detail_binding = None;
                 seed.footer = MainFooter::default();
             }
         }
@@ -2170,12 +2637,31 @@ impl InteractiveRefresh {
             Ok(scope) => scope,
             Err(error) => {
                 self.scope = None;
+                *pending_agy_detail = None;
+                self.agy_group_renewal = None;
                 self.phase = RefreshPhase::Failed(error.message);
                 return (changed, None, None);
             }
         };
+        if let Some(pending) = pending_agy_detail.as_ref()
+            && !same_footer_scope(&pending.scope, &scope)
+        {
+            *pending_agy_detail = None;
+        }
+        if self.agy_group_renewal.as_ref().is_some_and(|detail| {
+            detail_binding.as_ref() != Some(&detail.binding)
+                || !same_footer_scope(&detail.scope, &scope)
+        }) {
+            self.agy_group_renewal = None;
+        }
         if changed || (request && !self.worker.busy()) {
-            self.request(&scope, seed.take());
+            let mut dispatched = seed.take();
+            if let Some(seed) = &mut dispatched {
+                seed.agy_detail = pending_agy_detail
+                    .take()
+                    .or_else(|| self.agy_group_renewal.clone());
+            }
+            self.request(&scope, dispatched);
         } else if request && !self.worker.queued() {
             // Keep the current scope's read eligible to paint even if wakes
             // arrive faster than it completes. An already queued scope change
@@ -2184,24 +2670,15 @@ impl InteractiveRefresh {
         }
         let result = ready.then(|| self.worker.poll(&scope.key)).flatten();
         let follow_up = !self.worker.busy() && std::mem::take(&mut self.deferred_refresh);
+        let replied = result.is_some();
         let completed = result.and_then(|result| match result {
             Ok(snapshot)
                 if snapshot.status == 0
                     && snapshot.report["collection"]["ok"] == true
-                    && scope.main.as_ref().is_none_or(|main| {
-                        let attempt = &snapshot.report["room_attempts"][&main.attempt];
-                        let member = crate::rows(&snapshot.report["room"]["participants"])
-                            .iter()
-                            .find(|row| row["participant"] == main.member);
-                        attempt["provider"] == main.owner
-                            && oms_panel_core::state::main_participant(attempt) == main.member
-                            && member.is_some_and(|row| {
-                                row["terminal"] != true
-                                    && !row["state"].as_str().is_some_and(|state| {
-                                        oms_panel_core::state::TERMINAL_STATES.contains(&state)
-                                    })
-                            })
-                    }) =>
+                    && scope
+                        .main
+                        .as_ref()
+                        .is_none_or(|main| report_has_live_main(&snapshot.report, main)) =>
             {
                 if !follow_up {
                     self.phase = RefreshPhase::Fresh;
@@ -2226,6 +2703,20 @@ impl InteractiveRefresh {
         let rejected_native = native.is_none() && completed.is_some() && scope.main.is_some();
         if rejected_native {
             self.quota.cancel();
+            *pending_agy_detail = None;
+            self.agy_group_renewal = None;
+        }
+        if !changed
+            && let Some(evidence) = native
+                .as_ref()
+                .and_then(|reading| reading.agy_detail_evidence.as_ref())
+            && detail_binding.as_ref() == Some(&evidence.binding)
+            && same_footer_scope(&evidence.scope, &scope)
+        {
+            self.agy_group_renewal = evidence.requires_group.then(|| AgyDetailUsageRequest {
+                scope: evidence.scope.clone(),
+                binding: evidence.binding.clone(),
+            });
         }
         if follow_up {
             if let Some(seed) = &mut seed {
@@ -2237,8 +2728,14 @@ impl InteractiveRefresh {
                     seed.footer = MainFooter::default();
                     seed.agy = None;
                 }
+                seed.agy_detail = pending_agy_detail
+                    .take()
+                    .or_else(|| self.agy_group_renewal.clone());
             }
             self.request(&scope, seed);
+            if replied && completed.is_none() && self.phase == RefreshPhase::Pending {
+                self.phase = RefreshPhase::RetryingAfterFailure;
+            }
         }
         self.scope = Some(scope);
         (changed, completed, native)
@@ -3212,6 +3709,21 @@ fn frame(
     chat: Option<&mut ChatDock>,
     weekly: Option<(&mut ChatDock, WeeklyPhase)>,
 ) -> render::BoardFrame {
+    frame_with_native_activity(report, nav, size, read, colored, split, chat, weekly, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn frame_with_native_activity(
+    report: &Value,
+    nav: &navigation::Navigation,
+    size: (usize, usize),
+    read: &std::collections::BTreeMap<String, String>,
+    colored: bool,
+    split: Option<&mut DockSplit>,
+    chat: Option<&mut ChatDock>,
+    weekly: Option<(&mut ChatDock, WeeklyPhase)>,
+    native_activity_current: bool,
+) -> render::BoardFrame {
     let (columns, height) = size;
     if let Some(menu) = &nav.main_switch {
         return render::main_switch_frame(menu, columns, height);
@@ -3290,7 +3802,7 @@ fn frame(
     };
     let nav = nav.as_ref();
     let interactive = dock_rows.is_some();
-    let mut board = render::board_frame(
+    let mut board = render::board_frame_with_native_activity(
         report,
         nav,
         columns,
@@ -3298,6 +3810,7 @@ fn frame(
         read,
         colored,
         interactive,
+        native_activity_current,
     );
     if interactive && let Some(provider) = report["native_dock"].as_str() {
         board.lines.resize(board_height, String::new());
@@ -4945,6 +5458,7 @@ mod tests {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let scope = |room: &str| BoardScope {
             key: RefreshKey::new(repo, Some(room), None).unwrap(),
@@ -5306,7 +5820,7 @@ mod tests {
     fn carried_board_report_drops_private_claude_weekly() {
         use super::{RefreshPhase, clear_private_weekly, clear_rejected_native, idle_report};
         use oms_panel_core::state::Snapshot;
-        use serde_json::json;
+        use serde_json::{Value, json};
 
         let mut previous = idle_report("room-fixture");
         previous["provider_status"] = json!({"codex":{"weekly_used":14}});
@@ -5315,6 +5829,8 @@ mod tests {
         previous["claude_local_weekly"] = json!({"weekly_used":14});
         previous["codex_weekly_account"] = json!("acct-b");
         previous["agy_footer_weekly"] = json!({"remaining":"99%"});
+        let slots = json!({"used":10,"limit":10,"active":0,"awaiting":8,"unconfirmed":2});
+        previous["board_write_slots"] = slots.clone();
         previous["provider_activity"] =
             json!({"antigravity":{"children":[{"role":"Worker","title":"Draft notes"}]}});
 
@@ -5369,6 +5885,15 @@ mod tests {
             );
             assert!(roster(&pending(sampled, None)).is_null());
         }
+        // Only a healthy same-scope held frame keeps its write slot evidence.
+        let held = pending(false, Some(previous.clone()));
+        assert_eq!(held["board_write_slots"], slots);
+        assert_eq!(pending(false, Some(held))["board_write_slots"], slots);
+        assert_eq!(pending(false, None)["board_write_slots"], Value::Null);
+        assert_eq!(
+            pending(true, Some(previous.clone()))["board_write_slots"],
+            Value::Null
+        );
         // A failed or stale frame hides its roster; pending must not relabel it.
         let failed = RefreshPhase::Failed("boom".into()).frame_report(
             None,
@@ -5377,11 +5902,15 @@ mod tests {
         );
         let mut stale = previous.clone();
         stale["capacity_stale"] = true.into();
+        assert_eq!(failed["board_write_slots"], Value::Null);
         for unhealthy in [failed.clone(), stale] {
             for sampled in [false, true] {
                 let replay = pending(sampled, Some(unhealthy.clone()));
                 assert!(roster(&replay).is_null(), "pending replayed failed roster");
-                assert!(roster(&pending(sampled, Some(replay))).is_null());
+                assert_eq!(replay["board_write_slots"], Value::Null);
+                let next = pending(sampled, Some(replay));
+                assert!(roster(&next).is_null());
+                assert_eq!(next["board_write_slots"], Value::Null);
             }
         }
         let mut sampled = idle_report("room-fixture");
@@ -5421,6 +5950,127 @@ mod tests {
                 "held {key} survived rejected proof"
             );
         }
+    }
+
+    #[test]
+    fn coalesced_pending_paints_only_the_current_native_activity() {
+        use super::*;
+        use serde_json::json;
+
+        let room = "room-fixture";
+        let mut observed = idle_report(room);
+        observed["provider_sessions"] = json!(["codex", "claude"]);
+        observed["provider_activity"] = json!({"codex":"idle"});
+        let nav = navigation::Navigation::default();
+        let first = RefreshPhase::Pending.frame_report(None, None, room);
+        assert!(first["provider_activity"].is_null());
+        assert!(!RefreshPhase::Pending.accepts_native_activity(false, false));
+        let observation = |phase: &RefreshPhase, has_reading, scope_changed| {
+            let mut report = phase.frame_report(None, Some(observed.clone()), room);
+            let observed_here = phase.accepts_native_activity(has_reading, scope_changed);
+            if has_reading && !scope_changed {
+                let current = json!({
+                    "provider_sessions": ["codex", "claude"],
+                    "provider_activity": {"codex":"working"},
+                });
+                replace_native_projection(
+                    &mut report,
+                    NATIVE_FIELDS.map(|key| current.get(key).cloned()),
+                );
+            }
+            if phase.pending() {
+                assert_eq!(report["collection"]["pending"], true);
+            }
+            (report, observed_here)
+        };
+        let weekly_line = |report: &Value, nav: &navigation::Navigation, size, observed_here| {
+            let frame = frame_with_native_activity(
+                report,
+                nav,
+                size,
+                &Default::default(),
+                false,
+                None,
+                None,
+                None,
+                observed_here,
+            );
+            let hit = frame.weekly_usage.unwrap();
+            frame.lines[hit.row].clone()
+        };
+
+        let (report, observed_here) = observation(&RefreshPhase::Pending, true, false);
+        let accepted = weekly_line(&report, &nav, (120, 25), observed_here);
+        assert!(
+            observed_here && accepted.contains("Codex — · working"),
+            "{accepted}"
+        );
+        assert!(accepted.contains("Claude — · unknown"), "{accepted}");
+
+        let mut moved = nav.clone();
+        assert!(!key_checks_scope(&input::Key::Down, false, false, false));
+        assert_eq!(
+            moved.apply(&input::Key::Down, 2, 10),
+            navigation::Action::None,
+        );
+        assert_eq!(moved.selected, 1);
+        let same_scope = InputScope {
+            current: true,
+            ..Default::default()
+        };
+        let redraw_current = observed_here && same_scope.accepts_native_activity_redraw(false);
+        for size in [(120, 25), (145, 30)] {
+            let redrawn = weekly_line(&report, &moved, size, redraw_current);
+            assert!(redrawn.contains("Codex — · working"), "{redrawn}");
+        }
+        let checkout_changed = InputScope {
+            current: true,
+            checkout_repaint: true,
+            ..Default::default()
+        };
+        for (scope, recollect) in [
+            (&same_scope, true),
+            (&checkout_changed, false),
+            (&InputScope::default(), false),
+        ] {
+            let mut still_current = redraw_current;
+            still_current &= scope.accepts_native_activity_redraw(recollect);
+            let invalidated = weekly_line(&report, &moved, (120, 25), still_current);
+            assert!(invalidated.contains("Codex — · pending"), "{invalidated}");
+            still_current &= same_scope.accepts_native_activity_redraw(false);
+            let later_resize = weekly_line(&report, &moved, (145, 30), still_current);
+            assert!(later_resize.contains("Codex — · pending"), "{later_resize}");
+        }
+
+        assert_eq!(
+            allow_board_action(
+                &mut nav.clone(),
+                navigation::Action::Open,
+                true,
+                RefreshPhase::Pending == RefreshPhase::Fresh,
+            ),
+            navigation::Action::None,
+        );
+
+        for (phase, has_reading, scope_changed) in [
+            (RefreshPhase::Pending, false, false),
+            (RefreshPhase::Pending, true, true),
+            (RefreshPhase::RetryingAfterFailure, false, false),
+        ] {
+            let (report, observed_here) = observation(&phase, has_reading, scope_changed);
+            let carried = weekly_line(&report, &nav, (120, 25), observed_here);
+            assert!(
+                !observed_here && carried.contains("Codex — · pending"),
+                "{carried}"
+            );
+        }
+        let (report, observed_here) =
+            observation(&RefreshPhase::Failed("fixture".into()), false, false);
+        let failed = weekly_line(&report, &nav, (120, 25), observed_here);
+        assert!(
+            !observed_here && failed.contains("Codex — · stale"),
+            "{failed}"
+        );
     }
 
     #[test]
@@ -5659,8 +6309,17 @@ mod tests {
     #[test]
     fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
         use super::*;
+        use crate::orchestrator::account_binding::test_support::TempDir;
         use input::Key;
+        use std::os::unix::fs::PermissionsExt;
         let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let staged = TempDir::new("board-main-switch");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let payload = staged.0.join("target/oms-native").join(revision);
+        std::fs::create_dir_all(&payload).unwrap();
+        let executable = payload.join("oms");
+        std::fs::write(&executable, b"fixture executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let scope = BoardScope {
             key: RefreshKey::new(&repo, Some("room-one"), Some("attempt-old"))
                 .unwrap()
@@ -5854,11 +6513,11 @@ mod tests {
             .unwrap();
         refs.remove("panel_host");
         refs.remove("panel_room_participant");
-        let blocked = |report: &Value| {
+        let blocked = |case_scope: &BoardScope, report: &Value| {
             let mut flow = MainSwitch::default();
             let mut nav = navigation::Navigation::default();
             let error = flow
-                .open_with(Some(&legacy_scope), report, &mut nav, |_| {
+                .open_with(Some(case_scope), report, &mut nav, |_| {
                     panic!("unavailable Main must not resolve targets")
                 })
                 .unwrap_err();
@@ -5867,49 +6526,91 @@ mod tests {
             error.message
         };
         assert_eq!(
-            blocked(&legacy),
+            blocked(&legacy_scope, &legacy),
             "This Main predates managed switching. Hand off work, exit normally, then launch a new managed Main."
         );
-        for (path, value) in [
-            ("/collection/pending", json!(true)),
-            ("/room/closed", json!(true)),
+        for (path, value, expected) in [
+            (
+                "/collection/pending",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room/closed",
+                json!(true),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
             (
                 "/room_attempts/attempt-old/attempt_id",
                 json!("foreign-attempt"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_room_id",
                 json!("room-foreign"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_wrapper_pid",
                 json!("52"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
             ),
             (
                 "/room_attempts/attempt-old/refs/panel_host",
                 json!("inline"),
+                "Current Main is running inline, not in a managed tmux pane. Hand off work and exit normally before launching a managed tmux Main.",
             ),
-            ("/room_attempts/attempt-old/state", json!("done")),
-            ("/room/participants/1/joined", json!(false)),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("done"),
+                "Current Main custody changed or is no longer live; refresh the Board before switching",
+            ),
+            (
+                "/room/participants/1/joined",
+                json!(false),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
         ] {
             let mut refused = legacy.clone();
             let (parent, key) = path.rsplit_once('/').unwrap();
             refused.pointer_mut(parent).unwrap()[key] = value;
-            assert_eq!(
-                blocked(&refused),
-                "Current Main is unavailable for a managed switch",
-                "{path}"
-            );
+            assert_eq!(blocked(&legacy_scope, &refused), expected, "{path}");
+        }
+        for (path, value, expected) in [
+            (
+                "/room_attempts/attempt-old/refs/panel_host",
+                json!("external"),
+                "Current Main lacks complete managed tmux custody proof; refresh the Board and verify the existing Main",
+            ),
+            (
+                "/room_attempts/attempt-old/state",
+                json!("blocked"),
+                "Current Main is blocked; wait until it is working to switch",
+            ),
+            (
+                "/room_attempts/attempt-old/refs/panel_native_scheduling",
+                json!("campaign"),
+                "Main swap is unavailable during a managed campaign",
+            ),
+        ] {
+            let mut refused = report.clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            refused.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(blocked(&scope, &refused), expected, "{path}");
         }
         let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
             .unwrap_err()
             .message;
-        for (owner, harness) in [
-            ("claude", Some("claude")),
-            ("antigravity", Some("agy")),
-            ("codex", Some("pi")),
-            ("codex", Some("unknown")),
-            ("codex", None),
+        for (owner, harness, expected) in [
+            ("claude", Some("claude"), expected_refusal.as_str()),
+            (
+                "antigravity",
+                Some("agy"),
+                "safe automatic exit currently requires a Codex Main composer; hand off work and exit the AGY Main normally before launching a replacement",
+            ),
+            ("codex", Some("pi"), expected_refusal.as_str()),
+            ("codex", Some("unknown"), expected_refusal.as_str()),
+            ("codex", None, expected_refusal.as_str()),
         ] {
             let mut case_scope = scope.clone();
             case_scope.main.as_mut().unwrap().owner = owner.into();
@@ -5934,7 +6635,7 @@ mod tests {
                     panic!("unsupported outgoing harness must not resolve targets")
                 })
                 .unwrap_err();
-            assert_eq!(error.message, expected_refusal);
+            assert_eq!(error.message, expected);
             assert!(nav.main_switch.is_none());
             assert!(flow.selection.is_none());
             assert!(flow.running.is_none());
@@ -5998,8 +6699,24 @@ mod tests {
             || Some(scope.clone()),
             |expected, target| {
                 assert_eq!(expected, &scope);
-                let req = main_switch_request(Path::new("/fixture/oms"), &repo, expected, target)?;
-                let opts = Options::parse(&req.argv[2..])?;
+                assert!(
+                    main_switch_request(&executable, &staged.0, &repo, expected, target).is_err()
+                );
+                std::fs::write(payload.join("manifest.json"), b"{}").unwrap();
+                assert!(main_switch_request(&executable, &repo, &repo, expected, target).is_err());
+                let req = main_switch_request(&executable, &staged.0, &repo, expected, target)?;
+                assert_eq!(
+                    req.argv[..6],
+                    [
+                        executable.as_os_str().to_owned(),
+                        "--oms-dispatch".into(),
+                        staged.0.as_os_str().to_owned(),
+                        revision.into(),
+                        "--".into(),
+                        "panel".into(),
+                    ]
+                );
+                let opts = Options::parse(&req.argv[6..])?;
                 assert_eq!(opts.get("room"), Some("room-one"));
                 assert_eq!(opts.get("swap-main"), Some("agy"));
                 assert_eq!(opts.get("model"), Some("gemini-4-carbon-high"));
@@ -6467,6 +7184,7 @@ mod tests {
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
+            agy_group_renewal: None,
         };
         let scope = |room: &str| BoardScope {
             key: RefreshKey::new(repo, Some(room), Some(MAIN)).unwrap(),
@@ -6491,6 +7209,7 @@ mod tests {
         let pending = board.phase.report(idle_report(ROOM));
         assert_eq!(pending["collection"]["pending"], true);
         assert!(render::calls(&pending).is_empty());
+        assert_eq!(pending["board_write_slots"], Value::Null);
         let report_room = json!({"id":ROOM,"closed":false,"participants":[
             {"participant":MAIN,"role":"main","provider":"codex","joined":true},
             {"participant":"call-worker","role":"worker","joined":true,"state":"working"}
@@ -6574,8 +7293,10 @@ mod tests {
             requested.recv_timeout(Duration::from_secs(5)).unwrap(),
             ROOM
         );
-        let held = board.phase.report(fresh.clone());
+        let held = board.phase.frame_report(None, Some(fresh.clone()), ROOM);
         assert!(!render::calls(&held).is_empty());
+        assert_eq!(fresh["board_write_slots"]["used"], 0);
+        assert_eq!(held["board_write_slots"], fresh["board_write_slots"]);
         assert!(board.chat_cache().is_none());
         assert!(!settle_chat_dock(&mut dock, &observations, &held));
         let paint = |report: &Value, nav: &navigation::Navigation, dock: Option<&mut ChatDock>| {
@@ -6618,6 +7339,7 @@ mod tests {
             let painted = paint(&retained, &nav, dock.as_mut());
             displayed.push((label, painted.contains(label)));
             assert_eq!(retained["native_children"][0]["participant"], native);
+            assert_eq!(retained["board_write_slots"], fresh["board_write_slots"]);
             assert_eq!(retained["provider_accounts"]["codex"]["account"], "backup");
             assert_eq!(retained["provider_status"]["codex"]["weekly_used"], 14);
             assert!(!painted.contains("Refreshing Board"));
@@ -6649,12 +7371,10 @@ mod tests {
         ready(&mut board);
         let (_, failed) = board.update(Ok(scope(ROOM)), true, true);
         assert!(failed.is_none());
-        assert_eq!(board.phase, RefreshPhase::Pending);
-        let painted = paint(
-            &board.phase.frame_report(failed, Some(retained), ROOM),
-            &nav,
-            dock.as_mut(),
-        );
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
+        let retrying = board.phase.frame_report(failed, Some(retained), ROOM);
+        assert_eq!(retrying["board_write_slots"], Value::Null);
+        let painted = paint(&retrying, &nav, dock.as_mut());
         assert!(painted.contains("Second wake result"));
         assert!(!painted.contains("refresh failed"));
         assert_eq!(
@@ -6752,8 +7472,9 @@ mod tests {
         let (changed, replacement) = board.update(Ok(scope(new_room)), false, false);
         assert!(changed && replacement.is_none());
         assert!(board.chat_cache().is_none());
-        let cold = board.phase.report(idle_report(new_room));
+        let cold = board.phase.frame_report(replacement, None, new_room);
         assert_eq!(cold["room"]["id"], new_room);
+        assert_eq!(cold["board_write_slots"], Value::Null);
         assert!(render::calls(&cold).is_empty());
     }
 
@@ -7357,6 +8078,646 @@ mod tests {
         }
         super::apply_selection_key(&mut nav, &mut selection, &Key::Escape, 1, 1);
         assert!(!nav.detail);
+    }
+
+    #[test]
+    fn agy_detail_usage_request_and_interactive_dispatch() {
+        use super::{
+            AgyDetailFrame, AgyDetailUsageEvidence, BoardScope, BoardTarget, InteractiveRefresh,
+            LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
+            SelectionFence, agy_detail_usage_request, apply_selection_key,
+            reconcile_agy_detail_evidence, report_for_frame,
+        };
+        use crate::board_refresh::BoardRefresh;
+        use crate::input::Key;
+        use crate::orchestrator::Observations;
+        use crate::orchestrator::codex_chat_fixture::{BoardSpy, NEW_TURN, TURN};
+        use oms_panel_core::{
+            CommandOutput, Error, NativeCommand, PeerExecutor, Result, Services, Value,
+        };
+        use serde_json::json;
+        use std::path::Path;
+        use std::sync::{atomic::AtomicBool, mpsc};
+        use std::time::{Duration, Instant};
+
+        const ROOM: &str = "room-fixture";
+        const MAIN: &str = "att_11111111111111111111111111111111";
+
+        let spy = BoardSpy::new("agy-detail-usage");
+        spy.provider.set("antigravity");
+        let child = crate::native_children::participant_id(
+            "antigravity",
+            "44444444-4444-4444-4444-dddddddddddd",
+        );
+        let observations = spy.agy_observations(&child, TURN);
+        let binding = observations.chat_binding(&child).unwrap().clone();
+        let repo = binding.repo().to_path_buf();
+        let pid = std::process::id();
+        let birth = oms_panel_core::terminals::process(pid).unwrap().birth;
+        let make_scope = |room_id: &str| BoardScope {
+            key: RefreshKey::new(&repo, Some(room_id), Some(MAIN)).unwrap(),
+            room: room_id.into(),
+            main: Some(LiveMain {
+                attempt: MAIN.into(),
+                member: MAIN.into(),
+                owner: "codex".into(),
+                session: "$1".into(),
+                window: "@1".into(),
+                pane: "%1".into(),
+                pid,
+                birth: birth.clone(),
+            }),
+        };
+        let current_scope = make_scope(ROOM);
+        let call = json!({
+            "participant": child,
+            "native_child": true,
+            "provider": "antigravity",
+            "role": "subagent",
+            "state": "working"
+        });
+        let report = json!({
+            "collection": {"ok": true},
+            "room": {
+                "id": ROOM,
+                "closed": false,
+                "participants": [
+                    {"participant": MAIN, "role": "main", "provider": "codex", "joined": true, "state": "working", "terminal": false}
+                ]
+            },
+            "room_attempts": {
+                MAIN: {
+                    "attempt_id": MAIN,
+                    "provider": "codex",
+                    "tool": "panel-main",
+                    "state": "working",
+                    "terminal": false,
+                    "refs": {"panel_role": "main", "panel_room_id": ROOM, "panel_room_participant": MAIN}
+                }
+            },
+            "native_children": [call.clone()]
+        });
+
+        let req =
+            agy_detail_usage_request(Some(&current_scope), &report, Some(&call), &observations)
+                .expect("unsampled AGY child under exact scope should request usage");
+        assert_eq!(req.scope, current_scope);
+        assert!(req.binding == binding);
+
+        // Already sampled -> None.
+        let mut sampled_call = call.clone();
+        sampled_call["native_response_usage"] = json!({
+            "scope": "latest_child_response",
+            "response": {"input_tokens": 1200, "cached_input_tokens": 0, "output_tokens": 40}
+        });
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &report,
+                Some(&sampled_call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Non-AGY -> None.
+        let mut codex_call = call.clone();
+        codex_call["provider"] = json!("codex");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &report,
+                Some(&codex_call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Wrong Room -> None.
+        let mut wrong_room = report.clone();
+        wrong_room["room"]["id"] = json!("other-room");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &wrong_room,
+                Some(&call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Wrong Main birth -> None.
+        let mut wrong_birth = current_scope.clone();
+        wrong_birth.main.as_mut().unwrap().birth = "other-birth".into();
+        assert!(
+            agy_detail_usage_request(Some(&wrong_birth), &report, Some(&call), &observations)
+                .is_none()
+        );
+
+        // Wrong participant -> None.
+        let mut wrong_child = call.clone();
+        wrong_child["participant"] = json!("native-antigravity-other");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &report,
+                Some(&wrong_child),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Terminal Main membership (flag or terminal state) -> None.
+        let mut terminal_flag = report.clone();
+        terminal_flag["room"]["participants"][0]["terminal"] = json!(true);
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &terminal_flag,
+                Some(&call),
+                &observations
+            )
+            .is_none()
+        );
+        let mut terminal_state = report.clone();
+        terminal_state["room"]["participants"][0]["state"] = json!("done");
+        assert!(
+            agy_detail_usage_request(
+                Some(&current_scope),
+                &terminal_state,
+                Some(&call),
+                &observations
+            )
+            .is_none()
+        );
+
+        // Targeted detail-only evidence lifecycle:
+        // 1. Successful targeted response while D is open is admitted and rendered via
+        //    report_for_frame without polluting raw report["native_children"].
+        let mut nav = crate::navigation::Navigation::default();
+        let calls = crate::render::visible(&report, &nav);
+        nav.selected = calls
+            .iter()
+            .position(|row| row["participant"] == child)
+            .unwrap();
+        let mut selection = SelectionFence::None;
+        apply_selection_key(&mut nav, &mut selection, &Key::Char('D'), calls.len(), 1);
+        assert!(nav.detail);
+
+        let ev = AgyDetailUsageEvidence {
+            scope: current_scope.clone(),
+            binding: binding.clone(),
+            response: json!({
+                "model": "gemini",
+                "input_tokens": 1200,
+                "cached_input_tokens": 0,
+                "output_tokens": 40
+            }),
+            observed_model: Some("gemini".into()),
+            requires_group: false,
+        };
+        let mut retained = None;
+        reconcile_agy_detail_evidence(
+            &mut retained,
+            Some(ev.clone()),
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(retained.as_ref() == Some(&ev));
+        assert!(
+            report["native_children"][0]
+                .get("native_response_usage")
+                .is_none()
+        );
+        let render_detail =
+            |src: &Value, n: &crate::navigation::Navigation, r: Option<&AgyDetailUsageEvidence>| {
+                let display = report_for_frame(src, n, r);
+                super::frame(
+                    &display,
+                    n,
+                    (80, 18),
+                    &Default::default(),
+                    false,
+                    Some(&mut DockSplit::default()),
+                    None,
+                    None,
+                )
+                .lines
+                .join("\n")
+            };
+        let detail = render_detail(&report, &nav, retained.as_ref());
+        for label in [
+            "Call Detail",
+            "Last response",
+            "1200 in",
+            "40 out",
+            "0 cache read",
+        ] {
+            assert!(detail.contains(label), "{label}: {detail}");
+        }
+        assert!(!detail.contains("1240"), "{detail}");
+
+        // 2. Next ordinary ambient refresh (incoming = None, raw report still has no
+        //    usage on child #4) preserves retained evidence while D stays open under
+        //    the same Room/Main/pane-birth/Turn/participant.
+        reconcile_agy_detail_evidence(
+            &mut retained,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Unchanged,
+            false,
+        );
+        assert!(retained.as_ref() == Some(&ev));
+        let detail_after_ambient = render_detail(&report, &nav, retained.as_ref());
+        assert!(
+            detail_after_ambient.contains("1200 in"),
+            "{detail_after_ambient}"
+        );
+        assert!(
+            !detail_after_ambient.contains("1240"),
+            "{detail_after_ambient}"
+        );
+
+        let mut group = ev.clone();
+        group.requires_group = true;
+        let mut retained_group = Some(group.clone());
+        let refresh_group = |retained: &mut Option<AgyDetailUsageEvidence>, incoming, frame| {
+            reconcile_agy_detail_evidence(
+                retained,
+                incoming,
+                Some(&current_scope),
+                &report,
+                &nav,
+                &observations,
+                frame,
+                false,
+            );
+        };
+        refresh_group(&mut retained_group, None, AgyDetailFrame::Unchanged);
+        assert!(retained_group.as_ref() == Some(&group));
+        let mut renewed = group;
+        renewed.response["input_tokens"] = 1300.into();
+        refresh_group(
+            &mut retained_group,
+            Some(renewed.clone()),
+            AgyDetailFrame::Observed,
+        );
+        assert!(retained_group.as_ref() == Some(&renewed));
+        assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+
+        // The same row and Turn can survive a revoked membership or ACL change.
+        refresh_group(&mut retained_group, None, AgyDetailFrame::Observed);
+        assert!(retained_group.is_none());
+        assert!(!render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+        refresh_group(&mut retained_group, Some(renewed), AgyDetailFrame::Observed);
+        assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+
+        // 3a. Closing D or moving selection before an in-flight response lands rejects
+        //     incoming evidence (zero bleed).
+        let mut closed_nav = nav.clone();
+        closed_nav.detail = false;
+        let mut bleed_check = None;
+        reconcile_agy_detail_evidence(
+            &mut bleed_check,
+            Some(ev.clone()),
+            Some(&current_scope),
+            &report,
+            &closed_nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(bleed_check.is_none());
+        let mut other_sel_nav = nav.clone();
+        other_sel_nav.selected = 0; // Main row
+        reconcile_agy_detail_evidence(
+            &mut bleed_check,
+            Some(ev.clone()),
+            Some(&current_scope),
+            &report,
+            &other_sel_nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(bleed_check.is_none());
+
+        // 3b. Changed Turn / binding, scope change, or rejected_native drops retained
+        //     evidence immediately so stale counters are redacted.
+        let new_turn_obs = spy.agy_observations(&child, NEW_TURN);
+        let mut stale_turn = retained.clone();
+        reconcile_agy_detail_evidence(
+            &mut stale_turn,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &new_turn_obs,
+            AgyDetailFrame::Unchanged,
+            false,
+        );
+        assert!(stale_turn.is_none());
+        let redacted = render_detail(&report, &nav, stale_turn.as_ref());
+        assert!(!redacted.contains("1200 in"), "{redacted}");
+
+        let mut on_rejected = retained.clone();
+        reconcile_agy_detail_evidence(
+            &mut on_rejected,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Rejected,
+            false,
+        );
+        assert!(on_rejected.is_none());
+
+        let mut on_scope_change = retained.clone();
+        reconcile_agy_detail_evidence(
+            &mut on_scope_change,
+            None,
+            Some(&current_scope),
+            &report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            true,
+        );
+        assert!(on_scope_change.is_none());
+
+        // 3c. A newer ambient native_response_usage on child #4 drops retained evidence
+        //     so the newer ambient sample wins.
+        let mut ambient_report = report.clone();
+        ambient_report["native_children"][0]["native_response_usage"] = json!({
+            "scope": "latest_child_response",
+            "response": {
+                "model": "gemini",
+                "input_tokens": 2500,
+                "cached_input_tokens": 10,
+                "output_tokens": 90
+            }
+        });
+        reconcile_agy_detail_evidence(
+            &mut retained,
+            None,
+            Some(&current_scope),
+            &ambient_report,
+            &nav,
+            &observations,
+            AgyDetailFrame::Observed,
+            false,
+        );
+        assert!(retained.is_none());
+        let ambient_detail = render_detail(&ambient_report, &nav, retained.as_ref());
+        assert!(ambient_detail.contains("2500 in"), "{ambient_detail}");
+        assert!(!ambient_detail.contains("1200 in"), "{ambient_detail}");
+
+        // InteractiveRefresh::update_with_native dispatches pending agy_detail once
+        // (immediately or on follow_up behind a busy worker), does not re-enqueue it,
+        // and drops it on scope change.
+        struct Collector {
+            rooms: mpsc::Sender<String>,
+            answer: mpsc::Receiver<Result<Value>>,
+        }
+        impl PeerExecutor for Collector {
+            fn execute(
+                &self,
+                _: &oms_panel_core::services::ExecutionRequest,
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                panic!("collector must not execute processes")
+            }
+        }
+        impl Services for Collector {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                args: &[std::ffi::OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                let value = match command {
+                    NativeCommand::Events => json!([{
+                        "attempt_id": MAIN, "tool": "panel-main", "provider": "claude",
+                        "terminal": false, "state": "working",
+                        "refs": {"panel_role": "main", "panel_room_id": ROOM}
+                    }]),
+                    NativeCommand::Room => {
+                        self.rooms
+                            .send(args[2].to_string_lossy().into())
+                            .map_err(Error::new)?;
+                        self.answer
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(Error::new)??
+                    }
+                    _ => panic!("unexpected collector command {command:?}"),
+                };
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(&value).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+
+        let (rooms, requested) = mpsc::channel();
+        let (answer, responses) = mpsc::channel();
+        let worker = BoardRefresh::spawn_with(move || {
+            Ok(Collector {
+                rooms,
+                answer: responses,
+            })
+        })
+        .unwrap();
+        let mut board = InteractiveRefresh {
+            worker,
+            quota: Default::default(),
+            scope: Some(current_scope.clone()),
+            phase: RefreshPhase::Fresh,
+            deferred_refresh: false,
+            agy_group_renewal: None,
+        };
+        let make_seed = || NativeSeed {
+            target: BoardTarget {
+                room: Some(ROOM.into()),
+                caller: None,
+                managed: false,
+            },
+            observations: Observations::default(),
+            footer: MainFooter::default(),
+            agy: None,
+            agy_detail: None,
+            agy_detail_binding: None,
+        };
+        let mut seed = make_seed();
+        seed.agy_detail = Some(req.clone());
+        let native_request = NativeRequest {
+            scope: current_scope.clone(),
+            seed,
+        };
+        assert!(native_request.authorized_agy_detail(&report).is_some());
+        let mut wrong_owner = report.clone();
+        wrong_owner["room_attempts"][MAIN]["provider"] = json!("claude");
+        wrong_owner["room"]["participants"][0]["provider"] = json!("claude");
+        assert!(current_scope.key.matches(&oms_panel_core::state::Snapshot {
+            report: wrong_owner.clone(),
+            status: 0,
+        }));
+        assert!(native_request.authorized_agy_detail(&wrong_owner).is_none());
+        let wait_ready = |board: &mut InteractiveRefresh| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !board.worker.ready() {
+                assert!(Instant::now() < deadline, "timed out waiting for worker");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // 1. Immediate dispatch consumes pending once and does not re-enqueue.
+        let mut pending = Some(req.clone());
+        let (changed, _, _) = board.update_with_native(
+            Ok(current_scope.clone()),
+            true,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(!changed);
+        assert!(pending.is_none());
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROOM
+        );
+        answer.send(Err(Error::new("done"))).unwrap();
+        wait_ready(&mut board);
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            true,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(pending.is_none());
+
+        // 2. A queued wake races with a report whose Room and Events agree with
+        // each other but disagree with the current physical Main provider.
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            true,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROOM
+        );
+        assert!(board.worker.busy());
+        pending = Some(req.clone());
+        let (changed, _, _) = board.update_with_native(
+            Ok(current_scope.clone()),
+            true,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(!changed);
+        assert!(pending.is_some());
+        assert!(board.deferred_refresh);
+        answer.send(Ok(wrong_owner["room"].clone())).unwrap();
+        wait_ready(&mut board);
+        let (changed, completed, _) = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            true,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(!changed);
+        assert!(completed.is_none());
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
+        assert!(pending.is_none());
+        let retrying = board
+            .phase
+            .frame_report(completed, Some(report.clone()), ROOM);
+        assert_eq!(retrying["collection"]["pending"], true);
+        let mut rejected = Some(ev);
+        reconcile_agy_detail_evidence(
+            &mut rejected,
+            None,
+            board.scope.as_ref(),
+            &retrying,
+            &nav,
+            &observations,
+            AgyDetailFrame::Rejected,
+            changed,
+        );
+        assert!(rejected.is_none());
+        assert!(!render_detail(&retrying, &nav, rejected.as_ref()).contains("1200 in"));
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROOM
+        );
+        answer.send(Err(Error::new("done"))).unwrap();
+        wait_ready(&mut board);
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            true,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(pending.is_none());
+
+        board.agy_group_renewal = Some(req.clone());
+        let mut open = make_seed();
+        open.agy_detail_binding = Some(binding.clone());
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            false,
+            Some(open),
+            &mut pending,
+        );
+        assert!(board.agy_group_renewal.as_ref() == Some(&req));
+        let _ = board.update_with_native(
+            Ok(current_scope.clone()),
+            false,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(
+            board.agy_group_renewal.is_none(),
+            "closed detail must stop renewal"
+        );
+
+        // 3. Dropped on scope change.
+        pending = Some(req);
+        let other_scope = make_scope("room-other");
+        let (changed, _, _) = board.update_with_native(
+            Ok(other_scope),
+            false,
+            false,
+            Some(make_seed()),
+            &mut pending,
+        );
+        assert!(changed);
+        assert!(pending.is_none());
+        assert_eq!(
+            requested.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "room-other"
+        );
+        answer.send(Err(Error::new("done"))).unwrap();
+        wait_ready(&mut board);
     }
 
     #[test]
@@ -8027,7 +9388,15 @@ mod tests {
             return;
         }
 
-        if std::env::var_os(WATCH_PTY).is_some() {
+        if let Some(tty) = std::env::var_os(WATCH_PTY) {
+            // The watch needs its terminal as controlling terminal. A session leader that
+            // has none acquires the terminal it opens.
+            rustix::process::setsid().unwrap();
+            let _controlling = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&tty)
+                .unwrap();
             let repo = PathBuf::from(std::env::var_os("OMS_TEST_REPO").unwrap());
             let counters_file = PathBuf::from(std::env::var_os("OMS_TEST_COUNTERS").unwrap());
             let options = Options::parse(&commands::strings(&["--watch"])).unwrap();
@@ -8097,6 +9466,7 @@ mod tests {
         let bin = tmp.0.join("bin");
         let log = tmp.0.join("tmux-calls.log");
         let counters = tmp.0.join("counters.txt");
+        let watch_pid = tmp.0.join("watch-pid");
         let gemini = home.join(".gemini");
         let app_root = gemini.join("antigravity-cli");
         let presence = app_root.join("presence");
@@ -8284,197 +9654,109 @@ mod tests {
         set_model("Fixture initial");
         std::fs::write(&lead_window, "@4").unwrap();
 
-        // Private fake tmux binary logging all calls; PATH holds ONLY <tmp>/bin (with real git symlinked).
+        // Private fake tmux script logging all calls; PATH holds ONLY <tmp>/bin (with real git symlinked).
         let git_bin = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .map(|d| d.join("git"))
             .find(|p| p.is_file())
             .unwrap();
         std::os::unix::fs::symlink(&git_bin, bin.join("git")).unwrap();
         let fake_tmux = bin.join("tmux");
-        let fake_tmux_src = r##"#!/usr/bin/python3
-import os, sys, time
-args = sys.argv[1:]
-log = os.environ.get("OMS_FAKE_TMUX_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as f:
-        f.write(" ".join(args) + "\n")
-ppid = os.getppid()
-quota = os.environ.get("OMS_FAKE_QUOTA_STAGE")
-def stage():
-    if quota and os.path.exists(quota):
-        with open(quota, encoding="utf-8") as source:
-            return source.read()
-    return ""
-def advance(value):
-    with open(quota, "w", encoding="utf-8") as target:
-        target.write(value)
-if args == [
-    "list-panes",
-    "-t",
-    "%2",
-    "-F",
-    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_main_watch}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_owner}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_panel_repo}\t.\t#{?#{m/r:[[:cntrl:]],#{pane_start_path}},,#{pane_start_path}}",
-]:
-    repo = os.environ["OMS_TEST_REPO"]
-    room = os.environ["OMS_FAKE_ROOM"]
-    attempt = os.environ["OMS_FAKE_ATTEMPT"]
-    execution = os.environ["OMS_TEST_EXECUTION"]
-    print(f"$1\t@1\t%2\t{ppid}\t0\t1\t{attempt}\t%1\tcodex\t{attempt}\t{room}\t{repo}\t.")
-    print(f"$1\t@1\t%1\t{ppid}\t0\t0\t{attempt}\t%1\tcodex\t{attempt}\t{room}\t{repo}\t.\t{execution}")
-elif args == [
-    "list-panes",
-    "-s",
-    "-t",
-    "%2",
-    "-F",
-    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_active}\t#{@oms_panel_native_pane}\t#{@oms_panel_main_attempt}\t#{@oms_panel_owner}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_provider_session}\t#{@oms_provider_parent}\t#{pane_active}\t.#{@oms_panel_main_account_ready}_#{@oms_codex_chat_bound}_#{@oms_claude_quota_bound}",
-]:
-    room = os.environ["OMS_FAKE_ROOM"]
-    attempt = os.environ["OMS_FAKE_ATTEMPT"]
-    lead_pid = os.environ["OMS_FAKE_LEAD_PID"]
-    print(f"$1\t@1\t%1\t{ppid}\t0\t1\t%1\t{attempt}\tcodex\t{attempt}\t{room}\t\t\t1\t.__")
-    print(f"$1\t@1\t%2\t{ppid}\t0\t1\t%1\t{attempt}\tcodex\t{attempt}\t{room}\t\t\t0\t.__")
-    window = "@4"
-    if "OMS_FAKE_LEAD_WINDOW" in os.environ:
-        with open(os.environ["OMS_FAKE_LEAD_WINDOW"], encoding="utf-8") as source:
-            window = source.read()
-    print(f"$1\t{window}\t%4\t{lead_pid}\t0\t0\t\t\t\t\t{room}\tantigravity\t{attempt}\t0\t.__")
-elif args == [
-    "display-message",
-    "-p",
-    "-t",
-    "$1",
-    "#{session_id}\t#{pid}\t#{socket_path}\t.",
-    ";",
-    "show-options",
-    "-v",
-    "-t",
-    "$1",
-    "@oms_panel_repo",
-]:
-    repo = os.environ["OMS_TEST_REPO"]
-    print(f"$1\t{ppid}\tfake-socket\t.\n{repo}")
-elif args == ["display-message", "-p", "-t", "%2", "#{pane_width} #{pane_height}"]:
-    print("160 45")
-elif args == [
-    "display-message",
-    "-p",
-    "-t",
-    "%2",
-    "#{session_id}\t#{window_id}\t#{pane_pid}\t#{pane_dead}\t#{window_active}\t#{pane_in_mode}\t#{@oms_panel_main_watch}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room}\t#{@oms_panel_repo}",
-]:
-    repo = os.environ["OMS_TEST_REPO"]
-    room = os.environ["OMS_FAKE_ROOM"]
-    attempt = os.environ["OMS_FAKE_ATTEMPT"]
-    print(f"$1\t@1\t{ppid}\t0\t1\t0\t1\t{attempt}\t{room}\t{repo}")
-elif quota and stage() and args == ["display-message", "-p", "-t", "%4", "#{pane_in_mode}|#{cursor_x}|#{cursor_y}"]:
-    print("0|2|0")
-elif quota and stage() and args in (["capture-pane", "-p", "-t", "%4", "-S", "0", "-E", "0"], ["capture-pane", "-p", "-e", "-S", "0", "-t", "%4"]):
-    print("> /usage" if stage() == "draft" else ">")
-elif quota and stage() == "armed" and len(args) == 5 and args[:2] == ["set-buffer", "-b"] and args[3:] == ["--", "/usage"]:
-    pass
-elif quota and stage() == "armed" and len(args) == 7 and args[:4] == ["paste-buffer", "-p", "-d", "-b"] and args[5:] == ["-t", "%4"]:
-    advance("draft")
-elif quota and stage() == "draft" and args == ["send-keys", "-t", "%4", "Enter"]:
-    advance("dialog")
-elif quota and stage() == "confirm" and args == ["send-keys", "-t", "%4", "Escape"]:
-    advance("closed")
-elif quota and stage() in ("dialog", "confirm") and args == ["capture-pane", "-p", "-t", "%4"]:
-    if stage() == "dialog":
-        advance("confirm")
-    else:
-        stall = os.environ["OMS_FAKE_STALL_CAPTURE"]
-        with open(os.environ["OMS_FAKE_CAPTURE_ENTERED"], "w", encoding="utf-8") as entry:
-            entry.write(f"quota\n{os.getpid()}")
-        while os.path.exists(stall):
-            time.sleep(0.01)
-    print("└ Models & Quota\nGEMINI MODELS\nWeekly Limit Remaining\n[███] 94%\nFive Hour Limit Remaining\n[███] 86%\nCLAUDE AND GPT MODELS\nWeekly Limit Remaining\n[███] 100%")
-elif args == ["capture-pane", "-p", "-t", "%1"]:
-    print("› \n\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts")
-elif args == ["capture-pane", "-p", "-t", "%4"] or args == ["capture-pane", "-p", "-J", "-S", "-100", "-t", "%4"]:
-    stall = os.environ.get("OMS_FAKE_STALL_CAPTURE")
-    if stall and args == ["capture-pane", "-p", "-t", "%4"] and os.path.exists(stall):
-        with open(stall, encoding="utf-8") as source:
-            ticket = source.read()
-        with open(os.environ["OMS_FAKE_CAPTURE_ENTERED"], "w", encoding="utf-8") as entry:
-            entry.write(f"{ticket}\n{os.getpid()}")
-        while True:
-            try:
-                with open(stall, encoding="utf-8") as source:
-                    if source.read() != ticket:
-                        break
-            except FileNotFoundError:
-                break
-            time.sleep(0.01)
-    prompt_file = os.environ["OMS_FAKE_PROMPT_FILE"]
-    with open(prompt_file, "r", encoding="utf-8") as pf:
-        sys.stdout.write(pf.read())
-    if "OMS_FAKE_PROVIDER_MODEL" in os.environ:
-        with open(os.environ["OMS_FAKE_PROVIDER_MODEL"], encoding="utf-8") as source:
-            print(f"{source.read()} (Antigravity ) | ctx 32% | main")
-else:
-    if log:
-        with open(log, "a", encoding="utf-8") as f:
-            f.write(f"UNEXPECTED: {args!r}\n")
-    sys.stderr.write(f"unexpected fake tmux call: {args!r}\n")
-    sys.exit(1)
+        let fake_tmux_src = r##"#!/bin/sh
+# Private fake tmux for the watch fixture. The fixture PATH holds no tools, so
+# this uses shell builtins and absolute /bin paths only.
+T=$(printf '\t')
+S=$(printf '\037')
+join() { r=; for a in "$@"; do r="$r$S$a"; done; }
+join "$@"; call=$r
+is() { join "$@"; [ "$call" = "$r" ]; }
+log=${OMS_FAKE_TMUX_LOG:-}
+[ -z "$log" ] || printf '%s\n' "$*" >> "$log"
+stall=${OMS_FAKE_STALL_CAPTURE:-}
+stall_ticket() {
+  [ -n "$stall" ] && [ -e "$stall" ] && /bin/cat "$stall"
+}
+hold_capture() {
+  ticket=$1
+  printf '%s\n%s' "$ticket" "$$" > "${OMS_FAKE_CAPTURE_ENTERED?}"
+  while [ -e "$stall" ] && [ "$(/bin/cat "$stall" 2>/dev/null)" = "$ticket" ]; do /bin/sleep 0.01; done
+}
+quota=${OMS_FAKE_QUOTA_STAGE:-}
+stage=
+if [ -n "$quota" ] && [ -e "$quota" ]; then IFS= read -r stage < "$quota" || :; fi
+advance() { printf '%s' "$1" > "$quota"; }
+PANES="#{session_id}$T#{window_id}$T#{pane_id}$T#{pane_pid}$T#{pane_dead}$T#{@oms_panel_main_watch}$T#{@oms_panel_main_attempt}$T#{@oms_panel_native_pane}$T#{@oms_panel_owner}$T#{@oms_panel_room_participant}$T#{@oms_panel_room}$T#{@oms_panel_repo}$T.$T#{?#{m/r:[[:cntrl:]],#{pane_start_path}},,#{pane_start_path}}"
+SESSION="#{session_id}$T#{window_id}$T#{pane_id}$T#{pane_pid}$T#{pane_dead}$T#{window_active}$T#{@oms_panel_native_pane}$T#{@oms_panel_main_attempt}$T#{@oms_panel_owner}$T#{@oms_panel_room_participant}$T#{@oms_panel_room}$T#{@oms_provider_session}$T#{@oms_provider_parent}$T#{pane_active}$T.#{@oms_panel_main_account_ready}_#{@oms_codex_chat_bound}_#{@oms_claude_quota_bound}"
+SERVER="#{session_id}$T#{pid}$T#{socket_path}$T."
+WATCH="#{session_id}$T#{window_id}$T#{pane_pid}$T#{pane_dead}$T#{window_active}$T#{pane_in_mode}$T#{@oms_panel_main_watch}$T#{@oms_panel_main_attempt}$T#{@oms_panel_room}$T#{@oms_panel_repo}"
+if is list-panes -t %2 -F "$PANES"; then
+  repo=${OMS_TEST_REPO?} room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?} execution=${OMS_TEST_EXECUTION?}
+  if [ -n "$stall" ] && [ -e "$stall.sampled" ] && [ "$(stall_ticket)" = native-after-sample ]; then
+    hold_capture native-after-sample
+  fi
+  printf '$1\t@1\t%%2\t%s\t0\t1\t%s\t%%1\tcodex\t%s\t%s\t%s\t.\n' "$PPID" "$attempt" "$attempt" "$room" "$repo"
+  printf '$1\t@1\t%%1\t%s\t0\t0\t%s\t%%1\tcodex\t%s\t%s\t%s\t.\t%s\n' "$PPID" "$attempt" "$attempt" "$room" "$repo" "$execution"
+elif is list-panes -s -t %2 -F "$SESSION"; then
+  room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?} lead_pid=${OMS_FAKE_LEAD_PID?}
+  printf '$1\t@1\t%%1\t%s\t0\t1\t%%1\t%s\tcodex\t%s\t%s\t\t\t1\t.__\n' "$PPID" "$attempt" "$attempt" "$room"
+  printf '$1\t@1\t%%2\t%s\t0\t1\t%%1\t%s\tcodex\t%s\t%s\t\t\t0\t.__\n' "$PPID" "$attempt" "$attempt" "$room"
+  window=@4
+  if [ -n "${OMS_FAKE_LEAD_WINDOW+x}" ]; then IFS= read -r window < "$OMS_FAKE_LEAD_WINDOW" || :; fi
+  if [ "$window" != absent ]; then
+    printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+  fi
+elif is display-message -p -t '$1' "$SERVER" ';' show-options -v -t '$1' @oms_panel_repo; then
+  repo=${OMS_TEST_REPO?}
+  printf '$1\t%s\tfake-socket\t.\n%s\n' "$PPID" "$repo"
+elif is display-message -p -t %2 '#{pane_width} #{pane_height}'; then
+  printf '160 45\n'
+elif is display-message -p -t %2 "$WATCH"; then
+  repo=${OMS_TEST_REPO?} room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?}
+  printf '$1\t@1\t%s\t0\t1\t0\t1\t%s\t%s\t%s\n' "$PPID" "$attempt" "$room" "$repo"
+elif [ -n "$stage" ] && is display-message -p -t %4 '#{pane_in_mode}|#{cursor_x}|#{cursor_y}'; then
+  printf '0|2|0\n'
+elif [ -n "$stage" ] && { is capture-pane -p -t %4 -S 0 -E 0 || is capture-pane -p -e -S 0 -t %4; }; then
+  if [ "$stage" = draft ]; then printf '> /usage\n'; else printf '>\n'; fi
+elif [ "$stage" = armed ] && [ $# -eq 5 ] && [ "$1" = set-buffer ] && [ "$2" = -b ] && [ "$4" = -- ] && [ "$5" = /usage ]; then
+  :
+elif [ "$stage" = armed ] && [ $# -eq 7 ] && [ "$1" = paste-buffer ] && [ "$2" = -p ] && [ "$3" = -d ] && [ "$4" = -b ] && [ "$6" = -t ] && [ "$7" = %4 ]; then
+  advance draft
+elif [ "$stage" = draft ] && is send-keys -t %4 Enter; then
+  advance dialog
+elif [ "$stage" = confirm ] && is send-keys -t %4 Escape; then
+  advance closed
+elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p -t %4; then
+  if [ "$stage" = dialog ]; then
+    advance confirm
+  else
+    stall=${OMS_FAKE_STALL_CAPTURE?}
+    printf 'quota\n%s' "$$" > "${OMS_FAKE_CAPTURE_ENTERED?}"
+    while [ -e "$stall" ]; do /bin/sleep 0.01; done
+  fi
+  printf '%s\n' '└ Models & Quota' 'GEMINI MODELS' 'Weekly Limit Remaining' '[███] 94%' 'Five Hour Limit Remaining' '[███] 86%' 'CLAUDE AND GPT MODELS' 'Weekly Limit Remaining' '[███] 100%'
+elif is capture-pane -p -t %1; then
+  printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
+elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
+  if [ -n "$stall" ] && [ -e "$stall" ]; then
+    ticket=$(stall_ticket)
+    if [ "$ticket" = native-after-sample ]; then
+      if is capture-pane -p -J -S -100 -t %4; then : > "$stall.sampled"; fi
+    elif is capture-pane -p -t %4; then
+      hold_capture "$ticket"
+    fi
+  fi
+  /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
+  if [ -n "${OMS_FAKE_PROVIDER_MODEL+x}" ]; then
+    IFS= read -r model < "$OMS_FAKE_PROVIDER_MODEL" || :
+    printf '%s (Antigravity ) | ctx 32%% | main\n' "$model"
+  fi
+else
+  [ -z "$log" ] || printf 'UNEXPECTED: %s\n' "$*" >> "$log"
+  printf 'unexpected fake tmux call: %s\n' "$*" >&2
+  exit 1
+fi
 "##;
         std::fs::write(&fake_tmux, fake_tmux_src).unwrap();
         std::fs::set_permissions(&fake_tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        let pty_py = r#"
-import fcntl, os, pty, select, struct, subprocess, sys, termios
-master, slave = pty.openpty()
-fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
-def pre():
-    os.setsid()
-    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-    os.close(master)
-proc = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, preexec_fn=pre, close_fds=True)
-os.close(slave)
-in_fd = sys.stdin.fileno()
-out_fd = sys.stdout.fileno()
-def write_all(fd, data):
-    while data:
-        n = os.write(fd, data)
-        data = data[n:]
-in_open = True
-while True:
-    rlist = [master] + ([in_fd] if in_open else [])
-    try:
-        r, _, _ = select.select(rlist, [], [], 0.05)
-    except InterruptedError:
-        continue
-    if master in r:
-        try:
-            data = os.read(master, 8192)
-        except OSError:
-            break
-        if not data:
-            break
-        write_all(out_fd, data)
-    if in_fd in r:
-        data = os.read(in_fd, 8192)
-        if not data:
-            in_open = False
-        else:
-            write_all(master, data)
-    if proc.poll() is not None:
-        while True:
-            r, _, _ = select.select([master], [], [], 0.05)
-            if not r:
-                break
-            try:
-                data = os.read(master, 8192)
-            except OSError:
-                break
-            if not data:
-                break
-            write_all(out_fd, data)
-        break
-os.close(master)
-sys.exit(proc.wait())
-"#;
 
         let count_captures = || -> usize {
             std::fs::read_to_string(&log)
@@ -8559,17 +9841,14 @@ sys.exit(proc.wait())
             }
         };
 
-        type PtyDriver<'a> = dyn FnMut(
-                &mut std::process::ChildStdin,
-                &mut String,
-                &mut [String],
-                &mpsc::Receiver<Vec<u8>>,
-            ) + 'a;
+        type PtyDriver<'a> = dyn FnMut(&mut std::fs::File, &mut String, &mut [String], &mpsc::Receiver<Vec<u8>>)
+            + 'a;
         let run_pty = |first_capture_held: bool,
                        stalled_quit: bool,
                        drive: &mut PtyDriver<'_>|
          -> ([usize; 8], String) {
             let _ = std::fs::remove_file(&stall_capture);
+            let _ = std::fs::remove_file(stall_capture.with_extension("sampled"));
             let _ = std::fs::remove_file(&capture_entered);
             let _ = std::fs::remove_file(&quota_stage);
             if first_capture_held {
@@ -8577,11 +9856,41 @@ sys.exit(proc.wait())
             }
             let _ = std::fs::remove_file(&log);
             let _ = std::fs::remove_file(&counters);
-            let mut pty_cmd = Command::new("/usr/bin/python3");
+            // A PTY sized like the fixture pane; the child takes it as controlling terminal.
+            let master = rustix::pty::openpt(
+                rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY,
+            )
+            .unwrap();
+            rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC).unwrap();
+            rustix::pty::grantpt(&master).unwrap();
+            rustix::pty::unlockpt(&master).unwrap();
+            let tty = rustix::pty::ptsname(&master, Vec::new()).unwrap();
+            let slave = rustix::fs::open(
+                tty.as_c_str(),
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .unwrap();
+            rustix::termios::tcsetwinsize(
+                &slave,
+                rustix::termios::Winsize {
+                    ws_row: 45,
+                    ws_col: 160,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                },
+            )
+            .unwrap();
+            let slave = std::fs::File::from(slave);
+            rustix::fs::fcntl_setfl(
+                &master,
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK,
+            )
+            .unwrap();
+            let mut child_out = std::fs::File::from(master);
+            let mut child_in = child_out.try_clone().unwrap();
+            let mut pty_cmd = Command::new(&exe);
             pty_cmd
-                .arg("-c")
-                .arg(pty_py)
-                .arg(&exe)
                 .args(["--exact", TEST_NAME, "--nocapture"])
                 .env_clear()
                 .env("PATH", &bin)
@@ -8590,7 +9899,7 @@ sys.exit(proc.wait())
                 .env("XDG_STATE_HOME", &state)
                 .env("TERM", "xterm-256color")
                 .env("TMUX_PANE", "%2")
-                .env(WATCH_PTY, "1")
+                .env(WATCH_PTY, tty.to_str().unwrap())
                 .env("OMS_TEST_REPO", &repo)
                 .env("OMS_TEST_EXECUTION", &wt)
                 .env("OMS_TEST_COUNTERS", &counters)
@@ -8604,22 +9913,39 @@ sys.exit(proc.wait())
                 .env("OMS_FAKE_PROVIDER_MODEL", &model)
                 .env("OMS_FAKE_LEAD_WINDOW", &lead_window)
                 .env("OMS_FAKE_QUOTA_STAGE", &quota_stage)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
+                .stdin(slave.try_clone().unwrap())
+                .stdout(slave)
                 .stderr(Stdio::inherit());
             let mut child = pty_cmd.spawn().unwrap();
-            let mut child_in = child.stdin.take().unwrap();
-            let mut child_out = child.stdout.take().unwrap();
+            std::fs::write(&watch_pid, child.id().to_string()).unwrap();
+            // The command holds the last parent copies of the slave.
+            drop(pty_cmd);
 
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            let reaped = std::sync::Arc::new(AtomicBool::new(false));
+            let reader_reaped = std::sync::Arc::clone(&reaped);
             let reader_thread = std::thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-                while let Ok(n) = child_out.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
+                let mut quiet = 0;
+                // The master is non-blocking. Read until the child side closes, or until the
+                // child was reaped and nothing more arrives.
+                while quiet < 5 {
+                    match child_out.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            quiet = 0;
+                            if tx.send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if reader_reaped.load(std::sync::atomic::Ordering::Relaxed) {
+                                quiet += 1;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
                     }
                 }
             });
@@ -8632,6 +9958,7 @@ sys.exit(proc.wait())
             child_in.write_all(b"q").unwrap();
             child_in.flush().unwrap();
             let status = child.wait().unwrap();
+            reaped.store(true, std::sync::atomic::Ordering::Relaxed);
             if stalled_quit {
                 let entered = std::fs::read_to_string(&capture_entered).unwrap();
                 let (_, pid) = entered.split_once('\n').unwrap();
@@ -9331,6 +10658,278 @@ sys.exit(proc.wait())
         assert!(
             !quota_log.contains("send-keys -t %4 Escape") && !quota_log.contains("UNEXPECTED:")
         );
+
+        // Hold both captures in turn so the targeted result arrives while the
+        // same-scope Board is still waiting for an ordinary refresh.
+        let child_d = "55555555-5555-5555-5555-eeeeeeeeeeee";
+        let participant = |id| crate::native_children::participant_id("antigravity", id);
+        assert!(
+            [child_a, child_b, child_c]
+                .into_iter()
+                .all(|id| participant(id) < participant(child_d))
+        );
+        let mut detail_lead = lead_rows;
+        let child_d_call = detail_lead.len();
+        detail_lead.extend([
+            json!({"step_index":9,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"spawning d","tool_calls":[{"id":"td","name":"invoke_subagent","args":{"Prompt":"count fixture tokens","Role":"Fourth Usage","TypeName":"general"}}]}),
+            json!({"step_index":10,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-18T18:01:02Z","content":format!("Created the following subagent:\n{:#}", json!({"conversationId":child_d,"workspaceUris":[repo_uri]}))}),
+        ]);
+        write_jsonl(lead_id, "transcript.jsonl", &detail_lead);
+        write_jsonl(lead_id, "transcript_full.jsonl", &detail_lead);
+        write_jsonl(
+            child_d,
+            "transcript_full.jsonl",
+            &[
+                json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-18T18:01:03Z","model":"gemini","input_tokens":1200,"cache_read_tokens":0,"output_tokens":40}),
+            ],
+        );
+        let detail_visible = |screen: &[String]| {
+            screen
+                .iter()
+                .any(|line| line.contains("Call Detail · Fourth Usage"))
+        };
+        let has_detail_usage = |screen: &[String]| {
+            screen
+                .iter()
+                .any(|line| line.contains("1200 in") && line.contains("40 out"))
+        };
+        let (detail_counts, detail_log) =
+            run_pty(false, false, &mut |child_in, stream, screen, rx| {
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "fourth child on fresh Board",
+                    &mut |s| s.iter().any(|line| line.contains("Fourth Usage")),
+                );
+                child_in.write_all(b"/Fourth Usage\r\x1b[B").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "filter fourth child", &mut |s| {
+                    s.iter().any(|line| line.contains("Filter /Fourth Usage"))
+                });
+
+                std::fs::write(&stall_capture, "detail").unwrap();
+                child_in.write_all(b"D").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "selected detail and targeted read",
+                    &mut |s| detail_visible(s) && entered("detail"),
+                );
+                assert!(!has_detail_usage(screen));
+                repeat_wakes(stream, screen, rx);
+                std::fs::write(&stall_capture, "detail-follow-up").unwrap();
+                wait_for(stream, screen, rx, "ordinary refresh held", &mut |_| {
+                    entered("detail-follow-up")
+                });
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "targeted usage during follow-up",
+                    &mut |s| detail_visible(s) && has_detail_usage(s),
+                );
+
+                detail_lead[child_d_call]["tool_calls"][0]["args"]["Role"] =
+                    json!("Fourth Usage Refreshed");
+                write_jsonl(lead_id, "transcript.jsonl", &detail_lead);
+                write_jsonl(lead_id, "transcript_full.jsonl", &detail_lead);
+                std::fs::remove_file(&stall_capture).unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "usage in fresh ordinary frame",
+                    &mut |s| {
+                        has_detail_usage(s)
+                            && s.iter()
+                                .any(|line| line.contains("Call Detail · Fourth Usage Refreshed"))
+                    },
+                );
+                child_in.write_all(b"\x1b").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "detail closed and usage hidden",
+                    &mut |s| !detail_visible(s) && !has_detail_usage(s),
+                );
+            });
+        assert!(!detail_log.contains("UNEXPECTED:"), "{detail_log}");
+        assert_eq!(detail_counts[2], 3 * detail_counts[1] + 1);
+        assert_eq!(detail_counts[3], 0);
+
+        // A markerless typed Turn opens the exact bounded parent roster.
+        // It starts empty so only a provider-native write can reveal its first child.
+        let transcript = brain
+            .join(lead_id)
+            .join(".system_generated/logs/transcript.jsonl");
+        let prepare_empty_roster = |markerless: bool| {
+            std::fs::write(&lead_window, "@4").unwrap();
+            if markerless {
+                std::fs::write(&prompt_file, "Antigravity ready\n").unwrap();
+            } else {
+                write_prompt(&prompt_line);
+            }
+            write_jsonl(lead_id, "transcript.jsonl", &detail_lead[..1]);
+        };
+        let append = |path: &Path, rows: &[Value]| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for row in rows {
+                writeln!(&mut file, "{row}").unwrap();
+            }
+        };
+        let start_child = |index| {
+            let mut spawn = [detail_lead[5].clone(), detail_lead[6].clone()];
+            spawn[0]["step_index"] = json!(index);
+            spawn[1]["step_index"] = json!(index + 1);
+            spawn
+        };
+        let has_first_child =
+            |screen: &[String]| screen.iter().any(|line| line.contains("Bound Researcher"));
+        let count_observations = || {
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "capture-pane -p -t %4")
+                .count()
+        };
+        let watch_armed = || {
+            let pid = std::fs::read_to_string(&watch_pid).unwrap();
+            std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .flatten()
+                .any(|fd| {
+                    std::fs::read_link(fd.path())
+                        .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                })
+        };
+        let quiet = |rx: &mpsc::Receiver<Vec<u8>>, duration| {
+            let snapshot = std::fs::read_to_string(&log).unwrap();
+            let until = Instant::now() + duration;
+            while let Some(wait) = until.checked_duration_since(Instant::now()) {
+                let _ = rx.recv_timeout(wait);
+                assert_eq!(std::fs::read_to_string(&log).unwrap(), snapshot);
+            }
+        };
+        prepare_empty_roster(true);
+        set_model("First child fixture");
+        let (_, first_child_log) = run_pty(false, false, &mut |_, stream, screen, rx| {
+            // A markerless recovered child proves its presence, with no trusted role.
+            let markerless_child = |s: &[String]| {
+                s.iter()
+                    .any(|line| line.contains("Worker") && line.contains("work unreported"))
+            };
+            wait_for(stream, screen, rx, "accepted empty roster", &mut |s| {
+                s.iter().any(|line| line.contains("First child fixture")) && !markerless_child(s)
+            });
+            assert!(
+                watch_armed(),
+                "no watch on the accepted markerless empty roster"
+            );
+            let foreign = brain
+                .join(child_b)
+                .join(".system_generated/logs/transcript.jsonl");
+            append(&foreign, &start_child(1));
+            // No key, OMS notification, or periodic observation during this quiet interval.
+            quiet(rx, super::REFRESH_INTERVAL);
+            let captures = count_observations();
+            let began = Instant::now();
+            append(&transcript, &start_child(1));
+            wait_for(stream, screen, rx, "native wake capture", &mut |_| {
+                count_observations() > captures
+            });
+            let captured = Instant::now();
+            wait_for(stream, screen, rx, "provider-only first child", &mut |s| {
+                markerless_child(s)
+            });
+            let elapsed = began.elapsed();
+            assert!(elapsed < super::REFRESH_INTERVAL, "{elapsed:?}");
+            assert_eq!(count_observations(), captures + 1);
+            eprintln!(
+                "synthetic AGY append-to-first-row {elapsed:?}, observed capture-to-row {:?}",
+                captured.elapsed()
+            );
+        });
+        assert!(!first_child_log.contains("UNEXPECTED:"));
+
+        prepare_empty_roster(false);
+        set_model("Native burst fixture");
+        let (_, native_burst_log) = run_pty(false, false, &mut |_, stream, screen, rx| {
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "accepted empty burst roster",
+                &mut |s| s.iter().any(|line| line.contains("Native burst fixture")),
+            );
+            assert!(
+                watch_armed(),
+                "no watch on the accepted anchored empty roster"
+            );
+            let first = count_observations();
+            set_model("Accepted empty sample");
+            std::fs::write(&stall_capture, "native-after-sample").unwrap();
+            let neutral = |index| {
+                json!({"step_index":index,"source":"MODEL","type":"PLANNER_RESPONSE",
+                    "status":"DONE","content":"fixture progress"})
+            };
+            append(&transcript, &[neutral(1)]);
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "native refresh held after empty sample",
+                &mut |_| entered("native-after-sample"),
+            );
+            for index in 2..22 {
+                append(&transcript, &[neutral(index)]);
+            }
+            append(&transcript, &start_child(22));
+            assert_eq!(count_observations(), first + 1);
+            set_model("Native burst fixture");
+            std::fs::write(&stall_capture, "native-follow-up").unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "accepted empty frame while follow-up held",
+                &mut |s| {
+                    entered("native-follow-up")
+                        && s.iter().any(|line| line.contains("Accepted empty sample"))
+                        && !has_first_child(s)
+                },
+            );
+            std::fs::remove_file(&stall_capture).unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "authoritative first child after burst",
+                &mut |s| has_first_child(s),
+            );
+            quiet(rx, Duration::from_millis(1_100));
+            assert_eq!(count_observations(), first + 2);
+
+            // Re-arm from a newly accepted empty roster, then remove the Lead
+            // from the verified pane census. Its old inode cannot wake the Board.
+            prepare_empty_roster(false);
+            crate::wakeup::notify_wakeup(&repo);
+            wait_for(stream, screen, rx, "rearmed empty roster", &mut |s| {
+                s.iter().any(|line| line.contains("Native burst fixture")) && !has_first_child(s)
+            });
+            std::fs::write(&lead_window, "absent").unwrap();
+            crate::wakeup::notify_wakeup(&repo);
+            wait_for(stream, screen, rx, "retired AGY scope", &mut |s| {
+                s.iter().all(|line| !line.contains("Native burst fixture")) && !has_first_child(s)
+            });
+            append(&transcript, &start_child(1));
+            quiet(rx, Duration::from_millis(1_100));
+        });
+        assert!(!native_burst_log.contains("UNEXPECTED:"));
 
         let _ = holder.kill();
         let _ = holder.wait();

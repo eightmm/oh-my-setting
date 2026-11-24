@@ -69,7 +69,7 @@ EOF
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
   expected_ci_record() {
-    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' "$1" "$2" "$3"
+    printf 'mode=%s\nnative=%s\ndocs_only=%s\n' "$1" "$2" "$3"
   }
   oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/README.md"
@@ -266,7 +266,6 @@ EOF
     fail "dirty fallback skipped native staging: $(cat "$check_probe/dirty-exec.log")"
   fi
 
-  # Preflight readiness must match the lanes: lint runs Cargo (oms-migrate), so
   # ShellCheck alone (blocked rustup/cargo stubs above) leaves no lane runnable.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$check_probe/bin/shellcheck"
   chmod +x "$check_probe/bin/shellcheck"
@@ -279,6 +278,44 @@ EOF
   [ "$status" -eq 1 ] || fail "preflight without the pinned toolchain must report missing prerequisites"
   grep -Fxq 'ok       shellcheck (shellcheck)' "$check_probe/preflight.out" || fail "preflight missed the ShellCheck stub"
   ! grep -q '^  yes ' "$check_probe/preflight.out" || fail "preflight claims a lane runnable without the pinned toolchain: $(cat "$check_probe/preflight.out")"
+
+  mkdir -p "$repo/plugins/oh-my-setting/scripts" "$repo/docs/examples" "$repo/templates"
+  touch "$repo/install.sh" "$repo/scripts/oms" "$repo/plugins/oh-my-setting/scripts/fixture.sh" \
+    "$repo/docs/examples/fixture.sh" "$repo/templates/fixture.sh"
+  cat > "$check_probe/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  '+1.99.1 run --quiet --manifest-path Cargo.toml -p oms-command-lifecycle --example skill_manifest --locked --offline')
+    printf 'skill-manifest\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
+    grep -Fxq '{"skills":[]}' skills.manifest.json || { echo 'fixture: malformed skill manifest' >&2; exit 2; }
+    ;;
+  '+1.99.1 run --quiet --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .'|\
+  '+1.99.1 run --quiet --manifest-path Cargo.toml -p oms-migrate --locked --offline -- policy --repo .')
+    printf 'rust-migration-check\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
+    ;;
+  *) printf 'unexpected-cargo\n' >> "$OMS_CHECK_FORBIDDEN_LOG"; exit 99 ;;
+esac
+EOF
+  lint_log="$check_probe/lint-exec.log"
+  expected_lint_log="$(printf 'maintenance-source\nmaintenance-begin\nskill-manifest\nrust-migration-check\nrust-migration-check\nmaintenance-end')"
+  printf '{"skills":[]}\n' > "$repo/skills.manifest.json"
+  OMS_CHECK_MAINT_ALLOW=1 OMS_CHECK_FORBIDDEN_LOG="$lint_log" invoke_check --lint-only \
+    > "$check_probe/lint-exec.out" 2>&1 || fail "lint-only execution failed: $(cat "$check_probe/lint-exec.out")"
+  selected="$(sed -E 's/^ok: (.*) \([0-9]+s\)$/\1/' "$check_probe/lint-exec.out")"
+  [ "$selected" = "$expected_stages" ] || fail "lint-only execution changed stages: $selected"
+  [ "$(cat "$lint_log")" = "$expected_lint_log" ] || fail "lint-only execution reached native staging or missed a Cargo check: $(cat "$lint_log")"
+
+  bad_lint_log="$check_probe/lint-bad.log"
+  printf '{"skills":null}\n' > "$repo/skills.manifest.json"
+  status=0
+  OMS_CHECK_MAINT_ALLOW=1 OMS_CHECK_FORBIDDEN_LOG="$bad_lint_log" invoke_check --lint-only \
+    > "$check_probe/lint-bad.out" 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "malformed lint-only manifest had status $status: $(cat "$check_probe/lint-bad.out")"
+  grep -Fq 'check: skill-manifest FAILED' "$check_probe/lint-bad.out" || fail 'malformed lint-only manifest did not fail its stage'
+  ! grep -Eq '^ok: (skill-manifest|doc-references|rust-migration-check)|^check: ok$' "$check_probe/lint-bad.out" ||
+    fail "lint-only continued past the failed skill-manifest stage: $(cat "$check_probe/lint-bad.out")"
+  [ "$(cat "$bad_lint_log")" = "$(printf 'maintenance-source\nmaintenance-begin\nskill-manifest\nmaintenance-end')" ] ||
+    fail "lint-only executed unexpected work after a manifest failure: $(cat "$bad_lint_log")"
 )
 
 check_markdown_links() {
@@ -403,6 +440,12 @@ check_affected_planning
 # 1. Zero retired .py files in scripts/, tests/, docs/
 leftover_py="$(git -C "$ROOT" ls-files -- 'scripts/*.py' 'scripts/**/*.py' 'tests/*.py' 'tests/**/*.py' 'docs/*.py' 'docs/**/*.py')"
 [ -z "$leftover_py" ] || fail "retired Python sources remain tracked: $leftover_py"
+# No OMS test or script runs the retired interpreter itself. The name is split so
+# this check does not count as a reference to it.
+retired='pyth''on'
+interp_use="$(git -C "$ROOT" grep -n -E "#!/usr/bin/(env )?$retired|Command::new\\(\"(/usr/bin/)?${retired}3?\"\\)" -- \
+  'crates/*.rs' 'crates/**/*.rs' 'scripts/*.sh' 'scripts/**/*.sh' 'tests/*.sh' 'tests/**/*.sh' || true)"
+[ -z "$interp_use" ] || fail "OMS sources run the retired interpreter: $interp_use"
 
 # 2. Shared namespace prefix and Korean coding-instructions invariants
 for surface in custom-skills templates/project-skills; do

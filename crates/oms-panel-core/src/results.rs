@@ -113,21 +113,44 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
         stop,
         false,
     )?;
-    let related: Vec<_> = array(&attempts)
-        .iter()
-        .filter(|v| {
-            v["tool"] != "panel-main"
-                && (v["task_id"] == request.task_id
-                    || (v["task_id"].as_str().is_none_or(str::is_empty)
-                        && parents.contains(&text(v, "parent_attempt_id"))))
-        })
-        .cloned()
-        .collect();
+    let requires_acceptance = request.outcome == "accepted" || request.landed_commit.is_some();
+    let attempts_slice = array(&attempts);
+    let mut summary_ancestry =
+        (!requires_acceptance).then(|| SummaryAncestry::new(attempts_slice, &parents));
+    let mut related = Vec::new();
+    let mut certified_inferred = Vec::new();
+    for v in attempts_slice {
+        if v["tool"] == "panel-main" {
+            continue;
+        }
+        let certified = if v["task_id"] == request.task_id {
+            Some(false)
+        } else if v["task_id"].as_str().is_none_or(str::is_empty) {
+            if requires_acceptance {
+                parents
+                    .contains(&text(v, "parent_attempt_id"))
+                    .then_some(false)
+            } else {
+                (summary_ancestry
+                    .as_mut()
+                    .and_then(|ancestry| ancestry.task_for(v))
+                    == Some(request.task_id.as_str()))
+                .then_some(true)
+            }
+        } else {
+            None
+        };
+        if let Some(certified) = certified {
+            related.push(v.clone());
+            certified_inferred.push(certified);
+        }
+    }
     require(!related.is_empty(), "task has no recorded attempts")?;
     require(
         related
             .iter()
-            .all(|v| descends(v, array(&attempts), &parents)),
+            .zip(&certified_inferred)
+            .all(|(v, &certified)| certified || descends(v, attempts_slice, &parents)),
         "task includes attempts owned by another main",
     )?;
     const MAX_FINALIZE_BLOCKERS: usize = 4;
@@ -316,6 +339,88 @@ fn descends(row: &Value, attempts: &[Value], parents: &std::collections::BTreeSe
         cursor = text(row, "parent_attempt_id");
     }
     true
+}
+
+#[derive(Clone, Copy)]
+enum Ancestry<'a> {
+    Invalid,
+    Certified(Option<&'a str>),
+}
+
+struct SummaryAncestry<'a> {
+    by_id: std::collections::HashMap<&'a str, Option<&'a Value>>,
+    parents: &'a std::collections::BTreeSet<String>,
+    memo: std::collections::HashMap<&'a str, Ancestry<'a>>,
+}
+
+impl<'a> SummaryAncestry<'a> {
+    fn new(attempts: &'a [Value], parents: &'a std::collections::BTreeSet<String>) -> Self {
+        let mut by_id = std::collections::HashMap::with_capacity(attempts.len());
+        for row in attempts {
+            if let Some(id) = row["attempt_id"].as_str().filter(|v| !v.is_empty()) {
+                by_id
+                    .entry(id)
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(row));
+            }
+        }
+        Self {
+            by_id,
+            parents,
+            memo: std::collections::HashMap::new(),
+        }
+    }
+
+    fn task_for(&mut self, row: &'a Value) -> Option<&'a str> {
+        let start_id = row["attempt_id"].as_str().filter(|v| !v.is_empty())?;
+        let mut cursor = start_id;
+        let mut path: Vec<(&'a str, Option<&'a str>)> = Vec::new();
+        let mut in_path = std::collections::HashSet::new();
+        let terminal = loop {
+            if let Some(&cached) = self.memo.get(cursor) {
+                break cached;
+            }
+            if self.parents.contains(cursor) {
+                break if matches!(self.by_id.get(cursor), Some(Some(_))) {
+                    Ancestry::Certified(None)
+                } else {
+                    Ancestry::Invalid
+                };
+            }
+            if !in_path.insert(cursor) {
+                break Ancestry::Invalid;
+            }
+            match self.by_id.get(cursor) {
+                Some(Some(node)) => {
+                    if node["tool"] == "panel-main" {
+                        break Ancestry::Invalid;
+                    }
+                    let own_task = node["task_id"].as_str().filter(|v| !v.is_empty());
+                    path.push((cursor, own_task));
+                    if let Some(parent) =
+                        node["parent_attempt_id"].as_str().filter(|v| !v.is_empty())
+                    {
+                        cursor = parent;
+                    } else {
+                        break Ancestry::Invalid;
+                    }
+                }
+                Some(None) | None => break Ancestry::Invalid,
+            }
+        };
+        let mut resolved = terminal;
+        for (node_id, own_task) in path.into_iter().rev() {
+            resolved = match resolved {
+                Ancestry::Invalid => Ancestry::Invalid,
+                Ancestry::Certified(above) => Ancestry::Certified(own_task.or(above)),
+            };
+            self.memo.insert(node_id, resolved);
+        }
+        match resolved {
+            Ancestry::Certified(task) => task,
+            Ancestry::Invalid => None,
+        }
+    }
 }
 
 pub fn finalize(
@@ -895,6 +1000,257 @@ fn load_result(store: &Store, row: &Value) -> Result<Value> {
     )?;
     Ok(value)
 }
+
+const MAX_NATIVE_RETURNS: usize = 20;
+
+fn native_action(kind: &str, reason: &str, commands: Vec<Value>) -> Value {
+    serde_json::json!({"kind":kind,"reason":reason,"commands":commands})
+}
+
+fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Result<Value> {
+    use crate::native_contract::NextAction;
+    let inspect = || serde_json::json!({"argv":["oms","panel","--results","--task-id",operation["task_id"],"--json"]});
+    let resolution = text(&operation["refs"], "native_resolution");
+    let sha = text(report, "artifact_sha256");
+    let resolved = text(&operation["refs"], "native_resolution_result_sha256");
+    require(
+        [
+            "awaiting-report",
+            "pending",
+            "request-revision",
+            "blocked",
+            "reviewed",
+            "retiring",
+            "retired",
+        ]
+        .contains(&resolution.as_str())
+            && if sha.is_empty() {
+                ["awaiting-report", "retiring", "retired"].contains(&resolution.as_str())
+                    && resolved.is_empty()
+            } else {
+                resolution != "awaiting-report"
+                    && (resolved.is_empty() || resolved == sha)
+                    && (resolution != "pending" || resolved.is_empty())
+                    && (!["request-revision", "blocked", "reviewed"].contains(&resolution.as_str())
+                        || resolved == sha)
+            },
+        "native resolution does not name this exact retained result",
+    )?;
+    report["resolution"] = resolution.clone().into();
+    let task = array(&plan["tasks"])
+        .iter()
+        .find(|row| row["id"] == report["task_id"]);
+    let same = task.filter(|task| {
+        plan["plan_id"] == report["plan_id"]
+            && task["lease_id"] == report["lease_id"]
+            && task["lease_epoch"] == report["lease_epoch"]
+            && task["provider"] == report["owner"]
+            && task["claimed_by_participant"]
+                == report
+                    .get("parent_participant")
+                    .unwrap_or(&report["parent_attempt_id"])
+                    .clone()
+    });
+    let Some(task) = same else {
+        report["plan_state"] = "unknown".into();
+        return Ok(native_action(
+            "inspect",
+            "Current canonical task or lease is unavailable or changed",
+            vec![inspect()],
+        ));
+    };
+    report["plan_state"] = task["state"].clone();
+    let reconcile = |decision: &str| serde_json::json!({"argv":["oms","panel","--native-reconcile",operation["attempt_id"],"--result-sha256",sha,"--decision",decision]});
+    if matches!(task["state"].as_str(), Some("done" | "cancelled"))
+        && task["completion_verified"] != false
+    {
+        let ready = serde_json::json!({"argv":["oms","agent-plan","ready","--json"]});
+        return Ok(
+            if resolution == "retired" && operation["terminal"] == true {
+                native_action(
+                    "next",
+                    "Canonical task is settled; inspect the next ready task",
+                    vec![ready],
+                )
+            } else if sha.is_empty() {
+                native_action(
+                    "retire",
+                    "Canonical task is settled without a result; the next bound assignment must reconcile its reservation",
+                    vec![ready],
+                )
+            } else {
+                native_action(
+                    "retire",
+                    "Canonical task is settled; retire this assignment reservation before the next task",
+                    vec![reconcile("reviewed")],
+                )
+            },
+        );
+    }
+    if !matches!(
+        task["state"].as_str(),
+        Some("claimed" | "running" | "review")
+    ) || task["claim_expired"] == true
+        || task["contract_stale"] == true
+        || task["completion_verified"] == false
+        || resolution == "retiring"
+        || resolution == "retired"
+    {
+        return Ok(native_action(
+            "inspect",
+            "Canonical task state needs reconciliation before another native action",
+            vec![inspect()],
+        ));
+    }
+    if sha.is_empty() {
+        let action = match operation["refs"]["native_transport"].as_str() {
+            Some("intent") => NextAction::Send,
+            Some("submitted") => NextAction::Wait,
+            _ => NextAction::Reconcile,
+        };
+        let mut next = native_action(action.name(), action.reason(), vec![inspect()]);
+        if report["pending_input"] == true && operation["refs"]["native_transport"] != "intent" {
+            next = native_action(
+                "import",
+                "An untrusted native return manifest is present; Main must import and validate it",
+                vec![
+                    serde_json::json!({"argv":["oms","panel","--orchestrator","codex","--task-id",report["task_id"],"--native-result",report["input_paths"]["manifest"]]}),
+                ],
+            );
+        }
+        return Ok(next);
+    }
+    if resolution == "request-revision" {
+        return Ok(native_action(
+            "continue",
+            "Main requested another round of the same frozen task and lease",
+            vec![
+                serde_json::json!({"argv":["oms","panel","--orchestrator","codex","--task-id",report["task_id"],"--after-native-result",sha,"--task","<reviewed-revision-brief>"],"required_input":["task"]}),
+            ],
+        ));
+    }
+    if resolution == "reviewed" {
+        return Ok(if report["patch"].is_object() {
+            if task["state"] != "review"
+                || task["review_lease_id"] != report["lease_id"]
+                || task["artifact"] != report["artifact"]
+                || task["patch"] != report["patch"]["path"]
+            {
+                native_action(
+                    "inspect",
+                    "Main review is recorded but its canonical Plan patch binding needs reconciliation",
+                    vec![reconcile("reviewed")],
+                )
+            } else {
+                native_action(
+                    "admit",
+                    "Main reviewed this candidate; run canonical admission from a clean integration checkout",
+                    vec![
+                        serde_json::json!({"argv":["oms","patch-admit","--patch",report["patch"]["path"],"--plan-task",report["task_id"],"--repo","<clean-integration-checkout>"],"required_input":["repo"]}),
+                    ],
+                )
+            }
+        } else {
+            native_action(
+                "verify",
+                "Main reviewed report-only claims; completion still needs the canonical verified Plan path",
+                vec![
+                    serde_json::json!({"argv":["oms","agent-plan","evidence-snapshot","--id",report["task_id"]]}),
+                ],
+            )
+        });
+    }
+    let action = if resolution == "blocked" || report["return_state"] == "blocked" {
+        NextAction::ResolveBlocker
+    } else if report["return_state"] == "needs-decision" {
+        NextAction::Decide
+    } else {
+        NextAction::Review
+    };
+    Ok(native_action(
+        action.name(),
+        action.reason(),
+        vec![
+            reconcile("request-revision"),
+            reconcile("blocked"),
+            reconcile("reviewed"),
+        ],
+    ))
+}
+
+fn result_participant(operation: &Value, participant: &str) -> bool {
+    operation["refs"]["panel_room_participant"] == participant
+        || (operation["tool"] == "panel-native-assignment"
+            && operation["refs"].get("native_return_schema").is_some()
+            && operation["attempt_id"] == participant)
+}
+
+fn native_succession_guidance(
+    store: &Store,
+    operation: &Value,
+    report: &mut Value,
+    attempts: &Value,
+) -> Result<Option<Value>> {
+    let succession = crate::native_succession::metadata(store, operation)?;
+    let custodian = succession.as_ref().map_or_else(
+        || text(operation, "parent_attempt_id"),
+        |record| text(record, "main_attempt_id"),
+    );
+    report["custodian_attempt_id"] = custodian.clone().into();
+    report["succession"] = succession.unwrap_or(Value::Null);
+    let mains: Vec<_> = array(attempts)
+        .iter()
+        .filter(|row| {
+            row["tool"] == "panel-main"
+                && row["refs"]["panel_room_id"] == operation["refs"]["panel_room_id"]
+                && row["terminal"] != true
+        })
+        .collect();
+    if mains.len() == 1 && mains[0]["attempt_id"] == custodian {
+        return Ok(None);
+    }
+    // Legacy/offline result views have no current Main. They may still describe
+    // the original contract, but never invent a successor from that absence.
+    if mains.is_empty() {
+        return Ok(None);
+    }
+    let inspect = serde_json::json!({"argv":["oms","panel","--results","--task-id",operation["task_id"],"--json"]});
+    let old = array(attempts)
+        .iter()
+        .find(|row| row["attempt_id"] == custodian);
+    if mains.len() != 1
+        || !old.is_some_and(|old| {
+            old["terminal"] == true
+                && old["state"] == "abandoned"
+                && old["reason_code"] == "main_swapped"
+        })
+        || crate::state::main_participant(mains[0]) != report["parent_participant"]
+    {
+        return Ok(Some(native_action(
+            "inspect",
+            "Native owner succession is unconfirmed; inspect the canonical Main handoff",
+            vec![inspect],
+        )));
+    }
+    let mut argv = serde_json::json!([
+        "oms",
+        "panel",
+        "--native-adopt",
+        operation["attempt_id"],
+        "--assignment-sha256",
+        report["binding_sha256"]
+    ]);
+    if let Some(digest) = report["artifact_sha256"].as_str() {
+        argv.as_array_mut()
+            .unwrap()
+            .extend(["--result-sha256".into(), digest.into()]);
+    }
+    Ok(Some(native_action(
+        "adopt",
+        "A successor Main must explicitly adopt this exact frozen assignment before continuing",
+        vec![serde_json::json!({"argv":argv})],
+    )))
+}
 /// Canonical task rows, paged after participant filtering. Missing or corrupt
 /// evidence is surfaced in `issue`; it cannot manufacture an owner outcome.
 pub fn results_page(
@@ -958,6 +1314,9 @@ pub fn results_page(
     let mut output = Vec::new();
     let mut passed = 0;
     let mut capped = false;
+    let mut native_remaining = MAX_NATIVE_RETURNS;
+    let mut native_plan = None;
+    let mut saw_typed = false;
     for task in latest {
         if request.task_id.as_ref().is_some_and(|v| v != &task) {
             continue;
@@ -967,7 +1326,7 @@ pub fn results_page(
             .filter(|v| v["task_id"] == task)
             .collect::<Vec<_>>();
         if let Some(member) = &request.room_participant {
-            metadata_attempts.retain(|v| v["refs"]["panel_room_participant"] == *member);
+            metadata_attempts.retain(|v| result_participant(v, member));
         }
         if request.room_participant.is_some()
             && request.task_id.is_none()
@@ -1010,7 +1369,7 @@ pub fn results_page(
             .map(|v| text(v, "attempt_id"))
             .collect::<std::collections::BTreeSet<_>>();
         if let Some(member) = &request.room_participant {
-            matching.retain(|v| v["refs"]["panel_room_participant"] == *member);
+            matching.retain(|v| result_participant(v, member));
         }
         let linked = matching
             .iter()
@@ -1304,16 +1663,17 @@ pub fn results_page(
         {
             projected["round_delta"] = delta;
         }
-        if request.task_id.is_some() {
-            // Input transport is the only recorded fact. No canonical writer
-            // acknowledges consumption, and acceptance is the Main's decision.
-            projected["native_assignment"] = metadata_attempts
-                .iter()
-                .rfind(|v| {
-                    v["tool"] == "panel-native-assignment"
-                        && v["refs"]["native_assignment_schema"] == "1"
-                })
-                .map_or(Value::Null, |v| {
+        let native = metadata_attempts.iter().rfind(|v| {
+            v["tool"] == "panel-native-assignment"
+                && (v["refs"]["native_assignment_schema"] == "1"
+                    || v["refs"].get("native_return_schema").is_some())
+        });
+        let typed = native.is_some_and(|v| v["refs"].get("native_return_schema").is_some());
+        saw_typed |= typed;
+        if request.task_id.is_some() || typed {
+            // A retained owner report is separate from native input transport.
+            // Neither proves consumption, completion or the Main's acceptance.
+            projected["native_assignment"] = native.map_or(Value::Null, |v| {
                     let recorded = v["refs"]["native_transport"].as_str();
                     let valid = recorded
                         .filter(|t| ["intent", "sending", "submitted", "unknown"].contains(t));
@@ -1326,15 +1686,81 @@ pub fn results_page(
                     if valid.is_none() {
                         entry["transport_issue"] = "invalid transport state".into();
                     }
+                    if !typed { match crate::native_results::read(&store, v) {
+                        Ok(Some(report)) => entry["report"] = report,
+                        Ok(None) => {}
+                        Err(error) => entry["report"] = serde_json::json!({
+                            "status":"unavailable", "acceptance_eligible":false,
+                            "issue":crate::eventlog::clean(&error.message,240)}),
+                    }}
                     entry
                 });
+            if typed {
+                let operation = native.unwrap();
+                let observation = if operation["refs"]["native_return_schema"] != "1" {
+                    Err(Error::busy("native return schema is unsupported"))
+                } else if native_remaining == 0 {
+                    Err(Error::busy(
+                        "native return read limit reached; inspect this task directly",
+                    ))
+                } else {
+                    native_remaining -= 1;
+                    crate::native_results::metadata(&store, operation).and_then(|mut report| {
+                        let plan = native_plan.get_or_insert_with(|| {
+                            query(
+                                service,
+                                NativeCommand::Plan,
+                                repo,
+                                &["list", "--json"],
+                                stop,
+                            )
+                            .unwrap_or(Value::Null)
+                        });
+                        let next = native_guidance(operation, &mut report, plan)?;
+                        let next =
+                            native_succession_guidance(&store, operation, &mut report, &attempts)?
+                                .unwrap_or(next);
+                        Ok((report, next))
+                    })
+                };
+                let (report,next) = observation.unwrap_or_else(|error| {
+                    let state = if error.code == 75 { "unknown" } else { "invalid" };
+                    let reason = if error.code == 75 { "native return evidence is unavailable or beyond this bounded view" } else { "native return binding, identity or result evidence is invalid" };
+                    let reason = if error.message == "native return read limit reached; inspect this task directly" || error.message == "native return schema is unsupported" { error.message.as_str() } else { reason };
+                    (serde_json::json!({"status":"unavailable","return_state":state,"acceptance_eligible":false,"issue":reason}),
+                        native_action("inspect",reason,vec![serde_json::json!({"argv":["oms","panel","--results","--task-id",task,"--json"]})]))
+                });
+                let entry = &mut projected["native_assignment"];
+                entry["return_state"] = report["return_state"].clone();
+                entry["resolution"] = report["resolution"].clone();
+                entry["verification"] = "unverified".into();
+                entry["child_cleanup"] = "unsupported".into();
+                entry["report"] = report;
+                entry["next_action"] = next;
+            }
             // Only an undecided task without a failure moves its next step to the
             // recorded transport; nothing here resends or retries.
-            let next = match projected["native_assignment"]["transport"].as_str() {
-                Some("intent") => Some("review unsent native assignment intent"),
-                Some("submitted") => Some("await native assignment result evidence"),
-                Some(_) => Some("inspect and reconcile unconfirmed native send before any retry"),
-                None => None,
+            let next = if typed {
+                projected["native_assignment"]["next_action"]["reason"].as_str()
+            } else {
+                match projected["native_assignment"]["transport"].as_str() {
+                    Some("intent") => Some("review unsent native assignment intent"),
+                    Some("submitted") => {
+                        match projected["native_assignment"]["report"]["status"].as_str() {
+                            Some("reported") => Some(
+                                "inspect native report; reconcile completion, verification and cleanup before acceptance",
+                            ),
+                            Some("unavailable") => {
+                                Some("inspect unavailable native result evidence")
+                            }
+                            _ => Some("await native assignment result evidence"),
+                        }
+                    }
+                    Some(_) => {
+                        Some("inspect and reconcile unconfirmed native send before any retry")
+                    }
+                    None => None,
+                }
             };
             if let Some(next) = next
                 && projected["representative_state"] == "pending"
@@ -1345,8 +1771,13 @@ pub fn results_page(
         output.push(projected);
     }
     let missing_task = request.task_id.is_some() && output.is_empty();
+    let native_coverage = if saw_typed {
+        "; native returns: at most 20 rows, 64 KiB each of binding/result/source; no candidate or verification bodies"
+    } else {
+        ""
+    };
     Ok(
-        serde_json::json!({"schema":1,"kind":"oms-panel-results","rows":output,"coverage":format!("{}; all retained artifact events; previously pruned evidence unavailable",if request.task_id.is_some() { "all retained attempts" } else { "latest 300 attempts; attempt coverage may be incomplete" }),"truncated":capped || missing_task,"offset":request.offset,"omitted":if capped { Value::Null } else { 0.into() },"omitted_range":if capped { serde_json::json!([request.offset+output.len(),null]) } else { Value::Null }}),
+        serde_json::json!({"schema":1,"kind":"oms-panel-results","rows":output,"coverage":format!("{}; all retained artifact events; previously pruned evidence unavailable{native_coverage}",if request.task_id.is_some() { "all retained attempts" } else { "latest 300 attempts; attempt coverage may be incomplete" }),"truncated":capped || missing_task,"offset":request.offset,"omitted":if capped { Value::Null } else { 0.into() },"omitted_range":if capped { serde_json::json!([request.offset+output.len(),null]) } else { Value::Null }}),
     )
 }
 
@@ -2182,10 +2613,14 @@ mod tests {
             files
         };
         let initial_snapshot = snapshot();
-        let refusal = |attempts, expected: String| {
+        let mut accepted = request.clone();
+        accepted.outcome = "accepted".into();
+        let mut landed = request.clone();
+        landed.landed_commit = Some("a".repeat(40));
+        let refusal_for = |req: &FinalizeRequest, attempts, expected: String| {
             let err = finalize_snapshot(
                 &repo.0,
-                &request,
+                req,
                 &ClaimedTask(attempts),
                 &AtomicBool::new(false),
             )
@@ -2193,10 +2628,15 @@ mod tests {
             assert_eq!(err, Error::new(expected));
             err
         };
+        let refusal = |attempts, expected: String| refusal_for(&request, attempts, expected);
+        let accepted_refusal =
+            |attempts, expected: String| refusal_for(&accepted, attempts, expected);
         let read = worker(WORKER, "read", "working");
         let review_id = "call-finalization:review";
         let mut review = worker(review_id, "write", "review");
         review["refs"]["panel_room_participant"] = WORKER.into();
+        let mut read_review = worker("call-read-review", "read", "review");
+        read_review["refs"]["panel_room_participant"] = WORKER.into();
         let later = worker("call-later", "write", "running");
         let done = worker("call-done", "write", "done");
         refusal(
@@ -2213,10 +2653,22 @@ mod tests {
                 "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup)"
             ),
         );
+        refusal(
+            vec![read_review],
+            "task has live or unconfirmed attempts (task attempt call-read-review, missing verified whole-tree cleanup)"
+                .to_owned(),
+        );
         let mut taskless = worker(WORKER, "write", "waiting_approval");
         taskless["task_id"] = Value::Null;
-        refusal(
+        accepted_refusal(
             vec![taskless.clone()],
+            format!(
+                "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        refusal_for(
+            &landed,
+            vec![done.clone(), taskless.clone()],
             format!(
                 "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
             ),
@@ -2225,7 +2677,7 @@ mod tests {
         let mut taskless_review = worker(taskless_review_id, "write", "review");
         taskless_review["task_id"] = "".into();
         taskless_review["refs"]["panel_room_participant"] = WORKER.into();
-        refusal(
+        accepted_refusal(
             vec![
                 done.clone(),
                 review.clone(),
@@ -2236,7 +2688,7 @@ mod tests {
                 "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
             ),
         );
-        let exact_cap_err = refusal(
+        let exact_cap_err = accepted_refusal(
             vec![
                 done.clone(),
                 read.clone(),
@@ -2252,11 +2704,11 @@ mod tests {
         let mut fifth = worker("call-fifth", "write", "blocked");
         fifth["task_id"] = Value::Null;
         let sixth = worker("call-sixth", "write", "verifying");
-        let overflow_err = refusal(
+        let overflow_err = accepted_refusal(
             vec![
-                done,
+                done.clone(),
                 review,
-                taskless_review,
+                taskless_review.clone(),
                 read.clone(),
                 later,
                 fifth,
@@ -2268,6 +2720,200 @@ mod tests {
         );
         assert!(!overflow_err.message.contains("call-fifth"));
         assert!(!overflow_err.message.contains("call-sixth"));
+        // Summary-only outcomes exclude unrelated taskless siblings of Main and
+        // taskless descendants of other tasks, while still blocking on proven
+        // taskless descendants of this task.
+        let mut other_task_root = worker("call-other-task", "read", "working");
+        other_task_root["task_id"] = "other-task".into();
+        let mut other_task_child = worker("call-other-child", "read", "working");
+        other_task_child["task_id"] = Value::Null;
+        other_task_child["parent_attempt_id"] = "call-other-task".into();
+        for outcome in ["completed", "failed", "rejected"] {
+            let mut summary_req = request.clone();
+            summary_req.outcome = outcome.into();
+            let snap = finalize_snapshot(
+                &repo.0,
+                &summary_req,
+                &ClaimedTask(vec![
+                    done.clone(),
+                    taskless.clone(),
+                    taskless_review.clone(),
+                    other_task_root.clone(),
+                    other_task_child.clone(),
+                ]),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let related = array(&snap["related_attempts"]);
+            assert_eq!(related.len(), 1);
+            assert_eq!(related[0]["attempt_id"], "call-done");
+        }
+        let mut task_child = worker("call-task-child", "read", "working");
+        task_child["task_id"] = Value::Null;
+        task_child["parent_attempt_id"] = "call-done".into();
+        let mut task_child_review = worker("call-task-child-review", "read", "review");
+        task_child_review["task_id"] = "".into();
+        task_child_review["parent_attempt_id"] = "call-done".into();
+        task_child_review["refs"]["panel_room_participant"] = WORKER.into();
+        let mut task_mid = worker("call-task-mid", "read", "done");
+        task_mid["task_id"] = "".into();
+        task_mid["parent_attempt_id"] = "call-done".into();
+        let mut task_grandchild = worker("call-task-grandchild", "read", "waiting_approval");
+        task_grandchild["task_id"] = Value::Null;
+        task_grandchild["parent_attempt_id"] = "call-task-mid".into();
+        let mut task_grandchild_review = worker("call-task-grandchild-review", "read", "review");
+        task_grandchild_review["task_id"] = Value::Null;
+        task_grandchild_review["parent_attempt_id"] = "call-task-mid".into();
+        task_grandchild_review["refs"]["panel_room_participant"] = WORKER.into();
+        for outcome in ["completed", "failed", "rejected"] {
+            let mut summary_req = request.clone();
+            summary_req.outcome = outcome.into();
+            refusal_for(
+                &summary_req,
+                vec![
+                    done.clone(),
+                    taskless.clone(),
+                    other_task_root.clone(),
+                    other_task_child.clone(),
+                    task_child.clone(),
+                    task_child_review.clone(),
+                    task_mid.clone(),
+                    task_grandchild.clone(),
+                    task_grandchild_review.clone(),
+                ],
+                "task has live or unconfirmed attempts (inherited taskless descendant attempt call-task-child, lifecycle state working · inherited taskless descendant attempt call-task-child-review, missing verified whole-tree cleanup · inherited taskless descendant attempt call-task-grandchild, lifecycle state waiting_approval · inherited taskless descendant attempt call-task-grandchild-review, missing verified whole-tree cleanup)"
+                    .to_owned(),
+            );
+        }
+        // Accepted/landed preserves the direct-Main taskless safeguard and does
+        // not widen into nested taskless children via nearest_task_id.
+        let done_read = worker("call-done-read", "read", "done");
+        let mut nested_child = worker("call-nested-child", "read", "working");
+        nested_child["task_id"] = Value::Null;
+        nested_child["parent_attempt_id"] = "call-done-read".into();
+        let landed_snap = finalize_snapshot(
+            &repo.0,
+            &landed,
+            &ClaimedTask(vec![done_read.clone(), nested_child.clone()]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let landed_related = array(&landed_snap["related_attempts"]);
+        assert_eq!(landed_related.len(), 1);
+        assert_eq!(landed_related[0]["attempt_id"], "call-done-read");
+        refusal_for(
+            &accepted,
+            vec![done_read, nested_child],
+            "accepted requires native plan completion/publication proof".to_owned(),
+        );
+        // Summary-only ancestry certification refuses to cross a foreign
+        // panel-main even when linked to current Main, and rejects cycles,
+        // missing parents, and ambiguous duplicate parent IDs.
+        let foreign_main = json!({
+            "attempt_id": "main-foreign", "tool": "panel-main", "provider": "codex",
+            "parent_attempt_id": MAIN, "state": "working", "terminal": false
+        });
+        let mut done_under_foreign = worker("call-done-under-foreign", "read", "done");
+        done_under_foreign["parent_attempt_id"] = "main-foreign".into();
+        let mut taskless_under_foreign = worker("call-taskless-under-foreign", "read", "working");
+        taskless_under_foreign["task_id"] = Value::Null;
+        taskless_under_foreign["parent_attempt_id"] = "call-done-under-foreign".into();
+        let foreign_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(vec![
+                foreign_main,
+                done_under_foreign,
+                taskless_under_foreign,
+            ]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let foreign_related = array(&foreign_snap["related_attempts"]);
+        assert_eq!(foreign_related.len(), 1);
+        assert_eq!(foreign_related[0]["attempt_id"], "call-done-under-foreign");
+
+        let mut cycle_a = worker("call-cycle-a", "read", "working");
+        cycle_a["task_id"] = Value::Null;
+        cycle_a["parent_attempt_id"] = "call-cycle-b".into();
+        let mut cycle_b = worker("call-cycle-b", "read", "working");
+        cycle_b["task_id"] = Value::Null;
+        cycle_b["parent_attempt_id"] = "call-cycle-a".into();
+        let mut orphan = worker("call-orphan", "read", "working");
+        orphan["task_id"] = Value::Null;
+        orphan["parent_attempt_id"] = "call-missing".into();
+        let graph_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(vec![done.clone(), cycle_a, cycle_b, orphan]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let graph_related = array(&graph_snap["related_attempts"]);
+        assert_eq!(graph_related.len(), 1);
+        assert_eq!(graph_related[0]["attempt_id"], "call-done");
+
+        let mut cycle_task = worker("call-cycle-task", "read", "done");
+        cycle_task["parent_attempt_id"] = "call-cycle-task-parent".into();
+        let mut cycle_task_parent = worker("call-cycle-task-parent", "read", "done");
+        cycle_task_parent["task_id"] = Value::Null;
+        cycle_task_parent["parent_attempt_id"] = "call-cycle-task".into();
+        let mut cycle_task_child = worker("call-cycle-task-child", "read", "working");
+        cycle_task_child["task_id"] = Value::Null;
+        cycle_task_child["parent_attempt_id"] = "call-cycle-task".into();
+        let cycle_attempts = vec![cycle_task, cycle_task_parent, cycle_task_child];
+        let cycle_parents = std::collections::BTreeSet::from([MAIN.to_owned()]);
+        let mut cycle_ancestry = SummaryAncestry::new(&cycle_attempts, &cycle_parents);
+        assert_eq!(cycle_ancestry.task_for(&cycle_attempts[2]), None);
+
+        let dup_a = worker("call-dup-parent", "read", "done");
+        let dup_b = worker("call-dup-parent", "read", "done");
+        let mut taskless_dup = worker("call-taskless-dup", "read", "working");
+        taskless_dup["task_id"] = Value::Null;
+        taskless_dup["parent_attempt_id"] = "call-dup-parent".into();
+        let dup_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(vec![dup_a, dup_b, taskless_dup]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let dup_related = array(&dup_snap["related_attempts"]);
+        assert_eq!(dup_related.len(), 2);
+        assert!(
+            dup_related
+                .iter()
+                .all(|row| row["attempt_id"] == "call-dup-parent")
+        );
+
+        let mut deep_chain = Vec::with_capacity(1002);
+        deep_chain.push(done.clone());
+        let mut prev_id = "call-done".to_owned();
+        for idx in 0..1000 {
+            let id = format!("call-deep-{idx}");
+            let mut node = worker(&id, "read", "done");
+            node["task_id"] = Value::Null;
+            node["parent_attempt_id"] = prev_id.into();
+            deep_chain.push(node);
+            prev_id = id;
+        }
+        let deep_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(deep_chain.clone()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(array(&deep_snap["related_attempts"]).len(), 1001);
+        let mut deep_live = worker("call-deep-live", "read", "working");
+        deep_live["task_id"] = Value::Null;
+        deep_live["parent_attempt_id"] = prev_id.into();
+        deep_chain.push(deep_live);
+        refusal(
+            deep_chain,
+            "task has live or unconfirmed attempts (inherited taskless descendant attempt call-deep-live, lifecycle state working)"
+                .to_owned(),
+        );
         let mut foreign = worker("call-foreign", "write", "working");
         foreign["parent_attempt_id"] = "foreign-main".into();
         refusal(
@@ -2336,6 +2982,297 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap()
+    }
+
+    struct TypedResults {
+        attempts: Vec<Value>,
+        plan: Value,
+        plan_reads: std::sync::atomic::AtomicUsize,
+    }
+    impl PeerExecutor for TypedResults {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            panic!("result observation cannot execute a verifier or provider")
+        }
+    }
+    impl Services for TypedResults {
+        fn command(
+            &self,
+            command: NativeCommand,
+            repo: &Path,
+            args: &[OsString],
+            stop: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            if command == NativeCommand::Plan {
+                assert_eq!(args, ["list", "--json"]);
+                self.plan_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(&self.plan).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            } else {
+                ClaimedTask(self.attempts.clone()).command(command, repo, args, stop)
+            }
+        }
+    }
+    fn typed_view(
+        repo: &Path,
+        request: ResultsRequest,
+        attempts: Vec<Value>,
+        tasks: Vec<Value>,
+    ) -> Value {
+        let host = TypedResults {
+            attempts,
+            plan: json!({"schema":1,"plan_id":format!("plan_{}","a".repeat(32)),"tasks":tasks}),
+            plan_reads: Default::default(),
+        };
+        let value = results_page(repo, &request, &host, &AtomicBool::new(false)).unwrap();
+        assert!(host.plan_reads.load(std::sync::atomic::Ordering::Relaxed) <= 1);
+        value
+    }
+
+    #[test]
+    fn typed_native_returns_match_task_room_and_list_without_acceptance() {
+        let repo = crate::git::Scratch::new().unwrap();
+        for (outcome, action) in [
+            ("reported", "review"),
+            ("blocked", "resolve-blocker"),
+            ("needs-decision", "decide"),
+        ] {
+            let (mut operation, task, assignment) =
+                crate::native_results::tests::fixture(&repo.0, &repo.0, "native-typed", TASK);
+            let mut source = assignment.report_template();
+            source["summary"] = "Claimed result for Main review".into();
+            source["outcome"] = outcome.into();
+            source["checks"] = json!([{"name":"frozen verifier","status":"passed","evidence":[],"note":"Lead claim only"}]);
+            crate::native_results::tests::retain(&repo.0, &mut operation, &assignment, &source);
+            let mut baseline = None;
+            for request in [
+                ResultsRequest::default(),
+                ResultsRequest {
+                    task_id: Some(TASK.into()),
+                    ..Default::default()
+                },
+                ResultsRequest {
+                    room_participant: Some("native-typed".into()),
+                    ..Default::default()
+                },
+            ] {
+                let view = typed_view(
+                    &repo.0,
+                    request,
+                    vec![operation.clone()],
+                    vec![task.clone()],
+                );
+                let row = &view["rows"][0];
+                let entry = &row["native_assignment"];
+                if let Some(before) = &baseline {
+                    assert_eq!(entry, before);
+                } else {
+                    baseline = Some(entry.clone());
+                }
+                assert_eq!(entry["return_state"], outcome);
+                assert_eq!(entry["resolution"], "pending");
+                assert_eq!(entry["next_action"]["kind"], action);
+                assert_eq!(
+                    entry["report"]["manifest_template"]["previous_sha256"],
+                    operation["refs"]["native_result_sha256"]
+                );
+                assert_eq!(
+                    entry["report"]["source_template"]["previous_report_sha256"],
+                    entry["report"]["source"]["sha256"]
+                );
+                assert_eq!(entry["report"]["return_claims"], source);
+                assert_eq!(entry["consumption"], "unconfirmed");
+                assert_eq!(entry["verification"], "unverified");
+                assert_eq!(entry["acceptance"], "pending");
+                assert_eq!(row["outcome"], Value::Null);
+                assert_eq!(row["acceptance"], false);
+                assert_eq!(row["stages"]["verify"]["state"], "not_run");
+                assert_eq!(row["process_state"], "working");
+            }
+        }
+    }
+
+    #[test]
+    fn typed_native_projection_bounds_reads_and_distinguishes_absent_unknown_invalid() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let mut operations = Vec::new();
+        let mut tasks = Vec::new();
+        for i in 0..=MAX_NATIVE_RETURNS {
+            let (operation, task, _) = crate::native_results::tests::fixture(
+                &repo.0,
+                &repo.0,
+                &format!("native-{i}"),
+                &format!("task-{i}"),
+            );
+            operations.push(operation);
+            tasks.push(task);
+        }
+        let view = typed_view(
+            &repo.0,
+            ResultsRequest {
+                limit: MAX_NATIVE_RETURNS + 1,
+                ..Default::default()
+            },
+            operations.clone(),
+            tasks.clone(),
+        );
+        let rows = array(&view["rows"]);
+        assert_eq!(rows.len(), MAX_NATIVE_RETURNS + 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["native_assignment"]["return_state"] == "absent")
+                .count(),
+            MAX_NATIVE_RETURNS
+        );
+        let deferred = rows
+            .iter()
+            .find(|row| row["native_assignment"]["return_state"] == "unknown")
+            .unwrap();
+        assert!(
+            text(&deferred["native_assignment"]["next_action"], "reason").contains("read limit")
+        );
+        let selected = text(deferred, "task_id");
+        assert_eq!(
+            typed_view(
+                &repo.0,
+                ResultsRequest {
+                    task_id: Some(selected),
+                    ..Default::default()
+                },
+                operations.clone(),
+                tasks.clone()
+            )["rows"][0]["native_assignment"]["return_state"],
+            "absent"
+        );
+        assert_eq!(
+            typed_view(
+                &repo.0,
+                ResultsRequest {
+                    offset: MAX_NATIVE_RETURNS,
+                    limit: 1,
+                    ..Default::default()
+                },
+                operations.clone(),
+                tasks.clone()
+            )["rows"][0]["native_assignment"]["return_state"],
+            "absent"
+        );
+        for (field, value, state) in [
+            ("native_return_schema", "2", "unknown"),
+            ("panel_owner", "foreign", "invalid"),
+            ("native_result_schema", "1", "invalid"),
+        ] {
+            let mut operation = operations[0].clone();
+            operation["refs"][field] = value.into();
+            assert_eq!(
+                typed_view(
+                    &repo.0,
+                    ResultsRequest::default(),
+                    vec![operation],
+                    tasks.clone()
+                )["rows"][0]["native_assignment"]["return_state"],
+                state,
+                "{field}"
+            );
+        }
+        std::fs::remove_file(repo.0.join(text(&operations[0]["refs"], "native_binding"))).unwrap();
+        assert_eq!(
+            typed_view(
+                &repo.0,
+                ResultsRequest::default(),
+                vec![operations[0].clone()],
+                tasks
+            )["rows"][0]["native_assignment"]["return_state"],
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn typed_native_guidance_imports_untrusted_input_and_retires_only_canonical_settlement() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let (mut operation, task, assignment) =
+            crate::native_results::tests::fixture(&repo.0, &repo.0, "native-settle", TASK);
+        let paths = crate::native_results::input_paths(&assignment);
+        crate::native_results::tests::write(
+            &repo.0,
+            paths["manifest"].as_str().unwrap(),
+            b"untrusted pending manifest",
+        );
+        let view = typed_view(
+            &repo.0,
+            ResultsRequest::default(),
+            vec![operation.clone()],
+            vec![task.clone()],
+        );
+        assert_eq!(
+            view["rows"][0]["native_assignment"]["return_state"],
+            "absent"
+        );
+        assert_eq!(
+            view["rows"][0]["native_assignment"]["next_action"]["kind"],
+            "import"
+        );
+        assert_eq!(view["rows"][0]["acceptance"], false);
+        let mut source = assignment.report_template();
+        source["summary"] = "Claimed result".into();
+        crate::native_results::tests::retain(&repo.0, &mut operation, &assignment, &source);
+        operation["refs"]["native_resolution"] = "reviewed".into();
+        operation["refs"]["native_resolution_result_sha256"] =
+            operation["refs"]["native_result_sha256"].clone();
+        for state in ["done", "cancelled"] {
+            let mut current = task.clone();
+            current["state"] = state.into();
+            let view = typed_view(
+                &repo.0,
+                ResultsRequest::default(),
+                vec![operation.clone()],
+                vec![current.clone()],
+            );
+            let row = &view["rows"][0];
+            assert_eq!(row["native_assignment"]["next_action"]["kind"], "retire");
+            assert_eq!(
+                row["native_assignment"]["next_action"]["commands"][0]["argv"][5],
+                operation["refs"]["native_result_sha256"]
+            );
+            assert_eq!(row["acceptance"], false);
+            assert_eq!(row["stages"]["verify"]["state"], "not_run");
+            let mut retired = operation.clone();
+            retired["terminal"] = true.into();
+            retired["refs"]["native_resolution"] = "retired".into();
+            assert_eq!(
+                typed_view(
+                    &repo.0,
+                    ResultsRequest::default(),
+                    vec![retired],
+                    vec![current.clone()]
+                )["rows"][0]["native_assignment"]["next_action"]["kind"],
+                "next"
+            );
+            current["completion_verified"] = false.into();
+            assert_eq!(
+                typed_view(
+                    &repo.0,
+                    ResultsRequest::default(),
+                    vec![operation.clone()],
+                    vec![current]
+                )["rows"][0]["native_assignment"]["next_action"]["kind"],
+                "inspect"
+            );
+        }
+        operation["refs"]["native_resolution_result_sha256"] = "a".repeat(64).into();
+        assert_eq!(
+            typed_view(
+                &repo.0,
+                ResultsRequest::default(),
+                vec![operation],
+                vec![task]
+            )["rows"][0]["native_assignment"]["return_state"],
+            "invalid"
+        );
     }
 
     #[test]

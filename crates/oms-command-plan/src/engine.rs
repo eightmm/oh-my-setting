@@ -417,9 +417,21 @@ impl<'a> Plan<'a> {
         }
     }
     pub fn load(&self) -> Result<Snapshot> {
-        let snap = self
-            .plan_storage()
-            .snapshot(&self.context.plan_file, MAX_JSON, true)?;
+        self.load_from_snapshot(self.read_snapshot()?)
+    }
+    fn read_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
+        self.plan_storage()
+            .snapshot(&self.context.plan_file, MAX_JSON, true)
+    }
+    /// Read the task against a stable Plan file while a sibling may publish
+    /// Review. Hold the writer's guard only for the bounded file snapshot.
+    pub fn show_task_with_locked_snapshot(&self, id: &str) -> Result<Response> {
+        let req = Request::new(Action::Show).with("id", id);
+        req.validate()?;
+        let snap = self.locked(false, None, || self.read_snapshot())?;
+        self.query(&req, &mut self.load_from_snapshot(snap)?)
+    }
+    fn load_from_snapshot(&self, snap: Option<storage::FileSnapshot>) -> Result<Snapshot> {
         let raw = snap.as_ref().map(|s| s.raw.clone());
         let strict =
             self.context.canonical() && self.store.directory_exists(".oms/plan/completions")?;
@@ -1047,6 +1059,7 @@ impl<'a> Plan<'a> {
                 if let Some(record) = &acceptance {
                     self.panel_accept_record(id, &t, &s.plan, record, req, false)?;
                 }
+                let reviewed = self.capture_review_evidence(req, &t)?;
                 t.set("state", string("review"))?;
                 evidence(req, &mut t)?;
                 t.set("review_lease_id", t.get("lease_id").clone())?;
@@ -1057,6 +1070,11 @@ impl<'a> Plan<'a> {
                     t.set("panel_accept", record)?;
                 } else {
                     t.remove("panel_accept");
+                }
+                if let Some(record) = reviewed {
+                    t.set("review_evidence", record)?;
+                } else {
+                    t.remove("review_evidence");
                 }
             }
             Repair => {
@@ -1080,6 +1098,7 @@ impl<'a> Plan<'a> {
                     "bounded review repair was already used or counter is invalid",
                 )?;
                 t.remove("panel_accept");
+                t.remove("review_evidence");
                 t.set("state", string("claimed"))?;
                 t.set("claimed_at", string(&self.context.ts))?;
                 t.set("reason", string(""))?;
@@ -1237,6 +1256,7 @@ impl<'a> Plan<'a> {
         if clear_repair {
             t.set("repair_artifact", string(""))?;
         }
+        t.remove("review_evidence");
         if !self.context.panel_main_attempt.is_empty() && receipt_id(&self.context.participant, 80)
         {
             t.set("claimed_by_participant", string(&self.context.participant))?;
@@ -1853,6 +1873,7 @@ impl<'a> Plan<'a> {
         }
         let lease = req.value("lease-id")?;
         self.lease(req, t)?;
+        self.verify_review_evidence(t)?;
         require(
             req.value("expected-review-lease-id")? == lease && t.text("review_lease_id") == lease,
             "review patch lease mismatch; patch is stale",
@@ -1896,6 +1917,7 @@ impl<'a> Plan<'a> {
     }
     fn finish(&self, req: &Request, s: &mut Snapshot, t: &mut Value) -> Result<bool> {
         self.lease(req, t)?;
+        self.verify_review_evidence(t)?;
         if let Some(commit) = req.values.get("landed-commit") {
             let commit = commit
                 .to_str()
@@ -1918,7 +1940,16 @@ impl<'a> Plan<'a> {
                     "completed task does not match exact landed commit/lease",
                 )?;
             }
+            if let Some(review) = t.opt("review_evidence") {
+                require(
+                    t.opt("panel_accept").is_some_and(|record| {
+                        record.get("patch_sha256") == review.get("patch").get("sha256")
+                    }),
+                    "exact reviewed evidence requires patch-land unless panel acceptance binds the same patch",
+                )?;
+            }
             evidence(req, t)?;
+            self.verify_review_evidence(t)?;
             let proof = crate::completion::commit_landing(self, commit, None)?;
             if let Some(record) = t.opt("panel_accept") {
                 require(
@@ -2009,12 +2040,104 @@ impl<'a> Plan<'a> {
             json::receipt_digest(t)? == expected,
             "landing receipt changed; stale finish rejected",
         )?;
+        let mut finished = t.clone();
+        evidence(req, &mut finished)?;
+        finished.set("state", string("done"))?;
+        self.verify_review_evidence(&finished)?;
         if req.has("refreeze-acceptance") {
             self.refreeze(req, s, t, expected)?;
         }
-        evidence(req, t)?;
-        t.set("state", string("done"))?;
+        *t = finished;
         Ok(false)
+    }
+
+    fn capture_review_evidence(&self, req: &Request, task: &Value) -> Result<Option<Value>> {
+        let flags = [
+            "expected-review-artifact-sha256",
+            "expected-review-patch-sha256",
+        ];
+        if flags.iter().all(|flag| !req.has(flag)) {
+            return Ok(None);
+        }
+        require(
+            flags.iter().all(|flag| req.has(flag)) && !task.text("lease_id").is_empty(),
+            "exact review evidence requires both artifact and patch digests under a claim lease",
+        )?;
+        let mut record = object([
+            ("schema", number(1)),
+            ("task_id", task.get("id").clone()),
+            ("lease_id", task.get("lease_id").clone()),
+        ]);
+        for (field, flag, limit) in [
+            ("artifact", flags[0], MAX_JSON),
+            ("patch", flags[1], MAX_PATCH),
+        ] {
+            let path = req.value(field)?;
+            let expected = req.value(flag)?;
+            require(
+                json::hex(expected, 64),
+                "invalid exact review evidence digest",
+            )?;
+            require(
+                json::sha(self.evidence_read(path, limit)?) == expected,
+                format!("reviewed {field} bytes changed before review"),
+            )?;
+            record.set(
+                field,
+                object([("path", string(path)), ("sha256", string(expected))]),
+            )?;
+        }
+        Ok(Some(record))
+    }
+
+    /// Opt-in reviews carry their original evidence through ordinary external
+    /// admission. A landing may relocate the exact patch into its frozen store.
+    pub(crate) fn verify_review_evidence(&self, task: &Value) -> Result<()> {
+        let Some(record) = task.opt("review_evidence") else {
+            return Ok(());
+        };
+        json::keys(
+            record,
+            &["schema", "task_id", "lease_id", "artifact", "patch"],
+            &[],
+        )?;
+        require(
+            record.get("schema").is_int(1)
+                && record.get("task_id") == task.get("id")
+                && !task.text("lease_id").is_empty()
+                && record.get("lease_id") == task.get("lease_id")
+                && record.get("lease_id") == task.get("review_lease_id")
+                && ["review", "landing", "done", "blocked", "cancelled"]
+                    .contains(&task.text("state")),
+            "review evidence belongs to another task, lease or state",
+        )?;
+        let cancelled = task.text("state") == "cancelled";
+        if cancelled {
+            crate::decision::validate(&self.store, task)?;
+        }
+        for (field, limit) in [("artifact", MAX_JSON), ("patch", MAX_PATCH)] {
+            let reference = record.get(field);
+            json::keys(reference, &["path", "sha256"], &[])?;
+            let original = reference.get("path").str()?;
+            let current = task.get(field).str()?;
+            let expected = json::digest(reference.get("sha256"))?;
+            require(
+                !original.is_empty()
+                    && !current.is_empty()
+                    && (current == original
+                        || field == "patch"
+                            && ["done", "blocked", "cancelled"].contains(&task.text("state"))),
+                format!("reviewed {field} path changed"),
+            )?;
+            if cancelled {
+                continue;
+            }
+            require(
+                json::sha(self.evidence_read(current, limit)?) == expected,
+                format!("reviewed {field} bytes changed"),
+            )?;
+        }
+        Ok(())
     }
     pub(crate) fn evidence_read(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
         let raw_path = Path::new(path);
@@ -2548,6 +2671,7 @@ pub(crate) fn clear_claim(s: &mut Snapshot, t: &mut Value) -> Result<()> {
         t.set(name, string(value))?;
     }
     t.remove("claimed_by_participant");
+    t.remove("review_evidence");
     Ok(())
 }
 pub(crate) fn parse_ts(s: &str) -> Option<i128> {

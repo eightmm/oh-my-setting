@@ -794,7 +794,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
     let retained = rows
         .iter()
         .filter(|r| {
-            !retired.contains(r.text("fingerprint"))
+            !retired.contains(failures::row_fingerprint(r))
                 || parse_timestamp(r.text("ts")).is_none_or(|t| t >= cutoff)
         })
         .collect::<Vec<_>>();
