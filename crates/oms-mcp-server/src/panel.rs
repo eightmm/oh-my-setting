@@ -360,8 +360,7 @@ fn valid_work_items_receipt(data: &Value) -> bool {
             items.len() <= 64
                 && items.iter().all(|row| {
                     row.as_object().is_some_and(|obj| {
-                        obj.keys().count() == keys.len()
-                            && keys.iter().all(|k| obj.contains_key(k))
+                        obj.keys().count() == keys.len() && keys.iter().all(|k| obj.contains_key(k))
                     }) && row["id"].as_str().is_some_and(id)
                         && nullable(&row["title"], 160)
                         && nullable(&row["issue"], 140)
