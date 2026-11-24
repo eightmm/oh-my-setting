@@ -44,6 +44,11 @@ before any action.
   any unavailable status. A launch receipt alone does not establish that a
   lead completed its assignment.
 - For branch, GitHub items and checks, call `oms_panel_git_status` on demand.
+  For Project intake, use the linked board’s `id` as `boardId` on that tool,
+  then the same board and its `nextCursor` for later pages. Use observed
+  Status/Priority as planning context. Recheck the canonical Issue, blockers,
+  Plan, current lease and authorization before assigning a candidate. If
+  Projects is unavailable, continue with the explicitly selected Issue.
   For a chosen item, send its paired `kind` (`issue` or `pull`) and positive
   `number` on the same project. Review the returned item before dispatch. For
   provider and attempt usage use `oms_panel_usage`. For a native Board

@@ -485,7 +485,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.3.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.4.0');
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
@@ -509,7 +509,7 @@ test('number lookup rejects mismatched resources, supports verified older items,
   p.get('git-match').children.at(-1).dispatchEvent(new Event('click')); await setImmediate();
   assert.match(p.get('git-goal').value,/org\/repo\/issues\/2/);
   p.get('git-kind').value='projects'; await p.event('git-kind','change');
-  assert.match(p.get('git-catalog').textContent,/Release.*Review input boundaries.*작업 목표 작성/);
+  assert.match(p.get('git-catalog').textContent,/Release.*Review input boundaries.*보드 식별 정보 미확인/);
 });
 
 test('provider availability and active Codex Lead are independent from Codex Main identity', async () => {
@@ -609,4 +609,28 @@ test('settings page, permission failure and project change discard prior catalog
   await p.open('input',{arguments:{project:'absent'}});
   assert.equal(p.get('connection-rows').textContent,'');
   assert.equal(p.calls.filter(c => c.name === 'oms_start_main').length,0);
+});
+
+
+test('Project pages use the linked board ID, expose field hints and only offer a draft for eligible issues',async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
+  const board={id:'PVT_scope',number:2,url:'https://github.com/orgs/org/projects/2',title:'Release'};
+  const calls=[];
+  p.host.tools={oms_panel_git_status:args=>{
+    if (!args.boardId) return {...workData,github:{...workData.github,work:{projects:{status:'available',items:[board]}}}};
+    calls.push(args);
+    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:['Phase']}},status:'available',nextCursor:args.cursor?null:'board.next',
+      items:[{...openItem,class:args.cursor?'blocked':'candidate',fields:{Status:{name:'Ready'}}}]}}};
+  }};
+  await p.event('tab-git','click');p.get('git-kind').value='projects';await p.event('git-kind','change');
+  const box=p.get('git-catalog').children.at(-1).children.at(-1);
+  const [next,back,note,rows]=box.children.filter(x=>typeof x==='object');
+  assert.equal(calls.length,0);next.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...calls[0]},{boardId:'PVT_scope',project:'one'});
+  assert.match(rows.textContent,/검토 후보.*Status Ready.*작업 목표 작성/);
+  assert.match(note.textContent,/Phase/);
+  next.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/선행 이슈 진행 중/);
+  assert.doesNotMatch(rows.textContent,/작업 목표 작성/);assert.equal(next.hidden,true);assert.equal(back.hidden,false);
+  assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>c.name==='oms_start_main'));
 });

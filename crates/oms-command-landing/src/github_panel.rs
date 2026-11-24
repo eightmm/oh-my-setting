@@ -1,5 +1,8 @@
 //! Live read-only panel detail. A linked checkout owns a PR only when the
 //! remote branch and head both occur in this repository's worktree registry.
+#[path = "github_board.rs"]
+mod board;
+
 use super::{Kind, Number, Slug, WEB, digits, gh_with_timeout, names, origin};
 use crate::{Context, Output, V, check, git::Git, now, obj};
 use oms_work_inspect::git::{STATUS_ARGS, object_id, ref_label, snapshot};
@@ -7,7 +10,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 
 // Three independent reads must finish within the desktop tool's 30-second deadline.
 const READ_TIMEOUT: Duration = Duration::from_secs(7);
-const PROJECT_QUERY: &str = "query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner projectsV2(first:6){pageInfo{hasNextPage} nodes{number title url closed owner{__typename ... on Organization{login} ... on User{login}} items(first:8){pageInfo{hasNextPage} nodes{type content{__typename ... on Issue{number title state url repository{nameWithOwner}} ... on PullRequest{number title state url repository{nameWithOwner}}}}}}}}}";
+const PROJECT_QUERY: &str = "query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner projectsV2(first:6){pageInfo{hasNextPage} nodes{id number title url closed owner{__typename ... on Organization{login} ... on User{login}} items(first:8){pageInfo{hasNextPage} nodes{type content{__typename ... on Issue{number title state url repository{nameWithOwner}} ... on PullRequest{number title state url repository{nameWithOwner}}}}}}}}}";
 
 fn worktrees(raw: &[u8]) -> BTreeMap<&str, &str> {
     let mut result = BTreeMap::new();
@@ -295,6 +298,10 @@ fn project(row: &V, slug: &Slug) -> Option<V> {
         partial = true;
     }
     Some(obj([
+        (
+            "id",
+            stable_id(row.get("id")).map(V::from).unwrap_or(V::Null),
+        ),
         ("number", V::Num(number.to_string())),
         ("title", display(row.get("title"), 120)?.into()),
         ("url", url.into()),
@@ -302,6 +309,33 @@ fn project(row: &V, slug: &Slug) -> Option<V> {
         ("items", V::Arr(items)),
         ("incomplete", partial.into()),
     ]))
+}
+
+fn project_error(code: i32, errors: &[V]) -> Option<&'static str> {
+    if code == 124 {
+        return Some("timeout");
+    }
+    if errors
+        .iter()
+        .any(|e| e.get("type").text() == Some("RATE_LIMITED"))
+    {
+        return Some("rate_limited");
+    }
+    if errors.iter().any(|e| {
+        e.get("type").text() == Some("INSUFFICIENT_SCOPES")
+            && e.get("message")
+                .text()
+                .is_some_and(|m| m.contains("read:project"))
+    }) {
+        return Some("insufficient_scope");
+    }
+    if errors
+        .iter()
+        .any(|e| e.get("type").text() == Some("NOT_FOUND"))
+    {
+        return Some("not_found");
+    }
+    None
 }
 
 fn projects(c: &Context<'_>, root: &Path, slug: &Slug) -> crate::Result<V> {
@@ -322,22 +356,15 @@ fn projects(c: &Context<'_>, root: &Path, slug: &Slug) -> crate::Result<V> {
     if reply.code == 130 {
         return Err(crate::Error::new(130, "interrupted"));
     }
-    let Ok(v) = super::strict(&reply.stdout) else {
-        return Ok(source("unavailable", vec![], true));
-    };
+    let v = super::strict(&reply.stdout).unwrap_or(V::Null);
     let errors = v.get("errors").array();
     let has_errors = !errors.is_empty();
     let unavailable = || {
-        let mut value = source("unavailable", vec![], true);
-        if errors.iter().any(|e| {
-            e.get("type").text() == Some("INSUFFICIENT_SCOPES")
-                && e.get("message")
-                    .text()
-                    .is_some_and(|m| m.contains("read:project"))
-        }) {
-            value.set("reason", "insufficient_scope");
+        let mut out = source("unavailable", vec![], true);
+        if let Some(reason) = project_error(reply.code, errors) {
+            out.set("reason", reason);
         }
-        value
+        out
     };
     if reply.code != 0 && !(reply.code == 1 && has_errors) {
         return Ok(unavailable());
@@ -368,6 +395,15 @@ fn projects(c: &Context<'_>, root: &Path, slug: &Slug) -> crate::Result<V> {
         boards.push(board);
     }
     Ok(source("available", boards, incomplete))
+}
+
+fn stable_id(value: &V) -> Option<&str> {
+    value.text().filter(|s| {
+        s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+            && s.len() <= 100
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    })
 }
 
 fn valid_cursor(value: &str) -> bool {
@@ -536,11 +572,27 @@ pub(super) fn status(c: &Context<'_>, o: &crate::cli::Options) -> crate::Result<
         .and_then(|_| origin(&git).ok())
         .filter(|s| s.owner.len() <= 100 && s.repo.len() <= 100);
     let look_up = o.has("issue") || o.has("pull");
-    if look_up || o.has("inventory") || o.has("cursor") {
-        let (key, detail) = if look_up {
+    if look_up || o.has("inventory") || o.has("cursor") || o.has("project-id") {
+        let (key, detail) = if o.has("project-id") {
+            crate::require(
+                !look_up && !o.has("inventory"),
+                "project cannot combine with issue, pull or inventory",
+            )?;
+            (
+                "board",
+                board::page(
+                    c,
+                    git.repo,
+                    slug.as_ref(),
+                    o.get("project-id"),
+                    o.has("cursor").then(|| o.get("cursor")),
+                )?,
+            )
+        } else if look_up {
             crate::require(
                 !o.has("inventory")
                     && !o.has("cursor")
+                    && !o.has("project-id")
                     && o.all("issue").len() + o.all("pull").len() == 1,
                 "select one issue or pull number",
             )?;

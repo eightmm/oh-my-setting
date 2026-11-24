@@ -119,8 +119,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             GIT,
-            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one.",
-            json!({"project":project,"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
+            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId from a linked project to read board pages.",
+            json!({"project":project,"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
             &[],
             false
         ),
@@ -448,7 +448,14 @@ impl Server<'_> {
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
                     OPEN | APPROVALS | SNAPSHOT | USAGE => &["project"],
-                    GIT => &["project", "kind", "number", "inventory", "cursor"],
+                    GIT => &[
+                        "project",
+                        "kind",
+                        "number",
+                        "inventory",
+                        "boardId",
+                        "cursor",
+                    ],
                     CHAT => &[
                         "project",
                         "room",
@@ -727,15 +734,35 @@ impl Server<'_> {
                     path,
                     "--json".into(),
                 ];
-                if args.get("inventory").is_some() || args.get("cursor").is_some() {
+                if args.get("inventory").is_some()
+                    || args.get("boardId").is_some()
+                    || args.get("cursor").is_some()
+                {
                     if args.get("kind").is_some() || args.get("number").is_some() {
                         return Err("Choose an inventory or an exact reference.".into());
                     }
-                    let collection = args["inventory"]
-                        .as_str()
-                        .filter(|s| matches!(*s, "issues" | "pullRequests"))
-                        .ok_or("Invalid GitHub collection.")?;
-                    cmd.extend(["--inventory".into(), collection.into()]);
+                    if let Some(id) = args.get("boardId") {
+                        if args.get("inventory").is_some() {
+                            return Err("Select one GitHub collection.".into());
+                        }
+                        let id = id
+                            .as_str()
+                            .filter(|s| {
+                                s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                                    && s.len() <= 100
+                                    && s.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+                                    })
+                            })
+                            .ok_or("Invalid linked board ID.")?;
+                        cmd.extend(["--project-id".into(), id.into()]);
+                    } else {
+                        let collection = args["inventory"]
+                            .as_str()
+                            .filter(|s| matches!(*s, "issues" | "pullRequests"))
+                            .ok_or("Invalid GitHub collection.")?;
+                        cmd.extend(["--inventory".into(), collection.into()]);
+                    }
                     if let Some(cursor) = args.get("cursor") {
                         let value = cursor
                             .as_str()

@@ -650,6 +650,24 @@ fn conversation_panel() {
             "abc.foo="
         ])
     );
+    good(&c.tool(
+        "oms_panel_git_status",
+        json!({"boardId":"PVT_fixture","cursor":"abc.foo="}),
+    ));
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "github",
+            "panel-status",
+            "--repo",
+            repo,
+            "--json",
+            "--project-id",
+            "PVT_fixture",
+            "--cursor",
+            "abc.foo="
+        ])
+    );
     for args in [
         json!({"kind":"issue"}),
         json!({"number":2}),
@@ -657,6 +675,9 @@ fn conversation_panel() {
         json!({"kind":"issue","number":"--repo"}),
         json!({"kind":"issue","number":10000000000i64}),
         json!({"inventory":"other"}),
+        json!({"boardId":"https://example.invalid/x"}),
+        json!({"boardId":"PVT_1","inventory":"issues"}),
+        json!({"boardId":"PVT_1","kind":"issue","number":1}),
         json!({"cursor":"abc"}),
         json!({"inventory":"issues","cursor":"x y"}),
         json!({"inventory":"issues","kind":"issue","number":1}),

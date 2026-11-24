@@ -3257,6 +3257,7 @@ case "$1 $2" in
   "issue view"|"pr view") panel=panel-lookup ;;
   "api graphql")
     case "$*" in
+      *'projectV2(number'*) panel=panel-board ;;
       *'work:issues('*|*'work:pullRequests('*) panel=panel-inventory ;;
       *) panel=panel-projects ;;
     esac ;;
@@ -4272,6 +4273,184 @@ fn land_pr_merge_preserves_head_branch_when_dependent_pr_is_open_or_unverified()
             "{status}"
         );
     }
+}
+
+#[test]
+fn github_panel_reads_one_explicit_project_board_without_guessing() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "desktop-board", false);
+    let url = "https://github.com/orgs/example-org/projects/3";
+    let field = |id: &str, name: &str, opts: &str| {
+        format!(
+            r#"{{"__typename":"ProjectV2SingleSelectField","id":"{id}","name":"{name}","options":[{opts}]}}"#
+        )
+    };
+    let fields = [
+        field("F_status", "Status", r#"{"id":"o1","name":"Ready"}"#),
+        field("F_prio", "Priority", r#"{"id":"o2","name":"P1"}"#),
+        field("F_prio2", "Priority", r#"{"id":"o3","name":"P2"}"#),
+    ]
+    .join(",");
+    let value = |field: &str, option: &str, name: &str| {
+        format!(
+            r#"{{"__typename":"ProjectV2ItemFieldSingleSelectValue","optionId":"{option}","name":"{name}","field":{{"id":"{field}"}}}}"#
+        )
+    };
+    let issue = |n: u32, state: &str, repo: &str, labels: &str, extra: &str| {
+        format!(
+            r#"{{"type":"ISSUE","isArchived":false,"content":{{"__typename":"Issue","number":{n},"title":"Work {n}","state":"{state}","url":"https://github.com/{repo}/issues/{n}","repository":{{"nameWithOwner":"{repo}"}},"issueType":null,"blockedBy":{{"pageInfo":{{"hasNextPage":false}},"nodes":[]}},"labels":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{labels}]}}}},"fieldValues":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{extra}]}}}}"#
+        )
+    };
+    let mine = "example-org/example-repo";
+    let plan = r.repo.join(".oms/plan");
+    fs::create_dir_all(&plan).unwrap();
+    fs::write(
+        plan.join("tasks.json"),
+        r##"{"tasks":{"existing":{"issue":"#7","state":"in_progress"}}}"##,
+    )
+    .unwrap();
+    let items = [
+        issue(1, "OPEN", mine, "", &value("F_status", "o1", "Ready")),
+        issue(1, "OPEN", mine, "", ""),
+        issue(2, "OPEN", mine, r#"{"name":"Epic"}"#, ""),
+        issue(3, "CLOSED", mine, "", ""),
+        issue(4, "OPEN", "elsewhere/project", "", ""),
+        r#"{"type":"DRAFT_ISSUE","isArchived":false,"content":null,"fieldValues":{"pageInfo":{"hasNextPage":false},"nodes":[]}}"#.to_string(),
+        issue(5, "OPEN", mine, "", "").replace(r#""isArchived":false"#, r#""isArchived":true"#),
+        issue(6, "OPEN", mine, "", &value("F_status", "zz", "Odd <b>name</b>")),
+        issue(7, "OPEN", mine, "", ""),
+        issue(8, "OPEN", mine, "", "").replace(r#""blockedBy":{"pageInfo":{"hasNextPage":false},"nodes":[]}"#,r#""blockedBy":{"pageInfo":{"hasNextPage":false},"nodes":[{"state":"OPEN"}]}"#),
+        issue(9, "OPEN", mine, "", "").replace(r#""blockedBy":{"pageInfo":{"hasNextPage":false},"nodes":[]}"#,r#""blockedBy":null"#),
+        issue(10, "OPEN", mine, "", "").replace(r#""issueType":null"#,r#""issueType":{"name":"Epic"}"#),
+        issue(11, "OPEN", mine, "", "").replace(r#""labels":{"pageInfo":{"hasNextPage":false}"#,r#""labels":{"pageInfo":{"hasNextPage":true}"#),
+    ]
+    .join(",");
+    let reply = |more: bool, id: &str| {
+        format!(
+            r#"{{"data":{{"organization":{{"login":"example-org","projectV2":{{"id":"{id}","number":3,"title":"Board","url":"{url}","closed":false,"fields":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{fields}]}},"items":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"cGFnZTE="}},"nodes":[{items}]}}}}}}}}}}"#
+        )
+    };
+    fs::write(r.dir.join("panel-board"), reply(true, "PVT_abc")).unwrap();
+    fs::write(r.dir.join("panel-projects"),r#"{"data":{"repository":{"nameWithOwner":"example-org/example-repo","projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PVT_abc","url":"https://github.com/orgs/example-org/projects/3","number":3,"title":"Board","closed":false,"owner":{"__typename":"Organization","login":"example-org"},"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}]}}}}"#).unwrap();
+    let run = |args: &[&str]| {
+        let mut a = vec!["panel-status", "--json"];
+        a.extend(args);
+        let (code, out, err) = r.run(&iso, &a);
+        (code, V::parse(out.as_bytes()).ok(), err)
+    };
+    let (code, out, err) = run(&["--project-id", "PVT_abc"]);
+    assert_eq!(code, 0, "{err}");
+    let b = out.unwrap();
+    let b = b.get("github").get("board");
+    assert_eq!(b.get("status").text(), Some("available"));
+    assert_eq!(b.get("incomplete"), &V::Bool(true));
+    assert!(b.get("nextCursor").text().is_some());
+    assert_eq!(b.get("board").get("id").text(), Some("PVT_abc"));
+    let missing: Vec<_> = b
+        .get("board")
+        .get("fields")
+        .get("missing")
+        .array()
+        .iter()
+        .filter_map(|v| v.text())
+        .collect();
+    assert_eq!(
+        missing,
+        ["Priority", "Area", "Phase"],
+        "duplicate Priority is ambiguous, not guessed"
+    );
+    let class: Vec<_> = b
+        .get("items")
+        .array()
+        .iter()
+        .map(|i| i.get("class").text().unwrap())
+        .collect();
+    assert_eq!(
+        class,
+        [
+            "candidate",
+            "duplicate",
+            "epic",
+            "closed",
+            "foreign",
+            "draft",
+            "archived",
+            "unverified",
+            "plan_linked",
+            "blocked",
+            "unverified",
+            "epic",
+            "unknown"
+        ]
+    );
+    let rows = b.get("items").array();
+    assert_eq!(
+        rows[0].get("url").text(),
+        Some("https://github.com/example-org/example-repo/issues/1")
+    );
+    assert_eq!(
+        rows[0].get("fields").get("Status").get("optionId").text(),
+        Some("o1")
+    );
+    assert_eq!(rows[7].get("fields").get("Status"), &V::Null);
+    assert!(
+        rows[4].get("url").text().is_none(),
+        "foreign item exposes no detail"
+    );
+    // A wrong node id, wrong cursor, or a different board never silently substitutes.
+    let (_, out, _) = run(&["--project-id", "PVT_other"]);
+    assert_eq!(
+        out.unwrap().get("github").get("board").get("reason").text(),
+        Some("board_not_in_catalog")
+    );
+    assert_ne!(
+        run(&["--project-id", "PVT_abc", "--cursor", "bogus.cGFnZTE="]).0,
+        0
+    );
+    assert_ne!(
+        r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project",
+                "https://github.com/orgs/example-org/repo"
+            ]
+        )
+        .0,
+        0
+    );
+    fs::write(r.dir.join("panel-board"), reply(false, "PVT_replaced")).unwrap();
+    assert_eq!(
+        run(&["--project-id", "PVT_abc"])
+            .1
+            .unwrap()
+            .get("github")
+            .get("board")
+            .get("reason")
+            .text(),
+        Some("identity_mismatch")
+    );
+    // Cursor continuation completes the board.
+    let cursor = b.get("nextCursor").text().unwrap().to_string();
+    fs::write(r.dir.join("panel-board"), reply(false, "PVT_abc")).unwrap();
+    let (code, out, err) = run(&["--project-id", "PVT_abc", "--cursor", &cursor]);
+    assert_eq!(code, 0, "{err}");
+    let done = out.unwrap();
+    assert!(matches!(
+        done.get("github").get("board").get("nextCursor"),
+        V::Null
+    ));
+    assert!(r.calls().contains("-f after=cGFnZTE="));
+    // Missing scope reports the reason; nothing was mutated.
+    fs::write(r.dir.join("panel-board"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
+    fs::write(r.dir.join("panel-board-failed"), "").unwrap();
+    let (_, out, _) = run(&["--project-id", "PVT_abc"]);
+    let denied = out.unwrap();
+    assert_eq!(
+        denied.get("github").get("board").get("reason").text(),
+        Some("insufficient_scope")
+    );
+    assert_eq!(r.posts(), 0);
 }
 
 #[test]

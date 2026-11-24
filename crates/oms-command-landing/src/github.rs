@@ -73,7 +73,15 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let action = o.action("");
     let allowed: &[&str] = match action {
         "status" => &["repo", "json"],
-        "panel-status" => &["repo", "json", "issue", "pull", "inventory", "cursor"],
+        "panel-status" => &[
+            "repo",
+            "json",
+            "issue",
+            "pull",
+            "inventory",
+            "cursor",
+            "project-id",
+        ],
         "refresh" => &["repo", "issue", "pull", "linked", "ttl-s"],
         "adopt-merged" => &["repo", "limit", "apply", "expected-sha256", "ttl-s"],
         "post-evidence" => &["repo", "issue", "pull", "yes"],

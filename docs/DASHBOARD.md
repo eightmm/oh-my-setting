@@ -244,6 +244,24 @@ already runs OMS, the local stdio entry can instead run the absolute installed
 `env: {"OMS_MCP_TOOL_PROFILE":"mcp-app"}`. The generic profile reads the
 configured alias catalog or an operator-pinned `OMS_PANEL_REPO`.
 
+In **Git → GitHub Projects**, open a repository-linked board and select
+**보드 상세 보기**. Each request rechecks the board node against the repository's
+linked catalog (up to six boards) and returns up to 20 cards. Use the next
+page for more cards. Fields come from the unique single-select field ID and
+a current option ID on that board. Missing, ambiguous, deleted or partial
+metadata leaves the affected value unknown. The recorded time applies to that
+page; cards can move while paging.
+
+The panel identifies same-repository open issues for review and marks observed
+open blockers, epics, PRs, drafts, archived or foreign cards, and existing
+Plan/task links separately. Status and priority describe the board. A Main
+must check current Issue requirements, scope, dependencies and the existing
+lease before dispatch. Opening the board or paging only reads it. With missing
+Projects access, exact Issue lookup and the repository inventories still work.
+The regression fixtures exercise readable boards and pagination. The live
+read against OMS Development Project #3 on 2026-11-24 returned
+`INSUFFICIENT_SCOPES` for `read:project`. The same account could read Issue #447.
+
 For “handle all open issues and PRs”, a Main pages both inventories in the
 selected repository through `oms_panel_git_status`. Each page returns its
 continuation cursor. Available Project boards add context; the initial Git
