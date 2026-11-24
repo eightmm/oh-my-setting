@@ -101,7 +101,7 @@ pub(super) fn prioritize(
         return Err(Changed);
     }
     let uid = rustix::process::getuid().as_raw();
-    let hint = |path: &Path| -> Option<(i128, i128)> {
+    let hint = |path: &Path| -> Option<(bool, i128, i128)> {
         let parent = path.parent()?.file_name()?;
         let child = path.file_name()?;
         let mut current = root.try_clone().ok()?;
@@ -125,7 +125,13 @@ pub(super) fn prioritize(
             && stat.st_nlink == 1
             && stat.st_uid == uid
             && stat.st_mode & 0o002 == 0)
-            .then(|| (stat.st_mtime.into(), stat.st_mtime_nsec.into()))
+            .then(|| {
+                (
+                    stat.st_size > 0 && stat.st_size as u64 <= observation::MAX_SOURCE_BYTES as u64,
+                    stat.st_mtime.into(),
+                    stat.st_mtime_nsec.into(),
+                )
+            })
     };
     let mut ranked = Vec::with_capacity(candidates.len());
     for path in candidates.drain(..) {
@@ -581,15 +587,20 @@ mod tests {
         assert_eq!(report.attempts[0].source_id, report.sources[1].id);
     }
     #[test]
-    fn recent_ledger_outside_original_window_receives_full_registration_proof() {
+    fn usable_ledger_outranks_newer_empty_or_oversized_sources_and_still_requires_proof() {
         let f = Fixture::new("coverage");
         let repo = f.repo("project");
         for i in 0..INSPECTIONS {
             let checkout = f.scratch(&repo, &format!("a{i:03}"));
             fs::create_dir_all(checkout.join(".oms/lifecycle")).unwrap();
-            fs::File::create(checkout.join(LEDGER))
-                .unwrap()
-                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(60))
+            let unsuitable = fs::File::create(checkout.join(LEDGER)).unwrap();
+            if i % 2 == 0 {
+                unsuitable
+                    .set_len(observation::MAX_SOURCE_BYTES as u64 + 1)
+                    .unwrap();
+            }
+            unsuitable
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(120))
                 .unwrap();
         }
         let recent = f.scratch(&repo, "zz-recent");
@@ -597,6 +608,12 @@ mod tests {
             &recent,
             row("new-worker", "peer-delegate", "2026-01-01T12:00:00Z"),
         );
+        fs::File::options()
+            .write(true)
+            .open(recent.join(LEDGER))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(60))
+            .unwrap();
         let original = f
             .resolver
             .discover_scratch_checkouts(&repo, &AtomicBool::new(false))
@@ -619,10 +636,119 @@ mod tests {
         );
         assert_eq!(report.attempts.len(), 1);
         assert_eq!(report.attempts[0].source_id, report.sources[1].id);
+        assert!(
+            report
+                .sources
+                .iter()
+                .any(|s| s.status == SourceStatus::SourceLimit)
+        );
+        assert!(
+            report
+                .sources
+                .iter()
+                .filter(|s| s.status == SourceStatus::Ready)
+                .count()
+                > 1
+        );
         let marker = recent.parent().unwrap().join(".oh-my-setting-tmp");
         fs::write(marker, b"kind=unverified\n").unwrap();
         let forged = observe(&f, &repo);
         assert!(forged.attempts.is_empty());
         assert_eq!(forged.unverified_checkouts, 1);
+    }
+    #[test]
+    fn absent_managed_root_keeps_verified_canonical_work_and_fails_closed_on_redirect_or_foreign_room()
+     {
+        let mut f = Fixture::new("first-install");
+        let repo = f.repo("project");
+        let other = f.repo("other");
+        append(
+            &repo,
+            row("canonical", "panel-main", "2026-01-01T00:00:00Z"),
+        );
+        let managed = f.resolver.managed_root.clone();
+        let prefix = managed.join("never-created");
+        f.resolver.managed_root = prefix.join("worktrees");
+        f.resolver.inherited_room = Some(repo.clone());
+        let report = observe(&f, &repo);
+        assert_eq!(
+            (
+                report.sources.len(),
+                report.sources[0].kind,
+                report.sources[0].status
+            ),
+            (1, SourceKind::Canonical, SourceStatus::Ready)
+        );
+        assert_eq!(
+            (
+                report.attempts.len(),
+                report.unverified_checkouts,
+                report.discovery_issue
+            ),
+            (1, 0, None)
+        );
+        let scratch = f
+            .resolver
+            .observe_managed_lifecycle(&repo, LifecycleScope::ScratchOnly, &AtomicBool::new(false))
+            .unwrap();
+        assert!(scratch.sources.is_empty() && scratch.discovery_issue.is_none());
+        assert!(!prefix.exists());
+        f.resolver.inherited_room = Some(other.clone());
+        assert_eq!(
+            f.resolver
+                .observe_managed_lifecycle(
+                    &repo,
+                    LifecycleScope::CanonicalAndScratch,
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err(),
+            OutsideScope
+        );
+        f.resolver.inherited_room = None;
+        let interrupted = AtomicBool::new(false);
+        let scan = Snapshot {
+            deadline: Instant::now() + OBSERVATION_TIME,
+            interrupted: &interrupted,
+        };
+        let (_, absent_binding, _) = f
+            .resolver
+            .discover_sources(&repo, &scan, INSPECTIONS, CandidateOrder::RecentLedger)
+            .unwrap();
+        std::os::unix::fs::symlink(other.join("dangling"), &prefix).unwrap();
+        assert_eq!(absent_binding.check(), Err(Changed));
+        assert!(
+            f.resolver
+                .observe_managed_lifecycle(
+                    &repo,
+                    LifecycleScope::CanonicalAndScratch,
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+        );
+        fs::remove_file(&prefix).unwrap();
+        std::os::unix::fs::symlink(&other, &prefix).unwrap();
+        assert!(
+            f.resolver
+                .observe_managed_lifecycle(
+                    &repo,
+                    LifecycleScope::CanonicalAndScratch,
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+        );
+        fs::remove_file(&prefix).unwrap();
+        f.resolver.managed_root = managed.clone();
+        let _removed = f.scratch(&repo, "registered");
+        fs::rename(&managed, managed.with_extension("moved")).unwrap();
+        let incomplete = observe(&f, &repo);
+        assert_eq!(
+            (
+                incomplete.sources.len(),
+                incomplete.attempts.len(),
+                incomplete.unverified_checkouts,
+                incomplete.discovery_issue
+            ),
+            (1, 1, 1, Some(UnverifiedRegistration))
+        );
     }
 }

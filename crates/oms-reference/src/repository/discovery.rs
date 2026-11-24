@@ -238,6 +238,40 @@ impl Proof {
         self.dirs.push((path.to_owned(), info));
         Ok(())
     }
+    /// Pin the nearest existing physical parent and the first missing name.
+    /// An absent scratch namespace can then be distinguished from redirection,
+    /// denied access or a registry entry that outlived its checkout.
+    fn managed_root(&mut self, configured: &Path, scan: &Snapshot<'_>) -> Checked<(PathBuf, bool)> {
+        let managed: PathBuf = std::path::absolute(configured)
+            .map_err(|_| Unavailable)?
+            .components()
+            .collect();
+        if managed
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(Unavailable);
+        }
+        let mut first_missing = None;
+        for parent in managed.ancestors() {
+            scan.check()?;
+            match fs::symlink_metadata(parent) {
+                Ok(_) => {
+                    self.dir(parent)?;
+                    let present = first_missing.is_none();
+                    if let Some(path) = first_missing {
+                        self.absent.push(path);
+                    }
+                    return Ok((managed, present));
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    first_missing = Some(parent.to_owned())
+                }
+                Err(_) => return Err(Unavailable),
+            }
+        }
+        Err(Unavailable)
+    }
     fn file(&mut self, path: &Path) -> Checked<Vec<u8>> {
         let (raw, info) = storage::regular(path, MARKER_LIMIT, 1).map_err(|_| Changed)?;
         self.files.push((path.to_owned(), info));
@@ -493,8 +527,7 @@ impl Resolver {
             }
         }
         binding.check()?;
-        let managed = physical_directory(&self.managed_root).map_err(|_| Unavailable)?;
-        binding.dir(&managed)?;
+        let (managed, present) = binding.managed_root(&self.managed_root, scan)?;
         let mut room_proof = None;
         if let Some(inherited) = &self.inherited_room {
             // Pin the physical Room locator itself. Alias retargeting must not
@@ -513,6 +546,9 @@ impl Resolver {
                 binding.absent.push(ancestor.join(".git"));
             }
             if top != primary {
+                if !present {
+                    return Err(OutsideScope);
+                }
                 room_proof = Some(
                     registration(&primary, &common, &managed, &registry.paths, &top)
                         .map_err(|_| OutsideScope)?
@@ -534,6 +570,17 @@ impl Resolver {
                 managed_scratch_parent(path).is_some_and(|parent| parent.parent() == Some(&managed))
             })
             .collect();
+        if !present {
+            binding.check()?;
+            scan.check()?;
+            let unverified = candidates.len();
+            let report = ScratchDiscovery {
+                unverified,
+                incomplete: (unverified > 0).then_some(UnverifiedRegistration),
+                ..ScratchDiscovery::default()
+            };
+            return Ok((report, binding, common));
+        }
         if matches!(order, CandidateOrder::RecentLedger) {
             lifecycle::prioritize(&mut candidates, &managed, &binding, scan)?;
         }
