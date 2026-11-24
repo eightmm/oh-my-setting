@@ -1,0 +1,4 @@
+{
+  "description": "The oms-panel hooks module: a read-only pane over oms dashboard --json",
+  "modules": ["./register.js"]
+}

@@ -143,3 +143,13 @@ one requires a schema bump.
 
 When the state source is unavailable, every section derived from state is
 `null`. A `null` means "not known", never "none".
+
+## Claude Code pane
+
+Claude Code does not render MCP Apps HTML, so its view of this projection is a
+native pane drawn by a mod. `plugins/claude-code/README.md` describes the
+optional `oms-panel` plugin: `/oms-panel` runs `oms dashboard --json` for the
+session directory and draws schema 1 in four tabs. It follows the reading rules
+above, starts no other process and writes nothing. Its fixture tests run with
+`claude plugin test`. Rendering in a live session has not been verified yet,
+and the repository marketplace does not list the plugin.
