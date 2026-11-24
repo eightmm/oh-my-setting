@@ -215,6 +215,12 @@ The panel below uses seeded project data.
 
 ![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
 
+### Project map and command directory
+
+The project map loads from the selected checkout as soon as the host confirms the project. Open **Explore** to follow nodes, inspect the source and bounds, or search the repository. Git containment describes folders and files. Indexed links distinguish extracted, inferred and ambiguous relationships. Reading the map leaves the index unchanged.
+
+**Find tools** searches the host's public OMS commands by name or purpose. Its shortcuts open existing panel views. Choosing a command prepares a help question. Hosts that advertise the OpenAI message extension can insert that question or a Git goal into the active composer for editing. Other hosts can copy the draft. **Attach to chat** sends only the explicitly selected node ID, kind and selected project alias to a host that supports text model context. Switching projects clears the preceding selection. [OpenAI plugin extensions](https://developers.openai.com/ko-KR/plugins/build/extensions) · [Message and model-context protocol](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md#prompt-target-and-send-behavior)
+
 ### Connection details
 
 Expand **연결 정보** to inspect the current host handshake, display mode, OMS tool profile, and last project check. Opening it reads the runtime host's PATH and Main registry. Selecting Codex, Claude, AGY, or Pi previews that harness. **이 하네스로 새 목표 작성** selects it in the new Main form; submitting the form is a separate action. Pi uses the CodexGateway. AGY and Pi resume are unsupported by the current registry. See the [Main launch registry](../crates/oms-command-panel/src/native_panel.rs).

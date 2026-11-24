@@ -36,7 +36,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {status:null, failStart:true, replies:[], messages:[], notices:[]};
+  const host = {contexts:[],status:null, failStart:true, replies:[], messages:[], notices:[]};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -70,8 +70,9 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode},hostCapabilities:{message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
     }
+    if(method==='ui/update-model-context'){host.contexts.push(params);result={isError:host.rejectContext===true};}
     if (method === 'ui/message') { host.messages.push(params); result = {isError:host.rejectMessage === true}; }
     if (method === 'tools/call') {
       try {
@@ -697,4 +698,103 @@ test('connection details surface bounded non-atomic observation revision across 
   await p.event('refresh', 'click');
   assert.equal(p.get('observation-revision').textContent, '미확인');
   assert.equal(p.get('observation-completeness').textContent, '관측 상태 미확인');
+});
+
+test('Overview binds its map before the dashboard finishes; node navigation and filtering stay read-only', async () => {
+  const p = await panel(['one','two'],{}, {context:true});
+  p.host.tools = {
+    oms_panel_project_graph:({project,node:focus}) => ({
+      schema:1,kind:'oms-panel-project-graph',provenance:{source:'git-ls-files'},scope:{focusNode:focus || 'dir:.'},status:'ready',selection:focus ? {status:'found',node:{id:focus,kind:'directory',privateDetail:'omit-this'}} : null,nodes:focus ? [{id:'src',label:'src',kind:'directory'},{id:'src/main.rs',label:'main.rs',kind:'file'}] :
+        [{id:'dir:.',label:project,kind:'repository'},{id:'src',label:'src',kind:'directory'},{id:'docs',label:'docs',kind:'directory'}],
+      edges:[{source:focus || 'dir:.',target:focus ? 'src/main.rs' : 'src',relation:'contains',confidence:'STRUCTURAL'}]
+    }),
+    oms_panel_capabilities:() => ({schema:1,commands:[],total:0})
+  };
+  p.host.delay='one';p.get('project-choice').value='one';await p.event('project-choice','change');
+  assert.equal(p.get('map-field').hidden,false);
+  assert.equal(p.get('map-root').textContent,'one');
+  assert.match(p.get('map-children').textContent,/src/);
+  assert.doesNotMatch(p.get('map-children').textContent,/docs|가져오기/);
+  p.host.release(); await setImmediate();
+  p.get('map-children').children[0].children.at(-1).dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('pane-project').hidden,false);
+  assert.match(p.get('graph-path').textContent,/src/);
+  assert.match(p.get('graph-list').textContent,/main.rs/);
+  assert.ok(!p.host.contexts.some(m=>JSON.stringify(m).includes('"node"')));
+  p.host.rejectContext=true;await p.event('graph-attach','click');assert.match(p.get('graph-attached').textContent,/확인할 수 없습니다/);
+  p.host.rejectContext=false;await p.event('graph-attach','click');
+  const attached=p.host.contexts.at(-1);assert.equal(attached.structuredContent,undefined);
+  assert.deepEqual(JSON.parse(attached.content[0].text),{project:'one',node:'src',kind:'directory'});
+  assert.match(p.get('graph-attached').textContent,/전달했습니다/);
+  p.get('graph-filter').value='missing';await p.event('graph-filter','input');
+  assert.equal(p.get('graph-list').children.length,0);
+  p.get('graph-path').children[0].dispatchEvent(new Event('click')); await setImmediate();
+  assert.equal(p.get('graph-filter').value,'');
+  assert.equal(p.calls.some(c=>['oms_start_main','oms_decide_approval'].includes(c.name)),false);
+  assert.ok(p.calls.filter(c=>c.name==='oms_panel_project_graph').every(c=>c.args.project==='one'));
+  p.get('project-choice').value='two';await p.event('project-choice','change');
+  assert.equal(p.get('graph-attach').hidden,true);assert.equal(p.get('graph-attached').textContent,'');
+  assert.ok(p.host.contexts.some(m=>Array.isArray(m.content)&&m.content.length===0));
+});
+
+test('host command directory searches every page in Korean and English; a help draft requires an explicit send', async () => {
+  const p=await panel(['one','two'],{}, {message:true,compose:true});
+  const calls=[];
+  p.host.tools={oms_panel_capabilities:args=>{
+    calls.push(args);
+    return args.offset ? {schema:1,total:2,commands:[{name:'doctor',description:'Inspect the installed runtime'}]} :
+      {schema:1,total:2,nextOffset:1,commands:[{name:'new-entry',description:'Read extension status'}]};
+  }};
+  p.get('project-choice').value='one';await p.event('project-choice','change');
+  await p.event('feature-open','click'); await setImmediate();
+  assert.deepEqual(calls.map(c=>c.offset),[undefined,1]);
+  assert.ok(calls.every(c=>c.project==='one'));
+  p.get('feature-filter').value='진단';await p.event('feature-filter','input');
+  assert.match(p.get('feature-list').textContent,/oms doctor/);
+  p.get('feature-list').children[0].children.at(-1).dispatchEvent(new Event('click'));await setImmediate();
+  assert.match(p.get('feature-draft').value,/oms doctor/);assert.equal(p.host.messages.length,0);
+  p.host.rejectMessage=true;await p.event('feature-send','click');assert.match(p.get('feature-outcome').textContent,/복사/);
+  p.host.rejectMessage=false;await p.event('feature-send','click');assert.equal(p.host.messages.length,2);
+  assert.deepEqual({...p.host.messages[1]._meta['openai/message']},{target:'active',send:false});
+  p.get('feature-filter').value='extension';await p.event('feature-filter','input');
+  assert.match(p.get('feature-list').textContent,/Read extension status/);
+  p.get('project-choice').value='two';await p.event('project-choice','change');
+  assert.equal(p.get('feature-draft').value,'');assert.equal(p.get('feature-editor').hidden,true);
+});
+
+test('all current public verbs have a Korean search label and new host verbs can use the native description', () => {
+  const registry=readFileSync(new URL('../../oms/src/registry.rs',import.meta.url),'utf8');
+  const names=JSON.parse(registry.match(/const PUBLIC: &str = (".*?");/)[1]).split('\n').sort();
+  const glossary=runInNewContext('('+script.match(/const commandKorean = (\{[\s\S]+?\n\});/)[1]+')');
+  assert.deepEqual(Object.keys(glossary).sort(),names);
+  assert.ok(Object.values(glossary).every(label=>/[가-힣]/.test(label)));
+});
+
+test('standard hosts retain selectable command help; provenance and inferred associations are explicit', async () => {
+  const p=await panel(['one','two'],{}, {message:true,readOnly:true});
+  p.host.tools={
+    oms_panel_capabilities:()=>({schema:1,total:1,commands:[{name:'land',description:'Publish a tested branch'}]}),
+    oms_panel_project_graph:({node,query})=>({
+      schema:1,kind:'oms-panel-project-graph',status:query?'not_found':'ready',completeness:'partial',
+      provenance:{source:'indexed-graph',indexState:'present',indexFreshness:'stale'},scope:{focusNode:node || 'file:a'},
+      nodes:query?[]:[{id:'file:a',label:'a',kind:'file'},{id:'file:b',label:'b',kind:'file'},{id:'file:c',label:'c',kind:'file'}],
+      edges:[{source:'file:a',target:'file:b',relation:'imports',confidence:'EXTRACTED'},{source:'file:a',target:'file:c',relation:'imports',confidence:'INFERRED'}]
+    })
+  };
+  p.get('project-choice').value='one';await p.event('project-choice','change');await p.event('feature-open','click');
+  assert.match(p.get('map-status').textContent,/오래된 색인/);assert.match(p.get('map-children').textContent,/추출/);assert.doesNotMatch(p.get('map-children').textContent,/추론/);
+  p.get('graph-confidence').value='all';await p.event('graph-confidence','change');assert.match(p.get('map-children').textContent,/추론/);
+  p.get('graph-filter').value='not-there';await p.event('graph-search','click');assert.match(p.get('map-status').textContent,/일치하는 노드 없음/);
+  p.get('feature-list').children[0].children.at(-1).dispatchEvent(new Event('click'));await p.event('feature-send','click');
+  assert.equal(p.host.messages.length,0);assert.equal(p.get('feature-draft').selected,true);
+});
+
+test('Git composer preview does not consume the existing explicit send action', async () => {
+  const p=await panel(['one'],{conversationMain:matchedMain},{message:true,compose:true});
+  await pickIssue(p);
+  await p.event('git-compose','click');
+  assert.deepEqual({...p.host.messages[0]._meta['openai/message']},{target:'active',send:false});
+  assert.equal(p.get('git-send').disabled,false);
+  await p.event('git-send','click');
+  assert.equal(p.host.messages.length,2);assert.equal(p.host.messages[1]._meta,undefined);
 });

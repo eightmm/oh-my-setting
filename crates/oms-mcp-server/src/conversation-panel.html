@@ -241,6 +241,58 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
 .connection-fields dt { color:var(--muted); }.connection-fields dd { margin:0; overflow-wrap:anywhere; }
 #source-details article + article { border-top:1px solid var(--line); padding-top:.4rem; }
 [hidden] { display: none !important; }
+.map-heading {display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}
+.map-heading h2 {font-size:.93rem}
+.map-link {background:none;border:0;color:var(--brand);font-size:.79rem;font-weight:650;padding:.35rem .15rem}
+.map-preview {padding:.65rem 0 .6rem;border-bottom:1px solid var(--line)}
+.map-preview p,.explorer-status {font-size:.77rem;color:var(--muted)}
+.map-field {padding:.6rem .55rem .45rem;border:1px solid var(--line);border-radius:.65rem;background-color:var(--surface);background-image:radial-gradient(var(--line) .8px,transparent .8px);background-size:11px 11px;margin-top:.25rem}
+.map-focus {font:650 .81rem var(--mono);max-width:100%;margin:0 auto;display:table;border:1px solid var(--main-line);border-radius:.4rem;background:var(--surface);padding:.3rem .65rem;text-align:center;overflow-wrap:anywhere}
+.map-row {display:flex;justify-content:center;gap:.45rem;position:relative;list-style:none;margin:.5rem 0 .1rem}
+.map-row.connected {padding-top:.8rem;margin-top:0}
+.map-row.connected::before {position:absolute;content:"";width:1px;height:.44rem;background:var(--main-line);top:0;left:50%}
+.map-row li {min-width:0;flex:1;max-width:12rem;position:relative}
+.map-row.connected li::before,.map-row.connected li::after {content:"";position:absolute;pointer-events:none}
+.map-row.connected li::before {width:calc(100% + .45rem);left:-.225rem;top:-.38rem;border-top:1px solid var(--main-line)}
+.map-row.connected li:first-child::before {width:calc(50% + .225rem);left:50%}
+.map-row.connected li:last-child::before {width:calc(50% + .225rem)}
+.map-row.connected li:only-child::before {display:none}
+.map-row.connected li::after {left:50%;top:-.38rem;height:.38rem;border-left:1px solid var(--main-line)}
+.map-node {display:block;width:100%;min-height:2.55rem;line-height:1.15;overflow:hidden;text-align:left;background:var(--bg);padding:.33rem .45rem}
+.map-node strong,.map-node small {display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-node strong {font:600 .76rem var(--mono)}
+.map-node small {font-size:.65rem;color:var(--muted);margin-top:.22rem}
+.explorer-bar {display:flex;align-items:center;flex-wrap:wrap;gap:.3rem;margin:.5rem 0}
+.explorer-bar button,.feature-links button {min-height:2.1rem}
+.explorer-bar .current {font-family:var(--mono)}
+.explorer-view {padding:.8rem 0;border-bottom:1px solid var(--line)}
+.explorer-filter {width:100%;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:.45rem;padding:.4rem .55rem;margin:.45rem 0}
+.explorer-list {list-style:none;max-height:21rem;overflow:auto}
+.explorer-list li + li {border-top:1px solid var(--line)}
+.explorer-item {display:flex;align-items:center;justify-content:space-between;text-align:left;width:100%;border:0;border-radius:0;min-height:2.6rem;background:transparent;padding:.45rem .2rem;gap:.6rem}
+.explorer-item strong,.explorer-item small {display:block}
+.explorer-item strong {font:600 .83rem var(--mono)}
+.explorer-item small {font-size:.76rem;line-height:1.4;color:var(--muted)}
+.feature-links {display:flex;flex-wrap:wrap;gap:.3rem;margin:.5rem 0}
+.feature-links button {font-size:.8rem}
+.feature-draft {width:100%;box-sizing:border-box;min-height:4rem;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:.4rem;padding:.5rem}
+
+.explorer-options {display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;font-size:.78rem}.explorer-options button {min-height:2rem}.explorer-options label {margin-left:auto;color:var(--muted)}
+.detail-map {display:grid;grid-template-columns:minmax(4.4rem,1fr) minmax(0,2.15fr);align-items:center;column-gap:1.45rem;margin:.15rem 0 .4rem;padding:.65rem}
+.detail-map[hidden] {display:none}
+.detail-map .map-focus {margin:0;position:relative}
+.detail-map .map-row {display:block;margin:0;padding:0}
+.detail-map .map-row li {max-width:none;margin:0;padding:.12rem 0}
+.detail-map .connected::before {left:-.75rem;top:50%;height:1px;width:.75rem}
+.detail-map .connected li::before,.detail-map .connected li::after {left:-.75rem}
+.detail-map .connected li::before {width:0;border:0;border-left:1px solid var(--main-line);height:100%;top:0}
+.detail-map .connected li:first-child::before {height:50%;top:50%;left:-.75rem;width:0}
+.detail-map .connected li:last-child::before {height:50%;width:0}
+.detail-map .connected li::after {top:50%;height:0;width:.75rem;border:0;border-top:1px solid var(--main-line)}
+.detail-map .map-node {min-height:2.4rem}
+
+.waiting-dashboard .main-line,.waiting-dashboard #pane-overview > :not(.map-preview),.waiting-dashboard #source-details {display:none}
+.waiting-dashboard .tabs button:not(#tab-project):not(#tab-overview) {visibility:hidden}
 </style>
 </head>
 <body>
@@ -257,6 +309,7 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
     <div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" type="button" hidden></button><span id="current-main" class="muted"></span></div>
     <nav class="tabs" role="tablist" aria-label="프로젝트 보기">
       <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview">개요</button>
+      <button id="tab-project" role="tab" aria-selected="false" aria-controls="pane-project" tabindex="-1">탐색</button>
       <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1">대화</button>
       <button id="tab-activity" role="tab" aria-selected="false" aria-controls="pane-activity" tabindex="-1">활동</button>
       <button id="tab-usage" role="tab" aria-selected="false" aria-controls="pane-usage" tabindex="-1">사용량</button>
@@ -268,6 +321,11 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
     </section>
     <details class="card" id="alerts"><summary>확인이 필요한 항목</summary><ul id="attention"></ul>
       <button type="button" id="attention-open">주의 항목 자세히 보기</button></details>
+    <section class="map-preview" aria-labelledby="map-title">
+      <div class="map-heading"><h2 id="map-title">프로젝트 지도</h2><div><button type="button" class="map-link" id="feature-open">기능 찾기</button> <button type="button" class="map-link" id="map-open">지도 열기 ↗</button></div></div>
+      <div class="map-field" id="map-field" hidden><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children"></ul></div>
+      <p role="status" id="map-status"></p>
+    </section>
     <section class="card" id="goal-card" aria-labelledby="goal-heading">
       <h2 id="goal-heading" class="section-label">프로젝트 목표</h2><p id="goal"></p>
       <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
@@ -314,6 +372,21 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
       <details class="history"><summary>최근 실행 기록</summary><ul id="activity"></ul></details>
     </details>
     </div>
+    <section id="pane-project" role="tabpanel" aria-labelledby="tab-project" hidden>
+      <section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading">프로젝트 구조</h2><button id="graph-reload" type="button" class="map-link">다시 조회</button></div>
+        <nav class="explorer-bar" id="graph-path" aria-label="탐색 경로"></nav>
+        <label class="sr-only" id="graph-filter-label" for="graph-filter">현재 노드 검색</label><input class="explorer-filter" id="graph-filter" type="search" placeholder="이름 또는 경로로 찾기">
+        <div class="explorer-options"><button type="button" id="graph-search">저장소에서 찾기</button> <label id="graph-confidence-label" for="graph-confidence">관계</label> <select id="graph-confidence"><option value="recorded" id="graph-recorded">추출·구조</option><option value="all" id="graph-all">추론 포함</option></select></div>
+        <div id="explore-map" class="map-field detail-map" hidden><span class="map-focus" id="explore-root"></span><ul class="map-row" id="explore-children"></ul></div>
+        <button type="button" id="graph-attach" hidden>대화에 첨부</button><span id="graph-attached" role="status" class="explorer-status"></span>
+        <p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button type="button" id="graph-more" hidden>더 보기</button>
+      </section>
+      <section class="explorer-view" aria-labelledby="feature-title"><h2 id="feature-title">OMS 기능 찾기</h2><div id="feature-links" class="feature-links"></div>
+        <label for="feature-filter" id="feature-filter-label" class="sr-only">OMS 기능 검색</label><input class="explorer-filter" id="feature-filter" type="search" placeholder="목적이나 OMS 명령으로 찾기">
+        <p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" type="button" hidden>더 보기</button>
+        <section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label">대화에 보낼 질문</label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button type="button" id="feature-native" hidden></button><button type="button" id="feature-send">현재 대화에 보내기</button><button type="button" id="feature-dismiss">닫기</button></div><p id="feature-outcome" role="status"></p></section>
+      </section>
+    </section>
     <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
       <div class="detail-title"><h2>작업방 대화</h2><button id="chat-back" type="button" hidden>이전 보기로</button></div>
       <div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자"></div>
@@ -354,7 +427,7 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
         <select id="git-provider"><option value="">Main이 Lead 선택</option><option value="codex">Codex Lead</option>
           <option value="claude">Claude Lead</option><option value="agy">AGY Lead</option></select>
         <label for="git-goal">대화에 전달할 목표</label><textarea id="git-goal" rows="3" maxlength="2000"></textarea>
-        <div class="cluster"><button type="button" class="primary" id="git-send" hidden>현재 Main 대화에 보내기</button>
+        <div class="cluster"><button type="button" id="git-compose" hidden>입력창에 넣기</button><button type="button" class="primary" id="git-send" hidden>현재 Main 대화에 보내기</button>
           <button type="button" id="git-copy">목표 복사</button><button type="button" id="git-new">별도 Main 목표로 사용</button></div>
         <p class="muted" id="git-editor-status" role="status"></p>
       </section>
@@ -413,7 +486,7 @@ const pendingOpens = [];
 const pendingErrors = [];
 let retryStart;
 let contextTypes;
-let canOpenLinks = false, canMessage = false, readOnly = false;
+let canOpenLinks = false, canMessage = false, canCompose = false, readOnly = false;
 let hostSurface = '미확인', hostVersion = '', displayMode = '', handshake = false;
 let connectionState = 'OMS 연결 확인 중', connectionReady = false, profileKnown = false, checkedAt = '';
 let connectionPage = 1, connectionNext = null;
@@ -422,12 +495,269 @@ let gitReady = false, overviewBacklog = false;
 const gitDrafts = new Map();
 let contextKey;
 let contextQueue = Promise.resolve();
-const tabs = ['overview','chat','activity','usage','git'];
+const tabs = ['overview','project','chat','activity','usage','git'];
 let currentTab = 'overview', dashboardData, members = [], selectedMember, olderCursor, backTarget, chatRows = [];
 let availableAttempts = [], evidenceId, evidenceSection, evidencePage = 1, evidenceNext, evidenceProofs = {};
 const evidenceNames = {info:'실행 정보', events:'이벤트', files:'변경 파일', diff:'패치', transcript:'기록된 답변'};
 let tuiPages = [], tuiNext;
 const jobs = new Map(), loaded = new Set(), tabScroll = new Map();
+
+// The map and the command directory use the selected project's read-only tools.
+let explorerBound = false, graphData, graphError = '', graphTrail = [], graphQuery = '', graphLimit = 40;
+let catalog = [], catalogTotal = null, catalogError = '', commandRows = 8, draftCommand = '';
+const choice = (ko,en) => document.documentElement?.lang === 'en' ? en : ko;
+function explorerButton(label, action, classes) {
+  const b = node('button',label,classes); b.type = 'button'; b.addEventListener('click',action); return b;
+}
+function explorerLabels() {
+  const labels = {
+    'feature-open':['기능 찾기','Find tools'],'tab-project':['탐색','Explore'],'map-title':['프로젝트 지도','Project map'],'map-open':['지도 열기 ↗','Explore map ↗'],
+    'explore-heading':['프로젝트 구조','Project structure'],'graph-reload':['다시 조회','Refresh map'],
+    'graph-filter-label':['그래프 노드 검색','Find a graph node'],'graph-more':['노드 더 보기','Show more nodes'],
+    'graph-search':['저장소에서 찾기','Search repository'],'graph-confidence-label':['관계','Relations'],'graph-recorded':['추출·구조','Extracted / structural'],'graph-all':['추론 포함','Include inferred'],
+    'feature-title':['OMS 기능 찾기','Explore OMS tools'],'feature-filter-label':['OMS 기능 검색','Search OMS tools'],
+    'feature-more':['더 보기','Show more'],'feature-draft-label':['대화에 보낼 질문','Question for this chat'],
+    'graph-attach':['대화에 첨부','Attach to chat'],'git-compose':['입력창에 넣기','Insert draft'],'feature-send':['입력창에 넣기','Insert draft'],'feature-dismiss':['닫기','Close']
+  };
+  for (const [id,pair] of Object.entries(labels)) el(id).textContent = choice(...pair);
+  el('graph-filter').placeholder = choice('이름 또는 경로로 찾기','Find by name or path');
+  el('feature-filter').placeholder = choice('목적이나 OMS 명령으로 찾기','Find a tool by purpose or name');
+  el('graph-path').setAttribute('aria-label',choice('탐색 경로','Exploration path'));
+  paintGraph(); paintFeatures();
+}
+function graphKind(k) {
+  const kinds = {directory:['폴더','Folder'],folder:['폴더','Folder'],file:['파일','File'],module:['모듈','Module'],repository:['저장소','Repository'],project:['프로젝트','Project'],symbol:['심볼','Symbol']};
+  return Object.hasOwn(kinds,k) ? choice(...kinds[k]) : k || choice('노드','Node');
+}
+function graphLink(e,out) {
+  const rel=e?.relation;
+  if(rel==='contains') return out ? choice('하위 항목','Child') : choice('상위 항목','Parent');
+  const direction=out ? '→ ' : '← ';
+  const name=rel==='imports' || rel==='import' ? choice('가져오기','Imports') : rel;
+  const confidence={EXTRACTED:['추출','Extracted'],INFERRED:['추론','Inferred'],AMBIGUOUS:['불확실','Ambiguous'],STRUCTURAL:['구조','Structural']};
+  const proof=Object.hasOwn(confidence,e?.confidence) ? choice(...confidence[e.confidence]) : choice('미확인','Unconfirmed');
+  return [name && direction+name,proof].filter(Boolean).join(' · ');
+}
+function readGraph(focus, query = '', limit = 40) {
+  if (!explorerBound) return;
+  graphQuery=query;graphLimit=limit;graphError='';graphData=undefined;el('graph-attached').textContent='';
+  paintGraph(true);
+  detailRead('graph','oms_panel_project_graph',{...(focus ? {node:focus} : {}),...(query ? {query} : {}),limit}, data => {
+    if (data?.schema !== 1 || data.kind !== 'oms-panel-project-graph' || !Array.isArray(data.nodes) || !Array.isArray(data.edges))
+      throw new Error(choice('그래프 응답 형식 미확인','Unrecognized graph response'));
+    graphData = data; paintGraph();
+  }, error => {graphError = error.message; graphData = undefined; paintGraph();});
+}
+function enterNode(row) {
+  const i = graphTrail.findIndex(s => s.id === row.id);
+  if (i < 0) graphTrail.push({id:row.id,label:row.label || row.id});
+  else graphTrail = graphTrail.slice(0,i+1);
+  el('graph-filter').value = ''; showTab('project',true); readGraph(row.id); el('graph-filter').focus();
+}
+function goToLevel(depth) {
+  graphTrail = graphTrail.slice(0,depth); el('graph-filter').value = '';
+  readGraph(graphTrail.at(-1)?.id); el('graph-filter').focus();
+}
+function paintGraph(loading = false) {
+  const data = graphData;
+  const rootName = dashboardData?.project || project || choice('저장소','Repository');
+  const rootLabel = graphTrail.at(-1)?.label || rootName;
+  const crumbs = el('graph-path'); crumbs.replaceChildren();
+  const root = explorerButton(rootName,() => goToLevel(0),'current'); root.disabled = !graphTrail.length; crumbs.append(root);
+  for (const [i,step] of graphTrail.entries()) {
+    const crumb = explorerButton(step.label,() => goToLevel(i+1),'current');
+    if (i === graphTrail.length-1) crumb.setAttribute('aria-current','location');
+    crumbs.append(node('span','›'),crumb);
+  }
+  const state = loading ? choice('프로젝트 구조를 읽는 중…','Reading project structure…') : graphError ||
+    (!data ? choice('프로젝트 연결 대기','Waiting for project') : '');
+  const tree = el('map-children'), detailed=el('explore-children'), list = el('graph-list'); tree.replaceChildren(); detailed.replaceChildren(); list.replaceChildren();
+  el('map-field').hidden = el('explore-map').hidden = true; el('graph-more').hidden = true;
+  el('graph-info').textContent = el('map-status').textContent = state;
+  const selected=data?.selection?.node;
+  el('graph-attach').hidden=!(contextTypes?.text && graphTrail.length && data?.selection?.status==='found' && selected?.id === graphTrail.at(-1).id);
+  if (!data || loading) return;
+  const focus = data.scope?.focusNode || data.nodes.find(n=>n.focus)?.id || data.nodes.find(n=>n.id==='dir:.')?.id ||
+    data.nodes.reduce((best,r)=>!best || (r.degree || 0)>(best.degree || 0) ? r : best,null)?.id;
+  const local = data.nodes.find(n => n.id === focus);
+  const candidates = data.nodes.filter(r => r && typeof r.id === 'string' && r.id !== focus);
+  const byNeighbor = new Map();
+  const allRelations=el('graph-confidence').value === 'all';
+  function showRelation(e) {return allRelations || ['STRUCTURAL','EXTRACTED'].includes(e.confidence);}
+  for (const e of data.edges) {
+    if (!showRelation(e)) continue;
+    if (e.source === focus) byNeighbor.set(e.target,{edge:e,out:true});
+    else if (e.target === focus) byNeighbor.set(e.source,{edge:e,out:false});
+  }
+  for (const n of data.selection?.neighbors || []) {
+    if (!n || !showRelation(n) || typeof n.id!=='string') continue;
+    if (!byNeighbor.has(n.id)) byNeighbor.set(n.id,{edge:n,out:n.direction!=='in'});
+    if (!candidates.some(x=>x.id===n.id) && n.id!==focus) candidates.push(n);
+  }
+  const connected = candidates.filter(r => byNeighbor.has(r.id));
+  const rows = [...connected,...candidates.filter(r => !byNeighbor.has(r.id))];
+  const input = el('graph-filter').value.trim();
+  const query = input === graphQuery ? '' : input.toLocaleLowerCase();
+  const filtered = rows.filter(r => !query || [r.label,r.path,r.kind,r.id].some(x=>String(x || '').toLocaleLowerCase().includes(query)));
+  const group = connected.length ? connected : rows;
+  tree.className = 'map-row' + (connected.length ? ' connected' : '');
+  el('map-root').textContent = el('explore-root').textContent = local?.label || rootLabel;
+  el('map-field').hidden = el('explore-map').hidden = !data.nodes.length;
+  detailed.className = tree.className;
+  function item(r,compact) {
+    const title = r.label || r.path || r.id;
+    const link = byNeighbor.get(r.id);
+    const relation = link && graphLink(link.edge,link.out);
+    const size = Number.isSafeInteger(r.fileCount) && r.fileCount>0 ? choice('파일 '+formatCount(r.fileCount)+'개',formatCount(r.fileCount)+' files') : '';
+    const description = [graphKind(r.kind),size,compact && size ? '' : relation].filter(Boolean).join(' · ');
+    const button = explorerButton('',()=>enterNode(r),compact?'map-node':'explorer-item');
+    button.title = [r.path || title,description].join(' · ');
+    button.setAttribute('aria-label',button.title);
+    const text = node('span',''); text.append(node('strong',title),node('small',description));
+    button.append(text); if (!compact) button.append(node('span','›','muted'));
+    const li=node('li','');li.append(button);return li;
+  }
+  for(const r of group.slice(0,3)) tree.append(item(r,true));
+  for(const r of group.filter(r=>filtered.includes(r)).slice(0,5)) detailed.append(item(r,true));
+  for(const r of filtered) list.append(item(r,false));
+  const provenance=data.provenance || {};
+  const sources={'indexed-graph':['OMS 그래프 색인','OMS graph index'],'git-ls-files':['Git 추적 경로','Git-tracked paths'],'directory-scan':['폴더 구조','Directory scan']};
+  const source = Object.hasOwn(sources,provenance.source) ? choice(...sources[provenance.source]) : '';
+  const basis = provenance.indexFreshness==='stale' ? choice('오래된 색인','Stale index') : provenance.indexState==='invalid' ? choice('색인 확인 실패','Index unreadable') :
+    ['absent','missing'].includes(provenance.indexState) ? choice('색인 없음 · 포함 관계','No index · containment') : '';
+  const total=data.counts?.total_nodes, shown=data.nodes.length;
+  const span=Number.isSafeInteger(total) && total>=shown ? choice('노드 '+shown+'/'+total,shown+'/'+total+' nodes') : '';
+  const partial=data.completeness==='partial'||data.limits?.truncated===true;
+  const missing = data.status==='not_found' ? choice('일치하는 노드 없음','No matching node') : data.status==='unknown' ? choice('구조를 확인할 수 없음','Structure unavailable') :
+    !shown ? choice('조회된 노드 없음','No nodes returned') : !rows.length ? choice('연결된 노드 없음','No connected nodes') : '';
+  el('map-status').textContent=[source,basis,span,missing,partial && choice('일부 표시','Partial view')].filter(Boolean).join(' · ');
+  el('graph-info').textContent=[el('map-status').textContent,query && choice('필터 결과 ','Filtered: ')+filtered.length].filter(Boolean).join(' · ');
+  el('graph-more').hidden=!partial || graphLimit>=60;
+}
+
+el('graph-attach').addEventListener('click',async()=>{
+  const selected=graphData?.selection?.node,button=el('graph-attach'),expected=generation;
+  if (!contextTypes?.text || !explorerBound || button.hidden || button.disabled || !selected ||
+      selected.id!==graphTrail.at(-1)?.id || typeof selected.kind!=='string') return;
+  button.disabled=true;
+  const attached=await updateContext({project:project || null,node:selected.id,kind:selected.kind},true);
+  if(expected===generation && selected.id===graphData?.selection?.node?.id) el('graph-attached').textContent=attached
+    ? choice('노드 참조를 전달했습니다.','Node reference shared.') : choice('첨부를 확인할 수 없습니다.','Attachment unconfirmed.');
+  if(expected===generation) button.disabled=false;
+});
+el('map-open').addEventListener('click',()=>{showTab('project',true);el('graph-filter').focus();});
+function openFeatureSearch() {showTab('project',true);el('feature-filter').focus();}
+el('feature-open').addEventListener('click',openFeatureSearch);
+window.addEventListener('keydown',event=>{
+  if (!explorerBound || event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented || event.isComposing || event.target?.isContentEditable ||
+      ['INPUT','TEXTAREA','SELECT'].includes(event.target?.tagName)) return;
+  if (event.key === '?') {event.preventDefault();openFeatureSearch();}
+  if (event.key === '/' && currentTab === 'project') {event.preventDefault();el('graph-filter').focus();}
+});
+el('graph-filter').addEventListener('input',()=>paintGraph());
+function submitGraphQuery() {
+  const query=el('graph-filter').value.trim();
+  if (!query || Array.from(query).length>128) return;
+  graphTrail=[];readGraph(undefined,query);
+}
+el('graph-search').addEventListener('click',submitGraphQuery);
+el('graph-filter').maxLength=128;
+el('graph-filter').addEventListener('keydown',e=>{
+  if(e.isComposing) return;
+  if(e.key==='Enter'){e.preventDefault();submitGraphQuery();}
+  if(e.key==='Escape'){e.preventDefault();goToLevel(0);}
+});
+el('graph-confidence').addEventListener('change',()=>paintGraph());
+el('graph-reload').addEventListener('click',()=>readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit));
+el('graph-more').addEventListener('click',()=>readGraph(graphTrail.at(-1)?.id,graphQuery,60));
+const commandKorean = {
+ advise:'결정 전 다른 에이전트의 조언 받기','agent-call':'공급자 실행과 시도 상태 확인','agent-events':'실행 이벤트 조회','agent-memory':'에이전트 기억 저장 및 찾기','agent-plan':'작업 계획과 의존성 관리','agent-role':'작업 역할과 규칙 확인','agent-supervisor':'에이전트 작업 감독','agent-task':'현재 작업과 인수인계 관리','apply-project-template':'프로젝트 규칙 템플릿 적용','approval-inbox':'승인 대기 요청 조회','artifact-index':'산출물 색인 조회','artifact-view':'저장된 산출물과 결과 읽기','auto-update':'OMS 자동 업데이트 설정',autopilot:'자동화 작업 실행 관리',candidate:'변경 후보와 검증 근거 관리','change-guard':'변경 경계 점검',checkpoint:'현재 진행 상태 기록','ci-status':'지속적 통합 검사 결과 확인',cite:'출처와 근거 인용',cleanup:'작업 파일 정리','connect-services':'외부 서비스 연결 확인',consult:'다른 에이전트와 협의',dashboard:'프로젝트 상태 개요','data-manifest':'데이터 분할과 변경 추적',deps:'프로젝트 의존성·버전 확인',doctor:'설치와 도구 상태 진단','draft-pr':'검증된 변경을 초안 PR로 제출','experiment-board':'실험 비교와 상태 조회',external:'외부 도구 연결','fail-ledger':'실패 기록과 재발 확인',gc:'오래된 상태 정리',github:'GitHub 이슈 및 PR 연동','goal-drive':'목표 진행과 완료 근거 확인',graph:'코드 구조와 관계 탐색',harness:'공급자 하네스 조회와 조정',hud:'현재 세션 요약',inbox:'확인할 작업과 요청 조회',init:'프로젝트 초기 설정',input:'입력 요청 관리','install-profile':'설치 프로필 선택',intent:'작업 의도에 맞는 명령 찾기','job-digest':'작업 실행 로그 요약',journal:'작업 일지 기록과 검색',land:'검증과 PR 게시 흐름',lease:'작업 소유권과 임대 확인','model-doctor':'모델 연결 상태 진단',models:'모델 및 공급자 카탈로그','output-digest':'명령 출력 요약',panel:'작업방과 에이전트 제어판','patch-admit':'패치 수락 전 검사','patch-land':'검증된 패치 반영','peer-ask':'다른 공급자에게 질문','peer-delegate':'다른 공급자에 작업 위임','peer-review':'다른 공급자의 검토 요청','plan-from-spec':'명세를 계획으로 변환','plan-run':'작업 계획 실행','project-doctor':'프로젝트 구성 진단','project-private':'프로젝트 전용 설정','provider-permissions':'공급자 권한 점검',recipe:'로컬 작업 절차 관리','remove-project-template':'프로젝트 관리 템플릿 제거',report:'오류 및 기능 요청 보고서',room:'공유 작업방과 메시지 관리',run:'작업 실행과 기록 연결','run-ledger':'실험 실행 기록','run-reconcile':'장시간 실행 결과 조정',runtime:'실행 상태와 근거 조회','scratch-worktree':'격리된 Git 작업공간 관리',session:'세션 검색 및 복구','session-handoff':'세션 인수인계 요약','skill-doctor':'스킬 설치 및 중복 진단','skill-forge':'프로젝트 스킬 생성','slurm-lint':'Slurm 작업 스크립트 점검','slurm-submit':'Slurm 작업 제출',snapshot:'상태 스냅샷 생성',state:'프로젝트 상태 조회','state-verify':'프로젝트 상태 검증',status:'설치 상태 확인','sync-shared':'공유 규칙 동기화',thread:'작업 스레드 기록',tick:'작업 스케줄 조정','tsp-queue':'로컬 작업 대기열 관리',uninstall:'OMS 설치 제거',update:'OMS 버전 업데이트'
+};
+const featureRoutes = [
+ ['agent-plan','계획','Plan',()=>openTui('plan')],['artifact-index','결과','Results',()=>openTui('results')],
+ ['agent-call','활동','Activity',()=>showTab('activity',true)],['usage','사용량','Usage',()=>showTab('usage',true)],
+ ['github','Git · PR','Git · PR',()=>showTab('git',true)],['graph','프로젝트 지도','Project map',()=>{showTab('project',true);el('graph-filter').focus();}]
+];
+function readCatalog(offset = 0) {
+  if (!explorerBound || jobs.has('catalog') && !offset) return;
+  catalogError = '';
+  detailRead('catalog','oms_panel_capabilities',offset ? {offset} : {},data=>{
+    if (data?.schema !== 1 || !Array.isArray(data.commands) || !Number.isSafeInteger(data.total) || data.total < 0 || data.total > 2000) throw new Error(choice('기능 목록 응답 형식 미확인','Unrecognized command directory'));
+    const records=data.commands.filter(c=>typeof c?.name === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(c.name) && typeof c.description === 'string');
+    if (records.length !== data.commands.length) throw new Error(choice('기능 목록 일부를 읽을 수 없습니다.','Could not read all entries.'));
+    catalogTotal=data.total;
+    catalog=offset ? [...catalog,...records] : records;
+    if (Number.isSafeInteger(data.nextOffset) && data.nextOffset > offset && data.nextOffset < data.total && records.length) {
+      readCatalog(data.nextOffset); paintFeatures(); return;
+    }
+    loaded.add('catalog'); paintFeatures();
+  },error=>{catalogError=error.message;paintFeatures();});
+}
+function paintFeatures() {
+  const links=el('feature-links'), list=el('feature-list'); links.replaceChildren(); list.replaceChildren();
+  for(const [,ko,en,open] of featureRoutes) links.append(explorerButton(choice(ko,en),open));
+  const q=el('feature-filter').value.trim().toLocaleLowerCase();
+  const rows=catalog.filter(c=>[c.name,c.description,commandKorean[c.name]].some(v=>v?.toLocaleLowerCase().includes(q)));
+  for(const c of rows.slice(0,commandRows)) {
+    const b=explorerButton('',()=>editFeature(c),'explorer-item'), t=node('span','');
+    t.append(node('strong','oms '+c.name),node('small',choice(commandKorean[c.name] || c.description,c.description)));
+    b.append(t,node('span','›','muted'));const li=node('li','');li.append(b);list.append(li);
+  }
+  el('feature-status').textContent=catalogError || (catalogTotal == null ? choice('호스트의 공개 명령 목록 조회 대기','Waiting for host command directory') :
+    choice('호스트 명령 ','Host commands: ')+catalog.length+'/'+catalogTotal+(q?' · '+choice('검색 결과 ','Matches: ')+rows.length:''));
+  el('feature-more').hidden=rows.length<=commandRows;
+  el('feature-send').textContent=canCompose ? choice('입력창에 넣기','Insert draft') : choice('질문 복사','Copy question');
+}
+function editFeature(c) {
+  draftCommand=c.name;
+  const direct=featureRoutes.find(([name])=>name===c.name), open=el('feature-native');
+  open.hidden=!direct;
+  if(direct) open.textContent=choice(direct[1]+' 열기','Open '+direct[2]);
+  el('feature-send').disabled=false;
+  const draft=el('feature-draft');
+  draft.value=choice('이 프로젝트에서 oms '+c.name+'의 용도와 사용 조건을 설명해 주세요. 지금은 설명만 원합니다.',
+    'Explain what oms '+c.name+' does and what it requires for this project. I am asking for an explanation only.');
+  el('feature-editor').hidden=false;el('feature-outcome').textContent=canCompose?'':choice('이 호스트에서는 질문을 복사해 대화에 붙여넣을 수 있습니다.','Copy this question into the chat on this host.');
+  draft.focus();draft.select();
+}
+el('feature-native').addEventListener('click',()=>featureRoutes.find(([name])=>name===draftCommand)?.[3]());
+el('feature-filter').addEventListener('input',()=>{commandRows=8;paintFeatures();});
+el('feature-more').addEventListener('click',()=>{commandRows+=12;paintFeatures();});
+el('feature-dismiss').addEventListener('click',()=>{draftCommand='';el('feature-draft').value='';el('feature-editor').hidden=true;el('feature-filter').focus();});
+el('feature-send').addEventListener('click',async()=>{
+  const command=draftCommand, expected=generation,text=el('feature-draft').value.trim(), button=el('feature-send');
+  if(!explorerBound || !command || !text || text.length>1000 || button.disabled) return;
+  if(!canCompose) {
+    try {
+      await navigator.clipboard.writeText(text);
+      if(expected===generation && draftCommand===command) el('feature-outcome').textContent=choice('질문을 복사했습니다.','Question copied.');
+    } catch {
+      if(expected===generation && draftCommand===command) {el('feature-draft').focus();el('feature-draft').select();el('feature-outcome').textContent=choice('질문을 선택했습니다. 복사해 사용할 수 있습니다.','Question selected for copying.');}
+    }
+    return;
+  }
+  button.disabled=true;
+  try {
+    const reply=await insertComposerDraft(text);
+    if(reply?.isError) throw new Error();
+    if(generation===expected && draftCommand===command) el('feature-outcome').textContent=choice('대화 입력창에 넣었습니다.','Inserted into the chat composer.');
+  } catch {
+    if(generation===expected && draftCommand===command) el('feature-outcome').textContent=choice('입력창을 확인하거나 질문을 복사하세요.','Check the composer or copy the question.');
+  } finally {if(generation===expected) button.disabled=false;}
+});
+function resetExplorer() {
+  explorerBound=false;graphData=undefined;graphError='';graphTrail=[];graphQuery='';graphLimit=40;el('graph-confidence').value='recorded';
+  catalog=[];catalogTotal=null;catalogError='';commandRows=8;draftCommand='';
+  for(const key of ['graph','catalog']){jobs.delete(key);loaded.delete(key);}
+  el('graph-filter').value=el('feature-filter').value=el('feature-draft').value='';
+  el('graph-attached').textContent='';el('graph-attach').disabled=false;el('feature-outcome').textContent='';el('feature-editor').hidden=true;el('feature-send').disabled=false;
+  paintGraph();paintFeatures();
+}
+
+explorerLabels();
+if (typeof MutationObserver === 'function' && document.documentElement) {
+  new MutationObserver(explorerLabels).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+}
 
 function showTab(tab, focus = false, origin) {
   if (tab !== currentTab) {
@@ -475,6 +805,10 @@ async function detailRead(key, name, args, success, failure) {
 }
 
 function loadTab(tab, force = false) {
+  if (tab === 'project' && explorerBound) {
+    if ((!loaded.has('catalog') || force) && !jobs.has('catalog')) readCatalog();
+    return;
+  }
   if (!dashboardData) return;
   if (tab === 'chat') {
     if (selectedMember && (force || (!loaded.has('chat') && !jobs.has('chat')))) loadChat();
@@ -496,18 +830,27 @@ function loadTab(tab, force = false) {
   }, error => { status.textContent = error.message; loaded.delete(tab); });
 }
 
-function updateContext(data) {
-  if (!contextTypes) return;
+function updateContext(data, textOnly = false) {
+  if (!contextTypes || (textOnly && !contextTypes.text)) return Promise.resolve(false);
   const key = JSON.stringify(data);
-  if (key === contextKey) return;
+  if (key === contextKey) return contextQueue;
   contextKey = key;
   contextQueue = contextQueue.then(async () => {
-    if (key !== contextKey) return;
-    const params = !data ? {content:[]} : contextTypes.structuredContent ? {structuredContent:data}
+    if (key !== contextKey) return false;
+    const params = !data ? {content:[]} : !textOnly && contextTypes.structuredContent ? {structuredContent:data}
       : {content:[{type:'text', text:key}]};
-    try { await request('ui/update-model-context', params, 5000); }
-    catch { if (contextKey === key) contextKey = undefined; }
+    try {
+      const result = await request('ui/update-model-context',params,5000);
+      if (result?.isError) throw new Error();
+      return key === contextKey;
+    } catch { if (contextKey === key) contextKey = undefined; return false; }
   });
+  return contextQueue;
+}
+
+function insertComposerDraft(text) {
+  if (!canCompose) throw new Error('Draft extension unavailable');
+  return request('ui/message',{role:'user',content:[{type:'text',text}],_meta:{'openai/message':{target:'active',send:false}}});
 }
 
 function send(message, origin = hostOrigin) {
@@ -854,6 +1197,7 @@ function updateSendButton() {
   send.textContent = bound ? '현재 Main 대화에 보내기' : '현재 대화에 공유';
   const same = sentBrief && sentBrief.room === (bound ? main?.room : null) && sentBrief.text === el('git-goal').value.trim();
   send.disabled = Boolean(!gitReady || gitItem?.stale || sendingBrief || same || !el('git-goal').value.trim());
+  el('git-compose').hidden=!canCompose; el('git-compose').disabled=Boolean(!gitReady || gitItem?.stale || sendingBrief || !el('git-goal').value.trim());
   el('git-new').disabled = Boolean(!gitReady || gitItem?.stale || !el('git-goal').value.trim());
 }
 el('git-provider').addEventListener('change', () => {
@@ -875,6 +1219,17 @@ el('git-copy').addEventListener('click',async () => {
     field.focus(); field.select();
     el('git-editor-status').textContent = '목표를 선택했습니다. 복사해 현재 대화에서 사용할 수 있습니다.';
   }
+});
+el('git-compose').addEventListener('click',async()=>{
+  const text=el('git-goal').value.trim(),item=gitItem,expected=generation,button=el('git-compose');
+  if (!canCompose || !gitReady || item?.stale || !item || !text || button.disabled) return;
+  const ticket=Symbol();sendingBrief=ticket;updateSendButton();
+  try {
+    const reply=await insertComposerDraft(text);
+    if(reply?.isError) throw new Error();
+    if (expected===generation && gitItem===item) el('git-editor-status').textContent=choice('대화 입력창에 넣었습니다.','Inserted into the chat composer.');
+  } catch {if (expected===generation && gitItem===item) el('git-editor-status').textContent=choice('입력창을 확인하거나 목표를 복사하세요.','Check the composer or copy the goal.');}
+  finally {if(sendingBrief===ticket){sendingBrief=undefined;updateSendButton();}}
 });
 el('git-send').addEventListener('click', async () => {
   const bound = !readOnly && !el('header-main').hidden;
@@ -1085,6 +1440,7 @@ function render(d) {
 }
 
 function clearProject() {
+  resetExplorer();
   checkedAt = ''; connectionReady = profileKnown = false; connectionState = '프로젝트 연결 미확인'; hostFacts(); resetConnectionRows();
   el('connection-status').textContent = ''; el('main-scope').textContent = '';
   el('view').hidden = true;
@@ -1720,6 +2076,8 @@ async function initialize() {
       const formats = info?.hostCapabilities?.updateModelContext;
       canOpenLinks = Boolean(info?.hostCapabilities?.openLinks);
       canMessage = Boolean(info?.hostCapabilities?.message?.text);
+      const extension = info?.hostCapabilities?.experimental?.['openai/message'];
+      canCompose = Boolean(canMessage && extension && typeof extension === 'object' && !Array.isArray(extension));
       if (formats?.text || formats?.structuredContent) contextTypes = formats;
       send({method:'ui/notifications/initialized', params:{}});
     })().catch(error => { initializing = undefined; throw error; });
@@ -1771,11 +2129,17 @@ async function loadStatus(expected, recover = true) {
     profileKnown = typeof registry.structuredContent.readOnly === 'boolean';
     checkedAt = new Date().toISOString(); connectionState = 'OMS 연결됨 · 프로젝트 선택 필요'; hostFacts();
     if (!selected) return;
+    explorerBound = true;
+    if (!dashboardData) {
+      el('view').className = 'waiting-dashboard'; el('view').hidden = false;
+    }
+    readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit);
     if (project && (contextKey == null || contextKey === 'null')) updateContext({project});
     const result = await tool('oms_panel_snapshot', {}, expected);
     const dashboard = result.structuredContent?.dashboard || result._meta?.dashboard;
     if (!dashboard) throw new Error('프로젝트 상태 응답을 읽을 수 없습니다.');
     checkedAt = new Date().toISOString(); connectionReady = true; connectionState = 'OMS 연결됨 · 프로젝트 상태 조회됨'; hostFacts();
+    el('view').className = '';
     render(dashboard);
     if (el('source-details').open) loadConnection(connectionPage);
     if (el('provider-options').open) loadProviderOptions();
@@ -1819,7 +2183,7 @@ async function loadStatus(expected, recover = true) {
     for (const id of ['updated','room','participant','main-state','main-scope','branch','provider-rows']) el(id).replaceChildren();
     jobs.delete('lead-providers'); providerData = undefined; el('provider-status').textContent = '';
     el('connection-status').textContent = '프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요.';
-    el('view').hidden = true;
+    resetExplorer(); updateContext(null); el('view').hidden = true;
     el('status').className = 'error';
     el('status').textContent = error.message;
   }
