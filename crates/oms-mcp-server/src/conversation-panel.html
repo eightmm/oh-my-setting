@@ -401,7 +401,11 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
       </div>
       <details class="history"><summary data-i18n="historyTeam">프로젝트 Main·Lead 기록</summary><ul id="repo-team"></ul></details>
       <details class="history"><summary data-i18n="historyOps">최근 보관된 결과물</summary><ul id="operations"></ul></details>
-      <details class="history"><summary data-i18n="historyRuns">최근 실행 기록</summary><ul id="activity"></ul></details>
+      <details class="history"><summary data-i18n="historyRuns">최근 실행 기록</summary><ul id="activity"></ul>
+        <section id="scratch-history" aria-labelledby="scratch-heading" hidden>
+          <h3 id="scratch-heading" data-i18n="scratch.heading">관리된 작업트리 기록</h3>
+          <p id="scratch-status" class="muted" role="status"></p><ul id="scratch-rows"></ul>
+        </section></details>
     </details>
     </div>
     <section class="card" id="pane-work" role="tabpanel" aria-labelledby="tab-work" hidden>
@@ -621,16 +625,11 @@ function initLanguage() {
 }
 const MSG = {
 ko: {
+  'scratch.unavailable':'작업트리 기록을 확인할 수 없습니다.', 'scratch.empty':'이 프로젝트에 기록된 작업트리 실행이 없습니다.',
+  'scratch.partial':'일부 기록만 확인했습니다.', 'scratch.omitted':'실행 기록 {n}개 생략', 'scratch.unverified':'소유 미확인 {n}개', 'scratch.unexamined':'미조회 {n}개',
+  'scratch.sources':'작업트리 {n}개 생략', 'scratch.recorded':'기록된 상태 · {s}', 'scratch.at':'기록 시각 · {at}',
   'share.manual':'이 호스트에서는 복사한 뒤 대화에 붙여넣으세요.',
-  'peer.assign':"읽기 전용 검토 요청",
-  'peer.legend':"이 작업방의 검토자",
-  'peer.provider':"공급자",
-  'peer.prompt':"검토할 내용",
   'peer.hint':"확인할 코드나 질문을 입력하세요",
-  'peer.start':"검토자 1회 호출",
-  'peer.check':"요청 상태 확인",
-  'peer.chat':"검토 대화 보기",
-  'peer.next':"다른 검토 요청",
   'peer.role':"연구원",
   'peer.result':"읽기 전용 검토 결과",
   'peer.reading':"요청 기록 확인 중…",
@@ -645,11 +644,6 @@ ko: {
   'peer.empty':"호출이 끝났습니다. 조회한 기록에 답변이 없습니다.",
   'peer.failed':"검토 호출이 실패했습니다.",
   'peer.unconfirmed':"검토 요청은 기록되었고 실행 상태는 미확인입니다.",
-  'share.choose':"검토 결과 첨부",
-  'share.label':"선택한 답변",
-  'share.send':"현재 대화로 보내기",
-  'share.copy':"답변 복사",
-  'share.cancel':"취소",
   'share.preview':"{p}의 답변을 확인한 뒤 전달하세요.",
   'share.partial':"{p}의 답변 중 아래에 표시된 부분만 전달합니다.",
   'share.copied':"선택한 답변을 복사했습니다.",
@@ -659,38 +653,25 @@ ko: {
   'share.sent':"선택한 답변을 현재 대화로 보냈습니다.",
   'share.rejected':"호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다.",
   'share.unknown':"호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요.",
-  title:'OMS · 프로젝트 제어', language:'언어 (Language)', project:'프로젝트', refresh:'새로고침',
+  title:'OMS · 프로젝트 제어', language:'언어 (Language)',
   unknown:'미확인', noInfo:'정보 없음', providerUnknown:'공급자 미확인', statusUnknown:'상태 미확인', partial:'일부 조회', noRecords:'기록 없음',
-  projectDefault:'OMS 프로젝트', selectProject:'프로젝트 선택', draft:'초안', pageN:'{page}페이지', prevPage:'이전 페이지', nextPage:'다음 페이지',
+  projectDefault:'OMS 프로젝트', selectProject:'프로젝트 선택', draft:'초안', pageN:'{page}페이지',
   closed:'패널이 닫혔습니다.', timeout:'응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요.', hostFail:'앱이 요청을 처리하지 못했습니다.',
   projChanged:'프로젝트가 변경되었습니다.', toolFail:'OMS 도구 호출에 실패했습니다.', linkFail:'앱에서 링크를 열 수 없습니다.', openApp:'앱 대화에서 OMS 패널을 여세요.',
-  'tab.chat':'대화', 'tab.activity':'활동', tabs:'프로젝트 보기',
-  'tab.overview':'지금', 'tab.work':'작업', 'tab.results':'결과', 'tab.relations':'관계도', 'tab.usage':'지표', 'tabsMore':'더 보기 화면', 'moreViews':'더 보기 · 프로젝트 지도 · 대화 · 지표 · Git', 'taskSections':'작업 상세 구분', 'task.overview':'요약', 'task.changes':'변경', 'task.verification':'검증', 'task.history':'이력', 'w.back':'← 목록으로', 'w.now':'진행 중인 작업', 'w.nowResults':'작업 결과', 'w.owners':'담당 연결', 'w.deps':'작업 의존성', 'w.loading':'작업 목록을 읽는 중…', 'w.unavailable':'작업 목록을 사용할 수 없습니다: {v}', 'w.bad':'작업 목록 형식을 확인할 수 없습니다.', 'w.count':'작업 {n}개', 'w.omitted':'{n}개는 표시 범위 밖입니다.', 'w.dropped':'식별자가 없는 항목 {n}개는 제외했습니다.', 'w.dup':'식별자가 겹친 작업 {n}개는 구분할 수 없어 제외했습니다.', 'w.empty':'관측된 작업이 없습니다.', 'w.noneActive':'진행 중인 작업이 없습니다.', 'w.noneResults':'결과가 기록된 작업이 없습니다.', 'w.noResultCount':'결과가 기록되지 않은 작업 {n}개', 'w.owner':'담당: {v}', 'w.ownerUnknown':'담당 미확인', 'w.stateUnknown':'상태 미확인', 'w.id':'ID {v}', 'g.planned':'예정', 'g.active':'진행', 'g.review':'검토', 'g.done':'완료', 'g.other':'기타 상태', 'w.na':'미확인', 'w.evidenceNo':'검증 근거 없음', 'w.ownersNote':'작업 기록에 적힌 담당 값으로만 묶습니다. 보고·상하 관계나 provider 소속은 추론하지 않습니다.', 'w.depsNote':'선행 작업 → 후속 작업 관계만 표시하며 담당 연결과 섞지 않습니다.', 'w.depsUnknown':'선행 정보 미확인', 'w.depsNone':'선행 작업 없음', 'w.pre':'선행: {v}', 'w.post':'후속: {v}', 'w.missingDep':'{id} (목록에 없음)', 'w.cycle':'순환 의존이 관측되어 그대로 표시합니다: {v}', 'w.gone':'이 작업은 현재 관측 결과에 없습니다: {id}', 'w.revChanged':'작업 상세 버전이 변경되었습니다 ({a} → {b}).', 'w.detailUnavailable':'작업 상세를 읽을 수 없습니다.', 'w.fState':'상태', 'w.fOwner':'담당(작업 기록)', 'w.fIssue':'이슈', 'w.fPre':'선행 작업', 'w.fPost':'후속 작업', 'w.fRev':'작업 상세 버전', 'w.fId':'작업 ID', 'w.fResult':'결과 참조', 'w.fVerify':'검증 근거', 'w.noPreview':'이 작업 기록에는 미리보기 또는 diff가 포함되지 않았습니다.', 'w.resultNone':'결과가 기록되지 않았습니다.', 'w.verifyNone':'검증 근거가 기록되지 않았습니다. 미실행인지 누락인지 구분할 수 없습니다.', 'w.verifyNoRev':'이 기록의 상세 버전을 확인할 수 없습니다.', 'w.histNone':'이 작업에 연결된 이벤트·시도 기록의 범위를 확인할 수 없어 표시하지 않습니다.', 'w.histOpen':'프로젝트 전체 활동 열기 (이 작업 전용 아님)', 'w.viewAll':'작업 전체 보기',
-  alerts:'확인이 필요한 항목', alertsOpen:'주의 항목 자세히 보기', goalHeading:'프로젝트 목표', planStrip:'프로젝트 작업 검증', planVerified:'계획 작업 검증', planOpen:'계획 보기 ›',
-  threads:'다른 작업 대화', providerOptions:'Lead 후보 · Codex, Claude, AGY', providerLoad:'호스트 상태 조회', backlog:'GitHub 열린 작업 전체 맡기기',
-  launcher:'별도 Main에 새 목표 전달', chooseMain:'새 Main 선택', briefLabel:'새 작업 목표', briefPlaceholder:'Main이 Lead들과 수행할 목표를 입력하세요.', start:'목표 전달',
-  records:'프로젝트 전체 기록', metricActive:'종료 기록 없는 시도', metricTasks:'계획된 작업', metricState:'현재 상태',
-  historyTeam:'프로젝트 Main·Lead 기록', historyOps:'최근 보관된 결과물', historyRuns:'최근 실행 기록',
-  chatHeading:'작업방 대화', chatBack:'이전 보기로', chatMembers:'대화 참여자', chatOlder:'이전 메시지', chatMessages:'시간순 작업방 메시지',
-  evidenceRegion:'호출별 실행 근거', evidenceCall:'기록된 호출', evidencePrev:'근거 이전 페이지', evidenceNext:'근거 다음 페이지',
-  activityHeading:'프로젝트 활동', tuiLabel:'OMS TUI 상세', 'tui.choose':'보기 선택', 'tui.runtime':'런타임', 'tui.collab':'협업', 'tui.run':'실행',
-  'tui.overview':'개요', 'tui.health':'건강 상태', 'tui.providers':'공급자', 'tui.metrics':'지표', 'tui.capacity':'용량', 'tui.log':'로그',
-  'tui.teams':'팀', 'tui.sessions':'세션', 'tui.plan':'계획', 'tui.attention':'확인할 항목', 'tui.results':'결과', 'tui.debate':'토론',
-  'tui.routes':'경로', 'tui.workspaces':'워크스페이스', 'tui.jobs':'작업', 'tui.past':'지난 실행', tuiRegion:'선택한 OMS TUI 기록', timeline:'명령·작업 타임라인',
-  usageHeading:'토큰 사용량', gitBacklog:'열린 작업 전체를 Main에 맡기기', gitEditor:'GitHub 항목 작업 목표', gitAssignee:'배정 요청 대상', gitAuto:'Main이 Lead 선택',
-  gitGoalLabel:'대화에 전달할 목표', gitCopy:'목표 복사', gitNew:'별도 Main 목표로 사용', gitView:'GitHub 보기',
-  'gitKind.checkout':'체크아웃 PR · 검사', 'gitKind.issues':'저장소 이슈', 'gitKind.pullRequests':'저장소 PR', gitFind:'번호로 찾기', gitLookup:'조회',
-  source:'연결 정보', room:'작업방', participant:'참여자', obsRevision:'관측 리비전', obsBasis:'관측 기준', obsCompleteness:'수집 상태', appAndOms:'앱과 OMS',
-  hostSupport:'호스트별 지원과 연결 경로',
-  hostSupport1:'Codex Desktop은 대화 탭을 제공합니다. CLI와 IDE는 프로젝트의 OMS MCP 도구 또는 로컬 OMS 스킬을 사용합니다.',
-  hostSupport2:'Claude Chat은 원격 HTTPS 커넥터, Desktop은 로컬 stdio도 지원합니다. 사이드 패널은 계정·대화별 배포 대상에 따라 달라집니다. Claude Code의 네이티브 Mod는 별도 기능입니다. 터미널 2.1.287+, Desktop 내 Code 2.1.286+, VS Code 확장 2.1.299+에서는 설정에 따라 지원하며 2.1.304+에서는 플래그가 필요 없습니다.',
-  hostSupport3:'Antigravity App 2.34.0+는 로컬 stdio 또는 구성된 원격 MCP로 패널을 엽니다. CLI와 IDE에서는 텍스트 도구를 사용합니다. 로컬 OMS에는 터널이 필요하지 않습니다.',
-  connectionView:'연결 내역', 'cv.connections':'하네스와 준비 상태', 'cv.modelcatalog':'모델·강도 카탈로그', 'cv.routes':'예상 라우팅 · 계정', 'cv.attribution':'실행 응답 근거',
-  harness:'하네스', connectionRefresh:'연결 내역 다시 조회', connectionDraft:'이 하네스로 새 목표 작성',
+  tabs:'프로젝트 보기',
+  'tabsMore':'더 보기 화면', 'taskSections':'작업 상세 구분', 'w.loading':'작업 목록을 읽는 중…', 'w.unavailable':'작업 목록을 사용할 수 없습니다: {v}', 'w.bad':'작업 목록 형식을 확인할 수 없습니다.', 'w.count':'작업 {n}개', 'w.omitted':'{n}개는 표시 범위 밖입니다.', 'w.dropped':'식별자가 없는 항목 {n}개는 제외했습니다.', 'w.dup':'식별자가 겹친 작업 {n}개는 구분할 수 없어 제외했습니다.', 'w.empty':'관측된 작업이 없습니다.', 'w.noneActive':'진행 중인 작업이 없습니다.', 'w.noneResults':'결과가 기록된 작업이 없습니다.', 'w.noResultCount':'결과가 기록되지 않은 작업 {n}개', 'w.owner':'담당: {v}', 'w.ownerUnknown':'담당 미확인', 'w.stateUnknown':'상태 미확인', 'w.id':'ID {v}', 'g.planned':'예정', 'g.active':'진행', 'g.review':'검토', 'g.done':'완료', 'g.other':'기타 상태', 'w.na':'미확인', 'w.evidenceNo':'검증 근거 없음', 'w.ownersNote':'작업 기록에 적힌 담당 값으로만 묶습니다. 보고·상하 관계나 provider 소속은 추론하지 않습니다.', 'w.depsNote':'선행 작업 → 후속 작업 관계만 표시하며 담당 연결과 섞지 않습니다.', 'w.depsUnknown':'선행 정보 미확인', 'w.depsNone':'선행 작업 없음', 'w.pre':'선행: {v}', 'w.post':'후속: {v}', 'w.missingDep':'{id} (목록에 없음)', 'w.cycle':'순환 의존이 관측되어 그대로 표시합니다: {v}', 'w.gone':'이 작업은 현재 관측 결과에 없습니다: {id}', 'w.revChanged':'작업 상세 버전이 변경되었습니다 ({a} → {b}).', 'w.detailUnavailable':'작업 상세를 읽을 수 없습니다.', 'w.fState':'상태', 'w.fOwner':'담당(작업 기록)', 'w.fIssue':'이슈', 'w.fPre':'선행 작업', 'w.fPost':'후속 작업', 'w.fRev':'작업 상세 버전', 'w.fId':'작업 ID', 'w.fResult':'결과 참조', 'w.fVerify':'검증 근거', 'w.noPreview':'이 작업 기록에는 미리보기 또는 diff가 포함되지 않았습니다.', 'w.resultNone':'결과가 기록되지 않았습니다.', 'w.verifyNone':'검증 근거가 기록되지 않았습니다. 미실행인지 누락인지 구분할 수 없습니다.', 'w.verifyNoRev':'이 기록의 상세 버전을 확인할 수 없습니다.', 'w.histNone':'이 작업에 연결된 이벤트·시도 기록의 범위를 확인할 수 없어 표시하지 않습니다.', 'w.histOpen':'프로젝트 전체 활동 열기 (이 작업 전용 아님)', 'w.viewAll':'작업 전체 보기',
+  planStrip:'프로젝트 작업 검증',
+  briefPlaceholder:'Main이 Lead들과 수행할 목표를 입력하세요.',
+  chatMembers:'대화 참여자', chatMessages:'시간순 작업방 메시지',
+  evidenceRegion:'호출별 실행 근거',
+  'tui.runtime':'런타임', 'tui.collab':'협업', 'tui.run':'실행',
+  tuiRegion:'선택한 OMS TUI 기록',
+  gitEditor:'GitHub 항목 작업 목표',
   'sv.connections':'설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다.',
   'sv.modelcatalog':'로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다.',
   'sv.routes':'프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다.',
   'sv.attribution':'선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다.',
+  'state.queued':'대기열에 등록', 'state.waiting_input':'입력 대기', 'state.waiting_approval':'승인 대기', 'state.failed':'실패', 'state.cancelled':'취소됨', 'state.timed_out':'시간 초과', 'state.abandoned':'중단됨',
   'state.working':'작업 중', 'state.starting':'시작 중', 'state.verifying':'검증 중', 'state.review':'검토 중', 'state.in_review':'검토 중', 'state.done':'완료', 'state.blocked':'차단됨', 'state.waiting_for_input':'입력 대기',
   'kind.issue':'이슈 #', 'kind.pr':'PR #',
   'git.unknown':'현재 체크아웃의 Git 상태 미확인', 'git.detached':'분리된 HEAD', 'git.dirty':'작업 트리 변경 있음', 'git.clean':'작업 트리 깨끗함', 'git.dirtyUnknown':'작업 트리 미확인',
@@ -775,6 +756,9 @@ ko: {
   'mutate.working':'요청을 처리하는 중…'
 },
 en: {
+  'scratch.heading':'Managed worktree history', 'scratch.unavailable':'Worktree records are unavailable.', 'scratch.empty':'No worktree executions recorded for this project.',
+  'scratch.partial':'Only part of the history was observed.', 'scratch.omitted':'{n} execution records omitted', 'scratch.unverified':'{n} unverified', 'scratch.unexamined':'{n} unexamined',
+  'scratch.sources':'{n} worktrees omitted', 'scratch.recorded':'Recorded state · {s}', 'scratch.at':'Recorded at · {at}',
   'share.manual':'Copy the answer and paste it into this conversation on this host.',
   'peer.assign':"Request a read-only review",
   'peer.legend':"Reviewer for this room",
@@ -845,6 +829,7 @@ en: {
   'sv.modelcatalog':'Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.',
   'sv.routes':'Expected routing for the project\'s next call. Only confirmed logical aliases are shown for accounts.',
   'sv.attribution':'Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.',
+  'state.queued':'Queued', 'state.waiting_input':'Waiting for input', 'state.waiting_approval':'Waiting for approval', 'state.failed':'Failed', 'state.cancelled':'Cancelled', 'state.timed_out':'Timed out', 'state.abandoned':'Abandoned',
   'state.working':'Working', 'state.starting':'Starting', 'state.verifying':'Verifying', 'state.review':'In review', 'state.in_review':'In review', 'state.done':'Done', 'state.blocked':'Blocked', 'state.waiting_for_input':'Waiting for input',
   'kind.issue':'Issue #', 'kind.pr':'PR #',
   'git.unknown':'Git status of the current checkout is unknown', 'git.detached':'Detached HEAD', 'git.dirty':'Working tree has changes', 'git.clean':'Working tree clean', 'git.dirtyUnknown':'Working tree unknown',
@@ -929,6 +914,11 @@ en: {
   'mutate.working':'Processing the request…'
 }
 };
+// Preserve the first-paint Korean labels as the static translation source.
+for (const e of document.querySelectorAll('[data-i18n]')) {
+  const key = e.getAttribute('data-i18n');
+  MSG.ko[key] ??= e.textContent;
+}
 const pending = new Map();
 let sequence = 0;
 let hostOrigin = '*';
@@ -1698,8 +1688,7 @@ function node(tag, text, className) {
 
 const formatCount = n => Number.isFinite(n) ? n.toLocaleString(locale()) : t('unknown');
 const providerName = p => names[p] || p || t('providerUnknown');
-const stateLabels = new Set(['working','starting','verifying','review','in_review','done','blocked','waiting_for_input']);
-const stateLabel = s => stateLabels.has(s) ? t('state.' + s) : s;
+const stateLabel = s => Object.hasOwn(MSG.ko,'state.' + s) ? t('state.' + s) : s;
 function dateLabel(stamp) {
   const ms = typeof stamp === 'number' ? stamp * 1000 : Date.parse(stamp);
   return Number.isFinite(ms) ? new Date(ms).toLocaleString(locale()) : '';
@@ -2223,6 +2212,7 @@ function clearProject() {
   el('launcher').open = false;
   briefInvalid = false; el('brief').setCustomValidity('');
   el('receipt').className = '';
+  renderScratch();
   for (const id of ['receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
     el(id).replaceChildren();
   }
@@ -2775,7 +2765,39 @@ function renderConversation(d) {
   }
 }
 
+function renderScratch(history) {
+  const section = el('scratch-history'), list = el('scratch-rows');
+  list.replaceChildren();
+  section.hidden = !history;
+  if (!history) { el('scratch-status').replaceChildren(); return; }
+  const readable = ['ready','partial'].includes(history.status);
+  const sources = new Map((Array.isArray(history.sources) ? history.sources : [])
+    .filter(s => s?.status === 'ready' && s.id && s.label).map(s => [s.id,s.label]));
+  const records = Array.isArray(history.attempts) ? history.attempts : [];
+  let skipped = !Array.isArray(history.attempts) || !Array.isArray(history.sources);
+  for (const row of readable ? records : []) {
+    const label = sources.get(row?.sourceId);
+    if (!label || !row.id) { skipped = true; continue; }
+    const item = node('li','','entry'), detail = node('div','');
+    detail.append(node('strong',label), node('div',() => [row.provider && providerName(row.provider),row.tool].filter(Boolean).join(' · '),'muted'),
+      node('div',() => t('scratch.recorded',{s:stateLabel(row.state) || t('unknown')})),
+      node('div',() => t('scratch.at',{at:dateLabel(row.updatedAt) || t('unknown')}),'muted'));
+    item.append(detail); list.append(item);
+  }
+  put('scratch-status', () => {
+    if (!readable) return t('scratch.unavailable');
+    const notes = [['omittedAttempts','scratch.omitted'],['omittedSources','scratch.sources'],
+      ['unverifiedCheckouts','scratch.unverified'],['unexaminedCheckouts','scratch.unexamined']]
+      .filter(([key]) => Number.isSafeInteger(history[key]) && history[key] > 0)
+      .map(([key,msg]) => t(msg,{n:formatCount(history[key])}));
+    if (skipped || notes.length || history.status === 'partial') notes.unshift(t('scratch.partial'));
+    else if (!records.length) notes.push(t('scratch.empty'));
+    return notes.join(' · ');
+  });
+}
+
 function renderActivity(d) {
+  renderScratch(d.managedScratch);
   const attempts = d.attempts || [];
   const state = d.commandStatus;
   put('core-state', () => [t('act.planned',{n:formatCount(d.tasks)}), d.taskStatus, d.degraded === true && t('act.partialRuntime')].filter(Boolean).join(' · '));
@@ -2996,7 +3018,7 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw uiError('openApp');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.7.0'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.0'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || {k:'surf.unknown'};
       hostLocale = typeof info?.hostContext?.locale === 'string' ? info.hostContext.locale : '';

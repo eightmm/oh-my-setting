@@ -441,6 +441,34 @@ test('TUI partial totals and failed next pages preserve the last observed rows a
   assert.doesNotMatch(p.get('tui-status').textContent,/전체 0|합계 0/);
 });
 
+test('managed worktree history is localized display-only evidence with independent canonical counts', async () => {
+  const source={id:'worktree-1',label:'wt-0123456789ab (detached)',status:'ready'};
+  const managedScratch={status:'partial',unverifiedCheckouts:1,unexaminedCheckouts:2,omittedAttempts:3,omittedSources:4,
+    sources:[source],attempts:[{id:'duplicate',sourceId:source.id,provider:'claude',tool:'peer-review',state:'queued',updatedAt:'2026-01-02T03:04:05Z'}]};
+  const p=await panel(['one'],{active:1,attempts:[{id:'duplicate',tool:'peer-ask'}],managedScratch});
+  assert.equal(p.get('scratch-history').hidden,false);
+  assert.match(p.get('scratch-rows').textContent,/wt-0123456789ab.*Claude.*peer-review.*기록된 상태 · 대기열에 등록.*기록 시각/);
+  assert.match(p.get('scratch-status').textContent,/실행 기록 3개 생략.*작업트리 4개 생략.*소유 미확인 1개.*미조회 2개/);
+  assert.equal(p.get('active').textContent,'1'); assert.doesNotMatch(p.get('activity').textContent,/peer-review/);
+  const calls=p.calls.length;
+  await choose(p,'en');
+  assert.match(p.get('scratch-heading').textContent,/Managed worktree history/);
+  assert.match(p.get('scratch-rows').textContent,/Recorded state · Queued.*Recorded at/);
+  assert.match(p.get('scratch-status').textContent,/Only part.*3 execution records omitted.*4 worktrees omitted/);
+  assert.equal(p.calls.length,calls);
+  for(const status of ['unavailable','future-status']) {
+    p.run('renderScratch('+JSON.stringify({...managedScratch,status})+')');
+    assert.match(p.get('scratch-status').textContent,/unavailable/); assert.equal(p.get('scratch-rows').textContent,'');
+  }
+  p.run('renderScratch({status:"ready",sources:[],attempts:[]})');
+  assert.match(p.get('scratch-status').textContent,/No worktree executions/);
+  p.run('renderScratch('+JSON.stringify({...managedScratch,status:'ready',sources:[],unverifiedCheckouts:0,unexaminedCheckouts:0,omittedAttempts:0,omittedSources:0})+')');
+  assert.match(p.get('scratch-status').textContent,/Only part/);
+  assert.equal(p.get('scratch-rows').textContent,'');
+  p.run('clearProject()');assert.equal(p.get('scratch-history').hidden,true);
+  const legacy=await panel(['one'],{active:1});assert.equal(legacy.get('scratch-history').hidden,true);
+});
+
 test('a compact snapshot reports only positive omissions and keeps empty samples uncertain', async () => {
   const p = await panel(['one'], {attemptsTrimmed:2,operationsTrimmed:1,attentionTrimmed:0,activeAttemptsTrimmed:3,
     active:0,activeAttempts:[],attempts:[],reviews:{available:true},
@@ -505,7 +533,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.7.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.0');
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);

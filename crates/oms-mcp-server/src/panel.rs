@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v12.html";
+const URI: &str = "ui://oms/conversation-panel/v13.html";
+const V12: &str = "ui://oms/conversation-panel/v12.html";
 const V11: &str = "ui://oms/conversation-panel/v11.html";
 const V10: &str = "ui://oms/conversation-panel/v10.html";
 const V9: &str = "ui://oms/conversation-panel/v9.html";
@@ -620,7 +621,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12)
                 ) =>
             {
                 json!({"contents":[{
