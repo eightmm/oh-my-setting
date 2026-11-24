@@ -211,9 +211,9 @@ chat. `oms_start_status` looks up the original project and request UUID.
 while launch remains unconfirmed. `recorded` returns the matching attempt
 and its state.
 
-This overview shows the OMS checkout’s Git-tracked directories in a 570-pixel Chromium test host. The compact preview ends before the project goal.
+This 570-pixel Chromium capture uses a local example project with three recorded plan tasks, two claimed owners and one prerequisite. The panel read the project through the generic MCP Apps profile.
 
-![OMS overview showing the crates, scripts and docs directories and project exploration controls](assets/oms-chat-panel.png)
+![OMS Now view showing the project goal, claimed tasks, result availability and project map](assets/oms-chat-panel.png)
 
 In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
 to ask one Claude or AGY researcher a question. Submitting the form invokes the
