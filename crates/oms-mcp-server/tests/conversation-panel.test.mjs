@@ -505,7 +505,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.6.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.7.0');
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
@@ -632,26 +632,56 @@ test('settings page, permission failure and project change discard prior catalog
 });
 
 
-test('Project pages use the linked board ID, expose field hints and only offer a draft for eligible issues',async () => {
+test('Project pages explain each native recommendation in both languages and keep unverified items read-only',async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   const board={id:'PVT_scope',number:2,url:'https://github.com/orgs/org/projects/2',title:'Release'};
+  const issue=(n,advice,kind='candidate')=>({...openItem,number:n,url:'https://github.com/org/repo/issues/'+n,
+    class:kind,fields:{Status:{name:'Ready'}},recommendation:advice});
   const calls=[];
   p.host.tools={oms_panel_git_status:args=>{
     if (!args.boardId) return {...workData,github:{...workData.github,work:{projects:{status:'available',items:[board]}}}};
     calls.push(args);
-    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:['Phase']}},status:'available',nextCursor:args.cursor?null:'board.next',
-      items:[{...openItem,class:args.cursor?'blocked':'candidate',fields:{Status:{name:'Ready'}}}]}}};
+    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:[]}},status:'available',incomplete:!args.cursor,nextCursor:args.cursor?null:'board.next',
+      items:args.cursor?[issue(9,{state:'excluded',reason:'blocked'},'blocked')]:[
+        issue(1,{state:'recommended',reason:'ready_with_priority'}),
+        issue(2,{state:'excluded',reason:'status_not_ready'}),
+        issue(3,{state:'unverified',reason:'dependencies_unknown'}),
+        issue(4,undefined,'plan_linked'),
+        issue(5,{state:'recommended',reason:'unrecognized-code'}),
+        issue(6,{state:'future-state',reason:'ready_with_priority'}),
+        issue(7,{state:'recommended',reason:'ready_with_priority'},'blocked')
+      ]}}};
   }};
   await p.event('tab-git','click');p.get('git-kind').value='projects';await p.event('git-kind','change');
   const box=p.get('git-catalog').children.at(-1).children.at(-1);
   const [next,back,note,rows]=box.children.filter(x=>typeof x==='object');
   assert.equal(calls.length,0);next.dispatchEvent(new Event('click'));await setImmediate();
   assert.deepEqual({...calls[0]},{boardId:'PVT_scope',project:'one'});
-  assert.match(rows.textContent,/검토 후보.*Status Ready.*작업 목표 작성/);
-  assert.match(note.textContent,/Phase/);
-  next.dispatchEvent(new Event('click'));await setImmediate();
-  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/선행 이슈 진행 중/);
-  assert.doesNotMatch(rows.textContent,/작업 목표 작성/);assert.equal(next.hidden,true);assert.equal(back.hidden,false);
+  const cards=rows.children.filter(c=>typeof c==='object');
+  assert.match(cards[0].textContent,/추천 · Ready.*Status Ready.*작업 목표 작성/);
+  assert.match(cards[1].textContent,/제외 · 상태가 Ready가 아닙니다/);
+  assert.match(cards[2].textContent,/추천 보류 · 선행 이슈/);
+  assert.match(cards[3].textContent,/서버가 추천 정보를 보내지 않았습니다/);
+  assert.match(cards[3].textContent,/Plan/);
+  for (const card of cards.slice(4)) assert.match(card.textContent,/추천 보류 · 추천 상태나 판단 근거/);
+  for (const card of cards.slice(1)) assert.doesNotMatch(card.textContent,/작업 목표 작성/);
+  assert.match(note.textContent,/이 페이지에 표시된 항목별/);
+  const draft=cards[0].children.at(-1);
+  assert.match(draft.getAttribute('aria-label'),/1/);
+  p.get('language-choice').value='en';await p.event('language-choice','change');
+  assert.match(cards[0].textContent,/Recommended · Ready at priority P0–P2/);
+  assert.match(cards[1].textContent,/Excluded · Status is not Ready/);
+  assert.match(cards[2].textContent,/Unverified · Blocker information is incomplete/);
+  assert.match(cards[3].textContent,/server did not provide a recommendation/);
+  assert.match(note.textContent,/per item on this page/);
+  draft.dispatchEvent(new Event('click'));
+  assert.equal(p.get('git-editor').hidden,false);
+  assert.match(p.get('git-goal').value,/https:\/\/github\.com\/org\/repo\/issues\/1/);
+  assert.ok(p.get('git-goal').focused);
+  assert.equal(calls.length,1);
+  p.document.activeElement=next;next.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/Excluded · Blocked by an open prerequisite/);
+  assert.equal(next.hidden,true);assert.equal(back.hidden,false);assert.equal(note.focused,1);
   assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>c.name==='oms_start_main'));
 });
 
