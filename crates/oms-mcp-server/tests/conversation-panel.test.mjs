@@ -705,7 +705,7 @@ test('Overview binds its map before the dashboard finishes; node navigation and 
   p.host.tools = {
     oms_panel_project_graph:({project,node:focus}) => ({
       schema:1,kind:'oms-panel-project-graph',provenance:{source:'git-ls-files',indexState:'unindexed'},scope:{focusNode:focus || 'dir:.'},status:'ready',selection:focus ? {status:'found',node:{id:focus,kind:'directory',privateDetail:'omit-this'}} : null,nodes:focus ? [{id:'src',label:'src',kind:'directory'},{id:'src/main.rs',label:'main.rs',kind:'file'}] :
-        [{id:'dir:.',label:project,kind:'repository'},{id:'src',label:'src',kind:'directory'},{id:'docs',label:'docs',kind:'directory'}],
+        [{id:'dir:.',label:project,kind:'repository'},{id:'src',label:'src',kind:'directory',file_count:5,omitted_children:2},{id:'docs',label:'docs',kind:'directory'}],
       edges:[{source:focus || 'dir:.',target:focus ? 'src/main.rs' : 'src',relation:'contains',confidence:'STRUCTURAL'}]
     }),
     oms_panel_capabilities:() => ({schema:1,commands:[],total:0})
@@ -713,7 +713,7 @@ test('Overview binds its map before the dashboard finishes; node navigation and 
   p.host.delay='one';p.get('project-choice').value='one';await p.event('project-choice','change');
   assert.equal(p.get('map-field').hidden,false);
   assert.equal(p.get('map-root').textContent,'one');assert.match(p.get('map-status').textContent,/색인 없음/);
-  assert.match(p.get('map-children').textContent,/src/);
+  assert.match(p.get('map-children').textContent,/src.*파일 5개/);
   assert.doesNotMatch(p.get('map-children').textContent,/docs|가져오기/);
   p.host.release(); await setImmediate();
   p.get('map-children').children[0].children.at(-1).dispatchEvent(new Event('click'));await setImmediate();
