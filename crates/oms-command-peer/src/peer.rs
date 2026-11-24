@@ -1054,12 +1054,26 @@ fn call_routed(
     }
     let raw = String::from_utf8_lossy(&result.stdout);
     let mut answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
-    // Classify the raw answer: redaction can erase a trailing stop-reason or timeout line.
+    // Classify the raw answer: redaction can erase a trailing stop-reason or timeout line. The saved
+    // answer then leads with a fixed stop line so every later reader classifies it the same way.
     let quality = if result.complete {
         providers::answer_quality(&raw).to_owned()
     } else {
         "truncated".into()
     };
+    let stop = match quality.as_str() {
+        "truncated" => {
+            Some("stop-reason: provider=oms reason=stream_truncated subtype=redacted is_error=0")
+        }
+        "blocked" => Some("stop-reason: provider=oms reason=refusal subtype=redacted is_error=1"),
+        _ => None,
+    };
+    if let Some(stop) = stop
+        && result.complete
+        && providers::answer_quality(&answer) != quality
+    {
+        answer = format!("{stop}\n{answer}");
+    }
     if tool == "peer-review" && args.has("gate") && quality == "ok" {
         answer = crate::review::restore_verdict(&raw, answer);
     }

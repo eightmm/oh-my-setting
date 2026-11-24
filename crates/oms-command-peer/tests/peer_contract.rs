@@ -3439,11 +3439,31 @@ fn review_classification_and_validation() {
                 ".oms/review-gate-redacted-refusal",
                 2,
             ),
+            (
+                format!(
+                    "CONFIDENCE: 0.9\nGATE: pass\nSee {marker} here.\nstop-reason: provider=codex reason=stream_truncated subtype=none is_error=0\n"
+                ),
+                ".oms/review-gate-redacted-truncated",
+                2,
+            ),
         ] {
             *provider_answer.borrow_mut() = answer.into_bytes();
             let (output, calls, _) = run_gate(&["--no-verify"], directory, false);
             assert_eq!(output.0, expected, "{directory}: {output:?}");
             assert_eq!(calls, 1);
+            let state = if expected == 1 { "fail" } else { "incomplete" };
+            let listed = run(
+                &gate_repo,
+                &gate_repo.0,
+                "peer-review",
+                &["verdicts", directory, "--json"],
+            );
+            let listed = V::parse(&listed.1).unwrap();
+            assert_eq!(
+                listed.get("seats").array()[0].get("verdict").text(),
+                Some(state),
+                "{directory}"
+            );
         }
     });
 }
