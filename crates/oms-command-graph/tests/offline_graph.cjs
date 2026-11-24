@@ -7,14 +7,26 @@ const template = fs.readFileSync(path.join(__dirname, '../src/graph.html'), 'utf
 const mcp = fs.readFileSync(path.join(__dirname, '../../oms-mcp-server/src/project-graph.html'), 'utf8');
 const script = html => html.match(/\(\(\) => \{[\s\S]*?\n\}\)\(\);/)[0];
 const style = html => html.match(/<style>([\s\S]*?)<\/style>/)[1];
+const legendBlock = html => html.match(/<div class="oms-graph-legend[^>]*>([\s\S]*?)<\/div>/)[1];
 assert.equal(script(mcp).replaceAll('oms-graph-view-19ff9c65bfcf', '@@ROOT@@'), script(template));
 assert.equal(style(mcp).replaceAll('oms-graph-view-19ff9c65bfcf', '@@ROOT@@'), style(template));
+assert.equal(legendBlock(mcp).replaceAll('oms-graph-view-19ff9c65bfcf', '@@ROOT@@'), legendBlock(template));
 
 // No new external dependencies, CDNs, network calls, or frameworks.
+const networkPattern = /\b(?:fetch|XMLHttpRequest)\b|@import\b/i;
+assert.match('@import url("a.css");', networkPattern, 'network regex must detect CSS @import');
+assert.match('  @import "a.css";', networkPattern, 'network regex must detect indented CSS @import');
+assert.match('fetch("/api")', networkPattern, 'network regex must detect fetch');
+assert.match('new XMLHttpRequest()', networkPattern, 'network regex must detect XMLHttpRequest');
 for (const [name, html] of [['graph.html', template], ['project-graph.html', mcp]]) {
   const externalScripts = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(externalScripts, ['https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js'], `${name} external scripts`);
-  assert.doesNotMatch(html, /\b(fetch|XMLHttpRequest|@import)\b/, `${name} must not make network calls`);
+  assert.doesNotMatch(html, networkPattern, `${name} must not make network calls`);
+  const svgTag = html.match(/<svg\b[^>]*>/);
+  assert.ok(svgTag, `${name} must include an <svg> element`);
+  assert.doesNotMatch(svgTag[0], /\brole="img"/, `${name} svg must not use role="img" (hides interactive button children)`);
+  assert.match(svgTag[0], /\brole="group"/, `${name} svg must use a container role that exposes interactive children`);
+  assert.match(svgTag[0], /\baria-label="[^"]+"/, `${name} svg must keep an accessible aria-label`);
 }
 
 // Theme variables, focus visibility, and responsive layout CSS contract.
@@ -125,25 +137,22 @@ function render(data, options = {}) {
   const svg = root.querySelector('#@@ROOT@@-svg');
   svg.append(new Element('title'));
   const legend = root.querySelector('#@@ROOT@@-legend');
-  for (const [cls, attr, val, label] of [
-    ['oms-project-key', 'data-assurance', 'supported', 'Test-linked'],
-    ['oms-project-key', 'data-assurance', 'needs-evidence', 'Needs evidence'],
-    ['oms-project-key', 'data-assurance', 'attention', 'Attention'],
-    ['oms-project-key', 'data-assurance', 'test-evidence', 'Test evidence'],
-    ['oms-exec-key', 'data-status', 'finished', 'Finished'],
-    ['oms-exec-key', 'data-status', 'active', 'Active'],
-    ['oms-change-key', 'data-change', 'changed', 'Changed'],
-    ['oms-change-key', 'data-change', 'impacted', 'Impacted'],
-    ['oms-kind-key', 'data-kind-key', 'file', 'File / module'],
-    ['oms-kind-key', 'data-kind-key', 'symbol', 'Symbol / func'],
-    ['oms-kind-key', 'data-kind-key', 'test', 'Test / gate'],
-    ['oms-kind-key', 'data-kind-key', 'agent', 'Agent'],
-    ['oms-kind-key', 'data-kind-key', 'terminal', 'Terminal']
-  ]) {
+  for (const match of legendBlock(template).matchAll(/<span\b([^>]*)>([\s\S]*?)<\/span>/g)) {
+    const [, attrs, inner] = match;
     const item = new Element('span');
-    item.setAttribute('class', cls);
-    if (attr === 'data-kind-key') item.setAttribute('data-kind-key', val);
-    item.textContent = label;
+    const cls = attrs.match(/\bclass="([^"]*)"/);
+    if (cls) item.setAttribute('class', cls[1]);
+    const kindKey = attrs.match(/\bdata-kind-key="([^"]*)"/);
+    if (kindKey) item.setAttribute('data-kind-key', kindKey[1]);
+    if (/\bhidden\b/.test(attrs)) item.hidden = true;
+    const glyphMatch = inner.match(/<i\b([^>]*)>([^<]*)<\/i>([\s\S]*)/);
+    if (glyphMatch) {
+      const icon = new Element('i');
+      icon.textContent = glyphMatch[2];
+      item.append(icon, {textContent: glyphMatch[3]});
+    } else {
+      item.textContent = inner.trim();
+    }
     legend.append(item);
   }
   root.append(legend, stage);
@@ -213,7 +222,7 @@ for (const kind of ['project', 'execution']) for (const count of [0, 1, 30]) {
   assert.equal(view.get('search').value, '');
 }
 
-// 2. Narrow / medium / wide responsive widths (320 / 768 / 1024 CSS px).
+// 2. Narrow / medium / wide responsive widths (320 / 768 / 1024 CSS px), including 200-node non-overlap.
 const responsiveData = model('project', 12);
 for (const [w, expectedLayout, expectedHeight] of [[320, 'narrow', 400], [768, 'medium', 520], [1024, 'wide', 520]]) {
   const view = render(responsiveData, {width: w});
@@ -224,6 +233,44 @@ for (const [w, expectedLayout, expectedHeight] of [[320, 'narrow', 400], [768, '
     assert.ok(Number(x) >= 18 && Number(x) <= w - 18, `x=${x} within width ${w}`);
     assert.ok(Number(y) >= 18 && Number(y) <= expectedHeight - 18, `y=${y} within height ${expectedHeight}`);
   }
+}
+
+const denseData = {
+  kind: 'project',
+  title: 'Dense Project Graph',
+  counts: {},
+  nodes: Array.from({length: 200}, (_, i) => ({
+    id: `d${i}`, label: `Node ${i}`, path: `src/${i}.rs`, kind: i % 2 === 0 ? 'file' : 'function',
+    show_label: i < 4, degree: (i % 6) * 7, assurance: 'supported', status: 'done'
+  })),
+  edges: [{source: 'd0', target: 'd1', relation: 'calls', confidence: 'EXTRACTED'}]
+};
+for (const [w, expectedLayout, minHeight] of [[320, 'narrow', 400], [768, 'medium', 520], [1024, 'wide', 520]]) {
+  const view = render(denseData, {width: w});
+  assert.equal(view.root.attributes['data-layout'], expectedLayout);
+  const vb = view.svg.attributes.viewBox.match(/^0 0 (\d+) (\d+)$/);
+  assert.ok(vb, `200-node viewBox must be numeric for width ${w}`);
+  const vbW = Number(vb[1]);
+  const vbH = Number(vb[2]);
+  assert.equal(vbW, w);
+  assert.ok(vbH >= minHeight, `200-node height ${vbH} >= ${minHeight} at width ${w}`);
+  const pts = view.nodes.map((n, idx) => {
+    const [, x, y] = n.attributes.transform.match(/^translate\(([\d.]+),([\d.]+)\)$/);
+    const r = Math.max(9, Math.min(14, 8 + Math.sqrt(denseData.nodes[idx].degree || 0)));
+    assert.ok(Number(x) >= 18 && Number(x) <= vbW - 18, `200-node x=${x} within width ${vbW}`);
+    assert.ok(Number(y) >= 18 && Number(y) <= vbH - 18, `200-node y=${y} within height ${vbH}`);
+    return {x: Number(x), y: Number(y), r};
+  });
+  for (let i = 0; i < pts.length; i += 1) {
+    for (let j = i + 1; j < pts.length; j += 1) {
+      const dist = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+      const minDist = pts[i].r + pts[j].r;
+      assert.ok(dist >= minDist, `200-node overlap at width ${w}: nodes ${i} and ${j} dist=${dist.toFixed(2)} < ${minDist.toFixed(2)}`);
+    }
+  }
+  const tabStops = view.nodes.filter(n => n.attributes.tabindex === '0');
+  assert.equal(tabStops.length, 1, `200-node graph must expose only 1 tab stop at width ${w}`);
+  assert.equal(tabStops[0], view.nodes[0]);
 }
 
 // 3. Non-color status and node kind encoding (shapes, glyphs, patterns, legend, badges).
@@ -261,12 +308,15 @@ assert.match(richView.get('badges').textContent, /changed/i);
 const richExec = {
   kind: 'execution',
   title: 'OMS Execution Graph',
-  counts: {shown_nodes: 4, total_nodes: 4, shown_edges: 2, total_edges: 2},
+  counts: {shown_nodes: 7, total_nodes: 7, shown_edges: 2, total_edges: 2},
   nodes: [
     {id: 'e1', label: 'Plan', kind: 'agent', degree: 1, focus: true, show_label: true, status: 'active'},
     {id: 'e2', label: 'Gate', kind: 'gate', degree: 2, focus: false, show_label: true, status: 'failed'},
     {id: 'e3', label: 'Verify', kind: 'node', degree: 1, focus: false, show_label: true, status: 'pending'},
-    {id: 'e4', label: 'Finish', kind: 'terminal', degree: 1, focus: false, show_label: true, status: 'finished'}
+    {id: 'e4', label: 'Finish', kind: 'terminal', degree: 1, focus: false, show_label: true, status: 'finished'},
+    {id: 'e5', label: 'Wait', kind: 'node', degree: 1, focus: false, show_label: true, status: 'blocked'},
+    {id: 'e6', label: 'Hold', kind: 'node', degree: 1, focus: false, show_label: true, status: 'waiting'},
+    {id: 'e7', label: 'Queue', kind: 'node', degree: 1, focus: false, show_label: true, status: 'ready'}
   ],
   edges: [
     {source: 'e1', target: 'e2', relation: 'next', confidence: 'NORMAL'},
@@ -275,15 +325,51 @@ const richExec = {
 };
 const execView = render(richExec, {width: 768});
 assert.equal(execView.get('legend').hidden, false, 'execution graph must also show status/kind legend');
-assert.deepEqual(execView.nodes.map(n => n.querySelector('.oms-graph-glyph').textContent), ['▶', '✕', '○', '✓']);
+const execGlyphs = execView.nodes.map(n => n.querySelector('.oms-graph-glyph').textContent);
+const execPatterns = execView.nodes.map(n => n.attributes['data-pattern']);
+assert.deepEqual(execGlyphs.slice(0, 6), ['▶', '✕', '○', '✓', '⏸', '⏸']);
+assert.notEqual(execGlyphs[6], execGlyphs[2], 'ready must have a distinct glyph from pending');
+assert.notEqual(execPatterns[6], execPatterns[2], 'ready must have a distinct pattern from pending');
+const visibleLegendGlyphs = (view, cls) => new Set(
+  view.get('legend').children
+    .filter(item => !item.hidden && item.classList.contains(cls))
+    .map(item => item.querySelector('i')?.textContent)
+    .filter(Boolean)
+);
+const execLegendGlyphs = visibleLegendGlyphs(execView, 'oms-exec-key');
+for (const glyph of execGlyphs) {
+  assert.ok(execLegendGlyphs.has(glyph), `execution legend must explain glyph ${JSON.stringify(glyph)}`);
+}
+const execLegendText = execView.get('legend').children.filter(item => !item.hidden && item.classList.contains('oms-exec-key')).map(item => item.textContent).join(' | ');
+assert.match(execLegendText, /blocked|waiting/i, 'execution legend must explain blocked/waiting');
+assert.match(execLegendText, /ready/i, 'execution legend must explain ready');
 
-// 4. Keyboard navigation, selection persistence across search/filter/zoom/resize, Escape & clear focus restoration.
+const unclassifiedProject = render({
+  kind: 'project',
+  title: 'Unclassified Project Graph',
+  counts: {shown_nodes: 5, total_nodes: 5, shown_edges: 0, total_edges: 0},
+  nodes: [
+    {id: 'u1', label: 'a.rs', path: 'src/a.rs', kind: 'file', degree: 1, show_label: true, assurance: 'supported'},
+    {id: 'u2', label: 'b.rs', path: 'src/b.rs', kind: 'file', degree: 1, show_label: true, assurance: 'needs-evidence'},
+    {id: 'u3', label: 'c.rs', path: 'src/c.rs', kind: 'file', degree: 1, show_label: true, assurance: 'attention'},
+    {id: 'u4', label: 'd.rs', path: 'src/d.rs', kind: 'test', degree: 1, show_label: true, assurance: 'test-evidence'},
+    {id: 'u5', label: 'e.rs', path: 'src/e.rs', kind: 'file', degree: 1, show_label: true, assurance: ''}
+  ],
+  edges: []
+}, {width: 768});
+const projectLegendGlyphs = visibleLegendGlyphs(unclassifiedProject, 'oms-project-key');
+for (const nodeEl of unclassifiedProject.nodes) {
+  const glyph = nodeEl.querySelector('.oms-graph-glyph').textContent;
+  assert.ok(projectLegendGlyphs.has(glyph), `project legend must explain glyph ${JSON.stringify(glyph)}`);
+}
+
+// 4. Keyboard navigation, roving tabindex, selection persistence across search/filter/zoom/resize, Escape & clear focus restoration.
 assert.equal(richView.nodes[0].attributes.role, 'button');
 assert.equal(richView.nodes[0].attributes.tabindex, '0');
 assert.equal(richView.nodes[0].attributes['aria-pressed'], 'true');
 assert.match(richView.nodes[0].attributes['aria-label'], /main\.rs.*file.*Test-linked/);
-// Out-of-scope node (distance 3 with default_scope='neighbors') is excluded from tab order.
-assert.equal(richView.nodes[4].attributes.tabindex, '-1');
+// Roving tabindex: only the selected (or first visible) node has tabindex=0; all others have -1.
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['0', '-1', '-1', '-1', '-1']);
 
 // Select fn1 via keyboard Enter without stealing focus to draft textarea.
 richView.nodes[1].focus();
@@ -291,10 +377,24 @@ richView.nodes[1].fire('keydown', {key: 'Enter'});
 assert.equal(richView.get('node').value, 'fn1');
 assert.equal(richView.nodes[1].attributes['aria-pressed'], 'true');
 assert.equal(richView.document.activeElement, richView.nodes[1], 'keyboard node selection must not steal focus to draft');
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['-1', '0', '-1', '-1', '-1']);
 
-// ArrowRight moves focus to next visible node.
+// ArrowRight/ArrowDown and ArrowLeft/ArrowUp move focus and the roving tab stop across visible nodes.
 richView.nodes[1].fire('keydown', {key: 'ArrowRight'});
 assert.equal(richView.document.activeElement, richView.nodes[2]);
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['-1', '-1', '0', '-1', '-1']);
+richView.nodes[2].fire('keydown', {key: 'ArrowDown'});
+assert.equal(richView.document.activeElement, richView.nodes[0]);
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['0', '-1', '-1', '-1', '-1']);
+richView.nodes[0].fire('keydown', {key: 'ArrowUp'});
+assert.equal(richView.document.activeElement, richView.nodes[2]);
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['-1', '-1', '0', '-1', '-1']);
+richView.nodes[2].fire('keydown', {key: 'ArrowLeft'});
+assert.equal(richView.document.activeElement, richView.nodes[1]);
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['-1', '0', '-1', '-1', '-1']);
+// Move tab stop to t1, then filter it out: tab stop falls back to selected visible node fn1.
+richView.nodes[1].fire('keydown', {key: 'ArrowRight'});
+assert.equal(richView.nodes[2].attributes.tabindex, '0');
 
 // Edit unsent draft on fn1, then search/filter/zoom/resize -> selection and unsent draft stay intact.
 richView.get('draft').value = 'Custom user note for fn1';
@@ -309,6 +409,7 @@ assert.equal(richView.root.attributes['data-layout'], 'narrow');
 assert.equal(richView.get('node').value, 'fn1');
 assert.equal(richView.nodes[1].classList.contains('is-selected'), true);
 assert.equal(richView.nodes[1].classList.contains('is-muted'), false);
+assert.deepEqual(richView.nodes.map(n => n.attributes.tabindex), ['-1', '0', '-1', '-1', '-1']);
 assert.equal(richView.get('draft').value, 'Custom user note for fn1');
 const fn1Option = richView.get('node').options.find(opt => opt.value === 'fn1');
 assert.equal(fn1Option.hidden, false, 'selected option must remain visible during search');
