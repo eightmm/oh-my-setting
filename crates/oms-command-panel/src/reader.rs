@@ -1302,9 +1302,16 @@ fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> S
             .into(),
         );
     }
-    for raw_line in raw.lines() {
-        lines.push(raw_line.trim_end_matches('\r').to_owned());
+    let mut kept: Vec<&str> = raw.lines().map(|l| l.trim_end_matches('\r')).collect();
+    // A tail cut can drop a PEM block's BEGIN line, and redaction only matches whole
+    // blocks, so drop everything through an END line that has no BEGIN before it.
+    if truncated
+        && let Some(end) = kept.iter().position(|l| l.starts_with("-----END "))
+        && !kept[..end].iter().any(|l| l.starts_with("-----BEGIN "))
+    {
+        kept.drain(..=end);
     }
+    lines.extend(kept.into_iter().map(str::to_owned));
     lines.join("\n")
 }
 
@@ -2774,6 +2781,16 @@ mod tests {
             budgeted.contains("REPORT2_TAIL"),
             "att-r2 tail should be retained:\n{budgeted}"
         );
+        // A tail cut inside a PEM block must not show the body whose BEGIN line was dropped.
+        let dashes = "-".repeat(5);
+        let cut = format!(
+            "KEYBODY_LINE\n{dashes}END {}{dashes}\nAFTER_KEY",
+            ["PRIVATE", "KEY"].join(" ")
+        );
+        let shown = format_report_bytes(cut.as_bytes(), true, true);
+        assert!(!shown.contains("KEYBODY_LINE"), "{shown}");
+        assert!(shown.contains("AFTER_KEY"), "{shown}");
+        assert!(format_report_bytes(cut.as_bytes(), false, false).contains("KEYBODY_LINE"));
         assert!(
             !budgeted.contains(&secret_like),
             "secret in truncated report tail leaked:\n{budgeted}"
