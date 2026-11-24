@@ -631,6 +631,145 @@ fn missing_services_fail_closed() {
     });
 }
 #[test]
+fn desktop_assignment_rechecks_partial_membership_with_a_bounded_complete_inventory() {
+    isolated(
+        "desktop_assignment_rechecks_partial_membership_with_a_bounded_complete_inventory",
+        || {
+            use sha2::{Digest, Sha256};
+            let repo = Repo::new();
+            let thread = "01900000-0000-7000-8000-000000000022";
+            let digest = format!("{:x}", Sha256::digest(thread.as_bytes()));
+            let consumer = &digest[..32];
+            let request = "aa000000-0000-4000-8000-000000000022";
+            let log = |id: &str| repo.0.join(format!(".oms/threads/{id}.jsonl"));
+            for id in ["big-history", "second-history", "ask-room"] {
+                success(run(&repo, &["new", "--id", id, "--participant", "owner"]));
+                success(run(
+                    &repo,
+                    &[
+                        "join",
+                        "--id",
+                        id,
+                        "--participant",
+                        "owner",
+                        "--provider",
+                        "codex",
+                        "--role",
+                        "main",
+                    ],
+                ));
+            }
+            let bind = |id| {
+                success(run(
+                    &repo,
+                    &[
+                        "bind",
+                        "--id",
+                        id,
+                        "--participant",
+                        "owner",
+                        "--native-session",
+                        thread,
+                    ],
+                ))
+            };
+            bind("ask-room");
+            let pad = |id| {
+                // Valid whitespace between turns exceeds 8 MiB without synthesizing participants or messages.
+                let path = log(id);
+                let original = fs::read(&path).unwrap();
+                let last = original[..original.len() - 1]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .unwrap()
+                    + 1;
+                let mut padded = original[..last].to_vec();
+                let mut line = vec![b' '; 32 * 1024];
+                *line.last_mut().unwrap() = b'\n';
+                for _ in 0..288 {
+                    padded.extend_from_slice(&line);
+                }
+                padded.extend_from_slice(&original[last..]);
+                fs::write(path, padded).unwrap();
+            };
+            let snapshot = || {
+                let room = oms_command_room::Room::open(
+                    &repo.0,
+                    Default::default(),
+                    &EMPTY,
+                    &STOP,
+                    false,
+                    false,
+                )
+                .unwrap();
+                let seen = room.conversation_main(consumer, []).unwrap();
+                assert_eq!(seen.text("conversationBinding"), "matched");
+                assert_eq!(seen["conversationMain"].text("room"), "ask-room");
+                assert!(seen["conversationMain"].flag("incomplete"));
+            };
+            let assign = |request| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        consumer,
+                        "--request",
+                        request,
+                        "--provider",
+                        "claude",
+                        "--label",
+                        "Review",
+                        "--text",
+                        "Review the change",
+                    ],
+                )
+            };
+            let status = || {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        consumer,
+                        "--request",
+                        request,
+                    ],
+                )
+            };
+            pad("big-history");
+            snapshot();
+            assert!(success(assign(request)).flag("fresh"));
+            assert_eq!(success(status()).text("status"), "assigned");
+            let before = fs::read(log("ask-room")).unwrap();
+            let refused = "aa000000-0000-4000-8000-000000000023";
+            let assert_refused = |reason| {
+                for err in [assign(refused), status()] {
+                    assert_eq!(err.0, 2);
+                    assert!(String::from_utf8_lossy(&err.2).contains(reason));
+                }
+                assert_eq!(fs::read(log("ask-room")).unwrap(), before);
+            };
+            let original = fs::read(log("second-history")).unwrap();
+            pad("second-history");
+            snapshot();
+            assert_refused("room_inventory_incomplete");
+            fs::write(log("second-history"), b"damaged\n").unwrap();
+            assert_refused("room_inventory_incomplete");
+            fs::write(log("second-history"), original).unwrap();
+            // This second matching owner is invisible to the smaller display census regardless of enumeration order.
+            bind("big-history");
+            snapshot();
+            assert_refused("conversation is not the owner");
+        },
+    );
+}
+
+#[test]
 fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
     isolated(
         "desktop_assignment_is_owner_proofed_idempotent_and_unforgeable",

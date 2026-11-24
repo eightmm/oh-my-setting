@@ -68,10 +68,6 @@ impl Room<'_> {
         if !hex(consumer, 32) {
             return Err(Error::new("invalid conversation binding digest"));
         }
-        let mut result = obj([
-            ("conversationMain", Value::Null),
-            ("conversationBinding", "unconfirmed".into()),
-        ]);
         let (mut rooms, incomplete) = self.discover()?;
         // The pointer only hints at another log when bounded discovery omits it.
         // Verify its participant, owner and native binding exactly as for every candidate.
@@ -88,6 +84,20 @@ impl Room<'_> {
         {
             rooms.push(state);
         }
+        self.match_conversation_main(consumer, panel_mains, &rooms, incomplete)
+    }
+
+    fn match_conversation_main<'a>(
+        &self,
+        consumer: &str,
+        panel_mains: impl IntoIterator<Item = ConversationPanelAttempt<'a>>,
+        rooms: &[Value],
+        incomplete: bool,
+    ) -> Result<Value> {
+        let mut result = obj([
+            ("conversationMain", Value::Null),
+            ("conversationBinding", "unconfirmed".into()),
+        ]);
         let matches = |r: &&Value| {
             !r.flag("closed")
                 && !r.flag("sealed")
@@ -431,23 +441,35 @@ impl Room<'_> {
             ));
         }
         let operations = self.operations()?;
-        let attempts = operations
-            .attempts()
-            .iter()
-            .filter(|a| a.tool == "panel-main")
-            .map(|a| ConversationPanelAttempt {
-                room: a.refs.text("panel_room_id"),
-                participant: a.refs["panel_room_participant"]
-                    .as_str()
-                    .unwrap_or(&a.attempt_id),
-                terminal: a.terminal,
-            });
-        let found = self.conversation_main(consumer, attempts)?;
+        let attempts = || {
+            operations
+                .attempts()
+                .iter()
+                .filter(|a| a.tool == "panel-main")
+                .map(|a| ConversationPanelAttempt {
+                    room: a.refs.text("panel_room_id"),
+                    participant: a.refs["panel_room_participant"]
+                        .as_str()
+                        .unwrap_or(&a.attempt_id),
+                    terminal: a.terminal,
+                })
+        };
+        let same_owner = |found: &Value| {
+            found.text("conversationBinding") == "matched"
+                && found["conversationMain"].text("room") == id
+        };
+        let mut found = self.conversation_main(consumer, attempts())?;
+        if same_owner(&found) && found["conversationMain"].flag("incomplete") {
+            // Spend the larger budget only to recheck this positively observed Room.
+            // A pointer or an incomplete second census cannot establish uniqueness.
+            let (rooms, incomplete) = self.discover_with_byte_limit(2 * crate::MAX_SCAN_BYTES)?;
+            if incomplete {
+                return Err(Error::new("room_inventory_incomplete"));
+            }
+            found = self.match_conversation_main(consumer, attempts(), &rooms, false)?;
+        }
         operations.check()?;
-        if found.text("conversationBinding") != "matched"
-            || found["conversationMain"].text("room") != id
-            || found["conversationMain"].flag("incomplete")
-        {
+        if !same_owner(&found) {
             return Err(Error::new("conversation is not the owner of this Room"));
         }
         let room = crate::project(&self.records(id)?)?;

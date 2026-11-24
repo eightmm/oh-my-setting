@@ -753,6 +753,20 @@ fn desktop_assignment() {
     );
     assert!(!source.join("last-call.json").exists());
     assert_eq!(runs(), 0);
+    fixture_settings(
+        &source,
+        json!({"exit": 2, "stderr": "room: room_inventory_incomplete"}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "room_inventory_incomplete:",
+    );
+    assert_eq!(runs(), 0, "incomplete ownership never launches a reviewer");
     // A fresh intent launches once and records the returned operation.
     // The fixture cannot know the generated operation id, so its receipt names another one.
     fixture_settings(

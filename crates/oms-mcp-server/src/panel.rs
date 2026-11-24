@@ -849,6 +849,10 @@ impl Server<'_> {
                     "The approval question changed. Refresh the approval list.",
                 ),
                 (
+                    "room_inventory_incomplete",
+                    "room_inventory_incomplete: OMS could not verify unique assignment ownership within the Room inventory limits.",
+                ),
+                (
                     "conversation is not the owner",
                     "The current conversation is not the confirmed Main of that Room.",
                 ),

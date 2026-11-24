@@ -1612,6 +1612,10 @@ impl<'a> Room<'a> {
     }
 
     pub fn discover(&self) -> Result<(Vec<Value>, bool)> {
+        self.discover_with_byte_limit(MAX_SCAN_BYTES)
+    }
+
+    pub(crate) fn discover_with_byte_limit(&self, byte_limit: usize) -> Result<(Vec<Value>, bool)> {
         let Some(store) = &self.store else {
             return Ok((vec![], false));
         };
@@ -1639,14 +1643,13 @@ impl<'a> Room<'a> {
             .map(|s| {
                 (s.st_size.max(0) as usize)
                     .min(2 * crate::MAX_ROW)
-                    .min(MAX_SCAN_BYTES.saturating_sub(bytes) + 1)
+                    .min(byte_limit.saturating_sub(bytes) + 1)
             })
             .unwrap_or(0);
             let result = (|| {
-                let (header, used) =
-                    self.header_bounded(id, MAX_SCAN_BYTES.saturating_sub(bytes))?;
+                let (header, used) = self.header_bounded(id, byte_limit.saturating_sub(bytes))?;
                 bytes += used;
-                if bytes > MAX_SCAN_BYTES {
+                if bytes > byte_limit {
                     return Err(Error::new("room discovery byte limit"));
                 }
                 if header.first().is_none_or(|r| r.text("thread") != id) {
@@ -1693,7 +1696,7 @@ impl<'a> Room<'a> {
                 .map_err(|_| Error::new("room discovery log unavailable"))?;
                 if stat.st_size < 0
                     || (stat.st_size as usize).saturating_sub(used)
-                        > MAX_SCAN_BYTES.saturating_sub(bytes)
+                        > byte_limit.saturating_sub(bytes)
                 {
                     return Err(Error::new("room discovery byte limit"));
                 }
@@ -1712,7 +1715,7 @@ impl<'a> Room<'a> {
                 Err(_) => {
                     incomplete = true;
                     bytes = bytes.max(before_bytes.saturating_add(failed_read_charge));
-                    if bytes >= MAX_SCAN_BYTES || active >= MAX_ROOMS {
+                    if bytes >= byte_limit || active >= MAX_ROOMS {
                         break;
                     }
                 }

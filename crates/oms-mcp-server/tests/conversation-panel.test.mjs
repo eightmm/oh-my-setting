@@ -1128,9 +1128,29 @@ test('read-only peer is explicitly requested once, recovered by ID and opened in
   assert.equal(p.calls.at(-1).args.participant,'ask-'+req.requestId);
   assert.match(p.get('chat-result').textContent,/Recorded answer/); assert.equal(starts().length,1);
 });
-test('foreign, ambiguous, partially observed, and generic views cannot submit a peer',async()=>{
+test('partial exact membership checks authority only on request and keeps its ID after a bounded refusal',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'observed',participant:'owner',incomplete:true};
+  const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  assert.equal(p.get('peer-assignment').hidden,false);
+  assert.equal(p.get('peer-proof').hidden,false);
+  await choose(p,'ko'); assert.match(p.get('peer-proof').textContent,/다른 작업방/);
+  await choose(p,'en'); assert.match(p.get('peer-proof').textContent,/across Rooms/);
+  const starts=()=>p.calls.filter(c=>c.name==='oms_assign_provider');
+  assert.equal(starts().length,0);
+  p.host.tools={oms_assign_provider:()=>{throw new Error('room_inventory_incomplete: bounded inventory');},
+    oms_assign_result:a=>({...a,status:'not_found'})};
+  p.get('peer-provider').value='claude'; p.get('peer-task').value='Inspect';
+  await p.event('peer-form','submit'); await p.event('peer-form','submit');
+  assert.equal(starts().length,1); assert.equal(starts()[0].args.room,'observed');
+  assert.match(p.get('peer-status').textContent,/inventory is incomplete/);
+  await choose(p,'ko'); assert.match(p.get('peer-status').textContent,/목록을 모두 확인/);
+  await p.event('peer-check','click');
+  assert.equal(p.calls.at(-1).args.requestId,starts()[0].args.requestId);
+  assert.equal(p.get('peer-controls').disabled,false); assert.equal(starts().length,1);
+});
+test('foreign, ambiguous, unverifiable, and generic views cannot submit a peer',async()=>{
   const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'main',incomplete:false};
-  for(const [binding,record,readOnly] of [['unconfirmed',null,false],['ambiguous',main,false],['matched',{...main,incomplete:true},false],['matched',main,true]]){
+  for(const [binding,record,readOnly] of [['unconfirmed',null,false],['ambiguous',main,false],['matched',{...main,incomplete:undefined},false],['matched',main,true]]){
     const p=await panel(['one'],{conversationBinding:binding,conversationMain:record},{readOnly});
     assert.equal(p.get('peer-assignment').hidden,true);
     p.get('peer-provider').value='claude';p.get('peer-task').value='Inspect'; await p.event('peer-form','submit');
