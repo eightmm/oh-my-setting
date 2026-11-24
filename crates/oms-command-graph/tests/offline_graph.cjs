@@ -170,7 +170,7 @@ function render(data, options = {}) {
   document.createTextNode = text => ({textContent: text});
   const frames = [];
   let rafCalls = 0;
-  const context = {document, window: {matchMedia: () => ({matches: !options.motion}), openai: options.openai}, navigator: {languages: options.languages || ['en-US']},
+  const context = {document, window: {innerWidth: options.innerWidth, innerHeight: options.innerHeight, matchMedia: () => ({matches: !options.motion}), openai: options.openai}, navigator: {languages: options.languages || ['en-US']},
     localStorage: options.stored ? {getItem: key => key === 'oms.panel.language' ? options.stored : null} : undefined,
     Option: function(text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     ResizeObserver: class {
@@ -283,7 +283,8 @@ for (const [w, expectedLayout, minHeight] of [[320, 'narrow', 400], [768, 'mediu
     assert.ok(Number(y) >= 18 && Number(y) <= vbH - 18, `200-node y=${y} within height ${vbH}`);
     return {x: Number(x), y: Number(y), r};
   });
-  for (let i = 0; i < pts.length; i += 1) {
+  // Narrow worlds are height-capped (the camera fit zooms out), so only medium/wide guarantee world-space separation.
+  for (let i = 0; i < pts.length && expectedLayout !== 'narrow'; i += 1) {
     for (let j = i + 1; j < pts.length; j += 1) {
       const dist = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
       const minDist = pts[i].r + pts[j].r;
@@ -802,6 +803,18 @@ const labelOf = el => el.querySelector('.oms-graph-label');
     const sx = cam.x + Number(x) * cam.k; const sy = cam.y + Number(y) * cam.k;
     assert.ok(sx >= 0 && sx <= 370 && sy >= 0 && sy <= Number(vh), `node inside viewBox (${sx},${sy})`);
   }
+}
+
+{ // Round 5: narrow world height ignores node density; nothing waits on animation frames to become visible.
+  for (const count of [3, 100, 300]) {
+    const view = render(model('project', count), {initWidth: 370, innerWidth: 390, innerHeight: 844, noObserverFire: true});
+    const [, vw, vh] = view.svg.attributes.viewBox.match(/^0 0 (\d+) (\d+)$/);
+    assert.ok(Number(vw) <= 370, `measured width ${vw} <= stage clientWidth`);
+    assert.ok(Number(vh) <= .7 * 844 && Number(vh) >= 320, `narrow world height ${vh} capped regardless of ${count} nodes`);
+  }
+  const early = render(model('project', 5), {initWidth: 370, noObserverFire: true});
+  assert.ok(early.nodes.every(n => !('opacity' in n.attributes) && !/opacity:\s*0\b/.test(n.attributes.style || '')), 'nodes carry no hidden opacity');
+  assert.match(css, /@keyframes @@ROOT@@-pop \{ from \{ transform: scale\(\.6\); \} \}/, 'entry keyframe never starts invisible');
 }
 
 console.log('offline renderer: layouts (320/768/1024), non-color kind/status, keyboard/focus, selection persistence, empty/partial/truncated states and template parity passed');
