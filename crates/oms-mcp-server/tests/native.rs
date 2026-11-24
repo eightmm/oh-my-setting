@@ -103,12 +103,19 @@ struct Client {
 }
 impl Client {
     fn new(source: &Path, repo: &Path, full: bool, tasks: bool, child: bool) -> Self {
-        Self::with_depth(source, repo, full, tasks, child, std::ffi::OsStr::new("0"))
+        Self::with_depth(
+            source,
+            repo,
+            if full { "full" } else { "core" },
+            tasks,
+            child,
+            std::ffi::OsStr::new("0"),
+        )
     }
     fn with_depth(
         source: &Path,
         repo: &Path,
-        full: bool,
+        profile: &str,
         tasks: bool,
         child: bool,
         depth: &std::ffi::OsStr,
@@ -119,7 +126,12 @@ impl Client {
             .arg("--stdio")
             .arg(source)
             .arg(repo)
-            .arg(if full { "full" } else { "core" })
+            .arg(profile)
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
             .arg(if tasks { "1" } else { "0" })
             .env("OMS_HARNESS_CHILD", if child { "1" } else { "0" })
             .env("OMS_HARNESS_DELEGATE_DEPTH", depth)
@@ -222,6 +234,7 @@ fn environment_profile() {
         (None, true),
         (Some(std::ffi::OsString::from("core")), true),
         (Some("full".into()), true),
+        (Some("chatgpt-panel".into()), true),
         (Some("".into()), false),
         (Some("invalid".into()), false),
         (Some(std::ffi::OsString::from_vec(vec![255])), false),
@@ -236,6 +249,148 @@ fn environment_profile() {
         assert_eq!(result.status.success(), ok, "{:?}", result);
     }
 }
+fn conversation_panel() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
+    let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
+    assert_eq!(tools.as_array().unwrap().len(), 6);
+    assert_eq!(
+        tools[0]["_meta"]["openai/ui"]["entrypoints"],
+        json!([{"type":"thread"}])
+    );
+    let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
+    assert_eq!(
+        c.call("resources/list", json!({}))["result"]["resources"][0]["uri"],
+        *uri
+    );
+    assert_eq!(
+        c.call("resources/read", json!({"uri":uri}))["result"]["contents"][0]["mimeType"],
+        "text/html;profile=mcp-app"
+    );
+    assert!(c.tool("oms_open_panel", json!({}))["result"].is_object());
+    assert!(c.tool("oms_peer_start", json!({}))["error"].is_object());
+    assert!(c.tool("oms_panel_snapshot", json!({"repo":source}))["error"].is_object());
+    assert!(
+        c.call("tasks/cancel", json!({"_meta":modern(),"taskId":"absent"}))["error"].is_object()
+    );
+    bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
+    assert!(!source.join("last-call.json").exists());
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let snapshot = json!({"schema":1,"kind":"oms-dashboard","repo":{"name":"demo"},"goal":{"text":"Finish inspection"},"attempts":{"available":false,"active":0},"attention":{"items":[{"summary":"Review pending","count":2,"command":"private command"}]}});
+    fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    let result = c.tool("oms_panel_snapshot", json!({}));
+    let data = &result["result"]["structuredContent"]["dashboard"];
+    assert_eq!(payload(&result)["dashboard"], *data);
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["dashboard", "--repo", repo, "--json"])
+    );
+    assert_eq!(data["goal"], "Finish inspection");
+    assert_eq!(data["degraded"], true);
+    assert!(data["active"].is_null());
+    assert_eq!(
+        data["attention"],
+        json!([{"summary":"Review pending","count":2}])
+    );
+    assert!(!result.to_string().contains("private command"));
+    let mut observed = snapshot;
+    let main = json!({"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main"}});
+    observed["attempts"] =
+        json!({"available":true,"active":1,"active_recent":[main],"recent":[main]});
+    fixture_settings(&source, json!({"stdout":observed.to_string()}));
+    let live = payload(&c.tool("oms_panel_snapshot", json!({})));
+    assert_eq!(live["dashboard"]["main"]["provider"], "pi");
+    assert_eq!(live["dashboard"]["attempts"][0]["role"], "main");
+    let start = json!({"main":"codex","goal":"--help; inspect scope","requestId":"4d6acd01-bd18-4567-bf69-ea05fb048b27"});
+    let room = "oms-app-4d6acd01-bd18-4567-bf69-ea05fb048b27";
+    fixture_settings(
+        &source,
+        json!({"stdout":json!({"status":"started","provider":"codex","room":room}).to_string()}),
+    );
+    good(&c.tool("oms_start_main", start.clone()));
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "panel",
+            "--repo",
+            repo,
+            "--host",
+            "desktop",
+            "--launch",
+            "codex",
+            "--room",
+            room,
+            "--task=--help; inspect scope",
+            "--json"
+        ])
+    );
+    let argv: Vec<std::ffi::OsString> = record(&source)["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().into())
+        .collect();
+    let interrupted = AtomicBool::new(false);
+    let recognized = |args: &[std::ffi::OsString]| {
+        CommandRequest {
+            args,
+            cwd: &repo,
+            timeout: Duration::from_secs(1),
+            interrupted: &interrupted,
+        }
+        .is_desktop_main_start()
+    };
+    assert!(recognized(&argv));
+    for (i, replacement) in [
+        (0, "other"),
+        (2, "/"),
+        (4, "inline"),
+        (6, "unknown"),
+        (8, "room-other"),
+        (9, "--help"),
+    ] {
+        let mut changed = argv.clone();
+        changed[i] = replacement.into();
+        assert!(!recognized(&changed));
+    }
+    let before = record(&source);
+    let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
+    bad(&worker.tool("oms_start_main", start.clone()), "parent app");
+    bad(&worker.tool("oms_list_projects", json!({})), "delegated");
+    bad(
+        &c.tool(
+            "oms_start_main",
+            json!({"main":"codex","goal":"x\ry","requestId":start["requestId"]}),
+        ),
+        "one-line goal",
+    );
+    assert_eq!(record(&source), before);
+    let map = source.join("test-config/oh-my-setting/desktop-projects.json");
+    std::fs::create_dir_all(map.parent().unwrap()).unwrap();
+    std::fs::write(&map, json!({"demo":repo}).to_string()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({})))["projects"],
+        json!(["demo"])
+    );
+    bad(&c.tool("oms_panel_snapshot", json!({})), "project");
+    bad(
+        &c.tool("oms_panel_snapshot", json!({"project":"../demo"})),
+        "project",
+    );
+    let mut routed = start;
+    routed["project"] = json!("demo");
+    good(&c.tool("oms_start_main", routed));
+    std::fs::write(&map, "{}").unwrap();
+    bad(
+        &c.tool("oms_list_projects", json!({})),
+        "Invalid OMS project map",
+    );
+}
+
 fn environment_authority() {
     use std::os::unix::ffi::OsStringExt;
     let t = Temp::new();
@@ -246,7 +401,7 @@ fn environment_authority() {
         std::ffi::OsString::from("invalid"),
         std::ffi::OsString::from_vec(vec![255]),
     ] {
-        let mut c = Client::with_depth(&source, &repo, false, false, false, &depth);
+        let mut c = Client::with_depth(&source, &repo, "core", false, false, &depth);
         bad(
             &c.tool("oms_peer_start", json!({"kind":"consult","prompt":"q"})),
             "delegated worker",
@@ -3005,6 +3160,9 @@ fn main() {
         let full = args[4] == "full";
         let tasks = args[5] == "1";
         let mut fixture_config = pinned(Path::new(&args[2]), config(full, tasks));
+        if args[4] == "chatgpt-panel" {
+            fixture_config.profile = ToolProfile::ChatGptPanel;
+        }
         if Path::new(&args[2]).join("fixture-owner").is_file() {
             fixture_config.peer_owner = std::env::current_exe().unwrap();
         }
@@ -3019,12 +3177,13 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 30] = [
+    let cases: [(&str, fn()); 31] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
         ("owner_validation", owner_validation),
         ("environment_profile", environment_profile),
+        ("conversation_panel", conversation_panel),
         ("environment_authority", environment_authority),
         ("boundary_limits", boundary_limits),
         ("canonical_protocol_cases", canonical_protocol_cases),

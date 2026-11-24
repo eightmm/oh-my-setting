@@ -44,6 +44,8 @@ In a Git repository, run `oms` to open the terminal panel. You can also open Cod
 
 OMS runs as a native Rust CLI at `~/.local/bin/oms`. The core commands require no system Python setup. The default `core` install provisions one coding-agent provider, and the managed panel uses tmux. [Installation guide](docs/INSTALL.md)
 
+In a Codex or ChatGPT Work desktop chat, mention **@OMS** to choose a Main, give it a goal, check progress and decide pending approvals. ChatGPT Work also offers a conversation panel. [Connect a project or SSH host](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
+
 <details>
 <summary>What the installer configures</summary>
 

@@ -27,6 +27,7 @@ mod carry;
 mod cli;
 mod core;
 mod cursor;
+mod desktop;
 mod model;
 mod relay;
 mod services;

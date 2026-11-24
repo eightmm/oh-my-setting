@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "oms",
+  "version": "0.1.0",
+  "description": "Give an OMS Main a project goal, follow its leads and decide pending approvals from chat.",
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "interface": {
+        "displayName": "OMS",
+        "shortDescription": "Coordinate a project with an OMS Main and its leads."
+      },
+      "onboardingSkill": "./skills/oms-connect/SKILL.md"
+    }
+  }
+}

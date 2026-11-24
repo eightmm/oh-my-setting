@@ -242,6 +242,78 @@ fn room_lifecycle_and_cursor() {
         assert_eq!(fs::read(&log).unwrap(), acknowledged);
         assert_eq!(call("updates", &["--after", "malformed"]).0, 2);
         assert_eq!(call("ack", &[]).0, 2);
+        success(run(
+            &repo,
+            &[
+                "join",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "oms-desktop",
+                "--role",
+                "advisor",
+                "--provider",
+                "codex",
+            ],
+        ));
+        success(run(
+            &repo,
+            &[
+                "send",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "owner",
+                "--to",
+                "oms-desktop",
+                "--kind",
+                "question",
+                "--message-id",
+                "review-one",
+                "--text",
+                "Approve the next test run?",
+            ],
+        ));
+        let listed = success(run(&repo, &["desktop-requests"]));
+        let approval = &listed.list("approvals")[0];
+        assert_eq!(approval.text("summary"), "Approve the next test run?");
+        let version = approval.number("version").to_string();
+        let decide = |ver: &str, digest: &str, choice: &str| {
+            run(
+                &repo,
+                &[
+                    "desktop-decide",
+                    "--id",
+                    "room-fixture",
+                    "--message",
+                    "review-one",
+                    "--version",
+                    ver,
+                    "--digest",
+                    digest,
+                    "--decision",
+                    choice,
+                ],
+            )
+        };
+        let digest = approval.text("digest");
+        assert_eq!(decide("1", digest, "approve").0, 2);
+        assert_eq!(decide(&version, &"0".repeat(64), "approve").0, 2);
+        let (yes, no) = std::thread::scope(|scope| {
+            let yes = scope.spawn(|| decide(&version, digest, "approve").0);
+            let no = scope.spawn(|| decide(&version, digest, "deny").0);
+            (yes.join().unwrap(), no.join().unwrap())
+        });
+        assert!(matches!((yes, no), (0, 2) | (2, 0)));
+        let accepted = if yes == 0 { "approve" } else { "deny" };
+        let decided = fs::read(&log).unwrap();
+        success(decide(&version, digest, accepted));
+        assert_eq!(fs::read(&log).unwrap(), decided);
+        assert!(
+            success(run(&repo, &["desktop-requests"]))
+                .list("approvals")
+                .is_empty()
+        );
         success(call("scope", &["--clear"]));
         let core = oms_command_room::Room::open(
             &repo.0,

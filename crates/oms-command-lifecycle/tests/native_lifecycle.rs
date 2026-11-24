@@ -3267,12 +3267,20 @@ state="$OMS_LIFECYCLE_FIXTURE/codex-state"
 now=here
 [ -e "$state" ] && read now < "$state"
 case "$*" in
-  'plugin remove '*|'plugin marketplace remove '*) echo gone > "$state" ;;
+  'plugin remove '*) echo gone > "$state" ;;
+  'plugin marketplace remove '*)
+    [ ! -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ] || exit 2
+    echo gone > "$state" ;;
   'plugin add '*|'plugin marketplace add '*) echo here > "$state" ;;
   'plugin list --json')
-    if [ "$now" = gone ]; then printf '%s\n' '{"installed":[]}'
+    if [ -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ]; then
+      sibling='{"pluginId":"oms@oh-my-setting-local","installed":true}'
+      hooks='{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true},'
+      [ "$now" != gone ] || hooks=''
+      printf '{"installed":[%s%s]}\n' "$hooks" "$sibling"
+    elif [ "$now" = gone ]; then printf '%s\n' '{"installed":[]}'
     else printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'; fi ;;
-  'plugin marketplace list') [ "$now" = gone ] || printf 'oh-my-setting-local %s/source\n' "$OMS_LIFECYCLE_FIXTURE" ;;
+  'plugin marketplace list') { [ "$now" = gone ] && [ ! -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ]; } || printf 'oh-my-setting-local %s/source\n' "$OMS_LIFECYCLE_FIXTURE" ;;
 esac
 "##).unwrap();
         // agy-hook reads one payload from stdin; the re-exec child inherits this file.
@@ -3471,7 +3479,10 @@ esac
             .unwrap()
             .contains("\"git-branch\", \"current-dir\"]")
     );
+    let sibling = root.join("market-sibling");
+    fs::write(&sibling, "").unwrap();
     success(call("install-codex-plugin", &["--remove"], &source, &host));
+    fs::remove_file(sibling).unwrap();
     assert!(
         !fs::read_to_string(&codex_config)
             .unwrap()

@@ -143,3 +143,87 @@ one requires a schema bump.
 
 When the state source is unavailable, every section derived from state is
 `null`. A `null` means "not known", never "none".
+
+## OMS in Codex and ChatGPT Work
+
+In the desktop app, mention **@OMS** in a project chat. For example, ask
+“Use Claude as Main for the docs project and have its leads review the API
+examples.” In the same conversation, ask “What are the leads working on?” or
+“What needs my approval?”. When OMS has multiple connected projects, select
+the intended project by its alias. Main and Lead execution, state and provider
+authentication live on that project's OMS host.
+
+In ChatGPT Work, open **OMS** from the conversation's content-tab picker for
+the Main selector, goal editor, project progress and pending decisions. In
+Codex, use the same plugin tools directly in the conversation. Acknowledging a
+goal means the Main received a launch request. Work in progress and outcomes
+come from runtime records. Approve or deny a specific pending question after
+reviewing it. A stale review requires a fresh decision. The approval is an
+answer to that question for its Main to consume.
+
+### Register a marketplace once
+
+Choose one transport for the app's **execution host**. Both expose the same
+`@OMS` tools. The existing `oh-my-setting` entry supplies separate lifecycle
+hooks.
+
+| Where the app can execute plugin tools | Marketplace path in this repository | Entry |
+|---|---|---|
+| On a supported OMS host, including a Codex project running on that host | Repository root | `oms@oh-my-setting-local` |
+| On a PC using OpenSSH to reach the OMS project host, including Windows Work | `plugins/oms-ssh` | `oms@oms-ssh` |
+
+For a managed workspace, an admin can open **Admin → Plugins → Add → Import
+marketplace** and use `https://github.com/eightmm/oh-my-setting` as the Source.
+Leave **Path** empty for the root catalog or enter `plugins/oms-ssh` for the SSH
+catalog. Select a branch or commit when testing a PR. Once the catalog is
+available on the execution host, select **OMS** in the app's Plugins directory.
+Its setup conversation checks the connection and offers the available projects.
+For a direct connection, it can register the active checkout with the owner's
+permission. Start a new project chat or continue the installation chat. [Workspace import](https://learn.chatgpt.com/docs/enterprise/plugin-management)
+and [personal and repo marketplaces](https://developers.openai.com/plugins/build/plugins).
+
+### Connect the project host
+
+The project host needs an OMS build containing the desktop tools, tmux, and
+an available provider for the selected Main and leads. Use the same OS account
+that owns the projects and provider sessions.
+
+- **Direct execution.** The plugin starts `oms mcp-server` from PATH. A
+  project-scoped executor can supply the project checkout as its working
+  directory. Codex 0.172.0 starts bundled servers in their plugin cache. For
+  that case, register the alias map below once on the project host. The
+  direct server can also receive `OMS_PANEL_PROJECTS` or one pinned checkout
+  in `OMS_PANEL_REPO`. A shell-capable project conversation can invoke the
+  same typed operations from its active checkout when the direct
+  server lacks a project binding. The panel itself uses its MCP connection.
+- **Windows or another remote desktop.** The SSH package uses the desktop's
+  OpenSSH client. Configure the SSH alias `oms-runtime` once for the existing
+  OMS account and host, with its verified host key and a key or agent that
+  already authenticates noninteractively. An existing OpenSSH entry with
+  an explicit `HostName` can include `oms-runtime` as a second name on its
+  `Host` line. The plugin opens a binary-clean stdio connection to that alias
+  and runs the server's `~/.local/bin/oms`. The desktop holds no OMS runtime
+  or project checkout. [SSH package](../plugins/oms-ssh/oms/mcp.json).
+
+To register projects, put the project map at
+`~/.config/oh-my-setting/desktop-projects.json` **on the OMS host**, readable and
+writable by its owning account only, for example with file mode `0600`.
+The direct package also honors an
+absolute `XDG_CONFIG_HOME` for the config directory. Use absolute
+physical paths to Git checkouts or adopted OMS projects that this desktop
+connection may manage. For example, this map offers two choices in the same
+plugin.
+
+```json
+{
+  "docs": "/srv/projects/docs",
+  "engine": "/srv/projects/engine"
+}
+```
+
+Keep access to that map and SSH account restricted to the intended operators.
+Refresh OMS after changing the map to see the current choices. Each call on a
+mapped connection identifies a project by alias. The plugin accepts the
+project paths from the host configuration. SSH uses strict host key
+verification and disables forwarding and interactive authentication.
+[Plugin thread entrypoints](https://developers.openai.com/plugins/build/extensions).

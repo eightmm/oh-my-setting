@@ -18,6 +18,11 @@ exercised by the documentation audit.
 | Definitions and handlers | [tools.json](src/tools.json), [lib.rs](src/lib.rs), [command.rs](src/command.rs), [peer.rs](src/peer.rs), [extra.rs](src/extra.rs), [output.rs](src/output.rs) |
 | Public boundary fixtures | Root `mcp_executor_runs_staged_native_and_honors_timeout_and_cancel`, `mcp_executor_reports_output_limit_distinctly`; this crate's `tests/native.rs` |
 
+The [desktop plugin](../../docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
+uses the dedicated `chatgpt-panel` profile. It provides the conversation UI,
+project selection, Main launch, runtime status and pending approval decisions.
+The server enforces its own method and tool allowlist on direct calls.
+
 Core discovery lists 13 tools and full discovery lists 32. Both profiles accept
 the same 32 tool names through `tools/call`, subject to their request and child
 restrictions; discovery is not authorization. There is one graph UI resource and

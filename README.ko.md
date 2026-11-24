@@ -44,6 +44,8 @@ Git 저장소에서 `oms`를 실행하면 터미널 패널을 열 수 있습니�
 
 OMS는 `~/.local/bin/oms`에서 네이티브 Rust CLI로 실행됩니다. 핵심 명령에는 시스템 Python 설정이 필요 없습니다. 기본 `core` 설치는 코딩 에이전트 provider 하나를 구성하며, 관리 패널은 tmux를 사용합니다. [설치 안내](docs/INSTALL.ko.md)
 
+Codex 또는 ChatGPT Work 데스크톱 대화에서 **@OMS**를 불러 Main을 고르고 목표를 전달할 수 있습니다. 같은 대화에서 Lead의 진행 상황과 승인 요청을 확인합니다. ChatGPT Work에서는 대화 옆에 OMS 패널도 열 수 있습니다. [프로젝트·SSH 호스트 연결 방법](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
+
 <details>
 <summary>설치 시 구성되는 항목</summary>
 

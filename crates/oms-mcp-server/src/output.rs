@@ -18,7 +18,7 @@ fn tool_error(error: CaptureError) -> ToolError {
 
 /// Same bounded environment and shared scanner as the native digest producer.
 /// The scanner selects secret environment values; ordinary values are not rules.
-fn outbound(snapshot: &[u8], args: &Value) -> Result<(), CaptureError> {
+pub(super) fn outbound(snapshot: &[u8], args: &Value) -> Result<(), CaptureError> {
     let withheld = || {
         failure(
             "capture_withheld",

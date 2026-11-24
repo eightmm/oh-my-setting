@@ -725,6 +725,12 @@ impl Room<'_> {
                     }
                     return Err(Error::new("message id conflicts with its existing content"));
                 }
+                if !carry.active()
+                    && e.text("sender") == crate::desktop::PARTICIPANT
+                    && e.text("message_kind") == "answer"
+                {
+                    self.validate_desktop_answer(&state, e, text)?;
+                }
                 if !e.text("reply_to").is_empty() {
                     let mut original = state
                         .list("messages")

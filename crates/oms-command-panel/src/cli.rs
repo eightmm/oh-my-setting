@@ -370,7 +370,7 @@ impl Options {
         )?;
         for (key, choices) in [
             ("layout", &["auto", "inline", "split"][..]),
-            ("host", &["auto", "inline", "tmux", "herdr"][..]),
+            ("host", &["auto", "inline", "tmux", "herdr", "desktop"][..]),
             (
                 "view",
                 &["auto", "summary", "compact", "detail", "graph", "tree"][..],
@@ -414,6 +414,17 @@ impl Options {
                 &["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
             )?;
         }
+        require(
+            self.get("host") != Some("desktop")
+                || (self.has("launch")
+                    && self.has("task")
+                    && self.has("json")
+                    && self
+                        .get("room")
+                        .is_some_and(|id| id.starts_with("oms-app-"))
+                    && !["account", "resume"].iter().any(|key| self.has(key))),
+            "--host desktop requires --launch, --task and --json for a fresh managed Main",
+        )?;
         let modes = [
             "watch",
             "launch",
@@ -763,6 +774,7 @@ impl Options {
         )?;
         require(
             !self.has("json")
+                || self.get("host") == Some("desktop")
                 || !["launch", "orchestrator", "focus-orchestrator"]
                     .iter()
                     .any(|key| self.has(key)),
@@ -1211,6 +1223,30 @@ mod tests {
             assert!(parse(&["--orchestrator", provider, "--resume", uuid]).is_err());
             assert!(parse(&["--focus-orchestrator", provider, "--resume", uuid]).is_err());
         }
+        assert!(
+            parse(&[
+                "--host",
+                "desktop",
+                "--launch",
+                "codex",
+                "--room",
+                "oms-app-example",
+                "--task=--report",
+                "--json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "--host",
+                "desktop",
+                "--launch",
+                "codex",
+                "--task=goal",
+                "--json"
+            ])
+            .is_err()
+        );
         assert!(parse(&["--launch", "codex", "--resume", "legacy-session"]).is_ok());
     }
 

@@ -9,6 +9,7 @@ pub mod value;
 mod command;
 mod extra;
 mod output;
+mod panel;
 pub use command::{Captured, CommandExecutor, CommandRequest, SubprocessExecutor};
 mod peer;
 mod storage;
@@ -52,6 +53,7 @@ const CORE: [&str; 13] = [
 pub enum ToolProfile {
     Core,
     Full,
+    ChatGptPanel,
 }
 
 /// Immutable process configuration; it confers no request or worker authority.
@@ -71,7 +73,8 @@ impl Config {
         let profile = match std::env::var("OMS_MCP_TOOL_PROFILE").as_deref() {
             Err(std::env::VarError::NotPresent) | Ok("core") => ToolProfile::Core,
             Ok("full") => ToolProfile::Full,
-            _ => return Err("error: OMS_MCP_TOOL_PROFILE must be core or full"),
+            Ok("chatgpt-panel") => ToolProfile::ChatGptPanel,
+            _ => return Err("error: unknown OMS_MCP_TOOL_PROFILE"),
         };
         Ok(Self {
             profile,
@@ -95,6 +98,9 @@ pub(crate) fn tools() -> &'static [Value] {
         .as_slice()
 }
 fn definitions(profile: ToolProfile) -> Value {
+    if profile == ToolProfile::ChatGptPanel {
+        return panel::definitions();
+    }
     Value::Array(tools().iter().filter(|t| profile == ToolProfile::Full || CORE.contains(&t["name"].as_str().unwrap())).map(|t| {
         let mut d = json!({"name":t["name"], "description":t["description"], "inputSchema":{"type":"object","properties":t["properties"],"required":t.get("required").cloned().unwrap_or_else(|| json!([]))}});
         for key in ["annotations", "title", "outputSchema"] {
@@ -311,7 +317,10 @@ impl<'a> Server<'a> {
     }
     fn capabilities(&self, protocol: &str) -> Value {
         let mut c = json!({"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}});
-        if self.config.tasks_extension && protocol == MODERN {
+        if self.config.profile != ToolProfile::ChatGptPanel
+            && self.config.tasks_extension
+            && protocol == MODERN
+        {
             c["extensions"] = json!({EXTENSION:{}});
         }
         c
@@ -399,6 +408,9 @@ impl<'a> Server<'a> {
             }
             "ping" => self.complete(json!({}), params, false),
             "tools/list" => self.complete(json!({"tools":self.definitions}), params, true),
+            _ if self.config.profile == ToolProfile::ChatGptPanel => {
+                return Some(self.panel_request(id, method, params));
+            }
             "resources/list" => {
                 if !params.is_null() && !params.is_object() {
                     return Some(invalid_params());
