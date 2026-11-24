@@ -76,6 +76,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if(method==='ui/update-model-context'){host.contexts.push(params);result={isError:host.rejectContext===true};}
     if (method === 'ui/message') {
       host.messages.push(params);
+      if (host.holdMessage) {host.finishMessage=ack=>notify({id,...ack});return;}
       if (host.messageError) { queueMicrotask(() => notify({id,error:host.messageError})); return; }
       result = {isError:host.rejectMessage === true};
     }
@@ -1093,4 +1094,44 @@ test('an ambiguous host send failure keeps the selected answer copyable without 
   assert.match(p.get('review-share-status').textContent,/Delivery is unconfirmed/);
   await p.event('review-submit','click');await p.event('review-copy','click');
   assert.equal(p.host.messages.length,1); assert.equal(p.get('review-text').selected,true);
+});
+
+for (const lang of ['en','ko']) test(`unknown review delivery stays copyable after dismiss and tab return, never resends (${lang})`,async()=>{
+  const p=await reviewedPanel({message:true});
+  p.host.messageError={code:-32603,message:'Host failed after delivery'};
+  await choose(p,lang);
+  await p.event('review-choose','click');await p.event('review-submit','click');
+  const unknown=p.get('review-share-status').textContent; assert.match(unknown,lang==='en'?/Delivery is unconfirmed/:/미확인/);
+  await p.event('review-cancel','click');
+  assert.equal(p.get('review-choose').disabled,false);
+  await p.event('tab-overview','click');await p.event('tab-chat','click');
+  assert.equal(p.get('review-choose').disabled,false);
+  await p.event('review-choose','click');
+  assert.equal(p.get('review-submit').hidden,true); assert.equal(p.get('review-text').value,reviewAnswer);
+  await p.event('review-submit','click');await p.event('review-copy','click');
+  assert.equal(p.get('review-text').selected,true); assert.equal(p.host.messages.length,1);
+});
+test('explicit review delivery success moves focus to the chat heading and locks the answer',async()=>{
+  const p=await reviewedPanel({message:true});
+  await p.event('review-choose','click');const before=p.get('chat-title').focused??0;await p.event('review-submit','click');
+  assert.equal(p.get('review-choose').disabled,true); assert.equal(p.host.messages.length,1);
+  assert.equal(p.get('chat-title').focused,before+1);
+});
+
+test('a late delivery is reconciled after the preview is dismissed without moving focus across tabs',async()=>{
+  for(const reply of [{result:{}},{error:{code:-32603,message:'Host response lost'}}]) for(const returnEarly of [true,false]){
+    const p=await reviewedPanel({message:true}); await choose(p,'en');
+    p.host.holdMessage=true; await p.event('review-choose','click'); await p.event('review-submit','click');
+    await p.event('tab-overview','click'); const focus=p.get('chat-title').focused;
+    assert.equal(p.get('review-choose').disabled,true);
+    if(returnEarly) await p.event('tab-chat','click');
+    p.host.finishMessage(reply); await setImmediate();assert.equal(p.get('chat-title').focused,focus);
+    if(!returnEarly) await p.event('tab-chat','click');
+    assert.equal(p.get('review-choose').disabled,!reply.error);
+    if(reply.error) {
+      await p.event('review-choose','click'); assert.equal(p.get('review-cancel').disabled,false);
+      assert.equal(p.get('review-submit').hidden,true);assert.equal(p.get('review-text').value,reviewAnswer);
+    }
+    assert.equal(p.host.messages.length,1);
+  }
 });
