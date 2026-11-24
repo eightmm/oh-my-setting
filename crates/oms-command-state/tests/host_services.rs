@@ -1078,3 +1078,126 @@ fn inbox_warns_on_recent_failure_repeat_without_command_text() {
         "valid rows keep the same stalls evidence: {codes:?}"
     );
 }
+
+#[test]
+fn dashboard_and_panel_snapshot_share_observation_revision_across_cli_json_and_foreign_scopes() {
+    let repo_a = TempRepo::new();
+    let repo_b = TempRepo::new();
+    seed(repo_a.path());
+    seed(repo_b.path());
+    let before_a = tree(repo_a.path());
+    let panel_json = |repo: &Path| {
+        let (_, out, err) = view("dashboard", repo, &["--json", "--panel-snapshot"]);
+        json::parse(out.as_bytes()).unwrap_or_else(|_| panic!("panel-snapshot: {out} {err}"))
+    };
+
+    let cli_json_1 = view_json("dashboard", repo_a.path());
+    let panel_1 = panel_json(repo_a.path());
+    let text_1 = view("dashboard", repo_a.path(), &[]).1;
+
+    let rev_cli_1 = cli_json_1.get("observation").text("revision").to_owned();
+    let rev_panel_1 = panel_1
+        .get("dashboard")
+        .get("observation")
+        .text("revision")
+        .to_owned();
+    assert!(rev_cli_1.starts_with("obs-v1:"), "{rev_cli_1}");
+    assert_eq!(rev_cli_1, rev_panel_1);
+    assert_eq!(
+        panel_1.get("dashboard").get("observation").get("atomic"),
+        &json::Value::Bool(false)
+    );
+    assert_eq!(
+        panel_1
+            .get("dashboard")
+            .get("observation")
+            .text("completeness"),
+        "complete"
+    );
+    assert!(
+        text_1.contains(&format!(
+            "observation: {rev_cli_1} (multi-source, non-atomic, complete)"
+        )),
+        "{text_1}"
+    );
+    assert!(
+        !serde_like(&panel_1).contains(repo_a.path().to_string_lossy().as_ref()),
+        "panel snapshot must not leak host path"
+    );
+
+    // Repeated equivalent read of unchanged scope keeps identical observation revision.
+    let panel_2 = panel_json(repo_a.path());
+    assert_eq!(
+        panel_2.get("dashboard").get("observation").text("revision"),
+        rev_panel_1
+    );
+    assert_eq!(tree(repo_a.path()), before_a, "read views must not write");
+
+    // Foreign scope has a distinct revision and mutating it does not alter repo_a.
+    let foreign = panel_json(repo_b.path());
+    let rev_foreign = foreign
+        .get("dashboard")
+        .get("observation")
+        .text("revision")
+        .to_owned();
+    assert_ne!(rev_foreign, rev_panel_1);
+    let valid_task = |id: &str| {
+        format!(
+            r#"{{"schema":1,"tasks":{{"{id}":{{"id":"{id}","title":"t","state":"ready","depends":[],"allowed_paths":["a"],"forbidden_paths":[],"verify":"true","role":"builder","assignment":{{}},"provider":"","ttl":"","artifact":"","patch":"","reason":"","executor_id":"","executor_soul_sha256":"","autopilot_owner_id":"","lease_epoch":0,"lease_id":"","review_lease_id":"","repair_count":0,"repair_artifact":"","created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}}}}"#
+        )
+    };
+    put(
+        repo_b.path(),
+        ".oms/plan/tasks.json",
+        &valid_task("t_foreign"),
+        0o664,
+    );
+    assert_eq!(
+        panel_json(repo_a.path())
+            .get("dashboard")
+            .get("observation")
+            .text("revision"),
+        rev_panel_1
+    );
+
+    // Changing state in the selected scope changes revision across CLI and panel snapshot.
+    put(
+        repo_a.path(),
+        ".oms/plan/tasks.json",
+        &valid_task("t1"),
+        0o664,
+    );
+    let cli_json_changed = view_json("dashboard", repo_a.path());
+    let panel_changed = panel_json(repo_a.path());
+    let rev_changed = panel_changed
+        .get("dashboard")
+        .get("observation")
+        .text("revision")
+        .to_owned();
+    assert_ne!(rev_changed, rev_panel_1);
+    assert_eq!(
+        cli_json_changed.get("observation").text("revision"),
+        rev_changed
+    );
+
+    // Partial/corrupt source marks completeness partial, names unavailable source, and changes revision.
+    put(
+        repo_a.path(),
+        ".oms/artifacts/index.jsonl",
+        "not valid json\n",
+        0o600,
+    );
+    let (code, out, _) = view("dashboard", repo_a.path(), &["--json", "--panel-snapshot"]);
+    assert_eq!(code, 1);
+    let degraded = json::parse(out.as_bytes()).unwrap();
+    let degraded_obs = degraded.get("dashboard").get("observation");
+    assert_eq!(degraded_obs.text("completeness"), "partial");
+    assert_eq!(degraded_obs.get("sources").text("artifacts"), "unavailable");
+    assert!(degraded_obs.text("revision").starts_with("obs-v1:"));
+    assert_ne!(degraded_obs.text("revision"), rev_changed);
+    let degraded_text = view("dashboard", repo_a.path(), &[]).1;
+    assert!(
+        degraded_text.contains("observation source gaps: artifacts"),
+        "{degraded_text}"
+    );
+}

@@ -591,11 +591,17 @@ pub(crate) fn run(
                 ])
             }
             "dashboard" => {
-                let report = projection::dashboard(&ctx, &state)?;
+                let mut report = projection::dashboard(&ctx, &state)?;
                 code = i32::from(!report.get("collection").get("ok").truth());
+                let panel =
+                    projection::panel_snapshot(&ctx.repo, &report, state.get("conversation"));
                 if opts.flag("panel-snapshot") {
-                    projection::panel_snapshot(&report, state.get("conversation"))
+                    panel
                 } else {
+                    report.set(
+                        "observation",
+                        panel.get("dashboard").get("observation").clone(),
+                    )?;
                     report
                 }
             }

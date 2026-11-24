@@ -140,6 +140,7 @@ one requires a schema bump.
 | `reviews` | object or `null` | `outcomes, passed, failed, unknown, seat_answers` over the listed window |
 | `acceptance` | object or `null` | `available, total, counts, complete, criteria[] {id, status, source, text}, omitted, note` |
 | `attention` | object or `null` | `actionable, items[] {priority, code, summary, command}, omitted, next[] {id, authority, command}` |
+| `observation` | object | `{schema, kind, atomic, revision, observedAt, completeness, sources, evidence}`: bounded multi-source, non-atomic (`atomic: false`) observation revision (`obs-v1:...` or `null` when unknown), observation time, completeness (`complete`, `partial`, `unknown`), per-source status, and repository-wide evidence references. The revision compares the bounded public view in the same physical checkout and conversation binding. It excludes read time. `observedAt` marks this read, not an atomic cut across stores. A partial source can retain valid rows, and a stale Plan denotes recorded stale claims or reviews. Omitted and trimmed counts describe rows in bounded windows that may overlap. The latest repository artifact does not establish a link to a particular Room or run. |
 
 When the state source is unavailable, every section derived from state is
 `null`. A `null` means "not known", never "none".

@@ -485,7 +485,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.4.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.4.1');
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
@@ -650,4 +650,51 @@ test('overview represents each scoped Lead assignment once and opens its exact m
   assert.equal(p.calls.at(-1).args.participant,'search-lead');
   assert.equal(p.calls.at(-1).args.room,'room');
   assert.match(p.get('chat-members').textContent,/qa/);
+});
+
+test('connection details surface bounded non-atomic observation revision across refreshes and scopes without cluttering overview', async () => {
+  assert.match(html, /<noscript>[\s\S]*oms_panel_snapshot[\s\S]*oms dashboard[\s\S]*<\/noscript>/);
+  const revOne = 'obs-v1:0123456789abcdef01234567';
+  const revTwo = 'obs-v1:fedcba9876543210fedcba98';
+  let snapOne = {
+    project:'one', updated:'2026-11-24T10:00:00Z',
+    observation:{schema:1, kind:'multi-source-observation', atomic:false, revision:revOne,
+      observedAt:'2026-11-24T10:00:00Z', completeness:'complete',
+      sources:{git:'ok', task:'ok', plan:'ok', attempts:'ok', artifacts:'ok', acceptance:'ok', conversation:'unconfirmed'},
+      evidence:{scope:'repository', head:'1234567890ab', room:null, latestArtifact:'art-1', omitted:0, trimmed:0}}
+  };
+  let snapTwo = {
+    project:'two', updated:'2026-11-24T10:02:00Z', degraded:true,
+    observation:{schema:1, kind:'multi-source-observation', atomic:false, revision:revTwo,
+      observedAt:'2026-11-24T10:02:00Z', completeness:'partial',
+      sources:{git:'ok', task:'ok', plan:'ok', attempts:'ok', artifacts:'unavailable', acceptance:'ok', conversation:'unconfirmed'},
+      evidence:{scope:'repository', head:'abcdef123456', room:null, latestArtifact:null, omitted:3, trimmed:1}}
+  };
+  const p = await panel(['one', 'two']);
+  p.host.tools = {oms_panel_snapshot:({project:alias}) => ({dashboard: alias === 'two' ? snapTwo : snapOne})};
+  p.get('project-choice').value = 'one';
+  await p.event('project-choice', 'change');
+  assert.equal(p.get('observation-revision').textContent, revOne);
+  assert.match(p.get('observation-basis').textContent, /다중 원장 관측 \(비원자적\)/);
+  assert.equal(p.get('observation-completeness').textContent, '전체 관측');
+  assert.match(p.get('observation-sources').textContent, /HEAD 1234567890ab · 저장소 최근 결과물 art-1/);
+  assert.doesNotMatch(p.get('goal').textContent, /obs-v1:/);
+  const firstStamp = p.get('updated').textContent;
+  // Unchanged read at a later wall-clock time keeps the same revision and updates observedAt.
+  snapOne = {...snapOne, updated:'2026-11-24T10:15:00Z', observation:{...snapOne.observation, observedAt:'2026-11-24T10:15:00Z'}};
+  await p.event('refresh', 'click');
+  assert.equal(p.get('observation-revision').textContent, revOne);
+  assert.notEqual(p.get('updated').textContent, firstStamp);
+  // Switching to a foreign project replaces with the foreign partial observation without writes.
+  p.get('project-choice').value = 'two';
+  await p.event('project-choice', 'change');
+  assert.equal(p.get('observation-revision').textContent, revTwo);
+  assert.match(p.get('observation-completeness').textContent, /일부 관측 · 생략 3건 · 축약 1건/);
+  assert.match(p.get('observation-sources').textContent, /확인 필요 · 결과물 \(미확인\)/);
+  assert.equal(p.calls.some(c => ['oms_start_main','oms_decide_approval'].includes(c.name)), false);
+  // Unknown or malformed revisions stay fail-closed as 미확인.
+  snapTwo = {...snapTwo, observation:{schema:1, kind:'multi-source-observation', atomic:false, revision:'/etc/passwd', completeness:'unknown'}};
+  await p.event('refresh', 'click');
+  assert.equal(p.get('observation-revision').textContent, '미확인');
+  assert.equal(p.get('observation-completeness').textContent, '관측 상태 미확인');
 });

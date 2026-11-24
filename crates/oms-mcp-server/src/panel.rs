@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v8.html";
+const URI: &str = "ui://oms/conversation-panel/v9.html";
+const V8: &str = "ui://oms/conversation-panel/v8.html";
 const V7: &str = "ui://oms/conversation-panel/v7.html";
 const V6: &str = "ui://oms/conversation-panel/v6.html";
 const V5: &str = "ui://oms/conversation-panel/v5.html";
@@ -431,7 +432,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8)
                 ) =>
             {
                 json!({"contents":[{
@@ -1005,7 +1006,16 @@ impl Server<'_> {
         }
         let mut dashboard = report["dashboard"].clone();
         if partial {
+            let was_degraded = dashboard["degraded"] == true;
             dashboard["degraded"] = json!(true);
+            if dashboard["observation"].is_object()
+                && (!was_degraded || dashboard["observation"]["completeness"] == "complete")
+            {
+                if dashboard["observation"]["completeness"] == "complete" {
+                    dashboard["observation"]["completeness"] = json!("partial");
+                }
+                dashboard["observation"]["revision"] = Value::Null;
+            }
         }
         if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
             return Err("OMS panel snapshot exceeds its output limit.".into());

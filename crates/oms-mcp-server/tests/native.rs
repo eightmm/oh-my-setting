@@ -332,16 +332,45 @@ fn cross_host_project_reads() {
         payload(&c.tool("oms_list_projects", json!({}))),
         json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
     );
-    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","conversationMain":null}});
+    let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","updated":"2026-11-24T10:00:00Z","conversationMain":null,"observation":obs}});
     fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     let reply=c.call("tools/call",json!({"name":"oms_panel_snapshot","arguments":{"project":"fixture"},"_meta":{"threadId":"00000000-0000-4000-8000-000000000001"}}));
     assert_eq!(payload(&reply)["dashboard"]["project"], "fixture");
+    assert_eq!(payload(&reply)["dashboard"]["observation"], obs);
+    assert_eq!(
+        reply["result"]["structuredContent"]["dashboard"]["observation"],
+        obs
+    );
     assert!(
         !record(&source)["argv"]
             .to_string()
             .contains("conversation-digest")
     );
     assert!(!record(&source)["argv"].to_string().contains("00000000-"));
+    // Fail-closed: exit-1 partial response contradicting a complete observation cannot claim complete revision.
+    fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    let degraded = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
+    assert_eq!(payload(&degraded)["dashboard"]["degraded"], true);
+    assert_eq!(
+        payload(&degraded)["dashboard"]["observation"]["completeness"],
+        "partial"
+    );
+    assert!(payload(&degraded)["dashboard"]["observation"]["revision"].is_null());
+    // Genuine partial response from the producer keeps its partial revision intact.
+    let mut partial_obs = obs.clone();
+    partial_obs["completeness"] = json!("partial");
+    partial_obs["sources"]["artifacts"] = json!("unavailable");
+    let partial_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","degraded":true,"conversationMain":null,"observation":partial_obs}});
+    fixture_settings(
+        &source,
+        json!({"exit":1,"stdout":partial_snapshot.to_string()}),
+    );
+    let partial_reply = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
+    assert_eq!(
+        payload(&partial_reply)["dashboard"]["observation"],
+        partial_obs
+    );
 }
 fn mcp_app_binding_boundaries() {
     use std::os::unix::fs::PermissionsExt;
@@ -468,7 +497,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v8.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v9.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -492,6 +521,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v5.html"),
         json!("ui://oms/conversation-panel/v6.html"),
         json!("ui://oms/conversation-panel/v7.html"),
+        json!("ui://oms/conversation-panel/v8.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

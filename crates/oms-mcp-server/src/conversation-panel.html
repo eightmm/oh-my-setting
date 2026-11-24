@@ -133,6 +133,7 @@ progress::-moz-progress-bar { background: var(--brand); }
 .identity { display: flex; flex-wrap: wrap; gap: .1rem .4rem; margin-top: .45rem; padding-top: .45rem; border-top: 1px dashed var(--line); }
 .identity dt, .identity dd, #main-state { font-size: .76rem; }
 .identity dd { font-weight: 500; }
+#observation-revision { font-family: var(--mono); }
 .identity dt:not(:first-child) { margin-left: .4rem; }
 #main-state { color: var(--muted); }
 #current-main { font-size: 1.15rem; line-height: 1.3; margin: .1rem 0; letter-spacing: -.02em; font-weight: 750; }
@@ -251,6 +252,7 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
   </header>
   <p id="status" role="status">OMS 연결 중…</p>
   <p id="receipt" role="status"></p>
+  <noscript><p class="muted">이 호스트에서 패널 UI를 실행할 수 없으면 텍스트 MCP 도구(oms_list_projects, oms_panel_snapshot) 또는 CLI(oms dashboard)로 같은 관측 리비전과 상태를 확인하세요.</p></noscript>
   <div id="view" hidden>
     <div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" type="button" hidden></button><span id="current-main" class="muted"></span></div>
     <nav class="tabs" role="tablist" aria-label="프로젝트 보기">
@@ -370,6 +372,8 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
     <details class="card" id="source-details"><summary>연결 정보</summary>
       <p class="muted" id="main-scope"></p><p id="main-state"></p>
       <dl class="identity" id="identity"><dt>작업방</dt><dd id="room"></dd><dt>참여자</dt><dd id="participant"></dd></dl>
+      <dl class="identity" id="observation-meta"><dt>관측 리비전</dt><dd id="observation-revision"></dd><dt>관측 기준</dt><dd id="observation-basis"></dd><dt>수집 상태</dt><dd id="observation-completeness"></dd></dl>
+      <p class="muted" id="observation-sources"></p>
       <p class="project-meta"><span id="branch"></span><time id="updated"></time></p>
       <h3>앱과 OMS</h3><p class="muted" id="connection-host"></p><p id="connection-runtime" role="status">OMS 연결 확인 중</p>
       <details><summary>호스트별 지원과 연결 경로</summary>
@@ -1043,8 +1047,36 @@ function render(d) {
     list.append(li);
   }
   el('alerts').hidden = !d.attention?.length;
-  const date = new Date(d.updated);
-  el('updated').textContent = d.updated && Number.isFinite(date.getTime()) ? '최근 조회 ' + date.toLocaleString() : '';
+  const obs = d.observation?.schema === 1 && d.observation.kind === 'multi-source-observation' && d.observation.atomic === false ? d.observation : null;
+  const revision = typeof obs?.revision === 'string' && /^obs-v[0-9]+:[0-9a-f]{12,64}$/.test(obs.revision) ? obs.revision : null;
+  el('observation-revision').textContent = revision || '미확인';
+  el('observation-basis').textContent = obs ? '다중 원장 관측 (비원자적)' : '관측 기준 미확인';
+  const completenessLabels = {complete:'전체 관측', partial:'일부 관측', unknown:'관측 상태 미확인'};
+  const completeness = obs && Object.hasOwn(completenessLabels, obs.completeness)
+    ? completenessLabels[obs.completeness]
+    : (d.degraded ? '일부 관측' : '관측 상태 미확인');
+  const ev = obs?.evidence && typeof obs.evidence === 'object' ? obs.evidence : null;
+  const omittedCount = Number.isSafeInteger(ev?.omitted) && ev.omitted > 0 ? ev.omitted : 0;
+  const trimmedCount = Number.isSafeInteger(ev?.trimmed) && ev.trimmed > 0 ? ev.trimmed : 0;
+  el('observation-completeness').textContent = [
+    completeness,
+    omittedCount > 0 && '생략 ' + formatCount(omittedCount) + '건',
+    trimmedCount > 0 && '축약 ' + formatCount(trimmedCount) + '건'
+  ].filter(Boolean).join(' · ');
+  const sourceNames = {git:'Git',task:'작업',plan:'계획',attempts:'실행',artifacts:'결과물',acceptance:'수락 근거',conversation:'대화'};
+  const sourceStates = {unavailable:'미확인',partial:'일부 수집',ambiguous:'연결 불명확',stale:'만료된 기록'};
+  const unavailableSources = Object.entries(sourceNames).flatMap(([key,label]) => {
+    const state = obs?.sources?.[key];
+    return Object.hasOwn(sourceStates,state) ? [label + ' (' + sourceStates[state] + ')'] : [];
+  });
+  el('observation-sources').textContent = [
+    unavailableSources.length > 0 && '확인 필요 · ' + unavailableSources.join(', '),
+    typeof ev?.head === 'string' && /^[a-f0-9]{12}$/i.test(ev.head) && 'HEAD ' + ev.head,
+    typeof ev?.latestArtifact === 'string' && /^[a-z0-9_-]{1,128}$/i.test(ev.latestArtifact) && '저장소 최근 결과물 ' + ev.latestArtifact
+  ].filter(Boolean).join(' · ');
+  const observedStamp = (typeof obs?.observedAt === 'string' && obs.observedAt) || d.updated;
+  const date = new Date(observedStamp);
+  el('updated').textContent = observedStamp && Number.isFinite(date.getTime()) ? '최근 조회 ' + date.toLocaleString() : '';
   const omitted = [['attemptsTrimmed','최근 실행'],['operationsTrimmed','결과물'],['attentionTrimmed','주의 항목'],['activeAttemptsTrimmed','미종료 실행']]
     .filter(([key]) => Number.isSafeInteger(d[key]) && d[key] > 0).map(([key,label]) => label + ' ' + formatCount(d[key]) + '건');
   el('status').textContent = [d.degraded && '일부 상태를 수집하지 못했습니다.',
@@ -1077,7 +1109,7 @@ function clearProject() {
   el('launcher').open = false;
   el('brief').setCustomValidity('');
   el('receipt').className = '';
-  for (const id of ['receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
+  for (const id of ['receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
     el(id).replaceChildren();
   }
 }
@@ -1680,7 +1712,7 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw new Error('앱 대화에서 OMS 패널을 여세요.');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.4.0'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.4.1'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || '호스트 미확인';
       hostVersion = /^\d+\.\d+\.\d+(?:[.-][A-Za-z0-9.-]{1,20})?$/.test(info?.hostInfo?.version || '') ? info.hostInfo.version : '';
