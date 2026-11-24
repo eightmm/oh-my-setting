@@ -509,7 +509,17 @@ const choice = (ko,en) => document.documentElement?.lang === 'en' ? en : ko;
 function explorerButton(label, action, classes) {
   const b = node('button',label,classes); b.type = 'button'; b.addEventListener('click',action); return b;
 }
+function preserveExplorerFocus() {
+  const key=document.activeElement?.getAttribute?.('data-explorer-key');
+  return () => {
+    if (!key || !document.querySelectorAll) return;
+    for(const button of document.querySelectorAll('[data-explorer-key]')) {
+      if(button.getAttribute('data-explorer-key')===key){button.focus({preventScroll:true});break;}
+    }
+  };
+}
 function explorerLabels() {
+  const restoreFocus=preserveExplorerFocus();
   const labels = {
     'feature-open':['기능 찾기','Find tools'],'tab-project':['탐색','Explore'],'map-title':['프로젝트 지도','Project map'],'map-open':['지도 열기 ↗','Explore map ↗'],
     'explore-heading':['프로젝트 구조','Project structure'],'graph-reload':['다시 조회','Refresh map'],
@@ -523,7 +533,7 @@ function explorerLabels() {
   el('graph-filter').placeholder = choice('이름 또는 경로로 찾기','Find by name or path');
   el('feature-filter').placeholder = choice('목적이나 OMS 명령으로 찾기','Find a tool by purpose or name');
   el('graph-path').setAttribute('aria-label',choice('탐색 경로','Exploration path'));
-  paintGraph(); paintFeatures();
+  paintGraph(); paintFeatures(); restoreFocus();
 }
 function graphKind(k) {
   const kinds = {directory:['폴더','Folder'],folder:['폴더','Folder'],file:['파일','File'],module:['모듈','Module'],repository:['저장소','Repository'],project:['프로젝트','Project'],symbol:['심볼','Symbol']};
@@ -540,12 +550,14 @@ function graphLink(e,out) {
 }
 function readGraph(focus, query = '', limit = 40) {
   if (!explorerBound) return;
-  graphQuery=query;graphLimit=limit;graphError='';graphData=undefined;el('graph-attached').textContent='';
-  paintGraph(true);
+  const reuse=graphData && (graphData.scope?.focusNode || null)===(focus || null) && query===graphQuery;
+  graphQuery=query;graphLimit=limit;graphError='';
+  if(!reuse) {graphData=undefined;el('graph-attached').textContent='';paintGraph(true);}
+  else {el('map-status').textContent=el('graph-info').textContent=choice('현재 지도를 다시 읽는 중…','Refreshing this map…');}
   detailRead('graph','oms_panel_project_graph',{...(focus ? {node:focus} : {}),...(query ? {query} : {}),limit}, data => {
     if (data?.schema !== 1 || data.kind !== 'oms-panel-project-graph' || !Array.isArray(data.nodes) || !Array.isArray(data.edges))
       throw new Error(choice('그래프 응답 형식 미확인','Unrecognized graph response'));
-    graphData = data; paintGraph();
+    const restoreFocus=preserveExplorerFocus();graphData = data; paintGraph();restoreFocus();
   }, error => {graphError = error.message; graphData = undefined; paintGraph();});
 }
 function enterNode(row) {
@@ -563,9 +575,10 @@ function paintGraph(loading = false) {
   const rootName = dashboardData?.project || project || choice('저장소','Repository');
   const rootLabel = graphTrail.at(-1)?.label || rootName;
   const crumbs = el('graph-path'); crumbs.replaceChildren();
-  const root = explorerButton(rootName,() => goToLevel(0),'current'); root.disabled = !graphTrail.length; crumbs.append(root);
+  const root = explorerButton(rootName,() => goToLevel(0),'current');root.setAttribute('data-explorer-key','root'); root.disabled = !graphTrail.length; crumbs.append(root);
   for (const [i,step] of graphTrail.entries()) {
     const crumb = explorerButton(step.label,() => goToLevel(i+1),'current');
+    crumb.setAttribute('data-explorer-key','crumb:'+step.id);
     if (i === graphTrail.length-1) crumb.setAttribute('aria-current','location');
     crumbs.append(node('span','›'),crumb);
   }
@@ -604,7 +617,8 @@ function paintGraph(loading = false) {
   el('map-root').textContent = el('explore-root').textContent = local?.label || rootLabel;
   el('map-field').hidden = el('explore-map').hidden = !data.nodes.length;
   detailed.className = tree.className;
-  function item(r,compact) {
+  function item(r,location) {
+    const compact=location!=='list';
     const title = r.label || r.path || r.id;
     const link = byNeighbor.get(r.id);
     const relation = link && graphLink(link.edge,link.out);
@@ -613,14 +627,14 @@ function paintGraph(loading = false) {
     const button = explorerButton('',()=>enterNode(r),compact?'map-node':'explorer-item');
     const rest = Number.isSafeInteger(r.omitted_children) && r.omitted_children > 0 ? choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children') : '';
     button.title = [r.path || title,description,rest].filter(Boolean).join(' · ');
-    button.setAttribute('aria-label',button.title);
+    button.setAttribute('aria-label',button.title);button.setAttribute('data-explorer-key',location+':'+r.id);
     const text = node('span',''); text.append(node('strong',title),node('small',description));
     button.append(text); if (!compact) button.append(node('span','›','muted'));
     const li=node('li','');li.append(button);return li;
   }
-  for(const r of group.slice(0,3)) tree.append(item(r,true));
-  for(const r of group.filter(r=>filtered.includes(r)).slice(0,5)) detailed.append(item(r,true));
-  for(const r of filtered) list.append(item(r,false));
+  for(const r of group.slice(0,3)) tree.append(item(r,'mini'));
+  for(const r of group.filter(r=>filtered.includes(r)).slice(0,5)) detailed.append(item(r,'map'));
+  for(const r of filtered) list.append(item(r,'list'));
   const provenance=data.provenance || {};
   const sources={'indexed-graph':['OMS 그래프 색인','OMS graph index'],'git-ls-files':['Git 추적 경로','Git-tracked paths'],'directory-scan':['폴더 구조','Directory scan']};
   const source = Object.hasOwn(sources,provenance.source) ? choice(...sources[provenance.source]) : '';
@@ -700,11 +714,14 @@ function readCatalog(offset = 0) {
 }
 function paintFeatures() {
   const links=el('feature-links'), list=el('feature-list'); links.replaceChildren(); list.replaceChildren();
-  for(const [,ko,en,open] of featureRoutes) links.append(explorerButton(choice(ko,en),open));
+  for(const [name,ko,en,open] of featureRoutes) {
+    const button=explorerButton(choice(ko,en),open);button.setAttribute('data-explorer-key','route:'+name);links.append(button);
+  }
   const q=el('feature-filter').value.trim().toLocaleLowerCase();
   const rows=catalog.filter(c=>[c.name,c.description,commandKorean[c.name]].some(v=>v?.toLocaleLowerCase().includes(q)));
   for(const c of rows.slice(0,commandRows)) {
     const b=explorerButton('',()=>editFeature(c),'explorer-item'), t=node('span','');
+    b.setAttribute('data-explorer-key','command:'+c.name);
     t.append(node('strong','oms '+c.name),node('small',choice(commandKorean[c.name] || c.description,c.description)));
     b.append(t,node('span','›','muted'));const li=node('li','');li.append(b);list.append(li);
   }
