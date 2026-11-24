@@ -1436,12 +1436,12 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
     if equal && !prompt.trim().lines().skip(1).any(|s| !s.trim().is_empty()) {
         return;
     }
-    let stale = cap("OMS_AGENT_TASK_TTL", 604800, 0, 315360000) == 0
+    let default_ttl = oms_command_task::packet::DEFAULT_TTL_SECONDS;
+    let ttl = cap("OMS_AGENT_TASK_TTL", default_ttl, 0, 315360000);
+    let stale = ttl == 0
         || oms_command_task::packet::stale(
             &task,
-            cap("OMS_AGENT_TASK_TTL", 604800, 0, 315360000)
-                .to_string()
-                .as_bytes(),
+            ttl.to_string().as_bytes(),
             chrono::DateTime::from(ctx.snapshot.time()),
         );
     let mut status = if task.is_empty() {
@@ -1541,4 +1541,165 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
         v,
         json!({"action":"auto_task","status":status,"workflow":workflow,"risk":risk,"prompt_hash":digest,"task":".oms/task/current.md"}),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::AtomicUsize;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "oms-routing-test-{label}-{}-{n}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("mkdir");
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn auto_task_keeps_7_day_default_rotation_ttl() {
+        if std::env::var_os("OMS_ROUTING_AUTO_TASK_ISOLATED").is_none() {
+            let env_tmp = TempDir::new("auto-task-env");
+            let state_dir = env_tmp.0.join("state");
+            fs::create_dir_all(&state_dir).expect("mkdir state");
+            let output = std::process::Command::new(std::env::current_exe().expect("exe"))
+                .args([
+                    "--exact",
+                    "routing::tests::auto_task_keeps_7_day_default_rotation_ttl",
+                    "--nocapture",
+                ])
+                .env("OMS_ROUTING_AUTO_TASK_ISOLATED", "1")
+                .env("OMS_AUTO_TASK", "1")
+                .env("HOME", &env_tmp.0)
+                .env("XDG_STATE_HOME", &state_dir)
+                .env_remove("OMS_AGENT_TASK_TTL")
+                .env_remove("OMS_HARNESS_CHILD")
+                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                .env_remove("OMS_STATE_REPO")
+                .output()
+                .expect("spawn isolated test");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let tmp = TempDir::new("auto-task-ttl");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms/task")).expect("mkdir");
+        let git_ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init")
+            .success();
+        assert!(git_ok);
+
+        let stamp = |offset: i64| {
+            let ts = (seconds() as i64 - offset).max(0);
+            chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                .expect("ts")
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let packet_path = repo.join(".oms/task/current.md");
+        let four_days_ago = stamp(4 * 86400 + 60);
+        fs::write(
+            &packet_path,
+            format!(
+                "# Active Task\n\
+                 - task_id: task-dormant-4d\n\
+                 - status: active\n\
+                 - updated: {four_days_ago}\n\
+                 - last_activity: {four_days_ago}\n\
+                 - closed_at:\n\n\
+                 ## Goal\n\nExisting 4-day task\n\n\
+                 ## Current State\n\n\
+                 ## Next Step\n\nKeep working\n"
+            ),
+        )
+        .expect("write 4d packet");
+
+        let cancel = AtomicBool::new(false);
+        let host = crate::NoHostServices;
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        auto_task(
+            &json!({"session_id": "s1", "turn_id": "turn-1"}),
+            "Continue investigating the test failure",
+            "debug",
+            "low",
+            &repo,
+            &ctx,
+        );
+        let after_4d = fs::read(&packet_path).expect("read after 4d");
+        let after_4d_text = String::from_utf8_lossy(&after_4d);
+        assert_eq!(
+            oms_command_task::packet::metadata(&after_4d, "task_id"),
+            Some(b"task-dormant-4d".as_slice()),
+            "4-day dormant packet must NOT auto-rotate under default 7d TTL:\n{after_4d_text}"
+        );
+        assert!(
+            after_4d_text.contains("Continue investigating the test failure"),
+            "4-day dormant packet should be appended:\n{after_4d_text}"
+        );
+
+        let eight_days_ago = stamp(8 * 86400 + 60);
+        fs::write(
+            &packet_path,
+            format!(
+                "# Active Task\n\
+                 - task_id: task-stale-8d\n\
+                 - status: active\n\
+                 - updated: {eight_days_ago}\n\
+                 - last_activity: {eight_days_ago}\n\
+                 - closed_at:\n\n\
+                 ## Goal\n\nExpired 8-day task\n\n\
+                 ## Current State\n\n\
+                 ## Next Step\n\nOld next step\n"
+            ),
+        )
+        .expect("write 8d packet");
+        auto_task(
+            &json!({"session_id": "s1", "turn_id": "turn-2"}),
+            "Start fixing the parser bug",
+            "code",
+            "low",
+            &repo,
+            &ctx,
+        );
+        let after_8d = fs::read(&packet_path).expect("read after 8d");
+        let after_8d_text = String::from_utf8_lossy(&after_8d);
+        assert_ne!(
+            oms_command_task::packet::metadata(&after_8d, "task_id"),
+            Some(b"task-stale-8d".as_slice()),
+            "8-day stale packet must auto-rotate under default 7d TTL:\n{after_8d_text}"
+        );
+        assert!(
+            after_8d_text.contains("Start fixing the parser bug"),
+            "8-day rotated packet should record the new prompt:\n{after_8d_text}"
+        );
+    }
 }
