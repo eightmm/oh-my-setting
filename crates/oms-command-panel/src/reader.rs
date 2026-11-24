@@ -1306,8 +1306,8 @@ fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> S
     // A tail cut can drop a PEM block's BEGIN line, and redaction only matches whole
     // blocks, so drop everything through an END line that has no BEGIN before it.
     if truncated
-        && let Some(end) = kept.iter().position(|l| l.starts_with("-----END "))
-        && !kept[..end].iter().any(|l| l.starts_with("-----BEGIN "))
+        && let Some(end) = kept.iter().position(|l| l.contains("-----END "))
+        && !kept[..end].iter().any(|l| l.contains("-----BEGIN "))
     {
         kept.drain(..=end);
     }
@@ -2791,6 +2791,12 @@ mod tests {
         assert!(!shown.contains("KEYBODY_LINE"), "{shown}");
         assert!(shown.contains("AFTER_KEY"), "{shown}");
         assert!(format_report_bytes(cut.as_bytes(), false, false).contains("KEYBODY_LINE"));
+        let indented = cut.replace('\n', "\n    > ");
+        let shown = format_report_bytes(indented.as_bytes(), true, true);
+        assert!(
+            !shown.contains("KEYBODY_LINE") && shown.contains("AFTER_KEY"),
+            "{shown}"
+        );
         assert!(
             !budgeted.contains(&secret_like),
             "secret in truncated report tail leaked:\n{budgeted}"
