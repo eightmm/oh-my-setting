@@ -278,7 +278,7 @@ fn cross_host_project_reads() {
         );
         let listed = c.call("tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let graph_tool = tools
             .iter()
             .find(|t| t["name"] == "oms_panel_project_graph")
@@ -296,6 +296,12 @@ fn cross_host_project_reads() {
                 .get("project")
                 .is_some()
         );
+        assert!(tools.iter().any(|t| t["name"] == "oms_panel_capabilities"
+            && t["annotations"]["readOnlyHint"] == true
+            && t["annotations"]["destructiveHint"] == false
+            && t["annotations"]["idempotentHint"] == true
+            && t["annotations"]["openWorldHint"] == false
+            && t["inputSchema"]["additionalProperties"] == false));
         let opener = tools
             .iter()
             .find(|t| t["name"] == "oms_open_panel")
@@ -803,7 +809,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 14);
+    assert_eq!(tools.as_array().unwrap().len(), 15);
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
@@ -1427,6 +1433,131 @@ fn conversation_panel() {
         &c.tool("oms_list_projects", json!({})),
         "Invalid OMS project map",
     );
+}
+
+fn panel_command_catalog() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let name = "oms_panel_capabilities";
+    let mut desktop =
+        Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let listing =
+        "advise                     First description.\npeer-ask                   Ask a peer.\n";
+    fixture_settings(&source, json!({"stdout":listing}));
+    let first = desktop.tool(name, json!({}));
+    let expected = json!({"schema":1,"total":2,"omitted":0,"commands":[{"name":"advise","description":"First description."},{"name":"peer-ask","description":"Ask a peer."}]});
+    assert_eq!(payload(&first), expected);
+    assert_eq!(first["result"]["structuredContent"], expected);
+    assert_eq!(record(&source)["argv"], json!(["list", "--all"]));
+    assert_eq!(record(&source)["cwd"], json!(repo));
+    assert_eq!(
+        payload(&desktop.tool(name, json!({"offset":2}))),
+        json!({"schema":1,"total":2,"omitted":2,"commands":[]})
+    );
+    let before = std::fs::read(source.join("last-call.json")).unwrap();
+    for field in [
+        json!({"command":"update"}),
+        json!({"path":repo}),
+        json!({"repo":repo}),
+    ] {
+        assert_eq!(desktop.tool(name, field)["error"]["code"], -32602);
+    }
+    for offset in [
+        json!(-1),
+        json!(10001),
+        json!("2"),
+        json!(null),
+        json!(true),
+        json!(0.5),
+    ] {
+        bad(
+            &desktop.tool(name, json!({"offset":offset})),
+            "Invalid command catalog offset",
+        );
+    }
+    let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
+    bad(&worker.tool(name, json!({})), "parent app");
+    let mut generic = Client::with_depth(&source, &repo, "mcp-app", false, false, "0".as_ref());
+    bad(&generic.tool(name, json!({})), "OMS_PANEL_REPO");
+    let map = source.join("test-config/oh-my-setting/desktop-projects.json");
+    std::fs::create_dir_all(map.parent().unwrap()).unwrap();
+    std::fs::write(&map, json!({"approved":repo}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for alias in [json!("unknown"), json!(repo), json!(null)] {
+        bad(
+            &generic.tool(name, json!({"project":alias})),
+            "OMS_PANEL_REPO",
+        );
+    }
+    assert_eq!(
+        before,
+        std::fs::read(source.join("last-call.json")).unwrap()
+    );
+    assert_eq!(
+        payload(&generic.tool(name, json!({"project":"approved"}))),
+        expected
+    );
+    for full in [false, true] {
+        assert_eq!(
+            Client::new(&source, &repo, full, false, false).tool(name, json!({}))["error"]["code"],
+            -32602
+        );
+    }
+    std::fs::remove_file(map).unwrap();
+
+    let descriptions = (0..240)
+        .map(|i| format!("Description {i} — {}", r#""some text" "#.repeat(30)))
+        .collect::<Vec<_>>();
+    let rows = descriptions
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("command-{i} {d}\n"))
+        .collect::<String>();
+    fixture_settings(&source, json!({"stdout":rows}));
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = desktop.tool(name, json!({"offset":offset}));
+        good(&page);
+        assert!(page.to_string().len() <= 60_000);
+        let data = &page["result"]["structuredContent"];
+        let rows = data["commands"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert_eq!(data["omitted"], descriptions.len() - rows.len());
+        for row in rows {
+            assert_eq!(row["name"], format!("command-{offset}"));
+            assert_eq!(row["description"], descriptions[offset]);
+            offset += 1;
+        }
+        pages += 1;
+        if data.get("nextOffset").is_none() {
+            break;
+        }
+        assert_eq!(data["nextOffset"], offset);
+    }
+    assert_eq!(offset, descriptions.len());
+    assert!(pages > 1);
+    for (stdout, error) in [
+        ("".into(), "Unreadable"),
+        ("a desc\na again\n".into(), "Unreadable"),
+        ("/bin/sh command\n".into(), "Unreadable"),
+        ("status bad\u{7}record".into(), "Unreadable"),
+        (format!("giant {}", "a".repeat(61000)), "response limit"),
+        (
+            format!("help {}{}", "gh", ["p_", &"a".repeat(36)].concat()),
+            "outbound scan",
+        ),
+    ] {
+        fixture_settings(&source, json!({"stdout":stdout}));
+        bad(&desktop.tool(name, json!({})), error);
+    }
+    fixture_settings(&source, json!({"exit":2,"stderr":"private diagnostic"}));
+    let result = desktop.tool(name, json!({}));
+    bad(&result, "OMS refused");
+    assert!(!result.to_string().contains("private diagnostic"));
 }
 
 fn environment_authority() {
@@ -4277,7 +4408,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 34] = [
+    let cases: [(&str, fn()); 35] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -4287,6 +4418,7 @@ fn main() {
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
         ("desktop_assignment", desktop_assignment),
+        ("panel_command_catalog", panel_command_catalog),
         ("environment_authority", environment_authority),
         ("boundary_limits", boundary_limits),
         ("canonical_protocol_cases", canonical_protocol_cases),
