@@ -123,7 +123,7 @@ explains overlapping entrypoints.
 | Component | Purpose | Invoke | Details |
 |---|---|---|---|
 | `install-profile` | Inspect or install tools for selected capabilities. | `oms install-profile` | [Install guide](INSTALL.md) |
-| `connect-services` | Connect GitHub/Notion or register another Codex account home. | `oms connect-services --account codex:ID [--home PATH] [--first\|--last] [--repair\|--remove\|--verify]` | [Provider accounts](TERMINAL-PANEL.md#provider-accounts) |
+| `connect-services` | Connect GitHub/Notion, register another account home, or sign in to a provider. | `oms connect-services --account codex:ID [--home PATH] [--first\|--last] [--repair\|--remove\|--verify]` · `oms connect-services --login PROVIDER[:ID] \| --login-menu` | [Provider accounts](TERMINAL-PANEL.md#provider-accounts) |
 | `status` | Show install, task and update status. | `oms status` | [Install and ownership](#install-and-ownership) |
 | `doctor` | Check managed links, tools, skills and manifest sync. | `oms doctor` | [Install and ownership](#install-and-ownership) |
 | `project-doctor` | Check project agent-facing files for agreement. | `oms project-doctor` | [Project onboarding](#project-onboarding) |

@@ -1902,3 +1902,235 @@ fn antigravity_legacy_claude_default_home_child() {
     assert_eq!(rj(&registry)["accounts"], json!([]));
     assert_eq!(rj(&receipt), json!([]));
 }
+
+fn write_login_stubs(root: &Path) {
+    let codex_overrides = [
+        concat!("CODEX_API_", "KEY"),
+        concat!("CODEX_ACCESS_", "TOKEN"),
+        concat!("OPENAI_API_", "KEY"),
+        "OPENAI_BASE_URL",
+    ];
+    let claude_overrides = [
+        concat!("ANTHROPIC_API_", "KEY"),
+        concat!("ANTHROPIC_AUTH_", "TOKEN"),
+        concat!("CLAUDE_CODE_OAUTH_", "TOKEN"),
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    ];
+    let check_vars = |vars: &[&str]| -> String {
+        let mut s = String::from("leaked=\"\"\n");
+        for v in vars {
+            s.push_str(&format!(
+                "if [ -n \"${{{v}+x}}\" ]; then leaked=\"$leaked {v}\"; fi\n"
+            ));
+        }
+        s
+    };
+    let codex_script = format!(
+        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'codex-status|%s|%s|%s\\n' \"$*\" \"$CODEX_HOME\" \"$leaked\" >> \"$log\"\n  [ -e \"$CODEX_HOME/ok\" ]\n  exit $?\nfi\nprintf 'codex-login|%s|%s|%s\\n' \"$*\" \"$CODEX_HOME\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CODEX_OUT\\n'\nprintf 'STUB_CODEX_ERR\\n' >&2\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  mkdir -p \"$CODEX_HOME\"\n  : > \"$CODEX_HOME/ok\"\nfi\nexit 0\n",
+        check_vars(&codex_overrides)
+    );
+    let claude_script = format!(
+        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'claude-status|%s|%s|%s\\n' \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$leaked\" >> \"$log\"\n  [ -e \"$CLAUDE_CONFIG_DIR/ok\" ]\n  exit $?\nfi\nprintf 'claude-login|%s|%s|%s\\n' \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CLAUDE_OUT\\n'\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  mkdir -p \"$CLAUDE_CONFIG_DIR\"\n  : > \"$CLAUDE_CONFIG_DIR/ok\"\nfi\nexit 0\n",
+        check_vars(&claude_overrides)
+    );
+    let agy_script = "#!/bin/sh\nlog=\"$HOME/login-trace.log\"\nprintf 'agy-login|%s|%s|%s|%s\\n' \"$#\" \"$*\" \"$CODEX_HOME\" \"$CLAUDE_CONFIG_DIR\" >> \"$log\"\nprintf 'STUB_AGY_OUT\\n'\nexit 0\n";
+    for (name, body) in [
+        ("codex", codex_script.as_str()),
+        ("claude", claude_script.as_str()),
+        ("agy", agy_script),
+    ] {
+        let path = root.join("bin").join(name);
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[test]
+fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
+    isolated(
+        "login_spawns_provider_strips_overrides_and_refuses_invalid",
+        &[],
+        |root| {
+            let (codex_main, _) = seed(root, "codex");
+            let (claude_main, _) = seed(root, "claude");
+            ok(root, &["--account", "codex:work"]);
+            ok(root, &["--account", "claude:work"]);
+            write_login_stubs(root);
+            let cfg_before = snapshot(&config(root));
+
+            // Refusals: unknown account, antigravity:ID, bad provider, bad flags, non-TTY menu.
+            refused(root, &["--login", "codex:unknown"], "unknown codex account");
+            refused(
+                root,
+                &["--login", "claude:unknown"],
+                "unknown claude account",
+            );
+            refused(
+                root,
+                &["--login", "antigravity:work"],
+                "does not support per-account sign-in",
+            );
+            refused(
+                root,
+                &["--login", "antigravity:default"],
+                "does not support per-account sign-in",
+            );
+            refused(
+                root,
+                &["--login", "codex:Bad"],
+                "invalid provider account id",
+            );
+            refused(root, &["--login", "agy"], "unsupported login provider");
+            refused(root, &["--login", "pi"], "unsupported login provider");
+            refused(
+                root,
+                &["--login", "codex", "--login-menu"],
+                "choose --login PROVIDER[:ID] or --login-menu",
+            );
+            refused(
+                root,
+                &["--login", "codex", "--account", "codex:work"],
+                "cannot be combined",
+            );
+            refused(root, &["--login-menu"], "interactive terminal");
+
+            // Spawn child with every credential override set; verify they are removed on
+            // both login and status verification, home env is set, and stdio is inherited.
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "login_env_overrides_and_stdio_child",
+                "--nocapture",
+            ])
+            .env(ROOT, root)
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("home/.config"))
+            .env("PATH", root.join("bin"));
+            for var in [
+                concat!("CODEX_API_", "KEY"),
+                concat!("CODEX_ACCESS_", "TOKEN"),
+                concat!("OPENAI_API_", "KEY"),
+                "OPENAI_BASE_URL",
+                concat!("ANTHROPIC_API_", "KEY"),
+                concat!("ANTHROPIC_AUTH_", "TOKEN"),
+                concat!("CLAUDE_CODE_OAUTH_", "TOKEN"),
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_CUSTOM_HEADERS",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_USE_FOUNDRY",
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+            ] {
+                cmd.env(var, "fixture-override");
+            }
+            let out = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{stdout}{stderr}");
+            // Child stdout/stderr passed directly through inherited stdio, never captured by OMS.
+            assert!(stdout.contains("STUB_CODEX_OUT"), "{stdout}");
+            assert!(stderr.contains("STUB_CODEX_ERR"), "{stderr}");
+            assert!(stdout.contains("STUB_CLAUDE_OUT"), "{stdout}");
+            let agy_hint = stdout
+                .find("Sign in inside Antigravity (agy)")
+                .expect("pre-launch agy instruction");
+            let agy_stub = stdout.find("STUB_AGY_OUT").expect("inherited agy stdout");
+            assert!(agy_hint < agy_stub, "{stdout}");
+
+            let trace = fs::read_to_string(root.join("home/login-trace.log")).unwrap();
+            let lines: Vec<&str> = trace.lines().collect();
+            let codex_work = codex_main.join("accounts/work");
+            let claude_work = claude_main.join("accounts/work");
+            assert!(
+                lines.contains(&format!("codex-login|login|{}|", codex_main.display()).as_str()),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(
+                    &format!("codex-status|login status|{}|", codex_main.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(&format!("codex-login|login|{}|", codex_work.display()).as_str()),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(
+                    &format!("claude-login|auth login|{}|", claude_main.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(
+                    &format!("claude-status|auth status|{}|", claude_main.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(
+                    &format!("claude-login|auth login|{}|", claude_work.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(lines.contains(&"agy-login|0|||"), "{trace}");
+
+            // Unverified login returns exit 1 and "not signed in".
+            fs::remove_file(codex_work.join("ok")).unwrap();
+            fs::write(root.join("home/skip-ok"), "").unwrap();
+            let res = connect(root, &["--login", "codex:work"]);
+            assert_eq!(res.0, 1, "{res:?}");
+            assert!(res.1.contains("codex:work: not signed in"), "{}", res.1);
+            assert!(!res.1.contains("STUB_CODEX_OUT"), "{}", res.1);
+
+            // Missing CLI binary reports a clear error naming the binary.
+            for (provider, bin) in [
+                ("codex", "codex"),
+                ("claude", "claude"),
+                ("antigravity", "agy"),
+            ] {
+                fs::remove_file(root.join("bin").join(bin)).unwrap();
+                refused(root, &["--login", provider], bin);
+            }
+
+            // Login never writes new state files or modifies registries.
+            assert_eq!(snapshot(&config(root)), cfg_before);
+        },
+    );
+}
+
+#[test]
+fn login_env_overrides_and_stdio_child() {
+    if std::env::var_os(ROOT).is_none() {
+        return;
+    }
+    let root = fixture_root(
+        TEMP_PARENT,
+        "login_spawns_provider_strips_overrides_and_refuses_invalid",
+        None,
+        None,
+        None,
+    );
+    let out = ok(&root, &["--login", "codex"]);
+    assert!(out.contains("codex: signed in"), "{out}");
+    assert!(!out.contains("STUB_CODEX_OUT"), "{out}");
+
+    let out = ok(&root, &["--login", "codex:work"]);
+    assert!(out.contains("codex:work: signed in"), "{out}");
+
+    let out = ok(&root, &["--login", "claude"]);
+    assert!(out.contains("claude: signed in"), "{out}");
+    assert!(!out.contains("STUB_CLAUDE_OUT"), "{out}");
+
+    let out = ok(&root, &["--login", "claude:work"]);
+    assert!(out.contains("claude:work: signed in"), "{out}");
+
+    let out = ok(&root, &["--login", "antigravity"]);
+    assert!(out.contains("antigravity: sign-in not verifiable"), "{out}");
+    assert!(!out.contains("STUB_AGY_OUT"), "{out}");
+}

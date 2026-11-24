@@ -569,6 +569,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
 | `N` | — | Previous search match |
 | `s`, then a listed number, then `Y` | Select and confirm a switch from a managed Codex Main. `Esc` cancels the selection | — |
+| `L` | Open a `login` tmux window to sign in to Codex, Claude or Antigravity (`oms connect-services --login-menu`) | — |
 | `a` / `c` | Ask advisor / request selected call cancellation | — |
 | `w` or click Weekly | Open weekly usage details. Quota appears when the Board snapshot is fresh | — |
 | `U` | Refresh weekly quota from idle Claude or AGY sessions. Also available in weekly details | — |
@@ -1376,7 +1377,10 @@ is available to routing without editing JSON.
 
 `oms connect-services --account codex:credits --verify` checks `codex login
 status` for every registered Codex home, including the main home. It fails if
-any home or login cannot be verified, and does not make a model call.
+any home or login cannot be verified, and does not make a model call. To run a
+provider's native sign-in interactively (or from the panel with `L`), use
+`oms connect-services --login PROVIDER[:ID]` (`codex`, `claude`, or
+`antigravity`) or `oms connect-services --login-menu`.
 
 `--first` places the account ahead of existing accounts; the default `--last`
 appends it. The ID `default` is reserved for the main home. A fresh registry

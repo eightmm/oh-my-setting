@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let args = Args::parse(
         raw,
-        &["--data-source-id", "--account", "--home"],
+        &["--data-source-id", "--account", "--home", "--login"],
         &[
             "--auto",
             "--required",
@@ -19,10 +19,41 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             "--repair",
             "--remove",
             "--verify",
+            "--login-menu",
         ],
     )?;
     args.count(0)?;
     host_mutation()?;
+    if args.get("--login").is_some() || args.has("--login-menu") {
+        if args.get("--login").is_some() && args.has("--login-menu") {
+            return Err(error("choose --login PROVIDER[:ID] or --login-menu"));
+        }
+        if args.get("--account").is_some()
+            || args.get("--home").is_some()
+            || args.get("--data-source-id").is_some()
+            || [
+                "--auto",
+                "--required",
+                "--no-github",
+                "--no-notion",
+                "--first",
+                "--last",
+                "--repair",
+                "--remove",
+                "--verify",
+            ]
+            .iter()
+            .any(|s| args.has(s))
+        {
+            return Err(error(
+                "login options cannot be combined with account or GitHub/Notion options",
+            ));
+        }
+        if let Some(target) = args.get("--login") {
+            return login_direct(target, ctx);
+        }
+        return login_menu(ctx);
+    }
     if args.get("--account").is_some() {
         if args.get("--data-source-id").is_some()
             || ["--auto", "--required", "--no-github", "--no-notion"]
@@ -1888,6 +1919,441 @@ fn validate_receipt_links(
     }
     Ok(links)
 }
+const CODEX_LOGIN_OVERRIDES: &[&str] = &[
+    concat!("CODEX_API_", "KEY"),
+    concat!("CODEX_ACCESS_", "TOKEN"),
+    concat!("OPENAI_API_", "KEY"),
+    "OPENAI_BASE_URL",
+];
+const CLAUDE_LOGIN_OVERRIDES: &[&str] = &[
+    concat!("ANTHROPIC_API_", "KEY"),
+    concat!("ANTHROPIC_AUTH_", "TOKEN"),
+    concat!("CLAUDE_CODE_OAUTH_", "TOKEN"),
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+];
+fn login_overrides(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "codex" => CODEX_LOGIN_OVERRIDES,
+        "claude" => CLAUDE_LOGIN_OVERRIDES,
+        _ => &[],
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LoginTarget {
+    provider: String,
+    account_id: Option<String>,
+}
+fn parse_login_spec(raw: &str) -> Result<LoginTarget> {
+    let (provider, account_id) = match raw.split_once(':') {
+        Some((p, id)) => (p, Some(id)),
+        None => (raw, None),
+    };
+    match provider {
+        "codex" | "claude" => {
+            if let Some(id) = account_id
+                && !valid_account_id(id)
+            {
+                return Err(error("invalid provider account id"));
+            }
+            Ok(LoginTarget {
+                provider: provider.to_owned(),
+                account_id: account_id.map(str::to_owned),
+            })
+        }
+        "antigravity" => {
+            if account_id.is_some() {
+                return Err(error(
+                    "antigravity does not support per-account sign-in; use --login antigravity",
+                ));
+            }
+            Ok(LoginTarget {
+                provider: "antigravity".to_owned(),
+                account_id: None,
+            })
+        }
+        _ => Err(error(
+            "unsupported login provider; expected codex, claude, or antigravity",
+        )),
+    }
+}
+fn registered_provider_accounts(provider: &str) -> Result<Vec<(String, PathBuf)>> {
+    if !["codex", "claude"].contains(&provider) {
+        return Ok(Vec::new());
+    }
+    let config = account_config_dir()?;
+    let registry = config.join("provider-accounts.json");
+    let raw = optional(&registry)?;
+    let shared = if raw.is_empty() {
+        json!({"schema":1,"providers":{}})
+    } else {
+        json(&raw)?
+    };
+    let shared_homes = validate_shared_registry(&shared)?;
+    if let Some(entries) = shared["providers"][provider]["accounts"].as_array() {
+        let mut out = Vec::with_capacity(entries.len());
+        for row in entries {
+            let (id, home_str) = validate_account_row(row, true)?;
+            out.push((id.to_owned(), physical(Path::new(home_str))?));
+        }
+        return Ok(out);
+    }
+    if provider == "claude" {
+        let claude_registry = config.join("provider-accounts.claude.json");
+        let claude_raw = optional(&claude_registry)?;
+        if !claude_raw.is_empty() {
+            let default_claude = physical(&home()?.join(".claude"))?;
+            let claude_doc = json(&claude_raw)?;
+            validate_claude_registry(&claude_doc, &default_claude, &shared, &shared_homes)?;
+            if let Some(entries) = claude_doc["accounts"].as_array()
+                && !entries.is_empty()
+            {
+                let mut out = vec![("default".to_owned(), default_claude)];
+                for row in entries {
+                    let (id, home_str) = validate_account_row(row, false)?;
+                    out.push((id.to_owned(), physical(Path::new(home_str))?));
+                }
+                return Ok(out);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LoginEntry {
+    provider: String,
+    account_id: Option<String>,
+    home_env: Option<(&'static str, PathBuf)>,
+}
+impl LoginEntry {
+    fn label(&self) -> String {
+        match &self.account_id {
+            Some(id) => format!("{}:{id}", self.provider),
+            None => self.provider.clone(),
+        }
+    }
+}
+fn default_provider_home(provider: &str) -> Result<Option<(&'static str, PathBuf)>> {
+    let (env_key, fallback) = match provider {
+        "codex" => ("CODEX_HOME", ".codex"),
+        "claude" => ("CLAUDE_CONFIG_DIR", ".claude"),
+        _ => return Ok(None),
+    };
+    let path = physical(&env_path(env_key, home()?.join(fallback)))?;
+    Ok(Some((env_key, path)))
+}
+fn resolve_login_entry(target: &LoginTarget) -> Result<LoginEntry> {
+    match target.provider.as_str() {
+        "codex" | "claude" => {
+            let env_key = if target.provider == "codex" {
+                "CODEX_HOME"
+            } else {
+                "CLAUDE_CONFIG_DIR"
+            };
+            let accounts = registered_provider_accounts(&target.provider)?;
+            if let Some(id) = &target.account_id {
+                let (_, path) = accounts
+                    .into_iter()
+                    .find(|(rid, _)| rid == id)
+                    .ok_or_else(|| error(format!("unknown {} account: {id}", target.provider)))?;
+                private_home(&path)?;
+                Ok(LoginEntry {
+                    provider: target.provider.clone(),
+                    account_id: Some(id.clone()),
+                    home_env: Some((env_key, path)),
+                })
+            } else {
+                let path = match accounts.into_iter().find(|(rid, _)| rid == "default") {
+                    Some((_, path)) => path,
+                    None => {
+                        default_provider_home(&target.provider)?
+                            .expect("codex/claude default home")
+                            .1
+                    }
+                };
+                Ok(LoginEntry {
+                    provider: target.provider.clone(),
+                    account_id: None,
+                    home_env: Some((env_key, path)),
+                })
+            }
+        }
+        "antigravity" => Ok(LoginEntry {
+            provider: "antigravity".to_owned(),
+            account_id: None,
+            home_env: None,
+        }),
+        _ => Err(error(
+            "unsupported login provider; expected codex, claude, or antigravity",
+        )),
+    }
+}
+fn provider_login_spec(provider: &str) -> Result<(&'static str, &'static [&'static str])> {
+    match provider {
+        "codex" => Ok(("codex", &["login"])),
+        "claude" => Ok(("claude", &["auth", "login"])),
+        "antigravity" => Ok(("agy", &[])),
+        _ => Err(error(
+            "unsupported login provider; expected codex, claude, or antigravity",
+        )),
+    }
+}
+fn run_login_entry(entry: &LoginEntry, ctx: &Context<'_>) -> Result<(i32, String)> {
+    use std::io::Write;
+    let (binary, subargs) = provider_login_spec(&entry.provider)?;
+    if entry.account_id.is_some()
+        && let Some((_, home_path)) = &entry.home_env
+    {
+        private_home(home_path)?;
+    }
+    if !installed(binary) {
+        return Err(error(format!("{binary} is not installed or not on PATH")));
+    }
+    if entry.provider == "antigravity" {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(
+            stdout,
+            "Sign in inside Antigravity ({binary}), then exit when done."
+        );
+        let _ = stdout.flush();
+    }
+    let mut command = Command::new(binary);
+    command
+        .args(subargs)
+        .current_dir(ctx.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some((env_key, home_path)) = &entry.home_env {
+        command.env(env_key, home_path);
+    }
+    for var in login_overrides(&entry.provider) {
+        command.env_remove(var);
+    }
+    let status = match command.status() {
+        Ok(status) => status,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error(format!("{binary} is not installed or not on PATH")));
+        }
+        Err(_) => return Err(error(format!("failed to run {binary}"))),
+    };
+    let label = entry.label();
+    if entry.provider == "antigravity" {
+        let code = if status.success() {
+            0
+        } else {
+            status.code().unwrap_or(1)
+        };
+        return Ok((code, format!("{label}: sign-in not verifiable\n")));
+    }
+    let home_path = entry
+        .home_env
+        .as_ref()
+        .map(|(_, path)| path.as_path())
+        .ok_or_else(|| error("missing account home"))?;
+    let verified = login_verified(&entry.provider, home_path, ctx)?;
+    let report = format!(
+        "{label}: {}\n",
+        if verified {
+            "signed in"
+        } else {
+            "not signed in"
+        }
+    );
+    Ok((i32::from(!verified), report))
+}
+fn login_direct(raw: &str, ctx: &Context<'_>) -> Result<Output> {
+    let target = parse_login_spec(raw)?;
+    let entry = resolve_login_entry(&target)?;
+    let (code, report) = run_login_entry(&entry, ctx)?;
+    Ok(Output {
+        code,
+        out: report.into_bytes(),
+        err: Vec::new(),
+    })
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MenuItem {
+    entry: LoginEntry,
+    status: String,
+}
+fn build_login_menu(ctx: &Context<'_>) -> Result<Vec<MenuItem>> {
+    let mut items = Vec::new();
+    for provider in ["codex", "claude"] {
+        let (binary, _) = provider_login_spec(provider)?;
+        let env_key = if provider == "codex" {
+            "CODEX_HOME"
+        } else {
+            "CLAUDE_CONFIG_DIR"
+        };
+        let has_binary = installed(binary);
+        let accounts = registered_provider_accounts(provider)?;
+        let rows: Vec<(Option<String>, PathBuf)> = if accounts.is_empty() {
+            vec![(
+                None,
+                default_provider_home(provider)?
+                    .expect("codex/claude default home")
+                    .1,
+            )]
+        } else {
+            accounts
+                .into_iter()
+                .map(|(id, path)| {
+                    let account_id = if id == "default" { None } else { Some(id) };
+                    (account_id, path)
+                })
+                .collect()
+        };
+        for (account_id, path) in rows {
+            let status = if !has_binary {
+                format!("{binary} not installed")
+            } else if private_home(&path).is_ok() && login_verified(provider, &path, ctx)? {
+                "signed in".to_owned()
+            } else {
+                "not signed in".to_owned()
+            };
+            items.push(MenuItem {
+                entry: LoginEntry {
+                    provider: provider.to_owned(),
+                    account_id,
+                    home_env: Some((env_key, path)),
+                },
+                status,
+            });
+        }
+    }
+    let agy_status = if installed("agy") {
+        "sign-in not verifiable".to_owned()
+    } else {
+        "agy not installed".to_owned()
+    };
+    items.push(MenuItem {
+        entry: LoginEntry {
+            provider: "antigravity".to_owned(),
+            account_id: None,
+            home_env: None,
+        },
+        status: agy_status,
+    });
+    Ok(items)
+}
+fn format_login_menu(items: &[MenuItem]) -> String {
+    let mut out = String::from("Provider sign-in:\n");
+    for (idx, item) in items.iter().enumerate() {
+        let label = match &item.entry.account_id {
+            Some(id) => format!("{}:{id}", item.entry.provider),
+            None if item.entry.provider == "antigravity" => "antigravity".to_owned(),
+            None => format!("{} (default)", item.entry.provider),
+        };
+        out.push_str(&format!("  {}. {:<24} [{}]\n", idx + 1, label, item.status));
+    }
+    out
+}
+fn parse_menu_choice(input: &str, count: usize) -> Result<Option<usize>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("q") {
+        return Ok(None);
+    }
+    let choice: usize = trimmed
+        .parse()
+        .map_err(|_| error(format!("invalid selection: expected 1-{count} or q")))?;
+    if choice == 0 || choice > count {
+        return Err(error(format!("invalid selection: expected 1-{count} or q")));
+    }
+    Ok(Some(choice - 1))
+}
+fn wait_for_enter() {
+    use std::io::{BufRead, Write};
+    let mut stdout = std::io::stdout().lock();
+    let _ = write!(stdout, "\nPress Enter to close.");
+    let _ = stdout.flush();
+    drop(stdout);
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+}
+fn login_menu(ctx: &Context<'_>) -> Result<Output> {
+    use std::io::{BufRead, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(error("--login-menu requires an interactive terminal"));
+    }
+    let items = match build_login_menu(ctx) {
+        Ok(items) => items,
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            wait_for_enter();
+            return Ok(Output {
+                code: e.code,
+                out: Vec::new(),
+                err: Vec::new(),
+            });
+        }
+    };
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = write!(
+            stdout,
+            "{}\nChoose 1-{} (or q to cancel): ",
+            format_login_menu(&items),
+            items.len()
+        );
+        let _ = stdout.flush();
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line)?;
+    if read == 0 {
+        return Ok(Output {
+            code: 0,
+            out: Vec::new(),
+            err: Vec::new(),
+        });
+    }
+    let selected = match parse_menu_choice(&line, items.len()) {
+        Ok(Some(idx)) => &items[idx].entry,
+        Ok(None) => {
+            return Ok(Output {
+                code: 0,
+                out: Vec::new(),
+                err: Vec::new(),
+            });
+        }
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            wait_for_enter();
+            return Ok(Output {
+                code: e.code,
+                out: Vec::new(),
+                err: Vec::new(),
+            });
+        }
+    };
+    match run_login_entry(selected, ctx) {
+        Ok((code, report)) => {
+            let mut stdout = std::io::stdout().lock();
+            let _ = write!(stdout, "{report}");
+            let _ = stdout.flush();
+            drop(stdout);
+            wait_for_enter();
+            Ok(Output {
+                code,
+                out: Vec::new(),
+                err: Vec::new(),
+            })
+        }
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            wait_for_enter();
+            Ok(Output {
+                code: e.code,
+                out: Vec::new(),
+                err: Vec::new(),
+            })
+        }
+    }
+}
 fn login_verified(provider: &str, path: &Path, ctx: &Context<'_>) -> Result<bool> {
     let (binary, args, env): (&str, &[&str], &str) = match provider {
         "codex" => ("codex", &["login", "status"], "CODEX_HOME"),
@@ -1896,6 +2362,9 @@ fn login_verified(provider: &str, path: &Path, ctx: &Context<'_>) -> Result<bool
     };
     let mut command = Command::new(binary);
     command.args(args).env(env, path).stdin(Stdio::null());
+    for var in login_overrides(provider) {
+        command.env_remove(var);
+    }
     Ok(capture(command, ctx.interrupted, 15)?.code == 0)
 }
 fn stat_id(info: &rustix::fs::Stat) -> Value {
@@ -2922,5 +3391,91 @@ mod tests {
         assert_eq!(calls.get(), 2);
         refused(run(&again, &failing), "durability unconfirmed");
         assert_eq!(fx.files(), snapshot);
+    }
+
+    #[test]
+    fn login_spec_and_menu_parsing() {
+        assert_eq!(
+            parse_login_spec("codex").unwrap(),
+            LoginTarget {
+                provider: "codex".into(),
+                account_id: None,
+            }
+        );
+        assert_eq!(
+            parse_login_spec("codex:work").unwrap(),
+            LoginTarget {
+                provider: "codex".into(),
+                account_id: Some("work".into()),
+            }
+        );
+        assert_eq!(
+            parse_login_spec("claude:work").unwrap(),
+            LoginTarget {
+                provider: "claude".into(),
+                account_id: Some("work".into()),
+            }
+        );
+        assert_eq!(
+            parse_login_spec("antigravity").unwrap(),
+            LoginTarget {
+                provider: "antigravity".into(),
+                account_id: None,
+            }
+        );
+        for bad in ["antigravity:work", "antigravity:default", "antigravity:"] {
+            refused(
+                parse_login_spec(bad),
+                "antigravity does not support per-account sign-in",
+            );
+        }
+        for bad in ["codex:", "codex:Bad", "claude:UPPER"] {
+            refused(parse_login_spec(bad), "invalid provider account id");
+        }
+        for bad in ["", "agy", "pi", "gemini:work"] {
+            refused(parse_login_spec(bad), "unsupported login provider");
+        }
+
+        assert_eq!(parse_menu_choice("1\n", 4).unwrap(), Some(0));
+        assert_eq!(parse_menu_choice(" 4 ", 4).unwrap(), Some(3));
+        assert_eq!(parse_menu_choice("q\n", 4).unwrap(), None);
+        assert_eq!(parse_menu_choice("Q", 4).unwrap(), None);
+        assert_eq!(parse_menu_choice("  \n", 4).unwrap(), None);
+        for bad in ["0", "5", "-1", "abc", "1 2"] {
+            refused(parse_menu_choice(bad, 4), "invalid selection");
+        }
+
+        let menu = format_login_menu(&[
+            MenuItem {
+                entry: LoginEntry {
+                    provider: "codex".into(),
+                    account_id: None,
+                    home_env: Some(("CODEX_HOME", PathBuf::from("codex-main"))),
+                },
+                status: "signed in".into(),
+            },
+            MenuItem {
+                entry: LoginEntry {
+                    provider: "codex".into(),
+                    account_id: Some("work".into()),
+                    home_env: Some(("CODEX_HOME", PathBuf::from("codex-work"))),
+                },
+                status: "not signed in".into(),
+            },
+            MenuItem {
+                entry: LoginEntry {
+                    provider: "antigravity".into(),
+                    account_id: None,
+                    home_env: None,
+                },
+                status: "sign-in not verifiable".into(),
+            },
+        ]);
+        assert!(menu.contains("1. codex (default)"), "{menu}");
+        assert!(menu.contains("[signed in]"), "{menu}");
+        assert!(menu.contains("2. codex:work"), "{menu}");
+        assert!(menu.contains("[not signed in]"), "{menu}");
+        assert!(menu.contains("3. antigravity"), "{menu}");
+        assert!(menu.contains("[sign-in not verifiable]"), "{menu}");
     }
 }

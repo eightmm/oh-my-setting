@@ -5680,6 +5680,7 @@ fn render_help_card(
         ("f", "Open selected task results"),
         ("Click title · 1/2/3", "Read Codex, Claude or AGY chat"),
         ("s", "Choose another Main and confirm the switch"),
+        ("L", "Sign in to Codex, Claude or Antigravity"),
         ("Click worker · c", "Read worker details or latest council"),
         ("Click weekly · w", "Read weekly usage details"),
         ("U", "Refresh Claude and AGY weekly usage"),

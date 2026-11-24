@@ -115,7 +115,7 @@ fn usage(tool: &str) -> String {
             "[--check|--print|--apply|--remove] [--profile consult|delegate] [--settings PATH] [--worktree-parent PATH] [--allow-command C] [--allow-toolchains]"
         }
         "connect-services" => {
-            "[--auto|--required] [--data-source-id ID] [--no-github] [--no-notion] | --account PROVIDER:ID [--home PATH] [--first|--last] [--repair|--remove|--verify]"
+            "[--auto|--required] [--data-source-id ID] [--no-github] [--no-notion] | --account PROVIDER:ID [--home PATH] [--first|--last] [--repair|--remove|--verify] | --login PROVIDER[:ID] | --login-menu"
         }
         "models" => "[--json] [--refresh] [--providers default|auto|all|CSV]",
         "model-doctor" => {
