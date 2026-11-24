@@ -30,18 +30,9 @@ pub(crate) fn read(
     }
 }
 pub(crate) fn rows(root: &Root, path: &Path, lifecycle: bool) -> Result<Vec<V>, String> {
-    let bytes = read(
-        root,
-        path,
-        if lifecycle {
-            usize::MAX
-        } else {
-            32 * 1024 * 1024
-        },
-        lifecycle,
-    )?;
     let mut out = Vec::new();
     if lifecycle {
+        let bytes = read(root, path, usize::MAX, true)?;
         let text = String::from_utf8_lossy(&bytes)
             .replace("\r\n", "\n")
             .replace('\r', "\n");
@@ -53,19 +44,33 @@ pub(crate) fn rows(root: &Root, path: &Path, lifecycle: bool) -> Result<Vec<V>, 
             out.push(row(root, path, line, index + 1)?);
         }
     } else {
-        // common.read_jsonl splits and strips bytes before strict UTF-8 decoding.
-        for (index, line) in byte_lines(&bytes).enumerate() {
-            if state_blank(line) {
-                continue;
-            }
-            if line.len() > 1024 * 1024 || out.len() >= 250_000 {
-                return Err("append-only state exceeds the supported row limit".into());
-            }
-            let text = std::str::from_utf8(line).map_err(|_| "invalid UTF-8 JSONL")?;
-            out.push(row(root, path, text, index + 1)?);
-        }
+        visit_state_rows(root, path, |_, row, _| out.push(row))?;
     }
     Ok(out)
+}
+
+pub(crate) fn visit_state_rows(
+    root: &Root,
+    path: &Path,
+    mut visit: impl FnMut(usize, V, bool),
+) -> Result<(), String> {
+    let bytes = read(root, path, 32 * 1024 * 1024, false)?;
+    let mut count = 0;
+    let mut starts_after_lf = true;
+    for (index, (line, terminated)) in byte_lines(&bytes).enumerate() {
+        let framed = starts_after_lf && terminated;
+        starts_after_lf = terminated;
+        if state_blank(line) {
+            continue;
+        }
+        if line.len() > 1024 * 1024 || count >= 250_000 {
+            return Err("append-only state exceeds the supported row limit".into());
+        }
+        count += 1;
+        let text = std::str::from_utf8(line).map_err(|_| "invalid UTF-8 JSONL")?;
+        visit(index + 1, row(root, path, text, index + 1)?, framed);
+    }
+    Ok(())
 }
 fn lifecycle_blank(line: &str) -> bool {
     line.chars()
@@ -74,7 +79,7 @@ fn lifecycle_blank(line: &str) -> bool {
 fn state_blank(line: &[u8]) -> bool {
     line.iter().all(|b| matches!(b, b'\t'..=b'\r' | b' '))
 }
-fn byte_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn byte_lines(bytes: &[u8]) -> impl Iterator<Item = (&[u8], bool)> {
     let mut start = 0;
     std::iter::from_fn(move || {
         if start == bytes.len() {
@@ -85,14 +90,10 @@ fn byte_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
             .position(|b| matches!(b, b'\r' | b'\n'))
             .map_or(bytes.len(), |i| start + i);
         let line = &bytes[start..end];
-        start = if bytes.get(end) == Some(&b'\r') && bytes.get(end + 1) == Some(&b'\n') {
-            end + 2
-        } else if end < bytes.len() {
-            end + 1
-        } else {
-            end
-        };
-        Some(line)
+        let crlf = bytes.get(end..end + 2) == Some(b"\r\n");
+        let terminated = crlf || bytes.get(end) == Some(&b'\n');
+        start = end + usize::from(end < bytes.len()) + usize::from(crlf);
+        Some((line, terminated))
     })
 }
 fn row(root: &Root, path: &Path, line: &str, number: usize) -> Result<V, String> {
@@ -172,7 +173,12 @@ mod tests {
         let bytes = b"\r\n\xc2\x85\n\x1c\r{}\n";
         assert_eq!(
             byte_lines(bytes).collect::<Vec<_>>(),
-            vec![b"".as_slice(), b"\xc2\x85", b"\x1c", b"{}"]
+            vec![
+                (b"".as_slice(), true),
+                (b"\xc2\x85", true),
+                (b"\x1c", false),
+                (b"{}", true)
+            ]
         );
     }
 }

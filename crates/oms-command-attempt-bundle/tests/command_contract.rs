@@ -374,6 +374,7 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
         .replace("observed_fingerprint", "fingerprint")
         .replace("2026-01-02T00:00:00Z", "2026-01-01T00:00:01Z")
         .replace("\"exact\"", "\"other\"")
+        .replace("\"task-one\"", "\"task-other\"")
         .replace("\"attempt1\"", "\"other-attempt\"");
     let malformed = exact
         .replace("\"snapshot-one\"", "null")
@@ -410,6 +411,158 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
     assert!(body.contains("neither proves a repair cause or current verification"));
     assert!(body.contains("\"outcome_sha256\""));
     assert!(body.contains("\"prior_failures\""));
+
+    // Timestamp candidates must not fill the bounded view before an exact
+    // accepted record. Valid foreign receipts remain advisory. Malformed native
+    // receipts do not take a display slot or change the physical line pointer.
+    let nearby = (0..51)
+        .map(|n| legacy.replace("\"legacy\"", &format!("\"nearby-{n:02}\"")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let malformed_nearby = malformed.replace("2026-01-02T00:00:00Z", "2026-01-01T00:00:01Z");
+    for event in ["verified", "resolved"] {
+        let accepted = if event == "resolved" {
+            exact
+                .replace("\"verified\"", "\"resolved\"")
+                .replace("observed_fingerprint", "fingerprint")
+        } else {
+            exact.clone()
+        };
+        fs::write(
+            f.0.join(".oms/failures.jsonl"),
+            format!("{nearby}\n{other}\n{malformed_nearby}\n{accepted}\n"),
+        )
+        .unwrap();
+        let (code, out, err) = f.call(&["--json"]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let body = String::from_utf8(out).unwrap();
+        let exact_at = body
+            .find("\"fingerprint\": \"exact\"")
+            .expect("exact accepted evidence was displaced by timestamp candidates");
+        assert!(body.contains(&format!("\"event\": \"{event}\"")));
+        assert!(body.contains("\"line\": 54"));
+        assert!(body.contains("\"rows_total\": 53"));
+        assert!(body.contains("\"rows_omitted\": 3"));
+        assert_eq!(
+            body.matches("\"correlation\": \"native-reference-attempt\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            body.matches("\"correlation\": \"time-window-only\"")
+                .count(),
+            49
+        );
+        let mut previous = exact_at;
+        for n in 0..49 {
+            let current = body
+                .find(&format!("\"fingerprint\": \"nearby-{n:02}\""))
+                .expect("timestamp candidates retain their ledger order");
+            assert!(previous < current);
+            previous = current;
+        }
+        for omitted in ["nearby-49", "nearby-50", "other", "invalid"] {
+            assert!(!body.contains(&format!("\"fingerprint\": \"{omitted}\"")));
+        }
+        assert!(body.contains("neither proves a repair cause or current verification"));
+    }
+
+    // Malformed native receipts within the window cannot crowd out a valid
+    // nearby failure either. The reported line pointer includes blank records.
+    let nearby_exact = exact.replace("2026-01-02T00:00:00Z", "2026-01-01T00:00:01Z");
+    let bad_envelope = nearby_exact.replace("\"agent\":\"codex\",", "");
+    let duplicate = nearby_exact.replace(
+        &format!("[\"{digest}\"]"),
+        &format!("[\"{digest}\",\"{digest}\"]"),
+    );
+    let unknown_reset = nearby_exact
+        .replace("observed_fingerprint", "fingerprint")
+        .replace("\"verified\"", "\"resolved\"")
+        .replace(&format!("[\"{digest}\"]"), "null");
+    let conflict = nearby_exact.replace(
+        "\"observed_fingerprint\":",
+        "\"fingerprint\":\"other\",\"observed_fingerprint\":",
+    );
+    let bad_exit = nearby_exact.replace("\"agent\":", "\"exit\":-1,\"agent\":");
+    let missing_prior = nearby_exact.replace(&format!(",\"prior_failures\":[\"{digest}\"]"), "");
+    let unknown_schema = nearby_exact.replace("\"schema\":2", "\"schema\":9");
+    let failed = nearby_exact
+        .replace("observed_fingerprint", "fingerprint")
+        .replace("\"verified\"", "\"fail\"")
+        .replace("\"accepted\"", "\"failed\"");
+    let exact_fail = failed
+        .replace(
+            "\"agent\":",
+            "\"cmd\":\"false\",\"kind\":\"cmd\",\"exit\":1,\"agent\":",
+        )
+        .replace("\"exact\"", "\"native-fail\"");
+    let records = [
+        bad_envelope,
+        duplicate,
+        unknown_reset,
+        conflict,
+        bad_exit,
+        missing_prior,
+        unknown_schema,
+        failed,
+    ]
+    .join("\n")
+        + "\n";
+    let unframed = nearby_exact.replace("\"exact\"", "\"unframed\"");
+    let history = format!(
+        "{}{legacy}\n\n{exact}\r\n{exact_fail}\n{unframed}\r{unframed}\n{unframed}",
+        records.repeat(7)
+    );
+    fs::write(f.0.join(".oms/failures.jsonl"), history).unwrap();
+    let (code, out, err) = f.call(&["--json"]);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let body = String::from_utf8(out).unwrap();
+    assert_eq!(
+        body.matches("\"correlation\": \"native-reference-attempt\"")
+            .count(),
+        2
+    );
+    assert_eq!(
+        body.matches("\"correlation\": \"time-window-only\"")
+            .count(),
+        1
+    );
+    assert!(body.contains("\"fingerprint\": \"legacy\""));
+    assert!(body.contains("\"fingerprint\": \"native-fail\""));
+    assert!(body.contains("\"line\": 59"));
+    assert!(body.contains("\"rows_total\": 3"));
+    assert!(!body.contains("\"fingerprint\": \"unframed\""));
+
+    // Exact identities still obey the cap and keep their ledger order.
+    let exact_rows = (0..51)
+        .map(|n| exact.replace("\"exact\"", &format!("\"exact-{n:02}\"")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        f.0.join(".oms/failures.jsonl"),
+        format!("{other}\n{malformed_nearby}\n{exact_rows}\n"),
+    )
+    .unwrap();
+    let (code, out, err) = f.call(&["--json"]);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let body = String::from_utf8(out).unwrap();
+    assert!(body.contains("\"rows_total\": 52"));
+    assert!(body.contains("\"rows_omitted\": 2"));
+    assert_eq!(
+        body.matches("\"correlation\": \"native-reference-attempt\"")
+            .count(),
+        50
+    );
+    assert!(!body.contains("\"correlation\": \"time-window-only\""));
+    let mut previous = 0;
+    for n in 0..50 {
+        let current = body
+            .find(&format!("\"fingerprint\": \"exact-{n:02}\""))
+            .expect("exact evidence remains in ledger order");
+        assert!(previous < current);
+        previous = current;
+    }
+    assert!(!body.contains("\"fingerprint\": \"exact-50\""));
     fs::write(f.0.join(".oms/lifecycle/events.jsonl"), "").unwrap();
     let (code, out, err) = f.call(&["--json"]);
     assert_eq!(code, 2);
