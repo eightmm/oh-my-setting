@@ -31,17 +31,20 @@ resolves the current Git top-level and refuses a non-repository with exit 3; exp
 not replace the providers' native conversation or authentication.
 
 <details>
-<summary>Transcripts: navigation, masking and retention</summary>
+<summary>Transcripts: navigation, masking and limits</summary>
 
-Finished dispatch calls keep an owner-only OMS transcript beside their activity summary
-in `.oms/panel-state/dispatch-logs/`. In a call's Detail press `x` for Transcript, or
-select Transcript (`x` or Tab) in its Results reader; arrows, Page Up/Down and search in
-the reader navigate the captured assistant messages, commands and tool results, edit
-content and final report. Esc returns. Secret-shaped lines are masked using the outbound
-scanner patterns. Each capture keeps at most the last 8 MiB with a truncation marker;
-captures older than 30 days or beyond the newest 128 are pruned when another capture
-finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
-“transcript not captured”; provider homes are never read.
+Select Transcript (`x` or Tab) in a call's Results reader to view its recorded output.
+When an owner-only OMS event transcript exists under `.oms/panel-state/dispatch-logs/`,
+the reader loads it first and formats its assistant messages, commands, tool results
+(output excerpts capped at 8 KiB), edit content and final report. Otherwise, for
+finished Rust dispatch calls whose call record names a per-attempt report under
+`.oms/artifacts/` (such as `.oms/artifacts/delegate/*.md` from `oms peer-delegate`),
+the Transcript view reads that report through the same repository-confined, no-symlink,
+owner-only reader path. Arrows, Page Up/Down and `/` search navigate the reader, and Esc
+returns. Secret-shaped lines are masked using the outbound scanner patterns, and reads
+keep at most the last 8 MiB per view with a truncation marker. Calls with neither a
+dispatch log nor a dispatch report show “transcript not captured”; provider homes are
+never read.
 
 </details>
 
