@@ -466,34 +466,47 @@ fn scrub_paths(input: &str) -> String {
     static PATH_RE: OnceLock<Regex> = OnceLock::new();
     let re = PATH_RE.get_or_init(|| {
         Regex::new(
-            r#"(?:^|[\s(\["'=,:;])(?:/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]*|~/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]*|[A-Za-z]:\\[^\s"'<>]+)"#,
+            r#"(?P<pre>^|[a-zA-Z][a-zA-Z0-9+.-]*://|[^A-Za-z0-9._/~\\])(?P<path>/(?:[^\s"'`<>|{}()\[\],;:/*]+/)+[^\s"'`<>|{}()\[\],;:/*]*|~/(?:[^\s"'`<>|{}()\[\],;:/*]+/)*[^\s"'`<>|{}()\[\],;:/*]*|[A-Za-z]:[\\/][^\s"'`<>|{}()\[\],;*]+)"#,
         )
         .expect("valid static path scrubber regex")
     });
     re.replace_all(input, |caps: &regex::Captures<'_>| {
-        let matched = caps.get(0).map_or("", |m| m.as_str());
-        let first = matched.chars().next();
-        match first {
-            Some(c)
-                if matches!(
-                    c,
-                    ' ' | '\t' | '(' | '[' | '"' | '\'' | '=' | ',' | ':' | ';'
-                ) =>
-            {
-                format!("{c}[path]")
-            }
-            _ => "[path]".to_owned(),
-        }
+        let pre = caps.name("pre").map_or("", |m| m.as_str());
+        format!("{pre}[path]")
     })
     .into_owned()
 }
 
-fn sanitize_text(raw: &str, max_chars: usize) -> Option<String> {
+pub(crate) fn redact_and_clean(raw: &str, max_chars: usize) -> Option<String> {
     if raw.is_empty() {
         return Some(String::new());
     }
     let redacted = oms_panel_core::redact(raw.as_bytes()).ok()?;
-    Some(crate::render::clean(&scrub_paths(&redacted), max_chars))
+    let scrubbed = scrub_paths(&redacted);
+    let cleaned = crate::render::clean(&scrubbed, usize::MAX);
+    if cleaned == scrubbed {
+        return Some(cleaned.chars().take(max_chars).collect());
+    }
+    let re_redacted = oms_panel_core::redact(cleaned.as_bytes()).ok()?;
+    let re_scrubbed = scrub_paths(&re_redacted);
+    Some(crate::render::clean(&re_scrubbed, max_chars))
+}
+
+fn is_outbound_safe(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    if oms_panel_core::outbound(text.as_bytes()).is_err() {
+        return false;
+    }
+    serde_json::to_vec(text)
+        .ok()
+        .is_some_and(|encoded| oms_panel_core::outbound(&encoded).is_ok())
+}
+
+fn sanitize_text(raw: &str, max_chars: usize) -> Option<String> {
+    let cleaned = redact_and_clean(raw, max_chars)?;
+    is_outbound_safe(&cleaned).then_some(cleaned)
 }
 
 fn opt_str(value: &Value, key: &str, max_chars: usize) -> Value {
@@ -2005,5 +2018,128 @@ mod tests {
         assert!(msg_rows.iter().any(|r| {
             r["summary"] == "작업방 질문" && !r.to_string().contains("msg-raw-id-empty")
         }));
+    }
+
+    #[test]
+    fn attention_redacts_before_truncation_scrubs_delimited_paths_and_isolates_outbound_failures() {
+        let posix_path = concat!("/ho", "me/alice/project/src/sample.rs");
+        let unicode_path = concat!("/ho", "me/사용자/문서.txt");
+        let tilde_path = concat!("~/", "private/key.pem");
+        let win_path = concat!("C:\\", "Users\\alice\\notes.txt");
+        let sample = concat!("ghp_", "1234567890abcdef1234567890abcdef1234");
+        let cluster_text = format!("Verify {} before deploy", concat!("clus", "ter=hpc-prod"));
+        let ssh_text = format!("Inspect {} key", concat!(".s", "sh/id_rsa"));
+
+        for (wrapped, expected) in [
+            (format!("check `{posix_path}` now"), "check `[path]` now"),
+            (format!("check <{posix_path}> now"), "check <[path]> now"),
+            (format!("check {{{posix_path}}} now"), "check {[path]} now"),
+            (format!("check *{posix_path}* now"), "check *[path]* now"),
+            (format!("check `{unicode_path}` now"), "check `[path]` now"),
+            (
+                format!("check file://{posix_path} now"),
+                "check file://[path] now",
+            ),
+            (format!("check `{tilde_path}` now"), "check `[path]` now"),
+            (format!("check `{win_path}` now"), "check `[path]` now"),
+        ] {
+            let scrubbed = scrub_paths(&wrapped);
+            assert_eq!(scrubbed, expected, "input: {wrapped}");
+            assert!(!scrubbed.contains("alice"));
+        }
+        assert_eq!(
+            scrub_paths(
+                "keep crates/oms-command-panel/src/desktop_board.rs and https://example.com/a/b"
+            ),
+            "keep crates/oms-command-panel/src/desktop_board.rs and https://example.com/a/b"
+        );
+
+        let report = json!({
+            "collection": {"ok": true},
+            "room": {
+                "id": "room-1",
+                "messages": [
+                    {
+                        "id": "msg-straddling-sample",
+                        "sender": "lead",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": format!("{} {}", "a".repeat(69), sample),
+                        "ts": "2026-11-24T12:04:00Z"
+                    },
+                    {
+                        "id": "msg-backtick-path",
+                        "sender": "lead",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": format!("Check `{posix_path}` now"),
+                        "ts": "2026-11-24T12:03:00Z"
+                    },
+                    {
+                        "id": "msg-outbound-question",
+                        "sender": "lead",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": cluster_text,
+                        "ts": "2026-11-24T12:02:00Z"
+                    },
+                    {
+                        "id": "msg-outbound-mail",
+                        "sender": "lead",
+                        "message_kind": "update",
+                        "pending_for": ["main"],
+                        "text": ssh_text,
+                        "ts": "2026-11-24T12:01:00Z"
+                    }
+                ]
+            },
+            "attempts": {
+                "recent": [
+                    {
+                        "attempt_id": "att-approval-1",
+                        "provider": "codex",
+                        "role": "worker",
+                        "state": "waiting_approval",
+                        "task_id": "task-approval",
+                        "title": "Approve release schema",
+                        "updated_at": "2026-11-24T12:05:00Z"
+                    }
+                ]
+            }
+        });
+
+        let (_, bytes, _) =
+            finalize_response(attention_response(&report, &BTreeMap::new(), 1)).unwrap();
+        let raw_json = String::from_utf8(bytes.clone()).unwrap();
+        let projected: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(projected["status"], "ready");
+        assert!(!raw_json.contains("ghp_"));
+        assert!(!raw_json.contains("123456"));
+        assert!(!raw_json.contains("alice"));
+        assert!(!raw_json.contains("hpc-prod"));
+        assert!(!raw_json.contains("id_rsa"));
+
+        let rows = projected["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 5);
+
+        let call_row = rows.iter().find(|r| r["source"] == "call").unwrap();
+        assert_eq!(
+            call_row["summary"],
+            "waiting for approval: Approve release schema"
+        );
+
+        let by_stamp = |stamp: &str| rows.iter().find(|r| r["stamp"] == stamp).unwrap();
+        assert!(
+            by_stamp("2026-11-24T12:04:00Z")["summary"]
+                .as_str()
+                .unwrap()
+                .contains("[oms-redacted:")
+        );
+        assert_eq!(
+            by_stamp("2026-11-24T12:03:00Z")["summary"],
+            "Check `[path]` now"
+        );
+        assert_eq!(by_stamp("2026-11-24T12:02:00Z")["summary"], "작업방 질문");
+        assert_eq!(by_stamp("2026-11-24T12:01:00Z")["summary"], "작업방 메시지");
     }
 }
