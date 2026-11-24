@@ -675,7 +675,9 @@ fn normalize_session_state(raw: &str) -> (&'static str, &'static str) {
         "waiting_approval" => ("waiting", "approval"),
         "review" => ("waiting", "review"),
         "blocked" => ("blocked", "owner"),
-        "done" | "exited" | "cancelled" => ("done", "none"),
+        "done" => ("done", "none"),
+        "exited" => ("exited", "none"),
+        "cancelled" => ("cancelled", "none"),
         "failed" | "timed_out" | "abandoned" => ("failed", "none"),
         _ => ("unknown", "unknown"),
     }
@@ -1057,17 +1059,7 @@ fn project_teams(
     ))
 }
 
-fn project_sessions(
-    repo: &Path,
-    room_id: Option<(&str, &str)>,
-    page: usize,
-    services: &dyn Services,
-    stop: &AtomicBool,
-) -> Result<BoardResponse> {
-    let Some(snap) = read_snapshot(repo, room_id, services, stop)? else {
-        return Ok(unavailable(DesktopView::Sessions, page));
-    };
-    let report = &snap.report;
+fn sessions_response(report: &Value, page: usize) -> BoardResponse {
     let incomplete = report["capacity_stale"] == true || report["collection"]["ok"] != true;
     let calls = crate::render::calls(report);
 
@@ -1113,7 +1105,20 @@ fn project_sessions(
             ("elapsed", opt_text_value(elapsed, 32)),
         ]));
     }
-    Ok(paginate(DesktopView::Sessions, page, out, true, incomplete))
+    paginate(DesktopView::Sessions, page, out, true, incomplete)
+}
+
+fn project_sessions(
+    repo: &Path,
+    room_id: Option<(&str, &str)>,
+    page: usize,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<BoardResponse> {
+    let Some(snap) = read_snapshot(repo, room_id, services, stop)? else {
+        return Ok(unavailable(DesktopView::Sessions, page));
+    };
+    Ok(sessions_response(&snap.report, page))
 }
 
 fn project_plan(
@@ -1152,7 +1157,7 @@ fn project_plan(
     Ok(paginate(DesktopView::Plan, page, out, true, false))
 }
 
-fn attention_summary(source: &str, kind: &str) -> Value {
+fn attention_fallback(source: &str, kind: &str) -> Value {
     match (source, kind) {
         ("message", "needs") => json!("작업방 질문"),
         ("message", _) => json!("작업방 메시지"),
@@ -1161,6 +1166,47 @@ fn attention_summary(source: &str, kind: &str) -> Value {
         _ => Value::Null,
     }
 }
+
+fn attention_summary(source: &str, kind: &str, what: &str) -> Value {
+    let candidate = what.trim();
+    if !candidate.is_empty()
+        && let Some(cleaned) = sanitize_text(candidate, MAX_TEXT_CHARS)
+    {
+        let trimmed = cleaned.trim();
+        if !trimmed.is_empty() {
+            return Value::String(trimmed.to_owned());
+        }
+    }
+    attention_fallback(source, kind)
+}
+
+fn attention_response(
+    report: &Value,
+    read_markers: &BTreeMap<String, String>,
+    page: usize,
+) -> BoardResponse {
+    let incomplete = report["capacity_stale"] == true || report["collection"]["ok"] != true;
+    let items = crate::attention::items(report, read_markers);
+
+    let mut out = Vec::new();
+    for item in items.iter().take(MAX_INPUT_ROWS + 1) {
+        let stamp = (!item.stamp.is_empty()).then_some(item.stamp.as_str());
+        out.push(row_map(vec![
+            ("kind", opt_text_value(Some(item.cls.as_str()), 32)),
+            ("source", opt_text_value(Some(item.row_id.0.as_str()), 32)),
+            ("who", opt_text_value(Some(item.who.as_str()), 96)),
+            ("taskId", opt_text_value(item.task.as_deref(), 96)),
+            (
+                "summary",
+                attention_summary(&item.row_id.0, &item.cls, &item.what),
+            ),
+            ("unread", json!(item.unread)),
+            ("stamp", opt_text_value(stamp, 40)),
+        ]));
+    }
+    paginate(DesktopView::Attention, page, out, true, incomplete)
+}
+
 fn project_attention(
     repo: &Path,
     room_id: Option<(&str, &str)>,
@@ -1172,30 +1218,8 @@ fn project_attention(
         return Ok(unavailable(DesktopView::Attention, page));
     };
     let report = &snap.report;
-    let incomplete = report["capacity_stale"] == true || report["collection"]["ok"] != true;
     let read_markers = crate::attention::load(repo, text(&report["room"], "id"));
-    let items = crate::attention::items(report, &read_markers);
-
-    let mut out = Vec::new();
-    for item in items.iter().take(MAX_INPUT_ROWS + 1) {
-        let stamp = (!item.stamp.is_empty()).then_some(item.stamp.as_str());
-        out.push(row_map(vec![
-            ("kind", opt_text_value(Some(item.cls.as_str()), 32)),
-            ("source", opt_text_value(Some(item.row_id.0.as_str()), 32)),
-            ("who", opt_text_value(Some(item.who.as_str()), 96)),
-            ("taskId", opt_text_value(item.task.as_deref(), 96)),
-            ("summary", attention_summary(&item.row_id.0, &item.cls)),
-            ("unread", json!(item.unread)),
-            ("stamp", opt_text_value(stamp, 40)),
-        ]));
-    }
-    Ok(paginate(
-        DesktopView::Attention,
-        page,
-        out,
-        true,
-        incomplete,
-    ))
+    Ok(attention_response(report, &read_markers, page))
 }
 
 fn project_results(
@@ -1686,7 +1710,14 @@ mod tests {
         let items = crate::attention::items(&messages, &Default::default());
         let msg = items.iter().find(|m| m.row_id.0 == "message").unwrap();
         assert!(msg.what.contains("private-message-sentinel"));
-        assert_eq!(attention_summary(&msg.row_id.0, &msg.cls), "작업방 질문");
+        assert_eq!(
+            attention_summary(&msg.row_id.0, &msg.cls, &msg.what),
+            "private-message-sentinel"
+        );
+        assert_eq!(
+            attention_summary(&msg.row_id.0, &msg.cls, ""),
+            "작업방 질문"
+        );
         for &view in VIEWS {
             let v = run(view, "1");
             assert_eq!(v["view"], view);
@@ -1772,5 +1803,207 @@ mod tests {
         let report: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(report["rows"].as_array().unwrap().len(), 20);
         assert_eq!(report["incomplete"], true);
+    }
+
+    #[test]
+    fn session_states_keep_exited_and_cancelled_distinct_from_done() {
+        assert_eq!(normalize_session_state("done"), ("done", "none"));
+        assert_eq!(normalize_session_state("exited"), ("exited", "none"));
+        assert_eq!(normalize_session_state("cancelled"), ("cancelled", "none"));
+        assert_eq!(normalize_session_state("failed"), ("failed", "none"));
+        assert_eq!(normalize_session_state("timed_out"), ("failed", "none"));
+        assert_eq!(normalize_session_state("abandoned"), ("failed", "none"));
+        assert_eq!(
+            normalize_session_state("waiting_approval"),
+            ("waiting", "approval")
+        );
+        assert_eq!(
+            normalize_session_state("waiting_input"),
+            ("waiting", "input")
+        );
+        assert_eq!(normalize_session_state("review"), ("waiting", "review"));
+        assert_eq!(normalize_session_state("blocked"), ("blocked", "owner"));
+        assert_eq!(normalize_session_state("working"), ("working", "none"));
+        assert_eq!(normalize_session_state("queued"), ("waiting", "none"));
+        assert_eq!(normalize_session_state("other"), ("unknown", "unknown"));
+
+        let report = json!({
+            "collection": {"ok": true},
+            "attempts": {
+                "recent": [
+                    {"attempt_id": "att-done", "provider": "codex", "role": "worker", "state": "done", "task_id": "t-done", "title": "Verified work"},
+                    {"attempt_id": "att-exited", "provider": "claude", "role": "worker", "state": "exited", "task_id": "t-exited", "title": "Process exited"},
+                    {"attempt_id": "att-cancelled", "provider": "agy", "role": "reviewer", "state": "cancelled", "task_id": "t-cancelled", "title": "Cancelled work"}
+                ]
+            }
+        });
+        let (_, bytes, _) = finalize_response(sessions_response(&report, 1)).unwrap();
+        let projected: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(projected["status"], "ready");
+        let state_col = projected["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["key"] == "state")
+            .unwrap();
+        assert_eq!(state_col["label"], "상태");
+        let rows = projected["rows"].as_array().unwrap();
+        let state_for = |id: &str| {
+            rows.iter()
+                .find(|r| r["id"] == id)
+                .map(|r| {
+                    (
+                        r["state"].as_str().unwrap(),
+                        r["waitingFor"].as_str().unwrap(),
+                    )
+                })
+                .unwrap()
+        };
+        assert_eq!(state_for("att-done"), ("done", "none"));
+        assert_eq!(state_for("att-exited"), ("exited", "none"));
+        assert_eq!(state_for("att-cancelled"), ("cancelled", "none"));
+    }
+
+    #[test]
+    fn attention_projects_sanitized_bounded_what_and_falls_back_when_empty() {
+        let posix_path = concat!("/ho", "me/alice/project/src/secret.rs");
+        let tilde_path = concat!("~/", "private/key.pem");
+        let win_path = concat!("C:\\", "Users\\alice\\notes.txt");
+        let secret_like = concat!("ghp_", "1234567890abcdef1234567890abcdef1234");
+
+        let scrubbed = attention_summary(
+            "call",
+            "needs",
+            &format!("waiting for approval: check {posix_path} and {tilde_path} and {win_path}"),
+        );
+        let scrubbed_str = scrubbed.as_str().unwrap();
+        assert!(scrubbed_str.contains("waiting for approval"));
+        assert!(scrubbed_str.contains("[path]"));
+        assert!(!scrubbed_str.contains(posix_path));
+        assert!(!scrubbed_str.contains(tilde_path));
+        assert!(!scrubbed_str.contains(win_path));
+
+        let redacted = attention_summary(
+            "call",
+            "failed",
+            &format!("provider error with {secret_like}"),
+        );
+        let redacted_str = redacted.as_str().unwrap();
+        assert!(!redacted_str.contains(secret_like));
+        assert!(!redacted_str.is_empty());
+
+        let long_what = format!("\u{1b}[31m{}\n\t", "가".repeat(MAX_TEXT_CHARS + 50));
+        let bounded = attention_summary("call", "needs", &long_what);
+        let bounded_str = bounded.as_str().unwrap();
+        assert_eq!(bounded_str.chars().count(), MAX_TEXT_CHARS);
+        assert!(!bounded_str.contains('\u{1b}'));
+
+        assert_eq!(attention_summary("message", "needs", ""), "작업방 질문");
+        assert_eq!(
+            attention_summary("message", "mail", "   \n\t "),
+            "작업방 메시지"
+        );
+        assert_eq!(
+            attention_summary("task", "stale", "\u{1b}[31m\n"),
+            "계획 작업 확인"
+        );
+        assert_eq!(attention_summary("call", "needs", ""), "실행 상태 확인");
+        assert!(attention_summary("other", "info", "").is_null());
+
+        let report = json!({
+            "collection": {"ok": true},
+            "room": {
+                "id": "room-1",
+                "messages": [
+                    {
+                        "id": "msg-raw-id-1",
+                        "sender": "lead",
+                        "recipient": "main",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": format!("Need decision on {posix_path}"),
+                        "ts": "2026-11-24T12:00:00Z"
+                    },
+                    {
+                        "id": "msg-raw-id-empty",
+                        "sender": "lead",
+                        "recipient": "main",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": "   ",
+                        "ts": "2026-11-24T11:59:00Z"
+                    }
+                ]
+            },
+            "attempts": {
+                "recent": [
+                    {
+                        "attempt_id": "att-raw-id-99",
+                        "provider": "codex",
+                        "role": "worker",
+                        "state": "waiting_approval",
+                        "task_id": "task-42",
+                        "title": "Approve release schema",
+                        "updated_at": "2026-11-24T12:01:00Z",
+                        "refs": {"panel_room_participant": "participant-raw-99"}
+                    },
+                    {
+                        "attempt_id": "att-done-1",
+                        "provider": "claude",
+                        "role": "worker",
+                        "state": "done",
+                        "task_id": "task-held",
+                        "updated_at": "2026-11-24T11:00:00Z"
+                    }
+                ]
+            },
+            "plan": {
+                "tasks": {
+                    "task-held": {
+                        "id": "task-held",
+                        "status": "held",
+                        "claimed_at": "2026-11-24T10:00:00Z"
+                    }
+                }
+            }
+        });
+        let (_, bytes, _) =
+            finalize_response(attention_response(&report, &BTreeMap::new(), 1)).unwrap();
+        let projected: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(projected["status"], "ready");
+        let rows = projected["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+
+        let call_row = rows.iter().find(|r| r["source"] == "call").unwrap();
+        assert_eq!(
+            call_row["summary"],
+            "waiting for approval: Approve release schema"
+        );
+        assert!(
+            !call_row["summary"]
+                .as_str()
+                .unwrap()
+                .contains("att-raw-id-99")
+        );
+        assert!(
+            !call_row["summary"]
+                .as_str()
+                .unwrap()
+                .contains("participant-raw-99")
+        );
+
+        let task_row = rows.iter().find(|r| r["source"] == "task").unwrap();
+        assert_eq!(task_row["summary"], "workers ended, still held");
+
+        let msg_rows: Vec<_> = rows.iter().filter(|r| r["source"] == "message").collect();
+        assert_eq!(msg_rows.len(), 2);
+        assert!(msg_rows.iter().any(|r| {
+            r["summary"] == "Need decision on [path]"
+                && !r.to_string().contains(posix_path)
+                && !r.to_string().contains("msg-raw-id-1")
+        }));
+        assert!(msg_rows.iter().any(|r| {
+            r["summary"] == "작업방 질문" && !r.to_string().contains("msg-raw-id-empty")
+        }));
     }
 }
