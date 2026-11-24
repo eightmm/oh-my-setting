@@ -1755,6 +1755,168 @@ fn review_classification_and_validation() {
             String::from_utf8_lossy(&validation.1),
             String::from_utf8_lossy(&validation.2)
         );
+
+        struct GateVerifyProbe<'a> {
+            repo: &'a Repo,
+            provider_calls: AtomicU64,
+            verify_commands: Mutex<Vec<String>>,
+            strip_fast_during_call: bool,
+        }
+        impl Executor for GateVerifyProbe<'_> {
+            fn execute(
+                &self,
+                request: Invocation,
+                stop: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                if request.argv[0] == "git" {
+                    return Native.execute(request, stop);
+                }
+                if request.argv[0] == "bash" {
+                    if let Some(cmd) = request.argv.last() {
+                        self.verify_commands
+                            .lock()
+                            .unwrap()
+                            .push(cmd.to_string_lossy().into_owned());
+                    }
+                    return Ok(Completed {
+                        code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        complete: true,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::ZERO,
+                    });
+                }
+                self.provider_calls.fetch_add(1, Ordering::SeqCst);
+                if self.strip_fast_during_call {
+                    self.repo
+                        .write("scripts/check.sh", "#!/usr/bin/env bash\nexit 0\n");
+                }
+                Ok(Completed {
+                    code: 0,
+                    stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
+                    stderr: Vec::new(),
+                    complete: true,
+                    cleanup_complete: Some(true),
+                    owned_cleanup: None,
+                    elapsed: Duration::ZERO,
+                })
+            }
+        }
+        let gate_repo = provider_repo();
+        let commit_check_sh = |script: &str, message: &str| {
+            gate_repo.write("scripts/check.sh", script);
+            gate_repo.git(&["add", "scripts/check.sh"]);
+            gate_repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                message,
+            ]);
+        };
+        let run_gate = |extra: &[&str], directory: &str, strip_fast: bool| {
+            let probe = GateVerifyProbe {
+                repo: &gate_repo,
+                provider_calls: AtomicU64::new(0),
+                verify_commands: Mutex::new(Vec::new()),
+                strip_fast_during_call: strip_fast,
+            };
+            let mut values = vec![
+                "--providers",
+                "codex",
+                "--model",
+                "fixture",
+                "--gate",
+                "--prompt",
+                "check gate verify resolution",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-graph-context",
+                "--artifact-dir",
+                directory,
+            ];
+            values.extend_from_slice(extra);
+            let output = oms_command_peer::run_with_executor(
+                "peer-review",
+                &args(&values),
+                &gate_repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &STOP,
+                &probe,
+            );
+            (
+                output,
+                probe.provider_calls.load(Ordering::SeqCst),
+                probe.verify_commands.into_inner().unwrap(),
+            )
+        };
+
+        commit_check_sh(
+            "#!/usr/bin/env bash\nexit 0\n",
+            "check.sh without fast mode",
+        );
+        let (output, calls, verified) = run_gate(&[], ".oms/review-gate-no-fast", false);
+        assert_eq!(output.0, 2);
+        assert!(
+            String::from_utf8_lossy(&output.2)
+                .contains("check.sh has no declared fast mode; give --verify CMD or --no-verify"),
+            "{output:?}"
+        );
+        assert_eq!(
+            calls, 0,
+            "unresolvable gate verify must fail before starting any provider seat"
+        );
+        assert!(verified.is_empty());
+
+        let (output, calls, verified) = run_gate(
+            &["--verify", "true", "--no-verify"],
+            ".oms/review-gate-conflict",
+            false,
+        );
+        assert_eq!(output.0, 2);
+        assert!(
+            String::from_utf8_lossy(&output.2)
+                .contains("--verify and --no-verify are mutually exclusive"),
+            "{output:?}"
+        );
+        assert_eq!(calls, 0);
+        assert!(verified.is_empty());
+
+        let (output, calls, verified) =
+            run_gate(&["--verify", "echo ok"], ".oms/review-gate-explicit", false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        assert_eq!(verified, vec!["echo ok".to_owned()]);
+
+        let (output, calls, verified) =
+            run_gate(&["--no-verify"], ".oms/review-gate-no-verify", false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        assert!(verified.is_empty());
+
+        commit_check_sh(
+            "#!/usr/bin/env bash\ncase \"${1:-}\" in\n  fast) exit 0 ;;\nesac\n",
+            "check.sh with fast mode",
+        );
+        let (output, calls, verified) = run_gate(&[], ".oms/review-gate-fast", false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        assert_eq!(verified, vec!["bash scripts/check.sh fast".to_owned()]);
+
+        // Reusing the pre-resolved verify command must not re-parse scripts/check.sh after reviews.
+        let (output, calls, verified) = run_gate(&[], ".oms/review-gate-reused", true);
+        assert_eq!(output.0, 2, "{output:?}");
+        assert!(
+            !String::from_utf8_lossy(&output.2).contains("no declared fast mode"),
+            "{output:?}"
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(verified, vec!["bash scripts/check.sh fast".to_owned()]);
     });
 }
 #[test]
@@ -4831,4 +4993,140 @@ fn retries_reselect_unpinned_accounts() {
             message(&collide)
         );
     });
+}
+
+#[test]
+fn delegate_attaches_active_task_packet_only_for_matching_task_or_explicit_flag() {
+    provider_isolated(
+        "delegate_attaches_active_task_packet_only_for_matching_task_or_explicit_flag",
+        "override",
+        || {
+            let repo = Repo::new();
+            repo.write("tracked.txt", "base\n");
+            repo.git(&["add", "tracked.txt"]);
+            repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ]);
+            let marker = "ACTIVE_TASK_PACKET_MARKER_459";
+            let active_packet = format!(
+                "# Active Agent Task\n\n- created: 2026-11-20T00:00:00Z\n- updated: 2026-11-20T00:00:00Z\n- task_id: active-task-459\n- status: active\n\n## Goal\n{marker}\n"
+            );
+            repo.write(".oms/task/current.md", &active_packet);
+
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let delegate_prompt = |extra: &[&str]| -> String {
+                let mut argv = vec![
+                    "--repo",
+                    repo.0.to_str().unwrap(),
+                    "--to",
+                    "codex",
+                    "--model",
+                    "fixture",
+                    "--dry-run",
+                    "--no-memory",
+                    "--no-ml-context",
+                ];
+                argv.extend_from_slice(extra);
+                argv.push("Unrelated write brief");
+                let out = run_with_source("peer-delegate", &args(&argv), &repo.0, source, &STOP);
+                assert_eq!(out.0, 0, "{extra:?}: {}", String::from_utf8_lossy(&out.2));
+                let artifact = String::from_utf8_lossy(&out.1)
+                    .lines()
+                    .next()
+                    .expect("artifact path")
+                    .to_owned();
+                fs::read_to_string(&artifact).expect("delegate dry-run artifact")
+            };
+
+            let unrelated = delegate_prompt(&[]);
+            assert!(
+                !unrelated.contains(marker),
+                "unrelated write delegation attached active task packet:\n{unrelated}"
+            );
+
+            let different_id = delegate_prompt(&["--task-id", "other-task"]);
+            assert!(
+                !different_id.contains(marker),
+                "mismatched --task-id attached active task packet:\n{different_id}"
+            );
+
+            let matching_id = delegate_prompt(&["--task-id", "active-task-459"]);
+            assert!(
+                matching_id.contains(marker),
+                "matching --task-id missed active task packet:\n{matching_id}"
+            );
+
+            let explicit_task = delegate_prompt(&["--task"]);
+            assert!(
+                explicit_task.contains(marker),
+                "explicit --task missed active task packet:\n{explicit_task}"
+            );
+
+            let suppressed_matching =
+                delegate_prompt(&["--task-id", "active-task-459", "--no-task"]);
+            assert!(
+                !suppressed_matching.contains(marker),
+                "--no-task failed to suppress matching task packet:\n{suppressed_matching}"
+            );
+
+            let suppressed_explicit = delegate_prompt(&["--task", "--no-task"]);
+            assert!(
+                !suppressed_explicit.contains(marker),
+                "--no-task failed to suppress explicit --task:\n{suppressed_explicit}"
+            );
+
+            let read_matching = delegate_prompt(&["--read-only", "--task-id", "active-task-459"]);
+            assert!(
+                !read_matching.contains(marker),
+                "read-only delegation attached task packet without --task:\n{read_matching}"
+            );
+
+            let read_explicit = delegate_prompt(&["--read-only", "--task"]);
+            assert!(
+                read_explicit.contains(marker),
+                "read-only delegation with --task missed task packet:\n{read_explicit}"
+            );
+
+            let closed_packet = active_packet.replace("- status: active", "- status: closed");
+            repo.write(".oms/task/current.md", &closed_packet);
+            let closed_matching = delegate_prompt(&["--task-id", "active-task-459"]);
+            assert!(
+                !closed_matching.contains(marker),
+                "closed task packet attached by default:\n{closed_matching}"
+            );
+            let closed_explicit = delegate_prompt(&["--task"]);
+            assert!(
+                closed_explicit.contains(marker),
+                "explicit --task should still attach packet:\n{closed_explicit}"
+            );
+
+            repo.write(
+                ".oms/task/current.md",
+                format!("# Active Agent Task\n\n## Goal\n{marker}\n"),
+            );
+            let legacy_matching = delegate_prompt(&["--task-id", "legacy"]);
+            assert!(
+                !legacy_matching.contains(marker),
+                "task packet without task_id matched by default:\n{legacy_matching}"
+            );
+
+            let help = run_with_source("peer-delegate", &args(&["--help"]), &repo.0, source, &STOP);
+            assert_eq!(help.0, 0);
+            let help_text = String::from_utf8_lossy(&help.1);
+            assert!(
+                !help_text.contains("(default for writes)."),
+                "stale --task help text:\n{help_text}"
+            );
+            assert!(
+                help_text.contains("when --task-id matches the active task's id"),
+                "help text should describe task binding default:\n{help_text}"
+            );
+        },
+    );
 }
