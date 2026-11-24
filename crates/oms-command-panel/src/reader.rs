@@ -1307,7 +1307,9 @@ fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> S
     // blocks, so drop everything through an END line that has no BEGIN before it.
     if truncated
         && let Some(end) = kept.iter().position(|l| l.contains("-----END "))
-        && !kept[..end].iter().any(|l| l.contains("-----BEGIN "))
+        && !kept[..end]
+            .iter()
+            .any(|l| l.contains(concat!("-----", "BEGIN ")))
     {
         kept.drain(..=end);
     }
