@@ -1,54 +1,35 @@
 <section id="@@ROOT@@" class="oms-graph-view" aria-labelledby="@@ROOT@@-title" data-layout="wide">
   <h2 id="@@ROOT@@-title">@@TITLE@@</h2>
   <div class="text-small text-muted tabular-nums" id="@@ROOT@@-summary">@@SUMMARY@@</div>
-  <div class="viz-controls" aria-label="Graph controls">
-    <label class="form-label" for="@@ROOT@@-search">Search nodes
+  <div class="viz-controls viz-primary" id="@@ROOT@@-primary" aria-label="Graph controls">
+    <label class="form-label" for="@@ROOT@@-search"><span id="@@ROOT@@-search-label">Search nodes</span>
       <input class="form-control" id="@@ROOT@@-search" type="search" autocomplete="off" placeholder="name, path, kind">
     </label>
-    <label class="form-label" for="@@ROOT@@-relation">Relation
-      <select class="form-select" id="@@ROOT@@-relation"><option value="">All relations</option></select>
-    </label>
-    <label class="form-label" for="@@ROOT@@-confidence">Confidence
-      <select class="form-select" id="@@ROOT@@-confidence"><option value="">All confidence levels</option></select>
-    </label>
-    <label class="form-label" for="@@ROOT@@-state"><span id="@@ROOT@@-state-label">Node state</span>
-      <select class="form-select" id="@@ROOT@@-state"><option value="">All states</option></select>
-    </label>
-    <label class="form-label" id="@@ROOT@@-scope-wrap" for="@@ROOT@@-scope" hidden>Task scope
-      <select class="form-select" id="@@ROOT@@-scope">
-        <option value="all">All nodes</option><option value="focus">Task focus</option>
-        <option value="neighbors">Focus + 1 hop</option><option value="two-hops">Focus + 2 hops</option>
-      </select>
-    </label>
-    <label class="form-label" id="@@ROOT@@-change-wrap" for="@@ROOT@@-change" hidden>Change impact
-      <select class="form-select" id="@@ROOT@@-change"><option value="">All change states</option></select>
-    </label>
-    <label class="form-label" for="@@ROOT@@-node">Selected node
-      <select class="form-select" id="@@ROOT@@-node"></select>
+    <label class="form-label" id="@@ROOT@@-scope-wrap" for="@@ROOT@@-scope" hidden><span id="@@ROOT@@-scope-label">Task scope</span>
+      <select class="form-select" id="@@ROOT@@-scope"></select>
     </label>
   </div>
-  <div class="oms-graph-legend text-small" id="@@ROOT@@-legend" aria-label="Project assurance and node kind legend" hidden>
-    <span class="oms-project-key"><i data-assurance="supported" aria-hidden="true">✓</i>Test-linked (solid)</span>
-    <span class="oms-project-key"><i data-assurance="needs-evidence" aria-hidden="true">?</i>Needs evidence (dashed)</span>
-    <span class="oms-project-key"><i data-assurance="attention" aria-hidden="true">!</i>Attention (dash-dot)</span>
-    <span class="oms-project-key"><i data-assurance="test-evidence" aria-hidden="true">T</i>Test evidence (dotted)</span>
-    <span class="oms-project-key"><i data-assurance="unclassified" aria-hidden="true">·</i>Unclassified (solid)</span>
-    <span class="oms-exec-key" hidden><i data-status="finished" aria-hidden="true">✓</i>Finished (solid)</span>
-    <span class="oms-exec-key" hidden><i data-status="active" aria-hidden="true">▶</i>Active (dashed)</span>
-    <span class="oms-exec-key" hidden><i data-status="ready" aria-hidden="true">▷</i>Ready (long-dash)</span>
-    <span class="oms-exec-key" hidden><i data-status="blocked" aria-hidden="true">⏸</i>Blocked / waiting (short-dash)</span>
-    <span class="oms-exec-key" hidden><i data-status="failed" aria-hidden="true">✕</i>Failed (dash-dot)</span>
-    <span class="oms-exec-key" hidden><i data-status="pending" aria-hidden="true">○</i>Pending (dotted)</span>
-    <span class="oms-change-key" hidden><i data-change="changed" aria-hidden="true">Δ</i>Changed (solid ring)</span>
-    <span class="oms-change-key" hidden><i data-change="impacted" aria-hidden="true">~</i>Impacted (dashed ring)</span>
-    <span class="oms-kind-key" data-kind-key="file" hidden><i data-kind="file" aria-hidden="true">□</i>File / module</span>
-    <span class="oms-kind-key" data-kind-key="symbol" hidden><i data-kind="symbol" aria-hidden="true">○</i>Symbol / func</span>
-    <span class="oms-kind-key" data-kind-key="test" hidden><i data-kind="test" aria-hidden="true">◇</i>Test / gate</span>
-    <span class="oms-kind-key" data-kind-key="agent" hidden><i data-kind="agent" aria-hidden="true">⬡</i>Agent</span>
-    <span class="oms-kind-key" data-kind-key="terminal" hidden><i data-kind="terminal" aria-hidden="true">◎</i>Terminal</span>
-    <span class="text-muted oms-project-key">Structural evidence only; colors and symbols do not assert that tests pass.</span>
-  </div>
-  <div class="viz-row" role="toolbar" aria-label="Graph view actions">
+  <details class="oms-graph-filters" id="@@ROOT@@-filters">
+    <summary id="@@ROOT@@-filters-summary">Filters · 0 active</summary>
+    <div class="viz-controls">
+      <label class="form-label" for="@@ROOT@@-relation"><span id="@@ROOT@@-relation-label">Relation</span>
+        <select class="form-select" id="@@ROOT@@-relation"></select>
+      </label>
+      <label class="form-label" for="@@ROOT@@-confidence"><span id="@@ROOT@@-confidence-label">Confidence</span>
+        <select class="form-select" id="@@ROOT@@-confidence"></select>
+      </label>
+      <label class="form-label" for="@@ROOT@@-state"><span id="@@ROOT@@-state-label">Node state</span>
+        <select class="form-select" id="@@ROOT@@-state"></select>
+      </label>
+      <label class="form-label" id="@@ROOT@@-change-wrap" for="@@ROOT@@-change" hidden><span id="@@ROOT@@-change-label">Change impact</span>
+        <select class="form-select" id="@@ROOT@@-change"></select>
+      </label>
+      <label class="form-label" for="@@ROOT@@-node"><span id="@@ROOT@@-node-label">Selected node</span>
+        <select class="form-select" id="@@ROOT@@-node"></select>
+      </label>
+    </div>
+  </details>
+  <div class="viz-row" id="@@ROOT@@-toolbar" role="toolbar" aria-label="Graph view actions">
     <button class="btn btn-ghost" id="@@ROOT@@-zoom-out" type="button" aria-label="Zoom out">Zoom out</button>
     <button class="btn btn-ghost" id="@@ROOT@@-reset" type="button">Reset view</button>
     <button class="btn btn-ghost" id="@@ROOT@@-zoom-in" type="button" aria-label="Zoom in">Zoom in</button>
@@ -60,19 +41,49 @@
   <div class="oms-graph-stage">
     <svg id="@@ROOT@@-svg" role="group" aria-label="Interactive dependency graph">
       <title>@@TITLE@@</title>
-      <desc>Use search, filters, Tab, Enter, Space, and arrow keys to explore this bounded graph.</desc>
+      <desc id="@@ROOT@@-svg-desc">Use search, filters, Tab, Enter, Space, arrow keys, plus, minus and 0 to explore this bounded graph.</desc>
     </svg>
   </div>
+  <div class="oms-graph-legend text-small" id="@@ROOT@@-legend" aria-label="Project assurance and node kind legend" hidden>
+    <span class="oms-project-key" data-legend="supported"><i data-assurance="supported" aria-hidden="true">✓</i>Test-linked (solid)</span>
+    <span class="oms-project-key" data-legend="needs-evidence"><i data-assurance="needs-evidence" aria-hidden="true">?</i>Needs evidence (dashed)</span>
+    <span class="oms-project-key" data-legend="attention"><i data-assurance="attention" aria-hidden="true">!</i>Attention (dash-dot)</span>
+    <span class="oms-project-key" data-legend="test-evidence"><i data-assurance="test-evidence" aria-hidden="true">T</i>Test evidence (dotted)</span>
+    <span class="oms-project-key" data-legend="unclassified"><i data-assurance="unclassified" aria-hidden="true">·</i>Unclassified (solid)</span>
+    <span class="oms-exec-key" data-legend="running" hidden><i data-state="running" aria-hidden="true">▶</i>Running (dashed)</span>
+    <span class="oms-exec-key" data-legend="verifying" hidden><i data-state="verifying" aria-hidden="true">⟳</i>Verifying (dashed)</span>
+    <span class="oms-exec-key" data-legend="review" hidden><i data-state="review" aria-hidden="true">⚑</i>In review (long-dash)</span>
+    <span class="oms-exec-key" data-legend="waiting" hidden><i data-state="waiting" aria-hidden="true">!</i>Needs you (short-dash)</span>
+    <span class="oms-exec-key" data-legend="blocked" hidden><i data-state="blocked" aria-hidden="true">⊘</i>Blocked (short-dash)</span>
+    <span class="oms-exec-key" data-legend="ready" hidden><i data-state="ready" aria-hidden="true">▷</i>Ready (long-dash)</span>
+    <span class="oms-exec-key" data-legend="pending" hidden><i data-state="pending" aria-hidden="true">·</i>Pending (dotted)</span>
+    <span class="oms-exec-key" data-legend="exited" hidden><i data-state="exited" aria-hidden="true">■</i>Exited (solid)</span>
+    <span class="oms-exec-key" data-legend="accepted" hidden><i data-state="accepted" aria-hidden="true">✓</i>Verified (solid)</span>
+    <span class="oms-exec-key" data-legend="failed" hidden><i data-state="failed" aria-hidden="true">×</i>Failed (dash-dot)</span>
+    <span class="oms-exec-key" data-legend="timed_out" hidden><i data-state="timed_out" aria-hidden="true">◷</i>Timed out (dash-dot)</span>
+    <span class="oms-exec-key" data-legend="stale" hidden><i data-state="stale" aria-hidden="true">~</i>Stale (dashed)</span>
+    <span class="oms-exec-key" data-legend="unknown" hidden><i data-state="unknown" aria-hidden="true">?</i>Unknown (dotted)</span>
+    <span class="oms-change-key" data-legend="changed" hidden><i data-change="changed" aria-hidden="true">Δ</i>Changed (Δ badge)</span>
+    <span class="oms-change-key" data-legend="impacted" hidden><i data-change="impacted" aria-hidden="true">~</i>Impacted (~ badge)</span>
+    <span class="oms-relgroup-key" data-legend="ownership" hidden><i data-relgroup="ownership" aria-hidden="true">—</i>Ownership: contains / owns (thin, muted, no arrow)</span>
+    <span class="oms-relgroup-key" data-legend="dependency" hidden><i data-relgroup="dependency" aria-hidden="true">→</i>Dependency: imports / calls (arrow; dashed = inferred)</span>
+    <span class="oms-kind-key" data-legend="file" data-kind-key="file" hidden><i data-kind="file" aria-hidden="true">□</i>File / module</span>
+    <span class="oms-kind-key" data-legend="symbol" data-kind-key="symbol" hidden><i data-kind="symbol" aria-hidden="true">ƒ</i>Symbol / func</span>
+    <span class="oms-kind-key" data-legend="test" data-kind-key="test" hidden><i data-kind="test" aria-hidden="true">◇</i>Test / gate</span>
+    <span class="oms-kind-key" data-legend="agent" data-kind-key="agent" hidden><i data-kind="agent" aria-hidden="true">⬡</i>Agent</span>
+    <span class="oms-kind-key" data-legend="terminal" data-kind-key="terminal" hidden><i data-kind="terminal" aria-hidden="true">◎</i>Terminal</span>
+    <span class="text-muted oms-project-key" data-legend="note">Structural evidence only; colors and symbols do not assert that tests pass.</span>
+  </div>
   @@FALLBACK@@
-  <div class="card oms-graph-selection" aria-live="polite">
+  <div class="card oms-graph-selection" id="@@ROOT@@-selection" aria-live="polite">
     <div class="oms-graph-badges text-small" id="@@ROOT@@-badges" aria-label="Selected node status and kind" hidden></div>
     <span id="@@ROOT@@-detail">Select a node to inspect it.</span>
-    <label class="form-label oms-graph-draft" for="@@ROOT@@-draft">Instruction draft
+    <label class="form-label oms-graph-draft" id="@@ROOT@@-draft-wrap" for="@@ROOT@@-draft"><span id="@@ROOT@@-draft-label">Instruction draft</span>
       <textarea class="form-control" id="@@ROOT@@-draft" rows="4" spellcheck="true"></textarea>
     </label>
     <div class="viz-row oms-graph-actions">
       <button class="btn btn-secondary" id="@@ROOT@@-copy" type="button">Copy text</button>
-      <button class="btn btn-primary" id="@@ROOT@@-ask" type="button" hidden>Send to Codex</button>
+      <button class="btn btn-primary" id="@@ROOT@@-ask" type="button" hidden>Send to chat</button>
       <span class="text-small text-muted" id="@@ROOT@@-action-status" role="status"></span>
     </div>
   </div>
@@ -138,6 +149,9 @@
 #@@ROOT@@ .card { padding: 12px; border: 1px solid var(--oms-border); border-radius: 8px; background: var(--oms-surface); color: var(--oms-fg); min-width: 0; }
 #@@ROOT@@-error { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--oms-destructive); border-left: 3px solid var(--oms-destructive); border-radius: 6px; background: color-mix(in srgb, var(--oms-destructive) 12%, var(--oms-bg)); overflow-wrap: anywhere; }
 #@@ROOT@@ .oms-graph-notice { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--oms-border); border-left: 3px solid var(--oms-s3); border-radius: 6px; background: var(--oms-surface); color: var(--oms-fg); overflow-wrap: anywhere; }
+#@@ROOT@@ .oms-graph-filters { margin-top: 8px; }
+#@@ROOT@@ .oms-graph-filters summary { cursor: pointer; padding: 6px 0; font-size: 0.8125rem; font-weight: 500; }
+#@@ROOT@@ .oms-graph-notice.is-empty { margin-top: 12px; padding: 20px 14px; text-align: center; border: 1px dashed var(--oms-border); border-left: 1px dashed var(--oms-border); background: var(--oms-surface); color: var(--oms-muted-fg); }
 #@@ROOT@@ .oms-graph-stage { position: relative; width: 100%; min-height: 440px; margin-top: 8px; border: 1px solid var(--oms-border); border-radius: 8px; background: var(--oms-bg); overflow: hidden; }
 #@@ROOT@@ .oms-graph-stage svg { display: block; width: 100%; height: 520px; touch-action: none; }
 #@@ROOT@@ .oms-graph-selection { display: flex; flex-direction: column; align-items: stretch; gap: 10px; margin-top: 8px; }
@@ -150,6 +164,7 @@
 #@@ROOT@@ .oms-badge[data-pattern="dash-dot"] { border-style: double; border-width: 3px; border-color: var(--oms-destructive); }
 #@@ROOT@@ .oms-badge[data-pattern="dotted"] { border-style: dotted; border-color: var(--oms-s4); }
 #@@ROOT@@ .oms-badge[data-pattern="solid"] { border-color: var(--oms-s5); }
+#@@ROOT@@ .oms-badge[data-state], #@@ROOT@@ .oms-badge[data-assurance] { border-color: var(--oms-st); }
 #@@ROOT@@ .oms-badge[data-change="changed"] { border-color: var(--oms-s1); }
 #@@ROOT@@ .oms-badge[data-change="impacted"] { border-style: dashed; border-color: var(--oms-s2); }
 #@@ROOT@@ .oms-graph-draft { width: 100%; }
@@ -160,65 +175,106 @@
 #@@ROOT@@ .oms-graph-legend[hidden] { display: none; }
 #@@ROOT@@ .oms-graph-legend span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 #@@ROOT@@ .oms-graph-legend i { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 18px; height: 18px; font-style: normal; font-size: 11px; font-weight: 700; line-height: 1; border: 1.5px solid var(--oms-muted-fg); border-radius: 50%; color: var(--oms-fg); background: var(--oms-bg); }
-#@@ROOT@@ .oms-graph-legend i[data-assurance="supported"],
-#@@ROOT@@ .oms-graph-legend i[data-status="finished"] { background: color-mix(in srgb, var(--oms-s5) 24%, var(--oms-bg)); border-color: var(--oms-s5); }
-#@@ROOT@@ .oms-graph-legend i[data-assurance="needs-evidence"],
-#@@ROOT@@ .oms-graph-legend i[data-status="active"] { background: color-mix(in srgb, var(--oms-s3) 24%, var(--oms-bg)); border-color: var(--oms-s3); border-style: dashed; }
-#@@ROOT@@ .oms-graph-legend i[data-status="ready"] { background: color-mix(in srgb, var(--oms-s4) 24%, var(--oms-bg)); border-color: var(--oms-s4); border-style: dashed; }
-#@@ROOT@@ .oms-graph-legend i[data-status="blocked"] { background: color-mix(in srgb, var(--oms-s3) 20%, var(--oms-bg)); border-color: var(--oms-s3); border-style: dotted; }
-#@@ROOT@@ .oms-graph-legend i[data-assurance="attention"],
-#@@ROOT@@ .oms-graph-legend i[data-status="failed"] { background: color-mix(in srgb, var(--oms-destructive) 22%, var(--oms-bg)); border-color: var(--oms-destructive); border-width: 2px; }
-#@@ROOT@@ .oms-graph-legend i[data-assurance="test-evidence"],
-#@@ROOT@@ .oms-graph-legend i[data-status="pending"] { background: color-mix(in srgb, var(--oms-s4) 22%, var(--oms-bg)); border-color: var(--oms-s4); border-style: dotted; }
-#@@ROOT@@ .oms-graph-legend i[data-assurance="unclassified"] { background: var(--oms-bg); border-color: var(--oms-muted-fg); }
-#@@ROOT@@ .oms-graph-legend i[data-change="changed"] { background: transparent; border: 2px solid var(--oms-s1); }
-#@@ROOT@@ .oms-graph-legend i[data-change="impacted"] { background: transparent; border: 2px dashed var(--oms-s2); }
+#@@ROOT@@ [data-assurance="supported"] { --oms-st: var(--oms-s5); }
+#@@ROOT@@ [data-assurance="needs-evidence"] { --oms-st: var(--oms-s3); }
+#@@ROOT@@ [data-assurance="attention"] { --oms-st: var(--oms-destructive); }
+#@@ROOT@@ [data-assurance="test-evidence"] { --oms-st: var(--oms-s4); }
+#@@ROOT@@ [data-assurance="unclassified"] { --oms-st: var(--oms-muted-fg); }
+#@@ROOT@@ [data-state="running"], #@@ROOT@@ [data-state="verifying"] { --oms-st: var(--oms-s1); }
+#@@ROOT@@ [data-state="review"], #@@ROOT@@ [data-state="waiting"], #@@ROOT@@ [data-state="blocked"], #@@ROOT@@ [data-state="stale"] { --oms-st: var(--oms-s3); }
+#@@ROOT@@ [data-state="ready"] { --oms-st: var(--oms-s4); }
+#@@ROOT@@ [data-state="pending"], #@@ROOT@@ [data-state="unknown"] { --oms-st: var(--oms-muted-fg); }
+#@@ROOT@@ [data-state="exited"] { --oms-st: color-mix(in srgb, var(--oms-s5) 62%, var(--oms-muted-fg)); }
+#@@ROOT@@ [data-state="accepted"] { --oms-st: var(--oms-s5); }
+#@@ROOT@@ [data-state="failed"], #@@ROOT@@ [data-state="timed_out"] { --oms-st: var(--oms-destructive); }
+#@@ROOT@@ .oms-graph-legend i[data-assurance], #@@ROOT@@ .oms-graph-legend i[data-state] { background: color-mix(in srgb, var(--oms-st) 24%, var(--oms-bg)); border-color: var(--oms-st); }
+#@@ROOT@@ .oms-graph-legend i[data-assurance="needs-evidence"], #@@ROOT@@ .oms-graph-legend i[data-state="running"], #@@ROOT@@ .oms-graph-legend i[data-state="verifying"], #@@ROOT@@ .oms-graph-legend i[data-state="stale"] { border-style: dashed; }
+#@@ROOT@@ .oms-graph-legend i[data-state="ready"], #@@ROOT@@ .oms-graph-legend i[data-state="review"] { border-style: dashed; }
+#@@ROOT@@ .oms-graph-legend i[data-assurance="test-evidence"], #@@ROOT@@ .oms-graph-legend i[data-state="pending"], #@@ROOT@@ .oms-graph-legend i[data-state="unknown"], #@@ROOT@@ .oms-graph-legend i[data-state="waiting"], #@@ROOT@@ .oms-graph-legend i[data-state="blocked"] { border-style: dotted; }
+#@@ROOT@@ .oms-graph-legend i[data-assurance="attention"], #@@ROOT@@ .oms-graph-legend i[data-state="failed"], #@@ROOT@@ .oms-graph-legend i[data-state="timed_out"] { border-width: 2px; }
+#@@ROOT@@ .oms-graph-legend i[data-relgroup] { border-radius: 4px; background: transparent; border-color: transparent; color: var(--oms-muted-fg); font-size: 14px; }
+#@@ROOT@@ .oms-graph-legend i[data-relgroup="dependency"] { color: var(--oms-s1); }
+#@@ROOT@@ .oms-graph-legend i[data-change="changed"] { background: var(--oms-s1); border-color: var(--oms-s1); color: var(--oms-bg); }
+#@@ROOT@@ .oms-graph-legend i[data-change="impacted"] { background: var(--oms-s2); border-color: var(--oms-s2); color: var(--oms-bg); }
 #@@ROOT@@ .oms-graph-legend i[data-kind] { border-radius: 4px; background: var(--oms-bg); border-color: var(--oms-muted-fg); }
-#@@ROOT@@ .oms-graph-edge { stroke: color-mix(in srgb, var(--oms-muted-fg) 78%, var(--oms-border)); stroke-width: 1.4; opacity: .75; }
-#@@ROOT@@ .oms-graph-edge[data-confidence="INFERRED"] { stroke: var(--oms-s2); stroke-dasharray: 5 3; }
-#@@ROOT@@ .oms-graph-edge[data-confidence="AMBIGUOUS"] { stroke: var(--oms-destructive); stroke-dasharray: 2 4; opacity: .7; }
-#@@ROOT@@ .oms-graph-edge[data-confidence="REPEAT"] { stroke: var(--oms-s3); stroke-dasharray: 6 4; }
+#@@ROOT@@ .oms-graph-edge { fill: none; stroke: color-mix(in srgb, var(--oms-muted-fg) 78%, var(--oms-border)); stroke-width: 1.25; opacity: .6; transition: opacity .15s; }
+#@@ROOT@@ .oms-graph-edge[data-rel="0"], #@@ROOT@@ .oms-graph-legend i[data-rel="0"] { stroke: var(--oms-s1); color: var(--oms-s1); }
+#@@ROOT@@ .oms-graph-edge[data-rel="1"], #@@ROOT@@ .oms-graph-legend i[data-rel="1"] { stroke: var(--oms-s2); color: var(--oms-s2); }
+#@@ROOT@@ .oms-graph-edge[data-rel="2"], #@@ROOT@@ .oms-graph-legend i[data-rel="2"] { stroke: var(--oms-s3); color: var(--oms-s3); }
+#@@ROOT@@ .oms-graph-edge[data-rel="3"], #@@ROOT@@ .oms-graph-legend i[data-rel="3"] { stroke: var(--oms-s4); color: var(--oms-s4); }
+#@@ROOT@@ .oms-graph-edge[data-rel="4"], #@@ROOT@@ .oms-graph-legend i[data-rel="4"] { stroke: var(--oms-s5); color: var(--oms-s5); }
+#@@ROOT@@ .oms-graph-legend i[data-rel] { border-color: currentColor; border-radius: 4px; }
+#@@ROOT@@ .oms-graph-edge[data-confidence="INFERRED"] { stroke-dasharray: 5 3; }
+#@@ROOT@@ .oms-graph-edge[data-confidence="AMBIGUOUS"] { stroke-dasharray: 2 4; opacity: .6; }
+#@@ROOT@@ .oms-graph-edge[data-confidence="REPEAT"] { stroke-dasharray: 6 4; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group="dependency"] { stroke-width: 1.25; opacity: .6; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group="ownership"] { stroke: var(--oms-muted-fg); stroke-width: 1.25; opacity: .35; stroke-dasharray: none; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group="ownership"][data-confidence="INFERRED"] { opacity: .22; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group].is-hot { opacity: 1; stroke-width: 1.75; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group].is-flow { stroke: var(--oms-primary); stroke-width: 1.75; opacity: 1; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group].is-dim { opacity: .08; }
+@keyframes @@ROOT@@-flow { to { stroke-dashoffset: -22; } }
+@keyframes @@ROOT@@-pulse { 0%, 100% { stroke-opacity: .95; stroke-width: 2.5; } 50% { stroke-opacity: .45; stroke-width: 4; } }
+/* Entry motion only scales from a visible start: a frozen timeline never hides a node. */
+@keyframes @@ROOT@@-pop { from { transform: scale(.6); } }
+@media (prefers-reduced-motion: no-preference) {
+  #@@ROOT@@ .oms-graph-edge.is-flow:is([data-confidence="INFERRED"], [data-confidence="AMBIGUOUS"], [data-confidence="REPEAT"]):not([data-relation-group="ownership"]) { animation: @@ROOT@@-flow 1.1s linear infinite; }
+  #@@ROOT@@ .oms-graph-node.is-selected .oms-graph-select-ring { animation: @@ROOT@@-pulse 2.2s ease-in-out infinite; }
+  #@@ROOT@@ .oms-graph-node .oms-graph-node-body, #@@ROOT@@ .oms-graph-node .oms-graph-glyph { transform-box: fill-box; transform-origin: center; animation: @@ROOT@@-pop .45s ease-out both; }
+  #@@ROOT@@ .oms-graph-node { transition: opacity .15s; }
+}
+#@@ROOT@@ .oms-graph-stage svg { cursor: grab; }
+#@@ROOT@@ .oms-graph-select-ring { fill: none; stroke: var(--oms-primary); stroke-width: 2.5; opacity: 0; pointer-events: none; }
+#@@ROOT@@ .oms-graph-node.is-selected .oms-graph-select-ring { opacity: 1; }
+#@@ROOT@@ .oms-graph-pin { display: none; fill: var(--oms-fg); stroke: var(--oms-bg); stroke-width: 1.5; pointer-events: none; }
+#@@ROOT@@ .oms-graph-node[data-pinned="true"] .oms-graph-pin { display: block; }
+#@@ROOT@@ .oms-graph-node.is-dim { opacity: .15; }
+#@@ROOT@@ .oms-graph-tip { position: absolute; z-index: 2; max-width: 260px; padding: 6px 8px; font-size: 0.75rem; line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; color: var(--oms-fg); background: var(--oms-surface); border: 1px solid var(--oms-border); border-radius: 6px; box-shadow: 0 2px 8px color-mix(in srgb, var(--oms-fg) 18%, transparent); }
 #@@ROOT@@ .oms-graph-node { cursor: pointer; }
 #@@ROOT@@ .oms-graph-node:focus { outline: none; }
-#@@ROOT@@ .oms-graph-node .oms-graph-focus-ring { fill: none; stroke: transparent; pointer-events: none; }
+#@@ROOT@@ .oms-graph-node .oms-graph-focus-ring, #@@ROOT@@ .oms-graph-node .oms-graph-focus-halo { fill: none; stroke: transparent; pointer-events: none; }
+#@@ROOT@@ .oms-graph-node:focus-visible .oms-graph-focus-halo { stroke: var(--oms-bg); stroke-width: 6; }
 #@@ROOT@@ .oms-graph-node:focus-visible .oms-graph-focus-ring { stroke: var(--oms-primary); stroke-width: 2.5; }
-#@@ROOT@@ .oms-graph-node .oms-graph-change-ring { fill: none; stroke: transparent; pointer-events: none; }
-#@@ROOT@@ .oms-graph-node[data-change="changed"] .oms-graph-change-ring { stroke: var(--oms-s1); stroke-width: 2.5; }
-#@@ROOT@@ .oms-graph-node[data-change="impacted"] .oms-graph-change-ring { stroke: var(--oms-s2); stroke-width: 2; stroke-dasharray: 4 3; }
-#@@ROOT@@ .oms-graph-node .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-surface) 88%, var(--oms-bg)); stroke: var(--oms-muted-fg); stroke-width: 1.6; }
-#@@ROOT@@ .oms-graph-node[data-kind="file"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s1) 20%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="test"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s4) 22%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="agent"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s2) 22%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="gate"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s3) 24%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="terminal"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s5) 22%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-assurance="supported"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s5) 26%, var(--oms-bg)); stroke: var(--oms-s5); stroke-width: 1.8; }
-#@@ROOT@@ .oms-graph-node[data-assurance="needs-evidence"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s3) 24%, var(--oms-bg)); stroke: var(--oms-s3); stroke-width: 1.8; stroke-dasharray: 4 2; }
-#@@ROOT@@ .oms-graph-node[data-assurance="attention"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-destructive) 24%, var(--oms-bg)); stroke: var(--oms-destructive); stroke-width: 2.4; stroke-dasharray: 6 2 2 2; }
-#@@ROOT@@ .oms-graph-node[data-assurance="test-evidence"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s4) 24%, var(--oms-bg)); stroke: var(--oms-s4); stroke-width: 1.8; stroke-dasharray: 2 2; }
-#@@ROOT@@ .oms-graph-node[data-status="finished"] .oms-graph-node-body,
-#@@ROOT@@ .oms-graph-node[data-status="done"] .oms-graph-node-body { stroke: var(--oms-s5); stroke-width: 2; }
-#@@ROOT@@ .oms-graph-node[data-status="active"] .oms-graph-node-body,
-#@@ROOT@@ .oms-graph-node[data-focus="true"] .oms-graph-node-body { stroke: var(--oms-s1); stroke-width: 2.4; stroke-dasharray: 6 2; }
-#@@ROOT@@ .oms-graph-node[data-status="ready"] .oms-graph-node-body { stroke: var(--oms-s4); stroke-width: 2; stroke-dasharray: 8 3; }
-#@@ROOT@@ .oms-graph-node[data-status="failed"] .oms-graph-node-body,
-#@@ROOT@@ .oms-graph-node[data-status="error"] .oms-graph-node-body { stroke: var(--oms-destructive); stroke-width: 2.4; stroke-dasharray: 6 2 2 2; }
-#@@ROOT@@ .oms-graph-node[data-status="blocked"] .oms-graph-node-body,
-#@@ROOT@@ .oms-graph-node[data-status="waiting"] .oms-graph-node-body { stroke: var(--oms-s3); stroke-width: 2; stroke-dasharray: 3 3; }
-#@@ROOT@@ .oms-graph-node[data-status="pending"] .oms-graph-node-body { stroke-dasharray: 2 2; }
+#@@ROOT@@ .oms-graph-change-badge { display: none; pointer-events: none; }
+#@@ROOT@@ .oms-graph-node[data-change="changed"] .oms-graph-change-badge, #@@ROOT@@ .oms-graph-node[data-change="impacted"] .oms-graph-change-badge { display: block; }
+#@@ROOT@@ .oms-graph-change-badge circle { fill: var(--oms-s1); stroke: var(--oms-bg); stroke-width: 1.5; }
+#@@ROOT@@ .oms-graph-node[data-change="impacted"] .oms-graph-change-badge circle { fill: var(--oms-s2); }
+#@@ROOT@@ .oms-graph-change-badge text { fill: var(--oms-bg); font-size: 9px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+#@@ROOT@@ .oms-graph-node .oms-graph-node-body { fill-opacity: .9; fill: color-mix(in srgb, var(--oms-surface) 88%, var(--oms-bg)); stroke: var(--oms-muted-fg); stroke-width: 1.6; }
+#@@ROOT@@ .oms-graph-node[data-kind="file"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s1) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="test"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s4) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="agent"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s2) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="gate"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s3) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="terminal"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s5) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-assurance] .oms-graph-node-body, #@@ROOT@@ .oms-graph-node[data-state] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-st) 40%, var(--oms-bg)); fill-opacity: .9; stroke: var(--oms-st); stroke-width: 1.8; }
+#@@ROOT@@ .oms-graph-node[data-assurance="needs-evidence"] .oms-graph-node-body { stroke-dasharray: 4 2; }
+#@@ROOT@@ .oms-graph-node[data-assurance="attention"] .oms-graph-node-body { stroke-width: 2.4; stroke-dasharray: 6 2 2 2; }
+#@@ROOT@@ .oms-graph-node[data-assurance="test-evidence"] .oms-graph-node-body { stroke-dasharray: 2 2; }
+#@@ROOT@@ .oms-graph-node[data-state="running"] .oms-graph-node-body { stroke: var(--oms-s1); stroke-width: 2.4; stroke-dasharray: 6 2; }
+#@@ROOT@@ .oms-graph-node[data-focus="true"] .oms-graph-node-body { filter: drop-shadow(0 0 2px var(--oms-s1)) drop-shadow(0 0 1px var(--oms-s1)); }
+#@@ROOT@@ .oms-graph-node[data-state="verifying"] .oms-graph-node-body { stroke-width: 2.2; stroke-dasharray: 4 2; }
+#@@ROOT@@ .oms-graph-node[data-state="review"] .oms-graph-node-body, #@@ROOT@@ .oms-graph-node[data-state="ready"] .oms-graph-node-body { stroke-width: 2; stroke-dasharray: 8 3; }
+#@@ROOT@@ .oms-graph-node[data-state="waiting"] .oms-graph-node-body, #@@ROOT@@ .oms-graph-node[data-state="blocked"] .oms-graph-node-body { stroke-width: 2; stroke-dasharray: 3 3; }
+#@@ROOT@@ .oms-graph-node[data-state="pending"] .oms-graph-node-body { stroke-dasharray: 2 2; }
+#@@ROOT@@ .oms-graph-node[data-state="unknown"] .oms-graph-node-body { stroke-dasharray: 2 3; }
+#@@ROOT@@ .oms-graph-node[data-state="exited"] .oms-graph-node-body { stroke-width: 1.6; }
+#@@ROOT@@ .oms-graph-node[data-state="accepted"] .oms-graph-node-body { stroke-width: 2; }
+#@@ROOT@@ .oms-graph-node[data-state="failed"] .oms-graph-node-body, #@@ROOT@@ .oms-graph-node[data-state="timed_out"] .oms-graph-node-body { stroke-width: 2.4; stroke-dasharray: 6 2 2 2; }
+#@@ROOT@@ .oms-graph-node[data-state="stale"] .oms-graph-node-body { stroke-dasharray: 4 3; }
 #@@ROOT@@ .oms-graph-node.is-selected .oms-graph-node-body { fill: var(--oms-primary); stroke: var(--oms-fg); stroke-width: 2.5; stroke-dasharray: none; }
 #@@ROOT@@ .oms-graph-node.is-muted { opacity: .22; }
 #@@ROOT@@ .oms-graph-node.is-out-of-scope { display: none; }
 #@@ROOT@@ .oms-graph-edge.is-muted { display: none; }
 #@@ROOT@@ .oms-graph-glyph { fill: var(--oms-fg); font-size: 10px; font-weight: 700; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
 #@@ROOT@@ .oms-graph-node.is-selected .oms-graph-glyph { fill: var(--oms-primary-fg); }
-#@@ROOT@@ .oms-graph-label { fill: var(--oms-fg); font-size: 12px; font-weight: 500; pointer-events: none; paint-order: stroke; stroke: var(--oms-bg); stroke-width: 3px; stroke-linejoin: round; }
+#@@ROOT@@ .oms-graph-label { fill: var(--oms-fg); font-size: 12px; font-weight: 500; text-anchor: middle; pointer-events: none; paint-order: stroke; stroke: var(--oms-bg); stroke-width: 3px; stroke-linejoin: round; }
 #@@ROOT@@ .oms-graph-label.is-hidden { display: none; }
 #@@ROOT@@ .oms-graph-fallback { margin-top: 8px; }
 #@@ROOT@@ .oms-graph-fallback summary { cursor: pointer; padding: 4px 0; }
 #@@ROOT@@ .oms-graph-fallback ul { max-height: 220px; overflow: auto; overflow-wrap: anywhere; }
 #@@ROOT@@[data-layout="medium"] .viz-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 #@@ROOT@@[data-layout="narrow"] .viz-controls { grid-template-columns: minmax(0, 1fr); }
-#@@ROOT@@[data-layout="narrow"] .oms-graph-stage { min-height: 360px; }
+#@@ROOT@@[data-layout="narrow"] .oms-graph-stage { min-height: 320px; }
 #@@ROOT@@[data-layout="narrow"] .oms-graph-stage svg { height: 400px; }
 #@@ROOT@@[data-layout="narrow"] .oms-graph-actions { align-items: stretch; flex-direction: column; }
 #@@ROOT@@[data-layout="narrow"] .oms-graph-actions .btn { width: 100%; }
@@ -229,7 +285,7 @@
 }
 @media (max-width: 480px) {
   #@@ROOT@@ .viz-controls { grid-template-columns: minmax(0, 1fr); }
-  #@@ROOT@@ .oms-graph-stage { min-height: 360px; }
+  #@@ROOT@@ .oms-graph-stage { min-height: 320px; }
   #@@ROOT@@ .oms-graph-stage svg { height: 400px; }
   #@@ROOT@@ .oms-graph-actions { align-items: stretch; flex-direction: column; }
   #@@ROOT@@ .oms-graph-actions .btn { width: 100%; }
@@ -237,7 +293,6 @@
   #@@ROOT@@ #@@ROOT@@-visible { flex-basis: 100%; }
 }
 </style>
-<script async src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 <script>
 (() => {
   const root = document.getElementById('@@ROOT@@');
@@ -272,26 +327,179 @@
   const zoomIn = root.querySelector('#@@ROOT@@-zoom-in');
   const zoomOut = root.querySelector('#@@ROOT@@-zoom-out');
   const visible = root.querySelector('#@@ROOT@@-visible');
+  const filtersSummary = root.querySelector('#@@ROOT@@-filters-summary');
+  const selectionCard = root.querySelector('#@@ROOT@@-selection');
+  const draftWrap = root.querySelector('#@@ROOT@@-draft-wrap');
+  const toolbar = root.querySelector('#@@ROOT@@-toolbar');
+  const primaryControls = root.querySelector('#@@ROOT@@-primary');
+  const svgDesc = root.querySelector('#@@ROOT@@-svg-desc');
+
+  // Localization: explicit choice > host locale > navigator languages (first Korean/English entry) > Korean,
+  // the same order as the conversation panel. Data from OMS (ids, paths, kinds, server labels) is never translated.
+  const LANGS = ['ko', 'en'];
+  const MSG = {
+    en: {
+      search: 'Search nodes', searchPh: 'name, path, kind', relation: 'Relation', allRelations: 'All relations',
+      confidence: 'Confidence', allConfidence: 'All confidence levels', assurance: 'Assurance', status: 'Status',
+      allStates: 'All states', scope: 'Task scope', scopeAll: 'All nodes', scopeFocus: 'Task focus',
+      scopeNeighbors: 'Focus + 1 hop', scopeTwo: 'Focus + 2 hops', change: 'Change impact', allChanges: 'All change states',
+      node: 'Selected node', filters: 'Filters · {n} active', zoomOut: 'Zoom out', reset: 'Reset view', zoomIn: 'Zoom in',
+      clear: 'Clear filters', toolbar: 'Graph view actions', controls: 'Graph controls', svgLabel: 'Interactive dependency graph',
+      svgDesc: 'Use search, filters, Tab, Enter, Space, arrow keys, plus, minus and 0 to explore this bounded graph. Press p on a node to pin or unpin it; double-click a pinned node or Reset view also unpins.',
+      legendProject: 'Project assurance and node kind legend', legendExec: 'Execution status and node kind legend',
+      legendNote: 'Structural evidence only; colors and symbols do not assert that tests pass.',
+      draft: 'Instruction draft', copy: 'Copy text', ask: 'Send to chat', badges: 'Selected node status and kind',
+      selectHint: 'Select a node to inspect it.', noNodesDetail: 'No nodes available to inspect.',
+      noGraphDetail: 'No graph data available to inspect.', noData: 'No graph data was delivered to this view.',
+      noDataSummary: 'No data — graph payload not delivered.', noDataShort: 'No data', noNodeOption: 'No nodes available',
+      copied: 'Copied.', copyManual: 'Select and copy the text manually.', sending: 'Sending…', sent: 'Sent.',
+      sendFail: 'Could not send; copy the draft instead.', cleared: 'Filters cleared.', pinned: 'pinned',
+      sumCounts: '{a}/{b} nodes · {c}/{d} edges', revision: 'revision', spec: 'spec',
+      prodOnly: 'production only · {n} hidden test nodes as evidence', parsed: 'parsed {p} / unparsed {u}',
+      truncSum: '{n} nodes hidden (truncated)', partialSum: 'partial graph',
+      fallback: 'Graph nodes (text alternative) — {n}', visEmpty: '0/0 nodes visible (no data)',
+      visEmptyTests: '0/0 nodes visible (no data · {n} test nodes hidden)', visHidden: '{v}/{n} nodes visible · {h} hidden',
+      vis: '{v}/{n} nodes visible', noNodes: 'No nodes in this graph (no data to plot).',
+      testsHidden: '{n} test nodes hidden as evidence', truncated: 'Truncated graph: {h} nodes hidden (showing {s} of {t})',
+      edgesHidden: '{n} edges hidden (showing {s} of {t})', partialGraph: 'Partial graph: some nodes or edges may be omitted',
+      unparsed: 'Partial parse coverage: {n} unparsed',
+      noMatchKept: 'No nodes match the current filters ({n} hidden; selected node kept visible).',
+      noMatch: 'No nodes match the current filters ({n} hidden).', connections: '{n} connections',
+      distance: 'task distance {n}', changeWord: 'change {c}', relKey: 'Relation: {name}',
+      'as.supported': 'Test-linked', 'as.needs-evidence': 'Needs evidence', 'as.attention': 'Attention',
+      'as.test-evidence': 'Test evidence', 'as.unclassified': 'Unclassified',
+      'st.running': 'Running', 'st.verifying': 'Verifying', 'st.review': 'In review', 'st.waiting': 'Needs you',
+      'st.blocked': 'Blocked', 'st.ready': 'Ready', 'st.pending': 'Pending', 'st.exited': 'Exited',
+      'st.accepted': 'Verified', 'st.failed': 'Failed', 'st.timed_out': 'Timed out', 'st.stale': 'Stale', 'st.unknown': 'Unknown',
+      'pat.solid': 'solid', 'pat.dashed': 'dashed', 'pat.long-dash': 'long-dash', 'pat.short-dash': 'short-dash',
+      'pat.dash-dot': 'dash-dot', 'pat.dotted': 'dotted',
+      'lg.changed': 'Changed (Δ badge)', 'lg.impacted': 'Impacted (~ badge)',
+      'lg.ownership': 'Ownership: contains / owns (thin, muted, no arrow)',
+      'lg.dependency': 'Dependency: imports / calls (arrow; dashed = inferred)',
+      'lg.file': 'File / module', 'lg.symbol': 'Symbol / func', 'lg.test': 'Test / gate', 'lg.agent': 'Agent', 'lg.terminal': 'Terminal'
+    },
+    ko: {
+      search: '노드 검색', searchPh: '이름, 경로, 종류', relation: '관계', allRelations: '모든 관계',
+      confidence: '신뢰도', allConfidence: '모든 신뢰 수준', assurance: '보증', status: '상태',
+      allStates: '모든 상태', scope: '작업 범위', scopeAll: '모든 노드', scopeFocus: '작업 초점',
+      scopeNeighbors: '초점 + 1단계', scopeTwo: '초점 + 2단계', change: '변경 영향', allChanges: '모든 변경 상태',
+      node: '선택한 노드', filters: '필터 · {n}개 적용', zoomOut: '축소', reset: '보기 초기화', zoomIn: '확대',
+      clear: '필터 지우기', toolbar: '그래프 보기 동작', controls: '그래프 컨트롤', svgLabel: '상호작용 가능한 의존 그래프',
+      svgDesc: '검색, 필터, Tab, Enter, Space, 방향키, +, -, 0 키로 이 제한된 그래프를 탐색하세요. 노드에서 p 키로 고정/해제하고, 고정된 노드를 더블클릭하거나 보기 초기화로도 해제할 수 있습니다.',
+      legendProject: '프로젝트 보증 및 노드 종류 범례', legendExec: '실행 상태 및 노드 종류 범례',
+      legendNote: '구조적 근거일 뿐이며 색과 기호가 테스트 통과를 뜻하지는 않습니다.',
+      draft: '지시 초안', copy: '텍스트 복사', ask: '대화에 보내기', badges: '선택한 노드의 상태와 종류',
+      selectHint: '노드를 선택해 살펴보세요.', noNodesDetail: '살펴볼 노드가 없습니다.',
+      noGraphDetail: '살펴볼 그래프 데이터가 없습니다.', noData: '이 화면에 전달된 그래프 데이터가 없습니다.',
+      noDataSummary: '데이터 없음 — 그래프 데이터가 전달되지 않았습니다.', noDataShort: '데이터 없음', noNodeOption: '사용 가능한 노드 없음',
+      copied: '복사했습니다.', copyManual: '텍스트를 직접 선택해 복사하세요.', sending: '보내는 중…', sent: '보냈습니다.',
+      sendFail: '보내지 못했습니다. 초안을 복사하세요.', cleared: '필터를 지웠습니다.', pinned: '고정됨',
+      sumCounts: '노드 {a}/{b} · 간선 {c}/{d}', revision: '리비전', spec: '명세',
+      prodOnly: '프로덕션만 · 숨긴 테스트 노드 {n}개는 근거로만 사용', parsed: '분석 {p} / 미분석 {u}',
+      truncSum: '노드 {n}개 숨김(잘림)', partialSum: '부분 그래프',
+      fallback: '그래프 노드(텍스트 대체) — {n}', visEmpty: '노드 0/0 표시 중 (데이터 없음)',
+      visEmptyTests: '노드 0/0 표시 중 (데이터 없음 · 테스트 노드 {n}개 숨김)', visHidden: '노드 {v}/{n} 표시 중 · {h}개 숨김',
+      vis: '노드 {v}/{n} 표시 중', noNodes: '이 그래프에 노드가 없습니다 (그릴 데이터 없음).',
+      testsHidden: '테스트 노드 {n}개는 근거로만 숨김', truncated: '잘린 그래프: 노드 {h}개 숨김 ({t}개 중 {s}개 표시)',
+      edgesHidden: '간선 {n}개 숨김 ({t}개 중 {s}개 표시)', partialGraph: '부분 그래프: 일부 노드나 간선이 빠졌을 수 있습니다',
+      unparsed: '부분 분석: {n}개 미분석',
+      noMatchKept: '현재 필터와 맞는 노드가 없습니다 ({n}개 숨김, 선택한 노드는 유지).',
+      noMatch: '현재 필터와 맞는 노드가 없습니다 ({n}개 숨김).', connections: '연결 {n}개',
+      distance: '작업 거리 {n}', changeWord: '변경 {c}', relKey: '관계: {name}',
+      'as.supported': '테스트 연결', 'as.needs-evidence': '근거 필요', 'as.attention': '주의',
+      'as.test-evidence': '테스트 근거', 'as.unclassified': '미분류',
+      'st.running': '실행 중', 'st.verifying': '검증 중', 'st.review': '검토 중', 'st.waiting': '확인 필요',
+      'st.blocked': '차단됨', 'st.ready': '대기 완료', 'st.pending': '대기 중', 'st.exited': '종료됨',
+      'st.accepted': '검증 완료', 'st.failed': '실패', 'st.timed_out': '시간 초과', 'st.stale': '만료', 'st.unknown': '미확인',
+      'pat.solid': '실선', 'pat.dashed': '파선', 'pat.long-dash': '긴 파선', 'pat.short-dash': '짧은 파선',
+      'pat.dash-dot': '일점쇄선', 'pat.dotted': '점선',
+      'lg.changed': '변경됨 (Δ 배지)', 'lg.impacted': '영향받음 (~ 배지)',
+      'lg.ownership': '소유: contains / owns (가늘고 흐림, 화살표 없음)',
+      'lg.dependency': '의존: imports / calls (화살표, 파선은 추정)',
+      'lg.file': '파일 / 모듈', 'lg.symbol': '심볼 / 함수', 'lg.test': '테스트 / 게이트', 'lg.agent': '에이전트', 'lg.terminal': '터미널'
+    }
+  };
+  const primaryLang = tags => {
+    for (const tag of tags) {
+      const base = String(tag || '').toLowerCase().split(/[-_]/)[0];
+      if (LANGS.includes(base)) return base;
+    }
+    return null;
+  };
+  function negotiateLang() {
+    let stored = null;
+    try { const saved = globalThis.localStorage?.getItem('oms.panel.language'); if (LANGS.includes(saved)) stored = saved; } catch (_error) { /* storage is optional */ }
+    const host = window.openai && typeof window.openai.locale === 'string' ? window.openai.locale : '';
+    const nav = globalThis.navigator;
+    return stored || primaryLang([host]) || primaryLang(nav && nav.languages && nav.languages.length ? nav.languages : [nav && nav.language]) || 'ko';
+  }
+  const lang = negotiateLang();
+  root.setAttribute('lang', lang);
+  const t = (key, params) => String(MSG[lang][key] ?? MSG.en[key] ?? key)
+    .replace(/\{(\w+)\}/g, (_match, name) => params && name in params ? params[name] : '');
+  const setText = (element, key) => { element.textContent = t(key); };
+  setText(root.querySelector('#@@ROOT@@-search-label'), 'search');
+  search.setAttribute('placeholder', t('searchPh'));
+  setText(root.querySelector('#@@ROOT@@-relation-label'), 'relation');
+  setText(root.querySelector('#@@ROOT@@-confidence-label'), 'confidence');
+  stateLabel.textContent = t('assurance');
+  setText(root.querySelector('#@@ROOT@@-scope-label'), 'scope');
+  setText(root.querySelector('#@@ROOT@@-change-label'), 'change');
+  setText(root.querySelector('#@@ROOT@@-node-label'), 'node');
+  setText(root.querySelector('#@@ROOT@@-draft-label'), 'draft');
+  setText(zoomOut, 'zoomOut'); zoomOut.setAttribute('aria-label', t('zoomOut'));
+  setText(zoomIn, 'zoomIn'); zoomIn.setAttribute('aria-label', t('zoomIn'));
+  setText(reset, 'reset');
+  setText(clear, 'clear');
+  setText(copy, 'copy');
+  setText(ask, 'ask');
+  setText(svgDesc, 'svgDesc');
+  setText(detail, 'selectHint');
+  primaryControls.setAttribute('aria-label', t('controls'));
+  toolbar.setAttribute('aria-label', t('toolbar'));
+  badges.setAttribute('aria-label', t('badges'));
+  svgElement.setAttribute('aria-label', t('svgLabel'));
+  filtersSummary.textContent = t('filters', {n: 0});
+  const addOption = (select, text, value) => select.append(new Option(text, value));
+  addOption(relation, t('allRelations'), '');
+  addOption(confidence, t('allConfidence'), '');
+  addOption(state, t('allStates'), '');
+  addOption(change, t('allChanges'), '');
+  [['all', 'scopeAll'], ['focus', 'scopeFocus'], ['neighbors', 'scopeNeighbors'], ['two-hops', 'scopeTwo']]
+    .forEach(([value, key]) => addOption(scope, t(key), value));
+  const controlsToDisable = [search, relation, confidence, state, scope, change, nodeSelect, zoomOut, reset, zoomIn, clear];
+  function showEmptyState(message, role) {
+    controlsToDisable.forEach(control => { control.disabled = true; });
+    copy.disabled = true;
+    ask.disabled = true;
+    ask.hidden = true;
+    badges.hidden = true;
+    draftWrap.hidden = true;
+    selectionCard.hidden = true;
+    stage.hidden = true;
+    legend.hidden = true;
+    if (role === 'status') {
+      notice.classList.toggle('is-empty', true);
+      notice.hidden = false;
+      notice.textContent = message;
+    }
+  }
 
   const embeddedData = JSON.parse(root.querySelector('#@@ROOT@@-data').textContent);
   const toolOutput = window.openai && window.openai.toolOutput;
   const delivered = toolOutput && toolOutput.structuredContent ? toolOutput.structuredContent : toolOutput;
   const data = delivered && delivered.graph ? delivered.graph : (delivered || embeddedData);
-  if (!data || !Array.isArray(data.nodes) || !Array.isArray(data.edges) ||
-      (data.display && data.display.resource_template)) {
-    error.hidden = false;
-    error.textContent = 'No graph data was delivered to this view.';
-    summaryElement.textContent = 'No data — graph payload not delivered.';
-    visible.textContent = 'No data';
-    detail.textContent = 'No graph data available to inspect.';
-    badges.hidden = true;
-    notice.hidden = true;
-    copy.disabled = true;
-    ask.disabled = true;
-    ask.hidden = true;
-    clear.disabled = true;
-    nodeSelect.disabled = true;
-    svgElement.hidden = true;
+  const missing = !data || !Array.isArray(data.nodes) || !Array.isArray(data.edges);
+  const templateOnly = !missing && Boolean(data.display && data.display.resource_template);
+  if (missing || templateOnly) {
+    // An unpopulated resource template is a calm status; a malformed payload is a real error.
+    error.hidden = !missing;
+    if (missing) error.textContent = t('noData');
+    summaryElement.textContent = t('noDataSummary');
+    fallbackSummary.textContent = t('fallback', {n: missing ? 0 : data.nodes.length});
+    visible.textContent = t('noDataShort');
+    detail.textContent = t('noGraphDetail');
+    showEmptyState(t('noData'), missing ? 'error' : 'status');
     return;
   }
 
@@ -309,25 +517,43 @@
     if (group === 'test') return '◇';
     if (group === 'agent') return '⬡';
     if (group === 'terminal') return '◎';
-    return '○';
+    return 'ƒ';
   }
+  // One vocabulary for every surface: key -> glyph and stroke pattern; words come from the dictionary.
+  const ASSURANCE_META = {
+    'supported': {glyph: '✓', pattern: 'solid'}, 'needs-evidence': {glyph: '?', pattern: 'dashed'},
+    'attention': {glyph: '!', pattern: 'dash-dot'}, 'test-evidence': {glyph: 'T', pattern: 'dotted'},
+    'unclassified': {glyph: '·', pattern: 'solid'}
+  };
+  const STATE_META = {
+    running: {glyph: '▶', pattern: 'dashed'}, verifying: {glyph: '⟳', pattern: 'dashed'},
+    review: {glyph: '⚑', pattern: 'long-dash'}, waiting: {glyph: '!', pattern: 'short-dash'},
+    blocked: {glyph: '⊘', pattern: 'short-dash'}, ready: {glyph: '▷', pattern: 'long-dash'},
+    pending: {glyph: '·', pattern: 'dotted'}, exited: {glyph: '■', pattern: 'solid'},
+    accepted: {glyph: '✓', pattern: 'solid'}, failed: {glyph: '×', pattern: 'dash-dot'},
+    timed_out: {glyph: '◷', pattern: 'dash-dot'}, stale: {glyph: '~', pattern: 'dashed'},
+    unknown: {glyph: '?', pattern: 'dotted'}
+  };
+  const STATE_ALIAS = {
+    active: 'running', starting: 'running', in_progress: 'running', in_review: 'review',
+    waiting_approval: 'waiting', waiting_input: 'waiting', queued: 'pending',
+    finished: 'exited', done: 'exited', passed: 'accepted', completed: 'accepted',
+    error: 'failed', guard_stop: 'failed', orphaned: 'failed', partial: 'stale', degraded: 'stale', unclassified: 'unknown'
+  };
+  const OUTCOME_STATE = {completed: 'exited', approved: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown', changes_requested: 'review', partial: 'stale', skipped: 'exited'};
   function statusMeta(row) {
     if (data.kind === 'project') {
-      const a = row.assurance || '';
-      if (a === 'supported') return {glyph: '✓', label: row.assurance_label || 'Test-linked', pattern: 'solid'};
-      if (a === 'needs-evidence') return {glyph: '?', label: row.assurance_label || 'Needs evidence', pattern: 'dashed'};
-      if (a === 'attention') return {glyph: '!', label: row.assurance_label || 'Attention', pattern: 'dash-dot'};
-      if (a === 'test-evidence') return {glyph: 'T', label: row.assurance_label || 'Test evidence', pattern: 'dotted'};
-      return {glyph: '·', label: row.assurance_label || 'Unclassified', pattern: 'solid'};
+      const key = Object.prototype.hasOwnProperty.call(ASSURANCE_META, row.assurance) ? row.assurance : 'unclassified';
+      return {key, ...ASSURANCE_META[key], label: t(`as.${key}`)};
     }
-    const st = String(row.status || 'pending').toLocaleLowerCase();
-    if (st === 'finished' || st === 'done' || st === 'passed' || st === 'completed') return {glyph: '✓', label: row.status || 'finished', pattern: 'solid'};
-    if (st === 'active' || st === 'running' || st === 'in_progress') return {glyph: '▶', label: row.status || 'active', pattern: 'dashed'};
-    if (st === 'ready') return {glyph: '▷', label: row.status || 'ready', pattern: 'long-dash'};
-    if (st === 'failed' || st === 'error') return {glyph: '✕', label: row.status || 'failed', pattern: 'dash-dot'};
-    if (st === 'blocked' || st === 'waiting') return {glyph: '⏸', label: row.status || 'blocked', pattern: 'short-dash'};
-    return {glyph: '○', label: row.status || 'pending', pattern: 'dotted'};
+    const raw = String(row.status || 'unknown').toLocaleLowerCase();
+    const outcome = String(row.outcome || '').toLocaleLowerCase();
+    const alias = raw === 'finished' && outcome ? (OUTCOME_STATE[outcome] || 'unknown') : (STATE_ALIAS[raw] || raw);
+    const key = Object.prototype.hasOwnProperty.call(STATE_META, alias) ? alias : 'unknown';
+    return {key, ...STATE_META[key], label: t(`st.${key}`)};
   }
+  const RELATION_OWNERSHIP = new Set(['contains', 'owns', 'parent']);
+  const relationGroup = name => RELATION_OWNERSHIP.has(String(name || '').toLocaleLowerCase()) ? 'ownership' : 'dependency';
   function shapePath(kind, r) {
     const group = kindGroup(kind);
     if (group === 'file') {
@@ -364,19 +590,19 @@
   const hiddenTestNodes = Number.isInteger(counts.hidden_test_nodes) ? counts.hidden_test_nodes : 0;
   const unparsedFiles = data.coverage && Number.isInteger(data.coverage.unparsed) ? data.coverage.unparsed : 0;
 
-  let summary = `${shownNodes}/${totalNodes} nodes · ${shownEdges}/${totalEdges} edges`;
-  if (data.revision) summary += ` · ${data.kind === 'project' ? 'revision' : 'spec'} ${String(data.revision).slice(0, 12)}`;
+  let summary = t('sumCounts', {a: shownNodes, b: totalNodes, c: shownEdges, d: totalEdges});
+  if (data.revision) summary += ` · ${t(data.kind === 'project' ? 'revision' : 'spec')} ${String(data.revision).slice(0, 12)}`;
   if (data.kind === 'project' && data.display && data.display.production_only) {
-    summary += ` · production only · ${hiddenTestNodes} hidden test nodes as evidence`;
+    summary += ` · ${t('prodOnly', {n: hiddenTestNodes})}`;
   }
   if (data.kind === 'project' && data.coverage && Object.keys(data.coverage).length) {
-    summary += ` · parsed ${data.coverage.parsed || 0} / unparsed ${unparsedFiles}`;
+    summary += ` · ${t('parsed', {p: data.coverage.parsed || 0, u: unparsedFiles})}`;
   }
-  if (truncatedNodes > 0) summary += ` · ${truncatedNodes} nodes hidden (truncated)`;
-  else if ((data.truncated || data.completeness === 'partial') && truncatedEdges === 0) summary += ' · partial graph';
+  if (truncatedNodes > 0) summary += ` · ${t('truncSum', {n: truncatedNodes})}`;
+  else if ((data.truncated || data.completeness === 'partial') && truncatedEdges === 0) summary += ` · ${t('partialSum')}`;
   summaryElement.textContent = summary;
 
-  fallbackSummary.textContent = `Graph nodes (text alternative) — ${data.nodes.length}`;
+  fallbackSummary.textContent = t('fallback', {n: data.nodes.length});
   fallbackList.replaceChildren(...data.nodes.map(row => {
     const item = document.createElement('li');
     const code = document.createElement('code');
@@ -386,13 +612,12 @@
     const meta = statusMeta(row);
     const kindText = `${kindSymbol(row.kind)} ${row.kind || 'node'}`;
     const stateText = `${meta.glyph} ${meta.label}`;
-    const detailText = [kindText, location, stateText, row.change ? `change: ${row.change}` : ''].filter(Boolean).join(' · ');
+    const detailText = [kindText, location, stateText, row.change ? t('changeWord', {c: row.change}) : ''].filter(Boolean).join(' · ');
     if (detailText) item.append(document.createTextNode(` — ${detailText}`));
     return item;
   }));
   if (data.title) svgElement.querySelector('title').textContent = String(data.title);
 
-  const d3 = window.d3;
   // A small DOM selection adapter keeps controls identical without the CDN.
   function nativeSelection(elements) {
     const selection = {
@@ -449,30 +674,36 @@
     };
     return selection;
   }
-  const svg = d3 ? d3.select(svgElement) : nativeSelection([svgElement]);
+  const svg = nativeSelection([svgElement]);
   const viewport = svg.append('g');
   const markerId = '@@ROOT@@-arrow';
-  svg.append('defs').append('marker')
-    .attr('id', markerId).attr('viewBox', '0 -5 10 10').attr('refX', 18).attr('refY', 0)
-    .attr('markerWidth', 5).attr('markerHeight', 5).attr('orient', 'auto')
-    .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'var(--oms-muted-fg)');
-  const links = data.edges.map(edge => ({...edge}));
   const nodes = data.nodes.map((node, index) => ({...node, index,
-    _search: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.language} ${node.assurance_label || ''} ${node.status || ''}`.toLocaleLowerCase(),
-    _optionSearch: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.assurance_label || ''} ${node.status || ''}`.toLocaleLowerCase()}));
+    _search: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.language} ${node.assurance_label || ''} ${node.status || ''} ${statusMeta(node).label} ${node.outcome || ''}`.toLocaleLowerCase(),
+    _optionSearch: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.assurance_label || ''} ${node.status || ''} ${statusMeta(node).label} ${node.outcome || ''}`.toLocaleLowerCase()}));
   const byId = new Map(nodes.map(node => [node.id, node]));
+  const links = data.edges.filter(edge => byId.has(edge.source) && byId.has(edge.target))
+    .map(edge => ({...edge, source: byId.get(edge.source), target: byId.get(edge.target), _group: relationGroup(edge.relation)}));
+  const adjacency = new Map(nodes.map(row => [row.id, new Set()]));
+  const linkCount = new Map(nodes.map(row => [row.id, 0]));
+  links.forEach(row => {
+    adjacency.get(row.source.id).add(row.target.id);
+    adjacency.get(row.target.id).add(row.source.id);
+    linkCount.set(row.source.id, linkCount.get(row.source.id) + 1);
+    linkCount.set(row.target.id, linkCount.get(row.target.id) + 1);
+  });
   const narrowLabelIds = new Set(nodes.filter(node => node.show_label)
     .sort((a, b) => (b.degree || 0) - (a.degree || 0) || a.id.localeCompare(b.id))
     .slice(0, 6).map(node => node.id));
   const relations = [...new Set(links.map(link => link.relation))].sort();
   relations.forEach(name => relation.append(new Option(name, name)));
+  const relationIndex = new Map(relations.map((name, index) => [name, index % 5]));
   const confidences = [...new Set(links.map(link => link.confidence))].sort();
   confidences.forEach(name => confidence.append(new Option(name, name)));
   const defaultConfidence = data.kind === 'project' && confidences.includes('EXTRACTED') ? 'EXTRACTED' : '';
   confidence.value = defaultConfidence;
-  const states = [...new Set(nodes.map(row => data.kind === 'project' ? row.assurance : row.status).filter(Boolean))].sort();
-  states.forEach(name => state.append(new Option(name, name)));
-  stateLabel.textContent = data.kind === 'project' ? 'Assurance' : 'Status';
+  const stateLabels = new Map(nodes.map(row => { const meta = statusMeta(row); return [meta.key, `${meta.glyph} ${meta.label}`]; }));
+  [...stateLabels.keys()].sort().forEach(key => state.append(new Option(stateLabels.get(key), key)));
+  stateLabel.textContent = t(data.kind === 'project' ? 'assurance' : 'status');
   const taskFocused = data.kind === 'project' && Boolean(data.display && data.display.task_focus);
   const defaultScope = taskFocused ? (data.display.default_scope || 'neighbors') : 'all';
   scopeWrap.hidden = !taskFocused;
@@ -481,23 +712,58 @@
   changes.forEach(name => change.append(new Option(name, name)));
   changeWrap.hidden = data.kind !== 'project' || !changes.length;
 
+  // The legend lists only the encodings present in the current nodes and edges; text and glyphs come
+  // from the same metadata as the nodes, so legend and canvas cannot drift apart.
   const presentKindGroups = new Set(nodes.map(row => kindGroup(row.kind)));
+  const presentStates = new Set(nodes.map(row => statusMeta(row).key));
+  const presentChanges = new Set(changes);
+  const presentGroups = new Set(links.map(row => relationGroup(row.relation)));
   legend.hidden = nodes.length === 0;
-  legend.setAttribute('aria-label', data.kind === 'project' ? 'Project assurance and node kind legend' : 'Execution status and node kind legend');
-  root.querySelectorAll('.oms-project-key').forEach(item => { item.hidden = data.kind !== 'project'; });
-  root.querySelectorAll('.oms-exec-key').forEach(item => { item.hidden = data.kind === 'project'; });
-  root.querySelectorAll('.oms-change-key').forEach(item => { item.hidden = !changes.length; });
-  root.querySelectorAll('.oms-kind-key').forEach(item => {
-    const key = typeof item.getAttribute === 'function' ? item.getAttribute('data-kind-key') : '';
-    item.hidden = !presentKindGroups.has(key);
+  legend.setAttribute('aria-label', t(data.kind === 'project' ? 'legendProject' : 'legendExec'));
+  const legendInfo = item => {
+    const key = item.getAttribute('data-legend');
+    const cls = item.getAttribute('class') || '';
+    if (cls.includes('oms-project-key')) {
+      if (key === 'note') return {show: data.kind === 'project', text: t('legendNote')};
+      const meta = ASSURANCE_META[key];
+      return {show: data.kind === 'project' && presentStates.has(key), glyph: meta && meta.glyph, text: `${t(`as.${key}`)} (${t(`pat.${meta && meta.pattern}`)})`};
+    }
+    if (cls.includes('oms-exec-key')) {
+      const meta = STATE_META[key];
+      return {show: data.kind !== 'project' && presentStates.has(key), glyph: meta && meta.glyph, text: `${t(`st.${key}`)} (${t(`pat.${meta && meta.pattern}`)})`};
+    }
+    if (cls.includes('oms-change-key')) return {show: presentChanges.has(key), text: t(`lg.${key}`)};
+    if (cls.includes('oms-relgroup-key')) return {show: presentGroups.has(key), text: t(`lg.${key}`)};
+    return {show: presentKindGroups.has(item.getAttribute('data-kind-key')), text: t(`lg.${key}`)};
+  };
+  root.querySelectorAll('[data-legend]').forEach(item => {
+    const info = legendInfo(item);
+    item.hidden = !info.show;
+    const icon = item.querySelector('i');
+    if (icon) {
+      if (info.glyph) icon.textContent = info.glyph;
+      item.replaceChildren(icon, document.createTextNode(info.text));
+    } else {
+      item.textContent = info.text;
+    }
+  });
+  relations.filter(name => relationGroup(name) === 'dependency').forEach(name => {
+    const item = document.createElement('span');
+    item.setAttribute('class', 'oms-relation-key');
+    const swatch = document.createElement('i');
+    swatch.setAttribute('class', 'oms-rel-swatch');
+    swatch.setAttribute('data-rel', String(relationIndex.get(name)));
+    swatch.setAttribute('aria-hidden', 'true');
+    swatch.textContent = '→';
+    item.append(swatch, document.createTextNode(t('relKey', {name})));
+    legend.append(item);
   });
 
-  ask.textContent = 'Send to Codex';
   if (nodes.length === 0) {
-    const emptyOption = new Option('No nodes available', '');
+    const emptyOption = new Option(t('noNodeOption'), '');
     emptyOption.disabled = true;
     nodeSelect.append(emptyOption);
-    nodeSelect.disabled = true;
+    showEmptyState('', 'none');
   } else {
     nodes.slice().sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id)).forEach(row => {
       const meta = statusMeta(row);
@@ -506,140 +772,632 @@
     });
   }
 
-  const link = viewport.append('g').selectAll('line').data(links).join('line')
+  // Arrowheads: one per relation colour plus one for the selection highlight.
+  const defs = svg.append('defs');
+  ['--oms-s1', '--oms-s2', '--oms-s3', '--oms-s4', '--oms-s5', '--oms-primary'].forEach((token, index) => {
+    defs.append('marker').attr('id', `${markerId}-${index}`).attr('viewBox', '0 0 10 10')
+      .attr('refX', 9).attr('refY', 5).attr('markerWidth', 9).attr('markerHeight', 9)
+      .attr('markerUnits', 'userSpaceOnUse').attr('orient', 'auto')
+      .append('path').attr('d', 'M0,1L10,5L0,9Z').attr('fill', `var(${token})`);
+  });
+  const link = viewport.append('g').selectAll('path').data(links).join('path')
     .attr('class', 'oms-graph-edge').attr('data-confidence', row => row.confidence)
-    .attr('marker-end', `url(#${markerId})`);
+    .attr('data-rel', row => relationIndex.get(row.relation))
+    .attr('data-relation-group', row => row._group)
+    .attr('marker-end', row => row._group === 'ownership' ? null : `url(#${markerId}-${relationIndex.get(row.relation)})`);
   const node = viewport.append('g').selectAll('g').data(nodes).join('g')
     .attr('class', 'oms-graph-node').attr('data-kind', row => row.kind || 'node')
     .attr('data-kind-group', row => kindGroup(row.kind))
-    .attr('data-status', row => row.status || 'pending').attr('data-assurance', row => row.assurance || '')
+    .attr('data-status', row => row.status || 'unknown')
+    .attr('data-state', row => data.kind === 'project' ? null : statusMeta(row).key)
+    .attr('data-assurance', row => data.kind === 'project' ? statusMeta(row).key : null)
     .attr('data-pattern', row => statusMeta(row).pattern)
     .attr('data-change', row => row.change || '')
     .attr('data-focus', row => String(Boolean(row.focus)))
     .attr('role', 'button').attr('tabindex', '-1').attr('aria-pressed', 'false')
-    .attr('aria-label', row => {
-      const meta = statusMeta(row);
-      return [row.label, row.kind || 'node', meta.label, row.change ? `change ${row.change}` : ''].filter(Boolean).join(', ');
-    });
+    .attr('aria-label', row => nodeAria(row));
+  function nodeAria(row) {
+    const meta = statusMeta(row);
+    return [row.label, row.kind || 'node', meta.label, row.change ? t('changeWord', {c: row.change}) : '', row._pinned ? t('pinned') : ''].filter(Boolean).join(', ');
+  }
   const nodeElementById = new Map();
   node.each(function(row) { nodeElementById.set(row.id, this); });
-  const nodeRadius = row => Math.max(9, Math.min(14, 8 + Math.sqrt(row.degree || 0)));
-  node.append('circle').attr('class', 'oms-graph-focus-ring').attr('r', row => nodeRadius(row) + 7);
-  node.append('path').attr('class', 'oms-graph-change-ring').attr('d', row => shapePath(row.kind, nodeRadius(row) + 4));
+  const nodeRadius = row => Math.max(6, Math.min(16, 4.5 + 1.5 * Math.sqrt(row.degree || 0)));
+  node.append('circle').attr('class', 'oms-graph-select-ring').attr('r', row => nodeRadius(row) + 5);
+  node.append('circle').attr('class', 'oms-graph-focus-halo').attr('r', row => nodeRadius(row) + 10);
+  node.append('circle').attr('class', 'oms-graph-focus-ring').attr('r', row => nodeRadius(row) + 10);
   node.append('path').attr('class', 'oms-graph-node-body').attr('d', row => shapePath(row.kind, nodeRadius(row)));
   node.append('text').attr('class', 'oms-graph-glyph').attr('aria-hidden', 'true').text(row => statusMeta(row).glyph);
-  node.append('title').text(row => {
-    const meta = statusMeta(row);
-    return [row.id, row.path, `${kindSymbol(row.kind)} ${row.kind || 'node'}`, `${meta.glyph} ${meta.label}`,
-      row.assurance_reason, row.change ? `change ${row.change}` : '', row.outcome].filter(Boolean).join(' · ');
-  });
-  const nodeLabel = node.append('text').attr('class', row => `oms-graph-label${row.show_label ? '' : ' is-hidden'}`)
-    .attr('x', row => nodeRadius(row) + 6).attr('y', 4)
-    .text(row => row.label.length > 30 ? `${row.label.slice(0, 29)}…` : row.label);
+  node.append('circle').attr('class', 'oms-graph-pin').attr('aria-hidden', 'true').attr('r', 3.2)
+    .attr('cx', row => nodeRadius(row) * .8).attr('cy', row => -nodeRadius(row) * .8);
+  // Changed / impacted is a small corner badge, so it never competes with the selection and focus rings.
+  const changeBadge = node.append('g').attr('class', 'oms-graph-change-badge').attr('aria-hidden', 'true')
+    .attr('transform', row => `translate(${(-nodeRadius(row) * .85).toFixed(1)},${(-nodeRadius(row) * .85).toFixed(1)})`);
+  changeBadge.append('circle').attr('r', 5.5);
+  changeBadge.append('text').text(row => row.change === 'changed' ? 'Δ' : '~');
+  const nodeTitle = node.append('title');
+  const nodeLabel = node.append('text').attr('class', 'oms-graph-label').attr('aria-hidden', 'true')
+    .attr('text-anchor', 'middle').text(row => row.label);
+  const tip = document.createElement('div');
+  tip.setAttribute('class', 'oms-graph-tip');
+  tip.setAttribute('aria-hidden', 'true');
+  tip.hidden = true;
+  stage.append(tip);
 
-  let width = 736;
+  // Read the real stage width synchronously: the ResizeObserver callback may arrive after the first settle.
+  const measuredWidth = (() => {
+    let w = 0;
+    // Apply the layout from the viewport first so the narrow CSS is in effect, then read the content box.
+    try { const vw = Number(window.innerWidth) || 0; if (vw) root.setAttribute('data-layout', layoutMode(vw)); } catch (_e) { /* keep default */ }
+    try { w = Math.floor(stage.clientWidth || (stage.getBoundingClientRect && stage.getBoundingClientRect().width) || 0); } catch (_e) { w = 0; }
+    return w > 0 ? Math.max(280, w) : 0;
+  })();
+  let width = measuredWidth || 736;
   let height = 520;
+  let worldH = 520;
+  let worldW = width;
   let selectedId = (nodes.find(row => row.focus) || nodes[0] || {}).id || '';
   let tabStopId = selectedId;
   let zoomScale = 1;
   let lastFocusBeforeSearch = null;
+  let hoverId = '';
+  let focusHotId = '';
+  let keyboardMode = false;
+  let tipId = '';
   const draftsByNode = new Map();
   const customDraftNodes = new Set();
 
   function layoutMode(w) { return w <= 480 ? 'narrow' : (w <= 768 ? 'medium' : 'wide'); }
   root.setAttribute('data-layout', layoutMode(width));
+  const reducedMotion = () => Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const stamp = ts => typeof ts === 'number' ? ts : Date.now();
+  const round1 = value => Math.round(value * 10) / 10;
+  const round2 = value => Math.round(value * 100) / 100;
+  const round3 = value => Math.round(value * 1000) / 1000;
 
+  // ---- Deterministic force layout (link spring, repulsion, centring, collision, execution targets) ----
+  const isExecution = data.kind === 'execution';
+  const PAD = 20;
+  let gesture = null;
+  const ALPHA_DECAY = 1 - Math.pow(.001, 1 / 300);
+  const MIN_ALPHA = .001;
+  const TICK_CAP = nodes.length > 400 ? 120 : 300;
+  const linkDistance = isExecution ? 130 : (nodes.length > 120 ? 58 : 72);
+  const linkStrength = isExecution ? .18 : .45;
+  // Hubs need room: link length and repulsion grow with endpoint degree, so a hub's leaves spread out.
+  const degreeOf = row => linkCount.get(row.id) || 0;
+  const linkLength = (a, b) => isExecution ? linkDistance
+    : linkDistance * (1 + .12 * Math.sqrt(Math.max(0, Math.max(degreeOf(a), degreeOf(b)) - 1)));
+  const chargeScale = row => isExecution ? 1 : 1 + .25 * Math.sqrt(degreeOf(row));
+  const projectCharge = -Math.max(65, Math.min(150, 1350 / Math.sqrt(Math.max(nodes.length, 1))));
+  const charge = isExecution ? -420 : projectCharge;
+  const collideRadius = row => isExecution ? 36 : nodeRadius(row) + 3;
+  let seed = 0;
+  function rand() {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
   function executionX(row) {
-    if (width <= 480) return width / 2;
-    return width * (row.index % 2 === 0 ? .27 : .68);
+    if (width <= 480) return worldW / 2;
+    return worldW * (row.index % 2 === 0 ? .27 : .68);
   }
   function executionY(row) {
     const columns = width <= 480 ? 1 : 2;
     const rows = Math.ceil(nodes.length / columns);
-    if (rows <= 1) return height / 2;
-    return 70 + Math.floor(row.index / columns) * (height - 140) / (rows - 1);
+    if (rows <= 1) return worldH / 2;
+    return 70 + Math.floor(row.index / columns) * (worldH - 140) / (rows - 1);
   }
-  const gridNodes = nodes.slice().sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  function layoutOffline() {
-    const baseHeight = width <= 480 ? 400 : 520;
-    const pad = 20;
-    const maxR = nodes.reduce((acc, row) => Math.max(acc, nodeRadius(row)), 14);
-    const minCell = Math.ceil(maxR * 2 + 12);
-    const innerW = Math.max(minCell, width - pad * 2);
-    const maxCols = Math.max(1, Math.floor(innerW / minCell));
-    const preferredMaxCols = width <= 480 ? 2 : (width <= 768 ? 4 : 7);
-    const fitRows = Math.max(1, Math.floor((baseHeight - pad * 2) / minCell));
-    const targetCols = Math.ceil(Math.sqrt(Math.max(1, nodes.length) * width / Math.max(1, baseHeight)));
-    const minColsForBaseHeight = Math.ceil(nodes.length / fitRows);
-    const desiredCols = nodes.length <= preferredMaxCols * fitRows
-      ? Math.min(preferredMaxCols, targetCols)
-      : Math.max(targetCols, minColsForBaseHeight);
-    const columns = Math.max(1, Math.min(maxCols, desiredCols));
-    const rows = Math.max(1, Math.ceil(nodes.length / columns));
-    height = Math.max(baseHeight, rows * minCell + pad * 2);
-    svg.attr('viewBox', `0 0 ${width} ${height}`);
-    if (svgElement.style) svgElement.style.height = height > baseHeight ? `${height}px` : '';
-    const innerH = Math.max(1, height - pad * 2);
-    const cellW = innerW / columns;
-    const cellH = innerH / rows;
-    gridNodes.forEach((row, index) => {
-      const col = index % columns;
-      const rowIndex = Math.floor(index / columns);
-      const stagger = columns > 1 && width <= 480 ? (col % 2 === 0 ? .35 : .65) : .5;
-      row.x = pad + (col + .5) * cellW;
-      row.y = pad + (rowIndex + stagger) * cellH;
+  function computeWorld() {
+    const viewportH = Number(window.innerHeight) || 0;
+    const narrowH = viewportH ? Math.max(320, Math.min(400, Math.round(viewportH * .7))) : 400;
+    const baseHeight = width <= 480 ? narrowH : 520;
+    const maxCollide = nodes.reduce((acc, row) => Math.max(acc, collideRadius(row)), 14);
+    const cell = Math.pow(maxCollide * 2 + 6, 2) * 2.4;
+    const narrow = width <= 480;
+    if (narrow) {
+      // Density grows the world by AREA at the stage's aspect ratio, so the camera fit fills the stage instead of a thin column.
+      const area = nodes.length * cell;
+      const wh = width * baseHeight;
+      const sum = width + baseHeight;
+      const grow = (PAD * 2 * sum + Math.sqrt(Math.pow(PAD * 2 * sum, 2) - 4 * wh * (Math.pow(PAD * 2, 2) - area))) / (2 * wh);
+      const scale = Math.max(1, grow);
+      worldW = Math.round(width * scale); worldH = Math.round(baseHeight * scale);
+      height = baseHeight;
+    } else {
+      const needed = Math.ceil(nodes.length * cell / Math.max(1, width - PAD * 2)) + PAD * 2;
+      worldW = width; worldH = Math.max(baseHeight, needed);
+      height = worldH;
+    }
+    const fanSpan = 2 * (PAD + fans.reduce((acc, fan) => Math.max(acc, fan.parent._fan), 0));
+    worldW = Math.max(worldW, Math.ceil(fanSpan)); worldH = Math.max(worldH, Math.ceil(fanSpan));
+    if (!narrow) height = worldH;
+    svg.attr('viewBox', `0 0 ${width} ${height}`).attr('data-world', `${worldW}x${worldH}`);
+    // The svg box equals the viewBox in CSS px, so 1 world unit is 1 px at k=1 and nothing is letterboxed.
+    if (svgElement.style) svgElement.style.height = `${height}px`;
+  }
+  function seedPositions() {
+    seed = 0x2545f491;
+    const spacing = Math.sqrt(worldW * worldH / Math.max(nodes.length, 1)) * .45;
+    nodes.forEach((row, index) => {
+      if (isExecution) {
+        row.x = executionX(row) + (rand() - .5) * 24;
+        row.y = executionY(row) + (rand() - .5) * 24;
+      } else {
+        const angle = index * 2.399963;
+        const radius = spacing * Math.sqrt(index + .5);
+        row.x = worldW / 2 + Math.cos(angle) * radius;
+        row.y = worldH / 2 + Math.sin(angle) * radius;
+      }
+      row.vx = 0; row.vy = 0; row.fx = null; row.fy = null; row._pinned = false;
     });
-    paint();
+    if (!isExecution) { seedHubRings(); applyFans(); }
   }
-  if (!d3) links.forEach(row => { row.source = byId.get(row.source); row.target = byId.get(row.target); });
-  const projectCharge = -Math.max(65, Math.min(150, 1350 / Math.sqrt(Math.max(nodes.length, 1))));
-  const simulation = d3 ? d3.forceSimulation(nodes).randomSource(d3.randomLcg(0.42))
-    .force('link', d3.forceLink(links).id(row => row.id).distance(data.kind === 'execution' ? 130 : nodes.length > 120 ? 58 : 72).strength(data.kind === 'execution' ? .18 : .45))
-    .force('charge', d3.forceManyBody().strength(data.kind === 'execution' ? -420 : projectCharge))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(row => data.kind === 'execution' ? 36 : Math.max(20, Math.min(32, 16 + Math.sqrt(row.degree || 0)))))
-    .force('execution-x', data.kind === 'execution' ? d3.forceX(executionX).strength(.85) : null)
-    .force('execution-y', data.kind === 'execution' ? d3.forceY(executionY).strength(.85) : null)
-    .force('project-x', data.kind === 'project' ? d3.forceX(width / 2).strength(.055) : null)
-    .force('project-y', data.kind === 'project' ? d3.forceY(height / 2).strength(.055) : null) : null;
-  function paint() {
-    const pad = 20;
+  // A parent with more than FAN_MIN ownership children keeps them on concentric rings (angle order by id).
+  const FAN_MIN = 24;
+  const fans = [];
+  (function buildFans() {
+    const claimed = new Set();
+    const kids = new Map();
+    links.filter(row => row._group === 'ownership' && row.source !== row.target).forEach(row => {
+      if (!kids.has(row.source.id)) kids.set(row.source.id, []);
+      kids.get(row.source.id).push(row.target);
+    });
+    // Bottom-up: a child that fans itself stays a free force node carrying its own ring, not a parent slot.
+    const heights = new Map();
+    const heightOf = (id, seen = new Set()) => {
+      if (heights.has(id)) return heights.get(id);
+      if (seen.has(id)) return 0;
+      seen.add(id);
+      let h = 0;
+      (kids.get(id) || []).forEach(c => { if ((kids.get(c.id) || []).length > FAN_MIN) h = Math.max(h, heightOf(c.id, seen) + 1); });
+      heights.set(id, h);
+      return h;
+    };
+    [...kids.entries()].sort((a, b) => heightOf(a[0]) - heightOf(b[0]) || b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1)).forEach(([id, list]) => {
+      const children = [...new Map(list.filter(c => !claimed.has(c.id) && c.id !== id && !c._fan).map(c => [c.id, c])).values()]
+        .sort((a, b) => (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
+      if (children.length <= FAN_MIN) return;
+      const parent = byId.get(id);
+      const slots = [];
+      const cr = children.reduce((acc, c) => Math.max(acc, collideRadius(c)), 0);
+      const step = 2 * cr + 2;
+      let placed = 0;
+      for (let ring = 0; placed < children.length; ring += 1) {
+        const radius = collideRadius(parent) + cr + 4 + ring * step;
+        const count = Math.min(children.length - placed, Math.max(1, Math.floor(Math.PI / Math.asin(Math.min(1, step / (2 * radius))))));
+        for (let i = 0; i < count; i += 1) {
+          const angle = 2 * Math.PI * i / count + ring * .6;
+          slots.push({child: children[placed + i], dx: Math.cos(angle) * radius, dy: Math.sin(angle) * radius});
+        }
+        placed += count;
+      }
+      slots.forEach(slot => { claimed.add(slot.child.id); slot.child._hub = parent; });
+      parent._fan = Math.max(parent._fan || 0, ...slots.map(slot => Math.hypot(slot.dx, slot.dy) + cr));
+      fans.push({parent, slots});
+    });
+  })();
+  function applyFans() {
+    fans.forEach(({parent, slots}) => slots.forEach(({child, dx, dy}) => {
+      if (child.fx !== null && child.fx !== undefined) return;
+      child.x = parent.x + dx; child.y = parent.y + dy; child.vx = 0; child.vy = 0;
+    }));
+  }
+  // Leaves of a large hub start on concentric rings by angle, so they never begin as one overlapping knot.
+  function seedHubRings() {
+    const placedLeaf = new Set();
+    nodes.filter(row => degreeOf(row) >= 8).sort((a, b) => degreeOf(b) - degreeOf(a) || a.index - b.index).forEach(hub => {
+      const leaves = [...adjacency.get(hub.id)].map(id => byId.get(id))
+        .filter(leaf => degreeOf(leaf) === 1 && !placedLeaf.has(leaf.id)).sort((a, b) => a.index - b.index);
+      let placed = 0;
+      for (let ring = 0; placed < leaves.length; ring += 1) {
+        const radius = nodeRadius(hub) + 46 + ring * 30;
+        const count = Math.min(leaves.length - placed, Math.max(1, Math.floor(2 * Math.PI * radius / 30)));
+        for (let i = 0; i < count; i += 1) {
+          const leaf = leaves[placed + i];
+          const angle = 2 * Math.PI * i / count + ring * .6;
+          leaf.x = hub.x + Math.cos(angle) * radius;
+          leaf.y = hub.y + Math.sin(angle) * radius;
+          placedLeaf.add(leaf.id);
+        }
+        placed += count;
+      }
+    });
+  }
+  // A collision on a fan child moves its hub, so the ring stays rigid; a pinned child moves itself.
+  function mover(row) {
+    while (row._hub && (row.fx === null || row.fx === undefined)) row = row._hub;
+    return row;
+  }
+  function collide(strength) {
+    let moved = false;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist = Math.hypot(dx, dy);
+        const min = collideRadius(a) + collideRadius(b);
+        if (dist >= min) continue;
+        if (dist < 1e-6) { dx = rand() - .5; dy = rand() - .5; dist = Math.hypot(dx, dy) || 1; }
+        const push = (min - dist) / dist * strength;
+        const ma = mover(a);
+        const mb = mover(b);
+        if (ma === mb) continue;
+        const aFixed = ma.fx !== null && ma.fx !== undefined;
+        const bFixed = mb.fx !== null && mb.fx !== undefined;
+        if (aFixed && bFixed) continue;
+        const share = aFixed || bFixed ? 1 : .5;
+        if (!aFixed) { ma.x -= dx * push * share; ma.y -= dy * push * share; }
+        if (!bFixed) { mb.x += dx * push * share; mb.y += dy * push * share; }
+        moved = true;
+      }
+    }
+    return moved;
+  }
+  // A fan hub keeps its whole ring inside the world: the hub's margin includes the fan radius.
+  const fanPad = row => PAD + (row._fan || 0);
+  function clampToWorld() {
     nodes.forEach(row => {
-      row.x = Math.max(pad, Math.min(width - pad, row.x || width / 2));
-      row.y = Math.max(pad, Math.min(height - pad, row.y || height / 2));
+      const m = fanPad(row);
+      row.x = Math.max(m, Math.min(worldW - m, Number.isFinite(row.x) ? row.x : worldW / 2));
+      row.y = Math.max(m, Math.min(worldH - m, Number.isFinite(row.y) ? row.y : worldH / 2));
     });
-    link.attr('x1', row => row.source.x).attr('y1', row => row.source.y)
-      .attr('x2', row => row.target.x).attr('y2', row => row.target.y);
-    node.attr('transform', row => `translate(${row.x},${row.y})`);
-    const flipThreshold = width <= 480 ? width * 0.55 : width - 150;
-    const cap = width <= 480 ? 18 : (width <= 768 ? 24 : 30);
-    nodeLabel
-      .attr('x', row => row.x > flipThreshold ? -(nodeRadius(row) + 6) : (nodeRadius(row) + 6))
-      .attr('text-anchor', row => row.x > flipThreshold ? 'end' : 'start')
-      .text(row => row.label.length > cap ? `${row.label.slice(0, cap - 1)}…` : row.label);
   }
-  if (simulation) {
-    simulation.stop();
-    for (let index = 0; index < 180; index += 1) simulation.tick();
+  let alpha = 0;
+  let remaining = 0;
+  let simRaf = 0;
+  function tick() {
+    alpha -= alpha * ALPHA_DECAY;
+    remaining -= 1;
+    links.forEach(row => {
+      const a = row.source;
+      const b = row.target;
+      if (a === b) return;
+      let dx = b.x + b.vx - a.x - a.vx;
+      let dy = b.y + b.vy - a.y - a.vy;
+      if (!dx && !dy) { dx = rand() - .5; dy = rand() - .5; }
+      const len = Math.hypot(dx, dy) || 1;
+      const force = (len - linkLength(a, b)) / len * alpha * linkStrength;
+      dx *= force; dy *= force;
+      const bias = linkCount.get(a.id) / (linkCount.get(a.id) + linkCount.get(b.id));
+      b.vx -= dx * bias; b.vy -= dy * bias;
+      a.vx += dx * (1 - bias); a.vy += dy * (1 - bias);
+    });
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1e-6) { dx = rand() - .5; dy = rand() - .5; d2 = dx * dx + dy * dy; }
+        if (d2 < 1) d2 = 1;
+        const w = charge * alpha * Math.sqrt(chargeScale(a) * chargeScale(b)) / d2;
+        a.vx += dx * w; a.vy += dy * w;
+        b.vx -= dx * w; b.vy -= dy * w;
+      }
+    }
+    nodes.forEach(row => {
+      if (isExecution) {
+        row.vx += (executionX(row) - row.x) * .3 * alpha;
+        row.vy += (executionY(row) - row.y) * .3 * alpha;
+      } else {
+        row.vx += (worldW / 2 - row.x) * .055 * alpha * Math.max(1, Math.min(4, worldH / worldW));
+        row.vy += (worldH / 2 - row.y) * .055 * alpha;
+      }
+      if (row.fx !== null && row.fx !== undefined) { row.x = row.fx; row.y = row.fy; row.vx = 0; row.vy = 0; return; }
+      row.vx *= .6; row.vy *= .6;
+      row.x += row.vx; row.y += row.vy;
+    });
+    applyFans();
+    collide(.7);
+    applyFans();
+    // Recentre only free nodes by their own centroid; pins and an active drag define their own anchors.
+    const free = nodes.filter(row => row.fx === null || row.fx === undefined);
+    if (free.length && !(gesture && gesture.type === 'node' && gesture.moved)) {
+      let mx = 0; let my = 0;
+      free.forEach(row => { mx += row.x; my += row.y; });
+      mx = mx / free.length - worldW / 2; my = my / free.length - worldH / 2;
+      free.forEach(row => { row.x -= mx; row.y -= my; });
+    }
+    clampToWorld();
+  }
+  function relax() {
+    for (let pass = 0; pass < 200; pass += 1) {
+      applyFans();
+      const moved = collide(1);
+      clampToWorld();
+      if (!moved) break;
+    }
+    applyFans();
+  }
+  function edgePath(row) {
+    const a = row.source;
+    const b = row.target;
+    if (a === b) {
+      const r = nodeRadius(a);
+      return `M${round1(a.x)},${round1(a.y - r)}C${round1(a.x + 34)},${round1(a.y - r - 44)} ${round1(a.x - 34)},${round1(a.y - r - 44)} ${round1(a.x)},${round1(a.y - r - 3)}`;
+    }
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return `M${round1(a.x)},${round1(a.y)}L${round1(b.x)},${round1(b.y)}`;
+    if (row._group === 'ownership') {
+      const ux = dx / len; const uy = dy / len;
+      const sr0 = nodeRadius(a) + 1; const tr0 = nodeRadius(b) + 1;
+      return `M${round1(a.x + ux * sr0)},${round1(a.y + uy * sr0)}L${round1(b.x - ux * tr0)},${round1(b.y - uy * tr0)}`;
+    }
+    const bend = Math.min(40, len * .14);
+    const cx = (a.x + b.x) / 2 - dy / len * bend;
+    const cy = (a.y + b.y) / 2 + dx / len * bend;
+    const sd = Math.hypot(cx - a.x, cy - a.y) || 1;
+    const td = Math.hypot(b.x - cx, b.y - cy) || 1;
+    const sr = nodeRadius(a) + 2;
+    const tr = nodeRadius(b) + 3;
+    return `M${round1(a.x + (cx - a.x) / sd * sr)},${round1(a.y + (cy - a.y) / sd * sr)}Q${round1(cx)},${round1(cy)} ${round1(b.x - (b.x - cx) / td * tr)},${round1(b.y - (b.y - cy) / td * tr)}`;
+  }
+  // Labels sit centred below their node. A greedy bounding-box pass in screen space hides colliding labels
+  // (selected, hovered and keyboard-focused ones always win) until the view is zoomed or the node is inspected.
+  const LABEL_H = 14;
+  const LABEL_GAP = 4;
+  const CHAR_W = 6.4;
+  let labelK = 1;
+  const labelCap = () => width <= 480 ? 18 : (width <= 768 ? 24 : 30);
+  const shortLabel = row => row.label.length > labelCap() ? `${row.label.slice(0, labelCap() - 1)}…` : row.label;
+  function relabel() {
+    nodeLabel.text(shortLabel);
+    nodeTitle.text(row => row.label.length > labelCap() ? row.label : '');
+  }
+  function labelTransform(row) {
+    const inverse = 1 / Math.max(cam.k, .05);
+    return `translate(0,${(nodeRadius(row) + (LABEL_GAP + 11) * inverse).toFixed(2)}) scale(${inverse.toFixed(4)})`;
+  }
+  function placeLabels() {
+    labelK = cam.k;
+    nodeLabel.attr('transform', labelTransform);
+    const forced = row => row.id === selectedId || row.id === hoverId || row.id === focusHotId;
+    const candidates = nodes.filter(row => !row._outOfScope && (row._labelWanted || forced(row)))
+      .sort((a, b) => Number(forced(b)) - Number(forced(a)) || Number(Boolean(a._muted)) - Number(Boolean(b._muted)) || Number(Boolean(b.show_label)) - Number(Boolean(a.show_label)) ||
+        (b.degree || 0) - (a.degree || 0) || a.index - b.index);
+    const placed = [];
+    nodes.forEach(row => { row._labelShown = false; });
+    candidates.forEach(row => {
+      const half = (shortLabel(row).length * CHAR_W + 6) / 2;
+      const cx = cam.x + row.x * cam.k;
+      const top = cam.y + (row.y + nodeRadius(row)) * cam.k + LABEL_GAP;
+      const box = [cx - half, top, cx + half, top + LABEL_H];
+      if (!forced(row) && placed.some(other => box[0] < other[2] && box[2] > other[0] && box[1] < other[3] && box[3] > other[1])) return;
+      placed.push(box);
+      row._labelShown = true;
+    });
+    nodeLabel.classed('is-hidden', row => !row._labelShown);
+  }
+  function paint() {
+    clampToWorld();
+    link.attr('d', edgePath);
+    node.attr('transform', row => `translate(${round2(row.x)},${round2(row.y)})`);
+    if (remaining <= 0) placeLabels();
+    positionTip();
+  }
+  function runSync(startAlpha, budget) {
+    alpha = Math.max(alpha, startAlpha);
+    remaining = Math.max(remaining, budget);
+    while (remaining > 0 && alpha > MIN_ALPHA) tick();
+    relax();
+    alpha = 0; remaining = 0;
     paint();
-    simulation.on('tick', paint);
-  } else {
-    requestAnimationFrame(layoutOffline);
+  }
+  function frame() {
+    simRaf = 0;
+    const perFrame = nodes.length > 150 ? 1 : 2;
+    for (let index = 0; index < perFrame && remaining > 0 && alpha > MIN_ALPHA; index += 1) tick();
+    paint();
+    clearTimeout(simTimer); simTimer = 0;
+    if (remaining > 0 && alpha > MIN_ALPHA) { scheduleSim(); return; }
+    relax(); alpha = 0; remaining = 0; paint();
+    if (!userMoved) fitAll();
+  }
+  // Animation frames may never arrive (hidden or throttled pages): a stalled simulation finishes synchronously.
+  let simTimer = 0;
+  function cancelFrame(id) { if (id && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id); }
+  function scheduleSim() {
+    if (!simRaf) simRaf = requestAnimationFrame(frame);
+    clearTimeout(simTimer);
+    simTimer = setTimeout(() => {
+      simTimer = 0; cancelFrame(simRaf); simRaf = 0;
+      runSync(alpha, remaining);
+      if (!userMoved) fitAll();
+    }, FRAME_FALLBACK_MS);
+  }
+  // Settle after a (re)layout or a drag: animated by frames, or fully computed up front under reduced motion.
+  function settle(startAlpha, budget) {
+    if (reducedMotion()) {
+      runSync(startAlpha, budget);
+      if (!userMoved) fitAll();
+      return;
+    }
+    alpha = Math.max(alpha, startAlpha);
+    remaining = Math.max(remaining, budget);
+    scheduleSim();
   }
 
-  const zoom = d3 ? d3.zoom().scaleExtent([.3, 5]).on('zoom', event => {
-    const tier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
-    const changed = tier(zoomScale) !== tier(event.transform.k);
-    zoomScale = event.transform.k;
-    viewport.attr('transform', event.transform);
-    if (changed) applyFilters();
-  }) : null;
-  if (d3) {
-    svg.call(zoom);
-    node.call(d3.drag()
-    .on('start', (event, row) => { if (!event.active) simulation.alphaTarget(.18).restart(); row.fx = row.x; row.fy = row.y; })
-    .on('drag', (event, row) => { row.fx = event.x; row.fy = event.y; })
-    .on('end', (event, row) => { if (!event.active) simulation.alphaTarget(0); row.fx = null; row.fy = null; }));
+  // ---- Camera: eased fit / focus / zoom, pan and wheel zoom ----
+  const MIN_K = .1;
+  const MAX_K = 5;
+  const cam = {x: 0, y: 0, k: 1};
+  let camAnim = null;
+  let camRaf = 0;
+  let camTimer = 0;
+  let camPlaced = false;
+  const FRAME_FALLBACK_MS = 100;
+  let userMoved = false;
+  const markMoved = () => { userMoved = true; };
+  const clampK = k => Math.max(MIN_K, Math.min(MAX_K, k));
+  const labelTier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
+  function setCam(x, y, k) {
+    const tierChanged = labelTier(zoomScale) !== labelTier(k);
+    cam.x = x; cam.y = y; cam.k = k; zoomScale = k; camPlaced = true;
+    viewport.attr('transform', `translate(${round3(x)},${round3(y)}) scale(${round3(k)})`);
+    if (tierChanged) applyFilters();
+    else if (Math.abs(Math.log(k / labelK)) > .04) placeLabels();
+    positionTip();
+  }
+  function stepCam(ts) {
+    camRaf = 0;
+    if (!camAnim) return;
+    clearTimeout(camTimer); camTimer = 0;
+    const now = stamp(ts);
+    if (camAnim.start === null) camAnim.start = now;
+    const t = Math.min(1, (now - camAnim.start) / camAnim.ms);
+    const e = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const from = camAnim.from;
+    const to = camAnim.to;
+    setCam(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e, from.k + (to.k - from.k) * e);
+    if (t >= 1) camAnim = null;
+    else { camRaf = requestAnimationFrame(stepCam); armCamFallback(); }
+  }
+  function animateCam(to, ms) {
+    const target = {x: to.x, y: to.y, k: clampK(to.k)};
+    if (reducedMotion() || !(ms > 0) || !camPlaced) {
+      camAnim = null; clearTimeout(camTimer); camTimer = 0;
+      setCam(target.x, target.y, target.k);
+      return;
+    }
+    camAnim = {from: {x: cam.x, y: cam.y, k: cam.k}, to: target, ms, start: null};
+    if (!camRaf) camRaf = requestAnimationFrame(stepCam);
+    armCamFallback();
+  }
+  // If no frame arrives within the fallback, commit the end transform instead of waiting.
+  function armCamFallback() {
+    clearTimeout(camTimer);
+    camTimer = setTimeout(() => {
+      camTimer = 0; cancelFrame(camRaf); camRaf = 0;
+      if (camAnim) { const to = camAnim.to; camAnim = null; setCam(to.x, to.y, to.k); }
+    }, FRAME_FALLBACK_MS);
+  }
+  const camGoal = () => camAnim ? camAnim.to : cam;
+  function zoomAt(px, py, factor, ms) {
+    const base = camGoal();
+    const k = clampK(base.k * factor);
+    const ratio = k / base.k;
+    animateCam({x: px - (px - base.x) * ratio, y: py - (py - base.y) * ratio, k}, ms);
+  }
+  // One screen padding per layout: fit bounds, ensureVisible and the drag clamp all read it.
+  function fitPad() { return width <= 480 ? 24 : 44; }
+  function fitTarget(rows) {
+    if (!rows.length) return {x: 0, y: 0, k: 1};
+    let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+    rows.forEach(row => {
+      const r = nodeRadius(row);
+      minX = Math.min(minX, row.x - r); maxX = Math.max(maxX, row.x + r);
+      minY = Math.min(minY, row.y - r); maxY = Math.max(maxY, row.y + r);
+    });
+    const pad = fitPad();
+    const fitK = (x0, x1, y0, y1) => clampK(Math.min(1.25, (width - pad * 2) / Math.max(1, x1 - x0), (height - pad * 2) / Math.max(1, y1 - y0)));
+    let k = fitK(minX, maxX, minY, maxY);
+    // Visible labels are screen-sized, so widen the bounds by their extent at the first-pass scale and refit.
+    const shown = rows.filter(row => row.show_label);
+    if (shown.length) {
+      shown.forEach(row => {
+        const half = (shortLabel(row).length * CHAR_W + 6) / 2 / k;
+        minX = Math.min(minX, row.x - half); maxX = Math.max(maxX, row.x + half);
+        maxY = Math.max(maxY, row.y + nodeRadius(row) + (LABEL_GAP + LABEL_H) / k);
+      });
+      k = fitK(minX, maxX, minY, maxY);
+    }
+    return {x: width / 2 - (minX + maxX) / 2 * k, y: height / 2 - (minY + maxY) / 2 * k, k};
+  }
+  function fitAll(ms = 380) {
+    userMoved = false;
+    animateCam(fitTarget(nodes.filter(row => !row._outOfScope)), ms);
+  }
+  function focusOn(id, ms = 380) {
+    const row = byId.get(id);
+    if (!row) return;
+    markMoved();
+    let hx = nodeRadius(row) + 8;
+    let hy = hx;
+    adjacency.get(id).forEach(otherId => {
+      const other = byId.get(otherId);
+      if (!other || other._outOfScope) return;
+      hx = Math.max(hx, Math.abs(other.x - row.x) + nodeRadius(other));
+      hy = Math.max(hy, Math.abs(other.y - row.y) + nodeRadius(other));
+    });
+    const pad = width <= 480 ? 36 : 60;
+    const k = clampK(Math.min(2.2, (width / 2 - pad) / hx, (height / 2 - pad) / hy));
+    animateCam({x: width / 2 - row.x * k, y: height / 2 - row.y * k, k}, ms);
+  }
+  function ensureVisible(row) {
+    const goal = camGoal();
+    const margin = fitPad();
+    const r = nodeRadius(row) * goal.k;
+    const sx = goal.x + row.x * goal.k;
+    const sy = goal.y + row.y * goal.k;
+    const slack = .5;
+    const dx = sx - r < margin - slack ? margin - (sx - r) : (sx + r > width - margin + slack ? width - margin - (sx + r) : 0);
+    const dy = sy - r < margin - slack ? margin - (sy - r) : (sy + r > height - margin + slack ? height - margin - (sy + r) : 0);
+    if (dx || dy) { markMoved(); animateCam({x: goal.x + dx, y: goal.y + dy, k: goal.k}, 260); }
+  }
+  function zoomBy(factor) {
+    markMoved();
+    zoomAt(width / 2, height / 2, factor, 260);
+  }
+
+  // ---- Hover / focus highlight and tooltip ----
+  function tipText(row) {
+    const meta = statusMeta(row);
+    const connections = Number.isInteger(row.degree) ? row.degree : adjacency.get(row.id).size;
+    return [row.label, `${row.kind || 'node'} · ${meta.glyph} ${meta.label} · ${t('connections', {n: connections})}`, row.path || ''].filter(Boolean).join('\n');
+  }
+  function showTip(row) {
+    tipId = row.id;
+    tip.textContent = tipText(row);
+    tip.hidden = false;
+    positionTip();
+  }
+  function hideTip() { tipId = ''; tip.hidden = true; }
+  function positionTip() {
+    const row = tipId ? byId.get(tipId) : null;
+    if (!row || tip.hidden || !tip.style) return;
+    const bounds = svgElement.getBoundingClientRect();
+    const sx = (cam.x + row.x * cam.k) * bounds.width / Math.max(1, width);
+    const sy = (cam.y + row.y * cam.k) * bounds.height / Math.max(1, height);
+    const tw = tip.offsetWidth || 260;
+    const th = tip.offsetHeight || 60;
+    const right = sx + 16 + tw > bounds.width - 4;
+    const left = Math.max(4, Math.min(bounds.width - tw - 4, right ? sx - 16 - tw : sx + 16));
+    const top = Math.max(4, Math.min(bounds.height - th - 4, sy - 10));
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+    tip.style.transform = '';
+  }
+  function updateHighlight() {
+    placeLabels();
+    const hot = hoverId || focusHotId;
+    const near = hot ? adjacency.get(hot) : null;
+    node.classed('is-dim', row => Boolean(hot) && row.id !== hot && !near.has(row.id));
+    const flows = row => Boolean(selectedId) && (row.source.id === selectedId || row.target.id === selectedId);
+    link.classed('is-dim', row => Boolean(hot) && row.source.id !== hot && row.target.id !== hot)
+      .classed('is-hot', row => Boolean(hot) && (row.source.id === hot || row.target.id === hot))
+      .classed('is-flow', flows)
+      .attr('marker-end', row => row._group === 'ownership' ? null : `url(#${markerId}-${flows(row) ? 5 : relationIndex.get(row.relation)})`);
+  }
+  function togglePin(row) {
+    if (row._pinned) { setPinned(row, false); settle(.3, 90); return; }
+    row.fx = row.x; row.fy = row.y;
+    setPinned(row, true);
+  }
+  function setPinned(row, pinned) {
+    row._pinned = pinned;
+    if (!pinned) { row.fx = null; row.fy = null; }
+    const element = nodeElementById.get(row.id);
+    if (element) {
+      element.setAttribute('data-pinned', String(pinned));
+      element.setAttribute('aria-label', nodeAria(row));
+    }
   }
 
   function isFocusableInRoot(element) {
@@ -647,6 +1405,10 @@
     if (element.hidden || element.disabled) return false;
     if (element.classList && element.classList.contains('is-out-of-scope')) return false;
     if (typeof root.contains === 'function' && !root.contains(element)) return false;
+    for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) {
+      if (parent.hidden) return false;
+      if (parent.tagName === 'DETAILS' && parent.open === false && !(element.tagName === 'SUMMARY' && element.parentElement === parent)) return false;
+    }
     return true;
   }
   function focusSelectedOrControl() {
@@ -678,23 +1440,23 @@
     const meta = statusMeta(row);
     const items = [
       makeBadge(`${kindSymbol(row.kind)} ${row.kind || 'node'}`, {'data-kind': row.kind || 'node'}),
-      makeBadge(`${meta.glyph} ${meta.label}`, {'data-pattern': meta.pattern})
+      makeBadge(`${meta.glyph} ${meta.label}`, {'data-pattern': meta.pattern, [data.kind === 'project' ? 'data-assurance' : 'data-state']: meta.key})
     ];
     if (row.change) items.push(makeBadge(`${row.change === 'changed' ? 'Δ' : '~'} ${row.change}`, {'data-change': row.change}));
-    if (Number.isInteger(row.distance)) items.push(makeBadge(`task distance ${row.distance}`));
+    if (Number.isInteger(row.distance)) items.push(makeBadge(t('distance', {n: row.distance})));
     badges.replaceChildren(...items);
     badges.hidden = false;
   }
   function describe(row) {
-    if (!nodes.length) return 'No nodes available to inspect.';
-    if (!row) return 'Select a node to inspect it.';
+    if (!nodes.length) return t('noNodesDetail');
+    if (!row) return t('selectHint');
     const meta = statusMeta(row);
     const location = row.line ? `${row.path}:${row.line}` : row.path;
-    const distance = Number.isInteger(row.distance) ? `task distance ${row.distance}` : '';
-    const changed = row.change ? `change ${row.change}` : '';
-    return [row.id, `${kindSymbol(row.kind)} ${row.kind || 'node'}`, location, row.language, changed, distance,
+    const distance = Number.isInteger(row.distance) ? t('distance', {n: row.distance}) : '';
+    const changed = row.change ? t('changeWord', {c: row.change}) : '';
+    return [row.label, row.id !== row.label ? row.id : '', `${kindSymbol(row.kind)} ${row.kind || 'node'}`, location, row.language, changed, distance,
       `${meta.glyph} ${meta.label}`, row.assurance_reason, row.outcome, row.binding,
-      `${row.degree || 0} connections`].filter(Boolean).join(' · ');
+      t('connections', {n: row.degree || 0})].filter(Boolean).join(' · ');
   }
   function promptFor(row) {
     if (!row) return '';
@@ -729,6 +1491,7 @@
     if (selectedId) nodeSelect.value = selectedId;
     const row = byId.get(selectedId);
     renderBadges(row);
+    updateHighlight();
     detail.textContent = describe(row);
     if (!row) {
       draft.value = '';
@@ -746,23 +1509,24 @@
   function updateNotice(visibleCount, matchedCount, hasFilters) {
     const parts = [];
     if (nodes.length === 0) {
-      parts.push('No nodes in this graph (no data to plot).');
-      if (totalNodes > 0) parts.push(`${totalNodes} nodes hidden (truncated)`);
-      if (hiddenTestNodes > 0) parts.push(`${hiddenTestNodes} test nodes hidden as evidence`);
+      parts.push(t('noNodes'));
+      if (totalNodes > 0) parts.push(t('truncSum', {n: totalNodes}));
+      if (hiddenTestNodes > 0) parts.push(t('testsHidden', {n: hiddenTestNodes}));
     } else {
-      if (truncatedNodes > 0) parts.push(`Truncated graph: ${truncatedNodes} nodes hidden (showing ${shownNodes} of ${totalNodes})`);
-      if (truncatedEdges > 0) parts.push(`${truncatedEdges} edges hidden (showing ${shownEdges} of ${totalEdges})`);
+      if (truncatedNodes > 0) parts.push(t('truncated', {h: truncatedNodes, s: shownNodes, t: totalNodes}));
+      if (truncatedEdges > 0) parts.push(t('edgesHidden', {n: truncatedEdges, s: shownEdges, t: totalEdges}));
       if ((data.truncated || data.completeness === 'partial') && truncatedNodes === 0 && truncatedEdges === 0) {
-        parts.push('Partial graph: some nodes or edges may be omitted');
+        parts.push(t('partialGraph'));
       }
-      if (unparsedFiles > 0) parts.push(`Partial parse coverage: ${unparsedFiles} unparsed`);
-      if (hiddenTestNodes > 0) parts.push(`${hiddenTestNodes} test nodes hidden as evidence`);
+      if (unparsedFiles > 0) parts.push(t('unparsed', {n: unparsedFiles}));
+      if (hiddenTestNodes > 0) parts.push(t('testsHidden', {n: hiddenTestNodes}));
       if (hasFilters && matchedCount === 0) {
         parts.push(selectedId
-          ? `No nodes match the current filters (${Math.max(0, nodes.length - visibleCount)} hidden; selected node kept visible).`
-          : `No nodes match the current filters (${nodes.length} hidden).`);
+          ? t('noMatchKept', {n: Math.max(0, nodes.length - visibleCount)})
+          : t('noMatch', {n: nodes.length}));
       }
     }
+    notice.classList.toggle('is-empty', nodes.length === 0);
     notice.hidden = parts.length === 0;
     notice.textContent = parts.join(' · ');
   }
@@ -786,8 +1550,7 @@
     nodes.forEach(row => {
       row._matchesSearch = !query || row._search.includes(query);
       row._outOfScope = row.id !== selectedId && !inScope(row) && !(query && row._matchesSearch);
-      const rowState = data.kind === 'project' ? row.assurance : row.status;
-      row._missesState = Boolean(stateName && rowState !== stateName);
+      row._missesState = Boolean(stateName && statusMeta(row).key !== stateName);
       row._missesChange = Boolean(changeName && row.change !== changeName);
       row._eligible = !row._outOfScope && row._matchesSearch && !row._missesState && !row._missesChange;
     });
@@ -808,11 +1571,12 @@
       return row._muted;
     });
     syncTabindex();
-    nodeLabel.classed('is-hidden', row => {
+    nodes.forEach(row => {
       const semanticLabel = row.show_label || row.id === selectedId || zoomScale >= 1.7;
       const presentationHidden = !semanticLabel || (width <= 480 && !narrowLabelIds.has(row.id) && row.id !== selectedId && zoomScale < 2.4);
-      return presentationHidden && !(query && !row._muted);
+      row._labelWanted = !presentationHidden || Boolean(query && !row._muted);
     });
+    placeLabels();
     [...nodeSelect.options].forEach(option => {
       const row = byId.get(option.value);
       if (!row) return;
@@ -822,14 +1586,13 @@
     const visibleCount = nodes.filter(row => !row._outOfScope && !row._muted).length;
     const hiddenCount = Math.max(0, nodes.length - visibleCount);
     if (nodes.length === 0) {
-      visible.textContent = hiddenTestNodes > 0
-        ? `0/0 nodes visible (no data · ${hiddenTestNodes} test nodes hidden)`
-        : '0/0 nodes visible (no data)';
+      visible.textContent = hiddenTestNodes > 0 ? t('visEmptyTests', {n: hiddenTestNodes}) : t('visEmpty');
     } else if (hiddenCount > 0) {
-      visible.textContent = `${visibleCount}/${nodes.length} nodes visible · ${hiddenCount} hidden`;
+      visible.textContent = t('visHidden', {v: visibleCount, n: nodes.length, h: hiddenCount});
     } else {
-      visible.textContent = `${visibleCount}/${nodes.length} nodes visible`;
+      visible.textContent = t('vis', {v: visibleCount, n: nodes.length});
     }
+    filtersSummary.textContent = t('filters', {n: [relationName, stateName, changeName].filter(Boolean).length + (confidenceName !== defaultConfidence ? 1 : 0)});
     updateNotice(visibleCount, matchedCount, hasFilters);
   }
 
@@ -842,18 +1605,33 @@
     change.value = '';
   }
 
-  node.on('click', (_event, row) => { selectNode(row.id); applyFilters(); });
+  let suppressClick = false;
+  node.on('click', (_event, row) => {
+    if (suppressClick) { suppressClick = false; return; }
+    selectNode(row.id); applyFilters(); ensureVisible(row);
+  });
+  node.on('pointerenter', (_event, row) => { hoverId = row.id; updateHighlight(); showTip(row); });
+  node.on('pointerleave', () => {
+    hoverId = ''; updateHighlight();
+    if (focusHotId) showTip(byId.get(focusHotId)); else hideTip();
+  });
   node.on('focus', (_event, row) => {
     if (!row._outOfScope && !row._muted) {
       tabStopId = row.id;
       syncTabindex();
     }
+    if (keyboardMode) { focusHotId = row.id; updateHighlight(); showTip(row); ensureVisible(row); }
+  });
+  node.on('blur', () => {
+    focusHotId = ''; updateHighlight();
+    if (!hoverId) hideTip();
   });
   node.on('keydown', (event, row) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       selectNode(row.id);
       applyFilters();
+      focusOn(row.id);
     } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
       const visibleNavigable = nodes.filter(item => !item._outOfScope && !item._muted);
       const navigable = visibleNavigable.length ? visibleNavigable : nodes.filter(item => !item._outOfScope);
@@ -872,11 +1650,18 @@
       }
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      if (search.value && isFocusableInRoot(search)) search.focus();
-      else if (isFocusableInRoot(nodeSelect)) nodeSelect.focus();
+      fitAll();
+      if (isFocusableInRoot(search)) search.focus();
+    } else if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomBy(1.35); }
+      else if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomBy(1 / 1.35); }
+      else if (event.key === '0') { event.preventDefault(); fitAll(); }
+      else if (event.key === 'p' || event.key === 'P') { event.preventDefault(); togglePin(row); }
     }
   });
-  nodeSelect.addEventListener('change', () => { selectNode(nodeSelect.value); applyFilters(); });
+  root.addEventListener('keydown', () => { keyboardMode = true; }, true);
+  root.addEventListener('pointerdown', () => { keyboardMode = false; }, true);
+  nodeSelect.addEventListener('change', () => { selectNode(nodeSelect.value); applyFilters(); focusOn(nodeSelect.value); });
   search.addEventListener('input', applyFilters);
   search.addEventListener('focus', event => {
     const prev = event.relatedTarget;
@@ -891,6 +1676,7 @@
       if (document.activeElement && document.activeElement !== search && isFocusableInRoot(document.activeElement)) {
         lastFocusBeforeSearch = document.activeElement;
       }
+      if (search.disabled) return;
       event.preventDefault();
       search.focus();
     } else if (event.key === 'Escape') {
@@ -916,59 +1702,147 @@
   relation.addEventListener('change', applyFilters);
   confidence.addEventListener('change', applyFilters);
   state.addEventListener('change', applyFilters);
-  scope.addEventListener('change', applyFilters);
+  scope.addEventListener('change', () => {
+    applyFilters();
+    fitAll();
+  });
   change.addEventListener('change', applyFilters);
   clear.addEventListener('click', () => {
+    const scopeBefore = scope.value;
     resetFilterValues();
     applyFilters();
-    actionStatus.textContent = 'Filters cleared.';
+    if (scope.value !== scopeBefore) fitAll();
+    actionStatus.textContent = t('cleared');
     if (isFocusableInRoot(search)) search.focus();
   });
   reset.addEventListener('click', () => {
+    const keepScope = scope.value;
     resetFilterValues();
+    scope.value = keepScope;
     if (!selectedId || !byId.has(selectedId)) {
       selectNode((nodes.find(row => row.focus) || nodes[0] || {}).id || '');
     }
+    const pinned = nodes.filter(row => row._pinned);
+    pinned.forEach(row => setPinned(row, false));
     applyFilters();
-    const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 180;
-    if (d3) svg.transition().duration(duration).call(zoom.transform, d3.zoomIdentity);
-    else { zoomScale = 1; panX = 0; panY = 0; offlineTransform(); }
+    fitAll();
+    if (pinned.length) settle(.3, 90);
   });
-  let panX = 0;
-  let panY = 0;
-  function offlineTransform() {
-    viewport.attr('transform', `translate(${panX},${panY}) translate(${width / 2},${height / 2}) scale(${zoomScale}) translate(${-width / 2},${-height / 2})`);
-    applyFilters();
-  }
-  if (!d3) {
-    svgElement.addEventListener('wheel', event => {
-      event.preventDefault();
-      zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1);
-    }, {passive: false});
-    let pointer = null;
-    svgElement.addEventListener('pointerdown', event => {
-      if (event.target.closest('.oms-graph-node')) return;
-      pointer = {id: event.pointerId, x: event.clientX, y: event.clientY};
-      svgElement.setPointerCapture(event.pointerId);
-    });
-    svgElement.addEventListener('pointermove', event => {
-      if (!pointer || pointer.id !== event.pointerId) return;
-      const bounds = svgElement.getBoundingClientRect();
-      panX += (event.clientX - pointer.x) * width / Math.max(1, bounds.width);
-      panY += (event.clientY - pointer.y) * height / Math.max(1, bounds.height);
-      pointer.x = event.clientX;
-      pointer.y = event.clientY;
-      offlineTransform();
-    });
-    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, () => { pointer = null; });
-  }
-  function zoomBy(factor) {
-    if (!d3) { zoomScale = Math.max(.3, Math.min(5, zoomScale * factor)); offlineTransform(); return; }
-    const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 120;
-    svg.transition().duration(duration).call(zoom.scaleBy, factor);
-  }
   zoomIn.addEventListener('click', () => zoomBy(1.35));
   zoomOut.addEventListener('click', () => zoomBy(1 / 1.35));
+
+  // ---- Pointer gestures: wheel/pinch zoom, background pan, node drag-and-pin ----
+  function toView(event) {
+    const bounds = svgElement.getBoundingClientRect();
+    return {x: (event.clientX - (bounds.left || 0)) * width / Math.max(1, bounds.width),
+      y: (event.clientY - (bounds.top || 0)) * height / Math.max(1, bounds.height)};
+  }
+  const pointers = new Map();
+  const nodeOf = event => {
+    const el = event.target && typeof event.target.closest === 'function' ? event.target.closest('.oms-graph-node') : null;
+    return el ? el.__data__ : null;
+  };
+  const capture = id => { try { svgElement.setPointerCapture(id); } catch (_error) { /* capture is optional */ } };
+  svgElement.addEventListener('wheel', event => {
+    event.preventDefault();
+    markMoved();
+    const unit = event.deltaMode === 1 ? 16 : 1;
+    const p = toView(event);
+    zoomAt(p.x, p.y, Math.exp(-event.deltaY * unit * (event.ctrlKey ? .012 : .0016)), 0);
+  }, {passive: false});
+  svgElement.addEventListener('pointerdown', event => {
+    if (event.button > 0) return;
+    keyboardMode = false;
+    suppressClick = false;
+    const p = toView(event);
+    pointers.set(event.pointerId, p);
+    camAnim = null;
+    capture(event.pointerId);
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      gesture = {type: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2}};
+      return;
+    }
+    if (pointers.size > 2) return;
+    const row = nodeOf(event);
+    if (row) {
+      const w = {x: (p.x - cam.x) / cam.k, y: (p.y - cam.y) / cam.k};
+      gesture = {type: 'node', id: event.pointerId, row, sx: event.clientX, sy: event.clientY, moved: false, dx: row.x - w.x, dy: row.y - w.y};
+    } else {
+      gesture = {type: 'pan', id: event.pointerId};
+    }
+    capture(event.pointerId);
+  });
+  svgElement.addEventListener('pointermove', event => {
+    if (!pointers.has(event.pointerId) || !gesture) return;
+    // A buttonless mouse move means the release was missed: end the gesture instead of dragging on hover.
+    if (event.buttons === 0 && event.pointerType === 'mouse') { endPointer(event); return; }
+    const previous = pointers.get(event.pointerId);
+    const p = toView(event);
+    pointers.set(event.pointerId, p);
+    if (gesture.type === 'pinch' && pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const mid = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
+      markMoved();
+      zoomAt(mid.x, mid.y, dist / gesture.dist, 0);
+      const goal = camGoal();
+      setCam(goal.x + mid.x - gesture.mid.x, goal.y + mid.y - gesture.mid.y, goal.k);
+      gesture.dist = dist; gesture.mid = mid;
+    } else if (gesture.type === 'pan' && gesture.id === event.pointerId) {
+      markMoved();
+      setCam(cam.x + p.x - previous.x, cam.y + p.y - previous.y, cam.k);
+    } else if (gesture.type === 'node' && gesture.id === event.pointerId) {
+      if (!gesture.moved) {
+        if (Math.hypot(event.clientX - gesture.sx, event.clientY - gesture.sy) < 4) return;
+        gesture.moved = true; markMoved();
+        hideTip(); setPinned(gesture.row, true);
+      }
+      const row = gesture.row;
+      // Keep the whole node inside the padded stage so a later click never has to pan it back.
+      const inset = fitPad() + nodeRadius(row) * cam.k;
+      const clampAxis = (value, world, size, offset) => {
+        const m = fanPad(row);
+        const min = Math.max(m, (inset - offset) / cam.k); const max = Math.min(world - m, (size - inset - offset) / cam.k);
+        return min > max ? Math.max(m, Math.min(world - m, value)) : Math.max(min, Math.min(max, value));
+      };
+      row.fx = clampAxis((p.x - cam.x) / cam.k + gesture.dx, worldW, width, cam.x);
+      row.fy = clampAxis((p.y - cam.y) / cam.k + gesture.dy, worldH, height, cam.y);
+      row.x = row.fx; row.y = row.fy;
+      if (reducedMotion()) paint();
+      else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); scheduleSim(); }
+    }
+  });
+  function endPointer(event) {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.delete(event.pointerId);
+    try { svgElement.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    const ended = gesture && (gesture.type !== 'node' || gesture.id === event.pointerId) ? gesture : null;
+    if (ended) gesture = null;
+    if (ended && ended.type === 'node') {
+      if (ended.moved) {
+        suppressClick = true;
+        setTimeout(() => { suppressClick = false; }, 0);
+        if (reducedMotion()) settle(.3, 90);
+      } else if (event.type === 'pointerup') {
+        // Capture retargets the native click to the svg, so a plain tap selects here.
+        selectNode(ended.row.id); applyFilters(); ensureVisible(ended.row);
+      }
+    }
+  }
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, endPointer);
+  svgElement.addEventListener('dblclick', event => {
+    event.preventDefault();
+    // Pointer capture can retarget the native dblclick to the svg, so fall back to hit-testing the point.
+    let row = nodeOf(event);
+    if (!row && typeof document.elementFromPoint === 'function' && Number.isFinite(event.clientX)) {
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      const el = hit && typeof hit.closest === 'function' ? hit.closest('.oms-graph-node') : null;
+      row = el ? el.__data__ : null;
+    }
+    if (!row) { fitAll(); return; }
+    if (row._pinned) { setPinned(row, false); settle(.3, 90); }
+  });
   draft.addEventListener('input', () => {
     if (selectedId) {
       draftsByNode.set(selectedId, draft.value);
@@ -988,11 +1862,11 @@
         draft.select();
         if (!document.execCommand('copy')) throw new Error('copy unavailable');
       }
-      actionStatus.textContent = 'Copied.';
+      actionStatus.textContent = t('copied');
     } catch (_error) {
       draft.focus();
       draft.select();
-      actionStatus.textContent = 'Select and copy the text manually.';
+      actionStatus.textContent = t('copyManual');
     }
   });
   ask.addEventListener('click', async () => {
@@ -1001,44 +1875,63 @@
     const prompt = draft.value.trim();
     if (!prompt) return;
     ask.disabled = true;
-    actionStatus.textContent = 'Sending…';
+    actionStatus.textContent = t('sending');
     try {
       await window.openai.sendFollowUpMessage({
         title: data.kind === 'project' ? 'Continue from selected graph node' : 'Continue from graph node',
         prompt
       });
-      actionStatus.textContent = 'Sent.';
+      actionStatus.textContent = t('sent');
     } catch (_error) {
-      actionStatus.textContent = 'Could not send; copy the draft instead.';
+      actionStatus.textContent = t('sendFail');
     } finally {
       ask.disabled = !draft.value.trim();
     }
   });
-  let lastWidth = 0;
+  let lastWidth = measuredWidth;
+  let lastStageHeight = 0;
+  let refitTimer = 0;
   const observer = new ResizeObserver(entries => {
     const nextWidth = Math.max(280, Math.floor(entries[0].contentRect.width || 736));
+    const stageHeight = Math.floor(entries[0].contentRect.height || 0);
+    // A height-only change (stage settled after first paint) refits once, debounced; it never re-lays out.
+    if (Math.abs(nextWidth - lastWidth) < 5 && lastWidth && Math.abs(stageHeight - lastStageHeight) >= 5 && !userMoved) {
+      lastStageHeight = stageHeight;
+      clearTimeout(refitTimer);
+      refitTimer = setTimeout(() => { if (!userMoved) fitAll(); }, 120);
+    }
+    lastStageHeight = stageHeight || lastStageHeight;
     if (Math.abs(nextWidth - lastWidth) < 5) return;
     lastWidth = nextWidth;
+    const previousWorldH = worldH;
+    const previousWorldW = worldW;
+    const modeChanged = layoutMode(nextWidth) !== layoutMode(width);
     width = nextWidth;
-    height = width <= 480 ? 400 : 520;
     root.setAttribute('data-layout', layoutMode(width));
-    svg.attr('viewBox', `0 0 ${width} ${height}`);
-    if (!simulation) { layoutOffline(); offlineTransform(); return; }
-    simulation.force('center', d3.forceCenter(width / 2, height / 2));
-    if (data.kind === 'execution') {
-      simulation.force('execution-x', d3.forceX(executionX).strength(.85));
-      simulation.force('execution-y', d3.forceY(executionY).strength(.85));
-    } else {
-      simulation.force('project-x', d3.forceX(width / 2).strength(.055));
-      simulation.force('project-y', d3.forceY(height / 2).strength(.055));
-    }
-    simulation.alpha(.35).stop();
-    for (let index = 0; index < 70; index += 1) simulation.tick();
+    computeWorld();
+    relabel();
+    nodes.forEach(row => {
+      row.x *= worldW / previousWorldW; row.y *= worldH / previousWorldH;
+      if (row.fx !== null && row.fx !== undefined) {
+        const m = fanPad(row);
+        row.fx = Math.max(m, Math.min(worldW - m, row.fx * worldW / previousWorldW));
+        row.fy = Math.max(m, Math.min(worldH - m, row.fy * worldH / previousWorldH));
+      }
+    });
+    if (modeChanged) applyFilters();
     paint();
-    applyFilters();
+    // Rescaled positions are only approximately collision-free: relax and refit on every width change.
+    if (!userMoved) fitAll(0);
+    settle(.35, 150);
   });
   observer.observe(stage);
+  computeWorld();
+  relabel();
+  seedPositions();
   selectNode(selectedId);
   applyFilters();
+  paint();
+  fitAll(0);
+  settle(1, TICK_CAP);
 })();
 </script>
