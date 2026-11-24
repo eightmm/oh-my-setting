@@ -54,10 +54,10 @@
     <span class="oms-exec-key" data-legend="verifying" hidden><i data-state="verifying" aria-hidden="true">⟳</i>Verifying (dashed)</span>
     <span class="oms-exec-key" data-legend="review" hidden><i data-state="review" aria-hidden="true">⚑</i>In review (long-dash)</span>
     <span class="oms-exec-key" data-legend="waiting" hidden><i data-state="waiting" aria-hidden="true">!</i>Needs you (short-dash)</span>
-    <span class="oms-exec-key" data-legend="blocked" hidden><i data-state="blocked" aria-hidden="true">!</i>Blocked (short-dash)</span>
+    <span class="oms-exec-key" data-legend="blocked" hidden><i data-state="blocked" aria-hidden="true">⊘</i>Blocked (short-dash)</span>
     <span class="oms-exec-key" data-legend="ready" hidden><i data-state="ready" aria-hidden="true">▷</i>Ready (long-dash)</span>
     <span class="oms-exec-key" data-legend="pending" hidden><i data-state="pending" aria-hidden="true">·</i>Pending (dotted)</span>
-    <span class="oms-exec-key" data-legend="exited" hidden><i data-state="exited" aria-hidden="true">✓</i>Exited (solid)</span>
+    <span class="oms-exec-key" data-legend="exited" hidden><i data-state="exited" aria-hidden="true">■</i>Exited (solid)</span>
     <span class="oms-exec-key" data-legend="accepted" hidden><i data-state="accepted" aria-hidden="true">✓</i>Verified (solid)</span>
     <span class="oms-exec-key" data-legend="failed" hidden><i data-state="failed" aria-hidden="true">×</i>Failed (dash-dot)</span>
     <span class="oms-exec-key" data-legend="timed_out" hidden><i data-state="timed_out" aria-hidden="true">◷</i>Timed out (dash-dot)</span>
@@ -217,7 +217,7 @@
 /* Entry motion only scales from a visible start: a frozen timeline never hides a node. */
 @keyframes @@ROOT@@-pop { from { transform: scale(.6); } }
 @media (prefers-reduced-motion: no-preference) {
-  #@@ROOT@@ .oms-graph-edge.is-flow { stroke-dasharray: 7 4; animation: @@ROOT@@-flow 1.1s linear infinite; }
+  #@@ROOT@@ .oms-graph-edge.is-flow:is([data-confidence="INFERRED"], [data-confidence="AMBIGUOUS"], [data-confidence="REPEAT"]):not([data-relation-group="ownership"]) { animation: @@ROOT@@-flow 1.1s linear infinite; }
   #@@ROOT@@ .oms-graph-node.is-selected .oms-graph-select-ring { animation: @@ROOT@@-pulse 2.2s ease-in-out infinite; }
   #@@ROOT@@ .oms-graph-node .oms-graph-node-body, #@@ROOT@@ .oms-graph-node .oms-graph-glyph { transform-box: fill-box; transform-origin: center; animation: @@ROOT@@-pop .45s ease-out both; }
   #@@ROOT@@ .oms-graph-node { transition: opacity .15s; }
@@ -493,6 +493,7 @@
     error.hidden = !missing;
     if (missing) error.textContent = t('noData');
     summaryElement.textContent = t('noDataSummary');
+    fallbackSummary.textContent = t('fallback', {n: missing ? 0 : data.nodes.length});
     visible.textContent = t('noDataShort');
     detail.textContent = t('noGraphDetail');
     showEmptyState(t('noData'), missing ? 'error' : 'status');
@@ -524,8 +525,8 @@
   const STATE_META = {
     running: {glyph: '▶', pattern: 'dashed'}, verifying: {glyph: '⟳', pattern: 'dashed'},
     review: {glyph: '⚑', pattern: 'long-dash'}, waiting: {glyph: '!', pattern: 'short-dash'},
-    blocked: {glyph: '!', pattern: 'short-dash'}, ready: {glyph: '▷', pattern: 'long-dash'},
-    pending: {glyph: '·', pattern: 'dotted'}, exited: {glyph: '✓', pattern: 'solid'},
+    blocked: {glyph: '⊘', pattern: 'short-dash'}, ready: {glyph: '▷', pattern: 'long-dash'},
+    pending: {glyph: '·', pattern: 'dotted'}, exited: {glyph: '■', pattern: 'solid'},
     accepted: {glyph: '✓', pattern: 'solid'}, failed: {glyph: '×', pattern: 'dash-dot'},
     timed_out: {glyph: '◷', pattern: 'dash-dot'}, stale: {glyph: '~', pattern: 'dashed'},
     unknown: {glyph: '?', pattern: 'dotted'}
@@ -541,9 +542,9 @@
       const key = Object.prototype.hasOwnProperty.call(ASSURANCE_META, row.assurance) ? row.assurance : 'unclassified';
       return {key, ...ASSURANCE_META[key], label: t(`as.${key}`)};
     }
-    const raw = String(row.status || 'pending').toLocaleLowerCase();
+    const raw = String(row.status || 'unknown').toLocaleLowerCase();
     const alias = STATE_ALIAS[raw] || raw;
-    const key = Object.prototype.hasOwnProperty.call(STATE_META, alias) ? alias : 'pending';
+    const key = Object.prototype.hasOwnProperty.call(STATE_META, alias) ? alias : 'unknown';
     return {key, ...STATE_META[key], label: t(`st.${key}`)};
   }
   const RELATION_OWNERSHIP = new Set(['contains', 'owns', 'parent']);
@@ -695,8 +696,8 @@
   confidences.forEach(name => confidence.append(new Option(name, name)));
   const defaultConfidence = data.kind === 'project' && confidences.includes('EXTRACTED') ? 'EXTRACTED' : '';
   confidence.value = defaultConfidence;
-  const states = [...new Set(nodes.map(row => data.kind === 'project' ? row.assurance : row.status).filter(Boolean))].sort();
-  states.forEach(name => state.append(new Option(name, name)));
+  const stateLabels = new Map(nodes.map(row => { const meta = statusMeta(row); return [meta.key, `${meta.glyph} ${meta.label}`]; }));
+  [...stateLabels.keys()].sort().forEach(key => state.append(new Option(stateLabels.get(key), key)));
   stateLabel.textContent = t(data.kind === 'project' ? 'assurance' : 'status');
   const taskFocused = data.kind === 'project' && Boolean(data.display && data.display.task_focus);
   const defaultScope = taskFocused ? (data.display.default_scope || 'neighbors') : 'all';
@@ -782,7 +783,7 @@
   const node = viewport.append('g').selectAll('g').data(nodes).join('g')
     .attr('class', 'oms-graph-node').attr('data-kind', row => row.kind || 'node')
     .attr('data-kind-group', row => kindGroup(row.kind))
-    .attr('data-status', row => row.status || 'pending')
+    .attr('data-status', row => row.status || 'unknown')
     .attr('data-state', row => data.kind === 'project' ? null : statusMeta(row).key)
     .attr('data-assurance', row => data.kind === 'project' ? statusMeta(row).key : null)
     .attr('data-pattern', row => statusMeta(row).pattern)
@@ -828,6 +829,7 @@
   })();
   let width = measuredWidth || 736;
   let height = 520;
+  let worldH = 520;
   let selectedId = (nodes.find(row => row.focus) || nodes[0] || {}).id || '';
   let tabStopId = selectedId;
   let zoomScale = 1;
@@ -877,8 +879,8 @@
   function executionY(row) {
     const columns = width <= 480 ? 1 : 2;
     const rows = Math.ceil(nodes.length / columns);
-    if (rows <= 1) return height / 2;
-    return 70 + Math.floor(row.index / columns) * (height - 140) / (rows - 1);
+    if (rows <= 1) return worldH / 2;
+    return 70 + Math.floor(row.index / columns) * (worldH - 140) / (rows - 1);
   }
   function computeWorld() {
     const viewportH = Number(window.innerHeight) || 0;
@@ -887,15 +889,16 @@
     const maxCollide = nodes.reduce((acc, row) => Math.max(acc, collideRadius(row)), 14);
     const cell = Math.pow(maxCollide * 2 + 6, 2) * 2.4;
     const needed = Math.ceil(nodes.length * cell / Math.max(1, width - PAD * 2)) + PAD * 2;
-    // Narrow stages keep the viewport-capped height; the camera fit zooms out for density.
-    height = width <= 480 ? baseHeight : Math.max(baseHeight, needed);
-    svg.attr('viewBox', `0 0 ${width} ${height}`);
+    // The world grows with density on every layout; narrow stages keep the viewport-capped height and the camera fit zooms out.
+    worldH = Math.max(baseHeight, needed);
+    height = width <= 480 ? baseHeight : worldH;
+    svg.attr('viewBox', `0 0 ${width} ${height}`).attr('data-world', `${width}x${worldH}`);
     // The svg box equals the viewBox in CSS px, so 1 world unit is 1 px at k=1 and nothing is letterboxed.
     if (svgElement.style) svgElement.style.height = `${height}px`;
   }
   function seedPositions() {
     seed = 0x2545f491;
-    const spacing = Math.sqrt(width * height / Math.max(nodes.length, 1)) * .45;
+    const spacing = Math.sqrt(width * worldH / Math.max(nodes.length, 1)) * .45;
     nodes.forEach((row, index) => {
       if (isExecution) {
         row.x = executionX(row) + (rand() - .5) * 24;
@@ -904,7 +907,7 @@
         const angle = index * 2.399963;
         const radius = spacing * Math.sqrt(index + .5);
         row.x = width / 2 + Math.cos(angle) * radius;
-        row.y = height / 2 + Math.sin(angle) * radius;
+        row.y = worldH / 2 + Math.sin(angle) * radius;
       }
       row.vx = 0; row.vy = 0; row.fx = null; row.fy = null; row._pinned = false;
     });
@@ -994,7 +997,7 @@
   function clampToWorld() {
     nodes.forEach(row => {
       row.x = Math.max(PAD, Math.min(width - PAD, Number.isFinite(row.x) ? row.x : width / 2));
-      row.y = Math.max(PAD, Math.min(height - PAD, Number.isFinite(row.y) ? row.y : height / 2));
+      row.y = Math.max(PAD, Math.min(worldH - PAD, Number.isFinite(row.y) ? row.y : worldH / 2));
     });
   }
   let alpha = 0;
@@ -1036,8 +1039,8 @@
         row.vx += (executionX(row) - row.x) * .3 * alpha;
         row.vy += (executionY(row) - row.y) * .3 * alpha;
       } else {
-        row.vx += (width / 2 - row.x) * .055 * alpha * Math.max(1, Math.min(4, height / width));
-        row.vy += (height / 2 - row.y) * .055 * alpha;
+        row.vx += (width / 2 - row.x) * .055 * alpha * Math.max(1, Math.min(4, worldH / width));
+        row.vy += (worldH / 2 - row.y) * .055 * alpha;
       }
       if (row.fx !== null && row.fx !== undefined) { row.x = row.fx; row.y = row.fy; row.vx = 0; row.vy = 0; return; }
       row.vx *= .6; row.vy *= .6;
@@ -1049,7 +1052,7 @@
     if (nodes.length) {
       let mx = 0; let my = 0;
       nodes.forEach(row => { mx += row.x; my += row.y; });
-      mx = mx / nodes.length - width / 2; my = my / nodes.length - height / 2;
+      mx = mx / nodes.length - width / 2; my = my / nodes.length - worldH / 2;
       nodes.forEach(row => { if (row.fx === null || row.fx === undefined) { row.x -= mx; row.y -= my; } });
     }
     clampToWorld();
@@ -1108,7 +1111,7 @@
     nodeLabel.attr('transform', labelTransform);
     const forced = row => row.id === selectedId || row.id === hoverId || row.id === focusHotId;
     const candidates = nodes.filter(row => !row._outOfScope && (row._labelWanted || forced(row)))
-      .sort((a, b) => Number(forced(b)) - Number(forced(a)) || Number(Boolean(b.show_label)) - Number(Boolean(a.show_label)) ||
+      .sort((a, b) => Number(forced(b)) - Number(forced(a)) || Number(Boolean(a._muted)) - Number(Boolean(b._muted)) || Number(Boolean(b.show_label)) - Number(Boolean(a.show_label)) ||
         (b.degree || 0) - (a.degree || 0) || a.index - b.index);
     const placed = [];
     nodes.forEach(row => { row._labelShown = false; });
@@ -1160,7 +1163,7 @@
   }
 
   // ---- Camera: eased fit / focus / zoom, pan and wheel zoom ----
-  const MIN_K = .3;
+  const MIN_K = .1;
   const MAX_K = 5;
   const cam = {x: 0, y: 0, k: 1};
   let camAnim = null;
@@ -1283,10 +1286,14 @@
     const bounds = svgElement.getBoundingClientRect();
     const sx = (cam.x + row.x * cam.k) * bounds.width / Math.max(1, width);
     const sy = (cam.y + row.y * cam.k) * bounds.height / Math.max(1, height);
-    const right = sx > bounds.width * .6;
-    tip.style.left = `${Math.round(right ? sx - 16 : sx + 16)}px`;
-    tip.style.top = `${Math.round(Math.max(4, sy - 10))}px`;
-    tip.style.transform = right ? 'translateX(-100%)' : '';
+    const tw = tip.offsetWidth || 260;
+    const th = tip.offsetHeight || 60;
+    const right = sx + 16 + tw > bounds.width - 4;
+    const left = Math.max(4, Math.min(bounds.width - tw - 4, right ? sx - 16 - tw : sx + 16));
+    const top = Math.max(4, Math.min(bounds.height - th - 4, sy - 10));
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+    tip.style.transform = '';
   }
   function updateHighlight() {
     placeLabels();
@@ -1314,6 +1321,9 @@
     if (element.hidden || element.disabled) return false;
     if (element.classList && element.classList.contains('is-out-of-scope')) return false;
     if (typeof root.contains === 'function' && !root.contains(element)) return false;
+    for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) {
+      if (parent.tagName === 'DETAILS' && parent.open === false) return false;
+    }
     return true;
   }
   function focusSelectedOrControl() {
@@ -1455,8 +1465,7 @@
     nodes.forEach(row => {
       row._matchesSearch = !query || row._search.includes(query);
       row._outOfScope = row.id !== selectedId && !inScope(row) && !(query && row._matchesSearch);
-      const rowState = data.kind === 'project' ? row.assurance : row.status;
-      row._missesState = Boolean(stateName && rowState !== stateName);
+      row._missesState = Boolean(stateName && statusMeta(row).key !== stateName);
       row._missesChange = Boolean(changeName && row.change !== changeName);
       row._eligible = !row._outOfScope && row._matchesSearch && !row._missesState && !row._missesChange;
     });
@@ -1533,7 +1542,6 @@
     if (!hoverId) hideTip();
   });
   node.on('keydown', (event, row) => {
-    keyboardMode = true;
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       selectNode(row.id);
@@ -1558,14 +1566,15 @@
     } else if (event.key === 'Escape') {
       event.preventDefault();
       fitAll();
-      if (search.value && isFocusableInRoot(search)) search.focus();
-      else if (isFocusableInRoot(nodeSelect)) nodeSelect.focus();
+      if (isFocusableInRoot(search)) search.focus();
     } else if (!event.ctrlKey && !event.metaKey && !event.altKey) {
       if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomBy(1.35); }
       else if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomBy(1 / 1.35); }
       else if (event.key === '0') { event.preventDefault(); fitAll(); }
     }
   });
+  root.addEventListener('keydown', () => { keyboardMode = true; }, true);
+  root.addEventListener('pointerdown', () => { keyboardMode = false; }, true);
   nodeSelect.addEventListener('change', () => { selectNode(nodeSelect.value); applyFilters(); focusOn(nodeSelect.value); });
   search.addEventListener('input', applyFilters);
   search.addEventListener('focus', event => {
@@ -1692,7 +1701,7 @@
       }
       const row = gesture.row;
       row.fx = Math.max(PAD, Math.min(width - PAD, (p.x - cam.x) / cam.k + gesture.dx));
-      row.fy = Math.max(PAD, Math.min(height - PAD, (p.y - cam.y) / cam.k + gesture.dy));
+      row.fy = Math.max(PAD, Math.min(worldH - PAD, (p.y - cam.y) / cam.k + gesture.dy));
       row.x = row.fx; row.y = row.fy;
       if (reducedMotion()) paint();
       else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); if (!simRaf) simRaf = requestAnimationFrame(frame); }
@@ -1760,12 +1769,10 @@
     }
   });
   let lastWidth = measuredWidth;
-  let firstObservation = true;
   let lastStageHeight = 0;
   let refitTimer = 0;
   const observer = new ResizeObserver(entries => {
     const nextWidth = Math.max(280, Math.floor(entries[0].contentRect.width || 736));
-    if (firstObservation && Math.abs(nextWidth - lastWidth) < 5) firstObservation = false;
     const stageHeight = Math.floor(entries[0].contentRect.height || 0);
     // A height-only change (stage settled after first paint) refits once, debounced; it never re-lays out.
     if (Math.abs(nextWidth - lastWidth) < 5 && lastWidth && Math.abs(stageHeight - lastStageHeight) >= 5 && !userMoved) {
@@ -1775,21 +1782,22 @@
     }
     lastStageHeight = stageHeight || lastStageHeight;
     if (Math.abs(nextWidth - lastWidth) < 5) return;
-    const refitOnly = firstObservation && measuredWidth > 0;
-    firstObservation = false;
     lastWidth = nextWidth;
     const previousWidth = width;
-    const previousHeight = height;
+    const previousWorldH = worldH;
+    const modeChanged = layoutMode(nextWidth) !== layoutMode(width);
     width = nextWidth;
     root.setAttribute('data-layout', layoutMode(width));
     computeWorld();
     relabel();
     nodes.forEach(row => {
-      row.x *= width / previousWidth; row.y *= height / previousHeight;
-      if (row.fx !== null && row.fx !== undefined) { row.fx *= width / previousWidth; row.fy *= height / previousHeight; }
+      row.x *= width / previousWidth; row.y *= worldH / previousWorldH;
+      if (row.fx !== null && row.fx !== undefined) { row.fx *= width / previousWidth; row.fy *= worldH / previousWorldH; }
     });
+    if (modeChanged) applyFilters();
     paint();
-    if (refitOnly) { if (!userMoved) fitAll(); } else settle(.35, 150);
+    if (modeChanged) settle(.35, 150);
+    else if (!userMoved) fitAll();
   });
   observer.observe(stage);
   computeWorld();

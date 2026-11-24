@@ -275,16 +275,21 @@ for (const [w, expectedLayout, minHeight] of [[320, 'narrow', 400], [768, 'mediu
   const vbW = Number(vb[1]);
   const vbH = Number(vb[2]);
   assert.equal(vbW, w);
-  assert.ok(vbH >= minHeight, `200-node height ${vbH} >= ${minHeight} at width ${w}`);
+  assert.ok(vbH >= minHeight, `200-node stage height ${vbH} >= ${minHeight} at width ${w}`);
+  if (expectedLayout === 'narrow') assert.ok(vbH <= 400, `narrow stage height ${vbH} stays viewport-capped`);
+  const world = view.svg.attributes['data-world'].match(/^(\d+)x(\d+)$/);
+  assert.ok(world && Number(world[1]) === w && Number(world[2]) >= vbH, 'world extent is at least the stage');
+  const worldH = Number(world[2]);
+  if (expectedLayout === 'narrow') assert.ok(worldH > vbH, `narrow world ${worldH} grows past the stage ${vbH}`);
   const pts = view.nodes.map((n, idx) => {
     const [, x, y] = n.attributes.transform.match(/^translate\(([\d.]+),([\d.]+)\)$/);
     const r = Math.max(9, Math.min(14, 8 + Math.sqrt(denseData.nodes[idx].degree || 0)));
     assert.ok(Number(x) >= 18 && Number(x) <= vbW - 18, `200-node x=${x} within width ${vbW}`);
-    assert.ok(Number(y) >= 18 && Number(y) <= vbH - 18, `200-node y=${y} within height ${vbH}`);
+    assert.ok(Number(y) >= 18 && Number(y) <= worldH - 18, `200-node y=${y} within world ${worldH}`);
     return {x: Number(x), y: Number(y), r};
   });
-  // Narrow worlds are height-capped (the camera fit zooms out), so only medium/wide guarantee world-space separation.
-  for (let i = 0; i < pts.length && expectedLayout !== 'narrow'; i += 1) {
+  assert.ok(camera(view).k < 1 && camera(view).k >= .1, `200-node fit zooms out to show the world at width ${w}`);
+  for (let i = 0; i < pts.length; i += 1) {
     for (let j = i + 1; j < pts.length; j += 1) {
       const dist = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
       const minDist = pts[i].r + pts[j].r;
@@ -350,8 +355,17 @@ const execView = render(richExec, {width: 768});
 assert.equal(execView.get('legend').hidden, false, 'execution graph must also show status/kind legend');
 const execGlyphs = execView.nodes.map(n => n.querySelector('.oms-graph-glyph').textContent);
 const execPatterns = execView.nodes.map(n => n.attributes['data-pattern']);
-assert.deepEqual(execGlyphs.slice(0, 6), ['▶', '×', '·', '✓', '!', '!']);
+assert.deepEqual(execGlyphs.slice(0, 6), ['▶', '×', '·', '■', '⊘', '!']);
 assert.notEqual(execGlyphs[6], execGlyphs[2], 'ready must have a distinct glyph from pending');
+{
+  const meta = script(template).match(/const STATE_META = \{([\s\S]*?)\n  \};/)[1];
+  const pairs = [...meta.matchAll(/(\w+): \{glyph: '([^']+)', pattern: '([^']+)'\}/g)].map(m => `${m[2]}|${m[3]}`);
+  assert.ok(pairs.length >= 13);
+  assert.equal(new Set(pairs).size, pairs.length, 'every execution state differs from every other in glyph or pattern');
+  const unk = render({kind: 'execution', title: 'x', counts: {}, nodes: [{id: 'u1', label: 'U', kind: 'node', degree: 0, status: 'cancelled'}, {id: 'u2', label: 'V', kind: 'node', degree: 0}], edges: []}, {width: 768});
+  assert.deepEqual(unk.nodes.map(n => n.attributes['data-state']), ['unknown', 'unknown']);
+  assert.deepEqual([...unk.get('state').children].map(o => o.value).filter(Boolean), ['unknown']);
+}
 assert.notEqual(execPatterns[6], execPatterns[2], 'ready must have a distinct pattern from pending');
 const visibleLegendGlyphs = (view, cls) => new Set(
   view.get('legend').children
@@ -544,6 +558,7 @@ for (const kind of ['project', 'execution']) {
   assert.ok(Math.abs(focused.x + row5.x * focused.k - 368) < 1 && Math.abs(focused.y + row5.y * focused.k - stageH / 2) < 1, 'selected node is centred');
   first.nodes[5].fire('keydown', {key: 'Escape'});
   assert.deepEqual(camera(first), before, 'Esc returns to fit-all');
+  assert.equal(first.document.activeElement, first.get('search'), 'Escape from a node moves focus to the visible search input');
   first.nodes[5].fire('keydown', {key: '+'}); assert.ok(camera(first).k > before.k);
   first.nodes[5].fire('keydown', {key: '0'}); assert.deepEqual(camera(first), before, '0 fits all');
   // Hover highlights neighbours and dims the rest; leaving clears it. Drag pin / unpin by double-click.
@@ -657,13 +672,13 @@ const labelOf = el => el.querySelector('.oms-graph-label');
   assert.match(css, /--oms-st:/);
   const exec = {kind: 'execution', title: 'x', counts: {}, edges: [], nodes: [
     ['running', '▶', 'Running'], ['active', '▶', 'Running'], ['verifying', '⟳', 'Verifying'], ['in_review', '⚑', 'In review'],
-    ['waiting_approval', '!', 'Needs you'], ['blocked', '!', 'Blocked'], ['ready', '▷', 'Ready'], ['queued', '·', 'Pending'],
-    ['done', '✓', 'Exited'], ['completed', '✓', 'Verified'], ['error', '×', 'Failed'], ['timed_out', '◷', 'Timed out'],
+    ['waiting_approval', '!', 'Needs you'], ['blocked', '⊘', 'Blocked'], ['ready', '▷', 'Ready'], ['queued', '·', 'Pending'],
+    ['done', '■', 'Exited'], ['completed', '✓', 'Verified'], ['error', '×', 'Failed'], ['timed_out', '◷', 'Timed out'],
     ['partial', '~', 'Stale'], ['unknown', '?', 'Unknown']
   ].map(([status], i) => ({id: `s${i}`, label: `S${i}`, kind: i === 0 ? 'function' : 'node', degree: 0, status, show_label: true}))};
   const vocabulary = [['running', '▶', 'Running'], ['active', '▶', 'Running'], ['verifying', '⟳', 'Verifying'], ['in_review', '⚑', 'In review'],
-    ['waiting_approval', '!', 'Needs you'], ['blocked', '!', 'Blocked'], ['ready', '▷', 'Ready'], ['queued', '·', 'Pending'],
-    ['done', '✓', 'Exited'], ['completed', '✓', 'Verified'], ['error', '×', 'Failed'], ['timed_out', '◷', 'Timed out'],
+    ['waiting_approval', '!', 'Needs you'], ['blocked', '⊘', 'Blocked'], ['ready', '▷', 'Ready'], ['queued', '·', 'Pending'],
+    ['done', '■', 'Exited'], ['completed', '✓', 'Verified'], ['error', '×', 'Failed'], ['timed_out', '◷', 'Timed out'],
     ['partial', '~', 'Stale'], ['unknown', '?', 'Unknown']];
   const view = render(exec);
   view.nodes.forEach((n, i) => {

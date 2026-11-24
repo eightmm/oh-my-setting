@@ -937,15 +937,19 @@ zoom/reset, zoom/pan, drag, and semantic label reveal stay local to the
 fragment. Selecting a node fills and focuses an editable instruction draft;
 the user may revise it before the explicit `Send to chat` action, or use the
 clipboard fallback when the host bridge is absent. An escaped text-node listing
-remains usable by assistive technology and when D3 cannot load. The draft
+remains usable by assistive technology without the canvas. The draft
 retains the current user request, identifies the selected node as untrusted
 repository metadata, asks the agent to refresh graph context, and strengthens
 implementation or the narrowest existing verification without adding a new
 test by default.
 Execution views use the same renderer with projected status, outcomes,
 bindings, gates, and repeat edges. The output contains graph metadata only,
-never source bytes or `.oms` event details. It loads pinned D3 in the UI and
-has no graph-build/runtime dependency on JavaScript.
+never source bytes or `.oms` event details. The renderer is self-contained and
+loads no external script; the graph build has no runtime dependency on JavaScript.
+On narrow stages the viewport-capped stage height is separate from the world
+extent: the world grows with node density, and fit-all zooms out to show it.
+Every execution state differs from the others in glyph or stroke pattern, and
+an unrecognized status renders as Unknown, never Pending.
 
 ## CLI
 
