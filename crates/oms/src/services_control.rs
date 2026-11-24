@@ -3634,9 +3634,22 @@ mod tests {
             } else {
                 None
             };
+            // Exercise the real issuance boundary while the adapter waits for
+            // its hello. This fixture-owned lock grants no session authority.
+            let issuance_store = (mode == "protocol-issuance-blocked")
+                .then(|| oms_panel_core::terminals::controller_store(&repo, true).unwrap());
+            let issuance_lock = issuance_store.as_ref().map(|store| {
+                store
+                    .lock_at(
+                        Path::new("team-request-issuance.lock"),
+                        Duration::from_secs(1),
+                    )
+                    .unwrap()
+            });
             let output = oms_command_peer::run_with_executor(
                 "peer-ask", &args, &repo, source, &stop, &collab,
             );
+            drop(issuance_lock);
             if let Some(handler) = handler {
                 signal_hook::low_level::unregister(handler);
             }
@@ -3669,39 +3682,53 @@ mod tests {
             let success = mode == "protocol-positive"
                 || mode == "protocol-fragment"
                 || mode == "protocol-proposal-positive";
-            if success && output.0 != 0 {
-                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
-                    .unwrap()
-                    .flatten()
-                {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        let text = String::from_utf8_lossy(&bytes);
-                        if let Some((_, diagnostic)) = text.split_once("## Diagnostics") {
-                            eprintln!("fixture diagnostics: {diagnostic}");
-                        }
-                    }
-                }
-            }
+            let stdout = String::from_utf8_lossy(&output.1);
+            let stderr = String::from_utf8_lossy(&output.2);
+            let diagnostic = || {
+                stdout
+                    .lines()
+                    .next()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .and_then(|artifact| {
+                        artifact
+                            .split_once("\n## Diagnostics\n\n")
+                            .map(|(_, body)| body.to_owned())
+                    })
+                    .unwrap_or_else(|| stderr.clone().into_owned())
+            };
             if success {
-                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+                assert_eq!(output.0, 0, "{mode:?}: {}", diagnostic());
             } else {
-                assert_ne!(output.0, 0, "invalid protocol succeeded");
+                assert_ne!(output.0, 0, "{mode:?}: invalid protocol succeeded");
             }
-            assert!(!String::from_utf8_lossy(&output.1).contains("nonce"));
-            assert!(!String::from_utf8_lossy(&output.2).contains("nonce"));
-            if mode == "protocol-partial" {
-                let mut seen = String::from_utf8_lossy(&output.2).into_owned();
-                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
-                    .unwrap()
-                    .flatten()
-                {
-                    seen.push_str(&String::from_utf8_lossy(
-                        &std::fs::read(entry.path()).unwrap_or_default(),
-                    ));
+            assert!(!stdout.contains("nonce"));
+            assert!(!stderr.contains("nonce"));
+            let (required, forbidden): (&[&str], &[&str]) = match mode.to_str().unwrap() {
+                "protocol-lost" | "protocol-proposal-lost" => {
+                    (&["channel-unconsumed-response"], &["protocol-failed"])
                 }
+                "protocol-conflict" | "protocol-proposal-conflict" => (
+                    &["protocol-failed"],
+                    &["channel-no-request", "channel-unconsumed-response"],
+                ),
+                "protocol-early" | "protocol-unsupported" => {
+                    (&["protocol-failed", "channel-no-request"], &[])
+                }
+                "protocol-partial" => (&["channel-partial-frame"], &[]),
+                "protocol-issuance-blocked" => (
+                    &[
+                        "Team channel issuance failed; pending intent retained (stage=issuance-lock)",
+                    ],
+                    &[],
+                ),
+                _ => (&[], &[]),
+            };
+            if !required.is_empty() {
+                let seen = diagnostic();
                 assert!(
-                    seen.contains("channel-partial-frame"),
-                    "partial-frame cue not delivered"
+                    required.iter().all(|cue| seen.contains(cue))
+                        && forbidden.iter().all(|cue| !seen.contains(cue)),
+                    "{mode:?}: unexpected channel phase: {seen}"
                 );
             }
             return;
@@ -4782,7 +4809,9 @@ session=$(field session)
 nonce=$(field nonce)
 generation=$(num connection_generation)
 binding=$(field binding_sha256)
-expiry=${OMS_TEAM_REQUEST_EXPIRY:-$(num expires_at)}
+hello_expiry=$(num expires_at)
+expiry=${OMS_TEAM_REQUEST_EXPIRY:-$hello_expiry}
+[ "$expiry" -le "$hello_expiry" ]
 case "$prompt" in *protocol-wrong*) nonce=wrong;; esac
 printf '{"schema":1,"kind":"hello","session":"%s","nonce":"%s","connection_generation":%s}\n' "$session" "$nonce" "$generation"
 case "$prompt" in *protocol-cancel*) kill -USR1 "$PPID"; while :; do sleep 1; done;; *protocol-timeout*) while :; do sleep 1; done;; esac
@@ -4792,8 +4821,12 @@ for sequence in 1 2; do
   case "$prompt" in *protocol-unsupported*) action=request_dispatch;; esac
   text=bounded-blocker
   case "$prompt:$sequence" in *protocol-conflict*:2) text=changed;; esac
-  request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"report-one","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$action" "$text" "$expiry")
   request_id=report-one
+  case "$prompt" in
+    *protocol-early*) request_id=report-early;;
+    *protocol-fragment*) request_id=report-fragment;;
+  esac
+  request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"%s","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$request_id" "$action" "$text" "$expiry")
   case "$prompt" in *protocol-proposal-*)
     request_id=proposal-one
     case "$prompt" in
@@ -4815,8 +4848,8 @@ for sequence in 1 2; do
     request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":2,"request_id":"%s","action":"propose_tasks","summary":"Bounded-decomposition","expected_task_sha256":"%s","tasks":[{"id":"%s","title":"%s","allowed":["%s"],"depends":%s}],"expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$request_id" "$task_sha" "$proposed_id" "$proposed_title" "$allowed" "$depends" "$expiry")
     ;;
   esac
+  case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"%s","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence" "$request_id";; esac
   case "$prompt" in *protocol-fragment*) printf '%s' "$request" | cut -c 1-20 | tr -d '\n'; sleep 0.02; printf '%s\n' "$request" | cut -c 21-;; *) printf '%s\n' "$request";; esac
-  case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence";; esac
   IFS= read -r response || exit 3
   case "$response" in *'"response"'*) :;; *) exit 4;; esac
   case "$prompt" in *protocol-lost*|*protocol-proposal-lost*) exit 0;; esac
@@ -4863,11 +4896,8 @@ done
             .to_owned();
         let task_before = json::hash(updated.get("tasks")).unwrap();
         let physical_before = physical::load(repo.as_path(), &stop).unwrap().len();
-        let report_expiry = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 12;
+        let mut report_expiry = None;
+        let mut report_count = 1;
         for mode in [
             "protocol-positive",
             "protocol-lost",
@@ -4881,8 +4911,13 @@ done
             "protocol-partial",
             "protocol-unsupported",
         ] {
-            let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
-                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN",mode).env("OMS_TEAM_REQUEST_EXPIRY",report_expiry.to_string()).env("OMS_TEAM_REQUEST_SPEC",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", mode).env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &head).env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team").env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters);
+            if matches!(mode, "protocol-lost" | "protocol-conflict") {
+                child.env("OMS_TEAM_REQUEST_EXPIRY", report_expiry.as_ref().unwrap());
+            }
+            let status = child.status().unwrap();
             assert!(status.success(), "native Team protocol case {mode} failed");
             let current_room = oms_command_room::Room::open(
                 repo.as_path(),
@@ -4908,11 +4943,34 @@ done
             assert_eq!(json::hash(ledger.get("tasks")).unwrap(), task_before);
             let record = ledger.get("teams").get("team-a");
             assert!(record.get("request_schema").is_int(2));
+            let requests = record.get("requests").array().unwrap();
+            if mode == "protocol-fragment" {
+                report_count += 1;
+                let fragment = requests.last().unwrap();
+                assert_eq!(
+                    fragment.get("request").text("request_id"),
+                    "report-fragment"
+                );
+                assert_eq!(fragment.get("outcome").text("status"), "recorded");
+            }
             assert_eq!(
-                record.get("requests").array().unwrap().len(),
-                1,
-                "replay cannot create another report"
+                requests.len(),
+                report_count,
+                "unexpected report effect for {mode}"
             );
+            if mode == "protocol-positive" {
+                let request = &requests[0];
+                assert_eq!(request.get("request").text("request_id"), "report-one");
+                assert_eq!(request.get("outcome").text("status"), "recorded");
+                report_expiry = Some(
+                    request
+                        .get("request")
+                        .get("expires_at")
+                        .int()
+                        .unwrap()
+                        .to_string(),
+                );
+            }
         }
         assert_eq!(
             physical::load(repo.as_path(), &stop).unwrap().len(),
@@ -4964,7 +5022,7 @@ done
             let record = ledger.get("teams").get("team-a");
             assert_eq!(
                 record.get("requests").array().unwrap().len(),
-                if index == 0 { 1 } else { 2 },
+                report_count + usize::from(index > 0),
                 "proposal replay/invalid input must not create another effect"
             );
             assert!(
@@ -5017,7 +5075,7 @@ done
                 .unwrap();
                 assert_eq!(
                     with_requests["requests"].as_array().unwrap().len(),
-                    if index == 0 { 1 } else { 2 }
+                    report_count + 1
                 );
                 assert_eq!(
                     std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
@@ -5052,6 +5110,28 @@ done
                 .get("team-a")
                 .get("requests")
                 .clone();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", "protocol-issuance-blocked")
+            .env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &head)
+            .env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team")
+            .env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters)
+            .status().unwrap();
+        assert!(status.success(), "blocked Team issuance diagnostic failed");
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 21,
+            "failed issuance must not resend the provider"
+        );
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "failed issuance cannot publish a Team request"
+        );
         spec["generation"] = 5.into();
         spec["previous_sha256"] = head.clone().into();
         std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
