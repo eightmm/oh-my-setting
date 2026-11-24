@@ -2992,11 +2992,12 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
         "#!/bin/sh\nprintf invoked > \"$HOME/doctor-provider-invoked\"\nexit 1\n",
     )
     .unwrap();
-    let report = || {
-        let out = call("doctor", &["--surfaces", "--json"], source, host);
+    let report_with = |services: &dyn Services| {
+        let out = call("doctor", &["--surfaces", "--json"], source, services);
         serde_json::from_slice::<Value>(&out.1)
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.2)))
     };
+    let report = || report_with(host);
     let diagnostic = |value: &Value| {
         value["findings"]
             .as_array()
@@ -3160,6 +3161,108 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     fs::set_permissions(source, fs::Permissions::from_mode(0o777)).unwrap();
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
     fs::set_permissions(source, checkout_permissions).unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        use oms_command_plan::services::{GroupMembership, GroupResolver};
+        use rustix::fs as rfs;
+        use std::cell::Cell;
+
+        struct TraceGroups {
+            initial: GroupResolver,
+            renewed: Option<GroupResolver>,
+            calls: Cell<usize>,
+        }
+        impl Services for TraceGroups {
+            fn group_resolver(&self) -> Option<GroupResolver> {
+                let calls = self.calls.get();
+                self.calls.set(calls + 1);
+                if calls == 0 {
+                    Some(self.initial)
+                } else {
+                    self.renewed
+                }
+            }
+        }
+        fn owner_only(gid: u32) -> oms_command_plan::Result<GroupMembership> {
+            Ok(GroupMembership {
+                gid,
+                explicit_member_uids: vec![],
+                primary_member_uids: vec![rustix::process::getuid().as_raw()],
+            })
+        }
+        fn shared(gid: u32) -> oms_command_plan::Result<GroupMembership> {
+            let mut proof = owner_only(gid)?;
+            proof
+                .explicit_member_uids
+                .push(proof.primary_member_uids[0] ^ 1);
+            Ok(proof)
+        }
+        let group_report = |initial: GroupResolver, renewed: Option<GroupResolver>| {
+            let groups = TraceGroups {
+                initial,
+                renewed,
+                calls: Cell::new(0),
+            };
+            let observed = diagnostic(&report_with(&groups));
+            (observed, groups.calls.get())
+        };
+        let repo_fd = rfs::open(
+            source,
+            rfs::OFlags::RDONLY | rfs::OFlags::DIRECTORY | rfs::OFlags::NOFOLLOW,
+            rfs::Mode::empty(),
+        )
+        .unwrap();
+        let access_acl = "system.posix_acl_access";
+        let supports_group_proof =
+            matches!(rfs::fstatfs(&repo_fd).unwrap().f_type, 0xef53 | 0x01021994)
+                && rfs::fgetxattr_query(&repo_fd, access_acl) == Err(rustix::io::Errno::NODATA);
+        let original = fs::metadata(source).unwrap().permissions();
+        assert_eq!(group_report(owner_only, Some(owner_only)).1, 0);
+        fs::set_permissions(source, fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+        assert_eq!(
+            group_report(shared, Some(shared)).0["trace"]["status"],
+            "unavailable"
+        );
+        let (allowed, lookups) = group_report(owner_only, Some(owner_only));
+        if supports_group_proof {
+            assert_eq!(allowed, observed);
+            assert_eq!(lookups, 2);
+            let (revoked, lookups) = group_report(owner_only, None);
+            assert_eq!(revoked["trace"]["status"], "unavailable");
+            assert_eq!(lookups, 2);
+            fs::set_permissions(&trace, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                group_report(owner_only, Some(owner_only)).0["trace"]["status"],
+                "unavailable"
+            );
+            fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
+            // Linux POSIX ACL v2 with a writable named user and unchanged mode bits.
+            let mut acl = 2u32.to_le_bytes().to_vec();
+            for (tag, perm, id) in [
+                (0x01u16, 7u16, u32::MAX),
+                (0x02, 7, rustix::process::getuid().as_raw() ^ 1),
+                (0x04, 7, u32::MAX),
+                (0x10, 7, u32::MAX),
+                (0x20, 5, u32::MAX),
+            ] {
+                acl.extend(tag.to_le_bytes());
+                acl.extend(perm.to_le_bytes());
+                acl.extend(id.to_le_bytes());
+            }
+            rfs::fsetxattr(&repo_fd, access_acl, &acl, rfs::XattrFlags::empty()).unwrap();
+            assert_eq!(rfs::fstat(&repo_fd).unwrap().st_mode & 0o777, 0o775);
+            assert_eq!(
+                group_report(owner_only, Some(owner_only)).0["trace"]["status"],
+                "unavailable"
+            );
+            rfs::fremovexattr(&repo_fd, access_acl).unwrap();
+            assert_eq!(group_report(owner_only, Some(owner_only)).0, observed);
+        } else {
+            assert_eq!(allowed["trace"]["status"], "unavailable");
+        }
+        fs::set_permissions(source, original).unwrap();
+    }
     // A conflicting repeat and a truncated row cannot become clean success evidence.
     fs::write(&trace, format!("{raw}{}\n{{", rows[0])).unwrap();
     let invalid = diagnostic(&report());
