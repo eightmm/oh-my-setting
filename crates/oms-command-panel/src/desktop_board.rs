@@ -1181,6 +1181,11 @@ fn attention_fallback(source: &str, kind: &str) -> Value {
 }
 
 fn attention_summary(source: &str, kind: &str, what: &str) -> Value {
+    // Desktop Board rows reach the model. Room bodies belong to the private
+    // conversation reader even when their text passes the outbound scrubber.
+    if source == "message" {
+        return attention_fallback(source, kind);
+    }
     let candidate = what.trim();
     if !candidate.is_empty()
         && let Some(cleaned) = sanitize_text(candidate, MAX_TEXT_CHARS)
@@ -1725,7 +1730,14 @@ mod tests {
         assert!(msg.what.contains("private-message-sentinel"));
         assert_eq!(
             attention_summary(&msg.row_id.0, &msg.cls, &msg.what),
-            "private-message-sentinel"
+            "작업방 질문"
+        );
+        let (_, board, _) =
+            finalize_response(attention_response(&messages, &BTreeMap::new(), 1)).unwrap();
+        assert!(
+            !String::from_utf8(board)
+                .unwrap()
+                .contains("private-message-sentinel")
         );
         assert_eq!(
             attention_summary(&msg.row_id.0, &msg.cls, ""),
@@ -2010,14 +2022,15 @@ mod tests {
 
         let msg_rows: Vec<_> = rows.iter().filter(|r| r["source"] == "message").collect();
         assert_eq!(msg_rows.len(), 2);
-        assert!(msg_rows.iter().any(|r| {
-            r["summary"] == "Need decision on [path]"
-                && !r.to_string().contains(posix_path)
-                && !r.to_string().contains("msg-raw-id-1")
-        }));
-        assert!(msg_rows.iter().any(|r| {
-            r["summary"] == "작업방 질문" && !r.to_string().contains("msg-raw-id-empty")
-        }));
+        assert!(msg_rows.iter().all(|row| row["summary"] == "작업방 질문"));
+        for private in [
+            "Need decision",
+            posix_path,
+            "msg-raw-id-1",
+            "msg-raw-id-empty",
+        ] {
+            assert!(!projected.to_string().contains(private));
+        }
     }
 
     #[test]
@@ -2129,16 +2142,8 @@ mod tests {
         );
 
         let by_stamp = |stamp: &str| rows.iter().find(|r| r["stamp"] == stamp).unwrap();
-        assert!(
-            by_stamp("2026-11-24T12:04:00Z")["summary"]
-                .as_str()
-                .unwrap()
-                .contains("[oms-redacted:")
-        );
-        assert_eq!(
-            by_stamp("2026-11-24T12:03:00Z")["summary"],
-            "Check `[path]` now"
-        );
+        assert_eq!(by_stamp("2026-11-24T12:04:00Z")["summary"], "작업방 질문");
+        assert_eq!(by_stamp("2026-11-24T12:03:00Z")["summary"], "작업방 질문");
         assert_eq!(by_stamp("2026-11-24T12:02:00Z")["summary"], "작업방 질문");
         assert_eq!(by_stamp("2026-11-24T12:01:00Z")["summary"], "작업방 메시지");
     }
