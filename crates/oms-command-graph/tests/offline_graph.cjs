@@ -175,11 +175,12 @@ function render(data, options = {}) {
     Option: function(text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     ResizeObserver: class {
       constructor(callback) { this.callback = callback; resizeCallback = callback; }
-      observe() { frames.push(() => this.callback([{contentRect: {width: currentWidth}}])); }
+      observe() { if (!options.noObserverFire) frames.push(() => this.callback([{contentRect: {width: currentWidth}}])); }
     },
     requestAnimationFrame: callback => { rafCalls += 1; return frames.push(callback); }};
   let clock = 0;
   const drain = () => { let guard = 0; while (frames.length && guard++ < 5000) { clock += 16.7; frames.shift()(clock); } };
+  if (options.initWidth) stage.getBoundingClientRect = () => ({width: options.initWidth, height: 0});
   context.console = console; vm.runInNewContext(script(template), context);
   const rafBeforeFirstFrames = rafCalls;
   drain();
@@ -787,6 +788,20 @@ const labelOf = el => el.querySelector('.oms-graph-label');
     assert.ok(order.indexOf('G') < order.lastIndexOf('G'), 'edge group precedes node group');
   }
   const bigNode = render(model('project', 3)).nodes.length; assert.equal(bigNode, 3);
+}
+
+// 3. Narrow stage measured synchronously at init; the ResizeObserver never fires.
+{
+  const view = render(model('project', 100), {initWidth: 370, noObserverFire: true});
+  const [, vw, vh] = view.svg.attributes.viewBox.match(/^0 0 (\d+) (\d+)$/);
+  assert.equal(Number(vw), 370, 'viewBox width comes from the measured stage');
+  const cam = camera(view); assert.ok(cam.k !== 1 || cam.x !== 0 || cam.y !== 0, 'first fit ran');
+  assert.ok(cam.k < 1.0001 || cam.k > 1.0001 || cam.x !== 0, 'camera is not the identity default');
+  for (const n of view.nodes) {
+    const [, x, y] = n.attributes.transform.match(/^translate\(([-\d.]+),([-\d.]+)\)$/);
+    const sx = cam.x + Number(x) * cam.k; const sy = cam.y + Number(y) * cam.k;
+    assert.ok(sx >= 0 && sx <= 370 && sy >= 0 && sy <= Number(vh), `node inside viewBox (${sx},${sy})`);
+  }
 }
 
 console.log('offline renderer: layouts (320/768/1024), non-color kind/status, keyboard/focus, selection persistence, empty/partial/truncated states and template parity passed');
