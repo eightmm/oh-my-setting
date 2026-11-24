@@ -1201,3 +1201,302 @@ fn dashboard_and_panel_snapshot_share_observation_revision_across_cli_json_and_f
         "{degraded_text}"
     );
 }
+
+#[test]
+fn state_projects_stale_task_packet_and_bounded_dated_plan() {
+    struct PlanOnlyHost(GroupPlan);
+    impl HostServices for PlanOnlyHost {
+        fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+            &self.0
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let stamp = |offset_secs: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp((now - offset_secs).max(0), 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+
+    let repo = TempRepo::new();
+    seed(repo.path());
+    let plan_updated = stamp(1800);
+    let mut task_entries = Vec::new();
+    for i in 1..=7 {
+        let created = stamp(7200 - i * 60);
+        task_entries.push(format!(
+            "\"t{i}\":{{\"id\":\"t{i}\",\"title\":\"Task {i}\",\"state\":\"ready\",\"depends\":[],\"created\":\"{created}\",\"updated\":\"{plan_updated}\"}}"
+        ));
+    }
+    let plan_json = format!(
+        "{{\"schema\":3,\"goal\":\"Live plan goal\",\"tasks\":{{{}}}}}",
+        task_entries.join(",")
+    );
+    fs::write(repo.path().join(".oms/plan/tasks.json"), &plan_json).unwrap();
+    fs::set_permissions(
+        repo.path().join(".oms/plan/tasks.json"),
+        Permissions::from_mode(0o664),
+    )
+    .unwrap();
+
+    let six_days_ago = stamp(6 * 86400 + 60);
+    let packet_path = repo.path().join(".oms/task/current.md");
+    fs::create_dir_all(packet_path.parent().unwrap()).unwrap();
+    let dormant_packet = format!(
+        "# Active Task\n\
+         - task_id: task-dormant-state\n\
+         - status: active\n\
+         - updated: {six_days_ago}\n\
+         - last_activity: {six_days_ago}\n\
+         - closed_at:\n\n\
+         ## Goal\n\nOld 6-day handoff goal\n\n\
+         ## Verify\n\ncargo test --dormant-state-verify\n\n\
+         ## Next Step\n\nDormant instruction kept in JSON only\n"
+    );
+    fs::write(&packet_path, &dormant_packet).unwrap();
+
+    let host = PlanOnlyHost(GroupPlan);
+    let snapshot = state(repo.path(), &host);
+    assert!(!snapshot.get("task").get("stale").truth(), "{snapshot:?}");
+    assert!(snapshot.get("task").get("dormant").truth(), "{snapshot:?}");
+    assert_eq!(
+        snapshot.get("task").text("next"),
+        "Dormant instruction kept in JSON only"
+    );
+    assert_eq!(snapshot.get("plan").text("updated_at"), plan_updated);
+
+    let flag = AtomicBool::new(false);
+    let (code, out, err) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("dormant (idle 6d)"), "{rendered}");
+    assert!(!rendered.contains("stale (idle"), "{rendered}");
+    assert!(
+        rendered.contains("oms agent-task close --reason"),
+        "{rendered}"
+    );
+    for line in rendered.lines() {
+        if line.trim_start().starts_with("hint:") {
+            assert!(
+                line.chars().count() <= 80,
+                "hint line exceeds 80 columns ({}): {line}",
+                line.chars().count()
+            );
+        }
+    }
+    assert!(
+        !rendered.contains("Dormant instruction kept in JSON only"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("cargo test --dormant-state-verify"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("goal: Live plan goal"), "{rendered}");
+    assert!(
+        rendered.contains(&format!("updated: {plan_updated}")),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("actionable now: 7 (t1, t2, t3, t4, t5 +2 more)"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("t6"), "{rendered}");
+    assert_eq!(
+        fs::read_to_string(&packet_path).unwrap(),
+        dormant_packet,
+        "oms state must never edit or close the handoff packet"
+    );
+
+    // 8 days idle (past default 7d TTL): stale (not dormant), JSON keeps task.next,
+    // text hides next and keeps hint within 80 columns.
+    let eight_days_ago = stamp(8 * 86400 + 60);
+    let stale_packet = format!(
+        "# Active Task\n\
+         - task_id: task-stale-state\n\
+         - status: active\n\
+         - updated: {eight_days_ago}\n\
+         - last_activity: {eight_days_ago}\n\
+         - closed_at:\n\n\
+         ## Goal\n\nOld 8-day handoff goal\n\n\
+         ## Next Step\n\nStale instruction kept in JSON only\n"
+    );
+    fs::write(&packet_path, &stale_packet).unwrap();
+    let stale_json = state(repo.path(), &host);
+    assert!(
+        stale_json.get("task").get("stale").truth(),
+        "{stale_json:?}"
+    );
+    assert!(
+        !stale_json.get("task").get("dormant").truth(),
+        "{stale_json:?}"
+    );
+    assert_eq!(
+        stale_json.get("task").text("next"),
+        "Stale instruction kept in JSON only"
+    );
+    let (code, out, err) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let stale_rendered = String::from_utf8(out).unwrap();
+    assert!(
+        stale_rendered.contains("stale (idle 8d)"),
+        "{stale_rendered}"
+    );
+    assert!(
+        !stale_rendered.contains("dormant (idle"),
+        "{stale_rendered}"
+    );
+    assert!(
+        !stale_rendered.contains("Stale instruction kept in JSON only"),
+        "{stale_rendered}"
+    );
+    for line in stale_rendered.lines() {
+        if line.trim_start().starts_with("hint:") {
+            assert!(
+                line.chars().count() <= 80,
+                "hint line exceeds 80 columns ({}): {line}",
+                line.chars().count()
+            );
+        }
+    }
+
+    // Fresh packet remains active and keeps its next step.
+    let one_hour_ago = stamp(3600);
+    let fresh_packet = format!(
+        "# Active Task\n\
+         - task_id: task-fresh-state\n\
+         - status: active\n\
+         - updated: {one_hour_ago}\n\
+         - last_activity: {one_hour_ago}\n\
+         - closed_at:\n\n\
+         ## Goal\n\nFresh handoff goal\n\n\
+         ## Next Step\n\nFresh next step\n"
+    );
+    fs::write(&packet_path, &fresh_packet).unwrap();
+    let fresh_json = state(repo.path(), &host);
+    assert!(!fresh_json.get("task").get("stale").truth());
+    assert!(!fresh_json.get("task").get("dormant").truth());
+    assert_eq!(fresh_json.get("task").text("next"), "Fresh next step");
+    let (code, out, err) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let fresh_rendered = String::from_utf8(out).unwrap();
+    assert!(
+        fresh_rendered.contains("goal: Fresh handoff goal"),
+        "{fresh_rendered}"
+    );
+    assert!(
+        fresh_rendered.contains("next: Fresh next step"),
+        "{fresh_rendered}"
+    );
+    assert!(!fresh_rendered.contains("stale (idle"), "{fresh_rendered}");
+    assert!(
+        !fresh_rendered.contains("dormant (idle"),
+        "{fresh_rendered}"
+    );
+    assert!(
+        !fresh_rendered.contains("oms agent-task close --reason"),
+        "{fresh_rendered}"
+    );
+}
+
+#[test]
+fn state_honors_task_ttl_above_72h_as_dormant_not_stale() {
+    if std::env::var_os("OMS_STATE_TTL_ISOLATED").is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state_honors_task_ttl_above_72h_as_dormant_not_stale",
+                "--nocapture",
+            ])
+            .env("OMS_STATE_TTL_ISOLATED", "1")
+            .env("OMS_AGENT_TASK_TTL", "864000")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    struct PlanOnlyHost(GroupPlan);
+    impl HostServices for PlanOnlyHost {
+        fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+            &self.0
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let eight_days_ago = chrono::DateTime::<chrono::Utc>::from_timestamp(now - 8 * 86400 - 60, 0)
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let repo = TempRepo::new();
+    let packet_path = repo.path().join(".oms/task/current.md");
+    fs::create_dir_all(packet_path.parent().unwrap()).unwrap();
+    fs::write(
+        &packet_path,
+        format!(
+            "# Active Task\n\
+             - task_id: task-8d-ttl\n\
+             - status: active\n\
+             - updated: {eight_days_ago}\n\
+             - last_activity: {eight_days_ago}\n\
+             - closed_at:\n\n\
+             ## Goal\n\nPacket under 10d TTL\n\n\
+             ## Next Step\n\nKeep in JSON\n"
+        ),
+    )
+    .unwrap();
+
+    let host = PlanOnlyHost(GroupPlan);
+    let snapshot = state(repo.path(), &host);
+    assert!(!snapshot.get("task").get("stale").truth(), "{snapshot:?}");
+    assert!(snapshot.get("task").get("dormant").truth(), "{snapshot:?}");
+    assert_eq!(snapshot.get("task").text("next"), "Keep in JSON");
+
+    let flag = AtomicBool::new(false);
+    let (code, out, err) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("dormant (idle 8d)"), "{rendered}");
+    assert!(!rendered.contains("stale (idle"), "{rendered}");
+    assert!(!rendered.contains("Keep in JSON"), "{rendered}");
+}
