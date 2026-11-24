@@ -10,7 +10,7 @@ use crate::cli::Options;
 use crate::commands::{self, Session};
 use crate::{Error, Output, Result, Services, rows, text};
 use oms_panel_core::{
-    NativeCommand, Value, health, jobs, metrics, results, state, teams, workspaces,
+    NativeCommand, Store, Value, health, jobs, metrics, results, state, teams, workspaces,
 };
 use regex::Regex;
 use serde::Serialize;
@@ -47,6 +47,10 @@ pub const MAX_PAGE: usize = 1000;
 const MAX_INPUT_ROWS: usize = 512;
 const MAX_TEXT_CHARS: usize = 160;
 const MAX_OUTPUT_BYTES: usize = 48 * 1024;
+const MAX_WORK_ITEMS: usize = 64;
+const MAX_WORK_ITEM_DEPENDS: usize = 32;
+// Reserve envelope headroom so structuredContent + escaped MCP text stay <= 60_000 bytes.
+const WORK_ITEM_HOST_BUDGET: usize = 56_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DesktopView {
@@ -466,7 +470,7 @@ fn scrub_paths(input: &str) -> String {
     static PATH_RE: OnceLock<Regex> = OnceLock::new();
     let re = PATH_RE.get_or_init(|| {
         Regex::new(
-            r#"(?P<pre>^|[a-zA-Z][a-zA-Z0-9+.-]*://|[^A-Za-z0-9._/~\\])(?P<path>/(?:[^\s"'`<>|{}()\[\],;:/*]+/)+[^\s"'`<>|{}()\[\],;:/*]*|~/(?:[^\s"'`<>|{}()\[\],;:/*]+/)*[^\s"'`<>|{}()\[\],;:/*]*|[A-Za-z]:[\\/][^\s"'`<>|{}()\[\],;*]+)"#,
+            r#"(?P<pre>^|[a-zA-Z][a-zA-Z0-9+.-]*://|[^A-Za-z0-9._/~\\])(?P<path>/(?:[^\s"'`<>|{}()\[\],;:/*]+/)+[^\s"'`<>|{}()\[\],;:/*]*|(?:~/|\.{1,2}/|\.oms/)(?:[^\s"'`<>|{}()\[\],;:/*]+/)*[^\s"'`<>|{}()\[\],;:/*]*|[A-Za-z]:[\\/][^\s"'`<>|{}()\[\],;*]+)"#,
         )
         .expect("valid static path scrubber regex")
     });
@@ -1641,6 +1645,237 @@ fn project_jobs(repo: &Path, page: usize, stop: &AtomicBool) -> Result<BoardResp
     ))
 }
 
+fn valid_work_item_id(value: &str) -> bool {
+    (1..=96).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+fn work_issue(task: &Value) -> Value {
+    let Some((slug, number)) = task["issue"].as_str().and_then(|s| s.split_once('#')) else {
+        return Value::Null;
+    };
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if slug.len() <= 128
+        && slug
+            .split_once('/')
+            .is_some_and(|(o, r)| segment(o) && segment(r))
+        && number.len() <= 10
+        && !number.starts_with('0')
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+    {
+        task["issue"].clone()
+    } else {
+        Value::Null
+    }
+}
+
+fn work_response(items: Vec<Value>, omitted: usize, availability: &str) -> Result<Output> {
+    let payload = json!({"schema":1,"items":items,"omitted":omitted,"availability":availability});
+    let bytes = crate::json(&payload)?;
+    if oms_panel_core::outbound(&bytes).is_err() {
+        return Ok((
+            0,
+            crate::json(&json!({"schema":1,"items":[],"omitted":0,"availability":"unavailable"}))?,
+            vec![],
+        ));
+    }
+    Ok((0, bytes, vec![]))
+}
+
+fn work_verification(task: &Value, result: &Value) -> Option<&'static str> {
+    if task["completion_verified"] == false {
+        return Some("unverified");
+    }
+    let v = &result["verification"];
+    let verified = v["command_sha256"]
+        .as_str()
+        .is_some_and(|s| oms_command_plan::json::hex(s, 64));
+    match (v["status"].as_str(), v["exit"].as_i64()) {
+        (Some("passed"), Some(0)) if verified => Some("passed"),
+        (Some("failed"), Some(n)) if n != 0 && verified => Some("failed"),
+        (Some("not_run"), None) => Some("not_run"),
+        _ if v.is_null()
+            && task["state"] == "done"
+            && task["completion_kind"].is_string()
+            && task["completion_receipt"]["sha256"]
+                .as_str()
+                .is_some_and(|s| oms_command_plan::json::hex(s, 64)) =>
+        {
+            Some("verified")
+        }
+        _ => None,
+    }
+}
+
+/// A Plan view's task hash and a result's stored binding use different canonical
+/// encodings. Check both against the same disk generation before displaying a result.
+pub(crate) fn work_items(
+    repo: &Path,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Output> {
+    checkpoint(stop)?;
+    let report = match commands::query(
+        services,
+        NativeCommand::Plan,
+        repo,
+        &["list", "--json"],
+        stop,
+    ) {
+        Ok(v) if v["schema"] == 1 && v["tasks"].is_array() => v,
+        Err(e) if e.code == 130 => return Err(e),
+        _ => return work_response(vec![], 0, "unavailable"),
+    };
+    let tasks = report["tasks"].as_array().expect("checked task array");
+    if tasks.is_empty() {
+        return work_response(vec![], 0, "ready");
+    }
+    let plan_id = report["plan_id"].as_str().filter(|s| {
+        s.strip_prefix("plan_")
+            .is_some_and(|id| oms_command_plan::json::hex(id, 32))
+    });
+    let store = Store::open(repo).ok();
+    let raw_plan = store.as_ref().and_then(|store| {
+        store
+            .json(Path::new(".oms/plan/tasks.json"), 4 * 1024 * 1024, true)
+            .ok()
+            .flatten()
+    });
+    let mut partial = plan_id.is_none()
+        || raw_plan.is_none()
+        || raw_plan
+            .as_ref()
+            .is_some_and(|v| v["plan_id"] != report["plan_id"]);
+    let indexed = results::index_rows(repo).unwrap_or_else(|_| {
+        partial = true;
+        vec![]
+    });
+    let mut latest = BTreeMap::new();
+    for row in &indexed {
+        if row["kind"] == "panel-result"
+            && let Some(id) = row["task_id"].as_str()
+        {
+            latest.insert(id, row);
+        }
+    }
+    let mut ids = BTreeMap::new();
+    for task in tasks {
+        if let Some(id) = task["id"].as_str().filter(|id| valid_work_item_id(id)) {
+            *ids.entry(id).or_insert(0usize) += 1;
+        }
+    }
+    let mut items = Vec::new();
+    let mut size = 512;
+    for task in tasks {
+        checkpoint(stop)?;
+        if items.len() == MAX_WORK_ITEMS {
+            break;
+        }
+        let Some(id) = task["id"].as_str().filter(|id| ids.get(id) == Some(&1)) else {
+            partial = true;
+            continue;
+        };
+        let state = task["state"].as_str().filter(|s| {
+            matches!(
+                *s,
+                "ready"
+                    | "claimed"
+                    | "running"
+                    | "review"
+                    | "landing"
+                    | "blocked"
+                    | "done"
+                    | "cancelled"
+            )
+        });
+        let title = opt_nonempty_str(task, "title", MAX_TEXT_CHARS);
+        let owner = ["claimed_by_participant", "owner", "provider"]
+            .iter()
+            .find_map(|key| task[*key].as_str().filter(|s| valid_work_item_id(s)));
+        let depends = task["depends"].as_array().filter(|deps| {
+            deps.len() <= MAX_WORK_ITEM_DEPENDS
+                && deps.iter().all(|d| {
+                    d.as_str()
+                        .is_some_and(|dep| dep != id && ids.get(dep) == Some(&1))
+                })
+        });
+        let issue = work_issue(task);
+        let task_hash = task["task_sha256"]
+            .as_str()
+            .filter(|s| oms_command_plan::json::hex(s, 64));
+        let mut result = Value::Null;
+        if let Some(row) = latest.get(id) {
+            let recorded = raw_plan.as_ref().filter(|plan| {
+                plan_id.is_some()
+                    && plan["plan_id"] == report["plan_id"]
+                    && plan["tasks"][id]["id"] == id
+            });
+            if let (Some(store), Some(plan), Some(hash)) = (&store, recorded, task_hash)
+                && oms_command_plan::stored_task_revision(
+                    &serde_json::to_vec(&plan["tasks"][id]).map_err(Error::new)?,
+                )
+                .is_ok_and(|v| v == hash)
+            {
+                match results::verified_bound_result(store, plan, row) {
+                    Ok(Some(v)) => result = v,
+                    Ok(None) => (),
+                    Err(_) => partial = true,
+                }
+            } else {
+                partial = true;
+            }
+        }
+        let outcome = result["outcome"]
+            .as_str()
+            .filter(|s| matches!(*s, "accepted" | "completed" | "failed" | "rejected"));
+        if !result.is_null() && outcome.is_none() {
+            partial = true;
+            result = Value::Null;
+        }
+        let verification = work_verification(task, &result);
+        partial |= state.is_none()
+            || title.is_null()
+            || depends.is_none()
+            || verification == Some("unverified")
+            || (!result["verification"].is_null() && verification.is_none());
+        let revision = plan_id.zip(task_hash).map(|(lineage, hash)| {
+            oms_panel_core::digest(
+                json!([lineage, id, hash, result["revision"], verification])
+                    .to_string()
+                    .as_bytes(),
+            )
+        });
+        partial |= revision.is_none();
+        let item = json!({"id":id,"title":title,"owner":owner,"state":state,"depends":depends,"issue":issue,
+            "result":result["outcome"],"verification":verification,"revision":revision});
+        let encoded = item.to_string();
+        size += encoded.len() + json!(encoded).to_string().len() + 4;
+        if size > WORK_ITEM_HOST_BUDGET {
+            break;
+        }
+        items.push(item);
+    }
+    let omitted = tasks.len() - items.len();
+    work_response(
+        items,
+        omitted,
+        if partial || omitted > 0 {
+            "partial"
+        } else {
+            "ready"
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2055,6 +2290,15 @@ mod tests {
             ),
             (format!("check `{tilde_path}` now"), "check `[path]` now"),
             (format!("check `{win_path}` now"), "check `[path]` now"),
+            (
+                "check `.oms/plan/작업.json` now".into(),
+                "check `[path]` now",
+            ),
+            (
+                "check <../private/report.md> now".into(),
+                "check <[path]> now",
+            ),
+            ("check ./private/notes now".into(), "check [path] now"),
         ] {
             let scrubbed = scrub_paths(&wrapped);
             assert_eq!(scrubbed, expected, "input: {wrapped}");
@@ -2146,5 +2390,155 @@ mod tests {
         assert_eq!(by_stamp("2026-11-24T12:03:00Z")["summary"], "작업방 질문");
         assert_eq!(by_stamp("2026-11-24T12:02:00Z")["summary"], "작업방 질문");
         assert_eq!(by_stamp("2026-11-24T12:01:00Z")["summary"], "작업방 메시지");
+    }
+
+    #[test]
+    fn work_items_projection_verifies_bindings_rejects_false_joins_and_enforces_budget() {
+        struct PlanFixture {
+            plan: Result<Value>,
+        }
+        impl PeerExecutor for PlanFixture {
+            fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                Err(Error::new("no external commands"))
+            }
+        }
+        impl Services for PlanFixture {
+            fn command(
+                &self,
+                cmd: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                match cmd {
+                    NativeCommand::Plan => match &self.plan {
+                        Ok(v) => Ok(CommandOutput {
+                            code: 0,
+                            stdout: serde_json::to_vec(v).unwrap(),
+                            stderr: vec![],
+                            output_complete: true,
+                            cleanup_complete: true,
+                            limited: false,
+                        }),
+                        Err(e) => Err(Error::new(&e.message)),
+                    },
+                    _ => Err(Error::new("unused")),
+                }
+            }
+        }
+
+        let tmp = TempDir::new("desktop-work-items");
+        let repo = &tmp.0;
+        let run = |plan: Result<Value>| {
+            let (_, out, _) =
+                work_items(repo, &PlanFixture { plan }, &AtomicBool::new(false)).unwrap();
+            serde_json::from_slice::<Value>(&out).unwrap()
+        };
+        let read = |plan: &Value, tasks: Vec<Value>| {
+            run(Ok(
+                json!({"schema":1,"plan_id":plan["plan_id"],"tasks":tasks}),
+            ))
+        };
+        assert_eq!(
+            run(Err(Error::new("unavailable")))["availability"],
+            "unavailable"
+        );
+        assert_eq!(read(&Value::Null, vec![])["availability"], "ready");
+        assert!(!repo.join(".oms").exists());
+        let source = json!({"id":"task-a","title":"한글 작업","state":"running","depends":[],"provider":"claude",
+                          "verify":"private verifier","issue":"org/project#433"});
+        let plan = json!({"plan_id":format!("plan_{}","a".repeat(32)),"tasks":{"task-a":source}});
+        let report_row = |record: &Value| {
+            let mut row = record.clone();
+            row["task_sha256"] =
+                oms_command_plan::stored_task_revision(&serde_json::to_vec(record).unwrap())
+                    .unwrap()
+                    .into();
+            row
+        };
+        for d in [
+            ".oms",
+            ".oms/plan",
+            ".oms/artifacts",
+            ".oms/artifacts/panel-results",
+        ] {
+            crate::orchestrator::account_binding::test_support::private_dir(&repo.join(d));
+        }
+        std::fs::write(repo.join(".oms/plan/tasks.json"), plan.to_string()).unwrap();
+        let query = || read(&plan, vec![report_row(&source)]);
+        let unbound = query();
+        let current = unbound["items"][0]["revision"].clone();
+        assert_eq!(unbound["availability"], "ready");
+        assert!(oms_command_plan::json::hex(current.as_str().unwrap(), 64));
+        assert!(unbound["items"][0]["result"].is_null());
+        assert!(!unbound.to_string().contains("private verifier"));
+        let raw = oms_json::parse_strict(&serde_json::to_vec(&source).unwrap()).unwrap();
+        let binding = json!({"plan_id":plan["plan_id"],"task_sha256":oms_json::projection_cache_digest(&raw).unwrap()});
+        let mut result = json!({"kind":"oms-panel-result","schema":1,"task_id":"task-a","outcome":"completed",
+             "revision":"1a".repeat(12),"summary":"private answer","summary_sha256":oms_panel_core::digest(b"private answer"),
+             "verification":{"status":"passed","exit":0,"command_sha256":"f".repeat(64)},"plan_binding":binding});
+        let write = |result: &Value| {
+            let path = ".oms/artifacts/panel-results/result.json";
+            let raw = result.to_string();
+            std::fs::write(repo.join(path), &raw).unwrap();
+            let row = json!({"kind":"panel-result","task_id":"task-a","artifact":path,"artifact_sha256":oms_panel_core::digest(raw.as_bytes())});
+            std::fs::write(repo.join(".oms/artifacts/index.jsonl"), format!("{row}\n")).unwrap();
+        };
+        write(&result);
+        let good = query();
+        let row = &good["items"][0];
+        assert_eq!(good["availability"], "ready");
+        assert_eq!(row["result"], "completed");
+        assert_eq!(row["verification"], "passed");
+        assert_ne!(row["revision"], current);
+        assert_eq!(row["depends"], json!([]));
+        assert_eq!(row["issue"], "org/project#433");
+        assert!(!good.to_string().contains("private answer"));
+        let mut changed = source.clone();
+        changed["title"] = json!("New generation");
+        let changed_view = read(&plan, vec![report_row(&changed)]);
+        let row = &changed_view["items"][0];
+        assert_eq!(changed_view["availability"], "partial");
+        assert!(row["result"].is_null());
+        assert_ne!(row["revision"], current);
+        for invalid in [
+            Value::Null,
+            json!({"plan_id":"other","task_sha256":binding["task_sha256"]}),
+            json!({"plan_id":plan["plan_id"],"task_sha256":"b".repeat(64)}),
+        ] {
+            result["plan_binding"] = invalid;
+            write(&result);
+            assert!(query()["items"][0]["verification"].is_null());
+        }
+        result["plan_binding"] = binding;
+        result["verification"]["exit"] = 2.into();
+        write(&result);
+        assert_eq!(query()["availability"], "partial");
+        assert!(query()["items"][0]["verification"].is_null());
+        std::fs::write(
+            repo.join(".oms/artifacts/panel-results/result.json"),
+            b"altered",
+        )
+        .unwrap();
+        assert_eq!(query()["availability"], "partial");
+        assert!(query()["items"][0]["result"].is_null());
+        let mut changed = report_row(&source);
+        changed["completion_verified"] = false.into();
+        changed["depends"] = json!(["foreign"]);
+        let bad = read(&plan, vec![changed]);
+        assert_eq!(bad["items"][0]["verification"], "unverified");
+        assert!(bad["items"][0]["depends"].is_null());
+        let many = (0..90)
+            .map(|i| {
+                json!({"id":format!("t{i}"),"title":"줄🌐".repeat(80),"state":"ready",
+            "depends":[],"task_sha256":"b".repeat(64)})
+            })
+            .collect();
+        let bounded = read(&plan, many);
+        let shown = bounded["items"].as_array().unwrap().len();
+        assert!(shown > 0 && shown <= MAX_WORK_ITEMS);
+        assert_eq!(shown + bounded["omitted"].as_u64().unwrap() as usize, 90);
+        let encoded = bounded.to_string();
+        assert!(encoded.len() + json!(encoded).to_string().len() + 1024 < 60_000);
     }
 }
