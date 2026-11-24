@@ -4317,7 +4317,11 @@ fn render_main_section(
     let mut out = Vec::new();
     let mut switch_cols = None;
     if use_cards {
-        let (top, cols) = if allow_switch && main.is_some() {
+        let (top, cols) = if allow_switch
+            && main.is_some_and(|call| {
+                call["provider"] != "claude"
+                    || crate::native_panel::claude_assisted_exit_available()
+            }) {
             card_top_with_action(
                 "Overall Main",
                 Some(state),

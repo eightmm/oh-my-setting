@@ -475,6 +475,16 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
     };
     let current_binding = text(&operation["refs"], "native_binding_sha256").to_owned();
     let current_result = current["artifact_sha256"].as_str().map(str::to_owned);
+    if stage == "successor" {
+        let arm = write_assisted_exit_fixture(&spy.load(), "operator_exit_armed", u64::MAX);
+        spy.calls.borrow_mut().clear();
+        let before = native_assignment_state(&repo, ROOM);
+        let error = adopt(&current_binding, current_result.as_deref()).unwrap_err();
+        assert!(error.message.contains("assisted exit"), "{}", error.message);
+        assert_eq!(native_assignment_state(&repo, ROOM), before);
+        assert!(spy.mutating_calls().is_empty());
+        std::fs::remove_file(arm).unwrap();
+    }
     let view =
         oms_panel_core::results::results(&repo, Some("native-one"), &spy, &spy.stop).unwrap();
     assert_eq!(
@@ -729,6 +739,26 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
             next_assignment.packet()["custody_succession_sha256"],
             adopted["succession_sha256"]
         );
+        let current = native_assignment::current_operation(&spy.load(), attempt).unwrap();
+        assert_ne!(current["parent_attempt_id"], spy.main_attempt);
+        assert_eq!(current["refs"]["native_custodian_attempt"], spy.main_attempt);
+        let before = native_assignment_state(&repo, ROOM);
+        {
+            let store = Store::open(&repo).unwrap();
+            let _fence = store
+                .transaction("panel-provider-sessions", Duration::from_secs(3))
+                .unwrap();
+            let error = crate::native_panel::check_native_assignments(
+                &repo,
+                ROOM,
+                &spy.main_attempt,
+                &spy,
+                &spy.stop,
+            )
+            .unwrap_err();
+            assert!(error.message.contains("unresolved native assignments"));
+        }
+        assert_eq!(native_assignment_state(&repo, ROOM), before);
         let mut source = next_assignment.report_template();
         source["summary"] = "Round two candidate for parent verification".into();
         let patch=b"diff --git a/src/value.txt b/src/value.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/value.txt\n@@ -0,0 +1 @@\n+answer\n";
