@@ -508,29 +508,6 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     None
                 };
             let mut text = data.to_string();
-            if data["kind"] == "oms-panel-project-graph"
-                && text.len() + json!(&text).to_string().len() + 1024 > 60_000
-            {
-                let nodes = data["nodes"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                let ids = nodes
-                    .iter()
-                    .take(4)
-                    .filter_map(|n| n["id"].as_str())
-                    .map(|id| id.chars().take(80).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                text = format!(
-                    "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
-                    data["status"].as_str().unwrap_or("unknown"),
-                    data["provenance"]["source"].as_str().unwrap_or("unknown"),
-                    nodes.len(),
-                    data["edges"].as_array().map_or(0, Vec::len),
-                    ids
-                );
-            }
             if data["dashboard"]["managedScratch"].is_object()
                 && text.len() + json!(&text).to_string().len() + 1024 > crate::OUTPUT_LIMIT
             {
@@ -689,6 +666,9 @@ impl Server<'_> {
                     &params["_meta"]
                 };
                 let result = self.panel_call(name, args, meta);
+                if name == GRAPH {
+                    return self.graph_reply(id, params, result);
+                }
                 if name == ASSIGN_RESULT {
                     match result {
                         Ok(data)
@@ -746,6 +726,59 @@ impl Server<'_> {
         reply(
             id,
             self.complete(result, params, method.starts_with("resources/")),
+        )
+    }
+
+    fn graph_reply(&self, id: &Value, params: &Value, data: PanelResult<Value>) -> Value {
+        let mut frame = reply(id, self.complete(response(data), params, false));
+        // write_response uses this ASCII encoding and appends one newline.
+        let fits = |frame: &Value| {
+            crate::value::encode(frame, true, false, false, false)
+                .as_bytes()
+                .len()
+                < crate::OUTPUT_LIMIT
+        };
+        if frame["result"]["isError"] != false || fits(&frame) {
+            return frame;
+        }
+        let graph = &frame["result"]["structuredContent"];
+        let nodes = graph["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let ids = nodes
+            .iter()
+            .take(4)
+            .filter_map(|n| n["id"].as_str())
+            .map(|id| id.chars().take(80).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
+            graph["status"].as_str().unwrap_or("unknown"),
+            graph["provenance"]["source"].as_str().unwrap_or("unknown"),
+            nodes.len(),
+            graph["edges"].as_array().map_or(0, Vec::len),
+            ids
+        );
+        for summary in [
+            text.as_str(),
+            "Project graph available in structuredContent.",
+        ] {
+            frame["result"]["content"] = json!([{"type":"text","text":summary}]);
+            if fits(&frame) {
+                return frame;
+            }
+        }
+        reply(
+            id,
+            self.complete(
+                response(Err(
+                    "OMS project graph exceeds the response limit. Request fewer nodes.".into(),
+                )),
+                params,
+                false,
+            ),
         )
     }
 

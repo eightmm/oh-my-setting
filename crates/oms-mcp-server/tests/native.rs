@@ -463,6 +463,81 @@ fn cross_host_project_reads() {
             .contains("60 nodes")
     );
     assert!(page.to_string().len() < 60_000);
+
+    // A long tracked path is escaped in the widget-only declaration, outside structuredContent.
+    let path = format!("{}/{}/code.rs", "\"".repeat(224), "\"".repeat(223));
+    let node = format!("symbol:{path}::function:read_value");
+    let parameters = (0..15)
+        .map(|i| format!("parameter_{i}: usize"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let definition =
+        json!({"id":node,"line":1,"endLine":2,"signature":format!("fn read_value({parameters})")});
+    let selected = json!({"id":node,"label":"read_value","kind":"function","path":&path[..260]});
+    let mut nodes = vec![selected.clone()];
+    nodes.extend((0..53).map(|i| {
+        let path = format!("src/{i:02}/{}.rs", "x".repeat(128));
+        json!({"id":format!("file:{path}"),"label":"f".repeat(110),"kind":"file","path":path,"language":"rust"})
+    }));
+    let mut graph = json!({"schema":1,"kind":"oms-panel-project-graph","status":"ready","completeness":"complete",
+        "provenance":{"source":"cache"},"limits":{"maxNodes":60,"maxEdges":180,"maxBytes":52000},
+        "counts":{"shown_nodes":54,"shown_edges":0},"nodes":nodes,"edges":[],
+        "selection":{"status":"found","node":selected,"neighbors":[],"breadcrumbs":[]}});
+    let mut native = graph.clone();
+    native["selection"]["definition"] = definition.clone();
+    fixture_settings(&source, json!({"stdout":native.to_string()}));
+    let params = json!({"name":"oms_panel_project_graph","arguments":{"project":"fixture","node":node,"limit":60},
+        "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}});
+    let wire_call = |c: &mut Client, id: Value| {
+        let request = json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params});
+        c.raw(format!("{request}\n").as_bytes());
+        let line = c.read_line();
+        assert!(
+            line.ends_with('\n') && line.len() <= 60_000,
+            "{} wire bytes",
+            line.len()
+        );
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["result"]["resultType"], "complete");
+        reply
+    };
+    let reply = wire_call(&mut c, json!(2));
+    good(&reply);
+    assert_eq!(reply["result"]["structuredContent"], graph);
+    assert_eq!(reply["result"]["_meta"]["graphDefinition"], definition);
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("54 nodes")
+    );
+
+    // Even a summary can exceed the envelope budget with a maximally escaped legal request ID.
+    let paths = (0..4)
+        .map(|i| format!("{}/{}{i}.rs", "🌳".repeat(40), "🌳".repeat(34)))
+        .chain((0..49).map(|i| format!("src/{i}_{}/{}.rs", "z".repeat(220), "x".repeat(78))));
+    let mut nodes = paths
+        .map(|path| {
+            json!({
+                "id":format!("file:{path}"),"path":path,"kind":"file","language":"rust",
+                "label":path.rsplit('/').next().unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    nodes.insert(4, selected);
+    graph["nodes"] = json!(nodes);
+    native = graph.clone();
+    native["selection"]["definition"] = definition.clone();
+    fixture_settings(&source, json!({"stdout":native.to_string()}));
+    let reply = wire_call(&mut c, json!("\u{1}".repeat(1024)));
+    good(&reply);
+    assert_eq!(reply["result"]["structuredContent"], graph);
+    assert_eq!(reply["result"]["_meta"]["graphDefinition"], definition);
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        "Project graph available in structuredContent."
+    );
 }
 fn mcp_app_binding_boundaries() {
     use std::os::unix::fs::PermissionsExt;
