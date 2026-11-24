@@ -826,7 +826,21 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
             assert_eq!(assign(&other, "codex", "task").0, 2);
             assert_eq!(assign(&digest, "pi", "task").0, 2);
             assert_eq!(assign(&digest, "codex", "task").0, 2);
-            assert!(success(assign(&digest, "claude", "task")).flag("fresh"));
+            let (intent, simultaneous) = std::thread::scope(|scope| {
+                let other = scope.spawn(|| success(assign(&digest, "claude", "task")));
+                (
+                    success(assign(&digest, "claude", "task")),
+                    other.join().unwrap(),
+                )
+            });
+            assert_ne!(
+                intent.flag("fresh"),
+                simultaneous.flag("fresh"),
+                "exactly one dispatch permission"
+            );
+            assert_eq!(intent.text("assignedAt"), simultaneous.text("assignedAt"));
+            let assigned_at = intent.text("assignedAt");
+            assert!(!assigned_at.is_empty());
             let first = std::fs::read(&log).unwrap();
             assert_ne!(first, before);
             let again = success(assign(&digest, "claude", "task"));
@@ -836,6 +850,7 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                 "duplicate intent appends nothing"
             );
             assert_eq!(again.text("status"), "assigned");
+            assert_eq!(again.text("assignedAt"), assigned_at);
             assert_eq!(again.text("role"), "researcher");
             assert!(again.flag("readOnly"));
             assert!(!again.flag("fresh"));
@@ -859,7 +874,10 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                 )
             };
             assert_eq!(status(&other).0, 2);
-            assert_eq!(success(status(&digest)).text("operation"), "");
+            let read = success(status(&digest));
+            assert_eq!(read.text("assignedAt"), assigned_at);
+            assert_eq!(read.text("operation"), "");
+            assert_eq!(fs::read(&log).unwrap(), first);
             let terminal = oms_command_room::Attempt {
                 attempt_id: "owner".into(),
                 tool: "panel-main".into(),
@@ -907,6 +925,12 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
             assert_eq!(receipt(&other, "ask-1").0, 2);
             let started = success(receipt(&digest, "ask-20261124T000000Z-abcd"));
             assert_eq!(started.text("status"), "started");
+            let linked = fs::read(&log).unwrap();
+            assert_eq!(
+                success(receipt(&digest, started.text("operation"))).text("assignedAt"),
+                assigned_at
+            );
+            assert_eq!(fs::read(&log).unwrap(), linked);
             assert_eq!(started.text("operation"), "ask-20261124T000000Z-abcd");
             assert_eq!(started.text("thread"), "ask-20261124T000000Z-abcd");
             assert_eq!(receipt(&digest, "ask-other").0, 2, "receipt is write-once");

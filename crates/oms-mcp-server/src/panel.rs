@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v14.html";
+const URI: &str = "ui://oms/conversation-panel/v15.html";
+const V14: &str = "ui://oms/conversation-panel/v14.html";
 const V13: &str = "ui://oms/conversation-panel/v13.html";
 const V12: &str = "ui://oms/conversation-panel/v12.html";
 const V11: &str = "ui://oms/conversation-panel/v11.html";
@@ -65,6 +66,100 @@ const ASSIGN: &str = "oms_assign_provider";
 const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
 type PanelResult<T> = Result<T, String>;
+
+// The committed handoff fixes the timestamp. Legacy linked requests keep the
+// original operation from their receipt; only new bound asks use this address.
+fn assignment_address(data: &Value, binding: &str) -> Option<String> {
+    let stamp = data["assignedAt"].as_str()?;
+    let time = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%SZ").ok()?;
+    if stamp.len() != 20 || time.format("%Y-%m-%dT%H:%M:%SZ").to_string() != stamp {
+        return None;
+    }
+    let suffix = crate::storage::hash(format!("assignment-operation/{binding}"));
+    Some(format!("ask-{}-{suffix}", time.format("%Y%m%dT%H%M%SZ")))
+}
+
+fn assignment_directory(
+    repo: &Path,
+    data: &Value,
+    op: &str,
+    binding: &str,
+    recovering: bool,
+) -> PanelResult<Option<PathBuf>> {
+    use crate::storage::Directory;
+    let dir = match Directory::run(repo, op, recovering) {
+        Ok(dir) => dir,
+        Err(_) if recovering => return Ok(None),
+        Err(_) => return Err("The recorded assignment operation is unavailable.".into()),
+    };
+    let proof = if recovering {
+        // A reservation and its metadata can precede supervisor startup. Read
+        // only the native supervisor's private directory and its fixed receipts.
+        let Some(before) = rustix::fs::fstat(&dir.fd)
+            .ok()
+            .filter(|s| s.st_mode & 0o077 == 0)
+        else {
+            return Ok(None);
+        };
+        let root = oms_safe_fs::Root::open(repo)
+            .map_err(|_| "The assignment repository is unavailable.")?;
+        let read = |name, limit| {
+            root.read(
+                &format!("{}/{op}/{name}", crate::RUN_ROOT),
+                limit,
+                oms_safe_fs::Policy::manifest(),
+            )
+        };
+        let number = |bytes: &[u8]| -> Option<i32> {
+            let line = std::str::from_utf8(bytes).ok()?.strip_suffix('\n')?;
+            let value: i32 = line.parse().ok()?;
+            (value.to_string() == line).then_some(value)
+        };
+        if !read("pid", 32).is_ok_and(|b| number(&b).is_some_and(|v| v > 0)) {
+            return Ok(None);
+        }
+        match read("status", 32) {
+            // The supervisor writes an 8-bit exit code or a negated Unix
+            // wait-status signal (7 bits, with 0x7f reserved for stops).
+            Ok(bytes) if number(&bytes).is_some_and(|v| (-126..=255).contains(&v)) => (),
+            Err(oms_safe_fs::Error::Missing) => (),
+            _ => return Ok(None),
+        }
+        let Some(bytes) = read("meta.json", 256 * 1024).ok() else {
+            return Ok(None);
+        };
+        // The generic MCP parser permits duplicate members. A linkage proof
+        // must have a single interpretation and still name the opened directory.
+        if oms_context::parse_json_bounded(&bytes, 256 * 1024).is_err()
+            || !Directory::run(repo, op, true)
+                .ok()
+                .and_then(|d| rustix::fs::fstat(&d.fd).ok())
+                .is_some_and(|s| {
+                    s.st_dev == before.st_dev
+                        && s.st_ino == before.st_ino
+                        && s.st_mode == before.st_mode
+                })
+        {
+            return Ok(None);
+        }
+        crate::value::from_slice(&bytes).unwrap_or(Value::Null)
+    } else {
+        crate::storage::meta(&dir.path)
+    };
+    if proof["operation"] != op
+        || proof["thread"] != op
+        || proof["kind"] != "ask"
+        || proof["panel_assignment"] != binding
+        || proof["targets"] != json!([data["provider"]])
+    {
+        return if recovering {
+            Ok(None)
+        } else {
+            Err("The recorded operation does not match this assignment.".into())
+        };
+    }
+    Ok(Some(dir.path))
+}
 
 pub(super) fn runtime_request(request: &Value) -> bool {
     let id = &request["id"];
@@ -233,7 +328,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
                "project":project,"room":ident,"requestId":{"type":"string","format":"uuid"},
                "provider":{"type":"string","enum":["claude","agy"]},
                "title":{"type":"string","minLength":1,"maxLength":120},
-               "task":{"type":"string","minLength":1,"maxLength":4000}
+               "task":{"type":"string","minLength":1,"maxLength":4000},
+               "repairOnly":{"type":"boolean","description":"Only link an existing verified operation; never create an assignment or start a provider."}
             }),
             &["room", "requestId", "provider", "title", "task"],
             true
@@ -607,7 +703,22 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12 | V13)
+                    Some(
+                        URI | V1
+                            | V2
+                            | V3
+                            | V4
+                            | V5
+                            | V6
+                            | V7
+                            | V8
+                            | V9
+                            | V10
+                            | V11
+                            | V12
+                            | V13
+                            | V14
+                    )
                 ) =>
             {
                 json!({"contents":[{
@@ -647,7 +758,15 @@ impl Server<'_> {
                     CAPABILITIES => &["project", "offset"],
                     START_STATUS => &["project", "requestId"],
                     START => &["project", "main", "goal", "requestId"],
-                    ASSIGN => &["project", "room", "requestId", "provider", "title", "task"],
+                    ASSIGN => &[
+                        "project",
+                        "room",
+                        "requestId",
+                        "provider",
+                        "title",
+                        "task",
+                        "repairOnly",
+                    ],
                     ASSIGN_RESULT => &["project", "room", "requestId", "after"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
                     _ => return error(id, -32602, "unknown desktop tool"),
@@ -1562,20 +1681,21 @@ impl Server<'_> {
             check(&data)?;
             let mut out = summary(&data, data["status"].as_str().unwrap_or("assigned"));
             out["task"] = data["task"].clone();
-            if data["status"] == "started" {
-                let op = data["operation"].as_str().unwrap_or_default();
-                let dir = crate::storage::Directory::run(repo, op, false)
-                    .map_err(|_| "The recorded assignment operation is unavailable.")?;
-                let proof = crate::storage::meta(&dir.path);
-                if proof["operation"] != op
-                    || proof["thread"] != op
-                    || proof["kind"] != "ask"
-                    || proof["panel_assignment"] != binding
-                    || proof["targets"] != json!([data["provider"]])
-                {
-                    return Err("The recorded operation does not match this assignment.".into());
+            let recovered = data["status"] == "assigned";
+            let operation = if recovered {
+                assignment_address(&data, &binding)
+            } else {
+                data["operation"].as_str().map(str::to_owned)
+            };
+            if let Some(op) = operation.as_deref()
+                && let Some(dir) = assignment_directory(repo, &data, op, &binding, recovered)?
+            {
+                if recovered {
+                    out["status"] = json!("recovered");
+                    out["operation"] = json!(op);
+                    out["thread"] = json!(op);
                 }
-                let (state, exit) = crate::peer::status(&dir.path);
+                let (state, exit) = crate::peer::status(&dir);
                 out["execution"] = json!({"state":state,"exit":exit});
                 out["transcript"] = self.provider_thread(
                     repo,
@@ -1606,8 +1726,15 @@ impl Server<'_> {
             crate::output::outbound(field.as_bytes(), &Value::Null)
                 .map_err(|_| "Assignment withheld by the OMS outbound scan.")?;
         }
-        let (data, _) = self.panel_exec(
-            repo,
+        let repair = match args.get("repairOnly") {
+            None => false,
+            Some(v) => v.as_bool().ok_or("Invalid repairOnly flag.")?,
+        };
+        // A repair must remain unable to create an intent even if the Room
+        // changed since the widget observed the unlinked operation.
+        let argv = if repair {
+            Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[])
+        } else {
             Self::assignment_argv(
                 "desktop-assign",
                 repo,
@@ -1619,9 +1746,9 @@ impl Server<'_> {
                     ("--label", title),
                     ("--text", task),
                 ],
-            ),
-            false,
-        )?;
+            )
+        };
+        let (data, _) = self.panel_exec(repo, argv, false)?;
         check(&data)?;
         if data["provider"]
             != if provider == "agy" {
@@ -1634,40 +1761,43 @@ impl Server<'_> {
         {
             return Err("The request does not match the recorded assignment.".into());
         }
-        if data["fresh"] != true {
-            // A recorded intent without a receipt may already have launched; its
-            // acknowledgment is unknown, so it is never dispatched again.
-            return Ok(summary(
-                &data,
-                if data["status"] == "started" {
-                    "recorded"
-                } else {
-                    "unconfirmed"
-                },
-            ));
+        if data["status"] == "started" {
+            if repair {
+                assignment_directory(
+                    repo,
+                    &data,
+                    data["operation"].as_str().unwrap_or_default(),
+                    &binding,
+                    false,
+                )?;
+            }
+            return Ok(summary(&data, "recorded"));
         }
         let unconfirmed = |data: &Value| summary(data, "unconfirmed");
-        let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
-        let launched = self.start_bound_peer(
-            &json!({
-                "repo":path,"kind":"ask","prompt":task,"providers":provider,
-                "debate_rounds":0,"include_memory":false,"include_task":false
-            }),
-            Some(&binding),
-        );
-        let Some(launched) = launched
-            .ok()
-            .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
-            .filter(|v| v["started"] == true && v["thread"] == v["operation"])
-        else {
+        let Some(operation) = assignment_address(&data, &binding) else {
             return Ok(unconfirmed(&data));
         };
-        let Some(operation) = launched["operation"]
-            .as_str()
-            .filter(|v| crate::operation(v))
-        else {
+        if !repair && data["fresh"] == true {
+            let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+            let started = self
+                .start_bound_peer(
+                    &json!({"repo":path,"kind":"ask","prompt":task,"providers":provider,
+                    "debate_rounds":0,"include_memory":false,"include_task":false}),
+                    Some((&operation, &binding)),
+                )
+                .ok()
+                .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
+                .is_some_and(|v| {
+                    v["started"] == true && v["operation"] == operation && v["thread"] == operation
+                });
+            if !started {
+                return Ok(unconfirmed(&data));
+            }
+        } else if (!repair && data["fresh"] != false)
+            || assignment_directory(repo, &data, &operation, &binding, true)?.is_none()
+        {
             return Ok(unconfirmed(&data));
-        };
+        }
         let recorded = self.panel_exec(
             repo,
             Self::assignment_argv(
@@ -1676,12 +1806,18 @@ impl Server<'_> {
                 room,
                 request,
                 &digest,
-                &[("--operation", operation)],
+                &[("--operation", &operation)],
             ),
             false,
         );
         match recorded {
-            Ok((receipt, _)) if check(&receipt).is_ok() && receipt["operation"] == operation => {
+            Ok((receipt, _))
+                if check(&receipt).is_ok()
+                    && receipt["operation"] == operation
+                    && ["provider", "title", "task", "assignedAt"]
+                        .iter()
+                        .all(|k| receipt[*k] == data[*k]) =>
+            {
                 Ok(summary(&receipt, "started"))
             }
             _ => {
@@ -1740,6 +1876,9 @@ impl Server<'_> {
             return;
         };
         data["assignment"] = json!({"state":result["status"],"execution":result["execution"],"title":result["title"]});
+        if result["status"] == "recovered" {
+            data["assignment"]["task"] = result["task"].clone();
+        }
         if result["execution"]["state"] == "done"
             && result["execution"]["exit"] == 0
             && let Some(path) = repo.to_str()

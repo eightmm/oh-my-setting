@@ -755,7 +755,7 @@ fn desktop_assignment() {
     let record_for = |status: &str, fresh: Option<bool>, operation: Value| {
         let mut r = json!({"request":req,"room":"r","participant":format!("ask-{req}"),"provider":"claude","role":"researcher",
             "title":"Find callers","task":"inspect the callers","readOnly":true,"thread":operation,
-            "status":status,"operation":operation});
+            "status":status,"operation":operation,"assignedAt":"2026-11-24T01:02:03Z"});
         if let Some(f) = fresh {
             r["fresh"] = json!(f);
         }
@@ -855,41 +855,181 @@ fn desktop_assignment() {
             .join("status")
             .is_file()
     });
-    // A retry observes the recorded intent and never starts another provider.
-    for (status, expected) in [("assigned", "unconfirmed"), ("started", "recorded")] {
-        let op = if status == "started" {
-            json!(operation)
+    let assigned = record_for("assigned", Some(false), Value::Null);
+    let linked = record_for("started", None, json!(operation));
+    let query = json!({"room":"r","requestId":req});
+    let repair = {
+        let mut a = args.clone();
+        a["repairOnly"] = true.into();
+        a
+    };
+    let host = json!({"threadId":thread});
+    // A new client has only the Room/request after losing the launch reply.
+    drop(c);
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign-status":assigned,"desktop-assign":assigned,"desktop-assign-receipt":linked}}),
+    );
+    let opdir = repo.join(".oms/artifacts/mcp").join(&operation);
+    let pidpath = opdir.join("pid");
+    let pid = std::fs::read(&pidpath).unwrap();
+    for invalid in [None, Some("0\n"), Some("-15\n"), Some("bad")] {
+        if let Some(bytes) = invalid {
+            std::fs::write(&pidpath, bytes).unwrap();
         } else {
-            Value::Null
-        };
-        fixture_settings(
-            &source,
-            json!({"room":{"desktop-assign":record_for(status,Some(false),op)}}),
+            std::fs::remove_file(&pidpath).unwrap();
+        }
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_result",
+                query.clone(),
+                host.clone()
+            ))["status"],
+            "assigned"
         );
-        let again = call(
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_provider",
+                repair.clone(),
+                host.clone()
+            ))["status"],
+            "unconfirmed"
+        );
+        assert_eq!(record(&source)["argv"][1], "desktop-assign-status");
+    }
+    std::fs::write(&pidpath, &pid).unwrap();
+    let meta_path = opdir.join("meta.json");
+    let metadata = std::fs::read_to_string(&meta_path).unwrap();
+    let duplicate = metadata.replacen('{', "{\"thread\":\"foreign\",", 1);
+    std::fs::write(&meta_path, duplicate).unwrap();
+    assert_eq!(
+        payload(&call(
+            &mut c,
+            "oms_assign_result",
+            query.clone(),
+            host.clone()
+        ))["status"],
+        "assigned"
+    );
+    std::fs::write(&meta_path, &metadata).unwrap();
+    std::fs::remove_file(&pidpath).unwrap();
+    std::os::unix::fs::symlink(opdir.join("status"), &pidpath).unwrap();
+    assert_eq!(
+        payload(&call(
             &mut c,
             "oms_assign_provider",
-            args.clone(),
-            json!({"threadId":thread}),
-        );
-        good(&again);
-        assert_eq!(payload(&again)["status"], expected);
-        assert_eq!(payload(&again)["role"], "researcher");
-        assert_eq!(payload(&again)["readOnly"], true);
-        assert_eq!(runs(), 1, "retry never redispatches");
-        assert_eq!(record(&source)["argv"][1], "desktop-assign");
-        let digest = record(&source)["argv"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .position(|v| v == "--conversation-digest")
-            .unwrap();
-        assert_ne!(
-            record(&source)["argv"][digest + 1],
-            thread,
-            "only a digest leaves the process"
+            repair.clone(),
+            host.clone()
+        ))["status"],
+        "unconfirmed"
+    );
+    std::fs::remove_file(&pidpath).unwrap();
+    std::fs::write(&pidpath, &pid).unwrap();
+    let exitpath = opdir.join("status");
+    let exit = std::fs::read(&exitpath).unwrap();
+    // The supervisor writes code or -signal, including the final newline.
+    std::fs::write(&exitpath, "-15\n").unwrap();
+    let signalled = call(&mut c, "oms_assign_result", query.clone(), host.clone());
+    let assignment = &signalled["result"]["_meta"]["assignment"];
+    assert_eq!(assignment["status"], "recovered");
+    assert_eq!(assignment["execution"], json!({"state":"done","exit":-15}));
+    for invalid in [
+        "broken\n", "-127\n", "256\n", "-0\n", "-015\n", "+0\n", "-15",
+    ] {
+        std::fs::write(&exitpath, invalid).unwrap();
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_result",
+                query.clone(),
+                host.clone()
+            ))["status"],
+            "assigned",
+            "{invalid:?}"
         );
     }
+    std::fs::write(&exitpath, exit).unwrap();
+    // Discovery normally returns only the newest twenty; recovery is an exact lookup.
+    let newer: Vec<_> = (0..21)
+        .map(|i| {
+            opdir
+                .parent()
+                .unwrap()
+                .join(format!("ask-20991231T235959Z-{i:08x}"))
+        })
+        .collect();
+    for d in &newer {
+        std::fs::create_dir(d).unwrap();
+    }
+    let recovered = call(&mut c, "oms_assign_result", query.clone(), host.clone());
+    assert_eq!(payload(&recovered)["status"], "recovered");
+    assert_eq!(
+        recovered["result"]["_meta"]["assignment"]["operation"],
+        operation
+    );
+    assert!(payload(&recovered)["operation"].is_null());
+    assert_ne!(record(&source)["argv"][1], "desktop-assign-receipt");
+    // The same synthetic Room data for another conversation cannot locate an operation.
+    assert_eq!(
+        payload(&call(
+            &mut c,
+            "oms_assign_result",
+            query.clone(),
+            json!({"threadId":"01900000-0000-7000-8000-0000000000cc"})
+        ))["status"],
+        "assigned"
+    );
+    for d in newer {
+        std::fs::remove_dir(d).unwrap();
+    }
+    let mut wrong_room = query.clone();
+    wrong_room["room"] = json!("another");
+    bad(
+        &call(&mut c, "oms_assign_result", wrong_room, host.clone()),
+        "unrecognized",
+    );
+    let mut wrong = repair.clone();
+    wrong["title"] = "changed".into();
+    bad(
+        &call(&mut c, "oms_assign_provider", wrong, host.clone()),
+        "does not match",
+    );
+    for original in [&repair, &args] {
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_provider",
+                original.clone(),
+                host.clone()
+            ))["status"],
+            "started"
+        );
+        assert_eq!(record(&source)["argv"][1], "desktop-assign-receipt");
+    }
+    fixture_settings(&source, json!({"room":{"desktop-assign-status":linked}}));
+    assert_eq!(
+        payload(&call(
+            &mut c,
+            "oms_assign_provider",
+            repair.clone(),
+            host.clone()
+        ))["status"],
+        "recorded"
+    );
+    assert_eq!(record(&source)["argv"][1], "desktop-assign-status");
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign-status":json!({"request":req,"status":"not_found"}).to_string()}}),
+    );
+    bad(
+        &call(&mut c, "oms_assign_provider", repair.clone(), host.clone()),
+        "unrecognized",
+    );
+    assert_eq!(record(&source)["argv"][1], "desktop-assign-status");
+    assert_eq!(runs(), 1, "read and repair never redispatch");
     // A Room record for another request, role or thread is never trusted.
     let mut forged: Value =
         serde_json::from_str(&record_for("started", Some(false), json!(operation))).unwrap();
@@ -981,6 +1121,29 @@ fn desktop_assignment() {
         ),
         "does not match",
     );
+    // A pre-upgrade receipt still addresses its recorded random operation.
+    let legacy = "ask-20250501T010203Z-abcd1234";
+    let legacy_dir = opdir.with_file_name(legacy);
+    std::fs::rename(&opdir, &legacy_dir).unwrap();
+    let mut old_meta: Value = serde_json::from_str(&metadata).unwrap();
+    old_meta["operation"] = legacy.into();
+    old_meta["thread"] = legacy.into();
+    std::fs::write(legacy_dir.join("meta.json"), old_meta.to_string()).unwrap();
+    let mut old_record: Value =
+        serde_json::from_str(&record_for("started", None, json!(legacy))).unwrap();
+    old_record.as_object_mut().unwrap().remove("assignedAt");
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign-status":old_record.to_string()}}),
+    );
+    let old = call(&mut c, "oms_assign_result", query.clone(), host.clone());
+    assert_eq!(old["result"]["_meta"]["assignment"]["operation"], legacy);
+    assert_eq!(payload(&old)["status"], "started");
+    fixture_settings(&source, json!({"room":{"desktop-assign-status":assigned}}));
+    assert_eq!(
+        payload(&call(&mut c, "oms_assign_result", query, host))["status"],
+        "assigned"
+    );
     // Delegated workers and the read-only app profile have no assignment authority.
     let before = runs();
     let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
@@ -1017,7 +1180,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v14.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v15.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -1047,6 +1210,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v11.html"),
         json!("ui://oms/conversation-panel/v12.html"),
         json!("ui://oms/conversation-panel/v13.html"),
+        json!("ui://oms/conversation-panel/v14.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

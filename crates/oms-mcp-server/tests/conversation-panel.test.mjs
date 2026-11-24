@@ -567,7 +567,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.1');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.2');
   for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
     const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
     assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
@@ -1165,6 +1165,22 @@ test('read-only peer is explicitly requested once, recovered by ID and opened in
   assert.equal(p.calls.at(-1).args.participant,'ask-'+req.requestId);
   assert.match(p.get('chat-result').textContent,/Recorded answer/); assert.equal(starts().length,1);
 });
+test('checking an unlinked operation is read-only and repairing reuses the immutable request',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'owner',incomplete:false};
+  const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  const answer=(req,status)=>({...req,status,role:'researcher',participant:'ask-'+req.requestId,readOnly:true,operation:'ask-confirmed'});
+  p.host.tools={oms_assign_provider:a=>answer(a,a.repairOnly?'started':'unconfirmed'),oms_assign_result:a=>answer({...a,provider:'claude'},'recovered')};
+  p.get('peer-provider').value='claude';p.get('peer-task').value='Original review';
+  await p.event('peer-form','submit');const original=p.calls.at(-1).args;
+  await p.event('peer-check','click');
+  await choose(p,'en');assert.match(p.get('peer-status').textContent,/operation found/);
+  await choose(p,'ko');assert.match(p.get('peer-status').textContent,/실행 기록을 찾/);
+  assert.equal(p.get('peer-repair').hidden,false);assert.equal(p.get('peer-chat').hidden,false);
+  assert.equal(p.calls.filter(c=>c.name==='oms_assign_provider').length,1);
+  p.get('peer-task').value='Changed draft';
+  await p.event('peer-repair','click');assert.deepEqual({...p.calls.at(-1).args},{...original,repairOnly:true});
+  assert.equal(p.get('peer-repair').hidden,true);
+});
 test('partial exact membership checks authority only on request and keeps its ID after a bounded refusal',async()=>{
   const main={source:'room-session',state:'joined',provider:'codex',room:'observed',participant:'owner',incomplete:true};
   const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
@@ -1208,6 +1224,21 @@ async function reviewedPanel(options = {}, response = {}) {
   await setImmediate();
   return p;
 }
+
+test('reopening an unlinked researcher permits only an explicit repair of that Room request',async()=>{
+  const assignment={state:'recovered',title:'Title',task:'Full original task'};
+  const p=await reviewedPanel({}, {assignment});
+  const writes=()=>p.calls.filter(c=>c.name==='oms_assign_provider');
+  assert.equal(writes().length,0);await choose(p,'en');
+  const button=p.get('chat-result').children.find(b=>b.textContent==='Link operation to Room');
+  assert.ok(button);
+  p.host.tools.oms_assign_provider=a=>({...a,participant:reviewMember.participant,status:'recorded'});
+  button.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...writes()[0].args},{project:'one',room:reviewMember.room,requestId:reviewMember.participant.slice(4),
+    provider:'claude',task:assignment.task,title:assignment.title,repairOnly:true});
+  await p.event('tab-overview','click');button.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(writes().length,1);assert.equal(p.host.messages.length,0);
+});
 
 test('review preview and cancel are local, translate instantly, and share only the selected answer once',async()=>{
   const p = await reviewedPanel({message:true});
