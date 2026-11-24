@@ -361,3 +361,9 @@ pub fn reference_repository(
     }
     resolver.state_repository(&physical, false, interrupted)
 }
+
+mod discovery;
+pub use discovery::{
+    AttemptHead, DiscoveryIssue, LifecycleObservation, LifecycleScope, LifecycleSource,
+    ObservedAttempt, ScratchDiscovery, SourceKind, SourceStatus, VerifiedScratch,
+};
