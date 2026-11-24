@@ -1007,6 +1007,411 @@ fn native_action(kind: &str, reason: &str, commands: Vec<Value>) -> Value {
     serde_json::json!({"kind":kind,"reason":reason,"commands":commands})
 }
 
+fn native_plan_task<'a>(report: &Value, plan: &'a Value) -> Option<&'a Value> {
+    let mut matching = array(&plan["tasks"])
+        .iter()
+        .filter(|row| row["id"] == report["task_id"]);
+    let task = matching.next()?;
+    (matching.next().is_none()
+        && plan["plan_id"] == report["plan_id"]
+        && task["lease_id"] == report["lease_id"]
+        && task["lease_epoch"] == report["lease_epoch"]
+        && task["provider"] == report["owner"]
+        && &task["claimed_by_participant"]
+            == report
+                .get("parent_participant")
+                .unwrap_or(&report["parent_attempt_id"]))
+    .then_some(task)
+}
+
+type Landings = std::result::Result<std::collections::HashMap<String, Vec<Value>>, &'static str>;
+const LANDINGS_MAX: usize = 8 * 1024 * 1024;
+const LANDING_REPORT_ONLY: &str = "report-only result has no landed patch";
+const LANDING_TASK: &str = "canonical Plan task or lease is unavailable or changed";
+const LANDING_NOT_DONE: &str = "canonical Plan task is not done or its completion is unverified";
+const LANDING_REVIEW: &str = "Plan review evidence does not name this retained result and patch";
+const LANDING_UNAVAILABLE: &str = "landing receipts unavailable or beyond the bounded view";
+const LANDING_NO_RECEIPT: &str = "no completed canonical landing receipt for this reviewed patch";
+const LANDING_COMMIT: &str = "landed through a commit receipt, not native patch-land";
+const LANDING_MISMATCH: &str = "landing receipt does not match this Plan task, lease or patch";
+const LANDING_STAMP: &str = "canonical landing or Plan receipt digest is missing or invalid";
+const LANDING_CONFLICT: &str = "landing index row conflicts with the receipt";
+const LANDING_ADMISSION: &str =
+    "landing admission for this receipt is missing, ambiguous or not verified";
+
+const LANDING_RECEIPT_FIELDS: [&str; 10] = [
+    "landing_id",
+    "patch",
+    "patch_sha",
+    "base_sha",
+    "task",
+    "lease",
+    "plan_receipt_sha",
+    "plan_done_receipt_sha",
+    "approval",
+    "approval_version",
+];
+
+fn native_landing_receipt(row: &Value) -> Option<String> {
+    use oms_command_plan::json;
+    if row["schema"].as_u64() != Some(1) {
+        return None;
+    }
+    // The landing writer stamps only this immutable projection of its intent.
+    let mut receipt = json::object([("schema", json::number(1))]);
+    for field in LANDING_RECEIPT_FIELDS {
+        receipt
+            .set(field, json::string(row[field].as_str()?))
+            .ok()?;
+    }
+    let hash = json::hash(&receipt).ok()?;
+    (row["receipt_sha"] == hash.as_str()).then_some(hash)
+}
+
+fn native_plan_landing_stamps(task: &Value, reviewed_patch: &str) -> Option<(String, String)> {
+    use oms_command_plan::json;
+    let mut stored = json::parse(&serde_json::to_vec(task).ok()?).ok()?;
+    // Plan List overlays these fields on the stored task. Its stamp must
+    // match the reconstructed task, including any unknown stored fields.
+    for field in [
+        "claim_age_s",
+        "claim_expired",
+        "contract_stale",
+        "issue_cache",
+        "stale_contracts",
+        "task_sha256",
+    ] {
+        stored.remove(field);
+    }
+    if task["task_sha256"].as_str()? != json::hash(&stored).ok()?.as_str() {
+        return None;
+    }
+    let done = json::receipt_digest(&stored).ok()?;
+    // Native Finish changes the patch path to its frozen landing path.
+    stored.set("patch", json::string(reviewed_patch)).ok()?;
+    Some((json::receipt_digest(&stored).ok()?, done))
+}
+
+fn landing_event_id<'a>(row: &'a Value, index: &[Value]) -> Option<&'a str> {
+    row["event_id"]
+        .as_str()
+        .filter(|id| id.strip_prefix("art_").is_some_and(|id| crate::hex(id, 32)))
+        .filter(|id| {
+            index
+                .iter()
+                .filter(|candidate| candidate["event_id"] == *id)
+                .take(2)
+                .count()
+                == 1
+        })
+}
+
+fn native_admission_report(
+    store: &Store,
+    admit: &Value,
+    file: &str,
+    patch: &str,
+    base: &str,
+    verify: &str,
+) -> Option<()> {
+    let attempt = admit["operation_id"].as_str()?;
+    let generation = attempt.strip_prefix("att_")?;
+    if !crate::hex(generation, 32)
+        || admit["artifact"] != format!(".oms/artifacts/admit/admit-{attempt}.md").as_str()
+    {
+        return None;
+    }
+    let bytes = indexed_artifact(store, admit).ok()?;
+    let report = std::str::from_utf8(&bytes).ok()?;
+    if !report.ends_with('\n') {
+        return None;
+    }
+    let mut lines = report.split_terminator('\n');
+    let fields: [&str; 11] = std::array::from_fn(|_| lines.next().unwrap_or_default());
+    let [
+        "# Patch admission: ADMIT",
+        "",
+        report_patch,
+        patch_sha,
+        checked_base,
+        "- verification: command",
+        verify_sha,
+        checked,
+        "",
+        "## Ladder",
+        "",
+    ] = fields
+    else {
+        return None;
+    };
+    // Admission names its private capture, which may be pruned after landing.
+    // The frozen publication path is proved separately by the landing receipt.
+    let capture = Path::new(report_patch.strip_prefix("- patch: ")?);
+    let capture_generation = capture.parent()?.file_name()?.to_str()?;
+    let checked = checked.strip_prefix("- checked: ")?;
+    // A command-verifying admission always records these policy gates in order.
+    // Only batch prerequisites, base-floor and regression are conditional.
+    let mut ladder = lines
+        .take_while(|line| !line.is_empty())
+        .map(|line| {
+            let (gate, detail) = line.strip_prefix("- ")?.split_once(": PASS — ")?;
+            (!detail.is_empty() && !detail.chars().any(char::is_control)).then_some((gate, detail))
+        })
+        .peekable();
+    if ladder.next()? != Some(("apply", "patch applies cleanly")) {
+        return None;
+    }
+    for required in ["scope", "syntax", "tests", "encoding-loss", "verifier"] {
+        if ladder.next()??.0 != required {
+            return None;
+        }
+    }
+    while ladder.next_if(|row| matches!(row, Some(("batch-prefix", detail)) if detail.starts_with("earlier task ") && detail.ends_with(" verification exit 0"))).is_some() {}
+    if ladder.next()? != Some(("verify", "candidate verification exit 0")) {
+        return None;
+    }
+    for optional in ["base-floor", "regression"] {
+        ladder.next_if(|row| row.is_some_and(|(gate, _)| gate == optional));
+    }
+    if ladder.next()?
+        != Some((
+            "batch-prefix",
+            "batch prefix stayed unchanged during admission",
+        ))
+        || ladder.next()?
+            != Some((
+                "source-integrity",
+                "HEAD, tracked tree and index SHA256 stayed unchanged",
+            ))
+        || ladder.next().is_some()
+    {
+        return None;
+    }
+    (capture.is_absolute()
+        && !capture.starts_with(store.repo())
+        && !capture
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        && capture.file_name()?.to_str()? == file
+        && capture_generation
+            .strip_prefix("oms-landing-capture-")
+            .is_some_and(|id| crate::hex(id, 32))
+        && patch_sha.strip_prefix("- patch_sha: ") == patch.get(..16)
+        && checked_base.strip_prefix("- base: ") == base.get(..7)
+        && verify_sha.strip_prefix("- verify_sha256: ")
+            == Some(crate::digest(verify.as_bytes()).as_str())
+        && checked.len() == 20
+        && checked.ends_with('Z')
+        && chrono::DateTime::parse_from_rfc3339(checked).is_ok())
+    .then_some(())
+}
+
+fn native_landings(store: &Store) -> Landings {
+    let body = store
+        .read(Path::new(".oms/landings.jsonl"), LANDINGS_MAX, true)
+        .map_err(|_| LANDING_UNAVAILABLE)?;
+    if !body.is_empty() && !body.ends_with(b"\n") {
+        return Err(LANDING_UNAVAILABLE);
+    }
+    let mut map = std::collections::HashMap::<String, Vec<Value>>::new();
+    for line in body
+        .split(|&b| b == b'\n')
+        .filter(|v| v.iter().any(|b| !b.is_ascii_whitespace()))
+    {
+        let row = crate::decode(line, MAX_RESULT).map_err(|_| LANDING_UNAVAILABLE)?;
+        map.entry(text(&row, "landing_id")).or_default().push(row);
+    }
+    Ok(map)
+}
+
+/// `None` leaves rows that are neither reviewed nor settled without a landing
+/// claim or issue; otherwise the first broken link of the canonical chain.
+fn native_landing(
+    report: &Value,
+    plan: &Value,
+    rows: &[Value],
+    store: &Store,
+    landings: &mut Option<Landings>,
+) -> Option<std::result::Result<Value, &'static str>> {
+    let task = native_plan_task(report, plan);
+    let done = task.is_some_and(|t| matches!(t["state"].as_str(), Some("done" | "cancelled")));
+    let settled = done
+        || matches!(
+            report["resolution"].as_str(),
+            Some("reviewed" | "retiring" | "retired")
+        );
+    (settled && !text(report, "artifact_sha256").is_empty()).then(|| {
+        if plan["schema"].as_u64() != Some(1) {
+            return Err(LANDING_TASK);
+        }
+        native_landing_chain(report, task, rows, store, landings)
+    })
+}
+
+/// The done Plan task, its review digests, one intent and its completion in the
+/// landing receipt log, and the admission patch-land recorded under that
+/// landing's capture name must all name the same result and patch. The
+/// patch-land index row is optional (recovery completes without it) but may
+/// not contradict the receipt.
+fn native_landing_chain(
+    report: &Value,
+    task: Option<&Value>,
+    rows: &[Value],
+    store: &Store,
+    landings: &mut Option<Landings>,
+) -> std::result::Result<Value, &'static str> {
+    let check = |ok: bool, reason: &'static str| if ok { Ok(()) } else { Err(reason) };
+    let hex = |v: &Value| v.as_str().filter(|v| crate::hex(v, 64)).map(str::to_owned);
+    let patch = hex(&report["patch"]["sha256"]).ok_or(LANDING_REPORT_ONLY)?;
+    let task = task.ok_or(LANDING_TASK)?;
+    let lease = report["lease_id"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or(LANDING_TASK)?;
+    check(
+        task["state"] == "done"
+            && task["completion_verified"] != false
+            && task.get("stored_state").is_none()
+            && task["contract_stale"] == false,
+        LANDING_NOT_DONE,
+    )?;
+    // Commit landings never carry a patch-land receipt; no receipt may stand in.
+    check(
+        !task["landing"].is_object() && task["landed_commit"].as_str().is_none_or(str::is_empty),
+        LANDING_COMMIT,
+    )?;
+    let review = &task["review_evidence"];
+    let artifact = hex(&report["artifact_sha256"]).ok_or(LANDING_REVIEW)?;
+    let retained_result = report["artifact"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .ok_or(LANDING_REVIEW)?;
+    let retained_patch = report["patch"]["path"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .ok_or(LANDING_REVIEW)?;
+    check(
+        task["review_lease_id"] == lease
+            && review["schema"].as_u64() == Some(1)
+            && review["task_id"] == report["task_id"]
+            && review["lease_id"] == lease
+            && task["artifact"] == retained_result
+            && review["artifact"]["path"] == retained_result
+            && review["artifact"]["sha256"] == artifact.as_str()
+            && review["patch"]["path"] == retained_patch
+            && review["patch"]["sha256"] == patch.as_str(),
+        LANDING_REVIEW,
+    )?;
+    let map = match landings.get_or_insert_with(|| native_landings(store)) {
+        Ok(map) => map,
+        Err(reason) => return Err(*reason),
+    };
+    // Plan finish copies the intent's frozen path, named for its landing id.
+    let id = task["patch"]
+        .as_str()
+        .and_then(|v| v.rsplit('/').next()?.strip_suffix(".patch"))
+        .unwrap_or_default();
+    let entries = map
+        .get(id)
+        .filter(|_| oms_reference::capture::landing_id(id))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let [intent, complete] = entries else {
+        return Err(if entries.is_empty() && !task["panel_accept"].is_null() {
+            LANDING_COMMIT
+        } else {
+            LANDING_NO_RECEIPT
+        });
+    };
+    check(
+        intent["event"] == "intent" && complete["event"] == "complete",
+        LANDING_NO_RECEIPT,
+    )?;
+    let base = intent["base_sha"]
+        .as_str()
+        .filter(|sha| crate::hex(sha, 40))
+        .ok_or(LANDING_MISMATCH)?;
+    let file = format!("{id}.patch");
+    let relative_patch = format!(".oms/landing-patches/{file}");
+    let frozen = store.repo().join(&relative_patch);
+    check(
+        LANDING_RECEIPT_FIELDS
+            .iter()
+            .all(|field| complete[*field] == intent[*field])
+            && intent["task"] == report["task_id"]
+            && intent["lease"] == lease
+            && intent["plan_id"] == report["plan_id"]
+            && complete["plan_id"] == report["plan_id"]
+            && intent["patch_sha"] == patch.as_str()
+            && intent["patch"] == task["patch"]
+            && intent["patch"] == frozen.to_string_lossy().as_ref(),
+        LANDING_MISMATCH,
+    )?;
+    let intent_stamp = native_landing_receipt(intent).ok_or(LANDING_STAMP)?;
+    check(
+        native_landing_receipt(complete).as_deref() == Some(intent_stamp.as_str()),
+        LANDING_STAMP,
+    )?;
+    let (review_stamp, done_stamp) =
+        native_plan_landing_stamps(task, retained_patch).ok_or(LANDING_STAMP)?;
+    check(
+        intent["plan_receipt_sha"] == review_stamp.as_str()
+            && intent["plan_done_receipt_sha"] == done_stamp.as_str(),
+        LANDING_STAMP,
+    )?;
+
+    let mut landed = rows
+        .iter()
+        .filter(|v| v["kind"] == "patch-land" && v["landing_id"] == id);
+    let land = landed.next();
+    check(
+        landed.next().is_none()
+            && land.is_none_or(|v| {
+                v["schema"].as_u64() == Some(1)
+                    && landing_event_id(v, rows).is_some()
+                    && v["exit"] == 0
+                    && v["task_id"] == report["task_id"]
+                    && v["plan_id"] == report["plan_id"]
+                    && v["patch_sha256"] == patch.as_str()
+                    && v["base"] == base
+                    && v["patch"] == relative_patch.as_str()
+            }),
+        LANDING_CONFLICT,
+    )?;
+    let mut admissions = rows
+        .iter()
+        .filter(|v| v["kind"] == "patch-admit" && v["patch_external"]["name"] == file.as_str());
+    let admit = admissions.next().ok_or(LANDING_ADMISSION)?;
+    let admission_event = landing_event_id(admit, rows).ok_or(LANDING_ADMISSION)?;
+    check(
+        admissions.next().is_none()
+            && admit["schema"].as_u64() == Some(1)
+            && admit["patch_sha256"] == patch.as_str()
+            && admit["patch_external"]["sha256"] == patch.as_str()
+            && admit["patch_external"]["owned"] == false
+            && admit["base"] == base
+            && admit.get("task_id").is_none_or(|v| *v == report["task_id"])
+            && admit.get("plan_id").is_none_or(|v| *v == report["plan_id"])
+            && admit["exit"] == 0
+            && admit["verification"] == "command"
+            && (admit["verify_exit"] == 0 || admit["verify_exit"] == "0"),
+        LANDING_ADMISSION,
+    )?;
+    let verify = task["verify"]
+        .as_str()
+        .filter(|command| !command.is_empty())
+        .ok_or(LANDING_ADMISSION)?;
+    native_admission_report(store, admit, &file, &patch, base, verify).ok_or(LANDING_ADMISSION)?;
+    let event = land.map_or(&Value::Null, |v| &v["event_id"]);
+    Ok(
+        serde_json::json!({"source":"canonical-landing","landing_id":id,"plan_state":"done",
+        "task_id":report["task_id"],"lease_id":lease,"artifact_sha256":artifact,
+        "patch_sha256":patch,"landing_base":base,
+        "assignment_base":report["custody"]["checkout"]["base_sha"],"verification":"command",
+        "verify_exit":0,"admission_event_id":admission_event,"landing_event_id":event}),
+    )
+}
+
 fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Result<Value> {
     use crate::native_contract::NextAction;
     let inspect = || serde_json::json!({"argv":["oms","panel","--results","--task-id",operation["task_id"],"--json"]});
@@ -1037,21 +1442,7 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
         "native resolution does not name this exact retained result",
     )?;
     report["resolution"] = resolution.clone().into();
-    let task = array(&plan["tasks"])
-        .iter()
-        .find(|row| row["id"] == report["task_id"]);
-    let same = task.filter(|task| {
-        plan["plan_id"] == report["plan_id"]
-            && task["lease_id"] == report["lease_id"]
-            && task["lease_epoch"] == report["lease_epoch"]
-            && task["provider"] == report["owner"]
-            && task["claimed_by_participant"]
-                == report
-                    .get("parent_participant")
-                    .unwrap_or(&report["parent_attempt_id"])
-                    .clone()
-    });
-    let Some(task) = same else {
+    let Some(task) = native_plan_task(report, plan) else {
         report["plan_state"] = "unknown".into();
         return Ok(native_action(
             "inspect",
@@ -1316,6 +1707,7 @@ pub fn results_page(
     let mut capped = false;
     let mut native_remaining = MAX_NATIVE_RETURNS;
     let mut native_plan = None;
+    let mut landings = None;
     let mut saw_typed = false;
     for task in latest {
         if request.task_id.as_ref().is_some_and(|v| v != &task) {
@@ -1730,6 +2122,12 @@ pub fn results_page(
                     (serde_json::json!({"status":"unavailable","return_state":state,"acceptance_eligible":false,"issue":reason}),
                         native_action("inspect",reason,vec![serde_json::json!({"argv":["oms","panel","--results","--task-id",task,"--json"]})]))
                 });
+                let landing = native_plan.as_ref().and_then(|plan| {
+                    native_landing(&report, plan, &indexed, &store, &mut landings)
+                });
+                if let Some(Ok(landing)) = &landing {
+                    projected["stages"]["verify"] = serde_json::json!({"state":"passed","source":"canonical-landing","attempt_id":null,"exit":0,"landing_id":landing["landing_id"]});
+                }
                 let entry = &mut projected["native_assignment"];
                 entry["return_state"] = report["return_state"].clone();
                 entry["resolution"] = report["resolution"].clone();
@@ -1737,6 +2135,15 @@ pub fn results_page(
                 entry["child_cleanup"] = "unsupported".into();
                 entry["report"] = report;
                 entry["next_action"] = next;
+                match landing {
+                    Some(Ok(landing)) => {
+                        entry["verification"] = "verified".into();
+                        entry["acceptance"] = "accepted".into();
+                        entry["landing"] = landing;
+                    }
+                    Some(Err(issue)) => entry["verification_issue"] = issue.into(),
+                    None => {}
+                }
             }
             // Only an undecided task without a failure moves its next step to the
             // recorded transport; nothing here resends or retries.
@@ -3279,6 +3686,642 @@ mod tests {
             )["rows"][0]["native_assignment"]["return_state"],
             "invalid"
         );
+    }
+
+    #[test]
+    fn typed_native_landing_projects_only_exact_canonical_chain() {
+        use oms_command_operations::value::V as OperationsValue;
+        use oms_command_plan::json as plan_json;
+
+        // The producer encodes this subset with the operations JSON codec.
+        fn stamp_receipt(row: &mut Value) {
+            let raw = OperationsValue::parse(&serde_json::to_vec(row).unwrap()).unwrap();
+            let fields = std::iter::once("schema").chain(LANDING_RECEIPT_FIELDS);
+            let mut immutable = OperationsValue::Obj(std::collections::BTreeMap::new());
+            for field in fields {
+                immutable.set(field, raw.get(field).clone());
+            }
+            row["receipt_sha"] = crate::digest(&immutable.json(false).unwrap()).into();
+        }
+
+        let plan_value =
+            |task: &Value| plan_json::parse(&serde_json::to_vec(task).unwrap()).unwrap();
+        let list_view = |task: &Value| {
+            let mut view = task.clone();
+            view["task_sha256"] = plan_json::hash(&plan_value(task)).unwrap().into();
+            view["claim_expired"] = false.into();
+            view["contract_stale"] = false.into();
+            view["stale_contracts"] = json!([]);
+            view["issue_cache"] = json!({"state":"open"});
+            view
+        };
+        let stamp_plan = |task: &Value, rows: &mut [Value]| {
+            let done = plan_value(task);
+            let finished = plan_json::receipt_digest(&done).unwrap();
+            let mut review = done;
+            review
+                .set(
+                    "patch",
+                    plan_json::string(task["review_evidence"]["patch"]["path"].as_str().unwrap()),
+                )
+                .unwrap();
+            let reviewed = plan_json::receipt_digest(&review).unwrap();
+            for row in rows {
+                row["plan_receipt_sha"] = reviewed.clone().into();
+                row["plan_done_receipt_sha"] = finished.clone().into();
+                stamp_receipt(row);
+            }
+        };
+
+        const LAND_ID: &str = "land-20260101T000001Z-aaaaaaaaaaaaaaaa";
+        const ADMIT_ID: &str = "art_44444444444444444444444444444444";
+        const LAND_EVENT_ID: &str = "art_55555555555555555555555555555555";
+        const ADMIT_ATTEMPT: &str = "att_66666666666666666666666666666666";
+        const VERIFY: &str = "printf release-check";
+        let file = format!("{LAND_ID}.patch");
+        let frozen = format!(".oms/landing-patches/{file}");
+        let repo = crate::git::Scratch::new().unwrap();
+        let retain = |id: &str, diff: Option<&[u8]>| {
+            let (mut operation, task, assignment) =
+                crate::native_results::tests::fixture(&repo.0, &repo.0, id, TASK);
+            let mut source = assignment.report_template();
+            source["summary"] = "Candidate for Main review".into();
+            if let Some(diff) = diff {
+                let path = format!(".oms/artifacts/{id}.patch");
+                crate::native_results::tests::write(&repo.0, &path, diff);
+                source["candidate_patch"] = path.clone().into();
+                source["changed_paths"] = json!(["src/value.txt"]);
+                source["evidence"] =
+                    json!([{"path":path,"sha256":crate::digest(diff),"bytes":diff.len()}]);
+            }
+            crate::native_results::tests::retain(&repo.0, &mut operation, &assignment, &source);
+            operation["refs"]["native_resolution"] = "reviewed".into();
+            operation["refs"]["native_resolution_result_sha256"] =
+                operation["refs"]["native_result_sha256"].clone();
+            (operation, task)
+        };
+        let diff = b"diff --git a/src/value.txt b/src/value.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/value.txt\n@@ -0,0 +1 @@\n+answer\n";
+        let (operation, task) = retain("native-land", Some(diff));
+        let (artifact, patch, base) = (
+            text(&operation["refs"], "native_result_sha256"),
+            crate::digest(diff),
+            "d".repeat(40),
+        );
+        let mut done = task.clone();
+        for key in ["plan_id", "claim_expired", "contract_stale"] {
+            done.as_object_mut().unwrap().remove(key);
+        }
+        done["state"] = "done".into();
+        done["verify"] = VERIFY.into();
+        done["review_lease_id"] = task["lease_id"].clone();
+        let result_path = text(&operation["refs"], "native_result_path");
+        let candidate_path = result_path.replace("/result.json", "/candidate.patch");
+        done["artifact"] = result_path.clone().into();
+        done["patch"] = repo.0.join(&frozen).to_string_lossy().into();
+        done["fixture_extension"] = json!({"keep": ["this durable task field"]});
+        done["review_evidence"] = json!({"schema":1,"task_id":TASK,"lease_id":task["lease_id"],
+            "artifact":{"path":result_path,"sha256":artifact},"patch":{"path":candidate_path,"sha256":patch}});
+        let admission_path = format!(".oms/artifacts/admit/admit-{ADMIT_ATTEMPT}.md");
+        let verify_sha = crate::digest(VERIFY.as_bytes());
+        let admission_body = format!(
+            "# Patch admission: ADMIT\n\n- patch: /tmp/oms-landing-capture-{}/{file}\n- patch_sha: {}\n- base: {}\n- verification: command\n- verify_sha256: {verify_sha}\n- checked: 2026-01-01T00:00:01Z\n\n## Ladder\n\n- apply: PASS — patch applies cleanly\n- scope: PASS — changed paths obey the declared scope and structural floor\n- syntax: PASS — changed shell/JSON files parse\n- tests: PASS — 0 assertion line(s) removed, 0 added\n- encoding-loss: PASS — patch hunk encoding preservation\n- verifier: PASS — verification surfaces require explicit owner consent\n- verify: PASS — candidate verification exit 0\n- batch-prefix: PASS — batch prefix stayed unchanged during admission\n- source-integrity: PASS — HEAD, tracked tree and index SHA256 stayed unchanged\n",
+            "a".repeat(32),
+            &patch[..16],
+            &base[..7]
+        );
+        let write_admission = |body: &[u8]| {
+            crate::native_results::tests::write(&repo.0, &admission_path, body);
+        };
+        write_admission(admission_body.as_bytes());
+        let rows = vec![
+            json!({"schema":1,"event_id":ADMIT_ID,"ts":"2026-01-01T00:00:01Z","kind":"patch-admit","exit":0,
+                "operation_id":ADMIT_ATTEMPT,"artifact":admission_path,"artifact_sha256":crate::digest(admission_body.as_bytes()),
+                "patch_sha256":patch,"patch_external":{"name":file,"owned":false,"sha256":patch},
+                "base":base,"verification":"command","verify_exit":0}),
+            json!({"schema":1,"event_id":LAND_EVENT_ID,"ts":"2026-01-01T00:00:02Z","kind":"patch-land","exit":0,
+                "landing_id":LAND_ID,"patch":frozen,"patch_sha256":patch,
+                "task_id":TASK,"plan_id":task["plan_id"],"base":base}),
+        ];
+        let intent = json!({"schema":1,"ts":"2026-01-01T00:00:01Z","landing_id":LAND_ID,"event":"intent",
+            "patch":done["patch"],"patch_sha":patch,"base_sha":base,"task":TASK,"lease":task["lease_id"],
+            "approval":"","approval_version":"","worktree":repo.0,"plan_id":task["plan_id"]});
+        let mut complete = intent.clone();
+        complete["event"] = "complete".into();
+        complete["ts"] = "2026-01-01T00:00:02Z".into();
+        let mut landings = vec![intent, complete];
+        stamp_plan(&done, &mut landings);
+        let stored_done = done;
+        let done = list_view(&stored_done);
+        let ledger = |landings: &[Value]| {
+            // A string row is written raw so a malformed receipt line is expressible.
+            landings
+                .iter()
+                .flat_map(|v| {
+                    let line = v
+                        .as_str()
+                        .map_or_else(|| serde_json::to_vec(v).unwrap(), |v| v.as_bytes().to_vec());
+                    [line, b"\n".to_vec()]
+                })
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        let view_raw = |operation: &Value, task: &Value, rows: &[Value], raw: &[u8]| {
+            index(&repo.0, rows);
+            crate::native_results::tests::write(&repo.0, ".oms/landings.jsonl", raw);
+            let request = ResultsRequest {
+                task_id: Some(TASK.into()),
+                ..Default::default()
+            };
+            typed_view(
+                &repo.0,
+                request,
+                vec![operation.clone()],
+                vec![task.clone()],
+            )["rows"][0]
+                .clone()
+        };
+        let view = |operation: &Value, task: &Value, rows: &[Value], landings: &[Value]| {
+            view_raw(operation, task, rows, &ledger(landings))
+        };
+        type Mutation = fn(&mut Value, &mut Vec<Value>, &mut Vec<Value>);
+        let verified: [(&str, Value, Mutation); 5] = [
+            ("normal", json!(LAND_EVENT_ID), |_, _, _| {}),
+            ("string verify exit", json!(LAND_EVENT_ID), |_, r, _| {
+                r[0]["verify_exit"] = "0".into()
+            }),
+            ("recovered without index row", Value::Null, |_, r, l| {
+                r.truncate(1);
+                l[1]["reason"] = "recovered".into();
+            }),
+            (
+                "competing failed admission",
+                json!(LAND_EVENT_ID),
+                |_, r, _| {
+                    let mut other = r[0].clone();
+                    other["event_id"] = "art_other".into();
+                    other["patch_external"]["name"] = "other.patch".into();
+                    other["verify_exit"] = 1.into();
+                    r.insert(0, other);
+                },
+            ),
+            (
+                "panel acceptance through patch-land",
+                json!(LAND_EVENT_ID),
+                |t, _, _| t["panel_accept"] = json!({"task_id":TASK}),
+            ),
+        ];
+        for (case, land, mutate) in verified {
+            let (mut task, mut rows, mut landings) =
+                (stored_done.clone(), rows.clone(), landings.clone());
+            mutate(&mut task, &mut rows, &mut landings);
+            stamp_plan(&task, &mut landings);
+            let task = list_view(&task);
+            let row = view(&operation, &task, &rows, &landings);
+            let entry = &row["native_assignment"];
+            assert_eq!(entry["report"]["artifact_sha256"], artifact.as_str());
+            assert_eq!(entry["verification"], "verified", "{case}: {entry}");
+            assert_eq!(entry["acceptance"], "accepted", "{case}");
+            assert!(entry.get("verification_issue").is_none(), "{case}");
+            assert_eq!(
+                entry["landing"],
+                json!({"source":"canonical-landing","landing_id":LAND_ID,"plan_state":"done","task_id":TASK,
+                    "lease_id":task["lease_id"],"artifact_sha256":artifact,"patch_sha256":patch,"landing_base":base,
+                    "assignment_base":"c".repeat(40),"verification":"command","verify_exit":0,
+                    "admission_event_id":ADMIT_ID,"landing_event_id":land}),
+                "{case}"
+            );
+            assert_eq!(
+                row["stages"]["verify"],
+                json!({"state":"passed","source":"canonical-landing","attempt_id":null,"exit":0,"landing_id":LAND_ID}),
+                "{case}"
+            );
+            assert_eq!(entry["consumption"], "unconfirmed");
+            assert_eq!(entry["child_cleanup"], "unsupported");
+            assert_eq!(entry["next_action"]["kind"], "retire");
+            assert_eq!(row["acceptance"], false);
+            assert_eq!(row["outcome"], Value::Null);
+        }
+        let other_lease = format!("lease_{}", "e".repeat(32));
+        let other_plan = format!("plan_{}", "c".repeat(32));
+        type Unverified = fn(&mut Value, &mut Vec<Value>, &mut Vec<Value>, &str, &str);
+        let cases: &[(&str, &str, Unverified)] = &[
+            ("bare done", LANDING_NO_RECEIPT, |_, r, l, _, _| {
+                r.clear();
+                l.clear();
+            }),
+            ("cancelled", LANDING_NOT_DONE, |t, _, _, _, _| {
+                t["state"] = "cancelled".into()
+            }),
+            (
+                "unverified completion",
+                LANDING_NOT_DONE,
+                |t, _, _, _, _| t["completion_verified"] = false.into(),
+            ),
+            ("stale Plan contract", LANDING_NOT_DONE, |t, _, _, _, _| {
+                t["contract_stale"] = true.into()
+            }),
+            ("revised artifact", LANDING_REVIEW, |t, _, _, _, _| {
+                t["review_evidence"]["artifact"]["sha256"] = "e".repeat(64).into()
+            }),
+            ("reviewed patch", LANDING_REVIEW, |t, _, _, _, _| {
+                t["review_evidence"]["patch"]["sha256"] = "f".repeat(64).into()
+            }),
+            ("artifact path changed", LANDING_REVIEW, |t, _, _, _, _| {
+                t["artifact"] = ".oms/artifacts/unrelated.json".into()
+            }),
+            (
+                "reviewed patch path changed",
+                LANDING_REVIEW,
+                |t, _, _, _, _| {
+                    t["review_evidence"]["patch"]["path"] = ".oms/artifacts/unrelated.patch".into()
+                },
+            ),
+            ("missing task stamp", LANDING_STAMP, |t, _, _, _, _| {
+                t.as_object_mut().unwrap().remove("task_sha256");
+            }),
+            ("wrong task stamp", LANDING_STAMP, |t, _, _, _, _| {
+                t["task_sha256"] = "e".repeat(64).into();
+            }),
+            (
+                "unknown stored field changed",
+                LANDING_STAMP,
+                |t, _, _, _, _| {
+                    t["fixture_extension"] = json!({"keep": []});
+                },
+            ),
+            ("re-claimed lease", LANDING_TASK, |t, _, _, lease, _| {
+                t["lease_id"] = lease.into();
+                t["review_lease_id"] = lease.into();
+                t["review_evidence"]["lease_id"] = lease.into();
+            }),
+            ("review lease", LANDING_REVIEW, |t, _, _, lease, _| {
+                t["review_lease_id"] = lease.into()
+            }),
+            (
+                "malformed receipts",
+                LANDING_UNAVAILABLE,
+                |_, _, l, _, _| l.push("{".into()),
+            ),
+            // A matching patch-land receipt never stands in for a commit landing.
+            ("managed landed commit", LANDING_COMMIT, |t, _, _, _, _| {
+                t["landing"] =
+                    json!({"kind":"commit","sha":"a".repeat(40),"receipt_sha256":"b".repeat(64)});
+            }),
+            (
+                "panel acceptance without receipt",
+                LANDING_COMMIT,
+                |t, _, l, _, _| {
+                    t["patch"] = ".oms/artifacts/native-land.patch".into();
+                    t["panel_accept"] = json!({"task_id":TASK});
+                    l.clear();
+                },
+            ),
+            ("task landing file", LANDING_NO_RECEIPT, |t, _, _, _, _| {
+                t["patch"] = ".oms/landing-patches/land-2.patch".into()
+            }),
+            (
+                "index-only nonterminal",
+                LANDING_NO_RECEIPT,
+                |_, _, l, _, _| l.truncate(1),
+            ),
+            ("abandoned landing", LANDING_NO_RECEIPT, |_, _, l, _, _| {
+                let mut abandoned = l[1].clone();
+                abandoned["event"] = "abandoned".into();
+                l.push(abandoned);
+            }),
+            ("duplicate intent", LANDING_NO_RECEIPT, |_, _, l, _, _| {
+                l.push(l[0].clone())
+            }),
+            ("duplicate terminal", LANDING_NO_RECEIPT, |_, _, l, _, _| {
+                l.push(l[1].clone())
+            }),
+            ("intent schema", LANDING_STAMP, |_, _, l, _, _| {
+                l[0]["schema"] = 2.into();
+                stamp_receipt(&mut l[0]);
+            }),
+            ("terminal schema", LANDING_STAMP, |_, _, l, _, _| {
+                l[1]["schema"] = Value::Null;
+                stamp_receipt(&mut l[1]);
+            }),
+            ("forged agreeing stamps", LANDING_STAMP, |_, _, l, _, _| {
+                for row in l {
+                    row["receipt_sha"] = "e".repeat(64).into();
+                }
+            }),
+            ("null terminal stamp", LANDING_STAMP, |_, _, l, _, _| {
+                l[1]["receipt_sha"] = Value::Null;
+            }),
+            ("missing intent stamp", LANDING_STAMP, |_, _, l, _, _| {
+                l[0].as_object_mut().unwrap().remove("receipt_sha");
+            }),
+            ("wrong Plan review stamp", LANDING_STAMP, |_, _, l, _, _| {
+                for row in l {
+                    row["plan_receipt_sha"] = "e".repeat(64).into();
+                    stamp_receipt(row);
+                }
+            }),
+            ("wrong Plan done stamp", LANDING_STAMP, |_, _, l, _, _| {
+                for row in l {
+                    row["plan_done_receipt_sha"] = "e".repeat(64).into();
+                    stamp_receipt(row);
+                }
+            }),
+            ("null Plan done stamp", LANDING_STAMP, |_, _, l, _, _| {
+                for row in l {
+                    row["plan_done_receipt_sha"] = Value::Null;
+                    stamp_receipt(row);
+                }
+            }),
+            ("receipt task", LANDING_MISMATCH, |_, _, l, _, _| {
+                l.iter_mut().for_each(|v| v["task"] = "task-other".into())
+            }),
+            ("receipt lease", LANDING_MISMATCH, |_, _, l, lease, _| {
+                l.iter_mut().for_each(|v| v["lease"] = lease.into())
+            }),
+            ("receipt plan", LANDING_MISMATCH, |_, _, l, _, plan| {
+                l.iter_mut().for_each(|v| v["plan_id"] = plan.into())
+            }),
+            ("receipt patch digest", LANDING_MISMATCH, |_, _, l, _, _| {
+                l.iter_mut()
+                    .for_each(|v| v["patch_sha"] = "f".repeat(64).into())
+            }),
+            (
+                "completion differs from intent",
+                LANDING_MISMATCH,
+                |_, _, l, _, _| l[1]["base_sha"] = "e".repeat(40).into(),
+            ),
+            ("task patch string", LANDING_MISMATCH, |t, _, _, _, _| {
+                t["patch"] = format!(".oms/landing-patches/{LAND_ID}.patch").into()
+            }),
+            ("landed patch", LANDING_CONFLICT, |_, r, _, _, _| {
+                r[1]["patch_sha256"] = "f".repeat(64).into()
+            }),
+            ("land index schema", LANDING_CONFLICT, |_, r, _, _, _| {
+                r[1]["schema"] = 2.into()
+            }),
+            ("duplicate land index", LANDING_CONFLICT, |_, r, _, _, _| {
+                r.push(r[1].clone())
+            }),
+            (
+                "land event reused elsewhere",
+                LANDING_CONFLICT,
+                |_, r, _, _, _| {
+                    let mut other = r[1].clone();
+                    other["landing_id"] = "land-other".into();
+                    r.push(other);
+                },
+            ),
+            ("other task", LANDING_CONFLICT, |_, r, _, _, _| {
+                r[1]["task_id"] = "task-other".into()
+            }),
+            ("other plan", LANDING_CONFLICT, |_, r, _, _, plan| {
+                r[1]["plan_id"] = plan.into()
+            }),
+            ("row landing file", LANDING_CONFLICT, |_, r, _, _, _| {
+                r[1]["patch"] = ".oms/landing-patches/land-2.patch".into()
+            }),
+            ("verify exit", LANDING_ADMISSION, |_, r, _, _, _| {
+                r[0]["verify_exit"] = 1.into()
+            }),
+            ("skipped verifier", LANDING_ADMISSION, |_, r, _, _, _| {
+                r[0]["verification"] = "skipped".into();
+                r[0]["verify_exit"] = Value::Null;
+            }),
+            ("admission failed", LANDING_ADMISSION, |_, r, _, _, _| {
+                r[0]["exit"] = 1.into()
+            }),
+            ("admission base", LANDING_ADMISSION, |_, r, _, _, _| {
+                r[0]["base"] = "e".repeat(40).into()
+            }),
+            ("admission schema", LANDING_ADMISSION, |_, r, _, _, _| {
+                r[0]["schema"] = 2.into()
+            }),
+            (
+                "unbound admission digest",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| r[0]["patch_external"]["sha256"] = "e".repeat(64).into(),
+            ),
+            (
+                "another task's admission",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| r[0]["task_id"] = "task-other".into(),
+            ),
+            (
+                "conflicting named admission",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| {
+                    let mut other = r[0].clone();
+                    other["base"] = "e".repeat(40).into();
+                    r.push(other);
+                },
+            ),
+            (
+                "duplicate named admission",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| r.insert(1, r[0].clone()),
+            ),
+            (
+                "admission event reused under another file",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| {
+                    let mut other = r[0].clone();
+                    other["patch_external"]["name"] = "other.patch".into();
+                    other["artifact"] = ".oms/artifacts/admit/other.md".into();
+                    r.push(other);
+                },
+            ),
+            (
+                "admission event reused by another kind",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| {
+                    r.push(json!({"schema":1,"kind":"peer-ask","event_id":ADMIT_ID}));
+                },
+            ),
+            (
+                "missing admission report",
+                LANDING_ADMISSION,
+                |_, r, _, _, _| {
+                    r[0]["artifact"] = ".oms/artifacts/admit/unavailable.md".into();
+                },
+            ),
+        ];
+        let unverified = |row: &Value, case: &str, issue: &str| {
+            let entry = &row["native_assignment"];
+            assert_eq!(entry["report"]["status"], "reported", "{case}");
+            assert_eq!(entry["verification"], "unverified", "{case}: {entry}");
+            assert_eq!(entry["verification_issue"], issue, "{case}");
+            assert_eq!(entry["acceptance"], "pending", "{case}");
+            assert!(entry.get("landing").is_none(), "{case}");
+            assert_eq!(row["stages"]["verify"]["state"], "not_run", "{case}");
+        };
+        for &(case, issue, mutate) in cases {
+            let (mut task, mut rows, mut landings) = (done.clone(), rows.clone(), landings.clone());
+            mutate(
+                &mut task,
+                &mut rows,
+                &mut landings,
+                &other_lease,
+                &other_plan,
+            );
+            unverified(&view(&operation, &task, &rows, &landings), case, issue);
+        }
+        let complete_without_lf = ledger(&landings);
+        let row = view_raw(
+            &operation,
+            &done,
+            &rows,
+            complete_without_lf.strip_suffix(b"\n").unwrap(),
+        );
+        unverified(&row, "valid JSON without terminal LF", LANDING_UNAVAILABLE);
+        write_admission(b"corrupted after index");
+        let row = view(&operation, &done, &rows, &landings);
+        unverified(
+            &row,
+            "indexed admission report was corrupted",
+            LANDING_ADMISSION,
+        );
+
+        for (case, body) in [
+            (
+                "rejected admission report",
+                admission_body.replacen("ADMIT", "REJECT", 1),
+            ),
+            (
+                "different capture file",
+                admission_body.replacen(&file, "other.patch", 1),
+            ),
+            (
+                "different verified patch",
+                admission_body.replacen(&patch[..16], &"e".repeat(16), 1),
+            ),
+            (
+                "different checked base",
+                admission_body.replacen(&base[..7], &"e".repeat(7), 1),
+            ),
+            (
+                "different verification mode",
+                admission_body.replacen("verification: command", "verification: skipped", 1),
+            ),
+            (
+                "different verifier",
+                admission_body.replacen(&verify_sha, &crate::digest(b"true"), 1),
+            ),
+            (
+                "missing verifier field",
+                admission_body.replacen(&format!("- verify_sha256: {verify_sha}\n"), "", 1),
+            ),
+            (
+                "duplicate verifier field",
+                format!("{admission_body}- verify_sha256: {verify_sha}\n"),
+            ),
+            (
+                "missing mandatory scope gate",
+                admission_body.replacen("- scope: PASS — changed paths obey the declared scope and structural floor\n", "",1),
+            ),
+            (
+                "misordered mandatory policy gates",
+                admission_body.replace("- scope:", "-swap:").replace("- syntax:", "- scope:").replace("-swap:", "- syntax:"),
+            ),
+            (
+                "missing final batch validation",
+                admission_body.replacen("- batch-prefix: PASS — batch prefix stayed unchanged during admission\n", "",1),
+            ),
+            (
+                "missing verification gate",
+                admission_body.replacen("- verify: PASS — candidate verification exit 0\n", "", 1),
+            ),
+            (
+                "failed verification gate",
+                admission_body.replacen("verify: PASS", "verify: FAIL", 1),
+            ),
+            (
+                "failed non-verifier gate",
+                admission_body.replacen("apply: PASS", "apply: FAIL", 1),
+            ),
+            (
+                "duplicate verifier gate",
+                admission_body.replacen(
+                    "- verify: PASS — candidate verification exit 0\n",
+                    "- verify: PASS — candidate verification exit 0\n- verify: PASS — candidate verification exit 0\n",
+                    1,
+                ),
+            ),
+            (
+                "incomplete ladder",
+                admission_body
+                    .split_once("- source-integrity:")
+                    .unwrap()
+                    .0
+                    .to_owned(),
+            ),
+            (
+                "missing report newline",
+                admission_body.strip_suffix('\n').unwrap().to_owned(),
+            ),
+            (
+                "duplicate report header",
+                format!("{admission_body}# Patch admission: ADMIT\n"),
+            ),
+        ] {
+            write_admission(body.as_bytes());
+            let mut alternate_rows = rows.clone();
+            alternate_rows[0]["artifact_sha256"] = crate::digest(body.as_bytes()).into();
+            let row = view(&operation, &done, &alternate_rows, &landings);
+            unverified(&row, case, LANDING_ADMISSION);
+        }
+        let optional = admission_body
+            .replace("- verify: PASS", "- batch-prefix: PASS — earlier task task-A verification exit 0\n- verify: PASS")
+            .replace("- batch-prefix: PASS — batch prefix stayed", "- base-floor: PASS — unchanged baseline verification exit 0\n- regression: PASS — base exit 1, candidate exit 0\n- batch-prefix: PASS — batch prefix stayed");
+        write_admission(optional.as_bytes());
+        let mut optional_rows = rows.clone();
+        optional_rows[0]["artifact_sha256"] = crate::digest(optional.as_bytes()).into();
+        assert_eq!(
+            view(&operation, &done, &optional_rows, &landings)["native_assignment"]["acceptance"],
+            "accepted"
+        );
+        let with_stdout = format!(
+            "{admission_body}\n## Changed files\n\n- src/value.txt\n\n## Verify output (tail)\n\n```\n# Patch admission: REJECT\n- patch: sample\n- verify_sha256: sample\n- verify: FAIL — sample log text\n```\n"
+        );
+        write_admission(with_stdout.as_bytes());
+        let mut stdout_rows = rows.clone();
+        stdout_rows[0]["artifact_sha256"] = crate::digest(with_stdout.as_bytes()).into();
+        let row = view(&operation, &done, &stdout_rows, &landings);
+        assert_eq!(row["native_assignment"]["verification"], "verified");
+        assert_eq!(row["native_assignment"]["acceptance"], "accepted");
+        write_admission(admission_body.as_bytes());
+
+        let mut changed_task = stored_done.clone();
+        changed_task["fixture_extension"] = json!({"keep": ["new durable content"]});
+        let row = view(&operation, &list_view(&changed_task), &rows, &landings);
+        unverified(&row, "restamped different stored task", LANDING_STAMP);
+        // A passing admission under another capture name never stands in for
+        // this landing's own failed admission.
+        let mut competing_rows = rows.clone();
+        competing_rows[0]["verify_exit"] = 1.into();
+        let mut other = rows[0].clone();
+        other["event_id"] = "art_other".into();
+        other["patch_external"]["name"] = "other.patch".into();
+        competing_rows.push(other);
+        let row = view(&operation, &done, &competing_rows, &landings);
+        unverified(&row, "competing passing admission", LANDING_ADMISSION);
+        let mut pending = operation.clone();
+        pending["refs"]["native_resolution"] = "pending".into();
+        pending["refs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_resolution_result_sha256");
+        let mut review = task.clone();
+        review["state"] = "review".into();
+        let row = view(&pending, &review, &rows, &landings);
+        assert_eq!(row["native_assignment"]["verification"], "unverified");
+        assert!(row["native_assignment"].get("verification_issue").is_none());
+        let (findings, _) = retain("native-findings", None);
+        let mut task = done.clone();
+        task["review_evidence"]["artifact"]["sha256"] =
+            findings["refs"]["native_result_sha256"].clone();
+        let row = view(&findings, &task, &rows, &landings);
+        assert!(row["native_assignment"]["report"]["patch"].is_null());
+        unverified(&row, "report only", LANDING_REPORT_ONLY);
     }
 
     #[test]

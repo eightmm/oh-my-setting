@@ -6018,11 +6018,29 @@ pub fn results(report: &Value, columns: usize) -> String {
                     lines.extend(wrap(&format!("    Next: {next}"), columns));
                 }
             }
+            if let Some(issue) = entry["verification_issue"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+            {
+                lines.extend(wrap(&format!("    Verification: {issue}"), columns));
+            }
             let report = &entry["report"];
             if report.is_object() {
+                // Managed rows reuse `acceptance` for the panel outcome; only a
+                // typed canonical landing names its landing id.
+                let landing = text(&entry["landing"], "landing_id");
+                let decision = if entry["acceptance"] == "accepted"
+                    && entry["verification"] == "verified"
+                    && entry["landing"]["source"] == "canonical-landing"
+                    && !landing.is_empty()
+                {
+                    format!("accepted through canonical landing {landing}")
+                } else {
+                    "acceptance ineligible".into()
+                };
                 lines.extend(wrap(
                     &format!(
-                        "    Native report {} · {} · verification {} · acceptance ineligible",
+                        "    Native report {} · {} · verification {} · {decision}",
                         text(report, "status"),
                         text(report, "result_kind"),
                         text(report, "verification_state")
@@ -11711,8 +11729,44 @@ mod tests {
                 assert!(joined.contains(&compact), "{fact}: {shown}");
             }
         }
-        let narrow = results(&json!({"rows":[reported]}), 30);
+        let narrow = results(&json!({"rows":[reported.clone()]}), 30);
         assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
+        let mut issue = reported.clone();
+        issue["native_assignment"]["verification_issue"] =
+            "no completed canonical landing receipt for this reviewed patch".into();
+        let shown = results(&json!({"rows":[issue]}), 160);
+        assert!(shown.contains(
+            "    Verification: no completed canonical landing receipt for this reviewed patch"
+        ));
+        assert!(shown.contains("acceptance ineligible"));
+        let mut managed = reported.clone();
+        managed["native_assignment"]["acceptance"] = "accepted".into();
+        managed["native_assignment"]["landing"] = json!({"landing_id":"foreign-mark"});
+        let shown = results(&json!({"rows":[managed]}), 160);
+        assert!(shown.contains("acceptance ineligible"), "{shown}");
+        assert!(!shown.contains("canonical landing"), "{shown}");
+        let mut landed = reported;
+        landed["native_assignment"]["acceptance"] = "accepted".into();
+        landed["native_assignment"]["verification"] = "verified".into();
+        let id = format!("land-20261124T010203Z-{}", "a".repeat(16));
+        landed["native_assignment"]["landing"] =
+            json!({"source":"canonical-landing","landing_id":id});
+        let accepted = format!("accepted through canonical landing {id}");
+        for columns in [32, 56, 160] {
+            let shown = results(&json!({"rows":[landed.clone()]}), columns);
+            assert!(shown.lines().all(|line| width(line) <= columns), "{shown}");
+            assert!(!shown.contains("ineligible"), "{shown}");
+            assert!(!shown.contains("Verification:"), "{shown}");
+            let joined: String = shown.chars().filter(|c| !c.is_whitespace()).collect();
+            for fact in [
+                "decision accepted",
+                "verification verified",
+                accepted.as_str(),
+            ] {
+                let compact: String = fact.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(joined.contains(&compact), "{fact}: {shown}");
+            }
+        }
     }
 
     #[test]

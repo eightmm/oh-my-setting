@@ -1550,7 +1550,7 @@ pub(crate) fn run(
         sandbox(paths, options, flag)?
     } else if options.has("--surfaces") {
         let mut rows = surfaces(paths)?;
-        crate::hook_diagnostics::append(paths, &mut rows)?;
+        crate::hook_diagnostics::append(paths, &mut rows, services)?;
         rows
     } else if options.has("--tool-lock") {
         tool_lock(paths)?

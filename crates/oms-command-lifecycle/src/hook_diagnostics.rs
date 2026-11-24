@@ -2,7 +2,9 @@
 use crate::{
     receipt::Paths,
     runtime::{self as r, Result},
+    services::Services,
 };
+use oms_safe_fs::Root;
 use rustix::{
     fs::{self as rfs, AtFlags, FileType, Mode, OFlags, Stat},
     io::Errno,
@@ -186,10 +188,14 @@ fn same_node(before: &Stat, after: &Stat) -> bool {
     before.st_dev == after.st_dev
         && before.st_ino == after.st_ino
         && before.st_uid == after.st_uid
+        && before.st_gid == after.st_gid
         && before.st_mode == after.st_mode
 }
 
-fn read_trace(repo: &Path) -> std::result::Result<Vec<u8>, Errno> {
+fn read_trace(
+    repo: &Path,
+    private_group: impl Fn(u32) -> bool,
+) -> std::result::Result<Vec<u8>, Errno> {
     // Walk physical names without following links, then protect the project
     // subtree. A private project can live below a shared sticky temp directory.
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -206,15 +212,49 @@ fn read_trace(repo: &Path) -> std::result::Result<Vec<u8>, Errno> {
     }
     let uid = rustix::process::geteuid().as_raw();
     let (parent, stat, _) = chain.last().unwrap();
-    if stat.st_uid != uid
-        || chain.iter().rev().enumerate().any(|(depth, (_, stat, _))| {
-            let sticky_ancestor = depth >= 3 && stat.st_mode & 0o1000 != 0;
-            (stat.st_uid != uid && stat.st_uid != 0)
-                || (stat.st_mode & 0o022 != 0 && !sticky_ancestor)
-        })
-    {
+    let recheck_names = || {
+        for pair in chain.windows(2) {
+            let (_, initial, name) = &pair[1];
+            let named = rfs::statat(&pair[0].0, *name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|_| Errno::AGAIN)?;
+            if !same_node(initial, &named) {
+                return Err(Errno::AGAIN);
+            }
+        }
+        Ok(())
+    };
+    if stat.st_uid != uid {
         return Err(Errno::ACCESS);
     }
+    let mut needs_workspace_proof = false;
+    for (depth, (_, stat, _)) in chain.iter().rev().enumerate() {
+        if stat.st_uid != uid && stat.st_uid != 0 {
+            return Err(Errno::ACCESS);
+        }
+        let sticky_ancestor = depth >= 3 && stat.st_mode & 0o1000 != 0;
+        if stat.st_mode & 0o022 == 0 || sticky_ancestor {
+            continue;
+        }
+        if depth < 2 || stat.st_uid != uid || stat.st_mode & 0o022 != 0o020 {
+            return Err(Errno::ACCESS);
+        }
+        needs_workspace_proof = true;
+    }
+    let workspace = if needs_workspace_proof {
+        let workspace =
+            Root::open_private_workspace(repo, &private_group).map_err(|_| Errno::ACCESS)?;
+        let (proved, _) = workspace
+            .pinned_metadata(OsStr::new(".oms"))
+            .map_err(|_| Errno::AGAIN)?;
+        // Relax only ancestry proved for the same held checkout.
+        if !same_node(&chain[chain.len() - 3].1, &proved) {
+            return Err(Errno::AGAIN);
+        }
+        recheck_names()?;
+        Some(workspace)
+    } else {
+        None
+    };
     let named = rfs::statat(parent, TRACE, AtFlags::SYMLINK_NOFOLLOW)?;
     if FileType::from_raw_mode(named.st_mode) != FileType::RegularFile
         || named.st_uid != uid
@@ -252,6 +292,11 @@ fn read_trace(repo: &Path) -> std::result::Result<Vec<u8>, Errno> {
         .take(TRACE_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Errno::IO)?;
+    if let Some(workspace) = workspace {
+        workspace
+            .recheck_private_workspace(private_group)
+            .map_err(|_| Errno::AGAIN)?;
+    }
     if bytes.len() != size
         || !stable(&rfs::fstat(&file)?)
         || !stable(
@@ -260,18 +305,11 @@ fn read_trace(repo: &Path) -> std::result::Result<Vec<u8>, Errno> {
     {
         return Err(Errno::AGAIN);
     }
-    for pair in chain.windows(2) {
-        let (_, initial, name) = &pair[1];
-        let named =
-            rfs::statat(&pair[0].0, *name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| Errno::AGAIN)?;
-        if !same_node(initial, &named) {
-            return Err(Errno::AGAIN);
-        }
-    }
+    recheck_names()?;
     Ok(bytes)
 }
 
-fn trace(paths: &Paths, expected: &Value) -> Value {
+fn trace(paths: &Paths, expected: &Value, services: &dyn Services) -> Value {
     // Match the callback writer's physical checkout selection, including subdirectories.
     let raw = fs::canonicalize(&paths.cwd)
         .map_err(|_| Errno::IO)
@@ -283,7 +321,20 @@ fn trace(paths: &Paths, expected: &Value) -> Value {
                         .is_ok_and(|meta| meta.is_file() || meta.is_dir())
                 })
                 .unwrap_or(&cwd);
-            read_trace(repo)
+            read_trace(repo, |gid| {
+                let uid = rustix::process::getuid().as_raw();
+                services
+                    .group_resolver()
+                    .and_then(|resolve| resolve(gid).ok())
+                    .is_some_and(|group| {
+                        group.gid == gid
+                            && group
+                                .explicit_member_uids
+                                .iter()
+                                .all(|member| *member == uid)
+                            && group.primary_member_uids == [uid]
+                    })
+            })
         });
     match raw {
         Ok(raw) => trace_summary(&raw, expected),
@@ -319,7 +370,11 @@ fn codex_configuration(paths: &Paths, expected: &Value) -> Value {
         "runtime_loading":"unverified"})
 }
 
-pub(crate) fn append(paths: &Paths, findings: &mut Vec<Value>) -> Result<()> {
+pub(crate) fn append(
+    paths: &Paths,
+    findings: &mut Vec<Value>,
+    services: &dyn Services,
+) -> Result<()> {
     let registration = findings
         .iter()
         .find_map(|row| {
@@ -352,7 +407,7 @@ pub(crate) fn append(paths: &Paths, findings: &mut Vec<Value>) -> Result<()> {
             "message":format!("{provider} Main edit policy: advisory; no OMS Main-specific write guard")}));
     }
     let expected = crate::plugins::codex_hooks(paths)?;
-    let trace = trace(paths, &expected);
+    let trace = trace(paths, &expected, services);
     let diagnosis = trace["diagnosis"]
         .as_str()
         .unwrap_or("trace_unavailable")
