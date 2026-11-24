@@ -321,3 +321,70 @@ Issue의 Goal/Scope/Acceptance criteria/Verification을 작성하고 구현 PR�
 이 문서 PR의 검증 범위는 참조 무결성과 문서 변경이다. Runtime 기능 시험의 통과,
 네 provider의 live parity, Project 생성, plugin 설치를 문서 검증 결과로 대신하지 않는다.
 해당 작업의 receipt와 Issue/PR 상태가 각 완료 주장을 뒷받침해야 한다.
+
+## 9. Main의 기능·세션·작업 계약
+
+[#432](https://github.com/eightmm/oh-my-setting/issues/432)의 구현 기준이다. 아래의 Main 경로와 fixture는 `63142c26`에서 확인했다. 로드맵 브랜치 `f8ed3319`의 해당 panel 소스도 같다. 현재 기본 브랜치 `ad03a1a3`에는 이후 Team 발행 경계 등의 변경이 있다. 아래 DTO 이름, 거절 코드, 버전 정책은 **제안**이며 현재 CLI·MCP가 반환하는 공통 wire schema는 아니다.
+
+### 9.1 네 Main의 현재 기능
+
+표의 **지원**(`supported`)은 해당 경로를 기존 owner가 제공한다는 뜻이다. **거절**(`unsupported`)은 지정한 작업을 owner가 명시적으로 거부할 때만 쓴다. **미확인**(`unknown`)은 관측이나 경로 근거가 불충분하다는 뜻이다. 명령·세션·계정이 실제로 준비되었는지는 별도다. 표의 확인일은 2026-11-24다. **F**는 아래 Linux fixture에서 확인한 범위, **S**는 인용한 소스에서 확인한 범위다. 실제 공급자 세션에서 실행한 증거는 별도의 버전·호스트·시각·receipt와 함께 기록한다.
+
+| 작업 범위 | Codex | Claude | AGY | Pi |
+|---|---|---|---|---|
+| Main 시작 | 지원 F | 지원 S | 지원 F | 지원 F |
+| 실행 중인 Main 관측 | 지원 S | 지원 S | 지원 F | 지원 F, harness와 owner를 함께 읽음 |
+| 세션 채팅 관측 | 지원 S, Codex locator | 지원 S, Claude locator | 지원 S, Antigravity locator | 미확인 |
+| Room에 보내기 | 지원 S | 지원 S | 지원 S | 지원 S |
+| Main의 native turn으로 보내기 / steer | 미확인 | 미확인 | 미확인 | 미확인 |
+| Main interrupt / stop | 미확인 | 미확인 | 미확인 | 미확인 |
+| native session resume | 지원 F | 지원 S | 거절 S | 거절 F |
+| 기존 tmux Main 붙이기 | 지원 S | 지원 S | 지원 S | 지원 S |
+| 새 Main의 명시적 계정 선택 | 지원 F | 지원 F | 거절 F | 거절 F |
+| 사용량 읽기 | 지원 S, 로컬 관측값 | 지원 F, 현재 별칭의 기록 | 지원 S, 기록된 호출 범위 | 미확인, Pi 행만으로 추론 사용량 귀속 불가 |
+
+- `MAIN_CAPABILITIES`는 Codex·Claude의 native CLI, AGY의 `agy` CLI와 `antigravity` owner, Pi의 `oms harness pi`와 `codex` 추론 owner를 구분한다. 기존 Main 관측·attach는 tmux와 lifecycle 기록을 사용한다. 창에 붙기만 했을 때는 제어 권한을 얻지 않는다. [Main 시작·재연결](../crates/oms-command-panel/src/native_panel.rs) · [채팅 locator](../crates/oms-command-panel/src/orchestrator.rs) · [사용량](../crates/oms-command-panel/src/usage.rs)
+- `require_resume`은 현재 AGY와 Pi의 native resume을 거부한다. Codex·Claude는 `native_resume_binding`에서 Room 열거가 완전해야 하고 동일 Room에 중복 participant가 있으면 거부한다. 호출부는 바인딩 **0개 또는 1개**를 허용한다. 여러 Room에 걸치거나 요청한 Room과 기존 바인딩이 다르면 거부한다. 바인딩 0개로 이 검사를 통과해도 Room 참가나 제어 권한이 증명된 것은 아니다. [Main admission과 resume](../crates/oms-command-panel/src/native_panel.rs)
+- Room 전송·갱신·확인은 등록된 참여자의 경로다. Lead의 native 입력 전달, managed job의 generation 기반 중단, peer 취소 receipt는 각각 다른 대상을 다룬다. Main의 직접 입력·정지 상태를 이 기록에서 추론하지 않는다. [Room CLI](../crates/oms-command-room/src/cli.rs) · [Lead 전달](../crates/oms-command-panel/src/lead_delivery.rs) · [managed 작업](../crates/oms-command-panel/src/managed.rs)
+- 기존 fixture는 `native_main_launch_preserves_physical_custody_and_unknown_evidence`, `installed_pi_picker_runs_the_gateway_and_opens_the_owned_codex_lead`, `explicit_main_account_is_only_for_fresh_codex_and_claude_launches`, `explicit_claude_receipts_follow_current_alias_and_keep_ranking_separate`다. 계정 선택의 F는 CLI 허용·거절 범위다. [Main fixture](../crates/oms-command-panel/src/native_panel.rs) · [CLI fixture](../crates/oms-command-panel/src/cli.rs) · [Claude 사용량 fixture](../crates/oms-command-panel/src/usage.rs)
+
+### 9.2 읽기와 실행 경계 제안
+
+| DTO 필드 | 기존 근거와 처리 |
+|---|---|
+| `harness`, `dispatch_owner`, `transport`, `requested_model`, `served_model` | 선택과 실행 경로는 `MainCapability` 및 `dry_run_plan`에서 읽는다. 실제 응답 모델은 해당 응답 기록이 있을 때만 채운다. 미관측 값을 요청 모델로 채우지 않는다. |
+| `project`, `host`, `boot`, `process_generation` | 프로젝트는 호스트가 허용한 범위로 한정한다. tmux의 `SessionProof`(서버·소켓)와 pane의 pid/birth는 프로세스 재사용을 검사한다. OS boot 증거는 해당 호스트 owner가 제공한 경우에만 채운다. |
+| `account_binding`, `native_session` | `PersistedAccountBinding`의 계정 식별·검증 여부와 `BindingAnchor`의 재검증을 사용한다. native resume의 Room consumer digest는 공급자 세션을 찾는 키다. 공개 뷰에는 원본 세션 ID, 계정 home, 환경변수 값을 보내지 않는다. |
+| `room`, `participant`, `attempt`, `operation`, `lease_epoch` | Room 멤버십, lifecycle 실행 시도, 작업 receipt와 Plan lease를 각각 해당 owner에서 읽는다. 필드 하나가 비어 있어도 다른 식별자로 대체하지 않는다. |
+| `observed_at`, `source_owner`, `generation`, `completeness`, `evidence` | 읽은 시각·출처·세대와 부분 결과를 보존한다. `evidence`는 근거 종류(`documentation/source/fixture/live`)와 참조를 담는다. 서로 다른 시점의 Board·Room·usage를 원자적 스냅숏으로 취급하지 않는다. |
+
+세대 표지는 owner가 다시 확인할 수 있는 불투명한 값으로 동등 비교에만 쓴다. 재접속·계정 교체·재시작 때는 actor의 현재 project/Room/lease, 작업 대상, 프로세스 세대와 필요한 승인을 기존 writer가 재검사한다. 읽기 연결, 플러그인 선택, 관측된 native 채팅은 실행 권한을 부여하지 않는다. [terminal proof](../crates/oms-panel-core/src/terminals.rs) · [계정 binding](../crates/oms-command-panel/src/account_binding.rs) · [SSH 호스트 관측](../crates/oms-runtime/src/ssh_adapter.rs)
+
+### 9.3 요청·거절·receipt·event 예시
+
+다음은 제안한 v1 메시지의 최소 예다. 각 객체는 독립 메시지이며 식별자는 예시 값이다. 실제 요청의 actor와 scope는 호스트·lease가 증명해야 한다.
+
+```json
+[
+  {"schema":1,"kind":"snapshot","project":"docs","observed_at":"2026-11-24T10:00:00Z","source_owner":"panel","generation":"g1","completeness":"partial","main":{"harness":"pi","dispatch_owner":"codex","transport":"codex_gateway","served_model":{"state":"unknown"}}},
+  {"schema":1,"kind":"action_request","action":"resume","target":{"project":"docs","room":"r1","attempt":"a1"},"expected_generation":"g1","expected_revision":"r7","expires_at":"2026-11-24T10:01:00Z","idempotency_key":"req-1"},
+  {"schema":1,"kind":"action_result","request":"req-1","outcome":"refused","code":"resume_binding_unverified","capability_state":"unsupported"},
+  {"schema":1,"kind":"operation_receipt","request":"req-2","operation":"op-2","owner":"room","outcome":"accepted","receipt_ref":"msg-2"},
+  {"schema":1,"kind":"event","owner":"room","event_id":"msg-2","operation":"op-2","cursor":"c8","gap":false}
+]
+```
+
+- `resume_binding_unverified`는 명시된 resume 거절, `generation_mismatch`는 기존 세대 불일치, `capability_unknown`은 근거 부족을 나타내는 제안 코드다. owner가 반환하는 현재 `Error`의 숫자 code·메시지·`publication_uncertain`을 보존한다. `accepted`, `delivered`, `completed`는 각각 별도 증거가 필요하다. [오류 형식](../crates/oms-panel-core/src/lib.rs)
+- 응답 유실이나 `delivery_unknown`이면 원래 scope·키로 기존 작업과 receipt를 먼저 조회한다. writer가 동일 요청 키의 중복 방지를 보장하고, 조회 결과 재시도가 안전할 때만 같은 키로 다시 보낸다. `publication_uncertain: false`만으로는 이 조건을 충족하지 않는다.
+- event는 기존 Room updates cursor와 이벤트 식별자를 보존한다. 누락 구간은 `gap`으로 표시하고 다시 읽는다. Plan·Agents·Logs·Review와 #441–#443의 뷰는 같은 projection과 writer receipt를 사용한다. [Room CLI](../crates/oms-command-room/src/cli.rs)
+
+### 9.4 호환과 진행 중인 provider/account 변경
+
+`schema`와 `kind`는 필수다. 같은 버전에서는 기존 필드 의미를 유지하고 선택 필드만 추가한다. 새 값에 익숙하지 않은 독자는 읽기에서 미확인을 표시하고 실행은 거부한다. 비호환 변경은 새 버전을 협상하거나 기존 소비자에 v1 투영을 계속 제공하고, 전환·폐기를 명시한다. CLI·Board·MCP는 각 writer와 저장 형식을 유지한다. #434의 원격 연결, supervisor의 host 관측, 기존 provider adapter와 UI의 역할은 2절의 소유 경계를 따른다. 새 패키지나 별도 권한 원장은 요구하지 않는다.
+
+| 확인한 PR diff (2026-11-24, 둘 다 draft) | 이번 계약과의 접점 |
+|---|---|
+| [#334, `b2d8b429`](https://github.com/eightmm/oh-my-setting/pull/334/files) | `provider_identity::canonical`은 `agy`를 `antigravity`로 정규화하고, `Discovery`는 builtin 실행 파일과 표시된 custom adapter를 찾는다. peer·models·MCP 호출부가 이를 사용한다. 이름/실행 파일 발견과 Main admission·Pi 추론 owner는 따로 검증한다. |
+| [#335, `2cb26b20`](https://github.com/eightmm/oh-my-setting/pull/335/files) | #334 위에 쌓인 diff다. `oms_context::provider_accounts`의 ID·home·중복·policy 검사를 connect·routing·peer가 공유하고 기존 `Strict`와 `PeerLegacy` 해석을 보존한다. 파일 소유권과 실제 실행의 account binding은 각 caller에 남는다. `provider-accounts-v1.json`이 소비자별 일치·예외를 고정한다. |
+
+두 PR이 반영되면 공통 validator의 결과를 읽고 별도 문자열 정규화나 account DTO 저장소를 만들지 않는다. 현재 Main의 명시적 계정 선택은 panel admission을 따른다. 공급자 실세션과 원격 쓰기 동작은 별도 검증 대상으로 남긴다.
