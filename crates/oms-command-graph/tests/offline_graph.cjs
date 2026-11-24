@@ -521,16 +521,17 @@ for (const kind of ['project', 'execution']) {
   assert.ok(new Set(pts.map(p => p.x.toFixed(1))).size > 20 && new Set(pts.map(p => p.y.toFixed(1))).size > 20, `${kind} layout must not sit on a fixed lattice`);
   const cam = camera(first);
   assert.ok(cam.k >= .3 && cam.k <= 5);
+  const stageH = Number(first.svg.attributes.viewBox.split(' ')[3]);
   for (const p of pts) {
     const sx = cam.x + p.x * cam.k; const sy = cam.y + p.y * cam.k;
-    assert.ok(sx >= 0 && sx <= 736 && sy >= 0 && sy <= 520, `${kind} fit-to-view keeps node inside stage (${sx},${sy})`);
+    assert.ok(sx >= 0 && sx <= 736 && sy >= 0 && sy <= stageH, `${kind} fit-to-view keeps node inside stage (${sx},${sy})`);
   }
   // Selecting a node moves/zooms the view; Reset and Escape return to fit-all.
   const before = camera(first);
   first.nodes[5].fire('click');
   assert.notDeepEqual(camera(first), before, 'click must focus the view on the node');
   const focused = camera(first); const row5 = pts[5];
-  assert.ok(Math.abs(focused.x + row5.x * focused.k - 368) < 1 && Math.abs(focused.y + row5.y * focused.k - 260) < 1, 'selected node is centred');
+  assert.ok(Math.abs(focused.x + row5.x * focused.k - 368) < 1 && Math.abs(focused.y + row5.y * focused.k - stageH / 2) < 1, 'selected node is centred');
   first.nodes[5].fire('keydown', {key: 'Escape'});
   assert.deepEqual(camera(first), before, 'Esc returns to fit-all');
   first.nodes[5].fire('keydown', {key: '+'}); assert.ok(camera(first).k > before.k);

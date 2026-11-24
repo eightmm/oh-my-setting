@@ -642,7 +642,7 @@
   function computeWorld() {
     const baseHeight = width <= 480 ? 400 : 520;
     const maxCollide = nodes.reduce((acc, row) => Math.max(acc, collideRadius(row)), 14);
-    const cell = Math.pow(maxCollide * 2 + 6, 2) * 1.5;
+    const cell = Math.pow(maxCollide * 2 + 6, 2) * 2.4;
     const needed = Math.ceil(nodes.length * cell / Math.max(1, width - PAD * 2)) + PAD * 2;
     height = Math.max(baseHeight, needed);
     svg.attr('viewBox', `0 0 ${width} ${height}`);
@@ -752,11 +752,9 @@
   function relax() {
     for (let pass = 0; pass < 200; pass += 1) {
       const moved = collide(1);
-      if (width === 1024 && nodes.length === 200 && (pass < 3 || pass > 196)) { let bad = 0; for (let i = 0; i < nodes.length; i += 1) for (let j = i + 1; j < nodes.length; j += 1) if (Math.hypot(nodes[i].x-nodes[j].x, nodes[i].y-nodes[j].y) < nodeRadius(nodes[i]) + nodeRadius(nodes[j])) bad += 1; console.log('pass', pass, moved, bad); }
       clampToWorld();
-      if (!moved) { globalThis.__log = (globalThis.__log||[]); break; }
+      if (!moved) break;
     }
-    { let bad = 0; for (let i = 0; i < nodes.length; i += 1) for (let j = i + 1; j < nodes.length; j += 1) if (Math.hypot(nodes[i].x-nodes[j].x, nodes[i].y-nodes[j].y) < nodeRadius(nodes[i]) + nodeRadius(nodes[j])) bad += 1; console.log('relax end bad', bad, width, height); }
   }
   function edgePath(row) {
     const a = row.source;
