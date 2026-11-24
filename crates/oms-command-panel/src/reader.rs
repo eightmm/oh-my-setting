@@ -8,10 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const TRANSCRIPT_MAX_BYTES: usize = 8 * 1024 * 1024;
+const TRANSCRIPT_VIEW_MAX_BYTES: usize = TRANSCRIPT_MAX_BYTES;
 const TRANSCRIPT_EXCERPT_BYTES: usize = 8 * 1024;
 const TRANSCRIPT_NOT_CAPTURED: &str = "transcript not captured";
 const TRANSCRIPT_TRUNCATED_NOTE: &str =
     "[transcript truncated: retained last 8 MiB; earlier events unavailable]";
+const TRANSCRIPT_BUDGET_TRUNCATED_NOTE: &str =
+    "[transcript truncated: retained tail within view budget; earlier events unavailable]";
+const TRANSCRIPT_BUDGET_EXHAUSTED_NOTE: &str = "[transcript omitted: view byte budget reached]";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum View {
@@ -37,12 +41,71 @@ impl View {
         }
     }
 }
-type FileRows = Vec<(usize, String)>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileEntryKey {
+    pub task_index: usize,
+    pub task_id: String,
+    pub call_index: Option<usize>,
+    pub call_label: String,
+    pub patch: String,
+    pub patch_sha256: String,
+    pub path: String,
+}
+
+type FileRows = Vec<(usize, FileEntryKey)>;
+
+enum FilesItem {
+    Line(String),
+    Wrapped(String),
+    File {
+        key: FileEntryKey,
+        patch_index: usize,
+        added: usize,
+        removed: usize,
+    },
+}
+
+struct FilesModel {
+    items: Vec<FilesItem>,
+    patches: Vec<Vec<u8>>,
+}
+
+enum TextItem {
+    Line(String),
+    Wrapped(String),
+}
+
+enum ViewCacheData {
+    Files(FilesModel),
+    Text(Vec<TextItem>),
+}
+
+struct ViewCache {
+    repo: std::path::PathBuf,
+    report: Value,
+    view: View,
+    data: ViewCacheData,
+}
+
+struct FilesListCache {
+    width: usize,
+    base_lines: Vec<String>,
+    file_rows: FileRows,
+}
+
+struct OpenedDiffCache {
+    key: FileEntryKey,
+    safe_diff: Option<String>,
+}
+
 struct RenderedCache {
+    repo: std::path::PathBuf,
+    report: Value,
     view: View,
     width: usize,
     selected_file: usize,
-    opened_file: Option<String>,
+    opened_file: Option<FileEntryKey>,
     lines: Arc<Vec<String>>,
 }
 #[derive(Default)]
@@ -53,27 +116,34 @@ pub struct Reader {
     pub searching: bool,
     pub section: usize,
     pub selected_file: usize,
-    pub opened_file: Option<String>,
+    pub opened_file: Option<FileEntryKey>,
     files_offset: usize,
     file_rows: FileRows,
+    view_cache: Option<ViewCache>,
+    files_list_cache: Option<FilesListCache>,
+    opened_diff_cache: Option<OpenedDiffCache>,
     rendered: Option<RenderedCache>,
 }
 impl Reader {
     /// Rendered lines for the current view and width; artifact reads, patch
-    /// digests and redaction rerun only when either changes.
+    /// digests and redaction rerun only when the underlying view or report changes.
     pub fn lines(&mut self, repo: &Path, report: &Value, width: usize) -> Result<Arc<Vec<String>>> {
         if let Some(cache) = &self.rendered
             && cache.view == self.view
             && cache.width == width
             && cache.selected_file == self.selected_file
             && cache.opened_file == self.opened_file
+            && cache.repo == repo
+            && cache.report == *report
         {
             return Ok(Arc::clone(&cache.lines));
         }
-        let (rendered_lines, file_rows) = self.render_with_files(repo, report, width)?;
+        let (rendered_lines, file_rows) = self.render_cached(repo, report, width)?;
         if let Some(prev) = &self.rendered
             && prev.view == self.view
             && prev.opened_file == self.opened_file
+            && prev.repo == repo
+            && prev.report == *report
             && prev.width != width
         {
             self.offset = resume_offset(&prev.lines, self.offset, &rendered_lines);
@@ -91,6 +161,8 @@ impl Reader {
         }
         let lines = Arc::new(rendered_lines);
         self.rendered = Some(RenderedCache {
+            repo: repo.to_path_buf(),
+            report: report.clone(),
             view: self.view,
             width,
             selected_file: self.selected_file,
@@ -100,253 +172,100 @@ impl Reader {
         Ok(lines)
     }
     pub fn render(&self, repo: &Path, report: &Value, width: usize) -> Result<Vec<String>> {
-        self.render_with_files(repo, report, width)
-            .map(|(lines, _)| lines)
+        if let Some(lines) = render_non_artifact_view(self.view, report, width)? {
+            return Ok(lines);
+        }
+        let data = load_view_cache_data(repo, report, self.view, TRANSCRIPT_VIEW_MAX_BYTES)?;
+        match &data {
+            ViewCacheData::Files(model) => {
+                if let Some(opened) = &self.opened_file {
+                    let safe = compute_opened_file_diff(model, opened)?;
+                    Ok(render_opened_file_diff(opened, safe.as_deref(), width))
+                } else {
+                    let (base, file_rows) = build_files_list(model, width);
+                    Ok(apply_selected_marker(&base, &file_rows, self.selected_file))
+                }
+            }
+            ViewCacheData::Text(items) => Ok(render_text_items(items, self.view, width)),
+        }
     }
-    fn render_with_files(
-        &self,
+    fn render_cached(
+        &mut self,
         repo: &Path,
         report: &Value,
         width: usize,
     ) -> Result<(Vec<String>, FileRows)> {
-        if report["kind"] == "oms-panel-routes" {
-            let routes = &report["routes"];
-            if matches!(self.view, View::Summary | View::Info) {
-                return Ok((
-                    render::routes(routes, width)
-                        .lines()
-                        .map(str::to_owned)
-                        .collect(),
-                    Vec::new(),
-                ));
-            }
-            let bytes = serde_json::to_vec(routes).map_err(Error::new)?;
-            return Ok((
-                render::wrap(&oms_panel_core::redact(&bytes)?, width),
-                Vec::new(),
-            ));
+        if let Some(lines) = render_non_artifact_view(self.view, report, width)? {
+            return Ok((lines, Vec::new()));
         }
-        if report["kind"] == "oms-panel-teams" {
-            if matches!(self.view, View::Summary | View::Info) {
-                return Ok((
-                    render::teams(report, width)
-                        .lines()
-                        .map(str::to_owned)
-                        .collect(),
-                    Vec::new(),
-                ));
-            }
-            let bytes = serde_json::to_vec(report).map_err(Error::new)?;
-            return Ok((
-                render::wrap(&oms_panel_core::redact(&bytes)?, width),
-                Vec::new(),
-            ));
+        let cache_valid = self
+            .view_cache
+            .as_ref()
+            .is_some_and(|c| c.view == self.view && c.repo == repo && c.report == *report);
+        if !cache_valid {
+            let data = load_view_cache_data(repo, report, self.view, TRANSCRIPT_VIEW_MAX_BYTES)?;
+            self.view_cache = Some(ViewCache {
+                repo: repo.to_path_buf(),
+                report: report.clone(),
+                view: self.view,
+                data,
+            });
+            self.files_list_cache = None;
+            self.opened_diff_cache = None;
         }
-        let mut out = Vec::new();
-        let mut file_rows = Vec::new();
-        let store = Store::open(repo)?;
-        if self.view == View::Summary {
-            return Ok((
-                render::results(report, width)
-                    .lines()
-                    .map(str::to_owned)
-                    .collect(),
-                Vec::new(),
-            ));
-        }
-        if self.view == View::Files
-            && let Some(path) = &self.opened_file
-        {
-            out.push(format!("File diff: {path} (Esc returns to Files)"));
-            let mut found_diff = false;
-            for task in rows(&report["rows"]) {
-                for call in rows(&task["calls"]) {
-                    if call["patch"].is_string() {
-                        let patch = oms_panel_core::results::verified_patch(&store, call)?;
-                        let slice = oms_panel_core::files::file_diff(&patch, path)?;
-                        if !slice.is_empty() {
-                            found_diff = true;
-                            let safe = oms_panel_core::redact(&slice)?;
-                            out.extend(render::wrap(&safe, width));
-                        }
+        let cache = self.view_cache.as_ref().expect("populated above");
+        match &cache.data {
+            ViewCacheData::Files(model) => {
+                if let Some(opened) = self.opened_file.clone() {
+                    let hit = self
+                        .opened_diff_cache
+                        .as_ref()
+                        .is_some_and(|c| c.key == opened);
+                    if !hit {
+                        let safe_diff = compute_opened_file_diff(model, &opened)?;
+                        self.opened_diff_cache = Some(OpenedDiffCache {
+                            key: opened.clone(),
+                            safe_diff,
+                        });
                     }
-                }
-                let native = &task["native_assignment"]["report"];
-                if native["status"] == "reported" && native["patch"].is_object() {
-                    let row = serde_json::json!({
-                        "patch": native["patch"]["path"],
-                        "patch_sha256": native["patch"]["sha256"],
-                    });
-                    let patch = oms_panel_core::results::verified_patch(&store, &row)?;
-                    let slice = oms_panel_core::files::file_diff(&patch, path)?;
-                    if !slice.is_empty() {
-                        found_diff = true;
-                        let safe = oms_panel_core::redact(&slice)?;
-                        out.extend(render::wrap(&safe, width));
-                    }
-                }
-            }
-            if !found_diff {
-                out.push("No diff recorded for this file".into());
-            }
-            return Ok((out, Vec::new()));
-        }
-        for task in rows(&report["rows"]) {
-            out.push(format!("Task {} · {:?}", text(task, "task_id"), self.view));
-            let calls = rows(&task["calls"]);
-            for call in calls {
-                match self.view {
-                    View::Diff | View::Files => {
-                        if call["patch"].is_string() {
-                            let patch = oms_panel_core::results::verified_patch(&store, call)?;
-                            if self.view == View::Files {
-                                for change in oms_panel_core::files::patch_changes(&patch)? {
-                                    file_rows.push((out.len(), change.path.clone()));
-                                    out.push(format!(
-                                        "  {} +{} -{}",
-                                        change.path, change.added, change.removed
-                                    ));
-                                }
-                            } else {
-                                let safe = oms_panel_core::redact(&patch)?;
-                                out.extend(render::wrap(&safe, width));
-                            }
-                        }
-                    }
-                    View::Events => out.extend(render::value_lines(call, width)),
-                    View::Info => {
-                        for key in [
-                            "attempt_id",
-                            "kind",
-                            "selected_model",
-                            "reason_code",
-                            "exit",
-                            "verify_exit",
-                            "duration_ms",
-                            "base_sha",
-                            "patch_sha256",
-                        ] {
-                            if let Some(value) = call.get(key)
-                                && !value.is_null()
-                            {
-                                out.extend(render::wrap(&format!("{key}: {value}"), width));
-                            }
-                        }
-                    }
-                    View::Raw => {
-                        if call["artifact"].is_string() {
-                            let raw = oms_panel_core::results::indexed_artifact(&store, call)?;
-                            let safe = oms_panel_core::redact(&raw)?;
-                            out.extend(render::wrap(&safe, width));
-                        } else {
-                            let excerpt = call["answer"]
-                                .as_str()
-                                .or_else(|| call["answer_excerpt"].as_str())
-                                .unwrap_or_default();
-                            let safe = oms_panel_core::redact(excerpt.as_bytes())?;
-                            out.extend(render::wrap(&safe, width));
-                            if call["answer_truncated"] == true {
-                                out.push("... (answer truncated)".into());
-                            }
-                        }
-                    }
-                    View::Transcript => {
-                        if let Some(lines) = load_dispatch_transcript(repo, call, width)? {
-                            out.extend(lines);
-                        } else {
-                            out.push(TRANSCRIPT_NOT_CAPTURED.into());
-                        }
-                    }
-                    View::Summary => {}
-                }
-            }
-            // Native reports remain a separate evidence surface. They never
-            // become delegate calls or supply implement/verify exit statuses.
-            let native = &task["native_assignment"]["report"];
-            if native["status"] == "reported" {
-                out.extend(render::wrap(
-                    &format!(
-                        "Native {} report · owner imported · acceptance ineligible",
-                        text(native, "result_kind")
-                    ),
-                    width,
-                ));
-                match self.view {
-                    View::Diff | View::Files => {
-                        if native["patch"].is_object() {
-                            let row = serde_json::json!({"patch":native["patch"]["path"],
-                                "patch_sha256":native["patch"]["sha256"]});
-                            let patch = oms_panel_core::results::verified_patch(&store, &row)?;
-                            if self.view == View::Files {
-                                for change in oms_panel_core::files::patch_changes(&patch)? {
-                                    file_rows.push((out.len(), change.path.clone()));
-                                    out.push(format!(
-                                        "  {} +{} -{}",
-                                        change.path, change.added, change.removed
-                                    ));
-                                }
-                            } else {
-                                out.extend(render::wrap(&oms_panel_core::redact(&patch)?, width));
-                            }
-                        }
-                    }
-                    View::Raw => {
-                        for (i, reference) in std::iter::once(&native["source"])
-                            .chain(rows(&native["verification"]).iter())
-                            .enumerate()
-                        {
-                            if i > 0 {
-                                out.push(format!(
-                                    "Reported verification evidence {i} · no certified verdict"
-                                ));
-                            }
-                            let row = serde_json::json!({"artifact":reference["path"],
-                                "artifact_sha256":reference["sha256"]});
-                            let raw = oms_panel_core::results::indexed_artifact(&store, &row)?;
-                            out.extend(render::wrap(&oms_panel_core::redact(&raw)?, width));
-                        }
-                    }
-                    View::Transcript => {
-                        if let Some(lines) =
-                            load_dispatch_transcript(repo, &task["native_assignment"], width)?
-                        {
-                            out.extend(lines);
-                        } else {
-                            out.push(TRANSCRIPT_NOT_CAPTURED.into());
-                        }
-                    }
-                    View::Events | View::Info => out.extend(render::value_lines(native, width)),
-                    View::Summary => {}
-                }
-            } else if native["status"] == "unavailable" {
-                out.extend(render::wrap(
-                    &format!("Native report unavailable: {}", text(native, "issue")),
-                    width,
-                ));
-            } else if self.view == View::Transcript && calls.is_empty() {
-                out.push(TRANSCRIPT_NOT_CAPTURED.into());
-            }
-        }
-        if self.view == View::Files && !file_rows.is_empty() {
-            let sel = self.selected_file.min(file_rows.len() - 1);
-            let line_idx = file_rows[sel].0;
-            if let Some(rest) = out[line_idx].strip_prefix("  ") {
-                out[line_idx] = format!("▸ {rest}");
-            }
-        }
-        if out.is_empty() {
-            out.push(
-                if self.view == View::Transcript {
-                    TRANSCRIPT_NOT_CAPTURED
+                    let safe = self
+                        .opened_diff_cache
+                        .as_ref()
+                        .and_then(|c| c.safe_diff.as_deref());
+                    Ok((render_opened_file_diff(&opened, safe, width), Vec::new()))
                 } else {
-                    "No recorded evidence for this view"
+                    let list_hit = self
+                        .files_list_cache
+                        .as_ref()
+                        .is_some_and(|c| c.width == width);
+                    if !list_hit {
+                        let (base_lines, file_rows) = build_files_list(model, width);
+                        self.files_list_cache = Some(FilesListCache {
+                            width,
+                            base_lines,
+                            file_rows,
+                        });
+                    }
+                    let list = self.files_list_cache.as_ref().expect("populated above");
+                    let lines = apply_selected_marker(
+                        &list.base_lines,
+                        &list.file_rows,
+                        self.selected_file,
+                    );
+                    Ok((lines, list.file_rows.clone()))
                 }
-                .into(),
-            );
+            }
+            ViewCacheData::Text(items) => {
+                Ok((render_text_items(items, self.view, width), Vec::new()))
+            }
         }
-        Ok((out, file_rows))
     }
     fn switch_view(&mut self, view: View) {
+        if self.view != view {
+            self.view_cache = None;
+            self.files_list_cache = None;
+            self.opened_diff_cache = None;
+        }
         self.view = view;
         self.offset = 0;
         self.selected_file = 0;
@@ -380,59 +299,93 @@ impl Reader {
                     self.offset = self.files_offset;
                     return true;
                 }
-            } else {
-                let parsed;
-                let file_rows = if self.file_rows.is_empty() {
-                    parsed = parse_file_rows(lines);
-                    &parsed
-                } else {
-                    &self.file_rows
-                };
-                if !file_rows.is_empty() {
-                    let count = file_rows.len();
-                    let next = match key {
-                        Key::Enter => {
-                            let sel = self.selected_file.min(count - 1);
-                            let path = file_rows[sel].1.clone();
-                            self.selected_file = sel;
-                            self.files_offset = self.offset;
-                            self.opened_file = Some(path);
-                            self.offset = 0;
-                            return true;
-                        }
-                        Key::Up => Some(self.selected_file.saturating_sub(1)),
-                        Key::Down => Some(self.selected_file.saturating_add(1).min(count - 1)),
-                        Key::PageUp => Some(self.selected_file.saturating_sub(page)),
-                        Key::PageDown | Key::Char(' ') => {
-                            Some(self.selected_file.saturating_add(page).min(count - 1))
-                        }
-                        Key::Home => Some(0),
-                        Key::End => Some(count - 1),
-                        Key::Scroll(n) if *n < 0 => {
-                            Some(self.selected_file.saturating_sub(n.unsigned_abs() as usize))
-                        }
-                        Key::Scroll(n) => Some(
-                            self.selected_file
-                                .saturating_add(*n as usize)
-                                .min(count - 1),
-                        ),
-                        _ => None,
-                    };
-                    if let Some(sel) = next {
-                        let line_idx = file_rows[sel].0;
+            } else if !self.file_rows.is_empty() {
+                let count = self.file_rows.len();
+                match key {
+                    Key::Enter => {
+                        let sel = self.selected_file.min(count - 1);
+                        let key = self.file_rows[sel].1.clone();
                         self.selected_file = sel;
-                        if sel == 0 && matches!(key, Key::Home) {
-                            self.offset = 0;
-                        } else {
+                        self.files_offset = self.offset;
+                        self.opened_file = Some(key);
+                        self.offset = 0;
+                        return true;
+                    }
+                    Key::Up => {
+                        if self.selected_file > 0 {
+                            self.selected_file = self.selected_file.min(count - 1) - 1;
+                            let line_idx = self.file_rows[self.selected_file].0;
                             if line_idx < self.offset {
                                 self.offset = line_idx;
                             } else if line_idx >= self.offset.saturating_add(page) {
                                 self.offset = line_idx.saturating_sub(page - 1);
                             }
-                            self.offset = self.offset.min(lines.len().saturating_sub(1));
+                        } else if self.offset > 0 {
+                            self.offset = self.offset.saturating_sub(1);
                         }
+                        self.offset = self.offset.min(lines.len().saturating_sub(1));
                         return true;
                     }
+                    Key::Down => {
+                        let cur = self.selected_file.min(count - 1);
+                        if cur + 1 < count {
+                            self.selected_file = cur + 1;
+                            let line_idx = self.file_rows[self.selected_file].0;
+                            if line_idx < self.offset {
+                                self.offset = line_idx;
+                            } else if line_idx >= self.offset.saturating_add(page) {
+                                self.offset = line_idx.saturating_sub(page - 1);
+                            }
+                        } else if self.offset.saturating_add(page) < lines.len() {
+                            self.offset = self.offset.saturating_add(1);
+                        }
+                        self.offset = self.offset.min(lines.len().saturating_sub(1));
+                        return true;
+                    }
+                    Key::PageUp
+                    | Key::PageDown
+                    | Key::Char(' ')
+                    | Key::Home
+                    | Key::End
+                    | Key::Scroll(_) => {
+                        let max_offset = lines.len().saturating_sub(page);
+                        match key {
+                            Key::PageUp => self.offset = self.offset.saturating_sub(page),
+                            Key::PageDown | Key::Char(' ') => {
+                                let ceiling = max_offset.max(self.offset);
+                                self.offset = self
+                                    .offset
+                                    .saturating_add(page)
+                                    .min(ceiling)
+                                    .min(lines.len().saturating_sub(1));
+                            }
+                            Key::Home => {
+                                self.offset = 0;
+                                self.selected_file = 0;
+                                return true;
+                            }
+                            Key::End => {
+                                self.offset = max_offset;
+                                self.selected_file = count - 1;
+                                return true;
+                            }
+                            Key::Scroll(n) if *n < 0 => {
+                                self.offset = self.offset.saturating_sub(n.unsigned_abs() as usize);
+                            }
+                            Key::Scroll(n) => {
+                                let ceiling = max_offset.max(self.offset);
+                                self.offset = self
+                                    .offset
+                                    .saturating_add(*n as usize)
+                                    .min(ceiling)
+                                    .min(lines.len().saturating_sub(1));
+                            }
+                            _ => unreachable!(),
+                        }
+                        self.sync_selected_file_to_viewport(page);
+                        return true;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -479,6 +432,30 @@ impl Reader {
         self.offset = self.offset.min(lines.len().saturating_sub(1));
         true
     }
+    fn sync_selected_file_to_viewport(&mut self, page: usize) {
+        if self.file_rows.is_empty() {
+            self.selected_file = 0;
+            return;
+        }
+        let end = self.offset.saturating_add(page);
+        let cur = self.selected_file.min(self.file_rows.len() - 1);
+        let cur_line = self.file_rows[cur].0;
+        if cur_line >= self.offset && cur_line < end {
+            self.selected_file = cur;
+            return;
+        }
+        if let Some(idx) = self
+            .file_rows
+            .iter()
+            .position(|(line_idx, _)| *line_idx >= self.offset && *line_idx < end)
+        {
+            self.selected_file = idx;
+        } else if self.offset > self.file_rows[self.file_rows.len() - 1].0 {
+            self.selected_file = self.file_rows.len() - 1;
+        } else if end <= self.file_rows[0].0 {
+            self.selected_file = 0;
+        }
+    }
     fn find(&mut self, lines: &[String], backwards: bool) {
         if self.query.is_empty() || lines.is_empty() {
             return;
@@ -498,39 +475,512 @@ impl Reader {
     }
 }
 
+fn call_display_label(call: &Value, index: usize) -> String {
+    let attempt = call
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let participant = call
+        .get("participant")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let call_id = call
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    match (participant, attempt) {
+        (Some(p), Some(a)) if p != a => format!("{p} ({a})"),
+        (_, Some(a)) => a.to_owned(),
+        (Some(p), None) => p.to_owned(),
+        (None, None) => call_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("call-{}", index + 1)),
+    }
+}
+
+fn native_display_label(native_assignment: &Value) -> String {
+    native_assignment
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            native_assignment
+                .get("participant")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("assignment")
+        .to_owned()
+}
+
+fn render_non_artifact_view(
+    view: View,
+    report: &Value,
+    width: usize,
+) -> Result<Option<Vec<String>>> {
+    if report["kind"] == "oms-panel-routes" {
+        let routes = &report["routes"];
+        if matches!(view, View::Summary | View::Info) {
+            return Ok(Some(
+                render::routes(routes, width)
+                    .lines()
+                    .map(str::to_owned)
+                    .collect(),
+            ));
+        }
+        let bytes = serde_json::to_vec(routes).map_err(Error::new)?;
+        return Ok(Some(render::wrap(&oms_panel_core::redact(&bytes)?, width)));
+    }
+    if report["kind"] == "oms-panel-teams" {
+        if matches!(view, View::Summary | View::Info) {
+            return Ok(Some(
+                render::teams(report, width)
+                    .lines()
+                    .map(str::to_owned)
+                    .collect(),
+            ));
+        }
+        let bytes = serde_json::to_vec(report).map_err(Error::new)?;
+        return Ok(Some(render::wrap(&oms_panel_core::redact(&bytes)?, width)));
+    }
+    if view == View::Summary {
+        return Ok(Some(
+            render::results(report, width)
+                .lines()
+                .map(str::to_owned)
+                .collect(),
+        ));
+    }
+    if matches!(view, View::Events | View::Info) {
+        let mut out = Vec::new();
+        for task in rows(&report["rows"]) {
+            out.push(format!("Task {} · {:?}", text(task, "task_id"), view));
+            for call in rows(&task["calls"]) {
+                match view {
+                    View::Events => out.extend(render::value_lines(call, width)),
+                    View::Info => {
+                        for key in [
+                            "attempt_id",
+                            "kind",
+                            "selected_model",
+                            "reason_code",
+                            "exit",
+                            "verify_exit",
+                            "duration_ms",
+                            "base_sha",
+                            "patch_sha256",
+                        ] {
+                            if let Some(value) = call.get(key)
+                                && !value.is_null()
+                            {
+                                out.extend(render::wrap(&format!("{key}: {value}"), width));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let native = &task["native_assignment"]["report"];
+            if native["status"] == "reported" {
+                out.extend(render::wrap(
+                    &format!(
+                        "Native {} report · owner imported · acceptance ineligible",
+                        text(native, "result_kind")
+                    ),
+                    width,
+                ));
+                out.extend(render::value_lines(native, width));
+            } else if native["status"] == "unavailable" {
+                out.extend(render::wrap(
+                    &format!("Native report unavailable: {}", text(native, "issue")),
+                    width,
+                ));
+            }
+        }
+        if out.is_empty() {
+            out.push("No recorded evidence for this view".into());
+        }
+        return Ok(Some(out));
+    }
+    Ok(None)
+}
+
+fn load_view_cache_data(
+    repo: &Path,
+    report: &Value,
+    view: View,
+    transcript_budget: usize,
+) -> Result<ViewCacheData> {
+    match view {
+        View::Files => Ok(ViewCacheData::Files(load_files_model(repo, report)?)),
+        View::Transcript => Ok(ViewCacheData::Text(load_transcript_items(
+            repo,
+            report,
+            transcript_budget,
+        )?)),
+        View::Diff | View::Raw => Ok(ViewCacheData::Text(load_artifact_text_items(
+            repo, report, view,
+        )?)),
+        View::Summary | View::Events | View::Info => Ok(ViewCacheData::Text(Vec::new())),
+    }
+}
+
+fn load_files_model(repo: &Path, report: &Value) -> Result<FilesModel> {
+    let store = Store::open(repo)?;
+    let mut items = Vec::new();
+    let mut patches = Vec::new();
+    for (task_index, task) in rows(&report["rows"]).iter().enumerate() {
+        let task_id = text(task, "task_id");
+        items.push(FilesItem::Line(format!(
+            "Task {task_id} · {:?}",
+            View::Files
+        )));
+        for (call_index, call) in rows(&task["calls"]).iter().enumerate() {
+            if call["patch"].is_string() {
+                let patch = oms_panel_core::results::verified_patch(&store, call)?;
+                let changes = oms_panel_core::files::patch_changes(&patch)?;
+                let patch_index = patches.len();
+                patches.push(patch);
+                let label = call_display_label(call, call_index);
+                if !changes.is_empty() {
+                    items.push(FilesItem::Line(format!("Call {label}")));
+                }
+                for change in changes {
+                    items.push(FilesItem::File {
+                        key: FileEntryKey {
+                            task_index,
+                            task_id: task_id.to_owned(),
+                            call_index: Some(call_index),
+                            call_label: label.clone(),
+                            patch: text(call, "patch").to_owned(),
+                            patch_sha256: text(call, "patch_sha256").to_owned(),
+                            path: change.path,
+                        },
+                        patch_index,
+                        added: change.added,
+                        removed: change.removed,
+                    });
+                }
+            }
+        }
+        let native = &task["native_assignment"]["report"];
+        if native["status"] == "reported" {
+            items.push(FilesItem::Wrapped(format!(
+                "Native {} report · owner imported · acceptance ineligible",
+                text(native, "result_kind")
+            )));
+            if native["patch"].is_object() {
+                let row = serde_json::json!({
+                    "patch": native["patch"]["path"],
+                    "patch_sha256": native["patch"]["sha256"],
+                });
+                let patch = oms_panel_core::results::verified_patch(&store, &row)?;
+                let changes = oms_panel_core::files::patch_changes(&patch)?;
+                let patch_index = patches.len();
+                patches.push(patch);
+                let label = native_display_label(&task["native_assignment"]);
+                for change in changes {
+                    items.push(FilesItem::File {
+                        key: FileEntryKey {
+                            task_index,
+                            task_id: task_id.to_owned(),
+                            call_index: None,
+                            call_label: label.clone(),
+                            patch: text(&native["patch"], "path").to_owned(),
+                            patch_sha256: text(&native["patch"], "sha256").to_owned(),
+                            path: change.path,
+                        },
+                        patch_index,
+                        added: change.added,
+                        removed: change.removed,
+                    });
+                }
+            }
+        } else if native["status"] == "unavailable" {
+            items.push(FilesItem::Wrapped(format!(
+                "Native report unavailable: {}",
+                text(native, "issue")
+            )));
+        }
+    }
+    Ok(FilesModel { items, patches })
+}
+
+fn build_files_list(model: &FilesModel, width: usize) -> (Vec<String>, FileRows) {
+    let mut out = Vec::new();
+    let mut file_rows = Vec::new();
+    for item in &model.items {
+        match item {
+            FilesItem::Line(line) => out.push(line.clone()),
+            FilesItem::Wrapped(text) => out.extend(render::wrap(text, width)),
+            FilesItem::File {
+                key,
+                added,
+                removed,
+                ..
+            } => {
+                file_rows.push((out.len(), key.clone()));
+                out.push(format!("  {} +{added} -{removed}", key.path));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push("No recorded evidence for this view".into());
+    }
+    (out, file_rows)
+}
+
+fn apply_selected_marker(
+    base_lines: &[String],
+    file_rows: &FileRows,
+    selected_file: usize,
+) -> Vec<String> {
+    let mut out = base_lines.to_vec();
+    if !file_rows.is_empty() {
+        let sel = selected_file.min(file_rows.len() - 1);
+        let line_idx = file_rows[sel].0;
+        if let Some(rest) = out[line_idx].strip_prefix("  ") {
+            out[line_idx] = format!("▸ {rest}");
+        }
+    }
+    out
+}
+
+fn compute_opened_file_diff(model: &FilesModel, opened: &FileEntryKey) -> Result<Option<String>> {
+    for item in &model.items {
+        if let FilesItem::File {
+            key, patch_index, ..
+        } = item
+            && key == opened
+        {
+            let slice =
+                oms_panel_core::files::file_diff(&model.patches[*patch_index], &opened.path)?;
+            if slice.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(oms_panel_core::redact(&slice)?));
+        }
+    }
+    Ok(None)
+}
+
+fn render_opened_file_diff(
+    opened: &FileEntryKey,
+    safe_diff: Option<&str>,
+    width: usize,
+) -> Vec<String> {
+    let header = if opened.task_id.is_empty() {
+        format!(
+            "File diff: {} · {} (Esc returns to Files)",
+            opened.path, opened.call_label
+        )
+    } else {
+        format!(
+            "File diff: {} · Task {} · {} (Esc returns to Files)",
+            opened.path, opened.task_id, opened.call_label
+        )
+    };
+    let mut out = render::wrap(&header, width);
+    match safe_diff {
+        Some(safe) if !safe.is_empty() => out.extend(render::wrap(safe, width)),
+        _ => out.push("No diff recorded for this file".into()),
+    }
+    out
+}
+
+fn load_artifact_text_items(repo: &Path, report: &Value, view: View) -> Result<Vec<TextItem>> {
+    let store = Store::open(repo)?;
+    let mut items = Vec::new();
+    for task in rows(&report["rows"]) {
+        items.push(TextItem::Line(format!(
+            "Task {} · {:?}",
+            text(task, "task_id"),
+            view
+        )));
+        for call in rows(&task["calls"]) {
+            match view {
+                View::Diff => {
+                    if call["patch"].is_string() {
+                        let patch = oms_panel_core::results::verified_patch(&store, call)?;
+                        items.push(TextItem::Wrapped(oms_panel_core::redact(&patch)?));
+                    }
+                }
+                View::Raw => {
+                    if call["artifact"].is_string() {
+                        let raw = oms_panel_core::results::indexed_artifact(&store, call)?;
+                        items.push(TextItem::Wrapped(oms_panel_core::redact(&raw)?));
+                    } else {
+                        let excerpt = call["answer"]
+                            .as_str()
+                            .or_else(|| call["answer_excerpt"].as_str())
+                            .unwrap_or_default();
+                        items.push(TextItem::Wrapped(oms_panel_core::redact(
+                            excerpt.as_bytes(),
+                        )?));
+                        if call["answer_truncated"] == true {
+                            items.push(TextItem::Line("... (answer truncated)".into()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let native = &task["native_assignment"]["report"];
+        if native["status"] == "reported" {
+            items.push(TextItem::Wrapped(format!(
+                "Native {} report · owner imported · acceptance ineligible",
+                text(native, "result_kind")
+            )));
+            match view {
+                View::Diff => {
+                    if native["patch"].is_object() {
+                        let row = serde_json::json!({
+                            "patch": native["patch"]["path"],
+                            "patch_sha256": native["patch"]["sha256"],
+                        });
+                        let patch = oms_panel_core::results::verified_patch(&store, &row)?;
+                        items.push(TextItem::Wrapped(oms_panel_core::redact(&patch)?));
+                    }
+                }
+                View::Raw => {
+                    for (i, reference) in std::iter::once(&native["source"])
+                        .chain(rows(&native["verification"]).iter())
+                        .enumerate()
+                    {
+                        if i > 0 {
+                            items.push(TextItem::Line(format!(
+                                "Reported verification evidence {i} · no certified verdict"
+                            )));
+                        }
+                        let row = serde_json::json!({
+                            "artifact": reference["path"],
+                            "artifact_sha256": reference["sha256"],
+                        });
+                        let raw = oms_panel_core::results::indexed_artifact(&store, &row)?;
+                        items.push(TextItem::Wrapped(oms_panel_core::redact(&raw)?));
+                    }
+                }
+                _ => {}
+            }
+        } else if native["status"] == "unavailable" {
+            items.push(TextItem::Wrapped(format!(
+                "Native report unavailable: {}",
+                text(native, "issue")
+            )));
+        }
+    }
+    Ok(items)
+}
+
+fn load_transcript_items(
+    repo: &Path,
+    report: &Value,
+    max_total_bytes: usize,
+) -> Result<Vec<TextItem>> {
+    let mut items = Vec::new();
+    let mut remaining = max_total_bytes;
+    for task in rows(&report["rows"]) {
+        let task_id = text(task, "task_id");
+        items.push(TextItem::Line(format!(
+            "Task {task_id} · {:?}",
+            View::Transcript
+        )));
+        let calls = rows(&task["calls"]);
+        for (idx, call) in calls.iter().enumerate() {
+            let label = call_display_label(call, idx);
+            append_transcript_for_target(repo, call, "Call", &label, &mut remaining, &mut items)?;
+        }
+        let native = &task["native_assignment"]["report"];
+        if native["status"] == "reported" {
+            items.push(TextItem::Wrapped(format!(
+                "Native {} report · owner imported · acceptance ineligible",
+                text(native, "result_kind")
+            )));
+            let label = native_display_label(&task["native_assignment"]);
+            append_transcript_for_target(
+                repo,
+                &task["native_assignment"],
+                "Native",
+                &label,
+                &mut remaining,
+                &mut items,
+            )?;
+        } else if native["status"] == "unavailable" {
+            items.push(TextItem::Wrapped(format!(
+                "Native report unavailable: {}",
+                text(native, "issue")
+            )));
+        } else if calls.is_empty() {
+            items.push(TextItem::Wrapped(if task_id.is_empty() {
+                TRANSCRIPT_NOT_CAPTURED.into()
+            } else {
+                format!("Task {task_id}: {TRANSCRIPT_NOT_CAPTURED}")
+            }));
+        }
+    }
+    Ok(items)
+}
+
+fn append_transcript_for_target(
+    repo: &Path,
+    target: &Value,
+    prefix: &str,
+    label: &str,
+    remaining_budget: &mut usize,
+    items: &mut Vec<TextItem>,
+) -> Result<()> {
+    if *remaining_budget == 0 {
+        items.push(TextItem::Wrapped(format!(
+            "{prefix} {label}: {TRANSCRIPT_BUDGET_EXHAUSTED_NOTE}"
+        )));
+        return Ok(());
+    }
+    for filename in transcript_candidates(target) {
+        if let Some(read) = read_dispatch_transcript(repo, &filename, *remaining_budget) {
+            *remaining_budget = remaining_budget.saturating_sub(read.bytes_read);
+            let formatted =
+                format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?;
+            let safe = oms_panel_core::redact(formatted.as_bytes())?;
+            items.push(TextItem::Line(format!("{prefix} {label}")));
+            if safe.trim().is_empty() {
+                items.push(TextItem::Line("No transcript events recorded".into()));
+            } else {
+                items.push(TextItem::Wrapped(safe));
+            }
+            return Ok(());
+        }
+    }
+    items.push(TextItem::Wrapped(format!(
+        "{prefix} {label}: {TRANSCRIPT_NOT_CAPTURED}"
+    )));
+    Ok(())
+}
+
+fn render_text_items(items: &[TextItem], view: View, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            TextItem::Line(line) => out.push(line.clone()),
+            TextItem::Wrapped(text) => out.extend(render::wrap(text, width)),
+        }
+    }
+    if out.is_empty() {
+        out.push(
+            if view == View::Transcript {
+                TRANSCRIPT_NOT_CAPTURED
+            } else {
+                "No recorded evidence for this view"
+            }
+            .into(),
+        );
+    }
+    out
+}
+
 fn body_rows(height: usize) -> usize {
     height
         .saturating_sub(if height >= 5 { 3 } else { 2 })
         .max(1)
-}
-
-fn parse_file_rows(lines: &[String]) -> Vec<(usize, String)> {
-    let mut rows = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let stripped = line
-            .strip_prefix("▸ ")
-            .or_else(|| line.strip_prefix("  "))
-            .unwrap_or(line.as_str());
-        let mut parts = stripped.rsplitn(3, ' ');
-        let Some(removed) = parts.next() else {
-            continue;
-        };
-        let Some(added) = parts.next() else {
-            continue;
-        };
-        let Some(path) = parts.next() else {
-            continue;
-        };
-        if !path.is_empty()
-            && added.starts_with('+')
-            && added[1..].bytes().all(|b| b.is_ascii_digit())
-            && removed.starts_with('-')
-            && removed[1..].bytes().all(|b| b.is_ascii_digit())
-        {
-            rows.push((i, path.to_owned()));
-        }
-    }
-    rows
 }
 
 fn visible_non_ws_count(line: &str) -> usize {
@@ -577,15 +1027,22 @@ fn resume_offset(old_lines: &[String], offset: usize, new_lines: &[String]) -> u
     new_lines.len().saturating_sub(1)
 }
 
+struct ReadTranscript {
+    bytes: Vec<u8>,
+    bytes_read: usize,
+    truncated: bool,
+    budget_limited: bool,
+}
+
 fn transcript_candidates(call: &Value) -> Vec<String> {
     let mut ids = Vec::new();
     for raw in [
-        call.get("participant").and_then(Value::as_str),
+        call.get("attempt_id").and_then(Value::as_str),
         call.get("call_id").and_then(Value::as_str),
+        call.get("participant").and_then(Value::as_str),
         call.get("refs")
             .and_then(|r| r.get("panel_room_participant"))
             .and_then(Value::as_str),
-        call.get("attempt_id").and_then(Value::as_str),
     ]
     .into_iter()
     .flatten()
@@ -615,10 +1072,16 @@ fn transcript_candidates(call: &Value) -> Vec<String> {
 
 /// Read an owner-scoped dispatch transcript from `.oms/panel-state/dispatch-logs/`
 /// without following symlinks, leaving the repository, or reading provider homes.
-fn read_dispatch_transcript(repo: &Path, filename: &str) -> Option<(Vec<u8>, bool)> {
+fn read_dispatch_transcript(
+    repo: &Path,
+    filename: &str,
+    max_bytes: usize,
+) -> Option<ReadTranscript> {
     use rustix::fs::{self, FileType, Mode, OFlags};
 
-    if filename.is_empty()
+    let cap = max_bytes.min(TRANSCRIPT_MAX_BYTES);
+    if cap == 0
+        || filename.is_empty()
         || filename.contains('/')
         || filename.contains('\0')
         || !filename.ends_with(".transcript")
@@ -662,28 +1125,27 @@ fn read_dispatch_transcript(repo: &Path, filename: &str) -> Option<(Vec<u8>, boo
     let size = before.st_size as u64;
     let mut file = std::fs::File::from(fd);
     let mut bytes = Vec::new();
-    let truncated = if size > TRANSCRIPT_MAX_BYTES as u64 {
-        let start = size - TRANSCRIPT_MAX_BYTES as u64;
+    let (bytes_read, truncated, budget_limited) = if size > cap as u64 {
+        let start = size - cap as u64;
         file.seek(SeekFrom::Start(start)).ok()?;
-        (&mut file)
-            .take(TRANSCRIPT_MAX_BYTES as u64)
-            .read_to_end(&mut bytes)
-            .ok()?;
+        (&mut file).take(cap as u64).read_to_end(&mut bytes).ok()?;
+        let read_len = bytes.len();
         if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
             bytes.drain(..=pos);
         } else {
             bytes.clear();
         }
-        true
+        (read_len, true, cap < TRANSCRIPT_MAX_BYTES)
     } else {
         (&mut file)
-            .take(TRANSCRIPT_MAX_BYTES as u64 + 1)
+            .take(cap as u64 + 1)
             .read_to_end(&mut bytes)
             .ok()?;
-        if bytes.len() > TRANSCRIPT_MAX_BYTES {
+        if bytes.len() > cap {
             return None;
         }
-        false
+        let read_len = bytes.len();
+        (read_len, false, false)
     };
     let after = fs::fstat(&file).ok()?;
     if before.st_dev != after.st_dev
@@ -694,7 +1156,12 @@ fn read_dispatch_transcript(repo: &Path, filename: &str) -> Option<(Vec<u8>, boo
     {
         return None;
     }
-    Some((bytes, truncated))
+    Some(ReadTranscript {
+        bytes,
+        bytes_read,
+        truncated,
+        budget_limited,
+    })
 }
 
 fn transcript_value_text(value: &Value) -> String {
@@ -710,25 +1177,38 @@ fn transcript_value_text(value: &Value) -> String {
     }
 }
 
-fn transcript_excerpt(value: &Value) -> String {
+/// Redact before truncating so a secret straddling the 8 KiB excerpt boundary
+/// never leaks an unredacted prefix.
+fn transcript_excerpt(value: &Value) -> Result<String> {
     let text = transcript_value_text(value);
     if text.len() <= TRANSCRIPT_EXCERPT_BYTES {
-        return text;
+        return Ok(text);
+    }
+    let safe = oms_panel_core::redact(text.as_bytes())?;
+    if safe.len() <= TRANSCRIPT_EXCERPT_BYTES {
+        return Ok(safe);
     }
     let mut end = TRANSCRIPT_EXCERPT_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
+    while end > 0 && !safe.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[output excerpt truncated]", &text[..end])
+    Ok(format!("{}\n[output excerpt truncated]", &safe[..end]))
 }
 
-fn format_transcript_bytes(bytes: &[u8], truncated: bool) -> String {
+fn format_transcript_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> Result<String> {
     let raw = String::from_utf8_lossy(bytes);
     let mut lines: Vec<String> = Vec::new();
     let mut tools: HashMap<String, usize> = HashMap::new();
     let mut saw_truncation = false;
     if truncated {
-        lines.push(TRANSCRIPT_TRUNCATED_NOTE.into());
+        lines.push(
+            if budget_limited {
+                TRANSCRIPT_BUDGET_TRUNCATED_NOTE
+            } else {
+                TRANSCRIPT_TRUNCATED_NOTE
+            }
+            .into(),
+        );
         saw_truncation = true;
     }
     for raw_line in raw.lines() {
@@ -780,7 +1260,7 @@ fn format_transcript_bytes(bytes: &[u8], truncated: bool) -> String {
                         .unwrap_or_else(|| "unknown".into());
                     lines.push(format!("Command: {cmd} / exit {exit}"));
                     if let Some(output) = item.get("aggregated_output") {
-                        let excerpt = transcript_excerpt(output);
+                        let excerpt = transcript_excerpt(output)?;
                         if !excerpt.is_empty() {
                             lines.push(excerpt);
                         }
@@ -821,7 +1301,7 @@ fn format_transcript_bytes(bytes: &[u8], truncated: bool) -> String {
                         }
                     }
                     if let Some(res) = item.get("result").or_else(|| item.get("error")) {
-                        let excerpt = transcript_excerpt(res);
+                        let excerpt = transcript_excerpt(res)?;
                         if !excerpt.is_empty() {
                             lines.push(excerpt);
                         }
@@ -952,7 +1432,7 @@ fn format_transcript_bytes(bytes: &[u8], truncated: bool) -> String {
                             }
                             lines.push(format!("Tool result: {status}"));
                             if let Some(c) = obj.get("content") {
-                                let excerpt = transcript_excerpt(c);
+                                let excerpt = transcript_excerpt(c)?;
                                 if !excerpt.is_empty() {
                                     lines.push(excerpt);
                                 }
@@ -969,27 +1449,7 @@ fn format_transcript_bytes(bytes: &[u8], truncated: bool) -> String {
             lines.push(result_text.to_owned());
         }
     }
-    lines.join("\n")
-}
-
-fn load_dispatch_transcript(
-    repo: &Path,
-    call: &Value,
-    width: usize,
-) -> Result<Option<Vec<String>>> {
-    for filename in transcript_candidates(call) {
-        if let Some((bytes, truncated)) = read_dispatch_transcript(repo, &filename) {
-            let formatted = format_transcript_bytes(&bytes, truncated);
-            let safe = oms_panel_core::redact(formatted.as_bytes())?;
-            let wrapped = render::wrap(&safe, width);
-            return Ok(Some(if wrapped.is_empty() {
-                vec!["No transcript events recorded".into()]
-            } else {
-                wrapped
-            }));
-        }
-    }
-    Ok(None)
+    Ok(lines.join("\n"))
 }
 pub fn page(
     repo: &Path,
@@ -1032,7 +1492,7 @@ pub fn page_with(
         View,
         usize,
         usize,
-        Option<String>,
+        Option<FileEntryKey>,
     );
     let mut drawn: Option<Drawn> = None;
     let mut rows: Vec<String> = Vec::new();
@@ -1073,7 +1533,16 @@ pub fn page_with(
             let pos = (reader.offset + 1).min(total_lines);
             let pct = (pos * 100) / total_lines;
             let view_label = match (&reader.view, &reader.opened_file) {
-                (View::Files, Some(path)) => format!("Files · {path}"),
+                (View::Files, Some(opened)) => {
+                    if opened.task_id.is_empty() {
+                        format!("Files · {} ({})", opened.path, opened.call_label)
+                    } else {
+                        format!(
+                            "Files · {} ({}/{})",
+                            opened.path, opened.task_id, opened.call_label
+                        )
+                    }
+                }
                 _ => view_name(reader.view).to_owned(),
             };
             let status_plain = render::clip(
@@ -1253,8 +1722,10 @@ mod tests {
         reader.view = View::Transcript;
         let missing_lines = reader.render(&repo.0, &report_with_capture, 100).unwrap();
         assert!(
-            missing_lines.iter().any(|l| l == TRANSCRIPT_NOT_CAPTURED),
-            "expected not captured: {missing_lines:?}"
+            missing_lines
+                .iter()
+                .any(|l| l.contains("att-1") && l.contains(TRANSCRIPT_NOT_CAPTURED)),
+            "expected named not captured: {missing_lines:?}"
         );
         assert!(
             !missing_lines
@@ -1263,7 +1734,11 @@ mod tests {
         );
 
         // With a private dispatch log containing JSONL events + a secret-shaped token + >8KiB output.
-        let secret_like = concat!("sk-", "live_", "1234567890abcdefghijklmnop");
+        let secret_like = [
+            ["sk", "-", "live", "_"].concat(),
+            ["1234567890", "abcdefghij", "klmnop"].concat(),
+        ]
+        .concat();
         let big_output = "x".repeat(TRANSCRIPT_EXCERPT_BYTES + 256);
         let jsonl = format!(
             concat!(
@@ -1286,7 +1761,7 @@ mod tests {
         assert!(joined.contains("Command: cargo test / exit 0"), "{joined}");
         assert!(joined.contains("[output excerpt truncated]"), "{joined}");
         assert!(joined.contains("Final report:"), "{joined}");
-        assert!(!joined.contains(secret_like), "secret leaked: {joined}");
+        assert!(!joined.contains(&secret_like), "secret leaked: {joined}");
         assert!(!joined.contains("indexed-raw-artifact-body"), "{joined}");
 
         // Symlinked transcript is refused and reports not captured.
@@ -1300,7 +1775,11 @@ mod tests {
             }]
         });
         let sym_lines = reader.render(&repo.0, &sym_report, 100).unwrap();
-        assert!(sym_lines.iter().any(|l| l == TRANSCRIPT_NOT_CAPTURED));
+        assert!(
+            sym_lines
+                .iter()
+                .any(|l| l.contains("att-2") && l.contains(TRANSCRIPT_NOT_CAPTURED))
+        );
         assert!(!sym_lines.join("\n").contains("should-not-read"));
 
         // Hardlinked transcript is refused.
@@ -1314,7 +1793,11 @@ mod tests {
             }]
         });
         let hard_lines = reader.render(&repo.0, &hard_report, 100).unwrap();
-        assert!(hard_lines.iter().any(|l| l == TRANSCRIPT_NOT_CAPTURED));
+        assert!(
+            hard_lines
+                .iter()
+                .any(|l| l.contains("att-3") && l.contains(TRANSCRIPT_NOT_CAPTURED))
+        );
         assert!(!hard_lines.join("\n").contains("hardlink-body"));
 
         // Native report never reads native source artifact as a transcript.
@@ -1348,7 +1831,11 @@ mod tests {
         );
         reader.view = View::Transcript;
         let native_tx = reader.render(&repo.0, &native_report, 100).unwrap();
-        assert!(native_tx.iter().any(|l| l == TRANSCRIPT_NOT_CAPTURED));
+        assert!(
+            native_tx
+                .iter()
+                .any(|l| l.contains("att-native") && l.contains(TRANSCRIPT_NOT_CAPTURED))
+        );
         assert!(!native_tx.join("\n").contains("native-source-only"));
     }
 
@@ -1408,7 +1895,14 @@ mod tests {
 
         // Enter opens only beta.rs's diff slice.
         assert!(reader.apply(&Key::Enter, &list_lines_2, 12));
-        assert_eq!(reader.opened_file.as_deref(), Some("src/beta.rs"));
+        assert_eq!(
+            reader.opened_file.as_ref().map(|k| k.path.as_str()),
+            Some("src/beta.rs")
+        );
+        assert_eq!(
+            reader.opened_file.as_ref().map(|k| k.call_label.as_str()),
+            Some("att-1")
+        );
         let diff_lines = reader.lines(&repo.0, &report, 100).unwrap();
         let diff_text = diff_lines.join("\n");
         assert!(diff_text.contains("File diff: src/beta.rs"), "{diff_text}");
@@ -1503,6 +1997,409 @@ mod tests {
         assert!(
             body_first.contains("MARKER_SECOND_PARAGRAPH"),
             "expected MARKER on first body row after resize, got {body_first:?} in:\n{last_frame}"
+        );
+    }
+
+    #[test]
+    fn files_view_isolates_duplicate_path_diffs_across_tasks_retries_and_native() {
+        let repo = TempRepo::new("files-duplicate-path");
+        let make_patch = |path: &str, added: &str| -> Vec<u8> {
+            format!(
+                "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1,2 @@\n base\n+{added}\n"
+            )
+            .into_bytes()
+        };
+        let mut p1 = make_patch("src/shared.rs", "t1_att1_only");
+        p1.extend_from_slice(&make_patch("src/other.rs", "t1_other_only"));
+        let p2 = make_patch("src/shared.rs", "t1_att2_retry_only");
+        let p3 = make_patch("src/shared.rs", "t2_att3_only");
+        let p4 = make_patch("src/shared.rs", "t2_native_only");
+
+        let rel1 = ".oms/artifacts/t1-att1.patch";
+        let rel2 = ".oms/artifacts/t1-att2.patch";
+        let rel3 = ".oms/artifacts/t2-att3.patch";
+        let rel4 = ".oms/artifacts/t2-native.patch";
+        let path1 = repo.write_file(rel1, &p1);
+        let path2 = repo.write_file(rel2, &p2);
+        let path3 = repo.write_file(rel3, &p3);
+        let path4 = repo.write_file(rel4, &p4);
+
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [
+                {
+                    "task_id": "T1",
+                    "calls": [
+                        {
+                            "attempt_id": "att-1",
+                            "patch": rel1,
+                            "patch_sha256": oms_panel_core::digest(&p1),
+                        },
+                        {
+                            "attempt_id": "att-2",
+                            "patch": rel2,
+                            "patch_sha256": oms_panel_core::digest(&p2),
+                        }
+                    ]
+                },
+                {
+                    "task_id": "T2",
+                    "calls": [
+                        {
+                            "attempt_id": "att-3",
+                            "patch": rel3,
+                            "patch_sha256": oms_panel_core::digest(&p3),
+                        }
+                    ],
+                    "native_assignment": {
+                        "attempt_id": "att-native",
+                        "report": {
+                            "status": "reported",
+                            "result_kind": "candidate",
+                            "patch": {
+                                "path": rel4,
+                                "sha256": oms_panel_core::digest(&p4),
+                            },
+                            "source": { "path": rel4, "sha256": oms_panel_core::digest(&p4) },
+                            "verification": []
+                        }
+                    }
+                }
+            ]
+        });
+
+        let mut reader = Reader {
+            view: View::Files,
+            ..Default::default()
+        };
+        let list = reader.lines(&repo.0, &report, 100).unwrap();
+
+        // Remove all patch files from disk after the initial Files load: Up/Down,
+        // Enter, Esc and width changes must reuse cached patches without rereading.
+        for p in [&path1, &path2, &path3, &path4] {
+            std::fs::remove_file(p).unwrap();
+        }
+
+        // Row indices in file_rows:
+        // 0: T1 att-1 src/shared.rs
+        // 1: T1 att-1 src/other.rs
+        // 2: T1 att-2 src/shared.rs
+        // 3: T2 att-3 src/shared.rs
+        // 4: T2 native src/shared.rs
+        let expected_markers = [
+            (0usize, "+t1_att1_only"),
+            (2usize, "+t1_att2_retry_only"),
+            (3usize, "+t2_att3_only"),
+            (4usize, "+t2_native_only"),
+        ];
+        let mut cur_lines = list;
+        let mut cur_idx = 0usize;
+        for (target_idx, expected) in expected_markers {
+            while cur_idx < target_idx {
+                assert!(reader.apply(&Key::Down, &cur_lines, 20));
+                cur_idx += 1;
+                cur_lines = reader.lines(&repo.0, &report, 100).unwrap();
+            }
+            assert!(reader.apply(&Key::Enter, &cur_lines, 20));
+            let diff_lines = reader.lines(&repo.0, &report, 100).unwrap();
+            let diff_text = diff_lines.join("\n");
+            assert!(
+                diff_text.contains(expected),
+                "row {target_idx} missing {expected}:\n{diff_text}"
+            );
+            for (_, other) in expected_markers {
+                if other != expected {
+                    assert!(
+                        !diff_text.contains(other),
+                        "row {target_idx} leaked {other}:\n{diff_text}"
+                    );
+                }
+            }
+            // Resize while diff is open must also succeed without rereading disk.
+            let narrow = reader.lines(&repo.0, &report, 40).unwrap();
+            assert!(narrow.join("\n").contains(expected));
+            assert!(reader.apply(&Key::Escape, &narrow, 20));
+            cur_lines = reader.lines(&repo.0, &report, 100).unwrap();
+        }
+    }
+
+    #[test]
+    fn transcript_excerpt_redacts_secret_straddling_8k_boundary() {
+        let repo = TempRepo::new("transcript-boundary-secret");
+        let prefix = ["sk", "-", "live", "_"].concat();
+        let tail = ["1234567890", "abcdefghij", "klmnop"].concat();
+        let sample = format!("{prefix}{tail}");
+        let line_chunk = format!("{}\n", "a".repeat(63)); // 64 bytes per line
+        let prefix_lines = line_chunk.repeat((TRANSCRIPT_EXCERPT_BYTES - 64) / 64);
+        let pad_in_line = "b".repeat(TRANSCRIPT_EXCERPT_BYTES - prefix_lines.len() - 12 - 1);
+        let payload = format!(
+            "{prefix_lines}{pad_in_line} {sample} tail\n{}",
+            "z".repeat(256)
+        );
+        let line = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "echo check",
+                "exit_code": 0,
+                "aggregated_output": payload,
+            }
+        });
+        let logs_dir = repo.0.join(".oms/panel-state/dispatch-logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tx = logs_dir.join("att-boundary.transcript");
+        std::fs::write(&tx, format!("{line}\n").as_bytes()).unwrap();
+        std::fs::set_permissions(&tx, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [{ "attempt_id": "att-boundary", "participant": "call-boundary" }]
+            }]
+        });
+        let reader = Reader {
+            view: View::Transcript,
+            ..Default::default()
+        };
+        let rendered = reader.render(&repo.0, &report, 120).unwrap().join("\n");
+        assert!(
+            rendered.contains("[output excerpt truncated]"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(&sample), "full sample leaked");
+        assert!(
+            !rendered.contains(&sample[..12]),
+            "sample prefix leaked across 8 KiB cut"
+        );
+    }
+
+    #[test]
+    fn files_view_page_keys_and_wheel_reach_trailing_lines_after_last_file_row() {
+        let repo = TempRepo::new("files-trailing");
+        let patch = concat!(
+            "diff --git a/src/only.rs b/src/only.rs\n",
+            "--- a/src/only.rs\n",
+            "+++ b/src/only.rs\n",
+            "@@ -1 +1,2 @@\n",
+            " old\n",
+            "+new\n",
+        )
+        .as_bytes();
+        let patch_rel = ".oms/artifacts/only.patch";
+        repo.write_file(patch_rel, patch);
+        let trailing_issue = format!(
+            "{} TRAILING_PREVIEW_END",
+            (0..20)
+                .map(|i| format!("segment_{i}_word"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [
+                {
+                    "task_id": "T1",
+                    "calls": [{
+                        "attempt_id": "att-1",
+                        "patch": patch_rel,
+                        "patch_sha256": oms_panel_core::digest(patch),
+                    }]
+                },
+                {
+                    "task_id": "T2",
+                    "calls": [],
+                    "native_assignment": {
+                        "report": {
+                            "status": "unavailable",
+                            "issue": trailing_issue,
+                        }
+                    }
+                }
+            ]
+        });
+
+        let mut reader = Reader {
+            view: View::Files,
+            ..Default::default()
+        };
+        let lines = reader.lines(&repo.0, &report, 30).unwrap();
+        let height = 8; // body_rows = 5
+        let page = body_rows(height);
+        assert!(
+            lines.len() > page + 4,
+            "need enough trailing lines to test paging: {lines:?}"
+        );
+
+        let visible_has_end = |r: &Reader| -> bool {
+            lines
+                .iter()
+                .skip(r.offset)
+                .take(page)
+                .any(|l| l.contains("TRAILING_PREVIEW_END"))
+        };
+        assert!(!visible_has_end(&reader));
+
+        // PageDown must reach every retained line including the final trailing line.
+        for _ in 0..10 {
+            if visible_has_end(&reader) {
+                break;
+            }
+            assert!(reader.apply(&Key::PageDown, &lines, height));
+        }
+        assert!(
+            visible_has_end(&reader),
+            "PageDown never reached TRAILING_PREVIEW_END; offset={} of {} lines",
+            reader.offset,
+            lines.len()
+        );
+
+        // Home returns to top; mouse wheel Scroll(+n) must also reach the end.
+        assert!(reader.apply(&Key::Home, &lines, height));
+        assert_eq!(reader.offset, 0);
+        for _ in 0..20 {
+            if visible_has_end(&reader) {
+                break;
+            }
+            assert!(reader.apply(&Key::Scroll(3), &lines, height));
+        }
+        assert!(
+            visible_has_end(&reader),
+            "Scroll never reached TRAILING_PREVIEW_END; offset={} of {} lines",
+            reader.offset,
+            lines.len()
+        );
+
+        // Home + End jumps straight to the last page containing TRAILING_PREVIEW_END.
+        assert!(reader.apply(&Key::Home, &lines, height));
+        assert!(reader.apply(&Key::End, &lines, height));
+        assert!(visible_has_end(&reader));
+    }
+
+    #[test]
+    fn transcript_prefers_attempt_id_for_retries_names_missing_calls_and_reuses_cache_on_resize() {
+        let repo = TempRepo::new("transcript-retries");
+        let logs_dir = repo.0.join(".oms/panel-state/dispatch-logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let write_tx = |name: &str, msg: &str| {
+            let file = logs_dir.join(name);
+            let body = format!(
+                "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"{msg}\"}}}}\n"
+            );
+            std::fs::write(&file, body.as_bytes()).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            file
+        };
+        let shared = write_tx("call-worker.transcript", "SHARED_PARTICIPANT_FALLBACK");
+        let att1 = write_tx("att-1.transcript", "ATTEMPT_ONE_UNIQUE_EVENT");
+        let att2 = write_tx("att-2.transcript", "ATTEMPT_TWO_UNIQUE_EVENT");
+
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [
+                    { "participant": "call-worker", "attempt_id": "att-1" },
+                    { "participant": "call-worker", "attempt_id": "att-2" },
+                    { "participant": "call-missing", "attempt_id": "att-3" },
+                ]
+            }]
+        });
+
+        let mut reader = Reader {
+            view: View::Transcript,
+            ..Default::default()
+        };
+        let wide = reader.lines(&repo.0, &report, 100).unwrap();
+        let text = wide.join("\n");
+        assert!(text.contains("ATTEMPT_ONE_UNIQUE_EVENT"), "{text}");
+        assert!(text.contains("ATTEMPT_TWO_UNIQUE_EVENT"), "{text}");
+        assert!(
+            !text.contains("SHARED_PARTICIPANT_FALLBACK"),
+            "attempt_id must take priority over shared participant: {text}"
+        );
+        assert!(
+            wide.iter()
+                .any(|l| l.contains("att-3") && l.contains(TRANSCRIPT_NOT_CAPTURED)),
+            "missing transcript line must name its call: {wide:?}"
+        );
+
+        // Delete transcript files from disk; width changes must reuse cached data.
+        for f in [&shared, &att1, &att2] {
+            std::fs::remove_file(f).unwrap();
+        }
+        let narrow = reader.lines(&repo.0, &report, 28).unwrap().join("\n");
+        assert!(narrow.contains("ATTEMPT_ONE_UNIQUE_EVENT"), "{narrow}");
+        assert!(narrow.contains("ATTEMPT_TWO_UNIQUE_EVENT"), "{narrow}");
+    }
+
+    #[test]
+    fn transcript_view_bounds_total_bytes_read_across_calls() {
+        let repo = TempRepo::new("transcript-budget");
+        let logs_dir = repo.0.join(".oms/panel-state/dispatch-logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let make_line = |tag: &str| {
+            format!(
+                "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"{tag}_{}\"}}}}\n",
+                "x".repeat(60)
+            )
+        };
+        let body1 = format!("{}{}", make_line("CALL1_A"), make_line("CALL1_B"));
+        let body2 = format!("{}{}", make_line("CALL2_HEAD"), make_line("CALL2_TAIL"));
+        let body3 = make_line("CALL3_NEVER_READ");
+
+        for (name, body) in [
+            ("att-1.transcript", &body1),
+            ("att-2.transcript", &body2),
+            ("att-3.transcript", &body3),
+        ] {
+            let p = logs_dir.join(name);
+            std::fs::write(&p, body.as_bytes()).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [
+                    { "attempt_id": "att-1" },
+                    { "attempt_id": "att-2" },
+                    { "attempt_id": "att-3" },
+                ]
+            }]
+        });
+
+        // Budget covers all of att-1 plus only a partial tail of att-2, leaving 0 for att-3.
+        let budget = body1.len() + (body2.len() / 2) + 20;
+        let items = load_transcript_items(&repo.0, &report, budget).unwrap();
+        let rendered = render_text_items(&items, View::Transcript, 120).join("\n");
+        assert!(rendered.contains("CALL1_A"), "{rendered}");
+        assert!(rendered.contains("CALL1_B"), "{rendered}");
+        assert!(
+            rendered.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE),
+            "expected budget truncation note for att-2:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("CALL2_HEAD"),
+            "att-2 head should be truncated by remaining budget:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("CALL2_TAIL"),
+            "att-2 tail should still be retained within remaining budget:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("att-3") && rendered.contains(TRANSCRIPT_BUDGET_EXHAUSTED_NOTE),
+            "att-3 should report budget exhaustion:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("CALL3_NEVER_READ"),
+            "att-3 must not be read after budget exhaustion:\n{rendered}"
         );
     }
 }
