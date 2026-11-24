@@ -195,6 +195,63 @@ pub fn wrap(value: &str, maximum: usize) -> Vec<String> {
     out
 }
 
+fn wrap_words(value: &str, maximum: usize) -> Vec<String> {
+    let maximum = maximum.max(1);
+    let mut out = Vec::new();
+    for line in value.lines() {
+        let line = clean(line, 1_048_576);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if width(trimmed) <= maximum {
+            out.push(trimmed.to_owned());
+            continue;
+        }
+        let mut current = String::new();
+        let mut used = 0usize;
+        for word in trimmed.split_whitespace() {
+            let word_w = width(word);
+            if current.is_empty() {
+                if word_w <= maximum {
+                    current.push_str(word);
+                    used = word_w;
+                } else {
+                    let mut parts = wrap(word, maximum);
+                    if let Some(last) = parts.pop() {
+                        out.extend(parts);
+                        used = width(&last);
+                        current = last;
+                    }
+                }
+            } else if used + 1 + word_w <= maximum {
+                current.push(' ');
+                current.push_str(word);
+                used += 1 + word_w;
+            } else {
+                out.push(std::mem::take(&mut current));
+                if word_w <= maximum {
+                    current.push_str(word);
+                    used = word_w;
+                } else {
+                    let mut parts = wrap(word, maximum);
+                    if let Some(last) = parts.pop() {
+                        out.extend(parts);
+                        used = width(&last);
+                        current = last;
+                    } else {
+                        used = 0;
+                    }
+                }
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+    out
+}
+
 fn spans_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| width(&s.plain)).sum()
 }
@@ -460,11 +517,39 @@ fn card_bottom(columns: usize, use_cards: bool, colored: bool) -> Option<String>
     })
 }
 
+fn card_bottom_labeled(label: &str, columns: usize, colored: bool) -> String {
+    if columns < 6 {
+        return card_bottom(columns, true, colored).unwrap_or_default();
+    }
+    let budget = columns.saturating_sub(5);
+    let clean_label = clip(label, budget);
+    let fill = columns.saturating_sub(5 + width(&clean_label));
+    let spans = vec![
+        Span::literal("╰─ ", Some(SGR_BORDER)),
+        Span {
+            plain: clean_label,
+            sgr: Some(SGR_MUTED),
+        },
+        Span::literal(" ", None),
+        Span {
+            plain: "─".repeat(fill),
+            sgr: Some(SGR_BORDER),
+        },
+        Span::literal("╯", Some(SGR_BORDER)),
+    ];
+    let mut out = String::new();
+    emit_spans(&mut out, &spans, colored, None);
+    out
+}
+
 fn role_style(role: &str) -> (&'static str, &'static str) {
     match role {
         "main" => ("■", SGR_AMBER_BOLD),
         "reviewer" | "verifier" | "security-auditor" => ("◆", SGR_VIOLET_BOLD),
         "advisor" | "architect" | "critic" | "researcher" | "scholar" => ("◇", SGR_SKY_BOLD),
+        "question" => ("?", SGR_GOLD_BOLD),
+        "mail" => ("·", SGR_CYAN),
+        "task" => ("!", SGR_AMBER_BOLD),
         _ => ("●", SGR_SAGE_BOLD),
     }
 }
@@ -509,6 +594,14 @@ fn active_verb(call: &Value) -> Option<&'static str> {
 }
 
 fn call_badge(call: &Value) -> (String, &'static str) {
+    if let Some(kind) = call["attention_kind"].as_str() {
+        return match (kind, text(call, "attention_class")) {
+            ("message", "needs") => ("[? question]".to_owned(), SGR_GOLD_BOLD),
+            ("message", _) => ("[· mail]".to_owned(), SGR_CYAN),
+            ("task", _) => ("[! held]".to_owned(), SGR_AMBER_BOLD),
+            _ => state_badge(text(call, "state")),
+        };
+    }
     if call["native_assignment_transport"].is_string() {
         match text(call, "state") {
             "assigned" => {
@@ -1457,14 +1550,40 @@ fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Valu
 }
 
 pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
-    let all = calls(report);
-    let main = overall_main(&report["room"], &all);
+    let mut all = calls(report);
+    let main_id = overall_main(&report["room"], &all).map(|call| {
+        (
+            text(call, "participant").to_owned(),
+            text(call, "attempt").to_owned(),
+        )
+    });
+    let attention = if nav.attention_only {
+        attention::items(report, &BTreeMap::new())
+    } else {
+        Vec::new()
+    };
+    if nav.attention_only {
+        all.extend(attention_extra_rows(report, &all, &attention));
+    }
+    let main = main_id.as_ref().and_then(|(participant, attempt)| {
+        all.iter().find(|call| {
+            call["role"] == "main"
+                && text(call, "participant") == participant
+                && text(call, "attempt") == attempt
+        })
+    });
     let direct = direct_work(report, &all, main);
+    let attention_calls = attention_call_ids(&attention);
     main.into_iter()
         .chain(
-            board_rows(visible_from(&all, nav, main, &direct), nav, main, &all)
-                .into_iter()
-                .map(|entry| entry.call),
+            board_rows(
+                visible_from(&all, nav, main, &direct, &attention_calls),
+                nav,
+                main,
+                &all,
+            )
+            .into_iter()
+            .map(|entry| entry.call),
         )
         .cloned()
         .collect()
@@ -1791,6 +1910,13 @@ fn token_span_with(
     boxed: bool,
     placeholder: bool,
 ) -> Vec<Span> {
+    if call["attention_kind"].is_string() {
+        let elapsed = text(call, "board_elapsed");
+        if columns >= 44 && !elapsed.is_empty() && elapsed != "—" && width(elapsed) <= limit {
+            return vec![Span::raw(elapsed, limit, Some(SGR_MUTED))];
+        }
+        return Vec::new();
+    }
     // Narrow fallback: when the aligned field does not fit, drop the padding
     // (`~12.5K`, `0 `, `— `) rather than the value.
     let (aligned, trimmed, unit) = token_field(call, columns);
@@ -1900,11 +2026,504 @@ fn collapsed_history(nav: &navigation::Navigation, call: &Value) -> bool {
                 .is_none_or(|finished| (oms_panel_core::timestamp() as f64 - finished) >= 300.0))
 }
 
+fn attention_call_ids(items: &[attention::Item]) -> BTreeSet<&str> {
+    items
+        .iter()
+        .filter(|item| item.row_id.0 == "call")
+        .map(|item| item.row_id.1.as_str())
+        .collect()
+}
+
+fn attention_item_age(
+    report: &Value,
+    calls: &[Value],
+    item: &attention::Item,
+    now: f64,
+) -> Option<String> {
+    let parse_str = |raw: &str| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        oms_panel_core::metrics::stamp(&Value::String(trimmed.to_owned())).or_else(|| {
+            trimmed
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.0)
+        })
+    };
+    let ts = parse_str(&item.stamp).or_else(|| match item.row_id.0.as_str() {
+        "call" => calls
+            .iter()
+            .find(|call| text(call, "participant") == item.row_id.1)
+            .and_then(|call| oms_panel_core::metrics::stamp(&call["updated_at"])),
+        "message" => rows(&report["room"]["messages"])
+            .iter()
+            .find(|msg| text(msg, "id") == item.row_id.1)
+            .and_then(|msg| oms_panel_core::metrics::stamp(&msg["ts"])),
+        "task" => match &report["plan"]["tasks"] {
+            Value::Object(map) => map
+                .get(&item.row_id.1)
+                .or_else(|| {
+                    map.values().find(|task| {
+                        text(task, "id") == item.row_id.1 || text(task, "task_id") == item.row_id.1
+                    })
+                })
+                .and_then(|task| {
+                    oms_panel_core::metrics::stamp(&task["claimed_at"])
+                        .or_else(|| oms_panel_core::metrics::stamp(&task["updated"]))
+                }),
+            Value::Array(list) => list
+                .iter()
+                .find(|task| {
+                    text(task, "id") == item.row_id.1 || text(task, "task_id") == item.row_id.1
+                })
+                .and_then(|task| {
+                    oms_panel_core::metrics::stamp(&task["claimed_at"])
+                        .or_else(|| oms_panel_core::metrics::stamp(&task["updated"]))
+                }),
+            _ => None,
+        },
+        _ => None,
+    })?;
+    if !ts.is_finite() || ts <= 0.0 || ts > now {
+        return None;
+    }
+    Some(crate::usage::format_age((now - ts).max(0.0)))
+}
+
+fn attention_extra_rows(report: &Value, all: &[Value], items: &[attention::Item]) -> Vec<Value> {
+    let now = oms_panel_core::metrics::stamp(&report["generated_at"])
+        .unwrap_or_else(|| oms_panel_core::timestamp() as f64);
+    let mut rows_out = Vec::new();
+    for item in items {
+        let elapsed = attention_item_age(report, all, item, now).unwrap_or_default();
+        match item.row_id.0.as_str() {
+            "message" => {
+                let is_question = item.cls == "needs";
+                let title = if item.who.is_empty() {
+                    item.what.clone()
+                } else if item.what.is_empty() {
+                    item.who.clone()
+                } else {
+                    format!("{}: {}", item.who, item.what)
+                };
+                rows_out.push(json!({
+                    "participant": format!("message:{}", item.row_id.1),
+                    "attempt": "",
+                    "alias": if is_question { "Q" } else { "M" },
+                    "role": if is_question { "question" } else { "mail" },
+                    "provider": "room",
+                    "state": if is_question { "waiting_input" } else { "mail" },
+                    "title": title,
+                    "purpose": item.what,
+                    "updated_at": item.stamp,
+                    "board_elapsed": elapsed,
+                    "attention_kind": "message",
+                    "attention_class": item.cls,
+                    "attention_who": item.who,
+                    "attention_what": item.what,
+                    "attention_id": item.row_id.1,
+                }));
+            }
+            "task" => {
+                let title = if item.what.is_empty() {
+                    item.who.clone()
+                } else {
+                    item.what.clone()
+                };
+                rows_out.push(json!({
+                    "participant": format!("task:{}", item.row_id.1),
+                    "attempt": "",
+                    "alias": item.row_id.1,
+                    "role": "task",
+                    "provider": "plan",
+                    "state": "held",
+                    "title": title,
+                    "purpose": item.what,
+                    "task_id": item.row_id.1,
+                    "updated_at": item.stamp,
+                    "board_elapsed": elapsed,
+                    "attention_kind": "task",
+                    "attention_class": item.cls,
+                    "attention_who": item.who,
+                    "attention_what": item.what,
+                    "attention_id": item.row_id.1,
+                }));
+            }
+            _ => {}
+        }
+    }
+    rows_out
+}
+
+/// Match a non-synthetic Room call to a task in the active plan, ignoring calls
+/// explicitly stamped with a different `refs.plan_id`.
+pub(crate) fn call_matches_plan_task(call: &Value, task_id: &str, plan_id: &str) -> bool {
+    if call["attention_kind"].is_string() || task_id.is_empty() || text(call, "task_id") != task_id
+    {
+        return false;
+    }
+    let ref_plan = text(&call["refs"], "plan_id");
+    ref_plan.is_empty() || plan_id.is_empty() || ref_plan == plan_id
+}
+
+/// Read-only dock title and body for synthetic Attention rows (`message` / `task`).
+pub(crate) fn attention_row_dock(report: &Value, call: &Value) -> Option<(String, String)> {
+    match call["attention_kind"].as_str()? {
+        "message" => {
+            let id = text(call, "attention_id");
+            let msg = if id.is_empty() {
+                None
+            } else {
+                rows(&report["room"]["messages"])
+                    .iter()
+                    .find(|m| text(m, "id") == id)
+            };
+            let is_question = text(call, "attention_class") == "needs"
+                || msg.is_some_and(|m| m["message_kind"] == "question");
+            let sender = msg
+                .map(|m| text(m, "sender"))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| text(call, "attention_who"));
+            let body = msg
+                .map(|m| text(m, "text"))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| text(call, "attention_what"));
+            let kind_title = if is_question {
+                "Room question"
+            } else {
+                "Room message"
+            };
+            let title = if sender.is_empty() {
+                kind_title.to_owned()
+            } else {
+                format!("{kind_title} · {sender}")
+            };
+            let mut lines = vec![format!(
+                "{} from {}",
+                if is_question { "Question" } else { "Message" },
+                if sender.is_empty() {
+                    "unknown sender"
+                } else {
+                    sender
+                }
+            )];
+            if let Some(m) = msg {
+                let pending: Vec<&str> = rows(&m["pending_for"])
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !pending.is_empty() {
+                    lines.push(format!("Pending for: {}", pending.join(", ")));
+                }
+            }
+            lines.push(String::new());
+            if body.trim().is_empty() {
+                lines.push("Message text unavailable".to_owned());
+            } else {
+                lines.push(body.trim().to_owned());
+            }
+            Some((title, lines.join("\n")))
+        }
+        "task" => {
+            let id = [text(call, "attention_id"), text(call, "task_id")]
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or("");
+            let task = if id.is_empty() {
+                None
+            } else {
+                match &report["plan"]["tasks"] {
+                    Value::Object(map) => map.get(id).or_else(|| {
+                        map.values()
+                            .find(|t| text(t, "id") == id || text(t, "task_id") == id)
+                    }),
+                    Value::Array(list) => list
+                        .iter()
+                        .find(|t| text(t, "id") == id || text(t, "task_id") == id),
+                    _ => None,
+                }
+            };
+            let state = task
+                .map(plan_task_state)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown");
+            let task_title = task.map(|t| text(t, "title")).unwrap_or("");
+            let holder = task
+                .map(|t| text(t, "claimed_by_participant"))
+                .unwrap_or("");
+            let reason = [text(call, "attention_what"), "workers ended, still held"]
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or("workers ended, still held");
+            let title = if id.is_empty() {
+                "Held task".to_owned()
+            } else {
+                format!("Task {id}")
+            };
+            let mut lines = vec![format!(
+                "Task {} · state: {state}",
+                if id.is_empty() { "unknown" } else { id }
+            )];
+            if !task_title.is_empty() {
+                lines.push(format!("Title: {}", clean(task_title, 200)));
+            }
+            if !holder.is_empty() {
+                lines.push(format!("Claimed by: {holder}"));
+            }
+            lines.push(format!("Status: {reason}"));
+            let plan_id = text(&report["plan"], "plan_id");
+            let workers: Vec<String> = if id.is_empty() {
+                Vec::new()
+            } else {
+                calls(report)
+                    .iter()
+                    .filter(|c| call_matches_plan_task(c, id, plan_id))
+                    .map(|c| {
+                        let who = text(c, "participant");
+                        let st = text(c, "state");
+                        if st.is_empty() {
+                            who.to_owned()
+                        } else {
+                            format!("{who} ({st})")
+                        }
+                    })
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            };
+            if workers.is_empty() {
+                lines.push("Workers: none recorded".to_owned());
+            } else {
+                lines.push(format!("Workers: {}", workers.join(", ")));
+            }
+            Some((title, lines.join("\n")))
+        }
+        _ => None,
+    }
+}
+
+fn attention_bucket(cls: &str) -> usize {
+    match cls {
+        "needs" => 0,
+        "failed" | "guard_stop" | "timed_out" | "verify_failed" | "verify_timed_out"
+        | "provider_error" => 1,
+        "decide" => 2,
+        "stale" => 3,
+        "mail" => 4,
+        _ => 5,
+    }
+}
+
+fn attention_item_badge(cls: &str, compact: bool) -> (&'static str, &'static str) {
+    match attention_bucket(cls) {
+        0 => (if compact { "? you" } else { "? needs" }, SGR_GOLD_BOLD),
+        1 => (if compact { "× fail" } else { "× failed" }, SGR_CORAL_BOLD),
+        2 => (if compact { "⚑ dec" } else { "⚑ decide" }, SGR_GOLD_BOLD),
+        3 => ("! stale", SGR_AMBER_BOLD),
+        4 => ("· mail", SGR_CYAN),
+        _ => ("· info", SGR_MUTED),
+    }
+}
+
+fn render_attention_band(
+    report: &Value,
+    all: &[Value],
+    items: &[attention::Item],
+    columns: usize,
+    use_cards: bool,
+    max_rows: usize,
+    colored: bool,
+) -> Vec<String> {
+    if items.is_empty() || max_rows == 0 {
+        return Vec::new();
+    }
+    let mut counts = [0usize; 6];
+    let mut unread = 0usize;
+    for item in items {
+        counts[attention_bucket(&item.cls)] += 1;
+        if item.unread {
+            unread += 1;
+        }
+    }
+    let total = items.len();
+    let format_header = |labels: [&str; 6]| {
+        let mut parts = vec![format!("Attention {total}")];
+        for (count, label) in counts.into_iter().zip(labels) {
+            if count > 0 {
+                parts.push(format!("{count} {label}"));
+            }
+        }
+        parts.join(" · ")
+    };
+    let wide_title = format_header(["needs you", "failed", "decide", "stale", "mail", "info"]);
+    let short_title = format_header(["you", "fail", "dec", "stale", "mail", "info"]);
+    let bare_title = format!("Attention {total}");
+    let tag_wide = format!("{unread} new / {total}");
+    let tag_compact = format!("{unread} new/{total}");
+
+    let boxed = use_cards && max_rows >= 3;
+    let item_limit = if boxed {
+        max_rows.saturating_sub(2).min(3)
+    } else {
+        let full = max_rows.saturating_sub(1).min(3);
+        if items.len() > full && max_rows >= 2 {
+            max_rows.saturating_sub(2).min(3)
+        } else {
+            full
+        }
+    };
+    let mut out = Vec::new();
+    if boxed {
+        let tag_limit = (columns / 3).max(6);
+        let tag = if width(&tag_wide) <= tag_limit {
+            tag_wide.as_str()
+        } else {
+            tag_compact.as_str()
+        };
+        let right_len = width(tag) + 3;
+        let title_budget = columns.saturating_sub(5 + right_len);
+        let title = if width(&wide_title) <= title_budget {
+            wide_title.as_str()
+        } else if width(&short_title) <= title_budget {
+            short_title.as_str()
+        } else {
+            bare_title.as_str()
+        };
+        out.push(card_top_styled(
+            title,
+            Some(tag),
+            columns,
+            colored,
+            SGR_GOLD_BOLD,
+        ));
+    } else {
+        let tag = if columns >= 36 && width(&bare_title) + 2 + width(&tag_wide) <= columns {
+            tag_wide.as_str()
+        } else if width(&bare_title) + 1 + width(&tag_compact) <= columns {
+            tag_compact.as_str()
+        } else {
+            ""
+        };
+        let right_w = width(tag);
+        let title_budget = left_budget(columns, right_w);
+        let title = if width(&wide_title) <= title_budget {
+            wide_title.as_str()
+        } else if width(&short_title) <= title_budget {
+            short_title.as_str()
+        } else {
+            bare_title.as_str()
+        };
+        let right = if tag.is_empty() {
+            vec![]
+        } else {
+            vec![Span::raw(tag, columns, Some(SGR_AMBER_BOLD))]
+        };
+        out.push(render_lr(
+            vec![Span::raw(title, title_budget.max(1), Some(SGR_GOLD_BOLD))],
+            right,
+            columns,
+            false,
+            None,
+            colored,
+        ));
+    }
+
+    let now = oms_panel_core::metrics::stamp(&report["generated_at"])
+        .unwrap_or_else(|| oms_panel_core::timestamp() as f64);
+    let inner = columns.saturating_sub(if boxed { 4 } else { 0 });
+    for item in items.iter().take(item_limit) {
+        let (badge, badge_sgr) = attention_item_badge(&item.cls, columns < 44);
+        let marker = if item.unread { "* " } else { "  " };
+        let marker_sgr = item.unread.then_some(SGR_GOLD_BOLD);
+        let who = clean(&item.who, 80);
+        let what = clean(&item.what, 160);
+        let age = attention_item_age(report, all, item, now);
+        let badge_w = width(marker) + width(badge);
+        let right = match age {
+            Some(age) if columns >= 44 || badge_w + width(&age) + 12 <= inner => {
+                vec![Span::raw(age, 8, Some(SGR_MUTED))]
+            }
+            _ => Vec::new(),
+        };
+        let left_limit = left_budget(inner, spans_width(&right));
+        let mut left = vec![
+            Span::literal(marker, marker_sgr),
+            Span::literal(badge, Some(badge_sgr)),
+        ];
+        let body_budget = left_limit.saturating_sub(badge_w);
+        if !who.is_empty() && !what.is_empty() && body_budget > 3 {
+            let who_limit = if columns < 44 {
+                (body_budget / 3).max(6)
+            } else {
+                (body_budget / 3).max(12)
+            };
+            let who_clipped = clip(&who, who_limit);
+            let sep = " · ";
+            let dash = " — ";
+            left.push(Span::literal(sep, Some(SGR_MUTED)));
+            left.push(Span {
+                plain: who_clipped.clone(),
+                sgr: Some(SGR_BOLD),
+            });
+            let rem = body_budget.saturating_sub(width(sep) + width(&who_clipped) + width(dash));
+            if rem > 0 {
+                left.push(Span::literal(dash, Some(SGR_MUTED)));
+                left.push(Span {
+                    plain: clip(&what, rem),
+                    sgr: Some(SGR_TEXT),
+                });
+            }
+        } else if !who.is_empty() && body_budget > 3 {
+            left.push(Span::literal(" · ", Some(SGR_MUTED)));
+            left.push(Span {
+                plain: clip(&who, body_budget.saturating_sub(3)),
+                sgr: Some(SGR_BOLD),
+            });
+        } else if !what.is_empty() && body_budget > 3 {
+            left.push(Span::literal(" · ", Some(SGR_MUTED)));
+            left.push(Span {
+                plain: clip(&what, body_budget.saturating_sub(3)),
+                sgr: Some(SGR_TEXT),
+            });
+        }
+        out.push(card_row_lr(left, right, columns, boxed, None, colored));
+    }
+    let hidden = items.len().saturating_sub(item_limit);
+    if boxed {
+        if hidden > 0 {
+            out.push(card_bottom_labeled(
+                &format!("+{hidden} more · b shows all"),
+                columns,
+                colored,
+            ));
+        } else if let Some(bottom) = card_bottom(columns, true, colored) {
+            out.push(bottom);
+        }
+    } else if hidden > 0 && out.len() < max_rows {
+        out.push(render_lr(
+            vec![Span::raw(
+                format!("  +{hidden} more · b shows all"),
+                columns,
+                Some(SGR_MUTED),
+            )],
+            vec![],
+            columns,
+            false,
+            None,
+            colored,
+        ));
+    }
+    out
+}
+
 fn visible_from<'a>(
     all: &'a [Value],
     nav: &navigation::Navigation,
     main: Option<&Value>,
     direct: &BTreeSet<(&str, &str)>,
+    attention_calls: &BTreeSet<&str>,
 ) -> Vec<&'a Value> {
     let groups = provider_groups(all, main);
     let words = navigation::words(&nav.filter);
@@ -1915,10 +2534,12 @@ fn visible_from<'a>(
         .filter(|v| navigation::matches_words(v, &words))
         .filter(|v| {
             !nav.attention_only
+                || v["attention_kind"].is_string()
                 || (v["room_only_history"] != true
                     && v["room_only_stale"] != true
                     && (awaiting_review(v)
                         || v["lifecycle_stale"] == true
+                        || attention_calls.contains(text(v, "participant"))
                         || [
                             "waiting_input",
                             "waiting_approval",
@@ -2135,8 +2756,24 @@ fn frame_with_capacity(
     } else {
         columns
     };
-    let all = calls(report);
-    let pinned = overall_main(&report["room"], &all);
+    let mut all = calls(report);
+    let attention = attention::items(report, read);
+    let main_id = overall_main(&report["room"], &all).map(|call| {
+        (
+            text(call, "participant").to_owned(),
+            text(call, "attempt").to_owned(),
+        )
+    });
+    if nav.attention_only {
+        all.extend(attention_extra_rows(report, &all, &attention));
+    }
+    let pinned = main_id.as_ref().and_then(|(participant, attempt)| {
+        all.iter().find(|call| {
+            call["role"] == "main"
+                && text(call, "participant") == participant
+                && text(call, "attempt") == attempt
+        })
+    });
     let direct = direct_work(report, &all, pinned);
     let pinned_count = usize::from(pinned.is_some());
     let total = all.len() - pinned_count;
@@ -2150,7 +2787,8 @@ fn frame_with_capacity(
         .filter(|call| !pinned.is_some_and(|main| std::ptr::eq(*call, main)))
         .filter(|call| fold_inactive(nav, call))
         .count();
-    let filtered = visible_from(&all, nav, pinned, &direct);
+    let attention_calls = attention_call_ids(&attention);
+    let filtered = visible_from(&all, nav, pinned, &direct, &attention_calls);
     let review = if default_overview(nav) {
         all.iter().filter(|call| awaiting_review(call)).count()
     } else {
@@ -2161,9 +2799,8 @@ fn frame_with_capacity(
     let selected_worker = nav.selected.checked_sub(pinned_count);
     let main_selected = pinned.is_some() && nav.selected == 0;
     let selected_entry = selected_worker.and_then(|index| calls.get(index));
-    let attention = attention::items(report, read);
     let view = nav.view.resolved(columns, height);
-    let goal = room_goal(report, &all).unwrap_or("");
+    let plan = room_plan(report, &all, &attention);
 
     let mut lines = Vec::new();
     lines.push(header_line(
@@ -2171,6 +2808,7 @@ fn frame_with_capacity(
         &calls,
         review,
         &attention,
+        plan.as_ref(),
         if nav.view == View::Auto {
             View::Auto
         } else {
@@ -2182,13 +2820,14 @@ fn frame_with_capacity(
     let overlay = nav.help || nav.health || nav.detail;
     let mut main_cards = use_cards && height >= 12;
     let (mut main, mut main_switch_cols) = render_main_section(
-        goal,
+        plan.as_ref(),
         pinned,
         main_selected,
         columns,
         main_cards,
         colored,
         !overlay,
+        overlay,
     );
     let mut notices = Vec::new();
     if let Some(notice) = &nav.notice {
@@ -2226,7 +2865,19 @@ fn frame_with_capacity(
     let required = fixed + main.len();
     // Keep the Main and Goal, dropping their card borders only when needed for Weekly.
     let compact_main = (short_board && main_cards && !main.is_empty() && required >= height)
-        .then(|| render_main_section(goal, pinned, main_selected, columns, false, colored, false).0)
+        .then(|| {
+            render_main_section(
+                plan.as_ref(),
+                pinned,
+                main_selected,
+                columns,
+                false,
+                colored,
+                false,
+                true,
+            )
+            .0
+        })
         .filter(|compact| fixed + compact.len() < height);
     let mut optional = Vec::new();
     if height >= 14 || (short_board && required < height) || compact_main.is_some() {
@@ -2292,6 +2943,7 @@ fn frame_with_capacity(
         lines.extend(match pinned.filter(|_| main_selected) {
             Some(main) => render_main_detail_card(
                 main,
+                plan.as_ref(),
                 columns,
                 inner_width,
                 use_cards,
@@ -2332,10 +2984,46 @@ fn frame_with_capacity(
         let main_row = usize::from(pinned.is_some() && (main_selected || body >= 3));
         lines.truncate(body.saturating_sub(worker_row + main_row));
         let main_room = body.saturating_sub(lines.len() + worker_row);
-        if main_cards && main.len() > main_room {
-            (main, main_switch_cols) =
-                render_main_section(goal, pinned, main_selected, columns, false, colored, false);
-            main_cards = false;
+        if main.len() > main_room {
+            if main_cards {
+                let (compact_boxed, compact_switch) = render_main_section(
+                    plan.as_ref(),
+                    pinned,
+                    main_selected,
+                    columns,
+                    true,
+                    colored,
+                    !overlay,
+                    true,
+                );
+                if compact_boxed.len() <= main_room {
+                    main = compact_boxed;
+                    main_switch_cols = compact_switch;
+                } else {
+                    (main, main_switch_cols) = render_main_section(
+                        plan.as_ref(),
+                        pinned,
+                        main_selected,
+                        columns,
+                        false,
+                        colored,
+                        false,
+                        true,
+                    );
+                    main_cards = false;
+                }
+            } else {
+                (main, main_switch_cols) = render_main_section(
+                    plan.as_ref(),
+                    pinned,
+                    main_selected,
+                    columns,
+                    false,
+                    colored,
+                    false,
+                    true,
+                );
+            }
         }
         main.truncate(main_room);
         let groups = provider_groups(&all, pinned);
@@ -2403,6 +3091,18 @@ fn frame_with_capacity(
             }
         }
         lines.extend(main);
+        if !attention.is_empty() && !nav.attention_only {
+            let attn_budget = height.saturating_sub(reserved + lines.len());
+            lines.extend(render_attention_band(
+                report,
+                &all,
+                &attention,
+                columns,
+                use_cards,
+                attn_budget,
+                colored,
+            ));
+        }
         let remaining_rows = body.saturating_sub(lines.len() + chrome);
         let row_capacity = remaining_rows.saturating_sub(1).max(1).min(remaining_rows);
         let detail_rows = !provider_view && view == View::Detail && row_capacity >= 2;
@@ -2426,12 +3126,12 @@ fn frame_with_capacity(
             .max(selected.saturating_add(1).saturating_sub(capacity))
             .min(calls.len().saturating_sub(capacity));
         if activity_chrome > 0 {
-            lines.push(card_top(
-                &format!("Tasks · {}", calls.len()),
-                None,
-                columns,
-                colored,
-            ));
+            let title = if nav.attention_only {
+                format!("Attention · {}", calls.len())
+            } else {
+                format!("Tasks · {}", calls.len())
+            };
+            lines.push(card_top(&title, None, columns, colored));
         }
         if provider_view {
             let base = lines.len();
@@ -2462,7 +3162,9 @@ fn frame_with_capacity(
                 *row += base;
             }
         } else if capacity > 0 && calls.is_empty() {
-            let empty = if pinned.is_some() {
+            let empty = if nav.attention_only {
+                "  No attention items"
+            } else if pinned.is_some() {
                 "  No visible lead or worker calls"
             } else {
                 "  No recorded calls — press ? for shortcuts or dispatch a worker"
@@ -3090,75 +3792,293 @@ fn plan_task_terminal(task: &Value) -> bool {
         )
 }
 
-/// The plan belongs to this Room only through the Room's own `task_id` link or
-/// a Room call that records this exact plan id; a reused task id without that
-/// identity binds nothing. The goal shows while a bound task is active.
-fn room_goal<'a>(report: &'a Value, calls: &[Value]) -> Option<&'a str> {
-    let plan_id = text(&report["plan"], "plan_id");
-    let room_id = text(&report["room"], "id");
-    let mut bound: BTreeSet<&str> = calls
-        .iter()
-        .filter(|call| {
-            let refs = &call["refs"];
-            let call_room = [text(refs, "panel_room_id"), text(refs, "panel_room")]
-                .into_iter()
-                .find(|id| !id.is_empty())
-                .unwrap_or(room_id);
-            !plan_id.is_empty() && text(refs, "plan_id") == plan_id && call_room == room_id
-        })
-        .map(|call| text(call, "task_id"))
-        .collect();
-    bound.insert(text(&report["room"], "task_id"));
-    bound.remove("");
-    let tasks: Vec<&Value> = match &report["plan"]["tasks"] {
-        Value::Object(map) => map
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlanProgress {
+    goal: String,
+    /// `None` means the task denominator is unknown (missing, invalid, or empty).
+    /// All-terminal plans (including all-cancelled plans) hide the Goal via `room_plan` returning `None`.
+    total: Option<usize>,
+    verified: usize,
+    in_review: usize,
+    claimed: usize,
+    stale: usize,
+}
+
+impl PlanProgress {
+    fn bar(&self) -> Option<String> {
+        let total = self.total.filter(|total| *total > 0)?;
+        let verified = self.verified.min(total);
+        let filled = if verified == 0 {
+            0
+        } else if verified == total {
+            10
+        } else {
+            ((verified * 10 + total / 2) / total).clamp(1, 9)
+        };
+        Some(format!(
+            "▕{}{}▏",
+            "█".repeat(filled),
+            "░".repeat(10 - filled)
+        ))
+    }
+
+    fn counts_text(&self, include_stale: bool, include_stages: bool) -> String {
+        let Some(total) = self.total else {
+            return "progress unknown".to_owned();
+        };
+        let mut parts = vec![format!("{}/{total} verified", self.verified)];
+        if include_stages {
+            if self.in_review > 0 {
+                parts.push(format!("{} in review", self.in_review));
+            }
+            if self.claimed > 0 {
+                parts.push(format!("{} claimed", self.claimed));
+            }
+            if include_stale && self.stale > 0 {
+                parts.push(format!("{} stale", self.stale));
+            }
+        }
+        parts.join(" · ")
+    }
+
+    fn goal_progress_label(&self, budget: usize, show_bar: bool) -> String {
+        let mut candidates = Vec::new();
+        if show_bar && let Some(bar) = self.bar() {
+            candidates.push(format!("{bar} {}", self.counts_text(true, true)));
+            candidates.push(format!("{bar} {}", self.counts_text(false, true)));
+            candidates.push(format!("{bar} {}", self.counts_text(false, false)));
+        }
+        candidates.push(self.counts_text(true, true));
+        candidates.push(self.counts_text(false, true));
+        candidates.push(self.counts_text(false, false));
+        if let Some(total) = self.total {
+            candidates.push(format!("{}/{total} ver", self.verified));
+            candidates.push(format!("{}/{total}", self.verified));
+        } else {
+            candidates.push("unknown".to_owned());
+        }
+        candidates
             .iter()
-            .filter(|(id, task)| {
-                bound.contains(id.as_str())
-                    || bound.contains(text(task, "id"))
-                    || bound.contains(text(task, "task_id"))
-            })
-            .map(|(_, task)| task)
-            .collect(),
+            .find(|label| width(label) <= budget)
+            .cloned()
+            .unwrap_or_else(|| clip(candidates.last().unwrap(), budget))
+    }
+
+    fn header_label(&self, budget: usize) -> Option<String> {
+        let candidates = if let Some(total) = self.total {
+            vec![
+                self.counts_text(false, true),
+                self.counts_text(false, false),
+                format!("{}/{total} ver", self.verified),
+            ]
+        } else {
+            vec![
+                "progress unknown".to_owned(),
+                "plan unknown".to_owned(),
+                "unknown".to_owned(),
+            ]
+        };
+        candidates.into_iter().find(|label| width(label) <= budget)
+    }
+}
+
+fn plan_task_state(task: &Value) -> &str {
+    [text(task, "state"), text(task, "status")]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or("")
+}
+
+fn plan_task_cancelled(task: &Value) -> bool {
+    matches!(plan_task_state(task), "cancelled" | "canceled")
+}
+
+/// Active plan explicitly bound to this Room via `room.plan_id`, `room.task_id`,
+/// a Room call's `refs.plan_id`, or a joined Room participant's task claim.
+/// Unbound workspace plans and plans whose tasks are all terminal (including all
+/// cancelled) stay hidden.
+fn room_plan(
+    report: &Value,
+    calls: &[Value],
+    attention: &[attention::Item],
+) -> Option<PlanProgress> {
+    let plan = &report["plan"];
+    let goal = clean(text(plan, "goal"), 1_048_576);
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return None;
+    }
+    let plan_id = text(plan, "plan_id");
+    let room = &report["room"];
+    let room_id = text(room, "id");
+    let room_task = text(room, "task_id");
+    let tasks_present = matches!(&plan["tasks"], Value::Object(_) | Value::Array(_));
+    let tasks: Vec<(&str, &Value)> = match &plan["tasks"] {
+        Value::Object(map) => map.iter().map(|(id, task)| (id.as_str(), task)).collect(),
         Value::Array(rows) => rows
             .iter()
-            .filter(|task| {
-                bound.contains(text(task, "id")) || bound.contains(text(task, "task_id"))
+            .map(|task| {
+                let id = [text(task, "id"), text(task, "task_id")]
+                    .into_iter()
+                    .find(|v| !v.is_empty())
+                    .unwrap_or("");
+                (id, task)
             })
             .collect(),
         _ => Vec::new(),
     };
-    tasks
+
+    let room_plan_match = !plan_id.is_empty() && text(room, "plan_id") == plan_id;
+    let room_task_match = !room_task.is_empty()
+        && tasks.iter().any(|(id, task)| {
+            *id == room_task || text(task, "id") == room_task || text(task, "task_id") == room_task
+        });
+    let mut room_participants: BTreeSet<&str> = rows(&room["participants"])
         .iter()
-        .any(|task| !plan_task_terminal(task))
-        .then(|| text(&report["plan"], "goal"))
+        .filter(|member| member["joined"] != false)
+        .map(|member| text(member, "participant"))
+        .filter(|id| !id.is_empty())
+        .collect();
+    for id in [text(room, "owner"), text(room, "main")] {
+        if !id.is_empty() {
+            room_participants.insert(id);
+        }
+    }
+    let claim_match = !plan_id.is_empty()
+        && tasks.iter().any(|(_, task)| {
+            let holder = text(task, "claimed_by_participant");
+            let task_plan = text(task, "plan_id");
+            !holder.is_empty()
+                && room_participants.contains(holder)
+                && (task_plan.is_empty() || task_plan == plan_id)
+        });
+
+    let call_plan_match = !plan_id.is_empty()
+        && calls.iter().any(|call| {
+            if call["attention_kind"].is_string() {
+                return false;
+            }
+            let refs = &call["refs"];
+            if text(refs, "plan_id") != plan_id {
+                return false;
+            }
+            let ref_rooms = [text(refs, "panel_room_id"), text(refs, "panel_room")];
+            if ref_rooms.iter().any(|r| !r.is_empty() && *r != room_id) {
+                return false;
+            }
+            ref_rooms
+                .iter()
+                .find(|r| !r.is_empty())
+                .copied()
+                .unwrap_or(room_id)
+                == room_id
+        });
+
+    let explicitly_bound = room_plan_match || room_task_match || call_plan_match || claim_match;
+    if !explicitly_bound {
+        return None;
+    }
+
+    if !tasks.is_empty() && tasks.iter().all(|(_, task)| plan_task_terminal(task)) {
+        return None;
+    }
+
+    let stale_tasks: BTreeSet<&str> = attention
+        .iter()
+        .filter(|item| item.row_id.0 == "task" && item.cls == "stale")
+        .map(|item| item.row_id.1.as_str())
+        .collect();
+    let mut total_count = 0usize;
+    let mut verified = 0usize;
+    let mut in_review = 0usize;
+    let mut claimed = 0usize;
+    let mut stale = 0usize;
+    for (id, task) in &tasks {
+        if plan_task_cancelled(task) {
+            continue;
+        }
+        total_count += 1;
+        let st = plan_task_state(task);
+        let task_id = attention::plan_task_id(id, task);
+        match st {
+            "done" => verified += 1,
+            "review" => {
+                if task["review_lease_abandoned"] == true || task["claim_expired"] == true {
+                    stale += 1;
+                } else {
+                    in_review += 1;
+                }
+            }
+            "claimed" | "running" | "landing" | "held" => {
+                if task["claim_expired"] == true || stale_tasks.contains(task_id) {
+                    stale += 1;
+                } else {
+                    claimed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    let total = (tasks_present && total_count > 0).then_some(total_count);
+    Some(PlanProgress {
+        goal: goal.to_owned(),
+        total,
+        verified,
+        in_review,
+        claimed,
+        stale,
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn header_line(
     report: &Value,
     calls: &[TreeEntry<'_>],
     review: usize,
     attention: &[attention::Item],
+    plan: Option<&PlanProgress>,
     view: View,
     columns: usize,
     colored: bool,
 ) -> String {
     let project = project_title(report);
+    let room = &report["room"];
+    let room_title_active = report["collection"]["ok"] == true
+        && report["capacity_stale"] != true
+        && !text(room, "id").is_empty()
+        && {
+            let cleaned = clean(text(room, "title"), 160);
+            let title = cleaned.trim();
+            !title.is_empty() && title != "Shared work" && title != project
+        };
     let (mut left, right) = if columns < 44 {
-        let left = vec![Span::raw(
-            format!("OMS · {project}"),
-            columns,
-            Some(SGR_AMBER_BOLD),
-        )];
-        let right = if attention.is_empty() {
-            vec![]
-        } else {
-            vec![Span::raw(
+        let left_text = format!("OMS · {project}");
+        let left = vec![Span::raw(left_text.clone(), columns, Some(SGR_AMBER_BOLD))];
+        let mut right = Vec::new();
+        if let Some(plan) = plan
+            && columns >= 30
+        {
+            let attn_w = if attention.is_empty() {
+                0
+            } else {
+                width(&format!("!{}", attention.len())) + 1
+            };
+            let free = columns.saturating_sub(width(&left_text) + attn_w + 2);
+            let cap = if room_title_active { 9 } else { 16 };
+            if let Some(label) = plan.header_label(free.min(cap)) {
+                right.push(Span::raw(label, columns, Some(SGR_CYAN)));
+            }
+        }
+        if !attention.is_empty() {
+            if !right.is_empty() {
+                right.push(Span::literal(" ", None));
+            }
+            right.push(Span::raw(
                 format!("!{}", attention.len()),
                 columns,
                 Some(SGR_AMBER_BOLD),
-            )]
-        };
+            ));
+        }
         (left, right)
     } else {
         let running = calls
@@ -3170,30 +4090,67 @@ fn header_line(
                 )
             })
             .count();
-        let mut parts = Vec::new();
+        let mut status_parts = Vec::new();
         if running > 0 {
-            parts.push(format!("{running} running"));
+            status_parts.push(format!("{running} running"));
         }
         if review > 0 {
-            parts.push(format!("{review} review"));
+            status_parts.push(format!("{review} review"));
         }
         if !attention.is_empty() {
-            parts.push(format!("{} attention", attention.len()));
+            status_parts.push(format!("{} attention", attention.len()));
         }
-        let summary = if parts.is_empty() {
-            format!("{} calls", calls.len())
+        let status_summary = if status_parts.is_empty() {
+            if plan.is_some() && calls.is_empty() {
+                String::new()
+            } else {
+                format!("{} calls", calls.len())
+            }
         } else {
-            parts.join(" · ")
+            status_parts.join(" · ")
         };
         let left = vec![
             Span::literal("OMS", Some(SGR_AMBER_BOLD)),
             Span::literal(" · ", Some(SGR_MUTED)),
             Span::raw(project, columns / 2, Some(SGR_BOLD)),
         ];
+        let view_tag = format!("[{}]", view_label(view));
+        let summary_budget = columns
+            .saturating_sub(
+                spans_width(&left) + width(&view_tag) + 4 + if room_title_active { 16 } else { 0 },
+            )
+            .max(columns / 2);
+        let summary = if let Some(plan) = plan {
+            let join_with_status = |plan_part: String| {
+                if status_summary.is_empty() {
+                    plan_part
+                } else {
+                    format!("{plan_part} · {status_summary}")
+                }
+            };
+            let full = join_with_status(plan.counts_text(false, true));
+            let core = join_with_status(plan.counts_text(false, false));
+            if width(&full) <= summary_budget {
+                full
+            } else if width(&core) <= summary_budget {
+                core
+            } else if let Some(short) = plan.header_label(summary_budget) {
+                let combined = join_with_status(short.clone());
+                if width(&combined) <= summary_budget {
+                    combined
+                } else {
+                    short
+                }
+            } else {
+                status_summary
+            }
+        } else {
+            status_summary
+        };
         let right = vec![
-            Span::raw(summary, columns / 2, Some(SGR_CYAN)),
+            Span::raw(summary, summary_budget, Some(SGR_CYAN)),
             Span::literal("  ", None),
-            Span::raw(format!("[{}]", view_label(view)), 16, Some(SGR_MUTED)),
+            Span::raw(view_tag, 16, Some(SGR_MUTED)),
         ];
         (left, right)
     };
@@ -3203,21 +4160,14 @@ fn header_line(
     let available = left_budget(columns, spans_width(&right))
         .saturating_sub(spans_width(&left) + width(SEPARATOR))
         .min(28);
-    let room = &report["room"];
-    if available >= 8
-        && report["collection"]["ok"] == true
-        && report["capacity_stale"] != true
-        && !text(room, "id").is_empty()
-    {
+    if available >= 8 && room_title_active {
         let title = clean(text(room, "title"), 160);
         let title = title.trim();
-        if !title.is_empty() && title != "Shared work" && title != project {
-            left.push(Span::literal(SEPARATOR, Some(SGR_MUTED)));
-            left.push(Span {
-                plain: clip(title, available),
-                sgr: Some(SGR_MUTED),
-            });
-        }
+        left.push(Span::literal(SEPARATOR, Some(SGR_MUTED)));
+        left.push(Span {
+            plain: clip(title, available),
+            sgr: Some(SGR_MUTED),
+        });
     }
     render_lr(left, right, columns, false, None, colored)
 }
@@ -3281,13 +4231,22 @@ fn render_provider_rows(
     }
     let provider_start = lines.len();
     for &group in groups {
-        let label = ["Codex", "Claude", "Antigravity", "Other providers"][group];
         let members: Vec<_> = calls
             .iter()
             .map(|entry| entry.call)
             .enumerate()
             .filter(|(_, call)| provider_bucket(call) == group && !is_direct_work(call, direct))
             .collect();
+        let label = if group == 3
+            && !members.is_empty()
+            && members
+                .iter()
+                .all(|(_, call)| call["attention_kind"].is_string())
+        {
+            "Room & Plan"
+        } else {
+            ["Codex", "Claude", "Antigravity", "Other providers"][group]
+        };
         let lead = all
             .iter()
             .filter(|call| provider_bucket(call) == group)
@@ -4286,16 +5245,18 @@ fn legend_line(colored: bool, columns: usize) -> String {
     render_lr(spans, vec![], columns, false, None, colored)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_main_section(
-    goal: &str,
+    plan: Option<&PlanProgress>,
     main: Option<&Value>,
     selected: bool,
     columns: usize,
     use_cards: bool,
     colored: bool,
     allow_switch: bool,
+    compact_goal: bool,
 ) -> (Vec<String>, Option<(usize, usize)>) {
-    if main.is_none() && goal.is_empty() {
+    if main.is_none() && plan.is_none() {
         return (vec![], None);
     }
     let model = main
@@ -4415,19 +5376,63 @@ fn render_main_section(
         (colored && selected).then_some(SGR_SEL_BG),
         colored,
     ));
-    if !goal.is_empty() {
-        out.push(card_row_lr(
-            vec![Span::raw(
-                format!("Goal: {goal}"),
-                1_048_576,
-                Some(SGR_TEXT),
-            )],
-            vec![],
-            columns,
-            use_cards,
-            None,
-            colored,
-        ));
+    if let Some(plan) = plan {
+        let show_bar = columns >= 72;
+        let progress_budget = inner.saturating_sub(7).max(7);
+        let progress = plan.goal_progress_label(progress_budget, show_bar);
+        let inline_fit = width("Goal: ") + width(&plan.goal) + 2 + width(&progress) <= inner;
+        if inline_fit || compact_goal {
+            let right_budget = inner.saturating_sub(14).max(7);
+            let inline_progress = if inline_fit {
+                progress
+            } else {
+                plan.goal_progress_label(right_budget, false)
+            };
+            out.push(card_row_lr(
+                vec![Span::raw(
+                    format!("Goal: {}", plan.goal),
+                    1_048_576,
+                    Some(SGR_TEXT),
+                )],
+                vec![Span::raw(inline_progress, inner, Some(SGR_CYAN))],
+                columns,
+                use_cards,
+                None,
+                colored,
+            ));
+        } else {
+            out.push(card_row_lr(
+                vec![Span::literal("Goal:", Some(SGR_GOLD_BOLD))],
+                vec![Span::raw(progress, progress_budget, Some(SGR_CYAN))],
+                columns,
+                use_cards,
+                None,
+                colored,
+            ));
+            let indent = if use_cards { "  " } else { " " };
+            let wrap_width = inner.saturating_sub(width(indent)).max(1);
+            let mut wrapped = wrap_words(&plan.goal, wrap_width);
+            if wrapped.len() > 2 {
+                wrapped.truncate(2);
+                wrapped[1] = clip(
+                    &format!("{}…", wrapped[1].trim_end_matches('…')),
+                    wrap_width,
+                );
+            }
+            for part in wrapped {
+                out.push(card_row_lr(
+                    vec![
+                        Span::literal(indent, None),
+                        Span::raw(part, wrap_width, Some(SGR_TEXT)),
+                    ],
+                    vec![],
+                    columns,
+                    use_cards,
+                    None,
+                    colored,
+                ));
+            }
+        }
     }
     if let Some(bottom) = card_bottom(columns, use_cards, colored) {
         out.push(bottom);
@@ -4851,6 +5856,7 @@ pub(crate) fn main_bounded_lines(call: &Value, columns: usize, rows: usize) -> V
 /// A short Board that cannot hold every row reads the two-line summary.
 fn render_main_detail_card(
     call: &Value,
+    plan: Option<&PlanProgress>,
     columns: usize,
     inner_width: usize,
     use_cards: bool,
@@ -4865,19 +5871,24 @@ fn render_main_detail_card(
             .map(|(label, key)| (label, text(call, key).to_owned()))
             .filter(|(_, value)| !value.is_empty()),
     );
+    if let Some(plan) = plan {
+        rows.push(("Goal", plan.goal.clone()));
+    }
     let budget = inner_width.saturating_sub(16);
     for (label, value) in rows {
+        let wrap_w = inner_width.saturating_sub(4).max(1);
         let mut wrapped = if width(&value) > budget {
-            wrap(&value, inner_width.saturating_sub(4).max(1))
+            if label == "Goal" {
+                wrap_words(&value, wrap_w)
+            } else {
+                wrap(&value, wrap_w)
+            }
         } else {
             vec![]
         };
-        if wrapped.len() > 4 {
+        if label != "Goal" && wrapped.len() > 4 {
             wrapped.truncate(4);
-            wrapped[3] = clip(
-                &format!("{}…", wrapped[3]),
-                inner_width.saturating_sub(4).max(1),
-            );
+            wrapped[3] = clip(&format!("{}…", wrapped[3]), wrap_w);
         }
         let right = if wrapped.is_empty() {
             value
@@ -4910,10 +5921,16 @@ fn render_main_detail_card(
         // The heading stays; the bottom border goes before any fact does.
         out.truncate(1);
         let bottom = card_bottom(columns, use_cards, colored);
-        let packed = main_bounded_lines(call, inner_width.max(1), usize::MAX).len();
-        let bottom = bottom.filter(|_| packed + 2 <= room);
+        let mut packed = main_bounded_lines(call, inner_width.max(1), usize::MAX);
+        if let Some(plan) = plan {
+            let goal_lines = wrap_words(&format!("Goal: {}", plan.goal), inner_width.max(1));
+            packed.extend(goal_lines);
+        }
+        let bottom = bottom.filter(|_| packed.len() + 2 <= room);
         let rows = room.saturating_sub(1 + usize::from(bottom.is_some()));
-        for part in main_bounded_lines(call, inner_width.max(1), rows) {
+        let main_lines = main_bounded_lines(call, inner_width.max(1), rows);
+        let main_used = main_lines.len();
+        for part in main_lines {
             out.push(card_row_lr(
                 vec![Span::raw(part, inner_width, Some(SGR_TEXT))],
                 vec![],
@@ -4922,6 +5939,31 @@ fn render_main_detail_card(
                 None,
                 colored,
             ));
+        }
+        if let Some(plan) = plan
+            && rows > main_used
+        {
+            let goal_budget = rows - main_used;
+            let mut goal_lines = wrap_words(&format!("Goal: {}", plan.goal), inner_width.max(1));
+            if goal_lines.len() > goal_budget {
+                goal_lines.truncate(goal_budget);
+                if let Some(last) = goal_lines.last_mut() {
+                    *last = clip(
+                        &format!("{}…", last.trim_end_matches('…')),
+                        inner_width.max(1),
+                    );
+                }
+            }
+            for part in goal_lines {
+                out.push(card_row_lr(
+                    vec![Span::raw(part, inner_width, Some(SGR_TEXT))],
+                    vec![],
+                    columns,
+                    use_cards,
+                    None,
+                    colored,
+                ));
+            }
         }
         out.extend(bottom);
     }
@@ -6803,8 +7845,19 @@ mod tests {
             overview.contains("1 review") && overview.contains("2 folded (Tab all)"),
             "{overview}"
         );
+        // The folded review item surfaces in the Attention band while staying out of provider rows.
         assert!(
-            !overview.contains("Pending decision") && !overview.contains("Recorded native child")
+            overview.contains("Attention 1 · 1 decide") && overview.contains("Pending decision"),
+            "{overview}"
+        );
+        let provider_section = overview
+            .split_once("╭─ Codex")
+            .map(|(_, rest)| rest)
+            .unwrap_or(&overview);
+        assert!(
+            !provider_section.contains("Pending decision")
+                && !overview.contains("Recorded native child"),
+            "{overview}"
         );
         let attention = navigation::Navigation {
             attention_only: true,
@@ -7687,8 +8740,16 @@ mod tests {
             assert!(
                 frame
                     .lines()
-                    .any(|s| s.starts_with("Goal:") && s.contains('…')),
+                    .any(|s| s.starts_with("Goal:") && s.contains("0/2 verified")),
                 "{frame}"
+            );
+            assert!(
+                frame
+                    .lines()
+                    .filter(|s| s.contains("長い目標") || s.contains("目標長い"))
+                    .count()
+                    >= 2,
+                "goal should wrap instead of clipping to one line: {frame}"
             );
             assert!(!frame.contains("OMS OMS"), "{frame}");
             assert!(
@@ -7948,8 +9009,15 @@ mod tests {
         ] {
             for columns in [40, 50, 60] {
                 for room in [2, 3, 4] {
-                    let card =
-                        render_main_detail_card(call, columns, columns - 4, true, false, room);
+                    let card = render_main_detail_card(
+                        call,
+                        None,
+                        columns,
+                        columns - 4,
+                        true,
+                        false,
+                        room,
+                    );
                     assert!(card.len() <= room, "{columns}/{room}: {card:?}");
                     assert!(card[0].contains("Overall Main") && card[0].contains("Esc back"));
                     assert!(card.iter().all(|line| width(line) <= columns), "{card:?}");
@@ -7981,7 +9049,7 @@ mod tests {
         brief["title"] = json!("Ship");
         brief["task_id"] = json!("t-main-42-".repeat(6));
         for columns in [40, 50, 60] {
-            let card = render_main_detail_card(&main, columns, columns - 4, true, false, 64);
+            let card = render_main_detail_card(&main, None, columns, columns - 4, true, false, 64);
             let rows: Vec<_> = card
                 .iter()
                 .skip_while(|line| !line.contains("Work"))
@@ -7996,7 +9064,7 @@ mod tests {
             assert!(card.iter().all(|line| width(line) <= columns), "{card:?}");
         }
         for columns in [80, 120] {
-            let card = render_main_detail_card(&brief, columns, columns - 4, true, false, 2);
+            let card = render_main_detail_card(&brief, None, columns, columns - 4, true, false, 2);
             let row = card[1].trim_matches(['│', ' ']);
             assert!(
                 row.ends_with("Work Ship…") && !row.contains("Task"),
@@ -9668,14 +10736,20 @@ mod tests {
                 report["room"]["participants"][index]["refs"] = refs.clone();
             }
         };
-        let ghost = {
+        let all_closed = {
             let mut report = bound.clone();
-            report["plan"]["tasks"]["t1"]["state"] = json!("done");
+            for task in report["plan"]["tasks"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+            {
+                task["state"] = json!("done");
+            }
             report
         };
         // A reused task id binds only with this plan's exact id, in this Room.
         let unbound = [
-            ghost,
+            all_closed,
             variant(&|r| worker_refs(r, json!({}))),
             variant(&|r| worker_refs(r, json!({"plan_id":"plan-old"}))),
             variant(&|r| {
@@ -9688,7 +10762,7 @@ mod tests {
             r["room"]["task_id"] = json!("t3");
         });
         for columns in [40, 80, 120] {
-            let header = if columns < 44 {
+            let unbound_header = if columns < 44 {
                 "OMS · canonical".to_owned()
             } else {
                 let right = "1 running  [Overview]";
@@ -9697,20 +10771,30 @@ mod tests {
                     " ".repeat(columns - 15 - right.chars().count())
                 )
             };
-            let (usage, goal) = if columns < 44 {
-                ("Wk left Cdx— Cld— AGY—", "Goal: Ship top bar".to_owned())
+            let usage = if columns < 44 {
+                "Wk left Cdx— Cld— AGY—"
             } else {
-                (
-                    "Weekly left · Codex — │ Claude — │ AGY —",
-                    format!("│ Goal: Ship top bar{} │", " ".repeat(columns - 22)),
-                )
+                "Weekly left · Codex — │ Claude — │ AGY —"
             };
             for report in [&bound, &room_link] {
                 for fill in [false, true] {
                     let lines = frame_styled(report, &nav, columns, 24, &read, false, fill);
-                    assert_eq!(lines[..2], [&header, usage], "{lines:#?}");
+                    assert!(lines[0].starts_with("OMS · canonical"), "{lines:#?}");
+                    assert!(lines[0].contains("2/5 verified"), "{lines:#?}");
+                    assert_eq!(lines[1], usage, "{lines:#?}");
                     assert!(lines.iter().all(|line| !line.contains("Plan ")));
-                    assert_eq!(lines.iter().filter(|line| **line == goal).count(), 1);
+                    assert!(
+                        lines.iter().any(|line| line.contains("Goal:")),
+                        "{lines:#?}"
+                    );
+                    assert!(
+                        lines.iter().any(|line| line.contains("Ship top bar")),
+                        "{lines:#?}"
+                    );
+                    assert!(
+                        lines.iter().any(|line| line.contains("2/5 verified") && line.contains("2 claimed")),
+                        "{lines:#?}"
+                    );
                     assert!(!lines.join("\n").contains("Shared work"));
                     if fill {
                         assert_eq!(lines.len(), 24, "managed frame keeps its height");
@@ -9720,7 +10804,7 @@ mod tests {
             for unrelated in &unbound {
                 let lines = frame_styled(unrelated, &nav, columns, 24, &read, false, true);
                 assert_eq!(lines.len(), 24);
-                assert_eq!(lines[..2], [&header, usage], "{lines:#?}");
+                assert_eq!(lines[..2], [&unbound_header, usage], "{lines:#?}");
                 assert!(
                     lines
                         .iter()
@@ -13551,6 +14635,11 @@ mod tests {
             &read,
         )
         .join("\n");
+        assert!(compact.contains("Attention 3 · 3 failed"), "{compact}");
+        let tasks_section = compact
+            .split_once("╭─ Tasks · ")
+            .map(|(_, rest)| rest)
+            .expect("Tasks section in compact view");
         for title in [
             "Done task",
             "Failed old task",
@@ -13563,7 +14652,11 @@ mod tests {
             "Settled joined",
             "Settled left",
         ] {
-            assert_eq!(compact.matches(title).count(), 1, "{title}: {compact}");
+            assert_eq!(
+                tasks_section.matches(title).count(),
+                1,
+                "{title}: {compact}"
+            );
         }
         assert!(!compact.contains("[⟳ run]"), "{compact}");
     }
@@ -13872,5 +14965,1017 @@ mod tests {
             .unwrap();
         assert_eq!(prefer["attempt"], "att-live-pref");
         assert_eq!(prefer["state"], "working");
+    }
+
+    #[test]
+    fn ux01_attention_band_shows_classes_unread_top_three_with_age_and_omits_when_empty() {
+        let now = 1_800_000_600u64;
+        let report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-ux01",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "model": "gpt-5",
+                        "state": "working",
+                        "joined": true,
+                        "title": "Coordinate UX"
+                    },
+                    {
+                        "participant": "w-fail",
+                        "role": "builder",
+                        "provider": "claude",
+                        "model": "sonnet",
+                        "state": "failed",
+                        "joined": true,
+                        "title": "Fix parser",
+                        "updated_at": now - 300
+                    },
+                    {
+                        "participant": "w-rev",
+                        "role": "reviewer",
+                        "provider": "codex",
+                        "model": "gpt-5",
+                        "state": "review",
+                        "joined": true,
+                        "title": "Approve patch",
+                        "updated_at": now - 120
+                    },
+                    {
+                        "participant": "w-ended",
+                        "role": "worker",
+                        "provider": "codex",
+                        "state": "done",
+                        "joined": true,
+                        "task_id": "t-held",
+                        "updated_at": now - 60
+                    }
+                ],
+                "messages": [
+                    {
+                        "id": "msg-q1",
+                        "message_kind": "question",
+                        "sender": "main-1",
+                        "text": "Ship option A or B?",
+                        "pending_for": ["user"],
+                        "answered": false,
+                        "ts": now - 420
+                    },
+                    {
+                        "id": "msg-m1",
+                        "message_kind": "note",
+                        "sender": "advisor-1",
+                        "text": "FYI fifth item note",
+                        "pending_for": ["main-1"],
+                        "answered": false,
+                        "ts": now - 60
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-ux01",
+                "goal": "Ship UX fixes",
+                "tasks": {
+                    "t-held": {
+                        "id": "t-held",
+                        "state": "running",
+                        "claimed_at": now - 600
+                    }
+                }
+            }
+        });
+        let items = attention::items(&report, &BTreeMap::new());
+        assert_eq!(items.len(), 5, "{items:?}");
+        let read_item = items
+            .iter()
+            .find(|item| item.row_id == ("call".into(), "w-fail".into()))
+            .expect("failed call in attention");
+        let read = BTreeMap::from([(attention::row_key(&read_item.row_id), read_item.cls.clone())]);
+
+        for columns in [40, 80, 120] {
+            let plain = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                30,
+                &read,
+                false,
+                true,
+            );
+            let colored = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                30,
+                &read,
+                true,
+                true,
+            );
+            assert_eq!(plain.len(), 30);
+            for (p, c) in plain.iter().zip(&colored) {
+                assert!(width(p) <= columns, "{columns}: overflow {p}");
+                assert_eq!(*p, strip_sgr(c), "{columns}: sgr geometry mismatch");
+            }
+            let joined = plain.join("\n");
+            assert!(joined.contains("Attention 5"), "{columns}: {joined}");
+            assert!(
+                joined.contains("4 new / 5") || joined.contains("4 new/5"),
+                "{columns}: missing unread ratio: {joined}"
+            );
+            if columns >= 120 {
+                for fragment in ["1 needs you", "1 failed", "1 decide", "1 stale", "1 mail"] {
+                    assert!(
+                        joined.contains(fragment),
+                        "{columns}: missing {fragment}\n{joined}"
+                    );
+                }
+            } else if columns >= 80 {
+                for fragment in ["1 you", "1 fail", "1 dec", "1 stale", "1 mail"] {
+                    assert!(
+                        joined.contains(fragment),
+                        "{columns}: missing {fragment}\n{joined}"
+                    );
+                }
+            }
+            if columns >= 80 {
+                for fragment in [
+                    "Ship option A or B?",
+                    "Fix parser",
+                    "Approve patch",
+                    "main-1",
+                    "sonnet builder",
+                    "gpt-5 reviewer",
+                    "7m",
+                    "5m",
+                    "2m",
+                ] {
+                    assert!(
+                        joined.contains(fragment),
+                        "{columns}: missing {fragment}\n{joined}"
+                    );
+                }
+                assert!(
+                    !joined.contains("FYI fifth item note"),
+                    "{columns}: top-3 band should omit 5th item\n{joined}"
+                );
+            }
+            let attn_start = plain
+                .iter()
+                .position(|line| line.contains("Attention 5"))
+                .expect("Attention band start");
+            let band_last_line = &plain[attn_start + 4];
+            assert!(
+                band_last_line.contains("+2 more · b shows all"),
+                "{columns}: truncated Attention band last line missing overflow footer: {band_last_line:?}\n{joined}"
+            );
+        }
+
+        // Non-truncated band (<= 3 items) must not show a "+N more" footer.
+        let mut three_items = report.clone();
+        three_items["room"]["messages"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|msg| msg["id"] != "msg-m1");
+        three_items["plan"]["tasks"] = json!({});
+        let three_joined = frame(
+            &three_items,
+            &navigation::Navigation::default(),
+            80,
+            30,
+            &read,
+        )
+        .join("\n");
+        assert!(
+            !three_joined.contains("more · b shows all"),
+            "non-truncated band should omit overflow footer:\n{three_joined}"
+        );
+
+        // Four non-zero classes at 80 cols keep the full class words per contract.
+        let mut four_class = report.clone();
+        four_class["room"]["messages"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|msg| msg["id"] != "msg-m1");
+        let four_joined = frame(
+            &four_class,
+            &navigation::Navigation::default(),
+            80,
+            30,
+            &read,
+        )
+        .join("\n");
+        assert!(
+            four_joined.contains("Attention 4 · 1 needs you · 1 failed · 1 decide · 1 stale"),
+            "{four_joined}"
+        );
+
+        // Undated attention item never fabricates an age.
+        let mut undated = report.clone();
+        undated["room"]["messages"][0]["ts"] = Value::Null;
+        let undated_lines = frame(&undated, &navigation::Navigation::default(), 80, 30, &read);
+        let q_line = undated_lines
+            .iter()
+            .find(|line| line.contains("Ship option A or B?"))
+            .expect("question line");
+        assert!(
+            !q_line.contains("7m") && !q_line.contains("0s"),
+            "undated attention row fabricated age: {q_line}"
+        );
+
+        // Empty attention omits the Attention band completely.
+        let clean_report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-clean",
+                "owner": "main-1",
+                "participants": [
+                    {"participant": "main-1", "role": "main", "provider": "codex", "state": "working", "joined": true},
+                    {"participant": "w-ok", "role": "worker", "provider": "codex", "state": "working", "joined": true, "title": "Healthy"}
+                ]
+            }
+        });
+        let empty_lines = frame(
+            &clean_report,
+            &navigation::Navigation::default(),
+            100,
+            24,
+            &BTreeMap::new(),
+        );
+        let body_lines = &empty_lines[..empty_lines.len().saturating_sub(1)];
+        assert!(
+            body_lines
+                .iter()
+                .all(|line| !line.contains("Attention ") && !line.contains("new /")),
+            "{empty_lines:#?}"
+        );
+    }
+
+    #[test]
+    fn ux01_attention_only_mode_includes_room_questions_and_held_tasks() {
+        let now = 1_800_000_600u64;
+        let report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-attn-b",
+                "owner": "main-1",
+                "participants": [
+                    {"participant": "main-1", "role": "main", "provider": "codex", "state": "working", "joined": true},
+                    {"participant": "w-ok", "role": "worker", "provider": "codex", "state": "working", "joined": true, "title": "Healthy worker"},
+                    {"participant": "w-ended", "role": "worker", "provider": "codex", "state": "done", "joined": true, "task_id": "t-held", "updated_at": now - 400}
+                ],
+                "messages": [
+                    {
+                        "id": "msg-q1",
+                        "message_kind": "question",
+                        "sender": "main-1",
+                        "text": "Approve release scope?",
+                        "pending_for": ["user"],
+                        "answered": false,
+                        "ts": now - 180
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-b",
+                "goal": "Check attention filter",
+                "tasks": {
+                    "t-held": {
+                        "id": "t-held",
+                        "state": "claimed",
+                        "claimed_at": now - 600
+                    }
+                }
+            }
+        });
+        let nav = navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        let rows = visible(&report, &nav);
+        assert!(
+            rows.iter().any(|r| r["participant"] == "message:msg-q1"),
+            "room question missing from attention_only visible: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r["participant"] == "task:t-held"),
+            "held task missing from attention_only visible: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r["participant"] == "w-ok"),
+            "healthy worker leaked into attention_only: {rows:?}"
+        );
+        let read = BTreeMap::new();
+        for columns in [40, 80, 120] {
+            let lines = frame(&report, &nav, columns, 24, &read);
+            assert!(
+                lines.iter().all(|line| width(line) <= columns),
+                "{columns}: {lines:?}"
+            );
+            let joined = lines.join("\n");
+            assert!(joined.contains("[? question]"), "{columns}: {joined}");
+            assert!(joined.contains("[! held]"), "{columns}: {joined}");
+            assert!(joined.contains("t-held"), "{columns}: {joined}");
+            assert!(
+                !joined.contains("Task t-held · Task t-held"),
+                "{columns}: {joined}"
+            );
+            if columns >= 80 {
+                assert!(
+                    joined.contains("Approve release scope?"),
+                    "{columns}: {joined}"
+                );
+                assert!(
+                    joined.contains("workers ended, still held"),
+                    "{columns}: {joined}"
+                );
+            }
+            assert!(
+                !joined.contains("No visible lead or worker calls"),
+                "{columns}: {joined}"
+            );
+            assert!(
+                !joined.contains("new /")
+                    && !joined.contains("new/")
+                    && !joined.contains("Attention 2"),
+                "{columns}: Attention-only mode must not duplicate the Attention band\n{joined}"
+            );
+        }
+        // Filtering and Detail overlay remain usable on message and task rows in attention-only mode.
+        let filtered_nav = navigation::Navigation {
+            attention_only: true,
+            filter: "release".into(),
+            ..Default::default()
+        };
+        let filtered_rows = visible(&report, &filtered_nav);
+        assert!(
+            filtered_rows
+                .iter()
+                .any(|r| r["participant"] == "message:msg-q1")
+                && !filtered_rows
+                    .iter()
+                    .any(|r| r["participant"] == "task:t-held"),
+            "{filtered_rows:?}"
+        );
+        let detail_nav = navigation::Navigation {
+            attention_only: true,
+            selected: 1,
+            detail: true,
+            ..Default::default()
+        };
+        let detail = frame(&report, &detail_nav, 80, 24, &read).join("\n");
+        assert!(
+            detail.contains("Call Detail") && detail.contains("[? question]"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn ux07_goal_wraps_full_text_and_shows_verified_progress_and_unknown_denominator() {
+        let now = 1_800_000_600u64;
+        let report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "project_name": "oms-demo",
+            "room": {
+                "id": "room-goal",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "state": "working",
+                        "joined": true,
+                        "title": "Main",
+                        "refs": {"plan_id": "plan-ux07", "panel_room_id": "room-goal"}
+                    },
+                    {"participant": "w-stale", "role": "worker", "provider": "codex", "state": "done", "joined": true, "task_id": "t-stale", "updated_at": now - 400}
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-ux07",
+                "goal": "Deliver wrapped terminal goal progress with verified counts across narrow normal and wide panes",
+                "tasks": {
+                    "t-done-1": {"state": "done"},
+                    "t-done-2": {"state": "done"},
+                    "t-rev": {"state": "review"},
+                    "t-claimed": {"state": "claimed"},
+                    "t-stale": {"state": "running"},
+                    "t-open": {"state": "ready"},
+                    "t-cancel": {"state": "cancelled"}
+                }
+            }
+        });
+        let read = BTreeMap::new();
+        for columns in [40, 80, 120] {
+            let plain = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                28,
+                &read,
+                false,
+                true,
+            );
+            let colored = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                28,
+                &read,
+                true,
+                true,
+            );
+            for (p, c) in plain.iter().zip(&colored) {
+                assert!(width(p) <= columns, "{columns}: overflow {p}");
+                assert_eq!(*p, strip_sgr(c), "{columns}: sgr geometry mismatch");
+            }
+            let header = &plain[0];
+            assert!(
+                header.contains("2/6 verified") || header.contains("2/6 ver"),
+                "{columns}: header missing plan progress: {header}"
+            );
+            let joined = plain.join("\n");
+            // Wrapped goal spans up to 2 lines (full at 80/120 cols; 2-line cap with ellipsis at 40 cols).
+            for word in ["Deliver", "wrapped", "terminal", "verified", "narrow"] {
+                assert!(
+                    joined.contains(word),
+                    "{columns}: goal missing {word}\n{joined}"
+                );
+            }
+            if columns >= 80 {
+                assert!(
+                    joined.contains("panes"),
+                    "{columns}: goal clipped missing panes\n{joined}"
+                );
+            } else {
+                assert!(
+                    joined.contains('…'),
+                    "{columns}: 3rd wrapped line should cap with ellipsis\n{joined}"
+                );
+            }
+            assert!(joined.contains("2/6 verified"), "{columns}: {joined}");
+            assert!(
+                !joined.contains("2/7"),
+                "{columns}: cancelled task inflated denominator\n{joined}"
+            );
+            if columns >= 80 {
+                assert!(joined.contains("1 in review"), "{columns}: {joined}");
+                assert!(joined.contains("1 claimed"), "{columns}: {joined}");
+                assert!(joined.contains("1 stale"), "{columns}: {joined}");
+            }
+        }
+
+        // Unknown denominator (missing or empty tasks) says unknown instead of 0/0.
+        for tasks in [Value::Null, json!({})] {
+            let unknown_report = json!({
+                "generated_at": now,
+                "collection": {"ok": true},
+                "capacity_stale": false,
+                "project_name": "oms-demo",
+                "room": {
+                    "id": "room-unknown",
+                    "owner": "main-1",
+                    "participants": [
+                        {
+                            "participant": "main-1",
+                            "role": "main",
+                            "provider": "codex",
+                            "state": "working",
+                            "joined": true,
+                            "refs": {"plan_id": "plan-empty", "panel_room_id": "room-unknown"}
+                        }
+                    ]
+                },
+                "plan": {
+                    "plan_id": "plan-empty",
+                    "goal": "Bootstrap plan before adding tasks",
+                    "tasks": tasks
+                }
+            });
+            let joined = frame(
+                &unknown_report,
+                &navigation::Navigation::default(),
+                80,
+                24,
+                &read,
+            )
+            .join("\n");
+            assert!(
+                joined.contains("Bootstrap plan before adding tasks"),
+                "{joined}"
+            );
+            assert!(joined.to_lowercase().contains("unknown"), "{joined}");
+            assert!(
+                !joined.contains("0/0"),
+                "must never fabricate 0/0: {joined}"
+            );
+        }
+
+        // All-cancelled bound plan is terminal and hides the Goal cleanly.
+        let mut all_cancelled = report.clone();
+        all_cancelled["plan"]["tasks"] = json!({
+            "t1": {"state": "cancelled"},
+            "t2": {"state": "canceled"}
+        });
+        assert_eq!(
+            room_plan(
+                &all_cancelled,
+                &calls(&all_cancelled),
+                &attention::items(&all_cancelled, &read),
+            ),
+            None
+        );
+        let cancelled_joined = frame(
+            &all_cancelled,
+            &navigation::Navigation::default(),
+            80,
+            24,
+            &read,
+        )
+        .join("\n");
+        assert!(
+            !cancelled_joined.contains("Goal:") && !cancelled_joined.contains("progress unknown"),
+            "{cancelled_joined}"
+        );
+
+        // A Room call from an older plan reusing a task_id must not mark the current
+        // plan's claimed/running task stale in room_plan, Goal row, or header.
+        let mut foreign_plan_task_reuse = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "project_name": "oms-demo",
+            "room": {
+                "id": "room-reuse",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "state": "working",
+                        "joined": true,
+                        "refs": {"plan_id": "plan-new", "panel_room_id": "room-reuse"}
+                    },
+                    {
+                        "participant": "w-old-ended",
+                        "role": "worker",
+                        "provider": "codex",
+                        "state": "done",
+                        "joined": true,
+                        "task_id": "t-1",
+                        "updated_at": now - 400,
+                        "refs": {"plan_id": "plan-old", "panel_room_id": "room-reuse"}
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-new",
+                "goal": "Current plan with reused task id",
+                "tasks": {
+                    "t-1": {"id": "t-1", "state": "running"},
+                    "t-2": {"id": "t-2", "state": "done"}
+                }
+            }
+        });
+        let reuse_attention = attention::items(&foreign_plan_task_reuse, &read);
+        assert!(
+            reuse_attention.is_empty(),
+            "old-plan call must not emit stale attention item: {reuse_attention:?}"
+        );
+        let reuse_progress = room_plan(
+            &foreign_plan_task_reuse,
+            &calls(&foreign_plan_task_reuse),
+            &reuse_attention,
+        )
+        .expect("bound current plan");
+        assert_eq!(reuse_progress.stale, 0, "{reuse_progress:?}");
+        assert_eq!(reuse_progress.claimed, 1, "{reuse_progress:?}");
+        let reuse_joined = frame(
+            &foreign_plan_task_reuse,
+            &navigation::Navigation::default(),
+            100,
+            24,
+            &read,
+        )
+        .join("\n");
+        assert!(
+            !reuse_joined.contains("1 stale"),
+            "Goal row/header falsely reported stale without matching Attention item:\n{reuse_joined}"
+        );
+        // Conversely, an active call from an older plan reusing t-1 must not mask a
+        // genuinely stale current-plan task whose current-plan worker already ended.
+        foreign_plan_task_reuse["room"]["participants"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "participant": "w-cur-ended",
+                "role": "worker",
+                "provider": "codex",
+                "state": "done",
+                "joined": true,
+                "task_id": "t-1",
+                "updated_at": now - 120,
+                "refs": {"plan_id": "plan-new", "panel_room_id": "room-reuse"}
+            }));
+        foreign_plan_task_reuse["room"]["participants"][1]["state"] = json!("working");
+        let current_stale_attention = attention::items(&foreign_plan_task_reuse, &read);
+        assert!(
+            current_stale_attention
+                .iter()
+                .any(|item| item.row_id == ("task".into(), "t-1".into()) && item.cls == "stale"),
+            "current-plan stale task missing from attention: {current_stale_attention:?}"
+        );
+        let current_stale_progress = room_plan(
+            &foreign_plan_task_reuse,
+            &calls(&foreign_plan_task_reuse),
+            &current_stale_attention,
+        )
+        .expect("bound current plan");
+        assert_eq!(
+            current_stale_progress.stale, 1,
+            "{current_stale_progress:?}"
+        );
+
+        // Decide-waiting finished worker and failed worker must NOT be counted stale
+        // by Goal progress; Goal row and Attention band must agree on both.
+        let decide_and_failed = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "project_name": "oms-demo",
+            "awaiting_admission": ["w-decide"],
+            "room": {
+                "id": "room-agree",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "state": "working",
+                        "joined": true,
+                        "refs": {"plan_id": "plan-agree", "panel_room_id": "room-agree"}
+                    },
+                    {
+                        "participant": "w-decide",
+                        "role": "worker",
+                        "provider": "codex",
+                        "state": "done",
+                        "joined": true,
+                        "task_id": "t-decide",
+                        "title": "Waiting on accept/reject",
+                        "updated_at": now - 120,
+                        "refs": {"plan_id": "plan-agree", "panel_room_id": "room-agree"}
+                    },
+                    {
+                        "participant": "w-failed",
+                        "role": "worker",
+                        "provider": "claude",
+                        "state": "failed",
+                        "joined": true,
+                        "task_id": "t-failed",
+                        "title": "Build failed",
+                        "updated_at": now - 180,
+                        "refs": {"plan_id": "plan-agree", "panel_room_id": "room-agree"}
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-agree",
+                "goal": "Keep Goal and Attention counts aligned",
+                "tasks": {
+                    "t-decide": {"id": "t-decide", "state": "running"},
+                    "t-failed": {"id": "t-failed", "state": "claimed"},
+                    "t-done": {"id": "t-done", "state": "done"}
+                }
+            }
+        });
+        let agree_attention = attention::items(&decide_and_failed, &read);
+        assert!(
+            agree_attention
+                .iter()
+                .any(|item| item.cls == "decide" && item.row_id.1 == "w-decide"),
+            "decide worker missing from attention: {agree_attention:?}"
+        );
+        assert!(
+            agree_attention
+                .iter()
+                .any(|item| item.cls == "failed" && item.row_id.1 == "w-failed"),
+            "failed worker missing from attention: {agree_attention:?}"
+        );
+        assert!(
+            agree_attention.iter().all(|item| item.cls != "stale"),
+            "decide/failed workers must not emit stale attention items: {agree_attention:?}"
+        );
+        let agree_progress = room_plan(
+            &decide_and_failed,
+            &calls(&decide_and_failed),
+            &agree_attention,
+        )
+        .expect("bound plan");
+        assert_eq!(agree_progress.stale, 0, "{agree_progress:?}");
+        assert_eq!(agree_progress.claimed, 2, "{agree_progress:?}");
+        let agree_joined = frame(
+            &decide_and_failed,
+            &navigation::Navigation::default(),
+            120,
+            24,
+            &read,
+        )
+        .join("\n");
+        assert!(
+            !agree_joined.contains("stale"),
+            "Goal row and Attention band must agree (0 stale):\n{agree_joined}"
+        );
+        assert!(
+            agree_joined.contains("1 failed") && agree_joined.contains("1 decide"),
+            "Attention band must show failed and decide:\n{agree_joined}"
+        );
+    }
+
+    #[test]
+    fn ux07_long_goal_caps_at_two_lines_to_preserve_attention_items_on_24_row_board() {
+        let now = 1_800_000_600u64;
+        let long_goal = "Deliver a comprehensive multi-stage verification pipeline with deterministic replay, bounded terminal layout, full goal visibility in the detail overlay, and uninterrupted visibility of high-priority attention items even on compact twenty-four row terminal viewports tailmarker";
+        let report = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "project_name": "oms-demo",
+            "room": {
+                "id": "room-24",
+                "owner": "main-1",
+                "participants": [
+                    {
+                        "participant": "main-1",
+                        "role": "main",
+                        "provider": "codex",
+                        "state": "working",
+                        "joined": true,
+                        "title": "Coordinate release",
+                        "refs": {"plan_id": "plan-24", "panel_room_id": "room-24"}
+                    },
+                    {
+                        "participant": "w-fail",
+                        "role": "builder",
+                        "provider": "claude",
+                        "model": "sonnet",
+                        "state": "failed",
+                        "joined": true,
+                        "task_id": "t-1",
+                        "title": "Fix parser crash",
+                        "updated_at": now - 300,
+                        "refs": {"plan_id": "plan-24", "panel_room_id": "room-24"}
+                    },
+                    {
+                        "participant": "w-rev",
+                        "role": "reviewer",
+                        "provider": "codex",
+                        "model": "gpt-5",
+                        "state": "review",
+                        "joined": true,
+                        "task_id": "t-2",
+                        "title": "Review auth diff",
+                        "updated_at": now - 120,
+                        "refs": {"plan_id": "plan-24", "panel_room_id": "room-24"}
+                    },
+                    {
+                        "participant": "w-ok",
+                        "role": "worker",
+                        "provider": "antigravity",
+                        "state": "working",
+                        "joined": true,
+                        "task_id": "t-3",
+                        "title": "Run smoke checks",
+                        "updated_at": now - 30,
+                        "refs": {"plan_id": "plan-24", "panel_room_id": "room-24"}
+                    }
+                ],
+                "messages": [
+                    {
+                        "id": "msg-q1",
+                        "message_kind": "question",
+                        "sender": "main-1",
+                        "text": "Approve staging deploy?",
+                        "pending_for": ["user"],
+                        "answered": false,
+                        "ts": now - 420
+                    },
+                    {
+                        "id": "msg-m1",
+                        "message_kind": "note",
+                        "sender": "advisor-1",
+                        "text": "Fourth item note",
+                        "pending_for": ["main-1"],
+                        "answered": false,
+                        "ts": now - 60
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-24",
+                "goal": long_goal,
+                "tasks": {
+                    "t-1": {"id": "t-1", "state": "claimed"},
+                    "t-2": {"id": "t-2", "state": "review"},
+                    "t-3": {"id": "t-3", "state": "running"},
+                    "t-4": {"id": "t-4", "state": "done"}
+                }
+            }
+        });
+        let read = BTreeMap::new();
+        for columns in [40, 80, 120] {
+            let plain = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                24,
+                &read,
+                false,
+                true,
+            );
+            let colored = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                24,
+                &read,
+                true,
+                true,
+            );
+            assert_eq!(plain.len(), 24);
+            for (p, c) in plain.iter().zip(&colored) {
+                assert!(width(p) <= columns, "{columns}: overflow {p}");
+                assert_eq!(*p, strip_sgr(c), "{columns}: sgr geometry mismatch");
+            }
+            let joined = plain.join("\n");
+            // Goal is capped at 2 wrapped lines with ellipsis (tailmarker clipped on board).
+            assert!(
+                !joined.contains("tailmarker"),
+                "{columns}: long goal was not capped at 2 lines:\n{joined}"
+            );
+            let goal_idx = plain
+                .iter()
+                .position(|line| line.contains("Goal:"))
+                .expect("Goal header row");
+            let goal_body_end = plain[goal_idx + 1..]
+                .iter()
+                .position(|line| line.starts_with('╰') || line.contains("Attention "))
+                .map(|off| goal_idx + 1 + off)
+                .expect("end of Goal section");
+            let goal_body_lines = &plain[goal_idx + 1..goal_body_end];
+            assert_eq!(
+                goal_body_lines.len(),
+                2,
+                "{columns}: expected 2 wrapped Goal lines, got {goal_body_lines:?}\n{joined}"
+            );
+            assert!(
+                goal_body_lines[1]
+                    .trim_end_matches(['│', ' '])
+                    .ends_with('…'),
+                "{columns}: second wrapped Goal line missing ellipsis: {:?}\n{joined}",
+                goal_body_lines[1]
+            );
+            // Attention band keeps its items (not shrunk to header only) on 24-row board.
+            assert!(joined.contains("Attention 4"), "{columns}: {joined}");
+            assert!(
+                joined.contains("main-1"),
+                "{columns}: attention item 1 missing\n{joined}"
+            );
+            assert!(
+                joined.contains("+1 more · b shows all"),
+                "{columns}: attention overflow footer missing on 24-row board\n{joined}"
+            );
+            if columns >= 80 {
+                assert!(
+                    joined.contains("Approve staging deploy?"),
+                    "{columns}: attention item 1 body missing\n{joined}"
+                );
+                assert!(
+                    joined.contains("Fix parser crash"),
+                    "{columns}: attention item 2 missing\n{joined}"
+                );
+                assert!(
+                    joined.contains("Review auth diff"),
+                    "{columns}: attention item 3 missing\n{joined}"
+                );
+            }
+        }
+        // Full goal text stays visible in Overall Main detail view.
+        let detail_nav = navigation::Navigation {
+            selected: 0,
+            detail: true,
+            ..Default::default()
+        };
+        let detail_joined = frame(&report, &detail_nav, 80, 24, &read).join("\n");
+        assert!(
+            detail_joined.contains("tailmarker"),
+            "Main detail view must keep full Goal text:\n{detail_joined}"
+        );
+    }
+
+    #[test]
+    fn room_plan_hides_unbound_workspace_plan_even_without_foreign_attempts() {
+        let now = 1_800_000_600u64;
+        // Unrelated room with no room.plan_id, no room.task_id, no call plan_id refs,
+        // no task claims, and empty attempts (no att_foreign in active/recent).
+        let unbound_empty_attempts = json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "project_name": "oms-demo",
+            "room": {
+                "id": "room-unrelated",
+                "owner": "main-other",
+                "participants": [
+                    {
+                        "participant": "main-other",
+                        "role": "main",
+                        "provider": "codex",
+                        "state": "working",
+                        "joined": true,
+                        "title": "Independent work"
+                    }
+                ]
+            },
+            "attempts": {"active": [], "recent": []},
+            "plan": {
+                "plan_id": "plan-other-room",
+                "goal": "Secret other room goal",
+                "tasks": {
+                    "t1": {"id": "t1", "state": "done"},
+                    "t2": {"id": "t2", "state": "running"}
+                }
+            }
+        });
+        assert_eq!(
+            room_plan(
+                &unbound_empty_attempts,
+                &calls(&unbound_empty_attempts),
+                &attention::items(&unbound_empty_attempts, &BTreeMap::new()),
+            ),
+            None
+        );
+        let rendered = frame_styled(
+            &unbound_empty_attempts,
+            &navigation::Navigation::default(),
+            80,
+            24,
+            &BTreeMap::new(),
+            false,
+            true,
+        )
+        .join("\n");
+        assert!(
+            !rendered.contains("Goal:")
+                && !rendered.contains("Secret other room goal")
+                && !rendered.contains("1/2 verified"),
+            "unrelated room leaked workspace plan without att_foreign:\n{rendered}"
+        );
+
+        // Same check on top_bar_report with att_foreign removed and worker refs cleared.
+        let mut no_foreign = top_bar_report();
+        no_foreign["room"]["task_id"] = Value::Null;
+        no_foreign["attempts"] = json!({"active": [], "recent": []});
+        for index in [1, 2] {
+            no_foreign["room"]["participants"][index]["refs"] = json!({});
+        }
+        assert_eq!(
+            room_plan(
+                &no_foreign,
+                &calls(&no_foreign),
+                &attention::items(&no_foreign, &BTreeMap::new()),
+            ),
+            None
+        );
+
+        // Contradictory room refs on a call must not bind this room.
+        let mut contradictory = no_foreign.clone();
+        contradictory["room"]["participants"][1]["refs"] = json!({
+            "plan_id": "plan-1",
+            "panel_room_id": "room-x",
+            "panel_room": "room-other"
+        });
+        assert_eq!(
+            room_plan(
+                &contradictory,
+                &calls(&contradictory),
+                &attention::items(&contradictory, &BTreeMap::new()),
+            ),
+            None
+        );
     }
 }

@@ -889,17 +889,9 @@ fn run_with_source_writer(
                         }
                         action @ (navigation::Action::Open | navigation::Action::Detail) => {
                             if let Some(call) = calls.get(nav.selected) {
-                                let items: Vec<_> = attention::items(&report, &read)
-                                    .into_iter()
-                                    .filter(|item| {
-                                        item.row_id.0 == "call"
-                                            && item.row_id.1 == crate::text(call, "participant")
-                                    })
-                                    .collect();
-                                if let Err(e) = attention::mark(repo, &room, &report, &items) {
-                                    nav.notice = Some(e.message);
-                                }
-                                read = attention::load(repo, &room);
+                                mark_opened_row_read(
+                                    repo, &room, &report, call, &mut read, &mut nav,
+                                );
                                 if action == navigation::Action::Open
                                     && open_row_dock(
                                         repo,
@@ -3549,6 +3541,16 @@ fn row_dock(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<ChatDock> {
+    if let Some((title, history)) = render::attention_row_dock(report, call) {
+        return Ok(ChatDock {
+            title,
+            history: oms_panel_core::redact(history.as_bytes())?,
+            back: 0,
+            chat: None,
+            agy_locator: None,
+            main: None,
+        });
+    }
     if !render::is_overall_main(report, call) {
         return worker_dock(repo, call, services, stop);
     }
@@ -3560,6 +3562,47 @@ fn row_dock(
         agy_locator: None,
         main: Some(call_identity(call)),
     })
+}
+
+/// Map a visible board row (worker call, synthetic room message, or synthetic
+/// held task) to its `attention::Item::row_id` pair.
+fn row_attention_id(call: &Value) -> (&str, &str) {
+    let kind = crate::text(call, "attention_kind");
+    if matches!(kind, "message" | "task") {
+        let id = crate::text(call, "attention_id");
+        let id = if id.is_empty() && kind == "task" {
+            crate::text(call, "task_id")
+        } else {
+            id
+        };
+        (kind, id)
+    } else {
+        ("call", crate::text(call, "participant"))
+    }
+}
+
+/// Mark the matching Attention item read when a row is opened or inspected.
+fn mark_opened_row_read(
+    repo: &Path,
+    room: &str,
+    report: &Value,
+    call: &Value,
+    read: &mut std::collections::BTreeMap<String, String>,
+    nav: &mut navigation::Navigation,
+) {
+    let (kind, id) = row_attention_id(call);
+    let items: Vec<_> = if id.is_empty() {
+        Vec::new()
+    } else {
+        attention::items(report, read)
+            .into_iter()
+            .filter(|item| item.row_id.0 == kind && item.row_id.1 == id)
+            .collect()
+    };
+    if let Err(e) = attention::mark(repo, room, report, &items) {
+        nav.notice = Some(e.message);
+    }
+    *read = attention::load(repo, room);
 }
 
 /// Enter on a worker or the pinned Main swaps any card for that row's dock.
@@ -12032,5 +12075,232 @@ fi
             started_att.selected >= started_att.offset
                 && started_att.selected < started_att.offset + page
         );
+    }
+
+    #[test]
+    fn row_dock_renders_synthetic_attention_rows_without_worker_result_fallback() {
+        let now = 1_800_000_600u64;
+        let report = serde_json::json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-attn-dock",
+                "owner": "main-1",
+                "participants": [
+                    {"participant": "main-1", "role": "main", "provider": "codex", "state": "working", "joined": true},
+                    {"participant": "w-ended", "role": "worker", "provider": "codex", "state": "done", "joined": true, "task_id": "t-held", "updated_at": now - 400, "refs": {"plan_id": "plan-b"}},
+                    {"participant": "w-old-plan", "role": "worker", "provider": "codex", "state": "done", "joined": true, "task_id": "t-held", "updated_at": now - 800, "refs": {"plan_id": "plan-old"}}
+                ],
+                "messages": [
+                    {
+                        "id": "msg-q1",
+                        "message_kind": "question",
+                        "sender": "main-1",
+                        "text": "Approve release scope before tagging v1.2 with full migration notes?",
+                        "pending_for": ["user"],
+                        "answered": false,
+                        "ts": now - 180
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-b",
+                "goal": "Check attention dock",
+                "tasks": {
+                    "t-held": {
+                        "id": "t-held",
+                        "state": "running",
+                        "title": "Run final checks",
+                        "claimed_by_participant": "main-1",
+                        "claimed_at": now - 600
+                    }
+                }
+            }
+        });
+        let nav = crate::navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        let rows = crate::render::visible(&report, &nav);
+        let q_row = rows
+            .iter()
+            .find(|r| r["participant"] == "message:msg-q1")
+            .expect("synthetic message row");
+        let t_row = rows
+            .iter()
+            .find(|r| r["participant"] == "task:t-held")
+            .expect("synthetic task row");
+        let spy = crate::orchestrator::codex_chat_fixture::BoardSpy::new("attn-dock");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+
+        let q_dock =
+            super::row_dock(std::path::Path::new("."), &report, q_row, &spy, &stop).unwrap();
+        assert!(q_dock.title.contains("Room question"), "{}", q_dock.title);
+        assert!(
+            q_dock
+                .history
+                .contains("Approve release scope before tagging v1.2 with full migration notes?"),
+            "{}",
+            q_dock.history
+        );
+        assert!(
+            !q_dock
+                .history
+                .contains("No result recorded for this worker yet"),
+            "{}",
+            q_dock.history
+        );
+
+        let t_dock =
+            super::row_dock(std::path::Path::new("."), &report, t_row, &spy, &stop).unwrap();
+        assert_eq!(t_dock.title, "Task t-held");
+        assert!(
+            t_dock.history.contains("state: running"),
+            "{}",
+            t_dock.history
+        );
+        assert!(
+            t_dock.history.contains("workers ended, still held"),
+            "{}",
+            t_dock.history
+        );
+        assert!(
+            t_dock.history.contains("w-ended (done)"),
+            "{}",
+            t_dock.history
+        );
+        assert!(
+            !t_dock.history.contains("w-old-plan"),
+            "held-task dock leaked worker from another plan: {}",
+            t_dock.history
+        );
+        assert!(
+            !t_dock
+                .history
+                .contains("No result recorded for this worker yet"),
+            "{}",
+            t_dock.history
+        );
+    }
+
+    #[test]
+    fn opening_attention_only_rows_marks_message_held_task_and_worker_call_read() {
+        struct TempRepo(std::path::PathBuf);
+        impl Drop for TempRepo {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-watch-attn-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".oms")).unwrap();
+        let repo = TempRepo(dir);
+
+        let now = 1_800_000_600u64;
+        let report = serde_json::json!({
+            "generated_at": now,
+            "collection": {"ok": true},
+            "capacity_stale": false,
+            "room": {
+                "id": "room-attn-read",
+                "owner": "main-1",
+                "participants": [
+                    {"participant": "main-1", "role": "main", "provider": "codex", "state": "working", "joined": true},
+                    {"participant": "w-fail", "role": "worker", "provider": "claude", "state": "failed", "joined": true, "task_id": "t-fail", "updated_at": now - 300},
+                    {"participant": "w-ended", "role": "worker", "provider": "codex", "state": "done", "joined": true, "task_id": "t-held", "updated_at": now - 400, "refs": {"plan_id": "plan-r"}}
+                ],
+                "messages": [
+                    {
+                        "id": "msg-q1",
+                        "message_kind": "question",
+                        "sender": "main-1",
+                        "text": "Approve release scope?",
+                        "pending_for": ["user"],
+                        "answered": false,
+                        "ts": now - 180
+                    }
+                ]
+            },
+            "plan": {
+                "plan_id": "plan-r",
+                "goal": "Mark opened attention rows read",
+                "tasks": {
+                    "t-held": {"id": "t-held", "state": "running", "claimed_at": now - 600}
+                }
+            }
+        });
+        let mut nav = crate::navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        let rows = crate::render::visible(&report, &nav);
+        let q_row = rows
+            .iter()
+            .find(|r| r["participant"] == "message:msg-q1")
+            .expect("synthetic message row");
+        let t_row = rows
+            .iter()
+            .find(|r| r["participant"] == "task:t-held")
+            .expect("synthetic task row");
+        let c_row = rows
+            .iter()
+            .find(|r| r["participant"] == "w-fail")
+            .expect("worker call row");
+
+        let mut read = crate::attention::load(&repo.0, "room-attn-read");
+        let unread_for =
+            |read: &std::collections::BTreeMap<String, String>, kind: &str, id: &str| {
+                crate::attention::items(&report, read)
+                    .into_iter()
+                    .find(|item| item.row_id == (kind.to_owned(), id.to_owned()))
+                    .expect("attention item present")
+                    .unread
+            };
+        assert!(unread_for(&read, "message", "msg-q1"));
+        assert!(unread_for(&read, "task", "t-held"));
+        assert!(unread_for(&read, "call", "w-fail"));
+
+        super::mark_opened_row_read(
+            &repo.0,
+            "room-attn-read",
+            &report,
+            q_row,
+            &mut read,
+            &mut nav,
+        );
+        assert!(nav.notice.is_none(), "{:?}", nav.notice);
+        assert!(!unread_for(&read, "message", "msg-q1"));
+        assert!(unread_for(&read, "task", "t-held"));
+        assert!(unread_for(&read, "call", "w-fail"));
+
+        super::mark_opened_row_read(
+            &repo.0,
+            "room-attn-read",
+            &report,
+            t_row,
+            &mut read,
+            &mut nav,
+        );
+        assert!(nav.notice.is_none(), "{:?}", nav.notice);
+        assert!(!unread_for(&read, "message", "msg-q1"));
+        assert!(!unread_for(&read, "task", "t-held"));
+        assert!(unread_for(&read, "call", "w-fail"));
+
+        super::mark_opened_row_read(
+            &repo.0,
+            "room-attn-read",
+            &report,
+            c_row,
+            &mut read,
+            &mut nav,
+        );
+        assert!(nav.notice.is_none(), "{:?}", nav.notice);
+        assert!(!unread_for(&read, "message", "msg-q1"));
+        assert!(!unread_for(&read, "task", "t-held"));
+        assert!(!unread_for(&read, "call", "w-fail"));
     }
 }
