@@ -4,7 +4,7 @@
 //! only when their identity, ordering and measured baseline are known.
 use super::*;
 use crate::value::{encode, obj};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 pub const RECEIPTS: &str = ".oms/usage/receipts.jsonl";
@@ -20,6 +20,10 @@ pub struct Identity {
     /// Selected route, not an assertion about the model ultimately served.
     pub selected_model: Option<String>,
     pub account: Option<String>,
+    /// Producer-observed private account-home generation, never credentials,
+    /// a billing identity, or evidence of effective provider permissions.
+    /// Absent preserves the legacy receipt/physical-intent encoding.
+    pub account_scope_sha256: Option<String>,
     pub goal_id: Option<String>,
     pub task_id: Option<String>,
     pub attempt_id: Option<String>,
@@ -117,6 +121,8 @@ pub struct AccountedCall {
     pub tokens: Option<u64>,
     pub cost_microusd: Option<u64>,
     pub conflict: bool,
+    // Derived from the retained revision order before projecting the latest rows.
+    unscoped_home_overlap: bool,
     /// Provider-reported reasoning tokens proven for this exact final receipt.
     /// Absent means unknown, never zero.
     pub reasoning_tokens: Option<u64>,
@@ -158,41 +164,114 @@ pub struct AttributedCall<'a> {
 #[derive(Default)]
 struct AttributionSession<'a> {
     saw_unknown_account: bool,
-    accounts: BTreeMap<&'a str, Option<&'a Usage>>,
+    accounts: BTreeMap<&'a str, (AccountContinuity, Option<&'a Usage>)>,
+    family: SessionFamily,
+}
+
+/// Home observations for one exact provider session, shared by both projections.
+#[derive(Default)]
+struct SessionFamily {
+    aliases: BTreeMap<String, String>,
+    last_unscoped: u64,
+}
+
+impl SessionFamily {
+    fn observe(&mut self, identity: &Identity, ordinal: u64) -> bool {
+        let Some((account, scope)) = identity
+            .account
+            .as_deref()
+            .zip(identity.account_scope_sha256.as_deref())
+        else {
+            // An alias without a home proof could still refer to any proven home.
+            self.last_unscoped = ordinal;
+            return false;
+        };
+        if self
+            .aliases
+            .get(scope)
+            .is_some_and(|previous| previous == account)
+        {
+            return false;
+        }
+        self.aliases
+            .insert(scope.to_owned(), account.to_owned())
+            .is_some()
+    }
+}
+
+/// A renamed registration must not reuse the old home's cumulative baseline.
+/// Once proof has been observed, missing proof cannot downgrade to alias-only
+/// arithmetic, even if another legacy observation follows it.
+#[derive(Default)]
+struct AccountContinuity {
+    scope: Option<String>,
+    seen: bool,
+    saw_proof: bool,
+    last_unscoped: u64,
+}
+impl AccountContinuity {
+    fn observe(&mut self, scope: Option<&str>, last_unscoped: u64) -> bool {
+        let continuous = (!self.seen || self.scope.as_deref() == scope)
+            && if scope.is_some() {
+                self.last_unscoped == last_unscoped
+            } else {
+                !self.saw_proof
+            };
+        self.seen = true;
+        self.saw_proof |= scope.is_some();
+        self.scope = scope.map(str::to_owned);
+        self.last_unscoped = last_unscoped;
+        continuous
+    }
+
+    fn can_anchor(&self) -> bool {
+        self.scope.is_some() || !self.saw_proof
+    }
 }
 
 impl<'a> AttributionSession<'a> {
     fn observe(
         &mut self,
-        account: Option<&'a str>,
+        receipt: &'a Receipt,
         observed: Option<&'a Usage>,
         baseline_unknown: bool,
     ) -> Option<AttributedUsage> {
-        let Some(account) = account else {
+        let identity = &receipt.identity;
+        let alias_changed = self.family.observe(identity, receipt.ordinal);
+        let Some(account) = identity.account.as_deref() else {
             let fresh = !baseline_unknown && !self.saw_unknown_account && self.accounts.is_empty();
             // Any named account in this family could own the observation.
             self.saw_unknown_account = true;
-            for snapshot in self.accounts.values_mut() {
+            for (_, snapshot) in self.accounts.values_mut() {
                 *snapshot = None;
             }
             return observed.filter(|_| fresh).map(AttributedUsage::standalone);
         };
-        let previous = self.accounts.insert(account, observed);
+        let (continuity, snapshot) = self.accounts.entry(account).or_default();
+        let first = !continuity.seen;
+        let continuous = continuity.observe(
+            identity.account_scope_sha256.as_deref(),
+            self.family.last_unscoped,
+        );
+        let previous = snapshot.take();
+        if !first && !baseline_unknown {
+            // The same exact session cannot start fresh twice.
+            return None;
+        }
+        *snapshot = observed.filter(|_| continuity.can_anchor());
+        if !continuous || alias_changed {
+            return None;
+        }
         match (observed, previous) {
-            (Some(usage), None) if !self.saw_unknown_account && !baseline_unknown => {
+            (Some(usage), None) if first && !self.saw_unknown_account && !baseline_unknown => {
                 Some(AttributedUsage::standalone(usage))
             }
-            (_, Some(_)) if !baseline_unknown => {
-                // The same exact session cannot start fresh twice.
-                self.accounts.insert(account, None);
-                None
-            }
-            (Some(usage), Some(Some(previous))) => {
+            (Some(usage), Some(previous)) => {
                 match AttributedUsage::between(usage, previous) {
                     Ok(delta) => Some(delta),
                     Err(()) => {
                         // A reset or contradictory delta cannot anchor the following call.
-                        self.accounts.insert(account, None);
+                        *snapshot = None;
                         None
                     }
                 }
@@ -214,16 +293,13 @@ impl Projection {
         for call in &self.calls {
             let receipt = &call.receipt;
             let identity = &receipt.identity;
-            let observed = (receipt.phase == Phase::Final).then_some(&receipt.usage);
+            let observed = (receipt.phase == Phase::Final && !call.unscoped_home_overlap)
+                .then_some(&receipt.usage);
             let usage = match &receipt.cumulative {
                 Some(cumulative) => sessions
                     .entry((identity.provider.as_str(), cumulative.session_id.as_str()))
                     .or_default()
-                    .observe(
-                        identity.account.as_deref(),
-                        observed,
-                        cumulative.baseline_unknown,
-                    ),
+                    .observe(receipt, observed, cumulative.baseline_unknown),
                 None => observed.map(|observed| AttributedUsage {
                     reasoning_tokens: call.reasoning_tokens,
                     ..AttributedUsage::standalone(observed)
@@ -357,6 +433,10 @@ fn validate(receipt: &Receipt) -> Result<(), StoreError> {
             .selected_model
             .as_deref()
             .is_some_and(|s| s.is_empty() || s.len() > 256 || s.chars().any(char::is_control))
+        || id
+            .account_scope_sha256
+            .as_deref()
+            .is_some_and(|s| id.account.is_none() || !sha256_hex(s))
         || receipt
             .cumulative
             .as_ref()
@@ -403,9 +483,13 @@ fn optional(n: Option<u64>) -> V {
     n.map(number).unwrap_or(V::Null)
 }
 pub(super) fn identity_value(i: &Identity) -> V {
-    obj!("call_id":i.call_id.clone(),"operation_id":i.operation_id.clone(),"provider":i.provider.clone(),
+    let mut value = obj!("call_id":i.call_id.clone(),"operation_id":i.operation_id.clone(),"provider":i.provider.clone(),
         "selected_model":i.selected_model.clone(),"account":i.account.clone(),"goal_id":i.goal_id.clone(),
-        "task_id":i.task_id.clone(),"attempt_id":i.attempt_id.clone(),"run_id":i.run_id.clone())
+        "task_id":i.task_id.clone(),"attempt_id":i.attempt_id.clone(),"run_id":i.run_id.clone());
+    if let Some(scope) = &i.account_scope_sha256 {
+        value["account_scope_sha256"] = scope.clone().into();
+    }
+    value
 }
 pub(super) fn validate_pending(
     identity: &Identity,
@@ -431,7 +515,7 @@ fn encode_receipt(r: &Receipt) -> Result<Vec<u8>, StoreError> {
     let (V::Object(mut fields), V::Object(payload)) = (
         identity_value(i),
         obj!(
-            "schema":2, "kind":"provider-usage",
+            "schema":if i.account_scope_sha256.is_some() {3} else {2}, "kind":"provider-usage",
             "ordinal":number(r.ordinal), "revision":number(r.revision),
             "phase":match r.phase { Phase::Pending=>"pending", Phase::Partial=>"partial", Phase::Final=>"final", Phase::Unknown=>"unknown" },
             "provider_usage":obj!("input_tokens":optional(u.input_tokens),"output_tokens":optional(u.output_tokens),
@@ -488,6 +572,7 @@ pub(super) fn identity_from_value(v: &V) -> Result<Identity, StoreError> {
         provider: string(&v["provider"])?,
         selected_model: opt_string(&v["selected_model"])?,
         account: opt_string(&v["account"])?,
+        account_scope_sha256: opt_string(&v["account_scope_sha256"])?,
         goal_id: opt_string(&v["goal_id"])?,
         task_id: opt_string(&v["task_id"])?,
         attempt_id: opt_string(&v["attempt_id"])?,
@@ -523,6 +608,12 @@ fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
     match v["schema"] {
         ref schema if *schema == V::from(1) => {}
         ref schema if *schema == V::from(2) => fields.push("cleanup_complete"),
+        ref schema if *schema == V::from(3) => {
+            fields.extend(["cleanup_complete", "account_scope_sha256"]);
+            if !v["account_scope_sha256"].text().is_some_and(sha256_hex) {
+                return Err(invalid("invalid account-home scope"));
+            }
+        }
         _ => return Err(invalid("unsupported usage receipt schema")),
     }
     keys(&v, &fields)?;
@@ -637,6 +728,7 @@ fn current(rows: &[Receipt]) -> Result<Vec<Receipt>, StoreError> {
             let key = (
                 &row.identity.provider,
                 &row.identity.account,
+                &row.identity.account_scope_sha256,
                 &session.session_id,
             );
             if cumulative_cost_basis
@@ -902,31 +994,138 @@ pub fn record_reasoning(
 }
 type SessionIdentity = (String, Option<String>, String);
 type MeasuredTotals = (Option<u64>, Option<u64>);
+struct LedgerSession {
+    continuity: AccountContinuity,
+    totals: MeasuredTotals,
+    last_usage: Option<Usage>,
+}
+struct CallInterval<'a> {
+    admitted_at: usize,
+    observed_at: usize,
+    latest: &'a Receipt,
+    terminal_at: Option<usize>,
+}
+
+fn unscoped_home_overlaps(rows: &[Receipt]) -> BTreeSet<u64> {
+    let mut intervals = BTreeMap::new();
+    // Admissions and revisions share the ledger's append lock. Ignore stale
+    // and identical repeats, which add no new lifecycle or measurement evidence.
+    for (at, row) in rows.iter().enumerate() {
+        let interval = intervals
+            .entry(row.identity.call_id.as_str())
+            .or_insert(CallInterval {
+                admitted_at: at,
+                observed_at: at,
+                latest: row,
+                terminal_at: None,
+            });
+        if at != interval.admitted_at && row.revision <= interval.latest.revision {
+            continue;
+        }
+        interval.latest = row;
+        interval.observed_at = at;
+        match row.phase {
+            Phase::Pending | Phase::Partial => interval.terminal_at = None,
+            Phase::Final | Phase::Unknown => {
+                interval.terminal_at.get_or_insert(at);
+            }
+        }
+    }
+
+    let mut terminal_by_session = BTreeMap::new();
+    let mut overlaps = BTreeSet::new();
+    for (at, row) in rows.iter().enumerate() {
+        let interval = &intervals[row.identity.call_id.as_str()];
+        // A terminal revision can identify the session of an admission that
+        // initially had no session evidence.
+        let Some(session) = &interval.latest.cumulative else {
+            continue;
+        };
+        let key = (row.identity.provider.as_str(), session.session_id.as_str());
+        if row.identity.account_scope_sha256.is_none() {
+            if at == interval.admitted_at {
+                let terminal = terminal_by_session.entry(key).or_insert(0);
+                *terminal = (*terminal).max(interval.terminal_at.unwrap_or(usize::MAX));
+            }
+        } else if at == interval.observed_at
+            && row.phase == Phase::Final
+            && terminal_by_session
+                .get(&key)
+                .is_some_and(|terminal| *terminal > interval.admitted_at)
+        {
+            overlaps.insert(row.ordinal);
+        }
+    }
+    overlaps
+}
+
 fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
-    let rows = current(rows)?;
-    let mut sessions: BTreeMap<SessionIdentity, MeasuredTotals> = BTreeMap::new();
+    let latest = current(rows)?;
+    let overlaps = unscoped_home_overlaps(rows);
+    let mut sessions = BTreeMap::<SessionIdentity, LedgerSession>::new();
+    let mut families = BTreeMap::<_, SessionFamily>::new();
     let mut calls = Vec::new();
-    for receipt in rows {
+    for receipt in latest {
         let mut tokens = receipt.usage.tokens();
         let mut cost = receipt.cost.microusd();
         let mut conflict = false;
+        let unscoped_home_overlap = overlaps.contains(&receipt.ordinal);
         if let Some(session) = &receipt.cumulative {
+            let family = families
+                .entry((
+                    receipt.identity.provider.clone(),
+                    session.session_id.clone(),
+                ))
+                .or_default();
+            let identity = &receipt.identity;
+            let scope = identity.account_scope_sha256.as_deref();
+            let alias_changed = family.observe(identity, receipt.ordinal);
             let key = (
                 receipt.identity.provider.clone(),
                 receipt.identity.account.clone(),
                 session.session_id.clone(),
             );
-            let prior = sessions
-                .get(&key)
-                .copied()
-                .unwrap_or(if session.baseline_unknown {
+            let LedgerSession {
+                continuity,
+                totals,
+                last_usage,
+            } = sessions.entry(key).or_insert_with(|| LedgerSession {
+                continuity: AccountContinuity::default(),
+                totals: if session.baseline_unknown {
                     (None, None)
                 } else {
                     (Some(0), Some(0))
-                });
-            conflict = matches!((tokens,prior.0),(Some(n),Some(p)) if n < p)
+                },
+                last_usage: None,
+            });
+            let first = !continuity.seen;
+            let continuous = continuity.observe(scope, family.last_unscoped);
+            let observed = receipt.phase == Phase::Final
+                && !unscoped_home_overlap
+                && continuity.can_anchor()
+                && !(continuity.saw_proof && !first && !session.baseline_unknown);
+            let comparable = continuous && observed && !alias_changed;
+            let component_conflict = comparable
+                && last_usage
+                    .as_ref()
+                    .is_some_and(|prior| AttributedUsage::between(&receipt.usage, prior).is_err());
+            let prior = if comparable && !component_conflict {
+                *totals
+            } else {
+                (None, None)
+            };
+            conflict = component_conflict
+                || matches!((tokens,prior.0),(Some(n),Some(p)) if n < p)
                 || matches!((cost,prior.1),(Some(n),Some(p)) if n < p);
-            sessions.insert(key, (tokens.or(prior.0), cost.or(prior.1)));
+            let can_anchor = observed && !(continuity.saw_proof && conflict);
+            *last_usage = (can_anchor && continuity.saw_proof).then(|| receipt.usage.clone());
+            *totals = if !can_anchor {
+                (None, None)
+            } else if continuity.saw_proof {
+                (tokens, cost)
+            } else {
+                (tokens.or(prior.0), cost.or(prior.1))
+            };
             tokens = tokens.zip(prior.0).and_then(|(n, p)| n.checked_sub(p));
             cost = cost.zip(prior.1).and_then(|(n, p)| n.checked_sub(p));
         }
@@ -935,6 +1134,7 @@ fn project(rows: &[Receipt]) -> Result<Projection, StoreError> {
             tokens,
             cost_microusd: cost,
             conflict,
+            unscoped_home_overlap,
             reasoning_tokens: None,
         });
     }
@@ -1032,7 +1232,9 @@ fn begin_inner(
         if let Some(session) = &cumulative
             && rows.iter().any(|r| {
                 r.identity.provider == identity.provider
-                    && r.identity.account == identity.account
+                    && (r.identity.account == identity.account
+                        || identity.account_scope_sha256.is_some()
+                            && r.identity.account_scope_sha256 == identity.account_scope_sha256)
                     && r.cumulative
                         .as_ref()
                         .is_some_and(|s| s.session_id == session.session_id)

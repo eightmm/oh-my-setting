@@ -517,6 +517,8 @@ pub(crate) fn begin_before(
         provider: route.provider.clone(),
         selected_model: (route.model != "provider-default").then(|| route.model.clone()),
         account: account.filter(|s| *s != "default").map(str::to_owned),
+        // Keep the shared ledger writable by legacy peers during the reader rollout.
+        account_scope_sha256: None,
         goal_id: env(extra, "OMS_GOAL_ID"),
         task_id: env(extra, "OMS_TASK_ID"),
         attempt_id: env(extra, "OMS_ATTEMPT_ID"),
@@ -759,6 +761,19 @@ pub(crate) fn finish(
             // visible while retaining the unresolved liability.
             receipt.phase = Phase::Unknown;
         }
+    }
+    if receipt.identity.account.is_some()
+        && receipt.identity.account_scope_sha256.is_none()
+        && receipt
+            .cumulative
+            .as_ref()
+            .is_some_and(|s| s.baseline_unknown)
+    {
+        // A legacy reader compares cumulative snapshots by alias alone. Do
+        // not leave counters it could subtract across account-home changes.
+        receipt.phase = Phase::Unknown;
+        receipt.usage = Usage::default();
+        receipt.cost = Cost::Unknown;
     }
     persist(repo, &receipt)?;
     // Optional evidence never fails a settled call; reruns repeat it idempotently.

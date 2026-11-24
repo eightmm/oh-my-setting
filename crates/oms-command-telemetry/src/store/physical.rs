@@ -79,7 +79,20 @@ pub(super) fn intents(value: &V) -> std::result::Result<Vec<Intent>, StoreError>
         usage::keys(record, &["schema", "request", "state", "usage_ordinal"])?;
         let request = &record["request"];
         let mut resource_binding = None;
-        let campaign_manifest_sha256 = match record["schema"].int() {
+        // Schema 4 adds a proven account-home scope to the exact identity while
+        // retaining each existing admission/binding contract.
+        let account_scoped = record["schema"] == V::from(4);
+        let binding_schema = if account_scoped {
+            match request["binding"].text() {
+                Some("legacy-observed") => Some("1"),
+                Some("campaign-observed") => Some("2"),
+                Some("resource-bound") => Some("3"),
+                _ => None,
+            }
+        } else {
+            record["schema"].int()
+        };
+        let campaign_manifest_sha256 = match binding_schema {
             Some("1") => {
                 usage::keys(
                     request,
@@ -142,21 +155,25 @@ pub(super) fn intents(value: &V) -> std::result::Result<Vec<Intent>, StoreError>
             }
             _ => return Err(invalid("unsupported physical call schema")),
         };
-        usage::keys(
-            &request["identity"],
-            &[
-                "call_id",
-                "operation_id",
-                "provider",
-                "selected_model",
-                "account",
-                "goal_id",
-                "task_id",
-                "attempt_id",
-                "run_id",
-            ],
-        )?;
+        let mut identity_fields = vec![
+            "call_id",
+            "operation_id",
+            "provider",
+            "selected_model",
+            "account",
+            "goal_id",
+            "task_id",
+            "attempt_id",
+            "run_id",
+        ];
+        if account_scoped {
+            identity_fields.push("account_scope_sha256");
+        }
+        usage::keys(&request["identity"], &identity_fields)?;
         let identity = usage::identity_from_value(&request["identity"])?;
+        if account_scoped != identity.account_scope_sha256.is_some() {
+            return Err(invalid("invalid physical account-home scope"));
+        }
         let cumulative = cumulative(&request["cumulative"])?;
         usage::validate_pending(&identity, &cumulative)?;
         if identity.call_id.as_bytes() != id
@@ -352,7 +369,7 @@ fn begin_inner(
     };
     records.insert(
         identity.call_id.as_bytes().to_vec(),
-        obj!("schema":if resource_binding.is_some() {3} else if campaign_manifest_sha256.is_some() {2} else {1},"request":request,"state":"reserved","usage_ordinal":V::Null),
+        obj!("schema":if identity.account_scope_sha256.is_some() {4} else if resource_binding.is_some() {3} else if campaign_manifest_sha256.is_some() {2} else {1},"request":request,"state":"reserved","usage_ordinal":V::Null),
     );
     resources::reserve(&mut registry, &identity, write, resource_binding)
         .map_err(|e| tx.error(e))?;
