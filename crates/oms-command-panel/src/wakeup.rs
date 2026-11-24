@@ -251,16 +251,53 @@ impl AgyRosterWatch {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Default)]
-pub(crate) struct AgyFirstChildWake {
-    source: Option<Arc<AgyRosterWatch>>,
+pub(crate) trait ChildWakeSource {
+    fn fd(&self) -> BorrowedFd<'_>;
+    fn active(&self) -> bool;
+    fn changed(&self) -> Option<bool>;
+    fn retire(&self);
+}
+
+#[cfg(target_os = "linux")]
+impl ChildWakeSource for AgyRosterWatch {
+    fn fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+
+    fn active(&self) -> bool {
+        self.active()
+    }
+
+    fn changed(&self) -> Option<bool> {
+        self.changed()
+    }
+
+    fn retire(&self) {
+        self.lost.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct FirstChildWake<S> {
+    source: Option<Arc<S>>,
     dirty: bool,
     next_refresh: Option<Instant>,
 }
 
 #[cfg(target_os = "linux")]
-impl AgyFirstChildWake {
-    pub(crate) fn replace(&mut self, source: Option<Arc<AgyRosterWatch>>) {
+impl<S> Default for FirstChildWake<S> {
+    fn default() -> Self {
+        Self {
+            source: None,
+            dirty: false,
+            next_refresh: None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<S: ChildWakeSource> FirstChildWake<S> {
+    pub(crate) fn replace(&mut self, source: Option<Arc<S>>) {
         let source = source.filter(|source| source.active());
         if !self
             .source
@@ -278,7 +315,7 @@ impl AgyFirstChildWake {
         self.source
             .as_ref()
             .filter(|_| !self.dirty)
-            .map(|source| source.fd.as_fd())
+            .map(|source| source.fd())
     }
 
     pub(crate) fn refresh(&mut self, readable: bool, idle: bool, now: Instant) -> bool {
@@ -289,7 +326,7 @@ impl AgyFirstChildWake {
             if let Some(changed) = source.changed() {
                 self.dirty |= changed;
             } else {
-                source.lost.store(true, Ordering::Relaxed);
+                source.retire();
                 self.replace(None);
             }
         }
@@ -328,9 +365,9 @@ mod tests {
         let file = dir.0.join("parent");
         fs::write(&file, b"empty roster").unwrap();
         let source = AgyRosterWatch::arm(&fs::File::open(&file).unwrap()).unwrap();
-        let mut wake = AgyFirstChildWake::default();
+        let mut wake = FirstChildWake::<AgyRosterWatch>::default();
         wake.replace(Some(source.clone()));
-        let ready = |wake: &AgyFirstChildWake| {
+        let ready = |wake: &FirstChildWake<AgyRosterWatch>| {
             wake.fd().is_some_and(|fd| {
                 let mut fds = [PollFd::new(&fd, PollFlags::IN)];
                 poll(&mut fds, Some(&timespec(Duration::ZERO))).unwrap() > 0
