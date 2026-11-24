@@ -12,6 +12,7 @@ use std::{
 struct Selected<'a> {
     root: oms_safe_fs::Root,
     lock: oms_lock::Lock,
+    observer: oms_lock::Lock,
     head: &'a str,
     stamp: &'a str,
     name: String,
@@ -20,13 +21,20 @@ struct Selected<'a> {
 
 impl Selected<'_> {
     fn activity(&self) -> (&'static str, Option<String>) {
-        match self.lock.probe() {
-            oms_lock::Status::Free => return ("not-held", None),
+        let owner = match self.observer.probe() {
+            oms_lock::Status::Held => format!("{}.ci-holder", self.stamp),
             oms_lock::Status::Unknown => return ("unverified", None),
-            oms_lock::Status::Held => {}
-        }
-        let Some(holder) = reconcile::read_private(&self.root, "active-holder")
-            .and_then(|bytes| V::parse(&bytes).ok())
+            oms_lock::Status::Free => {
+                match self.lock.probe() {
+                    oms_lock::Status::Free => return ("not-held", None),
+                    oms_lock::Status::Unknown => return ("unverified", None),
+                    oms_lock::Status::Held => {}
+                }
+                "active-holder".to_owned()
+            }
+        };
+        let Some(holder) =
+            reconcile::read_private(&self.root, &owner).and_then(|bytes| V::parse(&bytes).ok())
         else {
             return ("unverified", None);
         };
@@ -203,6 +211,9 @@ pub(super) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         oms_lock::Settings::from_env().map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
     let selected = Selected {
         root,
+        observer: crate::storage::file_lock(
+            &directory.join(delivery::pr_observation::owner_name(stamp)),
+        )?,
         lock: oms_lock::Lock::for_file(&directory.join("active"), settings)
             .map_err(|e| Error::new(e.exit_code(), e.to_string()))?,
         head,

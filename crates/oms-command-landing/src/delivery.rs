@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+pub(super) mod pr_observation;
+
 fn cksum(raw: &[u8]) -> (u32, usize) {
     let mut crc = 0u32;
     let add = |crc: &mut u32, b: u8| {
@@ -176,10 +178,24 @@ fn status(c: &Context<'_>, o: &Options, git: &Git<'_>, directory: &Path) -> Resu
     Ok(out)
 }
 fn finish(path: &Path, row: &mut V, state: &str, message: &str, c: &Context<'_>) -> Result<Output> {
+    finish_checked(path, row, state, message, c, None)
+}
+fn finish_checked(
+    path: &Path,
+    row: &mut V,
+    state: &str,
+    message: &str,
+    c: &Context<'_>,
+    checkpoint: Option<&[u8]>,
+) -> Result<Output> {
     row.set("state", state);
     row.set("finished_at", now());
     row.set("message", message);
-    save(path, row, c.interrupted)?;
+    if let Some(bytes) = checkpoint {
+        storage::write_external(path, Some(bytes), &row.json(false)?, c.interrupted)?;
+    } else {
+        save(path, row, c.interrupted)?;
+    }
     Ok(Output {
         code: i32::from(!matches!(state, "passed" | "awaiting-merge")),
         stdout: format!("land: {message}\nreceipt: {}\n", path.display()).into_bytes(),
@@ -321,7 +337,11 @@ fn open_pr(r: &Run<'_>, repo_arg: &str) -> Result<Option<V>> {
             "--state",
             "open",
             "--json",
-            "number,url,headRefOid",
+            if !r.o.has("merge") && r.ci_wait > 0 {
+                "number,url,headRefOid,headRefName,baseRefName,isCrossRepository"
+            } else {
+                "number,url,headRefOid"
+            },
             "--limit",
             "2",
         ],
@@ -419,7 +439,93 @@ fn pr_text(base: &str, r: &Run<'_>, scope: &str) -> Result<(String, String)> {
     crate::safe(body.as_bytes())?;
     Ok((title, body))
 }
-fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
+enum PrCi {
+    Passed(&'static str),
+    Failed(String),
+}
+
+fn observe_pr_ci(
+    r: &Run<'_>,
+    row: &mut V,
+    observation: Option<&pr_observation::Checkpoint>,
+) -> Result<PrCi> {
+    let (c, snapshot, head_branch) = (r.c, r.snapshot, r.head_branch);
+    let deadline = Instant::now() + Duration::from_secs(r.ci_wait);
+    let mut successful = None;
+    let conclusion = loop {
+        crate::check(c.interrupted)?;
+        let mut found = None;
+        for event in ["pull_request", "push"] {
+            match ci::latest(c, r.destination, &snapshot.head, head_branch, event) {
+                Ok(Some(run)) => {
+                    found = Some(run);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    crate::check(c.interrupted)?;
+                    return Ok(PrCi::Failed(format!(
+                        "CI unknown: {e}; pull request left open"
+                    )));
+                }
+            }
+        }
+        let state = match &found {
+            Some(run) => {
+                let state = ci::conclusion(run, &snapshot.head)?;
+                row.set(
+                    "ci",
+                    obj([
+                        ("conclusion", state.clone().into()),
+                        ("run_id", run.get("databaseId").clone()),
+                    ]),
+                );
+                if observation.is_none() {
+                    save(r.receipt, row, c.interrupted)?;
+                }
+                if state == "success" {
+                    successful = Some(run.clone());
+                }
+                state
+            }
+            None => "pending".into(),
+        };
+        if state != "pending" || Instant::now() >= deadline {
+            break state;
+        }
+        let next = deadline.min(Instant::now() + Duration::from_secs(10));
+        if let Some(checkpoint) = observation {
+            while Instant::now() < next {
+                crate::check(c.interrupted)?;
+                checkpoint.check_legacy_claim()?;
+                std::thread::park_timeout(
+                    Duration::from_millis(250).min(next.saturating_duration_since(Instant::now())),
+                );
+            }
+        } else {
+            std::thread::park_timeout(next.saturating_duration_since(Instant::now()));
+        }
+    };
+    if conclusion != "success" {
+        return Ok(PrCi::Failed(format!(
+            "CI {conclusion}; pull request left open and unmerged; retry --wait"
+        )));
+    }
+    let mut ci_scope = "unknown";
+    if let Some(run) = successful
+        && let Ok(detailed) =
+            ci::run_details(c, r.destination, run.get("databaseId"), &snapshot.head)
+        && ci::full_scope(&detailed, &snapshot.head).is_ok_and(|s| s == "full")
+    {
+        ci_scope = "full";
+    }
+    let mut ci_row = row.get("ci").clone();
+    ci_row.set("scope", ci_scope);
+    row.set("ci", ci_row);
+    Ok(PrCi::Passed(ci_scope))
+}
+
+fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Result<Output> {
     let (c, o, git, snapshot, target, head_branch) =
         (r.c, r.o, r.git, r.snapshot, r.target, r.head_branch);
     if base == snapshot.head {
@@ -565,6 +671,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
     row.set("pr_number", pr.get("number").clone());
     row.set("pr_url", pr.get("url").clone());
     save(r.receipt, row, c.interrupted)?;
+    let mut active = Some(active);
+    let mut prior = None;
     let mut ci_scope = "unknown";
     if r.ci_wait == 0 {
         row.set(
@@ -575,73 +683,30 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
             ]),
         );
     } else {
-        let deadline = Instant::now() + Duration::from_secs(r.ci_wait);
-        let mut successful = None;
-        let conclusion = loop {
-            crate::check(c.interrupted)?;
-            let mut found = None;
-            for event in ["pull_request", "push"] {
-                match ci::latest(c, r.destination, &snapshot.head, head_branch, event) {
-                    Ok(Some(run)) => {
-                        found = Some(run);
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        return finish(
-                            r.receipt,
-                            row,
-                            "failed",
-                            &format!("CI unknown: {e}; pull request left open"),
-                            c,
-                        );
-                    }
-                }
-            }
-            let state = match &found {
-                Some(run) => {
-                    let state = ci::conclusion(run, &snapshot.head)?;
-                    row.set(
-                        "ci",
-                        obj([
-                            ("conclusion", state.clone().into()),
-                            ("run_id", run.get("databaseId").clone()),
-                        ]),
-                    );
-                    save(r.receipt, row, c.interrupted)?;
-                    if state == "success" {
-                        successful = Some(run.clone());
-                    }
-                    state
-                }
-                None => "pending".into(),
-            };
-            if state != "pending" || Instant::now() >= deadline {
-                break state;
-            }
-            std::thread::park_timeout(
-                Duration::from_secs(10).min(deadline.saturating_duration_since(Instant::now())),
-            );
+        let observation = if o.has("merge") {
+            None
+        } else {
+            Some(pr_observation::Checkpoint::begin(r, row, &mut active)?)
         };
-        if conclusion != "success" {
-            return finish(
-                r.receipt,
-                row,
-                "failed",
-                &format!("CI {conclusion}; pull request left open and unmerged; retry --wait"),
-                c,
-            );
+        let observed = observe_pr_ci(r, row, observation.as_ref())?;
+        crate::check(c.interrupted)?;
+        if let Some(checkpoint) = observation {
+            let (guard, bytes) = checkpoint.reenter(r, &pr, base)?;
+            active = Some(guard);
+            prior = Some(bytes);
         }
-        if let Some(run) = successful
-            && let Ok(detailed) =
-                ci::run_details(c, r.destination, run.get("databaseId"), &snapshot.head)
-            && ci::full_scope(&detailed, &snapshot.head).is_ok_and(|s| s == "full")
-        {
-            ci_scope = "full";
+        // The repository guard stays alive through both final receipt paths.
+        if let Some(guard) = &active {
+            guard
+                .check()
+                .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
         }
-        let mut ci_row = row.get("ci").clone();
-        ci_row.set("scope", ci_scope);
-        row.set("ci", ci_row);
+        ci_scope = match observed {
+            PrCi::Passed(scope) => scope,
+            PrCi::Failed(reason) => {
+                return finish_checked(r.receipt, row, "failed", &reason, c, prior.as_deref());
+            }
+        };
     }
     if !o.has("merge") {
         row.set("merge", obj([("state", "not-requested".into())]));
@@ -657,7 +722,14 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
             string(&pr, "url"),
             string(row.get("ci"), "conclusion")
         );
-        return finish(r.receipt, row, "awaiting-merge", &message, c);
+        return finish_checked(
+            r.receipt,
+            row,
+            "awaiting-merge",
+            &message,
+            c,
+            prior.as_deref(),
+        );
     }
     let delete_branch = dependent_pr_delete_guard(r, &repo_arg)?;
     let flag = format!("--{method}");
@@ -1069,6 +1141,13 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             || !(o.has("handoff-receipt-to") || o.has("sync-shared")),
         "--handoff-receipt-to and --sync-shared need --merge in pull-request mode",
     )?;
+    let publish_only_wait = mode == Mode::Pr && !o.has("merge") && ci_wait > 0;
+    if publish_only_wait {
+        require(
+            git.text(&["remote", "get-url", "--push", "--all", remote])? == destination,
+            "PR observation requires one exact push destination",
+        )?;
+    }
     let mut head_branch = String::new();
     let mut from_sha = String::new();
     if mode == Mode::Pr {
@@ -1173,6 +1252,15 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let stamp = request_stamp(&snapshot.head, &request_parts)?;
     let receipt = directory.join(format!("{stamp}.json"));
     let _active = storage::lock(&directory.join("active"), c.interrupted)?;
+    if mode == Mode::Pr
+        && storage::file_lock(&directory.join(pr_observation::owner_name(&stamp)))?.probe()
+            != oms_lock::Status::Free
+    {
+        return Err(Error::new(
+            75,
+            "exact request already observing CI or ownership unknown; use land wait",
+        ));
+    }
     let holder = obj([
         ("receipt", format!("{stamp}.json").into()),
         ("sha", snapshot.head.clone().into()),
@@ -1216,7 +1304,16 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         let row = V::parse(&previous)?;
         require(
             string(&row, "sha") == snapshot.head
-                && row.get("gate").get("command").text() == Some(&gate),
+                && row.get("gate").get("command").text() == Some(&gate)
+                && (!publish_only_wait
+                    || (crate::reconcile::matches_checkout(
+                        &row,
+                        &snapshot.head,
+                        &stamp,
+                        &digest(repo.as_os_str().as_encoded_bytes()),
+                    ) && row.get("mode").text() == Some("pr")
+                        && row.get("remote").text() == Some(remote)
+                        && row.get("target").text() == Some(target))),
             "land receipt identity mismatch",
         )?;
         row
@@ -1253,7 +1350,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             .wait_siblings(&repo, Duration::from_secs(sibling_wait), c.interrupted)?;
     }
     match mode {
-        Mode::Pr => return land_pr(&ctx, &mut row, &base),
+        Mode::Pr => return land_pr(&ctx, &mut row, &base, _active),
         Mode::LocalMerge => return land_local(&ctx, &mut row),
         Mode::Direct => {}
     }

@@ -217,7 +217,17 @@ fn child_entry() {
     } else {
         raw.split(SEP).map(OsString::from).collect()
     };
-    let flag = AtomicBool::new(false);
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    if let Some(marker) = std::env::var_os("OMS_CT_INTERRUPT_AT") {
+        let marker = PathBuf::from(marker);
+        let cancelled = flag.clone();
+        std::thread::spawn(move || {
+            while !marker.is_file() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            cancelled.store(true, Ordering::Release);
+        });
+    }
     let (code, out, err) = if tool == "feedback-candidate" {
         let result = oms_command_landing::feedback::repair_candidate(
             &cwd,
@@ -2155,10 +2165,11 @@ impl Isolated {
         let body = format!(
             r#"#!{bash}
 printf '%s\n' "$*" >> '{log}'
-head=; commit=; event=; body=; match=
+head=; commit=; event=; body=; match=; base=
 args=("$@")
 for ((i = 0; i < ${{#args[@]}}; i++)); do
   case "${{args[i]}}" in
+    --base) base=${{args[i+1]}} ;;
     --head) head=${{args[i+1]}} ;;
     --commit) commit=${{args[i+1]}} ;;
     --event) event=${{args[i+1]}} ;;
@@ -2177,7 +2188,7 @@ case "$1 $2" in
       else echo '[]'; fi
     elif [ -f '{state}' ]; then
       tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
-      printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s"}}]\n' "$tip"
+      printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s","baseRefName":"%s","headRefName":"%s","isCrossRepository":false}}]\n' "$tip" "$base" "$head"
     else echo '[]'; fi ;;
   "pr create") : > '{state}'; IFS= read -rd '' text < "$body"; printf '%s' "$text" > '{state}.body'; echo https://example.invalid/pull/7 ;;
   "pr merge")
@@ -2302,6 +2313,187 @@ fn land_to_github_opens_a_pr_and_merges_only_with_merge() {
         merged.len() == 40 && merged.bytes().all(|b| b.is_ascii_hexdigit()),
         "{status}"
     );
+}
+
+#[test]
+fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
+    use std::time::{Duration, Instant};
+    for scenario in [
+        "unchanged",
+        "receipt-changed",
+        "head-moved",
+        "target-moved",
+        "interrupted",
+        "legacy-writer",
+    ] {
+        let iso = Isolated::new();
+        let (a, bare) = iso.with_remote("ci-concurrent");
+        let b = iso.home.path().join("checkout-b");
+        iso.git(
+            &a,
+            &["worktree", "add", "-q", "-b", "b", b.to_str().unwrap()],
+        );
+        iso.git(&a, &["checkout", "-qb", "a"]);
+        let head = iso.commit_file(&a, "a.txt");
+        iso.commit_file(&b, "b.txt");
+        let (gh_a, log) = iso.fake_gh(&bare, "success");
+        let original = fs::read_to_string(&gh_a).unwrap();
+        let gh_b = iso.home.path().join("gh-b");
+        fs::write(
+            &gh_b,
+            original
+                .replace("gh.pr", "gh.pr-b")
+                .replace("\"number\":7", "\"number\":8")
+                .replace("pull/7", "pull/8"),
+        )
+        .unwrap();
+        fs::set_permissions(&gh_b, fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(which("sleep"), iso.bin.join("sleep")).unwrap();
+        fs::write(
+            &gh_a,
+            original.replace(
+                "\"run list\")",
+                r#""run list")
+    : > "$HOME/observing"
+    for ((tick=0; tick < 500; tick++)); do
+        [ ! -f "$HOME/release-ci" ] || break
+        sleep 0.025
+    done
+    [ -f "$HOME/release-ci" ] || exit 1
+"#,
+            ),
+        )
+        .unwrap();
+        let args = [
+            "--pr",
+            "--why",
+            "fixture",
+            "--gate",
+            "true",
+            "--no-update",
+            "--ignore-siblings",
+        ];
+        let cancel = iso.home.path().join("interrupt");
+        let mut env = vec![
+            ("OMS_GH_BIN", gh_a.to_str().unwrap()),
+            ("OMS_LOCK_TIMEOUT", "2"),
+        ];
+        if scenario == "interrupted" {
+            env.push(("OMS_CT_INTERRUPT_AT", cancel.to_str().unwrap()));
+        }
+        std::thread::scope(|scope| {
+            let running = scope.spawn(|| iso.run_with_services("land", &a, &args, &env));
+            let start = Instant::now();
+            while !iso.home.path().join("observing").exists() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10) && !running.is_finished(),
+                    "publisher did not enter CI observation"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let status = iso.run("land", &a, &["status", "--json", "--active-exit"]);
+            assert_eq!(status.0, 0, "{status:?}");
+            let row = V::parse(status.1.as_bytes()).unwrap();
+            assert_eq!(row.get("pr_number"), &7usize.into());
+            let stamp = row.get("request").text().unwrap();
+            let directory = fs::read_dir(iso.home.path().join(".local/state/oh-my-setting/land"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let receipt = directory.join(format!("{stamp}.json"));
+            let mut expected = fs::read(&receipt).unwrap();
+            let observed = iso.run(
+                "land",
+                &a,
+                &[
+                    "wait",
+                    "--reviewed-head",
+                    &head,
+                    "--request",
+                    stamp,
+                    "--json",
+                ],
+            );
+            let result = V::parse(observed.1.as_bytes()).unwrap();
+            assert_eq!(result.get("activity").text(), Some("held"));
+            assert_eq!(result.get("phase").text(), Some("pr-recorded"));
+            let duplicate =
+                iso.run_with_services("land", &a, &[args.as_slice(), &["--merge"]].concat(), &env);
+            assert_eq!(duplicate.0, 75, "{duplicate:?}");
+            assert_eq!(fs::read(&receipt).unwrap(), expected);
+            let mut legacy_guard = None;
+            if scenario == "unchanged" {
+                let other = iso.run_with_services(
+                    "land",
+                    &b,
+                    &args,
+                    &[
+                        ("OMS_GH_BIN", gh_b.to_str().unwrap()),
+                        ("OMS_LOCK_TIMEOUT", "2"),
+                    ],
+                );
+                assert_eq!(other.0, 0, "{other:?}");
+                assert!(other.1.contains("pull request #8 open"));
+                assert_eq!(fs::read(&receipt).unwrap(), expected);
+            } else if scenario == "receipt-changed" {
+                expected.push(b' ');
+                fs::write(&receipt, &expected).unwrap();
+            } else if scenario == "interrupted" {
+                fs::write(&cancel, b"").unwrap();
+            } else if scenario == "target-moved" {
+                iso.git(&bare, &["update-ref", "refs/heads/main", &head]);
+            } else if scenario == "head-moved" {
+                iso.git(&bare, &["update-ref", "refs/heads/a", "refs/heads/main"]);
+            } else {
+                // Previous versions take active first, publish their holder, then
+                // must take the receipt lock before gate/push/PR/merge.
+                let mut settings = oms_lock::Settings::from_env().unwrap();
+                settings.home = iso.home.path().into();
+                settings.temp_dir = iso.tmp.clone();
+                settings.cwd = a.clone();
+                settings.search_path = iso.bin.clone().into_os_string();
+                settings.lock_dir = None;
+                settings.mode = oms_lock::Mode::Mkdir;
+                let global =
+                    oms_lock::Lock::for_file(&directory.join("active"), settings.clone()).unwrap();
+                legacy_guard = Some(global.try_acquire().unwrap());
+                fs::write(
+                    directory.join("active-holder"),
+                    fs::read(directory.join(format!("{stamp}.ci-holder"))).unwrap(),
+                )
+                .unwrap();
+                let legacy_write = oms_lock::Lock::for_file(&receipt, settings)
+                    .unwrap()
+                    .try_acquire();
+                assert!(matches!(legacy_write, Err(oms_lock::Error::Busy)));
+            }
+            if scenario != "interrupted" {
+                fs::write(iso.home.path().join("release-ci"), b"").unwrap();
+            }
+            let final_result = running.join().unwrap();
+            if scenario == "unchanged" {
+                assert_eq!(final_result.0, 0, "{final_result:?}");
+                assert!(final_result.1.contains("CI success; not merged"));
+            } else {
+                assert_ne!(final_result.0, 0, "{final_result:?}");
+                assert_eq!(fs::read(&receipt).unwrap(), expected);
+                if scenario == "interrupted" {
+                    assert_eq!(final_result.0, 130, "{final_result:?}");
+                }
+                if legacy_guard.is_some() {
+                    assert_eq!(final_result.0, 75);
+                }
+            }
+            let calls = fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                calls.lines().filter(|l| l.starts_with("pr create")).count(),
+                if scenario == "unchanged" { 2 } else { 1 }
+            );
+            assert!(!calls.contains("pr merge"));
+        });
+    }
 }
 
 #[test]
