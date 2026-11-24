@@ -1972,15 +1972,25 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
     let claim = Request::new(Action::Claim)
         .with("id", "a")
         .with("provider", "codex")
-        .with("ttl", "1");
+        .with("ttl", "3600");
     let mut context = Context::from_environment_at(&claim, &repo, &repo, None).unwrap();
     context.panel_main_attempt = format!("att_{}", "1".repeat(32));
     context.participant = "main-fixture".into();
     context.ts = "2026-11-21T00:00:00Z".into();
     let active = Plan::open(context.clone(), &Host, &stop).unwrap();
     active.execute(&claim).unwrap();
-    context.ts = "2026-11-21T00:00:01Z".into();
+    context.ts = "2026-11-21T02:11:48Z".into();
     let expired = Plan::open(context, &Host, &stop).unwrap();
+    let query = |action, options: &[(&str, &str)]| {
+        let req = options
+            .iter()
+            .fold(Request::new(action), |req, &(key, value)| {
+                req.with(key, value)
+            });
+        expired.execute(&req).unwrap()
+    };
+    let read =
+        |action, options: &[(&str, &str)]| json::parse(&query(action, options).stdout).unwrap();
     for state in ["claimed", "running"] {
         if state == "running" {
             active
@@ -2001,6 +2011,73 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
                 .message
                 .contains("expired")
         );
+        let plan_file = repo.join(".oms/plan/tasks.json");
+        let original = fs::read(&plan_file).unwrap();
+        let show = read(Action::Show, &[("id", "a")]);
+        assert_eq!(show.text("state"), state);
+        assert_eq!(show.get("claim_expired"), &json::Value::Bool(true));
+        assert_eq!(show.get("claim_age_s"), &json::number(7908));
+        let list = read(Action::List, &[("json", "1")]);
+        assert_eq!(
+            list.get("tasks").array().unwrap()[0].get("claim_expired"),
+            &json::Value::Bool(true)
+        );
+        assert!(
+            String::from_utf8(query(Action::List, &[]).stdout)
+                .unwrap()
+                .contains("EXPIRED")
+        );
+        let status = read(Action::Status, &[("json", "1")]);
+        assert_eq!(status.get("stale").array().unwrap()[0].text("id"), "a");
+        let brief = String::from_utf8(query(Action::Brief, &[("id", "a")]).stdout).unwrap();
+        assert!(brief.contains("EXPIRED"));
+        assert_eq!(brief.contains("; claimable"), state == "claimed");
+        let ready = read(Action::Ready, &[("json", "1")]);
+        assert_eq!(
+            ready.get("tasks").array().unwrap().len(),
+            usize::from(state == "claimed")
+        );
+        assert_eq!(
+            query(Action::Next, &[]).code,
+            if state == "claimed" { 0 } else { 3 }
+        );
+        if state == "running" {
+            assert!(expired.execute(&claim).is_err());
+            assert!(
+                String::from_utf8(query(Action::Reclaim, &[]).stdout)
+                    .unwrap()
+                    .contains("reclaimed 0")
+            );
+            fs::create_dir_all(repo.join(".oms/delegations")).unwrap();
+            let marker = json::object([
+                ("schema", json::number(1)),
+                ("id", json::string("live")),
+                ("pid", json::number(std::process::id())),
+                ("task_id", json::string("a")),
+                ("lease_id", expected.get("lease_id").clone()),
+            ]);
+            fs::write(
+                repo.join(".oms/delegations/live.json"),
+                json::canonical(&marker).unwrap(),
+            )
+            .unwrap();
+            expired.verify_panel_review_lease(&expected).unwrap();
+            assert!(
+                String::from_utf8(query(Action::Reclaim, &[("include-running", "1")]).stdout)
+                    .unwrap()
+                    .contains("reclaimed 0")
+            );
+            let live = read(Action::Show, &[("id", "a")]);
+            assert_eq!(live.get("claim_expired"), &json::Value::Bool(false));
+            assert!(
+                read(Action::Status, &[("json", "1")])
+                    .get("stale")
+                    .array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(fs::read(&plan_file).unwrap(), original);
         expected
             .set(
                 "lease_id",

@@ -247,7 +247,18 @@ fn dispatch(
         .filter(|s| !s.is_empty())
         .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
     let context = Context::resolve(&req, &default_repo, cwd, interrupted, &|repo| {
-        services.state_root(repo)
+        use crate::Action::*;
+        if req.file.is_none()
+            && (matches!(
+                req.action,
+                Show | List | Status | Ready | Brief | Discovered | Retro
+            ) || (req.action == Next && !req.has("claim")))
+        {
+            let requested = cwd.join(req.repo.as_deref().unwrap_or(&default_repo));
+            services.query_state_root(repo, &requested)
+        } else {
+            services.state_root(repo)
+        }
     })?;
     require(!interrupted.load(Ordering::SeqCst), "interrupted")?;
     Plan::open(context, services, interrupted)?.execute(&req)

@@ -467,6 +467,41 @@ impl oms_command_plan::Services for ControlServices<'_> {
             .map_err(|_| plan_error("cannot resolve physical repository"))?;
         Ok((state != own).then_some(state))
     }
+    fn query_state_root(
+        &self,
+        repo: &Path,
+        requested: &Path,
+    ) -> oms_command_plan::Result<Option<PathBuf>> {
+        use oms_reference::repository::{Resolver, managed_scratch_parent};
+        // Context already resolved Git's physical root. Check the original
+        // scratch spelling as well: a substituted checkout must not turn into
+        // a normal read of the symlink target's unrelated Plan.
+        let selected = requested
+            .ancestors()
+            .find_map(|path| managed_scratch_parent(path).map(|parent| (path, parent)));
+        if selected.is_none() && managed_scratch_parent(repo).is_none() {
+            return self.state_root(repo);
+        }
+        let resolver = Resolver::from_env().map_err(plan_error)?;
+        if resolver.child {
+            return self.state_root(repo);
+        }
+        if let Some((worktree, parent)) = selected
+            && !([worktree, &parent]
+                .iter()
+                .all(|p| std::fs::symlink_metadata(p).is_ok_and(|entry| entry.is_dir()))
+                && std::fs::canonicalize(worktree).is_ok_and(|path| repo.starts_with(&path)))
+        {
+            return Err(plan_error("selected scratch checkout was substituted"));
+        }
+        if managed_scratch_parent(repo).is_none() {
+            return self.state_root(repo);
+        }
+        resolver
+            .verified_scratch_repository(repo, self.interrupted)
+            .map(Some)
+            .map_err(plan_error)
+    }
     fn lifecycle_writer(
         &self,
         repo: &Path,

@@ -4238,6 +4238,145 @@ fn landing_plain_approval_and_recover_converge_through_native_services() {
 }
 
 #[test]
+fn plan_queries_from_registered_scratch_use_only_proven_shared_state() {
+    use std::{fs, os::unix::fs::symlink, path::Path};
+    let host = Landing::new();
+    host.ok(&["agent-plan", "init", "--goal", "shared goal"]);
+    host.ok(&[
+        "agent-plan",
+        "add",
+        "--id",
+        "task-a",
+        "--title",
+        "shared task",
+        "--verify",
+        "true",
+        "--allowed",
+        "a.txt",
+    ]);
+    let canonical = host.ok(&["agent-plan", "status", "--json"]);
+    let stored = host.repo.join(".oms/plan/tasks.json");
+    let unchanged = fs::read(&stored).unwrap();
+    let scratch = host.ok(&[
+        "scratch-worktree",
+        "add",
+        "--owner-pid",
+        &std::process::id().to_string(),
+    ]);
+    let scratch = Path::new(scratch.trim());
+    let read = |path: &Path| {
+        host.oms(&[
+            "agent-plan",
+            "--repo",
+            path.to_str().unwrap(),
+            "status",
+            "--json",
+        ])
+    };
+    assert_eq!(read(scratch), (0, canonical.clone(), String::new()));
+    let nested = scratch.join("nested");
+    fs::create_dir(&nested).unwrap();
+    assert_eq!(read(&nested), (0, canonical.clone(), String::new()));
+    let name = scratch.to_str().unwrap();
+    assert_eq!(
+        host.ok(&["agent-plan", "--repo", name, "show", "--id", "task-a"]),
+        host.ok(&["agent-plan", "show", "--id", "task-a"])
+    );
+    assert_ne!(
+        host.oms(&[
+            "agent-plan",
+            "--repo",
+            name,
+            "next",
+            "--claim",
+            "--provider",
+            "codex"
+        ])
+        .0,
+        0
+    );
+    assert_ne!(
+        host.oms(&["agent-plan", "--repo", name, "init", "--goal", "shadow"])
+            .0,
+        0
+    );
+    let child = host.oms_env(
+        &["agent-plan", "--repo", name, "status", "--json"],
+        &[("OMS_HARNESS_CHILD", "1")],
+    );
+    assert_eq!(child.0, 0, "{}", child.2);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&child.1).unwrap()["present"],
+        false
+    );
+    let scoped = host.oms_env(
+        &["agent-plan", "--repo", name, "status", "--json"],
+        &[
+            ("OMS_HARNESS_CHILD", "1"),
+            ("OMS_STATE_REPO", host.repo.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(scoped, (0, canonical.clone(), String::new()));
+    let marker = scratch.parent().unwrap().join(".oh-my-setting-tmp");
+    let original = fs::read(&marker).unwrap();
+    let saved = marker.with_extension("original");
+    fs::rename(&marker, &saved).unwrap();
+    assert_ne!(read(scratch).0, 0);
+    symlink(&saved, &marker).unwrap();
+    assert_ne!(read(scratch).0, 0);
+    fs::remove_file(&marker).unwrap();
+    fs::rename(&saved, &marker).unwrap();
+
+    let unrelated = host.f.0.join("unrelated");
+    fs::create_dir(&unrelated).unwrap();
+    host.git_in(&unrelated, &["init", "-q"]);
+    let redirect = host.oms_env(
+        &["agent-plan", "--repo", name, "status", "--json"],
+        &[
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.worktree"),
+            ("GIT_CONFIG_VALUE_0", unrelated.to_str().unwrap()),
+        ],
+    );
+    // Git versions can ignore core.worktree on registered linked checkouts.
+    // A supported query can only return the verified original, never the other Plan.
+    if redirect.0 == 0 {
+        assert_eq!(redirect.1, canonical);
+    } else {
+        assert_eq!(redirect.0, 2);
+    }
+    let forged = host.f.0.join("wtroot/oh-my-setting-scratch.copy");
+    let copied = forged.join("wt-copy");
+    fs::create_dir(&forged).unwrap();
+    fs::set_permissions(&forged, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    fs::write(forged.join(".oh-my-setting-tmp"), &original).unwrap();
+    fs::create_dir(&copied).unwrap();
+    host.git_in(&copied, &["init", "-q"]);
+    assert_ne!(read(&copied).0, 0);
+    fs::write(
+        forged.join(".oh-my-setting-tmp"),
+        format!(
+            "kind=oh-my-setting-temp\ntemporary=1\nrepo={}\nworktree={}\n",
+            host.repo.display(),
+            copied.display()
+        ),
+    )
+    .unwrap();
+    assert_ne!(read(&copied).0, 0);
+    fs::rename(copied.join(".git"), copied.join("old.git")).unwrap();
+    fs::copy(scratch.join(".git"), copied.join(".git")).unwrap();
+    assert_ne!(read(&copied).0, 0);
+    let swapped = forged.join("old");
+    fs::rename(&copied, &swapped).unwrap();
+    symlink(&unrelated, &copied).unwrap();
+    assert_ne!(read(&copied).0, 0);
+    assert_eq!(fs::read(&stored).unwrap(), unchanged);
+    for repo in [scratch, &unrelated, &swapped] {
+        assert!(!repo.join(".oms/plan").exists());
+    }
+}
+
+#[test]
 fn landing_admission_covers_and_plan_scope_use_native_context() {
     let l = Landing::new();
     std::fs::write(
