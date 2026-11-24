@@ -58,7 +58,7 @@ function render(data, options = {}) {
     }
     get textContent() { return this.children.length ? this.children.map(c => c.textContent).join('') : this._text; }
     set textContent(v) { this._text = String(v ?? ''); this.children = []; }
-    append(...children) { children.forEach(child => { child.parent = this; this.children.push(child); }); }
+    append(...children) { children.forEach(child => { child.parent = this; child.parentElement = this; this.children.push(child); }); }
     replaceChildren(...children) { this.children = []; this.append(...children); }
     setAttribute(name, value) {
       this.attributes[name] = String(value);
@@ -640,7 +640,7 @@ for (const w of [320, 736]) {
   const free = centroid(positions(view).slice(1));
   assert.ok(Math.hypot(free.x - centre.x, free.y - centre.y) < 4, `unpinned nodes keep their own centroid at the world centre (${free.x.toFixed(1)},${free.y.toFixed(1)} vs ${centre.x.toFixed(1)},${centre.y.toFixed(1)})`);
 }
-{ // Task scope refits to the new scope unless the camera was moved; Reset view keeps the scope.
+{ // Task scope and Clear filters always refit to the new scope; Reset view fits the current scope.
   const data = chain('project', 40);
   data.display = {production_only: true, task_focus: true, default_scope: 'neighbors'};
   data.nodes.forEach((row, i) => { row.focus = i === 0; row.distance = i === 0 ? 0 : (i < 3 ? 1 : 3); });
@@ -649,9 +649,9 @@ for (const w of [320, 736]) {
   sc.value = 'all'; sc.fire('change');
   const wide = camera(view);
   assert.ok(wide.k < narrow.k, 'widening the scope refits to the larger node set');
-  view.get('zoom-in').fire('click'); const moved = camera(view);
+  view.get('zoom-in').fire('click');
   sc.value = 'neighbors'; sc.fire('change');
-  assert.deepEqual(camera(view), moved, 'a user-moved camera is kept on scope change');
+  assert.ok(Math.abs(camera(view).k - narrow.k) < 1e-2, 'scope change refits even after the camera was moved');
   sc.value = 'all'; sc.fire('change'); view.get('zoom-in').fire('click');
   view.get('reset').fire('click');
   assert.equal(sc.value, 'all', 'Reset view does not change the scope');
@@ -898,6 +898,25 @@ const labelOf = el => el.querySelector('.oms-graph-label');
     assert.ok(order.indexOf('G') < order.lastIndexOf('G'), 'edge group precedes node group');
   }
   const bigNode = render(model('project', 3)).nodes.length; assert.equal(bigNode, 3);
+}
+{ // Fan hubs reserve their ring against the world border: no child is clamped onto PAD and no bodies overlap.
+  const files = ['a', 'b'].map(h => ({id: h, label: `${h}.rs`, kind: 'file', degree: 31, show_label: true, assurance: 'supported'}));
+  const leaves = files.flatMap(f => Array.from({length: 30}, (_, i) => ({id: `${f.id}${i}`, label: `${f.id}${i}`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'})));
+  const two = {kind: 'project', title: 'Fan2', counts: {}, nodes: [...files, ...leaves],
+    edges: leaves.map(l => ({source: l.id[0], target: l.id, relation: 'contains', confidence: 'EXTRACTED'}))};
+  const clean = (view, nodes, label) => {
+    const pts = positions(view); const r = nodes.map(n => radiusOf(n.degree));
+    pts.forEach((p, i) => {
+      assert.ok(p.x >= 19.99 && p.y >= 19.99, `${label}: node ${i} stays inside PAD (${p.x},${p.y})`);
+      for (let j = i + 1; j < pts.length; j += 1) assert.ok(Math.hypot(p.x - pts[j].x, p.y - pts[j].y) >= r[i] + r[j], `${label}: bodies ${i}/${j} do not overlap`);
+    });
+  };
+  clean(render(two, {width: 320}), two.nodes, 'two fans at 320');
+  const big = {kind: 'project', title: 'Fan', counts: {}, nodes: [{id: 'hub', label: 'hub.rs', kind: 'file', degree: 90, show_label: true, assurance: 'supported'},
+    ...Array.from({length: 90}, (_, i) => ({id: `leaf${i}`, label: `leaf${i}.rs`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}))],
+    edges: Array.from({length: 90}, (_, i) => ({source: 'hub', target: `leaf${i}`, relation: 'contains', confidence: 'EXTRACTED'}))};
+  const view = render(big, {width: 320}); dragNode(view, 0, 1, 1, 1); view.flushTimers();
+  clean(view, big.nodes, 'dragged hub at 320');
 }
 
 // 3. Narrow stage measured synchronously at init; the ResizeObserver never fires.

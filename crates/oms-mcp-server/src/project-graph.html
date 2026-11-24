@@ -442,6 +442,7 @@
   search.setAttribute('placeholder', t('searchPh'));
   setText(root.querySelector('#oms-graph-view-19ff9c65bfcf-relation-label'), 'relation');
   setText(root.querySelector('#oms-graph-view-19ff9c65bfcf-confidence-label'), 'confidence');
+  stateLabel.textContent = t('assurance');
   setText(root.querySelector('#oms-graph-view-19ff9c65bfcf-scope-label'), 'scope');
   setText(root.querySelector('#oms-graph-view-19ff9c65bfcf-change-label'), 'change');
   setText(root.querySelector('#oms-graph-view-19ff9c65bfcf-node-label'), 'node');
@@ -907,6 +908,9 @@
       worldW = width; worldH = Math.max(baseHeight, needed);
       height = worldH;
     }
+    const fanSpan = 2 * (PAD + fans.reduce((acc, fan) => Math.max(acc, fan.parent._fan), 0));
+    worldW = Math.max(worldW, fanSpan); worldH = Math.max(worldH, fanSpan);
+    if (!narrow) height = worldH;
     svg.attr('viewBox', `0 0 ${width} ${height}`).attr('data-world', `${worldW}x${worldH}`);
     // The svg box equals the viewBox in CSS px, so 1 world unit is 1 px at k=1 and nothing is letterboxed.
     if (svgElement.style) svgElement.style.height = `${height}px`;
@@ -955,6 +959,7 @@
         placed += count;
       }
       slots.forEach(slot => claimed.add(slot.child.id));
+      parent._fan = Math.max(parent._fan || 0, ...slots.map(slot => Math.hypot(slot.dx, slot.dy)));
       fans.push({parent, slots});
     });
   })();
@@ -1009,10 +1014,13 @@
     }
     return moved;
   }
+  // A fan hub keeps its whole ring inside the world: the hub's margin includes the fan radius.
+  const fanPad = row => PAD + (row._fan || 0);
   function clampToWorld() {
     nodes.forEach(row => {
-      row.x = Math.max(PAD, Math.min(worldW - PAD, Number.isFinite(row.x) ? row.x : worldW / 2));
-      row.y = Math.max(PAD, Math.min(worldH - PAD, Number.isFinite(row.y) ? row.y : worldH / 2));
+      const m = fanPad(row);
+      row.x = Math.max(m, Math.min(worldW - m, Number.isFinite(row.x) ? row.x : worldW / 2));
+      row.y = Math.max(m, Math.min(worldH - m, Number.isFinite(row.y) ? row.y : worldH / 2));
     });
   }
   let alpha = 0;
@@ -1076,9 +1084,10 @@
   }
   function relax() {
     for (let pass = 0; pass < 200; pass += 1) {
-      const moved = collide(1);
       applyFans();
+      const moved = collide(1);
       clampToWorld();
+      applyFans();
       if (!moved) break;
     }
   }
@@ -1202,8 +1211,7 @@
   let camPlaced = false;
   const FRAME_FALLBACK_MS = 100;
   let userMoved = false;
-  let scopeMoved = false;
-  const markMoved = () => { userMoved = true; scopeMoved = true; };
+  const markMoved = () => { userMoved = true; };
   const clampK = k => Math.max(MIN_K, Math.min(MAX_K, k));
   const labelTier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
   function setCam(x, y, k) {
@@ -1375,7 +1383,8 @@
     if (element.classList && element.classList.contains('is-out-of-scope')) return false;
     if (typeof root.contains === 'function' && !root.contains(element)) return false;
     for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) {
-      if (parent.tagName === 'DETAILS' && parent.open === false) return false;
+      if (parent.hidden) return false;
+      if (parent.tagName === 'DETAILS' && parent.open === false && !(element.tagName === 'SUMMARY' && element.parentElement === parent)) return false;
     }
     return true;
   }
@@ -1644,6 +1653,7 @@
       if (document.activeElement && document.activeElement !== search && isFocusableInRoot(document.activeElement)) {
         lastFocusBeforeSearch = document.activeElement;
       }
+      if (search.disabled) return;
       event.preventDefault();
       search.focus();
     } else if (event.key === 'Escape') {
@@ -1671,16 +1681,14 @@
   state.addEventListener('change', applyFilters);
   scope.addEventListener('change', () => {
     applyFilters();
-    if (!scopeMoved) fitAll();
-    scopeMoved = false;
+    fitAll();
   });
   change.addEventListener('change', applyFilters);
   clear.addEventListener('click', () => {
     const scopeBefore = scope.value;
     resetFilterValues();
     applyFilters();
-    if (scope.value !== scopeBefore && !scopeMoved) fitAll();
-    if (scope.value !== scopeBefore) scopeMoved = false;
+    if (scope.value !== scopeBefore) fitAll();
     actionStatus.textContent = t('cleared');
     if (isFocusableInRoot(search)) search.focus();
   });
@@ -1771,8 +1779,9 @@
       // Keep the whole node inside the padded stage so a later click never has to pan it back.
       const inset = fitPad() + nodeRadius(row) * cam.k;
       const clampAxis = (value, world, size, offset) => {
-        const min = Math.max(PAD, (inset - offset) / cam.k); const max = Math.min(world - PAD, (size - inset - offset) / cam.k);
-        return min > max ? Math.max(PAD, Math.min(world - PAD, value)) : Math.max(min, Math.min(max, value));
+        const m = fanPad(row);
+        const min = Math.max(m, (inset - offset) / cam.k); const max = Math.min(world - m, (size - inset - offset) / cam.k);
+        return min > max ? Math.max(m, Math.min(world - m, value)) : Math.max(min, Math.min(max, value));
       };
       row.fx = clampAxis((p.x - cam.x) / cam.k + gesture.dx, worldW, width, cam.x);
       row.fy = clampAxis((p.y - cam.y) / cam.k + gesture.dy, worldH, height, cam.y);
