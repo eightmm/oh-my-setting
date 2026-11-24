@@ -1901,6 +1901,12 @@ fn token_span(call: &Value, limit: usize, columns: usize, boxed: bool) -> Vec<Sp
     token_span_with(call, limit, columns, boxed, true)
 }
 
+/// A known elapsed time; `—` and empty mean unknown.
+fn known_elapsed(call: &Value) -> &str {
+    let elapsed = text(call, "board_elapsed");
+    if elapsed == "—" { "" } else { elapsed }
+}
+
 /// `placeholder` false drops an unknown total's `— tok` so a narrow row can
 /// keep its operation badge.
 fn token_span_with(
@@ -1911,8 +1917,8 @@ fn token_span_with(
     placeholder: bool,
 ) -> Vec<Span> {
     if call["attention_kind"].is_string() {
-        let elapsed = text(call, "board_elapsed");
-        if columns >= 44 && !elapsed.is_empty() && elapsed != "—" && width(elapsed) <= limit {
+        let elapsed = known_elapsed(call);
+        if columns >= 44 && !elapsed.is_empty() && width(elapsed) <= limit {
             return vec![Span::raw(elapsed, limit, Some(SGR_MUTED))];
         }
         return Vec::new();
@@ -1924,7 +1930,7 @@ fn token_span_with(
     let unknown = trimmed.starts_with('—');
     // The unboxed Main on a short board shares the boxed call rows' right edge.
     let edge = if columns >= 44 && !boxed { "  " } else { "" };
-    let elapsed = text(call, "board_elapsed");
+    let elapsed = known_elapsed(call);
     let elapsed =
         (columns >= 56 && !elapsed.is_empty()).then(|| format!("  {:>9}", clip(elapsed, 9)));
     // Counters without a total show separately; no total is invented.
@@ -2953,7 +2959,13 @@ fn frame_with_capacity(
             lines.push(line);
         }
     }
-    if columns >= 68 && height >= 18 && !overlay && !(nav.attention_only && calls.is_empty()) {
+    if columns >= 68
+        && height >= 18
+        && !overlay
+        && calls
+            .iter()
+            .any(|entry| !entry.call["attention_kind"].is_string())
+    {
         optional.push(legend_line(colored, columns));
     }
     if stale {
@@ -3220,7 +3232,24 @@ fn frame_with_capacity(
         } else if capacity > 0 && calls.is_empty() {
             // While the prompt is edited `b` would be typed, so it is not advertised.
             let stages: Vec<_> = [
-                (removed[0], "folded history (Tab all)", "Tab all"),
+                (
+                    removed[0],
+                    if nav.editing {
+                        "folded history"
+                    } else {
+                        "folded history (Tab all)"
+                    },
+                    if nav.editing { "" } else { "Tab all" },
+                ),
+                (
+                    folded,
+                    if nav.editing {
+                        "folded in tree"
+                    } else {
+                        "folded in tree (Tab changes view)"
+                    },
+                    if nav.editing { "" } else { "Tab view" },
+                ),
                 (
                     removed[1],
                     if nav.editing {
@@ -3236,9 +3265,14 @@ fn frame_with_capacity(
             .filter(|stage| stage.0 > 0)
             .collect();
             let reasons = stages.iter().map(|s| s.1).collect::<Vec<_>>().join(", ");
-            let keys = stages.iter().map(|s| s.2).collect::<Vec<_>>().join(" · ");
+            let keys = stages
+                .iter()
+                .map(|s| s.2)
+                .filter(|key| !key.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
             let long = format!("  0 of {room_total} shown — {reasons}");
-            let empty = if room_total > 0 {
+            let empty = if room_total > 0 && !stages.is_empty() {
                 if width(&long) <= inner_width || keys.is_empty() {
                     long
                 } else {
@@ -3535,7 +3569,6 @@ fn render_card_row(
     } else {
         24
     };
-    let role = clip(&role, role_cap);
     let name = if !explicit_worker_alias(call) && display.name == text(call, "title") {
         board_brief(&display.name, &role)
     } else {
@@ -3574,7 +3607,8 @@ fn render_card_row(
             Span::literal(" ", None),
         ]);
     }
-    left.push(Span::raw(&role, role_cap, Some(role_sgr)));
+    let shown_role = clip(&role, role_cap);
+    left.push(Span::raw(&shown_role, role_cap, Some(role_sgr)));
     if !name.is_empty() || !task.is_empty() {
         let field = if align_roles
             || child && columns >= 56
@@ -3589,7 +3623,7 @@ fn render_card_row(
         } else {
             0
         };
-        let pad = field.saturating_sub(width(&role)) + 1;
+        let pad = field.saturating_sub(width(&shown_role)) + 1;
         left.push(Span {
             plain: " ".repeat(pad),
             sgr: None,
@@ -3622,17 +3656,17 @@ fn render_card_row(
         } else {
             metadata_limit.saturating_sub(width(&badge) + 2)
         };
-        let elapsed = clip(text(call, "board_elapsed"), 9);
+        let elapsed = clip(known_elapsed(call), 9);
         let spans =
             |limit, placeholder| token_span_with(call, limit, columns, use_cards, placeholder);
         right = [
             spans(roomy, true),
             spans(roomy, false),
+            spans(limit, true),
             (columns >= 56 && !elapsed.is_empty())
                 .then(|| Span::raw(&elapsed, limit, Some(SGR_MUTED)))
                 .into_iter()
                 .collect(),
-            spans(limit, true),
         ]
         .into_iter()
         .find(|spans| (1..=limit).contains(&spans_width(spans)))
@@ -7454,6 +7488,36 @@ mod tests {
             }
         }
 
+        // Unknown elapsed never replaces a known total or renders as a bare `—`.
+        for role in [
+            "worker",
+            "security-auditor",
+            "orchestrator-with-a-long-role",
+        ] {
+            let call = json!({
+                "title":"Inspect it", "provider":"codex", "role":role, "participant":"call-fixture",
+                "state":"working", "event_tokens":{"total":12500}, "board_elapsed":"—"
+            });
+            for prefix in ["", "├─ "] {
+                for columns in [56, 58, 61, 80] {
+                    let line = render_call_row(&call, prefix, "", false, columns, true, false);
+                    assert!(
+                        !line.contains(" — ")
+                            && !line
+                                .trim_end()
+                                .trim_end_matches('│')
+                                .trim_end()
+                                .ends_with('—'),
+                        "{columns}: {line}"
+                    );
+                    assert_eq!(width(&line), columns, "{line}");
+                    if role == "worker" && prefix.is_empty() {
+                        assert!(line.contains("12.5K"), "{columns}: {line}");
+                    }
+                }
+            }
+        }
+
         let report = json!({"collection":{"ok":true},
             "provider_sessions":["codex", "claude", "antigravity"],
             "provider_activity":{"codex":"working", "claude":"idle", "antigravity":"unknown"},
@@ -9411,6 +9475,22 @@ mod tests {
         assert!(filtered.contains("3 filt"), "{filtered}");
         // An emptied board names only the stages that removed Room rows.
         let total = 4;
+        // Tree folding is a counted stage; it never leaves a dangling dash.
+        let folded = navigation::Navigation {
+            view: View::Tree,
+            folded: super::calls(&report)
+                .iter()
+                .filter_map(|call| call["participant"].as_str().map(str::to_owned))
+                .collect(),
+            ..Default::default()
+        };
+        let out = frame(&report, &folded, 80, 24, &read).join("\n");
+        if out.contains("0 of") {
+            assert!(
+                out.contains("folded in tree (Tab changes view)") && !out.contains("— \n"),
+                "{out}"
+            );
+        }
         let hint = |nav: &navigation::Navigation, columns| {
             frame(&report, nav, columns, 24, &read).join("\n")
         };
@@ -11402,16 +11482,17 @@ mod tests {
                     } else if columns >= 56 {
                         let (prefix, elapsed) = line.rsplit_once(" tok").unwrap();
                         prefix.ends_with(token)
-                            && elapsed.trim() == if id == "worker" { "2m" } else { "—" }
+                            && (elapsed.trim().is_empty()
+                                || id == "worker" && elapsed.trim() == "2m")
                     } else {
                         line.ends_with(token)
                     },
-                    "{line}"
+                    "{columns}: {line}"
                 );
                 assert_eq!(
                     width(line),
                     columns - usize::from(columns >= 44) * 2,
-                    "{line}"
+                    "{columns}: {line}"
                 );
             }
             let (_, builder) = find_row("worker");
@@ -14332,7 +14413,7 @@ mod tests {
             assert!(line.contains("[· -]"), "{expected}: {line}");
             assert!(line.contains("— tok"), "{expected}: {line}");
             assert!(
-                line.trim_end_matches(" │").ends_with('—'),
+                line.trim_end_matches(" │").ends_with("— tok"),
                 "{expected}: {line}"
             );
         }
