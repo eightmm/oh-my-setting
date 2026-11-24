@@ -240,7 +240,12 @@ fn verify_checkout(selected: &Path) -> Result<(PathBuf, CheckoutKind)> {
     }
 }
 
-pub(crate) fn dispatch(args: &Args, selected: &Path, cancel: &AtomicBool) -> Result<CommandResult> {
+pub(crate) fn dispatch(
+    args: &Args,
+    selected: &Path,
+    cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
+) -> Result<CommandResult> {
     validate_args(args)?;
     let (repo, checkout_kind) = verify_checkout(selected)?;
     let limit = args.int("limit").clamp(1, MAX_LIMIT);
@@ -257,6 +262,7 @@ pub(crate) fn dispatch(args: &Args, selected: &Path, cancel: &AtomicBool) -> Res
         depth,
         include_tests,
         cancel,
+        packaged_helper,
     )?;
     enforce_byte_budget(&mut payload, args.flag("pretty"))?;
     let out = if args.flag("json") {
@@ -453,6 +459,7 @@ fn build_projection(
     depth: i64,
     include_tests: bool,
     cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
 ) -> Result<Value> {
     check(cancel)?;
     let scan = scan_repo_paths(repo, checkout_kind, cancel)?;
@@ -503,6 +510,8 @@ fn build_projection(
                 limit,
                 depth,
                 include_tests,
+                cancel,
+                packaged_helper,
             ));
         }
         IndexAttempt::Empty {
@@ -616,6 +625,8 @@ fn selected_definition(
     graph: &Graph,
     symbol: &Value,
     freshness: &str,
+    cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
 ) -> Option<Value> {
     let path = s(symbol, "path");
     let metadata = &symbol["metadata"];
@@ -729,6 +740,31 @@ fn selected_definition(
     if !valid_decl {
         return None;
     }
+    // A declaration-shaped prefix does not prove identity. Reproduce the
+    // producer's scoped IDs and spans from the selected file's verified bytes.
+    let parsed =
+        build::selected_source_nodes(path, text, packaged_helper.map(Path::to_owned), cancel)
+            .ok()?;
+    let mut matches = parsed.iter().filter(|node| node["id"] == symbol["id"]);
+    let exact = matches.next()?;
+    if matches.next().is_some()
+        || ["name", "kind", "path", "language", "source_digest"]
+            .iter()
+            .any(|key| exact[key] != symbol[key])
+        || [
+            "qualname",
+            "line",
+            "end_line",
+            "signature",
+            "span_complete",
+            "scope_truncated",
+            "signature_truncated",
+        ]
+        .iter()
+        .any(|key| exact["metadata"][key] != metadata[key])
+    {
+        return None;
+    }
     Some(json!({"id":symbol["id"],"line":line,"endLine":end_line,"signature":signature}))
 }
 
@@ -745,6 +781,8 @@ fn build_indexed_projection(
     limit: i64,
     depth: i64,
     include_tests: bool,
+    cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
 ) -> Value {
     let repo_name = repo_basename(repo);
     let include_tests = include_tests || (!node.is_empty() && graph.is_test(node));
@@ -788,7 +826,8 @@ fn build_indexed_projection(
                 .collect();
             selection = json!({"status":"found","node":selected,"breadcrumbs":crumbs,"neighbors":neighbors,"omittedNeighbors":rows.len().saturating_sub(neighbors.len())});
             if node.starts_with("symbol:")
-                && let Some(detail) = selected_definition(repo, graph, record, freshness)
+                && let Some(detail) =
+                    selected_definition(repo, graph, record, freshness, cancel, packaged_helper)
             {
                 selection["definition"] = detail;
             }
