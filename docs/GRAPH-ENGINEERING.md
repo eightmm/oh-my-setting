@@ -1072,9 +1072,9 @@ bounded graph readers. The [native discovery and argv fixtures](../crates/oms-mc
 check the descriptors and the graph viewer resource.
 
 The default `core` discovery profile lists graph render, query, trace, and
-affected alongside shared-state, peer and output-reader tools (13 total). Configure the MCP
+affected alongside shared-state, panel snapshot, peer and output-reader tools (14 total). Configure the MCP
 server environment with `OMS_MCP_TOOL_PROFILE=full` and reconnect to list all
-32 tools, including all 12 graph tools. Both profiles accept calls to
+33 tools, including all 12 graph tools. Both profiles accept calls to
 every registered tool; only discovery is filtered, with unchanged input/output
 contracts and viewer resources. Invalid profiles fail at startup.
 

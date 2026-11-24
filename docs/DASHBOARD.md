@@ -1,7 +1,7 @@
 # Collaboration dashboard
 
 This guide is for operators who need a quick read of recorded OMS collaboration.
-It documents the read-only terminal view and its JSON contract.
+It covers the terminal dashboard, its JSON contract and the status available in project chats.
 
 `oms dashboard` is a read-only terminal view of what OMS knows about a
 repository's collaboration: goal and scope, task/plan and attempt states, which
@@ -146,6 +146,39 @@ When the state source is unavailable, every section derived from state is
 
 ## OMS in Codex and ChatGPT Work
 
+In a Codex project with OMS installed, ask **“@oh-my-setting 이 프로젝트 패널 상태 보여줘. Main과 Lead가 어떤 작업을 하고 있어?”**.
+The `oh-my-setting` plugin supplies Codex hooks, including optional skill
+hints. The project host’s separately configured OMS MCP server (Core or Full)
+supplies the read-only `oms_panel_snapshot` tool. The assistant passes the
+current project checkout in `repo` and reports the snapshot in the conversation.
+For a bundled MCP connection, select the standalone **OMS** marketplace entry
+below.
+
+Both connections use the repository projection from
+`oms dashboard --json --panel-snapshot`. It identifies the repository, branch
+and collection time, the recorded Main and bound Room when available, active
+and recent attempts, current task state, recent operation outcomes, review and
+acceptance counts, and inbox attention. Only attribute a row to a Main or Lead
+when records link them. Provider-native workers without a record have unknown
+status. Ask again in the same chat to refresh.
+
+### How the panel reaches the runtime
+
+| Surface | Data and control path |
+| --- | --- |
+| Codex project chat | The assistant calls the OMS MCP tool. Rust collects project state, attempts and artifact outcomes and returns a bounded snapshot for the reply. |
+| ChatGPT Work content tab | The host renders the plugin’s HTML and forwards its tool requests over MCP. Refresh reads the same Rust dashboard. Start and approval use separate project-scoped tools. |
+| Terminal panel | The Rust TUI calls native OMS panel services directly and can attach to managed tmux sessions. It draws the Board from project and provider records. |
+
+When a user submits a goal through **@OMS**, the selected Main coordinates the
+work on the project host. An authorized provider Lead can delegate to its
+native workers. Their recorded attempts, task updates, results and evidence
+supply later status queries. An approval in the Work tab answers the selected
+Room question. [Terminal panel](TERMINAL-PANEL.md) ·
+[Main and Lead responsibilities](TEAM-ORCHESTRATION-MAIN-POLICY.md).
+
+### Select a Main and give it a goal
+
 In the desktop app, mention **@OMS** in a project chat. For example, ask
 “Use Claude as Main for the docs project and have its leads review the API
 examples.” In the same conversation, ask “What are the leads working on?” or
@@ -170,6 +203,23 @@ and its state.
 The panel below uses seeded project data.
 
 ![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
+
+### If the tab fails before the OMS heading appears
+
+A tab listed in the picker can still lack an MCP connection in the open
+conversation. With the legacy **OMS Panel** preview, a running Codex executor
+listed the installed plugin and could read its HTML globally, while the open
+chat returned `unknown MCP server 'oms-panel'` for both the resource and
+`oms_open_panel`. Reloading the executor’s MCP configuration left that chat
+in the same state.
+
+Open a **new chat in the same project** after enabling the plugin, then select
+the tab there. A fresh isolated Codex app-server conversation successfully
+read the preview HTML and called its opener in this setup. To diagnose a
+specific thread, compare its named `mcpServerStatus/list` and
+`mcpServer/resource/read` results with the host-wide results. Use the server
+name advertised by that plugin. Once the OMS heading appears, a status error
+inside the panel is a separate project-binding or runtime query to diagnose.
 
 ### Register a marketplace once
 
