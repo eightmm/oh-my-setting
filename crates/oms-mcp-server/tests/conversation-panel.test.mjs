@@ -17,7 +17,7 @@ class Element extends EventTarget {
   get scrollHeight() { return this.children.length; }
   get textContent() { return this.children.map(child => child?.textContent ?? child).join(''); }
   set textContent(value) { this.children = [String(value ?? '')]; }
-  add() {}
+  add(child) { this.children.push(child); }
   append(...children) { this.children.push(...children); }
   prepend(...children) { this.children.unshift(...children); }
   setAttribute(name,value) { this.attributes.set(name,value); }
@@ -108,7 +108,8 @@ async function panel(projects, dashboard = {}, options = {}) {
   });
   const document = {getElementById:get, createElement:() => new Element(), title:'',
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
-  const context = createContext({window, document, Option:Element, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
+  class Option extends Element { constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
+  const context = createContext({window, document, Option, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
     ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -1353,7 +1354,7 @@ test('state-chip renders canonical glyph and word across every state family in K
   assert.equal(leadChips[0].textContent, '▶ 실행 중');
   assert.equal(threadChips[0].textContent, '◷ 시간 초과');
   assert.equal(opsChips[0].textContent, '× 실패');
-  assert.equal(activityChips[0].textContent, '✓ 종료됨');
+  assert.equal(activityChips[0].textContent, '✓ 완료');
   assert.equal(taskStatusChips[0].textContent, '! 확인 필요');
   assert.deepEqual(checkChips.map(c => c.textContent), ['× 실패', '✓ 통과', '· 대기 중']);
   assert.doesNotMatch(p.get('command-list').textContent, /\b(working|failed|done|blocked|timed_out)\b/);
@@ -1365,11 +1366,109 @@ test('state-chip renders canonical glyph and word across every state family in K
   assert.equal(leadChips[0].textContent, '▶ Running');
   assert.equal(threadChips[0].textContent, '◷ Timed out');
   assert.equal(opsChips[0].textContent, '× Failed');
-  assert.equal(activityChips[0].textContent, '✓ Exited');
+  assert.equal(activityChips[0].textContent, '✓ Done');
   assert.equal(taskStatusChips[0].textContent, '! Needs you');
   assert.deepEqual(checkChips.map(c => c.textContent), ['× Failed', '✓ Passed', '· Pending']);
   assert.equal(approvalWord.textContent, 'Needs you');
   assert.doesNotMatch(styleCss, /\.thread-dot|\.work-dot|\.lead-state::before|#approval-card\.awaiting-action h2::before/);
+});
+
+test('honest state mapping preserves distinct terminal/live states, unknown raw tokens, neutral Leads count, and relabels attempt options', async () => {
+  const leads = [
+    {room:'r', participant:'lead-1', provider:'claude', role:'lead', task:'Claimed task', state:'claimed'},
+    {room:'r', participant:'lead-2', provider:'codex', role:'lead', task:'Landing task', state:'landing'},
+    {room:'r', participant:'lead-3', provider:'agy', role:'lead', task:'Custom task', state:'paused_x'}
+  ];
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner', participants:leads},
+    activeAttempts:leads,
+    attempts:[
+      {id:'a-cancelled', provider:'codex', tool:'run', task:'t1', room:'r', state:'cancelled'},
+      {id:'a-canceled', provider:'codex', tool:'run', task:'t2', room:'r', state:'canceled'},
+      {id:'a-abandoned', provider:'codex', tool:'run', task:'t3', room:'r', state:'abandoned'},
+      {id:'a-interrupted', provider:'codex', tool:'run', task:'t4', room:'r', state:'interrupted'},
+      {id:'a-closed', provider:'codex', tool:'run', task:'t5', room:'r', state:'closed'},
+      {id:'a-completed', provider:'codex', tool:'run', task:'t6', room:'r', state:'completed'},
+      {id:'a-accepted', provider:'codex', tool:'run', task:'t7', room:'r', state:'accepted'},
+      {id:'a-done', provider:'codex', tool:'run', task:'t8', room:'r', state:'done'},
+      {id:'a-exited', provider:'codex', tool:'run', task:'t9', room:'r', state:'exited'},
+      {id:'a-unknown', provider:'codex', tool:'run', task:'t10', room:'r', state:'paused_x'}
+    ]
+  }, {tools:{
+    oms_panel_chat:a => ({room:a.room, participant:a.participant, source:'room', messages:[],
+      attempts:[
+        {id:'att-1', tool:'peer-review', state:'done', sections:['info']},
+        {id:'att-2', tool:'run', state:'cancelled', sections:['info']},
+        {id:'att-3', tool:'run', state:'landing', sections:['info']},
+        {id:'att-4', tool:'run', state:'paused_x', sections:['info']}
+      ]})
+  }});
+
+  // Leads heading badge shows only a neutral count with no state word or glyph; individual rows carry their own chips.
+  const leadsBadge = p.get('work-dot');
+  assert.equal(leadsBadge.hidden, false);
+  assert.equal(leadsBadge.textContent, '3');
+  assert.doesNotMatch(leadsBadge.textContent, /실행|Running|▶|⟳|▷|!/);
+  assert.doesNotMatch(leadsBadge.className || '', /\bstate-chip\b/);
+
+  const leadChips = stateChips(p.get('leads'));
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ 점유됨', '⟳ 착지 중', '? paused_x']);
+
+  const chips = stateChips(p.get('activity'));
+  assert.deepEqual(chips.map(c => c.textContent), [
+    '⊘ 취소됨', '⊘ 취소됨', '⊘ 중단됨', '◷ 중단됨', '· 닫힘',
+    '✓ 완료', '✓ 검증 완료', '✓ 완료', '✓ 종료됨', '? paused_x'
+  ]);
+  assert.equal(chips[0].getAttribute('data-role'), 'muted');
+  assert.equal(chips[0].getAttribute('data-state'), 'cancelled');
+  assert.equal(chips[1].getAttribute('data-role'), 'muted');
+  assert.equal(chips[2].getAttribute('data-role'), 'muted');
+  assert.equal(chips[3].getAttribute('data-role'), 'warning');
+  assert.equal(chips[4].getAttribute('data-role'), 'muted');
+  assert.equal(chips[5].getAttribute('data-state'), 'completed');
+  assert.notEqual(chips[5].getAttribute('data-state'), chips[6].getAttribute('data-state'));
+  assert.equal(chips[7].getAttribute('data-state'), 'done');
+  assert.equal(chips[8].getAttribute('data-state'), 'exited');
+  assert.equal(chips[9].getAttribute('data-role'), 'muted');
+  assert.equal(p.run('MSG.ko["state.done"]'), p.run('MSG.ko["g.done"]'));
+  assert.equal(p.run('MSG.en["state.done"]'), p.run('MSG.en["g.done"]'));
+
+  // Open chat to populate evidence-attempt select options, then switch language.
+  await p.event('header-main', 'click');
+  const optionTexts = () => p.get('evidence-attempt').children.map(o => o.textContent);
+  assert.deepEqual(optionTexts(), [
+    '호출 선택',
+    'peer-review · att-1 · 완료',
+    'run · att-2 · 취소됨',
+    'run · att-3 · 착지 중',
+    'run · att-4 · ? paused_x'
+  ]);
+
+  await choose(p, 'en');
+  assert.equal(leadsBadge.textContent, '3');
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ Claimed', '⟳ Landing', '? paused_x']);
+  assert.deepEqual(chips.map(c => c.textContent), [
+    '⊘ Cancelled', '⊘ Cancelled', '⊘ Abandoned', '◷ Interrupted', '· Closed',
+    '✓ Completed', '✓ Verified', '✓ Done', '✓ Exited', '? paused_x'
+  ]);
+  assert.deepEqual(optionTexts(), [
+    'Select a call',
+    'peer-review · att-1 · Done',
+    'run · att-2 · Cancelled',
+    'run · att-3 · Landing',
+    'run · att-4 · ? paused_x'
+  ]);
+  assert.doesNotMatch(optionTexts().join('\n'), /완료|취소됨|착지 중|호출 선택/);
+
+  await choose(p, 'ko');
+  assert.deepEqual(optionTexts(), [
+    '호출 선택',
+    'peer-review · att-1 · 완료',
+    'run · att-2 · 취소됨',
+    'run · att-3 · 착지 중',
+    'run · att-4 · ? paused_x'
+  ]);
 });
 
 test('inline project map separates ownership children from dependency chips with directional arrows', async () => {
@@ -1435,6 +1534,9 @@ test('CSS design contracts: control-border token, no suppressed focus outline, f
   assert.match(styleCss, /\.entry\{[^}]*grid-template-columns:minmax\(0,1fr\) auto/);
   const narrowMedia = styleCss.match(/@media \(max-width:28rem\)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/)?.[1] || '';
   assert.doesNotMatch(narrowMedia, /\.entry\b/);
-  // Degraded notice style exists.
+  // Degraded notice style exists; progress vendor pseudo-elements stay in two separate rules.
   assert.match(styleCss, /#status\.degraded\{[^}]*border-left:3px solid var\(--warm\)/);
+  assert.doesNotMatch(styleCss, /::-webkit-progress-value\s*,\s*progress::-moz-progress-bar/);
+  assert.match(styleCss, /progress::-webkit-progress-value\{[^}]*background:var\(--brand\)/);
+  assert.match(styleCss, /progress::-moz-progress-bar\{[^}]*background:var\(--brand\)/);
 });

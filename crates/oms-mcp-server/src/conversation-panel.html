@@ -56,7 +56,8 @@ details[open]>summary::before{transform:rotate(90deg)}
 .alerts-preview{font-weight:400;font-size:.78rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 8rem}
 .approval-idle{font-size:.78rem;padding:.25rem 0}
 .approval-idle:empty{display:none}
-.state-chip{--c:var(--muted);--cbg:var(--tint);display:inline-flex;align-items:center;gap:.26rem;white-space:nowrap;font-size:.74rem;font-weight:650;line-height:1.25;padding:.12rem .42rem;border-radius:.35rem;color:var(--c);background:var(--cbg);border:1px solid color-mix(in srgb,var(--c) 34%,transparent);flex-shrink:0}
+.state-chip,.count-badge{--c:var(--muted);--cbg:var(--tint);display:inline-flex;align-items:center;gap:.26rem;white-space:nowrap;font-size:.74rem;font-weight:650;line-height:1.25;padding:.12rem .42rem;border-radius:.35rem;color:var(--c);background:var(--cbg);border:1px solid color-mix(in srgb,var(--c) 34%,transparent);flex-shrink:0}
+.count-badge{font-variant-numeric:tabular-nums;border-color:var(--line)}
 .state-glyph{font-family:var(--mono);font-size:.82em}
 .state-chip[data-role="info"]{--c:var(--info);--cbg:var(--info-bg)}
 .state-chip[data-role="warning"]{--c:var(--warm);--cbg:var(--warm-bg)}
@@ -146,7 +147,8 @@ a{color:var(--brand);text-underline-offset:.18em}
 .measure p{font-size:.76rem;color:var(--muted)}
 progress{width:100%;height:.28rem;border:0;border-radius:.4rem;overflow:hidden;appearance:none;background:var(--line);accent-color:var(--brand)}
 progress::-webkit-progress-bar{background:var(--line)}
-progress::-webkit-progress-value,progress::-moz-progress-bar{background:var(--brand)}
+progress::-webkit-progress-value{background:var(--brand)}
+progress::-moz-progress-bar{background:var(--brand)}
 .identity{display:flex;flex-wrap:wrap;gap:.1rem .4rem;margin-top:.45rem;padding-top:.45rem;border-top:1px dashed var(--line)}
 .identity dt,.identity dd,#main-state{font-size:.76rem}
 .identity dd{font-weight:500}
@@ -288,7 +290,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 .waiting-dashboard .main-line,.waiting-dashboard #pane-overview>:not(.map-preview):not(#now-work):not(#latest-results),.waiting-dashboard #source-details{display:none}
 .waiting-dashboard #tabs-secondary button:not(#tab-project){visibility:hidden}
 .waiting-dashboard #more-summary{display:none}
-@media (forced-colors:active){:focus-visible{outline:2px solid Highlight;outline-offset:2px}button,input,select,textarea,.state-chip,.map-dep-chip{border:1px solid ButtonBorder}.tabs button[aria-selected="true"]{border-bottom:2px solid Highlight}#status.degraded,#approval-card.awaiting-action{border:1px solid CanvasText;border-left:4px solid Highlight}.choice input:checked+span{outline:2px solid Highlight}.primary{background:Highlight;color:HighlightText;border-color:Highlight}}
+@media (forced-colors:active){:focus-visible{outline:2px solid Highlight;outline-offset:2px}button,input,select,textarea,.state-chip,.count-badge,.map-dep-chip{border:1px solid ButtonBorder}.tabs button[aria-selected="true"]{border-bottom:2px solid Highlight}#status.degraded,#approval-card.awaiting-action{border:1px solid CanvasText;border-left:4px solid Highlight}.choice input:checked+span{outline:2px solid Highlight}.primary{background:Highlight;color:HighlightText;border-color:Highlight}}
 </style>
 </head>
 <body>
@@ -327,7 +329,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
       <button type="button" id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
     <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-      <div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span></h2><span id="work-dot" class="state-chip" data-state="running" data-role="info" hidden><span class="state-glyph" aria-hidden="true">▶</span> <span class="state-word" data-i18n="state.running">실행 중</span></span></div><div id="leads" class="leads"></div>
+      <div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span></h2><span id="work-dot" class="count-badge" hidden></span></div><div id="leads" class="leads"></div>
     </section>
     <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
     <section class="card" id="now-work" aria-labelledby="now-heading">
@@ -680,7 +682,7 @@ ko: {
   'sv.modelcatalog':'로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다.',
   'sv.routes':'프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다.',
   'sv.attribution':'선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다.',
-  'state.running':'실행 중','state.working':'실행 중','state.starting':'실행 중','state.verifying':'검증 중','state.review':'검토 중','state.in_review':'검토 중','state.waiting':'확인 필요','state.waiting_for_input':'확인 필요','state.blocked':'차단됨','state.ready':'대기 완료','state.queued':'대기 중','state.exited':'종료됨','state.done':'종료됨','state.accepted':'검증 완료','state.failed':'실패','state.timed_out':'시간 초과','state.stale':'일부·만료','state.unknown':'미확인',
+  'state.running':'실행 중','state.working':'실행 중','state.starting':'실행 중','state.claimed':'점유됨','state.landing':'착지 중','state.verifying':'검증 중','state.review':'검토 중','state.in_review':'검토 중','state.waiting':'확인 필요','state.waiting_for_input':'확인 필요','state.blocked':'차단됨','state.ready':'대기 완료','state.queued':'대기 중','state.done':'완료','state.completed':'완료','state.exited':'종료됨','state.accepted':'검증 완료','state.closed':'닫힘','state.cancelled':'취소됨','state.abandoned':'중단됨','state.interrupted':'중단됨','state.failed':'실패','state.rejected':'반려됨','state.timed_out':'시간 초과','state.stale':'일부·만료','state.unknown':'미확인',
   'kind.issue':'이슈 #', 'kind.pr':'PR #',
   'git.unknown':'현재 체크아웃의 Git 상태 미확인', 'git.detached':'분리된 HEAD', 'git.dirty':'작업 트리 변경 있음', 'git.clean':'작업 트리 깨끗함', 'git.dirtyUnknown':'작업 트리 미확인',
   'git.upstream':'추적 브랜치 {v}', 'git.ahead':'앞섬 {n}', 'git.behind':'뒤처짐 {n}',
@@ -826,7 +828,7 @@ en: {
   'sv.modelcatalog':'Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.',
   'sv.routes':'Expected routing for the project\'s next call. Only confirmed logical aliases are shown for accounts.',
   'sv.attribution':'Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.',
-  'state.running':'Running','state.working':'Running','state.starting':'Running','state.verifying':'Verifying','state.review':'In review','state.in_review':'In review','state.waiting':'Needs you','state.waiting_for_input':'Needs you','state.blocked':'Blocked','state.ready':'Ready','state.queued':'Pending','state.exited':'Exited','state.done':'Exited','state.accepted':'Verified','state.failed':'Failed','state.timed_out':'Timed out','state.stale':'Stale','state.unknown':'Unknown',
+  'state.running':'Running','state.working':'Running','state.starting':'Running','state.claimed':'Claimed','state.landing':'Landing','state.verifying':'Verifying','state.review':'In review','state.in_review':'In review','state.waiting':'Needs you','state.waiting_for_input':'Needs you','state.blocked':'Blocked','state.ready':'Ready','state.queued':'Pending','state.done':'Done','state.completed':'Completed','state.exited':'Exited','state.accepted':'Verified','state.closed':'Closed','state.cancelled':'Cancelled','state.abandoned':'Abandoned','state.interrupted':'Interrupted','state.failed':'Failed','state.rejected':'Rejected','state.timed_out':'Timed out','state.stale':'Stale','state.unknown':'Unknown',
   'kind.issue':'Issue #', 'kind.pr':'PR #',
   'git.unknown':'Git status of the current checkout is unknown', 'git.detached':'Detached HEAD', 'git.dirty':'Working tree has changes', 'git.clean':'Working tree clean', 'git.dirtyUnknown':'Working tree unknown',
   'git.upstream':'Upstream {v}', 'git.ahead':'Ahead {n}', 'git.behind':'Behind {n}',
@@ -1667,20 +1669,20 @@ function node(tag, text, className) {
 
 const formatCount = n => Number.isFinite(n) ? n.toLocaleString(locale()) : t('unknown');
 const providerName = p => names[p] || p || t('providerUnknown');
-const STATE_META={running:['▶','info'],verifying:['⟳','info'],review:['⚑','warning'],waiting:['!','attention'],blocked:['!','attention'],ready:['▷','accent'],queued:['·','muted'],exited:['✓','success-muted'],accepted:['✓','success'],failed:['×','error'],timed_out:['◷','error'],stale:['~','warning'],unknown:['?','muted']};
-const STATE_ALIAS=Object.fromEntries('running:running,working,starting,active,in_progress,claimed,landing;verifying:verifying;review:review,in_review;waiting:waiting,waiting_approval,waiting_input,waiting_for_input;blocked:blocked;ready:ready;queued:queued,pending,planned,todo,open;exited:exited,done;accepted:accepted,completed,passed,verified,supported;failed:failed,error,guard_stop,orphaned,rejected,cancelled,canceled;timed_out:timed_out,timeout;stale:stale,partial,degraded;unknown:unknown,unclassified,needs_evidence,other'.split(';').flatMap(g=>{const [c,l]=g.split(':');return l.split(',').map(k=>[k,c]);}));
+const STATE_META={running:['▶','info'],claimed:['▷','info'],landing:['⟳','info'],verifying:['⟳','info'],review:['⚑','warning'],waiting:['!','attention'],blocked:['!','attention'],ready:['▷','accent'],queued:['·','muted'],done:['✓','success-muted'],completed:['✓','success-muted'],exited:['✓','success-muted'],accepted:['✓','success'],closed:['·','muted'],cancelled:['⊘','muted'],abandoned:['⊘','muted'],interrupted:['◷','warning'],failed:['×','error'],rejected:['×','error'],timed_out:['◷','error'],stale:['~','warning'],unknown:['?','muted']};
+const STATE_ALIAS=Object.fromEntries('running:working,starting,active,in_progress;review:in_review;waiting:waiting_approval,waiting_input,waiting_for_input;queued:pending,planned,todo,open;accepted:passed,verified,supported;cancelled:canceled;failed:error,guard_stop,orphaned;timed_out:timeout;stale:partial,degraded'.split(';').flatMap(g=>{const [c,l]=g.split(':');return l.split(',').map(k=>[k,c]);}));
 function resolveState(raw,check=false){
-  const norm=typeof raw==='string'?raw.trim().toLowerCase().replace(/[\s-]+/g,'_'):'';
-  const canonical=Object.hasOwn(STATE_ALIAS,norm)?STATE_ALIAS[norm]:'unknown';
-  const [glyph,role]=STATE_META[canonical];
-  return {canonical,glyph,role,key:check?'git.check.'+(['failed','pending','passed','other'].includes(norm)?norm:'unknown'):'state.'+canonical};
+  const text=typeof raw==='string'?raw.trim():'',norm=text.toLowerCase().replace(/[\s-]+/g,'_');
+  const canonical=Object.hasOwn(STATE_META,norm)?norm:Object.hasOwn(STATE_ALIAS,norm)?STATE_ALIAS[norm]:null,[glyph,role]=STATE_META[canonical||'unknown'];
+  if(check) return {canonical:canonical||'unknown',glyph,role,key:'git.check.'+(['failed','pending','passed','other'].includes(norm)?norm:'unknown'),raw:text};
+  return {canonical:canonical||'unknown',glyph,role,key:canonical?'state.'+canonical:text?null:'state.unknown',raw:text};
 }
-const stateLabel=s=>t(resolveState(s).key);
+const stateLabel=s=>{const i=resolveState(s);return i.key?t(i.key):'? '+i.raw;};
 function stateChip(raw,{check=false,extraClass='',labelKey}={}){
   const info=resolveState(raw,check),chip=node('span','',['state-chip',extraClass].filter(Boolean).join(' '));
   chip.setAttribute('data-state',info.canonical);chip.setAttribute('data-role',info.role);
   const glyph=node('span',info.glyph,'state-glyph');glyph.setAttribute('aria-hidden','true');
-  const word=node('span','','state-word');put(word,()=>t(labelKey||info.key));
+  const word=node('span','','state-word');put(word,()=>labelKey?t(labelKey):info.key?t(info.key):info.raw);
   chip.append(glyph,' ',word);return chip;
 }
 function stateWithExit(raw,exit){
@@ -2164,8 +2166,8 @@ function clearProject() {
   for (const id of ['git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status']) el(id).replaceChildren();
   el('git-number').value = ''; el('git-goal').value = ''; el('git-provider').value = '';
   el('approval-card').className = 'card'; el('approval-card').hidden = false;
-  for (const id of ['thread-rows','approval-idle','alerts-count','alerts-preview','latest-operations']) el(id).replaceChildren();
-  for (const id of ['work-threads','plan-strip','acceptance-bar','header-main','approval-badge','alerts-badge','latest-operations']) el(id).hidden = true;
+  for (const id of ['thread-rows','approval-idle','alerts-count','alerts-preview','latest-operations','work-dot']) el(id).replaceChildren();
+  for (const id of ['work-threads','plan-strip','acceptance-bar','header-main','approval-badge','alerts-badge','latest-operations','work-dot']) el(id).hidden = true;
   showTab('overview'); tabScroll.clear();
   updateContext(null);
   retryStart = undefined;
@@ -2380,7 +2382,11 @@ function renderAttempts(page) {
   const select = el('evidence-attempt');
   const choose = new Option('',''); put(choose, () => t('evidence.choose'));
   select.replaceChildren(); select.add(choose);
-  for (const a of availableAttempts) select.add(new Option([a.tool,a.id,a.state && stateLabel(a.state)].filter(Boolean).join(' · '),a.id));
+  for (const a of availableAttempts) {
+    const option = new Option('', a.id);
+    put(option, () => [a.tool, a.id, a.state && stateLabel(a.state)].filter(Boolean).join(' · '));
+    select.add(option);
+  }
   el('chat-evidence').hidden = !availableAttempts.length && !evidenceId;
   if (evidenceId) {
     if (!availableAttempts.some(a => a.id === evidenceId)) {
@@ -2704,7 +2710,9 @@ function renderConversation(d) {
   const active = d.activeAttempts || [];
   const complete = Array.isArray(d.activeAttempts) && !(d.activeAttemptsTrimmed > 0) && d.active === active.length;
   const roomLeads = active.filter(attempt => (readOnly || attempt.room === main.room) && isLead(attempt));
-  el('work-dot').hidden = !roomLeads.length;
+  const dot = el('work-dot');
+  dot.hidden = !roomLeads.length;
+  put(dot, () => roomLeads.length ? formatCount(roomLeads.length) : '');
   if (!roomLeads.length) {
     cards.append(node('p', () => t(complete ? 'lead.none' : 'lead.unseen'), 'muted'));
     return;
