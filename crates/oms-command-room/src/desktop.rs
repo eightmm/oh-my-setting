@@ -2,7 +2,7 @@
 //! The reply goes into the owner's ordinary inbox. Privileged operation grants
 //! keep their separate one-use approval contract.
 use crate::core::Carry;
-use crate::model::{hex, identifier};
+use crate::model::{clean, hex, identifier, member};
 use crate::value::{Value, encode, obj};
 use crate::{Error, Result, Room};
 
@@ -401,5 +401,252 @@ impl Room<'_> {
             return Ok(());
         }
         Err(Error::new("stale or mismatched desktop approval request"))
+    }
+}
+
+pub(crate) fn request_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                matches!(b, b'0'..=b'9' | b'a'..=b'f')
+            }
+        })
+}
+
+impl Room<'_> {
+    /// The unique, joined, native Main of this exact Room, from the app
+    /// connection's bound conversation only. A worker or participant session
+    /// never qualifies.
+    fn assignment_owner(&self, id: &str, consumer: &str, request: &str) -> Result<Value> {
+        identifier(id, "room")?;
+        if self.session.child
+            || self.session.participant.is_some()
+            || !hex(consumer, 32)
+            || !request_uuid(request)
+        {
+            return Err(Error::new(
+                "assignment needs a bound app conversation and a request UUID",
+            ));
+        }
+        let operations = self.operations()?;
+        let attempts = operations
+            .attempts()
+            .iter()
+            .filter(|a| a.tool == "panel-main")
+            .map(|a| ConversationPanelAttempt {
+                room: a.refs.text("panel_room_id"),
+                participant: a.refs["panel_room_participant"]
+                    .as_str()
+                    .unwrap_or(&a.attempt_id),
+                terminal: a.terminal,
+            });
+        let found = self.conversation_main(consumer, attempts)?;
+        operations.check()?;
+        if found.text("conversationBinding") != "matched"
+            || found["conversationMain"].text("room") != id
+            || found["conversationMain"].flag("incomplete")
+        {
+            return Err(Error::new("conversation is not the owner of this Room"));
+        }
+        let room = crate::project(&self.records(id)?)?;
+        let viewer = member(&room, room.text("owner"))?;
+        if room.text("id") != id
+            || room.flag("closed")
+            || room.flag("sealed")
+            || !room["successor"].is_null()
+            || !self.published_room(&room)?
+            || viewer.text("consumer") != consumer
+            || viewer.text("provider") != "codex"
+            || viewer.text("role") != "main"
+        {
+            return Err(Error::new("conversation is not the owner of this Room"));
+        }
+        Ok(room)
+    }
+
+    fn assignment_receipt(&self, room: &Value, request: &str, fresh: Option<bool>) -> Value {
+        let who = format!("ask-{request}");
+        let messages = room.list("messages");
+        let find = |id: String| messages.iter().find(|m| m.text("id") == id);
+        let Some(task) = find(format!("assign-{request}")) else {
+            return obj([("request", request.into()), ("status", "not_found".into())]);
+        };
+        let member = room
+            .list("participants")
+            .iter()
+            .find(|p| p.text("participant") == who);
+        let mut out = obj([
+            ("request", request.into()),
+            ("room", room["id"].clone()),
+            ("participant", who.as_str().into()),
+            (
+                "provider",
+                member.map_or(Value::Null, |p| p["provider"].clone()),
+            ),
+            ("role", member.map_or(Value::Null, |p| p["role"].clone())),
+            ("title", member.map_or(Value::Null, |p| p["label"].clone())),
+            ("task", task["text"].clone()),
+            ("readOnly", true.into()),
+            ("thread", Value::Null),
+            ("status", "assigned".into()),
+            ("operation", Value::Null),
+        ]);
+        if let Some(receipt) = find(format!("dispatch-{request}")) {
+            let Some(operation) = receipt.text("text").strip_prefix("operation ") else {
+                return out;
+            };
+            if receipt.text("sender") != room.text("owner")
+                || receipt.text("recipient") != who
+                || receipt.text("message_kind") != "status"
+                || identifier(operation, "operation").is_err()
+            {
+                return out;
+            }
+            out.set("thread", operation);
+            out.set("status", "started");
+            out.set("operation", operation);
+        }
+        if let Some(fresh) = fresh {
+            out.set("fresh", fresh);
+        }
+        out
+    }
+
+    /// Record one durable read-only provider assignment. `fresh` is true only
+    /// for the call that wrote the intent; every retry observes it instead.
+    pub(crate) fn desktop_assign(
+        &self,
+        id: &str,
+        consumer: &str,
+        request: &str,
+        provider: &str,
+        title: &str,
+        task: &str,
+    ) -> Result<Value> {
+        let room = self.assignment_owner(id, consumer, request)?;
+        let provider = self.services.canonical_provider(provider)?;
+        if !matches!(provider.as_str(), "claude" | "antigravity")
+            || title.is_empty()
+            || title != clean(title, 120)
+            || task.trim().is_empty()
+        {
+            return Err(Error::new(
+                "assignment needs a supported provider, title and task",
+            ));
+        }
+        let owner = room.text("owner").to_owned();
+        let who = format!("ask-{request}");
+        let join = obj([
+            ("kind", "join".into()),
+            ("participant", who.as_str().into()),
+            ("provider", provider.as_str().into()),
+            ("role", "researcher".into()),
+            ("model", Value::Null),
+            ("label", title.into()),
+            ("owns", Vec::<Value>::new().into()),
+            ("parent", owner.as_str().into()),
+        ]);
+        let event = obj([
+            ("kind", "message".into()),
+            ("id", format!("assign-{request}").into()),
+            ("sender", owner.as_str().into()),
+            ("recipient", who.as_str().into()),
+            ("message_kind", "handoff".into()),
+        ]);
+        let applied = self.append_batch_at(
+            id,
+            &[
+                (&join, &format!("Joined: {title}"), Carry::No),
+                (&event, task, Carry::DesktopOwner(consumer)),
+            ],
+        )?;
+        let state = crate::project(&self.records(id)?)?;
+        Ok(self.assignment_receipt(&state, request, Some(applied[1])))
+    }
+
+    pub(crate) fn desktop_assign_status(
+        &self,
+        id: &str,
+        consumer: &str,
+        request: &str,
+    ) -> Result<Value> {
+        self.assignment_owner(id, consumer, request)?;
+        let state = crate::project(&self.records(id)?)?;
+        Ok(self.assignment_receipt(&state, request, None))
+    }
+
+    /// Bind the peer operation the provider launch actually returned.
+    pub(crate) fn desktop_assign_receipt(
+        &self,
+        id: &str,
+        consumer: &str,
+        request: &str,
+        operation: &str,
+    ) -> Result<Value> {
+        let room = self.assignment_owner(id, consumer, request)?;
+        identifier(operation, "operation")?;
+        let event = obj([
+            ("kind", "message".into()),
+            ("id", format!("dispatch-{request}").into()),
+            ("sender", room["owner"].clone()),
+            ("recipient", format!("ask-{request}").into()),
+            ("message_kind", "status".into()),
+        ]);
+        let text = format!("operation {operation}");
+        self.append_at(id, &event, &text, Carry::DesktopOwner(consumer))?;
+        let state = crate::project(&self.records(id)?)?;
+        Ok(self.assignment_receipt(&state, request, None))
+    }
+
+    /// `assign-` and `dispatch-` ids are the only trusted association between
+    /// a Room and a provider thread, so no participant or worker may write them.
+    pub(crate) fn validate_desktop_assignment(
+        &self,
+        state: &Value,
+        e: &Value,
+        text: &str,
+        consumer: &str,
+    ) -> Result<()> {
+        let id = e.text("id");
+        let (dispatch, request) = match id.strip_prefix("assign-") {
+            Some(r) => (false, r),
+            None => (true, id.strip_prefix("dispatch-").unwrap_or("")),
+        };
+        let who = format!("ask-{request}");
+        let owner = state.text("owner");
+        let ok = request_uuid(request)
+            && !self.session.child
+            && self.session.participant.is_none()
+            && member(state, owner).is_ok_and(|p| {
+                p.text("consumer") == consumer
+                    && p.text("role") == "main"
+                    && p.text("provider") == "codex"
+            })
+            && e.text("sender") == owner
+            && e.text("recipient") == who
+            && member(state, &who)
+                .is_ok_and(|p| p.text("role") == "researcher" && p.text("parent") == owner)
+            && if dispatch {
+                e.text("message_kind") == "status"
+                    && state
+                        .list("messages")
+                        .iter()
+                        .any(|m| m.text("id") == format!("assign-{request}"))
+                    && matches!(
+                        text.split_whitespace().collect::<Vec<_>>()[..],
+                        ["operation", op] if identifier(op, "operation").is_ok()
+                    )
+            } else {
+                e.text("message_kind") == "handoff"
+            };
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "assignment records belong to the Room owner's app conversation",
+            ))
+        }
     }
 }

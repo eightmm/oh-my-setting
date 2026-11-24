@@ -28,6 +28,9 @@ const ACTIONS: &[&str] = &[
     "desktop-start-status",
     "desktop-requests",
     "desktop-decide",
+    "desktop-assign",
+    "desktop-assign-status",
+    "desktop-assign-receipt",
 ];
 const VALUES: &[&str] = &[
     "--repo",
@@ -55,11 +58,14 @@ const VALUES: &[&str] = &[
     "--digest",
     "--version",
     "--decision",
+    "--conversation-digest",
+    "--request",
+    "--operation",
     "--queue",
     "--worktree",
 ];
 const FLAGS: &[&str] = &["--clear", "--json", "--exact", "--retry", "--allow-wakeup"];
-pub const HELP: &str = "OMS work rooms: shared threads, addressed messages and explicit consumption.\n\nUsage: oms room ACTION [OPTIONS]\nActions: new join bind scope describe leave close send updates ack show list publish rollover relay-server desktop-start-status desktop-requests desktop-decide\n  --repo PATH             State repository (defaults to inherited room or current repository)\n  --id ID                 Room id (defaults to inherited room)\n  --participant ID        Exact participant (defaults to inherited participant)\n  --provider PROVIDER     Registered provider or adapter (default OMS_AGENT or codex)\n  --role ROLE             main, worker, advisor, reviewer, researcher\n  --model MODEL           Declared model\n  --label TEXT            Bounded plain participant label\n  --native-session ID     Native session id, or current inside Claude; stored only as a hash\n  --replaces ID           join only: atomically resume an exact terminal Main binding\n  --owns PATH             Repeatable declared relative scope, not a write grant\n  --clear                 scope only: clear declared scopes\n  --parent ID             Parent participant\n  --topic TEXT            New room title (default Shared work)\n  --task-id ID            Task identifier for new\n  --to ID                 Exact recipient or all; a worker defaults to its parent\n  --text TEXT             Inline message of 1..4000 UTF-8 bytes\n  --text-file PATH        Message file of at most 4000 bytes\n  --kind KIND             question, answer, note, decision, handoff, status\n  --reply-to ID           Exact message being answered\n  --message-id ID         Stable message identity for idempotent retry\n  --after CURSOR          Opaque updates cursor; never an acknowledgment\n  --message ID            Repeatable exact consumed message id for ack\n  --json                  JSON output\n  --exact                 show only: read this log itself, not its successor\n  --retry                 publish only: explicitly retry an uncertain snapshot; may duplicate output\n  --app APP               publish target codex or claude; default Codex fixed receiver\n  --allow-wakeup          Claude publish only: authorize native inbox delivery which can spend model usage\n  -h, --help              Show this help\n";
+pub const HELP: &str = "OMS work rooms: shared threads, addressed messages and explicit consumption.\n\nUsage: oms room ACTION [OPTIONS]\nActions: new join bind scope describe leave close send updates ack show list publish rollover relay-server desktop-start-status desktop-requests desktop-decide desktop-assign desktop-assign-status desktop-assign-receipt\n  --repo PATH             State repository (defaults to inherited room or current repository)\n  --id ID                 Room id (defaults to inherited room)\n  --participant ID        Exact participant (defaults to inherited participant)\n  --provider PROVIDER     Registered provider or adapter (default OMS_AGENT or codex)\n  --role ROLE             main, worker, advisor, reviewer, researcher\n  --model MODEL           Declared model\n  --label TEXT            Bounded plain participant label\n  --native-session ID     Native session id, or current inside Claude; stored only as a hash\n  --replaces ID           join only: atomically resume an exact terminal Main binding\n  --owns PATH             Repeatable declared relative scope, not a write grant\n  --clear                 scope only: clear declared scopes\n  --parent ID             Parent participant\n  --topic TEXT            New room title (default Shared work)\n  --task-id ID            Task identifier for new\n  --to ID                 Exact recipient or all; a worker defaults to its parent\n  --text TEXT             Inline message of 1..4000 UTF-8 bytes\n  --text-file PATH        Message file of at most 4000 bytes\n  --kind KIND             question, answer, note, decision, handoff, status\n  --reply-to ID           Exact message being answered\n  --message-id ID         Stable message identity for idempotent retry\n  --after CURSOR          Opaque updates cursor; never an acknowledgment\n  --message ID            Repeatable exact consumed message id for ack\n  --json                  JSON output\n  --exact                 show only: read this log itself, not its successor\n  --retry                 publish only: explicitly retry an uncertain snapshot; may duplicate output\n  --app APP               publish target codex or claude; default Codex fixed receiver\n  --allow-wakeup          Claude publish only: authorize native inbox delivery which can spend model usage\n  -h, --help              Show this help\n";
 struct Options {
     action: String,
     values: BTreeMap<String, Vec<OsString>>,
@@ -396,7 +402,13 @@ fn execute(
         let resolved = if !room_id.is_empty()
             && !matches!(
                 o.action.as_str(),
-                "new" | "rollover" | "desktop-decide" | "desktop-start-status"
+                "new"
+                    | "rollover"
+                    | "desktop-decide"
+                    | "desktop-start-status"
+                    | "desktop-assign"
+                    | "desktop-assign-status"
+                    | "desktop-assign-receipt"
             )
             && !o.flag("--exact")
         {
@@ -517,6 +529,25 @@ fn execute(
             ])),
             "desktop-start-status" => core.desktop_start_status(id),
             "desktop-requests" => core.desktop_requests(),
+            "desktop-assign" => core.desktop_assign(
+                id,
+                o.text("--conversation-digest")?.unwrap_or(""),
+                o.text("--request")?.unwrap_or(""),
+                o.text("--provider")?.unwrap_or(""),
+                o.text("--label")?.unwrap_or(""),
+                o.text("--text")?.unwrap_or(""),
+            ),
+            "desktop-assign-status" => core.desktop_assign_status(
+                id,
+                o.text("--conversation-digest")?.unwrap_or(""),
+                o.text("--request")?.unwrap_or(""),
+            ),
+            "desktop-assign-receipt" => core.desktop_assign_receipt(
+                id,
+                o.text("--conversation-digest")?.unwrap_or(""),
+                o.text("--request")?.unwrap_or(""),
+                o.text("--operation")?.unwrap_or(""),
+            ),
             "desktop-decide" => core.desktop_decide(
                 id,
                 o.text("--message")?.unwrap_or(""),

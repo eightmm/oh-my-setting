@@ -200,7 +200,7 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 #git-number { width: 8rem; max-width: 100%; font: inherit; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: .4rem; padding: .28rem .45rem; }
 #git-find { margin: .45rem 0; }
 #git-editor label { display: block; font-size: .82rem; margin: .6rem 0 .2rem; }
-#git-goal { display: block; width: 100%; min-height: 5rem; resize: vertical; margin: 0 0 .5rem; padding: .5rem; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: .4rem; }
+#git-goal, #review-text { display: block; width: 100%; min-height: 5rem; resize: vertical; margin: 0 0 .5rem; padding: .5rem; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: .4rem; }
 #git-editor-status:not(:empty),#git-catalog-status:not(:empty) { margin-top: .3rem; }
 #git-catalog details { border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
 #git-catalog button,#git-content .draft-action { margin-top: .35rem; }
@@ -281,6 +281,15 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
       <h2 id="leads-heading"><span id="work-dot" class="work-dot" aria-hidden="true" hidden></span><span id="lead-scope">Main 아래의 Lead 활동</span></h2><div id="leads" class="leads"></div>
     </section>
     <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
+    <details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
+      <form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
+        <label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
+        <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
+        <button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
+      </fieldset></form><p id="peer-status" class="muted" role="status"></p>
+      <div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
+        <button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
+    </details>
       <details class="card" id="provider-options"><summary data-i18n="providerOptions">Lead 후보 · Codex, Claude, AGY</summary>
         <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
         <button id="provider-load" type="button" data-i18n="providerLoad">호스트 상태 조회</button>
@@ -321,7 +330,21 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
         <div><h3 id="chat-title"></h3><p id="chat-status" class="muted" role="status"></p>
           <button id="chat-older" type="button" data-i18n="chatOlder" hidden>이전 메시지</button>
           <ol class="messages" id="chat-messages" aria-label="시간순 작업방 메시지" data-i18n-attr="aria-label:chatMessages" tabindex="0"></ol>
-          <div id="chat-result"></div><div id="chat-native"></div>
+          <div id="chat-result"></div>
+          <div id="review-share" hidden>
+            <button type="button" id="review-choose" data-i18n="share.choose">검토 결과 첨부</button>
+            <div id="review-preview" hidden>
+              <label for="review-text" data-i18n="share.label">선택한 답변</label>
+              <textarea id="review-text" readonly rows="5"></textarea>
+              <div class="cluster">
+                <button type="button" id="review-submit" data-i18n="share.send">현재 대화로 보내기</button>
+                <button type="button" id="review-copy" data-i18n="share.copy">답변 복사</button>
+                <button type="button" id="review-cancel" data-i18n="share.cancel">취소</button>
+              </div>
+            </div>
+            <p id="review-share-status" role="status" class="muted"></p>
+          </div>
+          <div id="chat-native"></div>
           <section class="history" id="chat-evidence" aria-label="호출별 실행 근거" data-i18n-attr="aria-label:evidenceRegion" hidden>
             <label for="evidence-attempt" data-i18n="evidenceCall">기록된 호출</label> <select id="evidence-attempt"></select>
             <div id="evidence-actions" class="cluster"></div>
@@ -481,6 +504,44 @@ function initLanguage() {
 }
 const MSG = {
 ko: {
+  'share.manual':'이 호스트에서는 복사한 뒤 대화에 붙여넣으세요.',
+  'peer.assign':"읽기 전용 검토 요청",
+  'peer.legend':"이 작업방의 검토자",
+  'peer.provider':"공급자",
+  'peer.prompt':"검토할 내용",
+  'peer.hint':"확인할 코드나 질문을 입력하세요",
+  'peer.start':"검토자 1회 호출",
+  'peer.check':"요청 상태 확인",
+  'peer.chat':"검토 대화 보기",
+  'peer.next':"다른 검토 요청",
+  'peer.role':"연구원",
+  'peer.result':"읽기 전용 검토 결과",
+  'peer.reading':"요청 기록 확인 중…",
+  'peer.sending':"검토 요청을 보내는 중…",
+  'peer.mismatch':"요청 기록이 일치하지 않습니다.",
+  'peer.absent':"기록된 요청이 없습니다.",
+  'peer.badActor':"검토자 기록이 일치하지 않습니다.",
+  'peer.accepted':"{p} 검토 요청 접수 · {title}",
+  'peer.unknown':"검토자 시작 여부를 확인하지 못했습니다. 같은 요청의 상태를 확인하세요.",
+  'peer.error':"{error} · 요청 상태를 확인하세요.",
+  'peer.working':"검토자가 응답을 작성 중입니다.",
+  'peer.empty':"호출이 끝났습니다. 조회한 기록에 답변이 없습니다.",
+  'peer.failed':"검토 호출이 실패했습니다.",
+  'peer.unconfirmed':"검토 요청은 기록되었고 실행 상태는 미확인입니다.",
+  'share.choose':"검토 결과 첨부",
+  'share.label':"선택한 답변",
+  'share.send':"현재 대화로 보내기",
+  'share.copy':"답변 복사",
+  'share.cancel':"취소",
+  'share.preview':"{p}의 답변을 확인한 뒤 전달하세요.",
+  'share.partial':"{p}의 답변 중 아래에 표시된 부분만 전달합니다.",
+  'share.copied':"선택한 답변을 복사했습니다.",
+  'share.select':"답변을 선택했습니다. 복사해 현재 대화에 붙여넣으세요.",
+  'share.already':"이 결과는 이미 전송을 요청했습니다. 현재 대화에서 확인하세요.",
+  'share.sending':"선택한 답변을 보내는 중…",
+  'share.sent':"선택한 답변을 현재 대화로 보냈습니다.",
+  'share.rejected':"호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다.",
+  'share.unknown':"호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요.",
   title:'OMS · 프로젝트 제어', language:'언어 (Language)', project:'프로젝트', refresh:'새로고침',
   unknown:'미확인', noInfo:'정보 없음', providerUnknown:'공급자 미확인', statusUnknown:'상태 미확인', partial:'일부 조회', noRecords:'기록 없음',
   projectDefault:'OMS 프로젝트', selectProject:'프로젝트 선택', draft:'초안', pageN:'{page}페이지', prevPage:'이전 페이지', nextPage:'다음 페이지',
@@ -588,6 +649,44 @@ ko: {
   'mutate.working':'요청을 처리하는 중…'
 },
 en: {
+  'share.manual':'Copy the answer and paste it into this conversation on this host.',
+  'peer.assign':"Request a read-only review",
+  'peer.legend':"Reviewer for this room",
+  'peer.provider':"Provider",
+  'peer.prompt':"Review request",
+  'peer.hint':"Enter the code to check or a question",
+  'peer.start':"Call one reviewer",
+  'peer.check':"Check request status",
+  'peer.chat':"Open review conversation",
+  'peer.next':"Request another review",
+  'peer.role':"Researcher",
+  'peer.result':"Read-only review",
+  'peer.reading':"Checking the request record…",
+  'peer.sending':"Submitting the review request…",
+  'peer.mismatch':"The request record does not match.",
+  'peer.absent':"No recorded request.",
+  'peer.badActor':"The recorded reviewer does not match.",
+  'peer.accepted':"{p} review requested · {title}",
+  'peer.unknown':"Reviewer start is unconfirmed. Check this request’s status.",
+  'peer.error':"{error} · Check this request’s status.",
+  'peer.working':"The reviewer is preparing an answer.",
+  'peer.empty':"The call ended. No answer was found in the records retrieved.",
+  'peer.failed':"The review call failed.",
+  'peer.unconfirmed':"Review request recorded. Execution status is unconfirmed.",
+  'share.choose':"Attach review result",
+  'share.label':"Selected answer",
+  'share.send':"Send to this conversation",
+  'share.copy':"Copy answer",
+  'share.cancel':"Cancel",
+  'share.preview':"Review the answer from {p} before sharing.",
+  'share.partial':"Only the portion of the answer from {p} shown here will be shared.",
+  'share.copied':"Selected answer copied.",
+  'share.select':"Answer selected. Copy and paste it into this conversation.",
+  'share.already':"Sending this result was already requested. Check the conversation.",
+  'share.sending':"Sending the selected answer…",
+  'share.sent':"Selected answer sent to this conversation.",
+  'share.rejected':"The host declined to send the answer. You can copy it instead.",
+  'share.unknown':"Delivery is unconfirmed. Check the conversation before copying the answer.",
   title:'OMS · Project control', language:'Language (언어)', project:'Project', refresh:'Refresh',
   unknown:'Unknown', noInfo:'No data', providerUnknown:'Unknown provider', statusUnknown:'Status unknown', partial:'Partially retrieved', noRecords:'No records',
   projectDefault:'OMS project', selectProject:'Select a project', draft:'Draft', pageN:'Page {page}', prevPage:'Previous page', nextPage:'Next page',
@@ -722,6 +821,7 @@ const gitDrafts = new Map();
 let contextKey;
 let contextQueue = Promise.resolve();
 const tabs = ['overview','chat','activity','usage','git'];
+let peerRoom, peerRequest, peerMember;
 let currentTab = 'overview', dashboardData, members = [], selectedMember, olderCursor, backTarget, chatRows = [];
 let availableAttempts = [], evidenceId, evidenceSection, evidencePage = 1, evidenceNext, evidenceProofs = {};
 const evidenceKeys = ['info','events','files','diff','transcript'];
@@ -730,6 +830,7 @@ const jobs = new Map(), loaded = new Set(), tabScroll = new Map();
 
 function showTab(tab, focus = false, origin) {
   if (tab !== currentTab) {
+    if (currentTab === 'chat' && reviewAttachment) dismissReview(false);
     backTarget = tab === 'chat' ? {tab:currentTab,origin:origin || el('tab-' + currentTab)} : undefined;
     el('chat-back').hidden = !backTarget;
     tabScroll.set(currentTab, window.scrollY || 0);
@@ -911,7 +1012,11 @@ window.addEventListener('message', event => {
   const call = pending.get(msg.id);
   clearTimeout(call.timer);
   pending.delete(msg.id);
-  if (msg.error) call.reject(msg.error.message ? new Error(msg.error.message) : uiError('hostFail'));
+  if (msg.error) {
+    const error = msg.error.message ? new Error(msg.error.message) : uiError('hostFail');
+    error.hostRejected = true;
+    call.reject(error);
+  }
   else call.resolve(msg.result);
 });
 
@@ -1384,7 +1489,15 @@ function render(d) {
   el('view').hidden = false;
 }
 
+function clearPeer(room) {
+  peerRoom = room; peerRequest = peerMember = undefined;
+  el('peer-assignment').open = false; el('peer-assignment').hidden = !room;
+  el('peer-task').value = ''; el('peer-status').textContent = '';
+  el('peer-controls').disabled = busy;
+  for (const id of ['peer-check','peer-chat','peer-next']) el(id).hidden = true;
+}
 function clearProject() {
+  clearPeer(); clearReviewAttachment();
   checkedAt = ''; connectionReady = profileKnown = false; connectionState = 'conn.unknownProject'; hostFacts(); resetConnectionRows();
   el('connection-status').textContent = ''; el('main-scope').textContent = '';
   el('view').hidden = true;
@@ -1476,14 +1589,107 @@ function isMain(attempt) {
 
 function memberKey(m) { return JSON.stringify([m.room,m.participant]); }
 function memberLabel(m) {
-  return [providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role && 'Room ' + m.role, m.participant, m.joined === false && t('member.left')].filter(Boolean).join(' · ');
+  return [providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role === 'researcher' ? t('peer.role') : m.role && 'Room ' + m.role, m.participant, m.joined === false && t('member.left')].filter(Boolean).join(' · ');
 }
 function clearChat() {
+  clearReviewAttachment();
   jobs.delete('chat'); loaded.delete('chat'); olderCursor = undefined; chatRows = [];
   el('chat-older').hidden = true;
   el('chat-messages').replaceChildren(); el('chat-result').replaceChildren(); el('chat-native').replaceChildren();
   clearEvidence(); availableAttempts = []; el('chat-evidence').hidden = true;
 }
+let reviewAttachment;
+const sentReviews = new Set();
+function clearReviewAttachment() {
+  reviewAttachment = undefined;
+  el('review-share').hidden = el('review-preview').hidden = true;
+  el('review-text').value = ''; el('review-choose').hidden = false; el('review-cancel').disabled = false;
+  el('review-share-status').textContent = '';
+}
+function prepareReviewAttachment(page, member) {
+  const operation = page.result?.attempt, text = page.result?.text;
+  if (page.assignment?.state !== 'started' || page.result?.kind !== 'read-only provider' ||
+      typeof operation !== 'string' || !/^ask-[0-9TZ]+-[0-9a-f]+$/.test(operation) ||
+      typeof text !== 'string' || !text.trim() || !member || member.room !== peerScope(dashboardData) ||
+      member.room !== page.room || member.participant !== page.participant || !/^ask-[0-9a-f-]{36}$/.test(member.participant) ||
+      !['claude','antigravity'].includes(member.provider) || page.provider !== member.provider || member.role !== 'researcher') {
+    clearReviewAttachment(); return;
+  }
+  const key = JSON.stringify([project,member.room,member.participant,operation]);
+  if (reviewAttachment?.key === key && reviewAttachment.text === text) return;
+  clearReviewAttachment();
+  reviewAttachment = {key,room:member.room,participant:member.participant,provider:member.provider,operation,text,partial:page.result.truncated === true};
+  el('review-share').hidden = false;
+  el('review-choose').disabled = sentReviews.has(key);
+  if (sentReviews.has(key)) put('review-share-status',() => t('share.already'));
+}
+function currentReview(item) {
+  return currentTab === 'chat' && item && item === reviewAttachment && item.room === peerScope(dashboardData) &&
+    selectedMember?.room === item.room && selectedMember.participant === item.participant && !el('view').hidden;
+}
+el('review-choose').addEventListener('click',() => {
+  const item = reviewAttachment;
+  if (!currentReview(item) || sentReviews.has(item.key)) return;
+  el('review-text').value = item.text;
+  el('review-preview').hidden = false;
+  el('review-submit').hidden = !canMessage; el('review-submit').disabled = false;
+  el('review-choose').hidden = true;
+  put('review-share-status',() => [t(item.partial ? 'share.partial' : 'share.preview',{p:providerName(item.provider)}),!canMessage && t('share.manual')].filter(Boolean).join(' '));
+  el('review-text').focus();
+});
+function dismissReview(focus) {
+  el('review-preview').hidden = true; el('review-choose').hidden = false; el('review-text').value = '';
+  const locked = reviewAttachment && sentReviews.has(reviewAttachment.key);
+  el('review-choose').disabled = Boolean(locked);
+  if (locked) put('review-share-status',() => t('share.already'));
+  else el('review-share-status').textContent = '';
+  if (focus) (locked ? el('chat-title') : el('review-choose')).focus();
+}
+el('review-cancel').addEventListener('click',() => {
+  if (currentReview(reviewAttachment) && !el('review-cancel').disabled) dismissReview(true);
+});
+el('review-copy').addEventListener('click',async () => {
+  const item = reviewAttachment;
+  if (!currentReview(item) || el('review-preview').hidden) return;
+  try {
+    if (!globalThis.navigator?.clipboard?.writeText) throw Error();
+    await navigator.clipboard.writeText(item.text);
+    if (currentReview(item)) put('review-share-status',() => t('share.copied'));
+  } catch {
+    if (!currentReview(item)) return;
+    el('review-text').focus(); el('review-text').select(); put('review-share-status',() => t('share.select'));
+  }
+});
+el('review-submit').addEventListener('click',async () => {
+  const item = reviewAttachment;
+  if (!currentReview(item) || !canMessage || el('review-preview').hidden || sentReviews.has(item.key)) return;
+  sentReviews.add(item.key);
+  el('review-submit').disabled = el('review-cancel').disabled = true;
+  put('review-share-status',() => t('share.sending'));
+  try {
+    const r = await request('ui/message',{role:'user',content:[{type:'text',text:item.text}]});
+    if (!r || typeof r !== 'object') throw Error();
+    const rejected = r.isError === true;
+    if (rejected) sentReviews.delete(item.key);
+    if (!currentReview(item)) return;
+    if (rejected) {
+      el('review-submit').disabled = false;
+      put('review-share-status',() => t('share.rejected'));
+    } else {
+      el('review-preview').hidden = true; el('review-text').value = ''; el('review-choose').hidden = false; el('review-choose').disabled = true;
+      put('review-share-status',() => t('share.sent'));
+    }
+  } catch (error) {
+    if (error.hostRejected) sentReviews.delete(item.key);
+    if (currentReview(item)) {
+      el('review-submit').disabled = !error.hostRejected;
+      put('review-share-status',() => t(error.hostRejected ? 'share.rejected' : 'share.unknown'));
+    }
+  } finally {
+    if (currentReview(item)) el('review-cancel').disabled = false;
+  }
+});
+
 function selectMember(member, origin, attempt) {
   if (!members.some(m => memberKey(m) === memberKey(member))) return;
   if (!selectedMember || memberKey(selectedMember) !== memberKey(member)) clearChat();
@@ -1607,7 +1813,14 @@ function loadChat(before) {
       list.scrollTop = !overlaps || nearEnd ? list.scrollHeight : top;
       const result = el('chat-result'); result.replaceChildren();
       if (page.result?.text) result.append(node('h3', () => t('chat.result'), 'small-title'),
-        node('p',() => [page.result.kind,page.result.attempt,dateLabel(page.result.at),page.result.truncated && t('chat.partial')].filter(Boolean).join(' · '),'muted'), node('p',page.result.text,'message'));
+        node('p',() => [page.result.kind === 'read-only provider' ? t('peer.result') : page.result.kind,page.result.attempt,dateLabel(page.result.at),page.result.truncated && t('chat.partial')].filter(Boolean).join(' · '),'muted'), node('p',page.result.text,'message'));
+      prepareReviewAttachment(page,m);
+      if (page.assignment && !page.result?.text) {
+        const execution = page.assignment.execution;
+        const key = execution?.state === 'running' ? 'peer.working' : execution?.state === 'done' ?
+          (execution.exit === 0 ? 'peer.empty' : 'peer.failed') : 'peer.unconfirmed';
+        result.append(node('p', () => t(key),'muted'));
+      }
       const native = el('chat-native'); native.replaceChildren();
       if (canOpenLinks && page.self === true && m.participant === dashboardData?.conversationMain?.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '')) {
         native.append(action(() => t('chat.native'), () => openHostLink(page.nativeUri,status)));
@@ -1728,7 +1941,60 @@ el('provider-load').addEventListener('click',loadProviderOptions);
 el('provider-options').addEventListener('toggle',() => {
   if (el('provider-options').open && !providerData) loadProviderOptions();
 });
+function peerScope(d) {
+  const m = d?.conversationMain;
+  return !readOnly && d?.conversationBinding === 'matched' && m?.source === 'room-session' && m.state === 'joined' &&
+    m.provider === 'codex' && m.participant && m.incomplete === false ? m.room : undefined;
+}
+async function peerAction(check) {
+  const room = peerScope(dashboardData);
+  if (!room || room !== peerRoom || busy || el('view').hidden || (check ? !peerRequest : peerRequest)) return;
+  const provider = el('peer-provider').value, task = el('peer-task').value.trim();
+  if (!check) {
+    if (!['claude','agy'].includes(provider) || !task || Array.from(task).length > 1000) {el('peer-task').focus(); return;}
+    peerRequest = {room, provider, task, title:Array.from(task).slice(0,24).join(''), requestId:crypto.randomUUID()};
+  }
+  const req = peerRequest, expected = generation, status = el('peer-status');
+  const current = () => generation === expected && peerRequest === req && peerRoom === room;
+  setBusy(true,true); el('peer-controls').disabled = true; el('peer-check').disabled = true;
+  put(status,() => t(check ? 'peer.reading' : 'peer.sending'));
+  try {
+    const result = check ? (await tool('oms_assign_result',{room,requestId:req.requestId},expected))._meta?.assignment :
+      (await tool('oms_assign_provider',req,expected)).structuredContent;
+    if (!current()) return;
+    if (result?.room !== room || result.requestId !== req.requestId) throw uiError('peer.mismatch');
+    if (check && result.status === 'not_found') {
+      clearPeer(room); el('peer-assignment').open = true; put(status,() => t('peer.absent')); return;
+    }
+    const wanted = req.provider === 'agy' ? 'antigravity' : req.provider;
+    if (result.role !== 'researcher' || result.provider !== wanted || result.readOnly !== true ||
+        result.participant !== 'ask-' + req.requestId) throw uiError('peer.badActor');
+    if (['started','recorded'].includes(result.status) && result.operation) {
+      peerMember = {room,participant:result.participant,provider:wanted,role:'researcher',joined:true};
+      if (!members.some(m => memberKey(m) === memberKey(peerMember))) members.push(peerMember);
+      renderMemberList();
+      put(status,() => t('peer.accepted',{p:providerName(wanted),title:req.title}));
+      el('peer-chat').hidden = el('peer-next').hidden = false;
+    } else {
+      put(status,() => t('peer.unknown'));
+    }
+  } catch (error) { if (current()) put(status,() => t('peer.error',{error:error.message})); }
+  finally {
+    if (generation === expected) setBusy(false);
+    if (current()) { el('peer-controls').disabled = true; el('peer-check').disabled = false; el('peer-check').hidden = false; }
+  }
+}
+el('peer-form').addEventListener('submit',event => {event.preventDefault(); peerAction(false);});
+el('peer-check').addEventListener('click',() => peerAction(true));
+el('peer-chat').addEventListener('click',() => {if (peerMember && peerRoom === peerScope(dashboardData)) selectMember(peerMember,el('peer-chat'));});
+el('peer-next').addEventListener('click',() => {
+  if (busy || !peerMember || peerRoom !== peerScope(dashboardData)) return;
+  clearPeer(peerRoom); el('peer-assignment').open = true; el('peer-task').focus();
+});
 function renderConversation(d) {
+  const scope = peerScope(d);
+  if (scope !== peerRoom) clearPeer(scope);
+  el('peer-assignment').hidden = !scope;
   const main = d.conversationMain;
   const joined = !readOnly && (!d.conversationBinding || d.conversationBinding === 'matched') && main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
   const isReadOnly = readOnly;
@@ -1751,6 +2017,7 @@ function renderConversation(d) {
   el('room-leads').hidden = !joined && !readOnly;
   el('git-send').hidden = !canMessage || (!joined && !readOnly);
   members = joined ? (main.participants || []).filter(m => m.room === main.room && typeof m.participant === 'string' && m.participant) : [];
+  if (peerMember && peerMember.room === scope && !members.some(m => memberKey(m) === memberKey(peerMember))) members.push(peerMember);
   if (joined && !members.some(m => m.participant === main.participant)) members.unshift({room:main.room, participant:main.participant, provider:main.provider, role:'main'});
   if (selectedMember) {
     selectedMember = members.find(m => memberKey(m) === memberKey(selectedMember));
@@ -1917,7 +2184,7 @@ function setBusy(value, writing = false) {
   el('view').ariaBusy = String(value);
   el('refresh').disabled = value;
   el('project-choice').disabled = value && writing;
-  el('controls').disabled = value;
+  el('controls').disabled = value; el('peer-controls').disabled = value || Boolean(peerRequest);
   for (const button of el('approvals').querySelectorAll('button')) button.disabled = value;
 }
 

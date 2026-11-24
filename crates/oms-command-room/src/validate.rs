@@ -685,6 +685,38 @@ impl Room<'_> {
                         "result-<participant> ids are reserved for that participant's handoff to its parent",
                     ));
                 }
+                if !carry.active()
+                    && ["assign-", "dispatch-"].iter().any(|prefix| {
+                        e.text("id")
+                            .strip_prefix(prefix)
+                            .is_some_and(crate::desktop::request_uuid)
+                    })
+                {
+                    if !text_checked {
+                        return Err(Error::new("assignment needs a complete unmodified request"));
+                    }
+                    let Carry::DesktopOwner(consumer) = carry else {
+                        return Err(Error::new("assignment records require the bound owner"));
+                    };
+                    self.validate_desktop_assignment(&state, e, text, consumer)?;
+                    let guard = self.operations()?;
+                    for a in guard
+                        .attempts()
+                        .iter()
+                        .filter(|a| a.terminal && a.tool == "panel-main")
+                    {
+                        if a.refs["panel_room_participant"]
+                            .as_str()
+                            .unwrap_or(&a.attempt_id)
+                            == state.text("owner")
+                            && self.same_room(a.refs.text("panel_room_id"), room_id)?
+                        {
+                            return Err(Error::new("conversation is not the owner of this Room"));
+                        }
+                    }
+                    guard.check()?;
+                    proofs.push(guard);
+                }
                 if e.text("id").starts_with("judgment-")
                     && e.text("id") != format!("judgment-{}", e.text("sender"))
                 {

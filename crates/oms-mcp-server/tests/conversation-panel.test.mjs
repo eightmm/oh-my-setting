@@ -77,7 +77,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -899,4 +899,83 @@ test('a Git draft keeps its typed text across languages and a later provider cha
   assert.equal((p.get('git-goal').value.match(/Lead/g) || []).length, 1);
   p.get('git-provider').value = 'codex'; await choose(p, 'ko'); await p.event('git-provider', 'change');
   assert.match(p.get('git-goal').value, /^Codex Lead에게 다음 작업을 배정해 주세요\. .*직접 쓴 문장$/);
+});
+
+test('read-only peer is explicitly requested once, recovered by ID and opened in the exact participant chat',async()=>{
+  const main = {source:'room-session',state:'joined',provider:'codex',room:'work',participant:'main',incomplete:false,participants:[]};
+  const p = await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  assert.equal(p.get('peer-assignment').hidden,false);
+  const starts = () => p.calls.filter(c => c.name === 'oms_assign_provider');
+  assert.equal(starts().length,0);
+  p.host.tools = {oms_assign_provider:()=>{throw new Error('연결 끊김');}};
+  p.get('peer-provider').value='agy'; p.get('peer-task').value='Review project compatibility';
+  await p.event('peer-form','submit'); await p.event('peer-form','submit');
+  assert.equal(starts().length,1);
+  const req=starts()[0].args;
+  assert.equal(req.project,'one'); assert.equal(req.room,'work'); assert.equal(req.provider,'agy');
+  p.host.tools.oms_assign_result = a => ({...a,provider:'antigravity',role:'researcher',readOnly:true,
+    participant:'ask-'+a.requestId,status:'started',operation:'ask-confirmed'});
+  await p.event('peer-check','click');
+  assert.deepEqual({...p.calls.at(-1).args},{room:'work',requestId:req.requestId,project:'one'});
+  p.host.tools.oms_panel_chat = a=>({...a,source:'room',messages:[],result:{kind:'read-only provider',text:'Recorded answer'}});
+  await p.event('peer-chat','click');
+  assert.equal(p.calls.at(-1).args.participant,'ask-'+req.requestId);
+  assert.match(p.get('chat-result').textContent,/Recorded answer/); assert.equal(starts().length,1);
+});
+test('foreign, ambiguous, partially observed, and generic views cannot submit a peer',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'main',incomplete:false};
+  for(const [binding,record,readOnly] of [['unconfirmed',null,false],['ambiguous',main,false],['matched',{...main,incomplete:true},false],['matched',main,true]]){
+    const p=await panel(['one'],{conversationBinding:binding,conversationMain:record},{readOnly});
+    assert.equal(p.get('peer-assignment').hidden,true);
+    p.get('peer-provider').value='claude';p.get('peer-task').value='Inspect'; await p.event('peer-form','submit');
+    assert.equal(p.calls.filter(c=>c.name==='oms_assign_provider').length,0);
+  }
+});
+
+const reviewMember = {role:'researcher',provider:'claude',room:'review-room',participant:'ask-07510448-d1c8-4766-8e1a-ae4451c41dc0'};
+const reviewAnswer = '검증한 결과: partially localized → <evidence> & raw text.';
+async function reviewedPanel(options = {}, response = {}) {
+  const main = {source:'room-session',state:'joined',provider:'codex',room:reviewMember.room,participant:'owner',incomplete:false,participants:[reviewMember]};
+  const p = await panel(['one'],{conversationMain:main,conversationBinding:'matched'},options);
+  p.host.tools = {oms_panel_chat:a=>({...a,source:'room',messages:[],provider:'claude',assignment:{state:'started'},result:{
+    kind:'read-only provider',attempt:'ask-20261124T090000Z-123abcd0',text:reviewAnswer,truncated:true},...response})};
+  await p.event('tab-chat','click');
+  const buttons = p.get('chat-members').children;
+  buttons.find(b => b.textContent.includes(reviewMember.participant)).dispatchEvent(new Event('click'));
+  await setImmediate();
+  return p;
+}
+
+test('review preview and cancel are local, translate instantly, and share only the selected answer once',async()=>{
+  const p = await reviewedPanel({message:true});
+  assert.equal(p.get('review-share').hidden,false); assert.equal(p.host.messages.length,0);
+  await p.event('review-choose','click'); assert.equal(p.get('review-text').value,reviewAnswer);
+  const calls = p.calls.length;
+  await choose(p,'en'); assert.match(p.get('review-share-status').textContent,/Only the portion/);
+  assert.equal(p.get('review-text').value,reviewAnswer); assert.equal(p.calls.length,calls);
+  await p.event('review-cancel','click'); assert.equal(p.get('review-preview').hidden,true); assert.equal(p.get('review-text').value,'');
+  await p.event('review-submit','click'); assert.equal(p.host.messages.length,0);
+  await p.event('review-choose','click'); await choose(p,'ko');
+  await p.event('review-submit','click'); await p.event('review-submit','click');
+  assert.equal(p.host.messages.length,1); assert.equal(p.host.messages[0].content[0].text,reviewAnswer);
+  assert.equal(p.get('review-preview').hidden,true); assert.match(p.get('review-share-status').textContent,/현재 대화로 보냈/);
+  assert.equal(p.calls.length,calls);
+});
+test('review copy fallback, host refusal and stale or unrelated result never implicitly transmit a review',async()=>{
+  for(const message of [true,false]){
+    const p=await reviewedPanel({message}); await choose(p,'en');
+    await p.event('review-choose','click');
+    if(message){p.host.rejectMessage=true; await p.event('review-submit','click'); assert.match(p.get('review-share-status').textContent,/host declined/);}
+    else {assert.equal(p.get('review-submit').hidden,true); await p.event('review-submit','click');assert.match(p.get('review-share-status').textContent,/Copy the answer/);}
+    await p.event('review-copy','click'); assert.equal(p.get('review-text').selected,true); assert.equal(p.host.messages.length,message?1:0);
+    assert.equal(p.get('review-text').value,reviewAnswer);
+    await p.event('tab-overview','click'); assert.equal(p.get('review-preview').hidden,true);
+    await p.event('review-submit','click');assert.equal(p.host.messages.length,message?1:0);
+    await p.open('input',{arguments:{project:'outside'}}); assert.equal(p.get('review-text').value,'');assert.equal(p.get('review-share').hidden,true);
+  }
+  for(const overrides of [{assignment:null},{provider:'antigravity'},{result:{kind:'native-report',text:reviewAnswer}}]){
+    const p=await reviewedPanel({message:true},overrides);
+    assert.equal(p.get('review-share').hidden,true); await p.event('review-choose','click');await p.event('review-submit','click');
+    assert.equal(p.host.messages.length,0);
+  }
 });
