@@ -91,6 +91,11 @@ pub trait Services {
     fn state_root(&self, _repo: &Path) -> Result<Option<PathBuf>> {
         Ok(None)
     }
+    /// Optional shared Plan for a side-effect-free task query. Other paths keep
+    /// their existing state and mutation authority, including explicit files.
+    fn query_state_root(&self, repo: &Path, _requested: &Path) -> Result<Option<PathBuf>> {
+        self.state_root(repo)
+    }
     fn group_membership_resolver(&self) -> Option<GroupResolver> {
         None
     }

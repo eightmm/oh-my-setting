@@ -56,12 +56,39 @@ impl Resolver {
         interrupted: &AtomicBool,
     ) -> Result<PathBuf> {
         let shared = self.resolve(input, interrupted)?;
-        if !allow_foreign
-            && let Some(inherited) = &self.inherited_room
+        if !allow_foreign {
+            self.check_room(&shared, interrupted)?;
+        }
+        Ok(shared)
+    }
+    fn check_room(&self, shared: &Path, interrupted: &AtomicBool) -> Result<()> {
+        if let Some(inherited) = &self.inherited_room
             && self.resolve(inherited, interrupted)? != shared
         {
             return Err("selected repository conflicts with the inherited room repository".into());
         }
+        Ok(())
+    }
+    /// Read an existing shared Plan only after proving this exact checkout is
+    /// in its private managed namespace. An unrelated or unverified local
+    /// fallback cannot serve as a successful parent lookup.
+    pub fn verified_scratch_repository(
+        &self,
+        checkout: &Path,
+        interrupted: &AtomicBool,
+    ) -> Result<PathBuf> {
+        let failure = "managed scratch Plan ownership could not be verified";
+        let parent = managed_scratch_parent(checkout).ok_or(failure)?;
+        storage::private_directory(&parent)?;
+        let (local, is_git) = work_repository(checkout, interrupted)?;
+        if self.child || !is_git || local != checkout {
+            return Err(failure.into());
+        }
+        let shared = self.resolve_checkout(local, interrupted)?;
+        if shared == checkout {
+            return Err(failure.into());
+        }
+        self.check_room(&shared, interrupted)?;
         Ok(shared)
     }
     pub fn native_repository(&self, shared: &Path, interrupted: &AtomicBool) -> Result<PathBuf> {
@@ -81,15 +108,12 @@ impl Resolver {
         if !is_git || self.child {
             return Ok(local);
         }
-        let Some(parent) = harness_residue_parent(&local) else {
+        self.resolve_checkout(local, interrupted)
+    }
+    fn resolve_checkout(&self, local: PathBuf, interrupted: &AtomicBool) -> Result<PathBuf> {
+        let Some(parent) = managed_scratch_parent(&local) else {
             return Ok(local);
         };
-        if !parent
-            .file_name()
-            .is_some_and(|v| v.as_bytes().starts_with(b"oh-my-setting-scratch."))
-        {
-            return Ok(local);
-        }
         let marker_path = parent.join(".oh-my-setting-tmp");
         let (fields, generation) = match marker(&marker_path) {
             Ok(v) => v,
@@ -181,6 +205,15 @@ impl Resolver {
         }
         Ok(main)
     }
+}
+
+/// This spelling identifies a candidate to verify; it does not prove ownership.
+pub fn managed_scratch_parent(worktree: &Path) -> Option<PathBuf> {
+    harness_residue_parent(worktree).filter(|parent| {
+        parent
+            .file_name()
+            .is_some_and(|v| v.as_bytes().starts_with(b"oh-my-setting-scratch."))
+    })
 }
 
 pub fn harness_residue_parent(worktree: &Path) -> Option<PathBuf> {
