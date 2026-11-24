@@ -2459,6 +2459,22 @@ exec '{real_git}' "$@"
     assert_eq!(r.0, 0, "{r:?}");
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     let receipt = V::parse(status.as_bytes()).expect("status json");
+    let (code, observed, err) = iso.run(
+        "land",
+        &repo,
+        &[
+            "wait",
+            "--reviewed-head",
+            &head,
+            "--request",
+            receipt.get("request").text().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let observed = V::parse(observed.as_bytes()).unwrap();
+    assert_eq!(observed.get("receipt_state").text(), Some("awaiting-merge"));
+    assert_eq!(observed.get("phase").text(), Some("pr-recorded"));
     let branch = receipt.get("head_branch").text().unwrap().to_owned();
     // main moved, then the PR merged with exactly the reviewed tree (PR 469 pattern)
     let commit = |tree: &str, parent: &str, msg: &str| {
@@ -2738,6 +2754,168 @@ exec '{real_git}' "$@"
         !calls.contains("pr merge") && calls.matches("pr create").count() == 1,
         "{calls}"
     );
+}
+
+#[test]
+fn land_wait_follows_only_the_exact_private_receipt_and_holder() {
+    let iso = Isolated::new();
+    let (repo, _) = iso.with_remote("observe");
+    let head = iso.commit_file(&repo, "next.txt");
+    let result = iso.run_with_services(
+        "land",
+        &repo,
+        &["--gate", "exit 1", "--ignore-siblings"],
+        &[],
+    );
+    assert_eq!(result.0, 1, "{result:?}");
+    let row = V::parse(iso.run("land", &repo, &["status", "--json"]).1.as_bytes()).unwrap();
+    let stamp = row.get("request").text().unwrap();
+    let directory = fs::read_dir(iso.home.path().join(".local/state/oh-my-setting/land"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let path = directory.join(format!("{stamp}.json"));
+    let holder_path = directory.join("active-holder");
+    let saved = fs::read(&path).unwrap();
+    let saved_holder = fs::read(&holder_path).unwrap();
+    let wait = |request: &str, extra: &[&str]| {
+        let mut args = vec![
+            "wait",
+            "--reviewed-head",
+            &head,
+            "--request",
+            request,
+            "--json",
+        ];
+        args.extend(extra);
+        iso.run("land", &repo, &args)
+    };
+    let json = |r: (i32, String, String)| {
+        assert_eq!(r.0, 0, "{r:?}");
+        V::parse(r.1.as_bytes()).unwrap()
+    };
+    let first = json(wait(stamp, &[]));
+    assert_eq!(first.get("event").text(), Some("terminal"));
+    assert_eq!(first.get("receipt_state").text(), Some("failed"));
+    let cursor = first.get("cursor").text().unwrap();
+    assert_eq!(
+        json(wait(stamp, &["--after", cursor, "--wait-seconds", "50"])),
+        first
+    );
+    let foreign = format!("{head}-{}", "a".repeat(24));
+    assert_ne!(wait(&foreign, &[]).0, 0);
+    assert!(
+        wait(&foreign, &["--after", cursor])
+            .2
+            .contains("cursor does not match")
+    );
+    for args in [
+        vec!["--wait-seconds", "51"],
+        vec!["--merge"],
+        vec!["--request", stamp],
+    ] {
+        assert_ne!(wait(stamp, &args).0, 0);
+    }
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    assert_eq!(fs::read(&holder_path).unwrap(), saved_holder);
+
+    // If the remote head already existed, the PR writer records the exact PR
+    // and publication state without recording a successful push of its own.
+    let mut preexisting = V::parse(&saved).unwrap();
+    preexisting.set("state", "awaiting-merge");
+    preexisting.set("mode", "pr");
+    preexisting.set("gate", obj([("rc", 0usize.into())]));
+    preexisting.set("pr_number", 7usize);
+    preexisting.set("pr_url", "https://example.invalid/pull/7");
+    fs::write(&path, preexisting.json(false).unwrap()).unwrap();
+    assert_eq!(
+        json(wait(stamp, &[])).get("phase").text(),
+        Some("pr-recorded")
+    );
+
+    let mut running = V::parse(&saved).unwrap();
+    running.set("state", "running");
+    running.set(
+        "gate",
+        obj([
+            ("rc", "pending".into()),
+            ("command", "private fixture text".into()),
+        ]),
+    );
+    fs::write(&path, running.json(false).unwrap()).unwrap();
+    let orphan = json(wait(stamp, &[]));
+    assert_eq!(orphan.get("event").text(), Some("holder-unconfirmed"));
+    assert_eq!(orphan.get("activity").text(), Some("not-held"));
+
+    let mut settings = oms_lock::Settings::from_env().unwrap();
+    settings.home = iso.home.path().to_owned();
+    settings.cwd = repo.clone();
+    settings.temp_dir = iso.tmp.clone();
+    settings.lock_dir = None;
+    settings.mode = oms_lock::Mode::Mkdir;
+    let lock = oms_lock::Lock::for_file(&directory.join("active"), settings).unwrap();
+    let guard = lock.try_acquire().unwrap();
+    let pid = std::process::id();
+    let birth = oms_command_operations::lock::process_start(pid).unwrap();
+    let mut holder = obj([
+        ("receipt", format!("{stamp}.json").into()),
+        ("sha", head.clone().into()),
+        ("pid", (pid as usize).into()),
+        ("start", birth.into()),
+    ]);
+    fs::write(&holder_path, holder.json(false).unwrap()).unwrap();
+    let live = json(wait(stamp, &["--after", cursor]));
+    assert_eq!(live.get("event").text(), Some("changed"));
+    assert_eq!(live.get("activity").text(), Some("held"));
+    let cursor = live.get("cursor").text().unwrap();
+    let before = (fs::read(&path).unwrap(), fs::read(&holder_path).unwrap());
+    let end = std::thread::scope(|s| {
+        let observe = || json(wait(stamp, &["--after", cursor, "--wait-seconds", "1"]));
+        let second = s.spawn(observe);
+        let first = observe();
+        assert_eq!(second.join().unwrap(), first);
+        first
+    });
+    assert_eq!(end.get("event").text(), Some("timeout"));
+    assert_eq!(end.get("cursor").text(), Some(cursor));
+    assert_eq!(
+        before,
+        (fs::read(&path).unwrap(), fs::read(&holder_path).unwrap())
+    );
+    let output = end.json(false).unwrap();
+    let output = std::str::from_utf8(&output).unwrap();
+    for private in [
+        "private fixture text",
+        "command",
+        "pid",
+        repo.to_str().unwrap(),
+        stamp,
+    ] {
+        assert!(!output.contains(private), "{output}");
+    }
+    holder.set("start", "not-this-process");
+    fs::write(&holder_path, holder.json(false).unwrap()).unwrap();
+    assert_eq!(
+        json(wait(stamp, &["--after", cursor]))
+            .get("activity")
+            .text(),
+        Some("process-ended")
+    );
+    holder.set("receipt", format!("{foreign}.json"));
+    fs::write(&holder_path, holder.json(false).unwrap()).unwrap();
+    assert_eq!(
+        json(wait(stamp, &[])).get("activity").text(),
+        Some("unmatched")
+    );
+    drop(guard);
+    running.set("repo", "unrelated");
+    fs::write(&path, running.json(false).unwrap()).unwrap();
+    assert_ne!(wait(stamp, &[]).0, 0);
+    fs::write(&path, &saved).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    assert_ne!(wait(stamp, &[]).0, 0);
 }
 
 #[test]

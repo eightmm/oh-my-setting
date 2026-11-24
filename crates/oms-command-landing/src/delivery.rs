@@ -966,6 +966,9 @@ fn land_local(r: &Run<'_>, row: &mut V) -> Result<Output> {
     )
 }
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
+    if o.action("") == "wait" {
+        return crate::wait::execute(c, o);
+    }
     if o.action("") == "reconcile" {
         return crate::reconcile::execute(c, o);
     }

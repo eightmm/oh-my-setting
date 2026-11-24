@@ -7,7 +7,31 @@ use crate::{
 };
 use std::{path::Path, time::Duration};
 
-const MAX_RECEIPT: usize = 64 * 1024;
+pub(super) fn matches_request(head: &str, stamp: &str) -> bool {
+    stamp
+        .strip_prefix(head)
+        .and_then(|s| s.strip_prefix('-'))
+        .is_some_and(|s| hex(s, 24))
+}
+
+pub(super) fn read_private(root: &oms_safe_fs::Root, name: &str) -> Option<Vec<u8>> {
+    root.read_no_follow(
+        Path::new(name),
+        oms_safe_fs::ByteReadOptions {
+            max_bytes: 64 * 1024,
+            missing_ok: false,
+        },
+    )
+    .ok()
+}
+
+pub(super) fn matches_checkout(row: &V, head: &str, stamp: &str, repo_digest: &str) -> bool {
+    row.get("schema") == &1usize.into()
+        && row.get("sha").text() == Some(head)
+        && row.get("request").text() == Some(stamp)
+        && row.get("repo").text() == Some(repo_digest)
+}
+
 const ALLOWED: [&str; 6] = [
     "repo",
     "remote",
@@ -57,10 +81,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "--reviewed-head must be a full lowercase commit id",
     )?;
     require(
-        !o.has("request")
-            || o.get("request")
-                .strip_prefix(&format!("{head}-"))
-                .is_some_and(|h| hex(h, 24)),
+        !o.has("request") || matches_request(head, o.get("request")),
         "--request must be <reviewed-head>-<24 hex>",
     )?;
     let remote = o.value("remote", "origin");
@@ -150,10 +171,6 @@ fn observe(
         R,
         "receipt-store-untrusted"
     );
-    let is_stamp = |n: &str| {
-        n.strip_prefix(&format!("{head}-"))
-            .is_some_and(|h| hex(h, 24))
-    };
     let stamp = if o.has("request") {
         o.get("request").to_owned()
     } else {
@@ -167,7 +184,7 @@ fn observe(
                 .file_name()
                 .to_str()
                 .and_then(|n| n.strip_suffix(".json"))
-                && is_stamp(stem)
+                && matches_request(head, stem)
             {
                 need!(found.is_none(), R, "receipt-ambiguous");
                 found = Some(stem.to_owned());
@@ -179,13 +196,7 @@ fn observe(
     let name = format!("{stamp}.json");
     let raw = tri!(
         c,
-        root.read_no_follow(
-            Path::new(&name),
-            oms_safe_fs::ByteReadOptions {
-                max_bytes: MAX_RECEIPT,
-                missing_ok: false
-            }
-        ),
+        read_private(&root, &name).ok_or(()),
         R,
         "receipt-untrusted"
     );
@@ -195,11 +206,12 @@ fn observe(
     let full_gate = oms_command_plan::floor::split(gate, false)
         .is_ok_and(|words| words == ["bash", "scripts/check.sh", "--parallel"]);
     need!(
-        row.get("schema") == &1usize.into()
-            && string(&row, "sha") == head
-            && string(&row, "request") == stamp
-            && string(&row, "repo") == crate::digest(repo.as_os_str().as_encoded_bytes())
-            && string(&row, "remote") == remote
+        matches_checkout(
+            &row,
+            head,
+            &stamp,
+            &crate::digest(repo.as_os_str().as_encoded_bytes())
+        ) && string(&row, "remote") == remote
             && string(&row, "target") == target
             && string(&row, "mode") == "pr"
             && row.get("gate").get("rc") == &0usize.into()

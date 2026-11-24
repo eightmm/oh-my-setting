@@ -27,6 +27,7 @@ pub mod review;
 pub mod services;
 mod storage;
 mod suggestions;
+mod wait;
 pub mod worktree;
 
 pub use oms_command_operations::value::{V, obj};

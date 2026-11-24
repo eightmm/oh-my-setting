@@ -1298,6 +1298,20 @@ are never pushed with `oms land` (and `patch-land --recover` landings) are not r
 Field names follow the Agent Trace contributor-type vocabulary (`ai`, `human`, `mixed`,
 `unknown`); this is not a claim of compliance with any spec.
 
+`oms land wait --reviewed-head FULL_SHA --request STAMP [--after CURSOR] [--wait-seconds 0..50] [--json]`
+observes one existing private landing receipt from its issuing checkout. Take an immediate
+snapshot, then pass its cursor and a wait duration for the next observation. The cursor
+binds the checkout, request, receipt revision and observed holder. Each waiter samples independently at
+most once a second. Exit 0 reports a local observation, including an unchanged timeout.
+A running receipt without its matching live process and held lock returns immediately
+with `holder-unconfirmed`. The `activity` field distinguishes a free lock, a different
+holder, an ended process and unavailable evidence. A repeated terminal receipt returns
+immediately. If a publisher resumes that exact request, the current holder and previously
+saved outcome are shown together. `awaiting-merge` records PR publication only. The
+observer never queries GitHub, claims a queued request, starts a publisher, or infers a
+merge, closure or installation. Requests queued before their first receipt are unavailable.
+An interrupt exits 130. A missing or untrusted receipt fails without changing any state.
+
 `oms land reconcile --reviewed-head FULL_SHA [--request STAMP] [--remote NAME] [--target BRANCH] [--json]`
 is the observation-only recovery for a PR landing whose reviewed head was merged after the
 target moved, so the delivery ancestor guard refuses a rerun. It writes no receipt, ref,
