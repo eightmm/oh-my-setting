@@ -122,6 +122,8 @@ pub(crate) fn render(
                 "  - write_to_file".into(),
                 "  - run_command".into(),
             ]);
+        } else {
+            lines.push("inheritMcp: false".into());
         }
         lines.extend(["---".into(), String::new(), body]);
         return Ok(lines.join("\n"));
