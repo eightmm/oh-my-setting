@@ -278,7 +278,24 @@ fn cross_host_project_reads() {
         );
         let listed = c.call("tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
+        let graph_tool = tools
+            .iter()
+            .find(|t| t["name"] == "oms_panel_project_graph")
+            .unwrap();
+        assert_eq!(graph_tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(graph_tool["annotations"]["destructiveHint"], false);
+        assert_eq!(graph_tool["inputSchema"]["additionalProperties"], false);
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("repo")
+                .is_none()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("project")
+                .is_some()
+        );
         let opener = tools
             .iter()
             .find(|t| t["name"] == "oms_open_panel")
@@ -371,6 +388,31 @@ fn cross_host_project_reads() {
         payload(&partial_reply)["dashboard"]["observation"],
         partial_obs
     );
+    // Generic read-only host can read the bounded repository project graph by alias.
+    let sample_graph = json!({
+        "schema": 1,
+        "kind": "oms-panel-project-graph",
+        "status": "ready",
+        "completeness": "complete",
+        "provenance": {"source":"git-ls-files","mode":"fallback","indexState":"unindexed","verifiedRelationships":false,"readOnly":true,"wroteIndex":false},
+        "scope": {"repository":"repo","focusNode":null,"query":null,"includeTests":false,"depth":2,"limit":40},
+        "limits": {"maxNodes":40,"maxEdges":180,"truncated":false},
+        "counts": {"shown_nodes":1,"total_nodes":1,"shown_edges":0,"total_edges":0,"confidence":{}},
+        "nodes": [{"id":"dir:.","label":"repo","kind":"directory","path":""}],
+        "edges": [],
+        "selection": null
+    });
+    fixture_settings(&source, json!({"stdout":sample_graph.to_string()}));
+    let graph_reply = c.tool("oms_panel_project_graph", json!({"project":"fixture"}));
+    good(&graph_reply);
+    assert_eq!(payload(&graph_reply), sample_graph);
+    assert_eq!(graph_reply["result"]["structuredContent"], sample_graph);
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "graph", "project", "panel", "--repo", repo, "--json", "--limit", "40", "--depth", "2"
+        ])
+    );
 }
 fn mcp_app_binding_boundaries() {
     use std::os::unix::fs::PermissionsExt;
@@ -410,6 +452,21 @@ fn mcp_app_binding_boundaries() {
     ] {
         assert_eq!(ask(&mut c, args, json!({}))["error"]["code"], -32602);
     }
+    assert_eq!(
+        c.tool(
+            "oms_panel_project_graph",
+            json!({"project":"fixture","repo":other})
+        )["error"]["code"],
+        -32602
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({"project":other})),
+        "OMS_PANEL_REPO",
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "OMS_PANEL_REPO",
+    );
     // An alias absent from the catalog (and a raw path) is refused.
     bad(
         &ask(&mut c, json!({"project":other}), json!({})),
@@ -441,6 +498,10 @@ fn mcp_app_binding_boundaries() {
     bind(json!({"fixture":link}));
     bad(
         &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({"project":"fixture"})),
         "OMS_PANEL_REPO",
     );
     // Repointing the alias grants exactly the newly bound checkout.
@@ -491,7 +552,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 11);
+    assert_eq!(tools.as_array().unwrap().len(), 12);
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
@@ -830,6 +891,115 @@ fn conversation_panel() {
             true
         );
     }
+    let panel_graph = json!({
+        "schema": 1,
+        "kind": "oms-panel-project-graph",
+        "status": "ready",
+        "completeness": "complete",
+        "provenance": {"source":"indexed-graph","mode":"indexed","indexState":"present","verifiedRelationships":true,"readOnly":true,"wroteIndex":false},
+        "scope": {"repository":"demo","focusNode":"dir:src","query":null,"includeTests":true,"depth":1,"limit":20},
+        "limits": {"maxNodes":20,"maxEdges":180,"truncated":false},
+        "counts": {"shown_nodes":2,"total_nodes":2,"shown_edges":1,"total_edges":1,"confidence":{"EXTRACTED":1}},
+        "nodes": [
+            {"id":"file:src/a.rs","label":"a.rs","kind":"file","path":"src/a.rs"},
+            {"id":"file:src/b.rs","label":"b.rs","kind":"file","path":"src/b.rs"}
+        ],
+        "edges": [{"source":"file:src/a.rs","target":"file:src/b.rs","relation":"imports","confidence":"EXTRACTED"}],
+        "selection": {"status":"found","requestedId":"dir:src","node":{"id":"dir:src","kind":"directory"},"breadcrumbs":[],"neighbors":[],"omittedNeighbors":0}
+    });
+    fixture_settings(&source, json!({"stdout":panel_graph.to_string()}));
+    assert_eq!(
+        payload(&c.tool(
+            "oms_panel_project_graph",
+            json!({"node":"dir:src","limit":20,"depth":1,"includeTests":true})
+        )),
+        panel_graph
+    );
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "graph",
+            "project",
+            "panel",
+            "--repo",
+            repo,
+            "--json",
+            "--limit",
+            "20",
+            "--depth",
+            "1",
+            "--include-tests",
+            "--node=dir:src"
+        ])
+    );
+    good(&c.tool("oms_panel_project_graph", json!({"query":"panel"})));
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "graph",
+            "project",
+            "panel",
+            "--repo",
+            repo,
+            "--json",
+            "--limit",
+            "40",
+            "--depth",
+            "2",
+            "--query=panel"
+        ])
+    );
+    assert_eq!(
+        c.tool("oms_panel_project_graph", json!({"repo":source}))["error"]["code"],
+        -32602
+    );
+    let before_bad_graph = record(&source);
+    for args in [
+        json!({"node":"dir:src","query":"src"}),
+        json!({"node":"file:../etc/passwd"}),
+        json!({"node":"file:/etc/passwd"}),
+        json!({"node":"--help"}),
+        json!({"query":"   "}),
+        json!({"query":"bad\nquery"}),
+        json!({"limit":0}),
+        json!({"limit":61}),
+        json!({"depth":-1}),
+        json!({"depth":4}),
+        json!({"includeTests":"yes"}),
+    ] {
+        assert_eq!(
+            c.tool("oms_panel_project_graph", args.clone())["result"]["isError"],
+            true,
+            "expected error for {args}"
+        );
+    }
+    assert_eq!(record(&source), before_bad_graph);
+    // Oversized node count from backend is rejected by panel receipt validation.
+    let mut oversize_graph = panel_graph.clone();
+    oversize_graph["nodes"] = json!(vec![json!({"id":"file:a.rs"}); 61]);
+    fixture_settings(&source, json!({"stdout":oversize_graph.to_string()}));
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "unrecognized receipt",
+    );
+    // Outbound secret-shaped text is withheld before leaving the MCP server.
+    let mut secret_graph = panel_graph.clone();
+    secret_graph["nodes"][0]["label"] =
+        json!(concat!("ghp_", "0123456789abcdef0123456789abcdef0123"));
+    fixture_settings(&source, json!({"stdout":secret_graph.to_string()}));
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "outbound scan",
+    );
+    // Invalid project repository stderr maps to a safe user-facing message.
+    fixture_settings(
+        &source,
+        json!({"exit":2,"stdout":"","stderr":"graph: invalid project repository: expected .git\n"}),
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "not a valid OMS or Git repository",
+    );
     let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
     fixture_settings(
         &source,
@@ -950,6 +1120,10 @@ fn conversation_panel() {
     let before = record(&source);
     let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
     bad(&worker.tool("oms_start_main", start.clone()), "parent app");
+    bad(
+        &worker.tool("oms_panel_project_graph", json!({})),
+        "parent app",
+    );
     bad(&worker.tool("oms_list_projects", json!({})), "delegated");
     bad(
         &c.tool(

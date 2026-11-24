@@ -550,6 +550,7 @@ function graphLink(e,out) {
 }
 function readGraph(focus, query = '', limit = 40) {
   if (!explorerBound) return;
+  if (!focus && !query) focus='dir:.';
   const reuse=graphData && (graphData.scope?.focusNode || null)===(focus || null) && query===graphQuery;
   graphQuery=query;graphLimit=limit;graphError='';
   if(!reuse) {graphData=undefined;el('graph-attached').textContent='';paintGraph(true);}

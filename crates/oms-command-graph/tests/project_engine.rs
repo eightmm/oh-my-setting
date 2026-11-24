@@ -38,6 +38,17 @@ impl Fixture {
         }
         Self(root)
     }
+    fn empty() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "oms-project-engine-empty-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        Self(root)
+    }
     fn state(&self) -> PathBuf {
         self.0.join(".oms/project-graph")
     }
@@ -681,4 +692,485 @@ fn rust_workspace_cache_and_impact() {
         affected.to_string().contains("app/tests/check.rs"),
         "{affected}"
     );
+}
+
+#[test]
+fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
+    fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, u64, std::time::SystemTime)>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            let mut entries: Vec<_> = entries.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                out.push((rel, meta.len(), mtime));
+                if meta.is_dir() && !meta.file_type().is_symlink() {
+                    walk(root, &path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+    let run_panel = |repo: &Path, extra: &[&str]| -> (i32, Value, String) {
+        let mut args: Vec<OsString> = vec![
+            "project".into(),
+            "panel".into(),
+            "--repo".into(),
+            repo.as_os_str().to_owned(),
+            "--json".into(),
+        ];
+        args.extend(extra.iter().map(OsString::from));
+        let (code, out, err) = run(&args, repo, &AtomicBool::new(false));
+        let stderr = String::from_utf8_lossy(&err).into_owned();
+        let value = if out.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&out).unwrap_or_else(|e| {
+                panic!(
+                    "invalid panel JSON ({e}): stdout={} stderr={stderr}",
+                    String::from_utf8_lossy(&out)
+                )
+            })
+        };
+        (code, value, stderr)
+    };
+    let git = |repo: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // 1. Invalid project states: plain dir (even nested under a parent git repo), broken .git file, symlinked .git.
+    let outer = Fixture::empty();
+    git(&outer.0, &["init", "-q"]);
+    let plain = outer.0.join("not-a-repo");
+    fs::create_dir(&plain).unwrap();
+    fs::write(plain.join("file.rs"), "pub fn x() {}\n").unwrap();
+    let before_plain = tree_fingerprint(&plain);
+    let (code, _, stderr) = run_panel(&plain, &[]);
+    assert_eq!(code, 2, "plain dir must fail closed, stderr={stderr}");
+    assert!(stderr.contains("invalid project repository"), "{stderr}");
+    assert_eq!(tree_fingerprint(&plain), before_plain);
+
+    let broken_git = outer.0.join("broken-git");
+    fs::create_dir(&broken_git).unwrap();
+    fs::write(broken_git.join(".git"), "gitdir: /nonexistent/outside\n").unwrap();
+    let (code, _, stderr) = run_panel(&broken_git, &[]);
+    assert_eq!(code, 2, "broken .git must fail closed, stderr={stderr}");
+    assert!(stderr.contains("invalid project repository"), "{stderr}");
+
+    let symlink_git = outer.0.join("symlink-git");
+    fs::create_dir(&symlink_git).unwrap();
+    std::os::unix::fs::symlink(outer.0.join(".git"), symlink_git.join(".git")).unwrap();
+    let (code, _, stderr) = run_panel(&symlink_git, &[]);
+    assert_eq!(code, 2, "symlink .git must fail closed, stderr={stderr}");
+    assert!(stderr.contains("invalid project repository"), "{stderr}");
+
+    // 2. Empty git repository -> status=empty, no writes.
+    let empty_repo = Fixture::empty();
+    git(&empty_repo.0, &["init", "-q"]);
+    let before_empty = tree_fingerprint(&empty_repo.0);
+    let (code, empty_dto, stderr) = run_panel(&empty_repo.0, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(empty_dto["schema"], 1);
+    assert_eq!(empty_dto["kind"], "oms-panel-project-graph");
+    assert_eq!(empty_dto["status"], "empty");
+    assert_eq!(empty_dto["completeness"], "complete");
+    assert_eq!(empty_dto["provenance"]["source"], "git-ls-files");
+    assert_eq!(empty_dto["provenance"]["mode"], "fallback");
+    assert_eq!(empty_dto["provenance"]["indexState"], "unindexed");
+    assert_eq!(empty_dto["provenance"]["wroteIndex"], false);
+    assert_eq!(empty_dto["nodes"], json!([]));
+    assert_eq!(empty_dto["edges"], json!([]));
+    assert!(!empty_repo.0.join(".oms").exists());
+    assert_eq!(tree_fingerprint(&empty_repo.0), before_empty);
+
+    // 3. Genuine small unindexed git repo: real structure, secret/symlink filtering, focus/drilldown, query, bounds, zero writes.
+    let unindexed = Fixture::empty();
+    git(&unindexed.0, &["init", "-q"]);
+    fs::create_dir_all(unindexed.0.join("src/sub")).unwrap();
+    fs::create_dir_all(unindexed.0.join("tests")).unwrap();
+    fs::create_dir_all(unindexed.0.join("keys")).unwrap();
+    fs::write(unindexed.0.join("README.md"), "# Demo\n").unwrap();
+    fs::write(
+        unindexed.0.join("src/lib.rs"),
+        "mod util;\npub fn entry() -> i32 { util::helper() }\n",
+    )
+    .unwrap();
+    fs::write(
+        unindexed.0.join("src/util.rs"),
+        "pub fn helper() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    fs::write(unindexed.0.join("src/sub/deep.rs"), "pub fn deep() {}\n").unwrap();
+    fs::write(
+        unindexed.0.join("tests/basic_test.rs"),
+        "#[test]\nfn basic() { let _ = \"src/lib.rs\"; }\n",
+    )
+    .unwrap();
+    // Secret-bearing files must never appear in fallback output or be read.
+    fs::write(
+        unindexed.0.join(".env"),
+        "TOP_SECRET_VALUE=should_never_leak\n",
+    )
+    .unwrap();
+    fs::write(unindexed.0.join("keys/private.pem"), "pem-body\n").unwrap();
+    let outside = outer.0.join("outside.txt");
+    fs::write(&outside, "outside-secret\n").unwrap();
+    std::os::unix::fs::symlink(&outside, unindexed.0.join("src/escape.rs")).unwrap();
+    git(
+        &unindexed.0,
+        &[
+            "add",
+            "README.md",
+            "src/lib.rs",
+            "src/util.rs",
+            "src/sub/deep.rs",
+            "tests/basic_test.rs",
+        ],
+    );
+
+    git(
+        &unindexed.0,
+        &["add", "-f", ".env", "keys/private.pem", "src/escape.rs"],
+    );
+    fs::write(
+        unindexed.0.join("src/untracked_sentinel.rs"),
+        "fn untracked_sentinel() {}",
+    )
+    .unwrap();
+    fs::write(unindexed.0.join("src/문서 파일.rs"), "fn demo() {}").unwrap();
+    git(&unindexed.0, &["add", "src/문서 파일.rs"]);
+    fs::write(
+        unindexed.0.join(".git/info/exclude"),
+        "ignored_sentinel.rs\n",
+    )
+    .unwrap();
+    fs::write(unindexed.0.join("ignored_sentinel.rs"), "fn demo() {}").unwrap();
+    let monitor = outer.0.join("monitor");
+    fs::write(&monitor, "#!/bin/sh\ntouch invoked-hook\n").unwrap();
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o700)).unwrap();
+    git(
+        &unindexed.0,
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+    let before_unindexed = tree_fingerprint(&unindexed.0);
+    let (code, dto, stderr) = run_panel(&unindexed.0, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(dto["status"], "ready");
+    // `src/sub/deep.rs` is at depth 3 while default depth is 2, so first-load marks dir:src/sub expandable.
+    assert_eq!(dto["completeness"], "partial");
+    assert_eq!(dto["provenance"]["source"], "git-ls-files");
+    assert_eq!(dto["provenance"]["mode"], "fallback");
+    assert_eq!(dto["provenance"]["indexState"], "unindexed");
+    assert_eq!(
+        dto["provenance"]["relationshipBasis"],
+        "structural-containment"
+    );
+    assert_eq!(dto["provenance"]["verifiedRelationships"], false);
+    assert_eq!(dto["provenance"]["readOnly"], true);
+    assert_eq!(dto["provenance"]["wroteIndex"], false);
+    // Scope repository is basename only, never absolute path.
+    assert!(!dto["scope"]["repository"].as_str().unwrap().contains('/'));
+    assert!(!dto.to_string().contains("untracked_sentinel"));
+    assert!(!dto.to_string().contains("ignored_sentinel"));
+    assert_eq!(
+        run_panel(&unindexed.0, &["--node=file:src/문서 파일.rs"]).1["selection"]["status"],
+        "found"
+    );
+    assert!(!unindexed.0.join("invoked-hook").exists());
+    assert!(!dto.to_string().contains(".env"));
+    assert!(!dto.to_string().contains("private.pem"));
+    assert!(!dto.to_string().contains("escape.rs"));
+    assert!(!dto.to_string().contains("should_never_leak"));
+    assert!(!dto.to_string().contains("outside-secret"));
+    assert!(dto["limits"]["excludedPaths"].as_u64().unwrap() >= 3);
+    assert_eq!(dto["counts"]["hidden_test_nodes"], 1);
+    let node_ids: Vec<&str> = dto["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert!(node_ids.contains(&"dir:."));
+    assert!(node_ids.contains(&"dir:src"));
+    assert!(node_ids.contains(&"dir:src/sub"));
+    assert!(node_ids.contains(&"file:README.md"));
+    assert!(node_ids.contains(&"file:src/lib.rs"));
+    assert!(!node_ids.contains(&"test:tests/basic_test.rs"));
+    let sub_node = dto["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "dir:src/sub")
+        .unwrap();
+    assert_eq!(sub_node["expandable"], true);
+    assert_eq!(sub_node["omitted_children"], 1);
+    let (code, full_depth, _) = run_panel(&unindexed.0, &["--depth", "3"]);
+    assert_eq!(code, 0);
+    assert_eq!(full_depth["completeness"], "complete");
+    assert!(
+        full_depth["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "file:src/sub/deep.rs")
+    );
+    let edges = dto["edges"].as_array().unwrap();
+    assert!(!edges.is_empty());
+    assert!(
+        edges
+            .iter()
+            .all(|e| e["relation"] == "contains" && e["confidence"] == "STRUCTURAL")
+    );
+
+    // Include tests reveals test file.
+    let (code, with_tests, _) = run_panel(&unindexed.0, &["--include-tests"]);
+    assert_eq!(code, 0);
+    assert!(
+        with_tests["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "test:tests/basic_test.rs")
+    );
+
+    // Focus / drilldown on directory node.
+    let (code, dir_focus, _) = run_panel(&unindexed.0, &["--node=dir:src", "--depth", "1"]);
+    assert_eq!(code, 0);
+    assert_eq!(dir_focus["selection"]["status"], "found");
+    assert_eq!(dir_focus["selection"]["node"]["id"], "dir:src");
+    assert_eq!(
+        dir_focus["selection"]["breadcrumbs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["dir:.", "dir:src"]
+    );
+    let neighbor_ids: Vec<&str> = dir_focus["selection"]["neighbors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert!(neighbor_ids.contains(&"dir:."));
+    assert!(neighbor_ids.contains(&"dir:src/sub"));
+    assert!(neighbor_ids.contains(&"file:src/lib.rs"));
+    assert!(neighbor_ids.contains(&"file:src/util.rs"));
+
+    // Focus on file node.
+    let (code, file_focus, _) = run_panel(&unindexed.0, &["--node=file:src/lib.rs"]);
+    assert_eq!(code, 0);
+    assert_eq!(file_focus["selection"]["status"], "found");
+    assert_eq!(file_focus["selection"]["node"]["id"], "file:src/lib.rs");
+    assert_eq!(file_focus["selection"]["neighbors"][0]["id"], "dir:src");
+
+    // Missing node -> clean not_found state.
+    let (code, missing, _) = run_panel(&unindexed.0, &["--node=dir:does-not-exist"]);
+    assert_eq!(code, 0);
+    assert_eq!(missing["status"], "not_found");
+    assert_eq!(missing["selection"]["status"], "not_found");
+    assert_eq!(missing["nodes"], json!([]));
+
+    // Query match and empty query miss.
+    let (code, qhit, _) = run_panel(&unindexed.0, &["--query=util"]);
+    assert_eq!(code, 0);
+    assert_eq!(qhit["status"], "ready");
+    assert!(
+        qhit["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "file:src/util.rs")
+    );
+    let (code, qmiss, _) = run_panel(&unindexed.0, &["--query=nonexistent_xyz_token"]);
+    assert_eq!(code, 0);
+    assert_eq!(qmiss["status"], "empty");
+    assert_eq!(qmiss["nodes"], json!([]));
+
+    // Scale cap & bounds enforcement.
+    let (code, capped, _) = run_panel(&unindexed.0, &["--limit", "3", "--depth", "1"]);
+    assert_eq!(code, 0);
+    assert!(capped["nodes"].as_array().unwrap().len() <= 3);
+    assert_eq!(capped["limits"]["truncated"], true);
+    assert_eq!(capped["completeness"], "partial");
+
+    for bad_args in [
+        &["--limit", "0"][..],
+        &["--limit", "61"][..],
+        &["--depth", "4"][..],
+        &["--node=dir:src", "--query=src"][..],
+        &["--node=file:../etc/passwd"][..],
+        &["--node=file:/etc/passwd"][..],
+    ] {
+        let (code, _, _) = run_panel(&unindexed.0, bad_args);
+        assert_eq!(code, 2, "expected refusal for {bad_args:?}");
+    }
+
+    // Strictly zero writes during all unindexed reads.
+    assert!(!unindexed.0.join(".oms").exists());
+    assert_eq!(tree_fingerprint(&unindexed.0), before_unindexed);
+
+    // A non-Git checkout cannot authorize a tracked inventory.
+    let oms_only = Fixture::empty();
+    fs::create_dir_all(oms_only.0.join(".oms")).unwrap();
+    fs::create_dir_all(oms_only.0.join("pkg")).unwrap();
+    fs::write(oms_only.0.join("pkg/app.rs"), "pub fn app() {}\n").unwrap();
+    let before_oms_only = tree_fingerprint(&oms_only.0);
+    let (code, oms_dto, stderr) = run_panel(&oms_only.0, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(oms_dto["status"], "unknown");
+    assert_eq!(oms_dto["nodes"], json!([]));
+    assert_eq!(tree_fingerprint(&oms_only.0), before_oms_only);
+
+    // 5. Corrupt index falls back cleanly to partial state without rewriting index.
+    let corrupt_dir = unindexed.0.join(".oms/project-graph");
+    fs::create_dir_all(&corrupt_dir).unwrap();
+    fs::write(corrupt_dir.join("graph.json"), b"{not valid json").unwrap();
+    let before_corrupt = tree_fingerprint(&unindexed.0);
+    let (code, corrupt_dto, stderr) = run_panel(&unindexed.0, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(corrupt_dto["status"], "partial");
+    assert_eq!(corrupt_dto["completeness"], "partial");
+    assert_eq!(corrupt_dto["provenance"]["mode"], "fallback");
+    assert_eq!(corrupt_dto["provenance"]["indexState"], "invalid");
+    assert_eq!(corrupt_dto["provenance"]["wroteIndex"], false);
+    assert_eq!(tree_fingerprint(&unindexed.0), before_corrupt);
+    fs::remove_dir_all(unindexed.0.join(".oms")).unwrap();
+
+    // 6. Genuine indexed repository: uses cached index with verified relationships and zero writes.
+    let indexed = Fixture::empty();
+    git(&indexed.0, &["init", "-q"]);
+    fs::create_dir_all(indexed.0.join("src")).unwrap();
+    fs::create_dir_all(indexed.0.join("tests")).unwrap();
+    fs::set_permissions(indexed.0.join("src"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(indexed.0.join("tests"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        indexed.0.join("src/lib.sh"),
+        "#!/usr/bin/env bash\nhelper() { echo ok; }\n",
+    )
+    .unwrap();
+    fs::write(
+        indexed.0.join("src/main.sh"),
+        "#!/usr/bin/env bash\nsource src/lib.sh\nrun_app() { helper; }\n",
+    )
+    .unwrap();
+    fs::write(
+        indexed.0.join("tests/test-app.sh"),
+        "#!/usr/bin/env bash\nsource src/main.sh\nrun_app\n",
+    )
+    .unwrap();
+    for path in ["src/lib.sh", "src/main.sh", "tests/test-app.sh"] {
+        fs::set_permissions(indexed.0.join(path), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    git(&indexed.0, &["add", "."]);
+    fs::write(
+        indexed.0.join("src/untracked_sentinel.sh"),
+        "untracked_sentinel() { echo ok; }",
+    )
+    .unwrap();
+    let built = indexed.build();
+    assert!(built["stats"]["nodes"].as_u64().unwrap() > 0);
+    let before_indexed = tree_fingerprint(&indexed.0);
+
+    let (code, idx_dto, stderr) = run_panel(&indexed.0, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!idx_dto.to_string().contains("untracked_sentinel"));
+    assert_eq!(idx_dto["status"], "ready");
+    assert_eq!(idx_dto["provenance"]["source"], "indexed-graph");
+    assert_eq!(idx_dto["provenance"]["mode"], "indexed");
+    assert_eq!(idx_dto["provenance"]["indexState"], "present");
+    assert_eq!(idx_dto["provenance"]["indexFreshness"], "cached");
+    assert_eq!(idx_dto["provenance"]["verifiedRelationships"], true);
+    assert_eq!(
+        idx_dto["provenance"]["relationshipBasis"],
+        "verified-and-inferred"
+    );
+    assert_eq!(idx_dto["provenance"]["wroteIndex"], false);
+    assert!(
+        idx_dto["counts"]["confidence"]["EXTRACTED"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "expected verified EXTRACTED edges: {idx_dto}"
+    );
+
+    // Indexed node focus & neighbors.
+    let (code, idx_focus, _) = run_panel(&indexed.0, &["--node=file:src/main.sh"]);
+    assert_eq!(code, 0);
+    assert_eq!(idx_focus["selection"]["status"], "found");
+    assert_eq!(idx_focus["selection"]["node"]["id"], "file:src/main.sh");
+    assert!(
+        idx_focus["selection"]["neighbors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["confidence"] == "EXTRACTED"),
+        "expected EXTRACTED neighbor: {idx_focus}"
+    );
+
+    // Indexed directory drilldown and missing node.
+    let (code, idx_dir, _) = run_panel(&indexed.0, &["--node=dir:src"]);
+    assert_eq!(code, 0);
+    assert_eq!(idx_dir["selection"]["status"], "found");
+    assert_eq!(idx_dir["selection"]["node"]["kind"], "directory");
+    let (code, idx_missing, _) = run_panel(&indexed.0, &["--node=symbol:src/main.sh::nope"]);
+    assert_eq!(code, 0);
+    assert_eq!(idx_missing["status"], "not_found");
+    assert_eq!(idx_missing["selection"]["status"], "not_found");
+
+    // Indexed query.
+    let (code, idx_query, _) = run_panel(&indexed.0, &["--query=helper"]);
+    assert_eq!(code, 0);
+    assert_eq!(idx_query["status"], "ready");
+    assert!(
+        idx_query["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["label"] == "helper" || n["path"] == "src/lib.sh")
+    );
+
+    // Assert zero writes or mtime changes to the index or repo.
+    assert_eq!(tree_fingerprint(&indexed.0), before_indexed);
+
+    // 7. Large repository scale cap keeps payload bounded under MAX_RESPONSE_BYTES.
+    let large = Fixture::empty();
+    git(&large.0, &["init", "-q"]);
+    for d in 0..15 {
+        let sub = large.0.join(format!("mod_{d:02}"));
+        fs::create_dir(&sub).unwrap();
+        for f in 0..6 {
+            fs::write(sub.join(format!("item_{f:02}.rs")), "pub fn f() {}\n").unwrap();
+        }
+    }
+    git(&large.0, &["add", "."]);
+    let before_large = tree_fingerprint(&large.0);
+    let (code, large_dto, stderr) = run_panel(&large.0, &["--limit", "60", "--depth", "3"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(large_dto["nodes"].as_array().unwrap().len() <= 60);
+    assert!(large_dto["edges"].as_array().unwrap().len() <= 180);
+    assert!(large_dto.to_string().len() <= 52_000);
+    assert_eq!(large_dto["limits"]["truncated"], true);
+    assert_eq!(large_dto["completeness"], "partial");
+    assert_eq!(tree_fingerprint(&large.0), before_large);
 }

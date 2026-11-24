@@ -27,6 +27,7 @@ const SNAPSHOT: &str = "oms_panel_snapshot";
 const USAGE: &str = "oms_panel_usage";
 const CHAT: &str = "oms_panel_chat";
 const GIT: &str = "oms_panel_git_status";
+const GRAPH: &str = "oms_panel_project_graph";
 const VIEW: &str = "oms_panel_tui_view";
 const VIEWS: &[&str] = &[
     "overview",
@@ -62,12 +63,26 @@ pub(super) fn runtime_request(request: &Value) -> bool {
         && request["method"] == "tools/call"
         && matches!(
             request["params"]["name"].as_str(),
-            Some(SNAPSHOT | USAGE | CHAT | GIT | VIEW | START | START_STATUS | APPROVALS | DECIDE)
+            Some(
+                SNAPSHOT
+                    | USAGE
+                    | CHAT
+                    | GIT
+                    | GRAPH
+                    | VIEW
+                    | START
+                    | START_STATUS
+                    | APPROVALS
+                    | DECIDE
+            )
         )
 }
 
 fn project_read(name: &str) -> bool {
-    matches!(name, OPEN | PROJECTS | SNAPSHOT | USAGE | GIT | VIEW)
+    matches!(
+        name,
+        OPEN | PROJECTS | SNAPSHOT | USAGE | GIT | GRAPH | VIEW
+    )
 }
 
 pub(super) fn definitions(profile: ToolProfile) -> Value {
@@ -122,6 +137,20 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
             GIT,
             "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId from a linked project to read board pages.",
             json!({"project":project,"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
+            &[],
+            false
+        ),
+        make(
+            GRAPH,
+            "Read a bounded, strictly read-only repository project graph without building or writing an index. Uses the cached project graph when present (distinguishing EXTRACTED vs INFERRED/AMBIGUOUS relationships) or bounded git ls-files structural containment otherwise. Pass node to focus, inspect neighbors, or drill into a directory or file; pass query to filter by name or path.",
+            json!({
+                "project": project,
+                "node": {"type":"string","minLength":1,"maxLength":512,"description":"Optional stable node ID to focus, inspect neighbors, or drill into (for example dir:crates or file:src/lib.rs)."},
+                "query": {"type":"string","minLength":1,"maxLength":256,"description":"Optional literal substring filter over node names and paths."},
+                "limit": {"type":"integer","minimum":1,"maximum":60,"description":"Maximum nodes to return (1-60, default 40)."},
+                "depth": {"type":"integer","minimum":0,"maximum":3,"description":"Maximum traversal or directory depth (0-3, default 2)."},
+                "includeTests": {"type":"boolean","description":"Include test nodes when available (default false)."}
+            }),
             &[],
             false
         ),
@@ -254,6 +283,29 @@ fn alias(value: &str) -> bool {
         && value
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+}
+fn valid_graph_node_id(value: &str) -> bool {
+    if value == "dir:." {
+        return true;
+    }
+    let Some((kind, suffix)) = value.split_once(':') else {
+        return false;
+    };
+    let path = if kind == "symbol" {
+        let Some((path, name)) = suffix.split_once("::") else {
+            return false;
+        };
+        if name.is_empty() || name.contains('/') {
+            return false;
+        }
+        path
+    } else if matches!(kind, "dir" | "file" | "test") {
+        suffix
+    } else {
+        return false;
+    };
+    value.len()<=512 && !value.contains('\\') && !value.chars().any(|c|c.is_control() || matches!(c,'\u{200b}'..='\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}'|'\u{feff}'))
+        && path.split('/').all(|c| !matches!(c,""|"."|".."))
 }
 
 fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
@@ -457,6 +509,7 @@ impl Server<'_> {
                         "boardId",
                         "cursor",
                     ],
+                    GRAPH => &["project", "node", "query", "limit", "depth", "includeTests"],
                     CHAT => &[
                         "project",
                         "room",
@@ -584,6 +637,10 @@ impl Server<'_> {
                 (
                     "message id conflicts",
                     "The question already has a different decision.",
+                ),
+                (
+                    "invalid project repository",
+                    "The selected project is not a valid OMS or Git repository.",
                 ),
             ];
             return Err(known
@@ -791,6 +848,79 @@ impl Server<'_> {
                 }
                 cmd
             }
+            GRAPH => {
+                let node = match args.get("node") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => {
+                        let id = v
+                            .as_str()
+                            .filter(|s| valid_graph_node_id(s))
+                            .ok_or("Invalid graph node id.")?;
+                        Some(id)
+                    }
+                };
+                let query = match args.get("query") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => {
+                        let q = v
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| {
+                                !s.is_empty()
+                                    && s.len() <= 256
+                                    && !s.chars().any(char::is_control)
+                                    && !s.contains('\0')
+                            })
+                            .ok_or("Invalid graph query.")?;
+                        crate::output::outbound(q.as_bytes(), &Value::Null)
+                            .map_err(|_| "Query withheld by the OMS outbound scan.")?;
+                        Some(q)
+                    }
+                };
+                if node.is_some() && query.is_some() {
+                    return Err("Choose either node or query, not both.".into());
+                }
+                let limit = match args.get("limit") {
+                    None | Some(Value::Null) => 40,
+                    Some(v) => v
+                        .as_i64()
+                        .filter(|n| (1..=60).contains(n))
+                        .ok_or("Invalid graph limit.")?,
+                };
+                let depth = match args.get("depth") {
+                    None | Some(Value::Null) => 2,
+                    Some(v) => v
+                        .as_i64()
+                        .filter(|n| (0..=3).contains(n))
+                        .ok_or("Invalid graph depth.")?,
+                };
+                let include_tests = match args.get("includeTests") {
+                    None | Some(Value::Null) => false,
+                    Some(v) => v.as_bool().ok_or("Invalid includeTests flag.")?,
+                };
+                let mut cmd = vec![
+                    "graph".into(),
+                    "project".into(),
+                    "panel".into(),
+                    "--repo".into(),
+                    path,
+                    "--json".into(),
+                    "--limit".into(),
+                    limit.to_string().into(),
+                    "--depth".into(),
+                    depth.to_string().into(),
+                ];
+                if include_tests {
+                    cmd.push("--include-tests".into());
+                }
+                if let Some(id) = node {
+                    cmd.push(format!("--node={id}").into());
+                }
+                if let Some(q) = query {
+                    cmd.push(format!("--query={q}").into());
+                }
+                cmd
+            }
             VIEW => {
                 let view = args["view"]
                     .as_str()
@@ -931,6 +1061,23 @@ impl Server<'_> {
             }
             USAGE if data["providers"].is_array() && data["attempts"].is_array() => Ok(data),
             GIT if data["git"].is_object() && data["github"].is_object() => Ok(data),
+            GRAPH
+                if data["schema"] == 1
+                    && data["kind"] == "oms-panel-project-graph"
+                    && matches!(
+                        data["status"].as_str(),
+                        Some("ready" | "partial" | "empty" | "not_found" | "unknown")
+                    )
+                    && data["provenance"].is_object()
+                    && data["limits"].is_object()
+                    && data["counts"].is_object()
+                    && data["nodes"].is_array()
+                    && data["edges"].is_array()
+                    && data["nodes"].as_array().is_some_and(|n| n.len() <= 60)
+                    && data["edges"].as_array().is_some_and(|e| e.len() <= 180) =>
+            {
+                Ok(data)
+            }
             VIEW if data["view"] == args["view"]
                 && data["page"].as_i64() == Some(args["page"].as_i64().unwrap_or(1))
                 && data["columns"].is_array()

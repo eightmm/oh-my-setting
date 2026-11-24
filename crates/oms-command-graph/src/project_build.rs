@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const GRAPH_LIMIT: usize = 256 * 1024 * 1024;
-const SCHEMA: u32 = 2;
-const VERSION: u32 = 12;
+pub(super) const SCHEMA: u32 = 2;
+pub(super) const VERSION: u32 = 12;
 const EXCLUDES: &[&str] = &[
     ".git",
     ".oms",

@@ -704,9 +704,9 @@ test('Overview binds its map before the dashboard finishes; node navigation and 
   const p = await panel(['one','two'],{}, {context:true});
   p.host.tools = {
     oms_panel_project_graph:({project,node:focus}) => ({
-      schema:1,kind:'oms-panel-project-graph',provenance:{source:'git-ls-files',indexState:'unindexed'},scope:{focusNode:focus || 'dir:.'},status:'ready',selection:focus ? {status:'found',node:{id:focus,kind:'directory',privateDetail:'omit-this'}} : null,nodes:focus ? [{id:'src',label:'src',kind:'directory'},{id:'src/main.rs',label:'main.rs',kind:'file'}] :
+      schema:1,kind:'oms-panel-project-graph',provenance:{source:'git-ls-files',indexState:'unindexed'},scope:{focusNode:focus || 'dir:.'},status:'ready',selection:focus && focus!=='dir:.' ? {status:'found',node:{id:focus,kind:'directory',privateDetail:'omit-this'}} : null,nodes:focus && focus!=='dir:.' ? [{id:'src',label:'src',kind:'directory'},{id:'src/main.rs',label:'main.rs',kind:'file'}] :
         [{id:'dir:.',label:project,kind:'repository'},{id:'src',label:'src',kind:'directory',file_count:5,omitted_children:2},{id:'docs',label:'docs',kind:'directory'}],
-      edges:[{source:focus || 'dir:.',target:focus ? 'src/main.rs' : 'src',relation:'contains',confidence:'STRUCTURAL'}]
+      edges:[{source:focus || 'dir:.',target:focus && focus!=='dir:.' ? 'src/main.rs' : 'src',relation:'contains',confidence:'STRUCTURAL'}]
     }),
     oms_panel_capabilities:() => ({schema:1,commands:[],total:0})
   };
@@ -782,6 +782,7 @@ test('standard hosts retain selectable command help; provenance and inferred ass
     })
   };
   p.get('project-choice').value='one';await p.event('project-choice','change');await p.event('feature-open','click');
+  p.get('map-children').children[0].children.at(-1).dispatchEvent(new Event('click'));await setImmediate();
   assert.match(p.get('map-status').textContent,/오래된 색인/);assert.match(p.get('map-children').textContent,/추출/);assert.doesNotMatch(p.get('map-children').textContent,/추론/);
   p.get('graph-confidence').value='all';await p.event('graph-confidence','change');assert.match(p.get('map-children').textContent,/추론/);
   p.get('graph-filter').value='not-there';await p.event('graph-search','click');assert.match(p.get('map-status').textContent,/일치하는 노드 없음/);
