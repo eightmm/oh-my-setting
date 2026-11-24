@@ -2477,6 +2477,8 @@ ready task instead of recommending admission again. Native consumption and
 completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
 permissions `unknown`, and child cleanup `unsupported`.
 
+#### Recover an unsent first intent
+
 If a first assignment was interrupted before writing its packet and its frozen
 inputs have changed, the owning Main can explicitly retire the original intent.
 Read `refs.native_intent_sha256` from `oms events show --attempt ATTEMPT --json`.

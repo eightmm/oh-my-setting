@@ -282,9 +282,21 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
                 )),
             ),
         ]);
+        // The optional exact Main evidence contract composes with the native
+        // delegate capture: path relocation must retain both proofs and hashes.
+        let review = if next {
+            review
+                .with(
+                    "expected-review-artifact-sha256",
+                    index.text("artifact_sha256"),
+                )
+                .with("expected-review-patch-sha256", index.text("patch_sha256"))
+        } else {
+            review
+        };
         let mut index_bytes = json::canonical(&index).unwrap();
         index_bytes.push(b'\n');
-        fs::write(r.join(".oms/artifacts/index.jsonl"), index_bytes).unwrap();
+        fs::write(r.join(".oms/artifacts/index.jsonl"), &index_bytes).unwrap();
         stop.store(true, Ordering::Relaxed);
         assert!(
             plan.execute_bound_task(&review, &running, Some(&index))
@@ -295,6 +307,44 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
             plan.load().unwrap().task("t1").unwrap().text("state"),
             "running"
         );
+        for flag in [
+            "expected-review-artifact-sha256",
+            "expected-review-patch-sha256",
+        ] {
+            assert!(
+                plan.execute_bound_task(
+                    &review.clone().with(flag, "0".repeat(64)),
+                    &running,
+                    Some(&index),
+                )
+                .unwrap_err()
+                .message
+                .contains("explicit Review digest differs")
+            );
+        }
+        if !next {
+            let oversized = vec![b'A'; oms_command_plan::storage::MAX_JSON + 1];
+            fs::write(r.join(".oms/artifacts/result.md"), &oversized).unwrap();
+            let mut large_index = index.clone();
+            large_index
+                .set("artifact_sha256", string(json::sha(&oversized)))
+                .unwrap();
+            let mut large_index_bytes = json::canonical(&large_index).unwrap();
+            large_index_bytes.push(b'\n');
+            fs::write(r.join(".oms/artifacts/index.jsonl"), large_index_bytes).unwrap();
+            assert!(
+                plan.execute_bound_task(&review, &running, Some(&large_index))
+                    .unwrap_err()
+                    .message
+                    .contains("InputTooLarge")
+            );
+            assert!(!r.join(".oms/plan/delegate-results").exists());
+            assert_eq!(
+                plan.load().unwrap().task("t1").unwrap().text("state"),
+                "running"
+            );
+            fs::write(r.join(".oms/artifacts/index.jsonl"), &index_bytes).unwrap();
+        }
         fs::write(
             r.join(".oms/artifacts/result.md"),
             "changed after verification\n",
@@ -323,6 +373,23 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
                 .text("patch")
                 .contains(".oms/plan/delegate-results/")
         );
+        assert!(retained.opt("delegate_result").is_some());
+        for (field, digest) in [("artifact", "artifact_sha256"), ("patch", "patch_sha256")] {
+            let reference = retained.get("review_evidence").get(field);
+            assert_eq!(reference.get("path"), retained.get(field));
+            assert_eq!(reference.get("sha256"), index.get(digest));
+        }
+        let direct_finish = Request::new(Action::Finish)
+            .with("id", "t1")
+            .with("lease-id", running.lease_id())
+            .with("landed-commit", initial.base_sha());
+        assert!(
+            plan.execute(&direct_finish)
+                .unwrap_err()
+                .message
+                .contains("requires patch-land")
+        );
+        assert_eq!(plan.load().unwrap().task("t1").unwrap(), &retained);
         fs::write(
             r.join(".oms/artifacts/result.md"),
             "original path later changed\n",
@@ -331,6 +398,13 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
         assert_eq!(
             fs::read_to_string(retained.text("artifact")).unwrap(),
             "Actual native result\n"
+        );
+        assert_eq!(
+            plan.execute(&Request::new(Action::EvidenceSnapshot).with("id", "t1"))
+                .unwrap()
+                .code,
+            0,
+            "evidence reads follow the retained paths, not the later changed source"
         );
         let land = Request::new(Action::Land)
             .with("id", "t1")
@@ -347,7 +421,7 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
             plan.execute(&land)
                 .unwrap_err()
                 .message
-                .contains("retained native delegate")
+                .contains("reviewed patch bytes changed")
         );
         fs::write(retained.text("patch"), &retained_patch).unwrap();
         let retained_index_path = r.join(retained.get("delegate_result").get("index").text("path"));
@@ -362,10 +436,198 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
         fs::write(&retained_index_path, retained_index).unwrap();
         if scenario == "legacy-finish" {
             plan.execute(&land).unwrap();
+            let landing = plan.load().unwrap().task("t1").unwrap().clone();
+            assert_eq!(landing.text("state"), "landing");
+            let relocated = ".oms/artifacts/landed-delegate.patch";
+            let finish = Request::new(Action::Finish)
+                .with("id", "t1")
+                .with("lease-id", running.lease_id())
+                .with("patch", relocated)
+                .with(
+                    "expected-landing-receipt-sha256",
+                    json::receipt_digest(&landing).unwrap(),
+                );
+            fs::write(r.join(relocated), "different patch\n").unwrap();
+            assert!(
+                plan.execute(&finish)
+                    .unwrap_err()
+                    .message
+                    .contains("reviewed patch bytes changed")
+            );
+            assert_eq!(plan.load().unwrap().task("t1").unwrap(), &landing);
+            fs::write(r.join(relocated), &retained_patch).unwrap();
+            plan.execute(&finish).unwrap();
+            let done = plan.load().unwrap().task("t1").unwrap().clone();
+            assert_eq!(done.text("state"), "done");
+            assert_eq!(done.text("patch"), relocated);
+            assert_eq!(done.get("review_evidence"), retained.get("review_evidence"));
+            assert_eq!(done.get("delegate_result"), retained.get("delegate_result"));
+            plan.execute(&Request::new(Action::EvidenceSnapshot).with("id", "t1"))
+                .unwrap();
+            continue;
+        }
+        if next {
+            let shown = plan
+                .execute(&Request::new(Action::EvidenceSnapshot).with("id", "t1"))
+                .unwrap();
+            let shown = json::parse(&shown.stdout).unwrap();
+            let binding = plan
+                .landing_review_fence(&shown, running.base_sha())
+                .unwrap();
+            plan.check_landing_review(&binding).unwrap();
+            if scenario == "stale-admission" {
+                publish_contract("2");
+                let err = plan.check_landing_review(&binding).unwrap_err();
+                assert!(
+                    err.message.contains("stale before admission"),
+                    "{}",
+                    err.message
+                );
+                assert_eq!(
+                    plan.load().unwrap().task("t1").unwrap().text("state"),
+                    "review"
+                );
+                continue;
+            }
+            let exact = land.clone().with(
+                "expected-review-binding",
+                String::from_utf8(binding.encode().unwrap()).unwrap(),
+            );
+            let repair = Request::new(Action::Repair)
+                .with("id", "t1")
+                .with("lease-id", running.lease_id())
+                .with(
+                    "expected-review-binding",
+                    String::from_utf8(binding.encode().unwrap()).unwrap(),
+                );
+            let report = fs::read(retained.text("artifact")).unwrap();
+            fs::write(
+                retained.text("artifact"),
+                b"replaced after review preflight\n",
+            )
+            .unwrap();
+            let err = plan.execute(&repair).unwrap_err();
+            assert!(
+                err.message.contains("reviewed artifact bytes changed"),
+                "{}",
+                err.message
+            );
+            assert_eq!(
+                plan.load().unwrap().task("t1").unwrap().text("state"),
+                "review"
+            );
+            let err = plan.execute(&exact).unwrap_err();
+            assert!(
+                err.message.contains("reviewed artifact bytes changed"),
+                "{}",
+                err.message
+            );
+            assert_eq!(
+                plan.load().unwrap().task("t1").unwrap().text("state"),
+                "review"
+            );
+            fs::write(retained.text("artifact"), report).unwrap();
+            let patch = fs::read(retained.text("patch")).unwrap();
+            fs::write(retained.text("patch"), b"replaced same-lease patch\n").unwrap();
+            let err = plan.execute(&repair).unwrap_err();
+            assert!(
+                err.message.contains("reviewed patch bytes changed"),
+                "{}",
+                err.message
+            );
+            let unchanged = plan.load().unwrap();
+            assert_eq!(unchanged.task("t1").unwrap().text("state"), "review");
+            assert!(unchanged.task("t1").unwrap().get("repair_count").is_int(0));
+            fs::write(retained.text("patch"), patch).unwrap();
+            plan.execute(&exact).unwrap();
             assert_eq!(
                 plan.load().unwrap().task("t1").unwrap().text("state"),
                 "landing"
             );
+            let landing = plan.load().unwrap().task("t1").unwrap().clone();
+            let release = Request::new(Action::Release)
+                .with("id", "t1")
+                .with("lease-id", running.lease_id());
+            assert!(
+                plan.execute(&release)
+                    .unwrap_err()
+                    .message
+                    .contains("expected-landing-receipt-sha256")
+            );
+            let release = release.with(
+                "expected-landing-receipt-sha256",
+                json::receipt_digest(&landing).unwrap(),
+            );
+            assert!(
+                plan.execute(&release)
+                    .unwrap_err()
+                    .message
+                    .contains("exact review binding")
+            );
+            assert_eq!(
+                plan.load().unwrap().task("t1").unwrap().text("state"),
+                "landing"
+            );
+            if scenario == "release" {
+                plan.execute(&release.with(
+                    "expected-review-binding",
+                    String::from_utf8(binding.encode().unwrap()).unwrap(),
+                ))
+                .unwrap();
+                let released = plan.load().unwrap();
+                let task = released.task("t1").unwrap();
+                assert_eq!(task.text("state"), "ready");
+                assert!(task.opt("landing_review_sha256").is_none());
+                continue;
+            }
+            let mut done = landing.clone();
+            let frozen = r.join(".oms/artifacts/frozen.patch");
+            fs::write(&frozen, fs::read(retained.text("patch")).unwrap()).unwrap();
+            done.set("patch", string(frozen.to_str().unwrap())).unwrap();
+            let finish = Request::new(Action::Finish)
+                .with("id", "t1")
+                .with("lease-id", running.lease_id())
+                .with("patch", frozen.as_os_str())
+                .with(
+                    "expected-landing-receipt-sha256",
+                    json::receipt_digest(&landing).unwrap(),
+                );
+            assert!(
+                plan.execute(&finish)
+                    .unwrap_err()
+                    .message
+                    .contains("exact review binding")
+            );
+            let finish = finish
+                .with(
+                    "expected-review-binding",
+                    String::from_utf8(binding.encode().unwrap()).unwrap(),
+                )
+                .with(
+                    "expected-landing-done-receipt-sha256",
+                    json::receipt_digest(&done).unwrap(),
+                );
+            let report = fs::read(retained.text("artifact")).unwrap();
+            fs::write(retained.text("artifact"), b"changed while landing\n").unwrap();
+            assert!(
+                plan.execute(&finish)
+                    .unwrap_err()
+                    .message
+                    .contains("reviewed artifact bytes changed")
+            );
+            assert_eq!(
+                plan.load().unwrap().task("t1").unwrap().text("state"),
+                "landing"
+            );
+            fs::write(retained.text("artifact"), report).unwrap();
+            plan.execute(&finish).unwrap();
+            let completed = plan.load().unwrap();
+            assert!(
+                plan.check_landing_done(&completed, "t1", None, index.text("patch_sha256"))
+                    .is_err()
+            );
+            plan.check_landing_done(&completed, "t1", Some(&binding), index.text("patch_sha256"))
+                .unwrap();
             continue;
         }
         if next {

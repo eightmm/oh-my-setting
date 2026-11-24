@@ -51,8 +51,9 @@ lock is acquired, so an expired lease cannot reuse an earlier Context timestamp.
 Bound Review requires the actual native delegate index and its verified
 artifact/patch bytes. Under the Plan lock, the owner checks the index and hashes,
 captures immutable files under the existing Plan artifact owner, and saves
-their references and original indexed provenance with Review. Land rechecks
-those retained hashes against its exact admitted patch. Neither this bridge nor
+their references and original indexed provenance with Review. The selected
+immutable paths and digests also enable the ordinary exact review-evidence
+checks at admission, Land and Finish. Neither this bridge nor
 an indexed worker exit grants completion or publication; changed and late
 results remain evidence without replacing a newer claimant.
 

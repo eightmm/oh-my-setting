@@ -1031,6 +1031,17 @@ impl<'a> Plan<'a> {
             matching.len() == 1 && matching[0] == index,
             "native delegation index changed before capture",
         )?;
+        for (flag, digest) in [
+            ("expected-review-artifact-sha256", "artifact_sha256"),
+            ("expected-review-patch-sha256", "patch_sha256"),
+        ] {
+            if req.has(flag) {
+                require(
+                    req.value(flag)? == index.text(digest),
+                    "explicit Review digest differs from the native delegation index",
+                )?;
+            }
+        }
         let mut request = req.clone();
         let mut retained = object([
             ("schema", number(1)),
@@ -1039,9 +1050,21 @@ impl<'a> Plan<'a> {
             ("lease_id", string(binding.lease_id())),
             ("index", crate::decision::retain_native(&self.store, index)?),
         ]);
-        for (field, digest, suffix) in [
-            ("artifact", "artifact_sha256", ".md"),
-            ("patch", "patch_sha256", ".patch"),
+        for (field, digest, suffix, flag, limit) in [
+            (
+                "artifact",
+                "artifact_sha256",
+                ".md",
+                "expected-review-artifact-sha256",
+                MAX_JSON,
+            ),
+            (
+                "patch",
+                "patch_sha256",
+                ".patch",
+                "expected-review-patch-sha256",
+                MAX_PATCH,
+            ),
         ] {
             let path = index.get(field).str()?;
             require(
@@ -1064,14 +1087,14 @@ impl<'a> Plan<'a> {
                 supplied == absolute,
                 "Plan Review path differs from the native delegation index",
             )?;
-            let bytes = self.source.read(path, MAX_PATCH)?;
+            let bytes = self.source.read(path, limit)?;
             require(
                 !bytes.is_empty() && json::sha(&bytes) == index.text(digest),
                 "native delegation result bytes changed before capture",
             )?;
             let (reference, _) =
                 self.store
-                    .immutable(".oms/plan/delegate-results", &bytes, suffix, MAX_PATCH)?;
+                    .immutable(".oms/plan/delegate-results", &bytes, suffix, limit)?;
             request = request.with(
                 field,
                 self.context
@@ -1079,6 +1102,9 @@ impl<'a> Plan<'a> {
                     .join(reference.text("path"))
                     .as_os_str(),
             );
+            // Carry these captured bytes through the existing admission and
+            // Finish fences as well as the delegate provenance check at Land.
+            request = request.with(flag, reference.text("sha256"));
             retained.set(field, reference)?;
         }
         Ok((request, retained))

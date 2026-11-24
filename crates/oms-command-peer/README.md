@@ -317,10 +317,11 @@ deadline. Capacity text cannot authorize automatic account overflow or model
 fallback for bound work. Codex, Claude and Antigravity JSON transports require
 their native terminal result. Incomplete delivery retains the worktree for
 reconciliation.
-A returned result must match the native index's operation, attempt, provider,
-base and exact file digests. The Plan owner then captures those artifact/patch bytes (at most 16 MiB
-each) and the index using its existing immutable store, rechecks the lease, and
-records Review. Landing verifies those retained digests again. A native worker
+A returned result must match the native index’s operation, attempt, provider, base and exact file
+digests. The Plan owner then captures the artifact (at most 4 MiB), patch (at most
+16 MiB) and index using its existing immutable store, rechecks the lease, and
+records Review with both exact evidence digests. Admission, Land and Finish verify
+those retained bytes again. A native worker
 success does not grant landing, task completion or goal acceptance.
 
 Canonical one-shot repair requires `repair_count=1`, the original reviewed
