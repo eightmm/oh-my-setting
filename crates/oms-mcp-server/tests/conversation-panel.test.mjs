@@ -1405,10 +1405,11 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
       ]})
   }});
 
-  // Leads heading badge shows only a neutral count with no state word or glyph; individual rows carry their own chips.
+  // Leads heading badge shows only a neutral count with an accessible name; individual rows carry their own chips.
   const leadsBadge = p.get('work-dot');
   assert.equal(leadsBadge.hidden, false);
   assert.equal(leadsBadge.textContent, '3');
+  assert.equal(leadsBadge.getAttribute('aria-label'), 'Lead 3개');
   assert.doesNotMatch(leadsBadge.textContent, /실행|Running|▶|⟳|▷|!/);
   assert.doesNotMatch(leadsBadge.className || '', /\bstate-chip\b/);
 
@@ -1447,6 +1448,7 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
 
   await choose(p, 'en');
   assert.equal(leadsBadge.textContent, '3');
+  assert.equal(leadsBadge.getAttribute('aria-label'), '3 Leads');
   assert.deepEqual(leadChips.map(c => c.textContent), ['▷ Claimed', '⟳ Landing', '? paused_x']);
   assert.deepEqual(chips.map(c => c.textContent), [
     '⊘ Cancelled', '⊘ Cancelled', '⊘ Abandoned', '◷ Interrupted', '· Closed',
@@ -1462,6 +1464,7 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
   assert.doesNotMatch(optionTexts().join('\n'), /완료|취소됨|착지 중|호출 선택/);
 
   await choose(p, 'ko');
+  assert.equal(leadsBadge.getAttribute('aria-label'), 'Lead 3개');
   assert.deepEqual(optionTexts(), [
     '호출 선택',
     'peer-review · att-1 · 완료',
@@ -1469,6 +1472,152 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
     'run · att-3 · 착지 중',
     'run · att-4 · ? paused_x'
   ]);
+});
+
+test('round 3 advisories: unified git check states, distinct states, Korean ready label, parent row above focus, lone approval collapse memory', async () => {
+  // 1, 2, 6: Git checks unified lookup, distinct states (orphaned/guard_stop/partial/degraded/error), state.ready Korean label.
+  const storage = memoryStorage();
+  const ap1 = {id:'ap1', version:1, digest:'d1', summary:'First approval', action:'Main scope decision', object:'r1', sender:'codex'};
+  const ap2 = {id:'ap2', version:1, digest:'d2', summary:'Second approval', action:'Run task', object:'r1', sender:'claude'};
+  let approvals = [ap1];
+  let graphPayload = {
+    schema:1, kind:'oms-panel-project-graph', status:'ready', provenance:{source:'indexed-graph'},
+    scope:{focusNode:'dir:src'},
+    nodes:[
+      {id:'dir:root', label:'root', kind:'directory'},
+      {id:'pkg:ws', label:'workspace', kind:'module'},
+      {id:'dir:src', label:'src', kind:'directory'},
+      {id:'file:src/lib.rs', label:'lib.rs', kind:'file'},
+      {id:'file:src/mod.rs', label:'mod.rs', kind:'file'},
+      {id:'file:core.rs', label:'core.rs', kind:'file'}
+    ],
+    edges:[
+      {source:'dir:root', target:'dir:src', relation:'contains', confidence:'STRUCTURAL'},
+      {source:'pkg:ws', target:'dir:src', relation:'owns', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:src/lib.rs', relation:'contains', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:src/mod.rs', relation:'owns', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:core.rs', relation:'imports', confidence:'EXTRACTED'}
+    ]
+  };
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner'},
+    activeAttempts:[{room:'r', participant:'lead-1', provider:'claude', role:'lead', task:'Ready task', state:'ready'}],
+    attempts:[
+      {id:'s-orphaned', provider:'codex', tool:'run', task:'t1', room:'r', state:'orphaned'},
+      {id:'s-guard', provider:'codex', tool:'run', task:'t2', room:'r', state:'guard_stop'},
+      {id:'s-partial', provider:'codex', tool:'run', task:'t3', room:'r', state:'partial'},
+      {id:'s-degraded', provider:'codex', tool:'run', task:'t4', room:'r', state:'degraded'},
+      {id:'s-error', provider:'codex', tool:'run', task:'t5', room:'r', state:'error'},
+      {id:'s-ready', provider:'codex', tool:'run', task:'t6', room:'r', state:'ready'}
+    ]
+  }, {storage, tools:{
+    oms_list_approvals:() => ({approvals}),
+    oms_panel_project_graph:() => graphPayload,
+    oms_panel_git_status:() => ({git:{available:true, branch:'main', dirty:false}, github:{status:'available', repository:'org/repo',
+      pullRequests:[{number:9, title:'Check matrix', headBranch:'fix', baseBranch:'main', checks:{passed:1, failed:1, pending:1, other:1,
+        items:[
+          {name:'c-fail', status:'failed'},
+          {name:'c-pass', status:'passed'},
+          {name:'c-pend', status:'pending'},
+          {name:'c-other', status:'other'},
+          {name:'c-cancel', status:'cancelled'},
+          {name:'c-err', status:'error'},
+          {name:'c-weird', status:'custom_check'},
+          {name:'c-empty', status:''}
+        ]}}]}})
+  }});
+  await p.event('tab-git', 'click');
+
+  // Distinct states + Korean state.ready + error stays failed.
+  const actChips = stateChips(p.get('activity'));
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '? 연결 끊김', '! 가드 정지', '~ 일부', '~ 저하', '× 실패', '▷ 준비됨'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-state')), [
+    'orphaned', 'guard_stop', 'partial', 'degraded', 'failed', 'ready'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-role')), [
+    'warning', 'warning', 'warning', 'warning', 'error', 'accent'
+  ]);
+  assert.equal(p.run('MSG.ko["state.ready"]'), '준비됨');
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), 'Lead 1개');
+
+  // Git checks: one lookup, general-table fallback, ? raw for unknown.
+  const checkChips = stateChips(p.get('git-content'));
+  assert.deepEqual(checkChips.map(c => c.textContent), [
+    '× 실패', '✓ 통과', '· 대기 중', '· 기타', '⊘ 취소됨', '× 실패', '? custom_check', '? 미확인'
+  ]);
+  assert.deepEqual(checkChips.map(c => c.getAttribute('data-role')), [
+    'error', 'success', 'muted', 'muted', 'muted', 'error', 'muted', 'muted'
+  ]);
+
+  // 3: Direction-aware ownership — parents above focus, never in children tree.
+  const fieldHtml = html.slice(html.indexOf('id="map-field"'), html.indexOf('id="map-status"'));
+  assert.ok(fieldHtml.indexOf('id="map-parents"') > 0 && fieldHtml.indexOf('id="map-parents"') < fieldHtml.indexOf('id="map-root"'));
+  assert.ok(fieldHtml.indexOf('id="map-root"') < fieldHtml.indexOf('id="map-children"'));
+  const exploreHtml = html.slice(html.indexOf('id="explore-map"'), html.indexOf('id="graph-attach"'));
+  assert.ok(exploreHtml.indexOf('id="explore-parents"') > 0 && exploreHtml.indexOf('id="explore-parents"') < exploreHtml.indexOf('id="explore-root"'));
+  assert.equal(p.get('map-parents').hidden, false);
+  assert.equal(p.get('explore-parents').hidden, false);
+  assert.match(p.get('map-parent-list').textContent, /root/);
+  assert.match(p.get('map-parent-list').textContent, /workspace/);
+  assert.match(p.get('explore-parent-list').textContent, /root/);
+  assert.match(p.get('map-children').textContent, /lib\.rs/);
+  assert.match(p.get('map-children').textContent, /mod\.rs/);
+  assert.doesNotMatch(p.get('map-children').textContent, /root|workspace/);
+  assert.doesNotMatch(p.get('explore-children').textContent, /root|workspace/);
+
+  // English switch updates distinct states, git checks, parent label, and Lead count aria-label.
+  await choose(p, 'en');
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '? Orphaned', '! Guard stop', '~ Partial', '~ Degraded', '× Failed', '▷ Ready'
+  ]);
+  assert.deepEqual(checkChips.map(c => c.textContent), [
+    '× Failed', '✓ Passed', '· Pending', '· Other', '⊘ Cancelled', '× Failed', '? custom_check', '? Unknown'
+  ]);
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), '1 Lead');
+  assert.equal(p.get('map-parents-label').textContent, 'Parent');
+  assert.equal(p.get('explore-parents-label').textContent, 'Parent');
+  await choose(p, 'ko');
+
+  // 4: Lone approval auto-opens once per id; collapsing stays collapsed across refreshes (memory only, no storage writes).
+  const setsBefore = storage.sets;
+  assert.equal(p.get('approvals').children[0].open, true);
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, true);
+  p.get('approvals').children[0].open = false;
+  p.get('approvals').children[0].dispatchEvent(new Event('toggle'));
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, false);
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, false);
+  // New lone approval id auto-opens once.
+  approvals = [ap2];
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, true);
+  // Returning to collapsed ap1 keeps it collapsed; no storage writes for approvals.
+  approvals = [ap1];
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, false);
+  assert.equal(storage.sets, setsBefore);
+
+  // Leaf with incoming contains only (no outgoing children, plus an unconnected node) never puts parent or unconnected node in children tree.
+  graphPayload = {
+    schema:1, kind:'oms-panel-project-graph', status:'ready', provenance:{source:'indexed-graph'},
+    scope:{focusNode:'file:src/leaf.rs'},
+    nodes:[
+      {id:'dir:src', label:'src', kind:'directory'},
+      {id:'file:src/leaf.rs', label:'leaf.rs', kind:'file'},
+      {id:'file:stray.rs', label:'stray.rs', kind:'file'}
+    ],
+    edges:[{source:'dir:src', target:'file:src/leaf.rs', relation:'contains', confidence:'STRUCTURAL'}]
+  };
+  await p.event('refresh', 'click');
+  assert.equal(p.get('map-parents').hidden, false);
+  assert.match(p.get('map-parent-list').textContent, /src/);
+  assert.equal(p.get('map-children').hidden, true);
+  assert.equal(p.get('map-children').children.length, 0);
 });
 
 test('inline project map separates ownership children from dependency chips with directional arrows', async () => {
