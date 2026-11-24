@@ -577,7 +577,7 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
                     r.receipt,
                     row,
                     "failed",
-                    "remote head branch has diverged from local HEAD; refusing to overwrite existing commits",
+                    "remote head branch has diverged from local HEAD. Fetch and merge the existing remote PR head into your local branch, then rerun land without a force push.",
                     c,
                 );
             }
@@ -1209,7 +1209,11 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             .ok_or_else(|| Error::new(2, "remote target is absent"))?;
         require(
             git.succeeds(&["merge-base", "--is-ancestor", &base, &snapshot.head])?,
-            "remote target is not an ancestor; rebase before land",
+            if mode == Mode::Pr {
+                "remote target is not an ancestor. Fetch the target and merge it into your PR branch, then rerun land with the same head branch."
+            } else {
+                "remote target is not an ancestor; rebase before land"
+            },
         )?;
         base
     };

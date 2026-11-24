@@ -2569,13 +2569,16 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
         "--why",
         "fixture",
         "--gate",
-        "true",
+        r#"bash -c 'git rev-parse HEAD >> "$HOME/gated-pr-heads"'"#,
         "--ignore-siblings",
         "--no-update",
     ];
     let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
-    assert!(r.1.contains("diverged"), "{r:?}");
+    assert!(
+        r.1.contains("diverged") && r.1.contains("merge the existing remote PR head"),
+        "{r:?}"
+    );
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
     iso.git(&bare, &["update-ref", "-d", "refs/heads/feat"]);
     let r = iso.run_with_services(
@@ -2586,13 +2589,62 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
     );
     assert_eq!(r.0, 0, "{r:?}");
     assert!(r.1.contains("CI skipped; not merged"), "{r:?}");
-    let calls = fs::read_to_string(log).expect("gh log");
+    let calls = fs::read_to_string(&log).expect("gh log");
     assert!(
         calls.contains("pr create --repo")
             && calls.contains("--head feat --title")
             && !calls.contains("pr merge"),
         "{calls}"
     );
+
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    let target = iso.commit_file(&repo, "upstream.txt");
+    iso.git(&repo, &["push", "-q", "origin", "main"]);
+    iso.git(&repo, &["checkout", "-q", "feat"]);
+    iso.commit_file(&repo, "pr-fix.txt");
+    let gated = iso.home.path().join("gated-pr-heads");
+    let original_gates = fs::read_to_string(&gated).unwrap();
+    assert_eq!(original_gates.lines().collect::<Vec<_>>(), [head.as_str()]);
+    let stale = iso.run_with_services("land", &repo, &args, &env);
+    assert_refused(&stale, "merge it into your PR branch");
+    assert_eq!(fs::read_to_string(&gated).unwrap(), original_gates);
+    assert_eq!(fs::read_to_string(&log).unwrap(), calls);
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
+
+    iso.git(&repo, &["fetch", "-q", "origin"]);
+    iso.git(&repo, &["merge", "--no-edit", "origin/main"]);
+    let updated = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 0, "{r:?}");
+    assert!(
+        r.1.contains("pull request #7 open") && r.1.contains("CI success"),
+        "{r:?}"
+    );
+    assert_eq!(
+        iso.git_out(&bare, &["rev-parse", "refs/heads/main"]),
+        target
+    );
+    assert_eq!(
+        iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]),
+        updated
+    );
+    iso.git(&bare, &["merge-base", "--is-ancestor", &head, &updated]);
+    assert_eq!(
+        fs::read_to_string(&gated)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [head.as_str(), updated.as_str()]
+    );
+    let calls = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|l| l.starts_with("pr create "))
+            .count(),
+        1
+    );
+    assert!(!calls.contains("pr merge"));
 }
 
 #[test]

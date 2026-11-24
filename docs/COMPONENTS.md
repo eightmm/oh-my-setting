@@ -3545,6 +3545,15 @@ commit's tree equals the PR head tree on an unchanged base; otherwise it waits f
 on the target. On GitHub, `--direct` pushes straight to the target and accepts only a
 change of at most two lines in `.md` files.
 
+To update an existing PR after its target moves, fetch the remote and keep the
+published PR head in the history of the branch you update. For example, with
+`origin` and target `main`, run `git fetch origin` on the local PR branch.
+If the fetched PR head contains commits your branch lacks, first merge that
+remote-tracking PR branch. Then run `git merge origin/main`, resolve any
+conflicts and rerun `oms land` with the same remote, target and PR head branch
+(use `--head-branch` when needed). The new HEAD receives its own gate and
+fast-forwards the source branch of the same open PR.
+
 A moving update target is rejected by the updater. Local CI-parity hides registry
 provider CLIs and adds operator-tools when tier-routing inputs change; it does not parse
 changed shell files with Bash 3.2. The receipt's `update.authority` records the full proof
