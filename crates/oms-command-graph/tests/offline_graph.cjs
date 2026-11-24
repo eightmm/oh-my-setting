@@ -584,7 +584,7 @@ for (const kind of ['project', 'execution']) {
 }
 
 // 7. Design round 2: labels, edge groups, vocabulary, language, filters, empty state, rings, hubs.
-const radiusOf = degree => Math.max(9, Math.min(14, 8 + Math.sqrt(degree || 0)));
+const radiusOf = degree => Math.max(6, Math.min(16, 4.5 + 1.5 * Math.sqrt(degree || 0)));
 const labelOf = el => el.querySelector('.oms-graph-label');
 { // AUD-02: labels centred below the node, collisions hidden, full text in <title> and the selection card.
   const long = 'a_very_long_module_name_that_gets_truncated.rs';
@@ -643,8 +643,10 @@ const labelOf = el => el.querySelector('.oms-graph-label');
   assert.equal(edges[0].attributes['marker-end'], undefined, 'selection highlight keeps ownership arrowless');
   const legendItems = view.get('legend').children.filter(item => !item.hidden).map(item => item.getAttribute('data-legend'));
   assert.ok(legendItems.includes('ownership') && legendItems.includes('dependency'), 'legend lists both edge groups');
-  assert.match(css, /data-relation-group="ownership"\][^}]*stroke-width:\s*2\.6/);
-  assert.match(css, /data-relation-group="dependency"\][^}]*stroke-width:\s*1\.2/);
+  assert.match(css, /data-relation-group="ownership"\][^}]*stroke-width:\s*1\.25;\s*opacity:\s*\.35;\s*stroke-dasharray:\s*none/);
+  assert.match(css, /data-relation-group="dependency"\][^}]*stroke-width:\s*1\.25;\s*opacity:\s*\.6/);
+  assert.match(css, /\[data-relation-group\]\.is-hot[^}]*stroke-width:\s*1\.75/);
+  assert.match(css, /oms-graph-node-body \{ fill-opacity: \.9;/, 'nodes are not washed out');
   const noOwnership = render(model('project', 2));
   assert.ok(!noOwnership.get('legend').children.some(item => !item.hidden && item.getAttribute('data-legend') === 'ownership'));
 }
@@ -758,6 +760,33 @@ const labelOf = el => el.querySelector('.oms-graph-label');
     for (const p of pts) assert.ok(cam.x + p.x * cam.k >= 0 && cam.x + p.x * cam.k <= width && cam.y + p.y * cam.k >= 0 && cam.y + p.y * cam.k <= h, 'fit view contains the settled hub graph');
     assert.deepEqual(positions(render(star, {width})), pts, 'hub layout is deterministic');
   }
+}
+
+{ // Round 3: nodes read above edges, fit centres on narrow stages, large ownership fans sit on rings.
+  const fan = {kind: 'project', title: 'Fan', counts: {}, nodes: [{id: 'hub', label: 'hub.rs', kind: 'file', degree: 90, show_label: true, assurance: 'supported'},
+    ...Array.from({length: 90}, (_, i) => ({id: `leaf${i}`, label: `leaf${i}.rs`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}))],
+    edges: Array.from({length: 90}, (_, i) => ({source: 'hub', target: `leaf${i}`, relation: 'contains', confidence: 'EXTRACTED'}))};
+  for (const width of [390, 1280]) {
+    const view = render(fan, {width});
+    const pts = positions(view); const h = Number(view.svg.attributes.viewBox.split(' ')[3]);
+    const cam = camera(view); const radii = fan.nodes.map(n => radiusOf(n.degree));
+    const sx = pts.map((p, i) => ({lo: cam.x + (p.x - radii[i]) * cam.k, hi: cam.x + (p.x + radii[i]) * cam.k}));
+    const sy = pts.map((p, i) => ({lo: cam.y + (p.y - radii[i]) * cam.k, hi: cam.y + (p.y + radii[i]) * cam.k}));
+    const minX = Math.min(...sx.map(v => v.lo)); const maxX = Math.max(...sx.map(v => v.hi));
+    const minY = Math.min(...sy.map(v => v.lo)); const maxY = Math.max(...sy.map(v => v.hi));
+    assert.ok(minX >= 0 && maxX <= width && minY >= 0 && maxY <= h, `all nodes in bounds at ${width}`);
+    assert.ok(Math.abs((minX + maxX) / 2 - width / 2) <= width * .1, `x centred at ${width}`);
+    assert.ok(Math.abs((minY + maxY) / 2 - h / 2) <= h * .1, `y centred at ${width}`);
+    // Children of the hub (more than 24 ownership children) form concentric rings: few distinct radii, id-ordered angles.
+    const hub = pts[0]; const rings = new Map();
+    pts.slice(1).forEach((p, i) => { const r = Math.round(Math.hypot(p.x - hub.x, p.y - hub.y) / 2) * 2; rings.set(r, (rings.get(r) || 0) + 1); });
+    assert.ok(rings.size <= 6 && rings.size >= 3, `fan uses concentric rings (${[...rings.keys()]}) at ${width}`);
+    const edgeEls = view.viewport.children[0].children;
+    assert.equal(edgeEls[0].attributes['data-relation-group'], 'ownership');
+    const order = view.viewport.children.map(c => c.tagName);
+    assert.ok(order.indexOf('G') < order.lastIndexOf('G'), 'edge group precedes node group');
+  }
+  const bigNode = render(model('project', 3)).nodes.length; assert.equal(bigNode, 3);
 }
 
 console.log('offline renderer: layouts (320/768/1024), non-color kind/status, keyboard/focus, selection persistence, empty/partial/truncated states and template parity passed');

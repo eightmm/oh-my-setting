@@ -65,7 +65,7 @@
     <span class="oms-exec-key" data-legend="unknown" hidden><i data-state="unknown" aria-hidden="true">?</i>Unknown (dotted)</span>
     <span class="oms-change-key" data-legend="changed" hidden><i data-change="changed" aria-hidden="true">Δ</i>Changed (Δ badge)</span>
     <span class="oms-change-key" data-legend="impacted" hidden><i data-change="impacted" aria-hidden="true">~</i>Impacted (~ badge)</span>
-    <span class="oms-relgroup-key" data-legend="ownership" hidden><i data-relgroup="ownership" aria-hidden="true">—</i>Ownership: contains / owns (thick, no arrow)</span>
+    <span class="oms-relgroup-key" data-legend="ownership" hidden><i data-relgroup="ownership" aria-hidden="true">—</i>Ownership: contains / owns (thin, muted, no arrow)</span>
     <span class="oms-relgroup-key" data-legend="dependency" hidden><i data-relgroup="dependency" aria-hidden="true">→</i>Dependency: imports / calls (arrow; dashed = inferred)</span>
     <span class="oms-kind-key" data-legend="file" data-kind-key="file" hidden><i data-kind="file" aria-hidden="true">□</i>File / module</span>
     <span class="oms-kind-key" data-legend="symbol" data-kind-key="symbol" hidden><i data-kind="symbol" aria-hidden="true">ƒ</i>Symbol / func</span>
@@ -196,7 +196,7 @@
 #@@ROOT@@ .oms-graph-legend i[data-change="changed"] { background: var(--oms-s1); border-color: var(--oms-s1); color: var(--oms-bg); }
 #@@ROOT@@ .oms-graph-legend i[data-change="impacted"] { background: var(--oms-s2); border-color: var(--oms-s2); color: var(--oms-bg); }
 #@@ROOT@@ .oms-graph-legend i[data-kind] { border-radius: 4px; background: var(--oms-bg); border-color: var(--oms-muted-fg); }
-#@@ROOT@@ .oms-graph-edge { fill: none; stroke: color-mix(in srgb, var(--oms-muted-fg) 78%, var(--oms-border)); stroke-width: 1.4; opacity: .7; transition: opacity .15s; }
+#@@ROOT@@ .oms-graph-edge { fill: none; stroke: color-mix(in srgb, var(--oms-muted-fg) 78%, var(--oms-border)); stroke-width: 1.25; opacity: .6; transition: opacity .15s; }
 #@@ROOT@@ .oms-graph-edge[data-rel="0"], #@@ROOT@@ .oms-graph-legend i[data-rel="0"] { stroke: var(--oms-s1); color: var(--oms-s1); }
 #@@ROOT@@ .oms-graph-edge[data-rel="1"], #@@ROOT@@ .oms-graph-legend i[data-rel="1"] { stroke: var(--oms-s2); color: var(--oms-s2); }
 #@@ROOT@@ .oms-graph-edge[data-rel="2"], #@@ROOT@@ .oms-graph-legend i[data-rel="2"] { stroke: var(--oms-s3); color: var(--oms-s3); }
@@ -206,11 +206,12 @@
 #@@ROOT@@ .oms-graph-edge[data-confidence="INFERRED"] { stroke-dasharray: 5 3; }
 #@@ROOT@@ .oms-graph-edge[data-confidence="AMBIGUOUS"] { stroke-dasharray: 2 4; opacity: .6; }
 #@@ROOT@@ .oms-graph-edge[data-confidence="REPEAT"] { stroke-dasharray: 6 4; }
-#@@ROOT@@ .oms-graph-edge[data-relation-group="dependency"] { stroke-width: 1.2; }
-#@@ROOT@@ .oms-graph-edge[data-relation-group="ownership"] { stroke: var(--oms-muted-fg); stroke-width: 2.6; opacity: .5; stroke-linecap: round; }
-#@@ROOT@@ .oms-graph-edge.is-hot { opacity: 1; stroke-width: 2; }
-#@@ROOT@@ .oms-graph-edge.is-flow { stroke: var(--oms-primary); stroke-width: 2.2; opacity: 1; }
-#@@ROOT@@ .oms-graph-edge.is-dim { opacity: .08; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group="dependency"] { stroke-width: 1.25; opacity: .6; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group="ownership"] { stroke: var(--oms-muted-fg); stroke-width: 1.25; opacity: .35; stroke-dasharray: none; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group="ownership"][data-confidence="INFERRED"] { opacity: .22; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group].is-hot { opacity: 1; stroke-width: 1.75; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group].is-flow { stroke: var(--oms-primary); stroke-width: 1.75; opacity: 1; }
+#@@ROOT@@ .oms-graph-edge[data-relation-group].is-dim { opacity: .08; }
 @keyframes @@ROOT@@-flow { to { stroke-dashoffset: -22; } }
 @keyframes @@ROOT@@-pulse { 0%, 100% { stroke-opacity: .95; stroke-width: 2.5; } 50% { stroke-opacity: .45; stroke-width: 4; } }
 @keyframes @@ROOT@@-pop { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: scale(1); } }
@@ -237,13 +238,13 @@
 #@@ROOT@@ .oms-graph-change-badge circle { fill: var(--oms-s1); stroke: var(--oms-bg); stroke-width: 1.5; }
 #@@ROOT@@ .oms-graph-node[data-change="impacted"] .oms-graph-change-badge circle { fill: var(--oms-s2); }
 #@@ROOT@@ .oms-graph-change-badge text { fill: var(--oms-bg); font-size: 9px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
-#@@ROOT@@ .oms-graph-node .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-surface) 88%, var(--oms-bg)); stroke: var(--oms-muted-fg); stroke-width: 1.6; }
-#@@ROOT@@ .oms-graph-node[data-kind="file"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s1) 20%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="test"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s4) 22%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="agent"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s2) 22%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="gate"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s3) 24%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-kind="terminal"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s5) 22%, var(--oms-bg)); }
-#@@ROOT@@ .oms-graph-node[data-assurance] .oms-graph-node-body, #@@ROOT@@ .oms-graph-node[data-state] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-st) 24%, var(--oms-bg)); stroke: var(--oms-st); stroke-width: 1.8; }
+#@@ROOT@@ .oms-graph-node .oms-graph-node-body { fill-opacity: .9; fill: color-mix(in srgb, var(--oms-surface) 88%, var(--oms-bg)); stroke: var(--oms-muted-fg); stroke-width: 1.6; }
+#@@ROOT@@ .oms-graph-node[data-kind="file"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s1) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="test"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s4) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="agent"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s2) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="gate"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s3) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-kind="terminal"] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-s5) 42%, var(--oms-bg)); }
+#@@ROOT@@ .oms-graph-node[data-assurance] .oms-graph-node-body, #@@ROOT@@ .oms-graph-node[data-state] .oms-graph-node-body { fill: color-mix(in srgb, var(--oms-st) 40%, var(--oms-bg)); fill-opacity: .9; stroke: var(--oms-st); stroke-width: 1.8; }
 #@@ROOT@@ .oms-graph-node[data-assurance="needs-evidence"] .oms-graph-node-body { stroke-dasharray: 4 2; }
 #@@ROOT@@ .oms-graph-node[data-assurance="attention"] .oms-graph-node-body { stroke-width: 2.4; stroke-dasharray: 6 2 2 2; }
 #@@ROOT@@ .oms-graph-node[data-assurance="test-evidence"] .oms-graph-node-body { stroke-dasharray: 2 2; }
@@ -370,7 +371,7 @@
       'pat.solid': 'solid', 'pat.dashed': 'dashed', 'pat.long-dash': 'long-dash', 'pat.short-dash': 'short-dash',
       'pat.dash-dot': 'dash-dot', 'pat.dotted': 'dotted',
       'lg.changed': 'Changed (Δ badge)', 'lg.impacted': 'Impacted (~ badge)',
-      'lg.ownership': 'Ownership: contains / owns (thick, no arrow)',
+      'lg.ownership': 'Ownership: contains / owns (thin, muted, no arrow)',
       'lg.dependency': 'Dependency: imports / calls (arrow; dashed = inferred)',
       'lg.file': 'File / module', 'lg.symbol': 'Symbol / func', 'lg.test': 'Test / gate', 'lg.agent': 'Agent', 'lg.terminal': 'Terminal'
     },
@@ -410,7 +411,7 @@
       'pat.solid': '실선', 'pat.dashed': '파선', 'pat.long-dash': '긴 파선', 'pat.short-dash': '짧은 파선',
       'pat.dash-dot': '일점쇄선', 'pat.dotted': '점선',
       'lg.changed': '변경됨 (Δ 배지)', 'lg.impacted': '영향받음 (~ 배지)',
-      'lg.ownership': '소유: contains / owns (굵게, 화살표 없음)',
+      'lg.ownership': '소유: contains / owns (가늘고 흐림, 화살표 없음)',
       'lg.dependency': '의존: imports / calls (화살표, 파선은 추정)',
       'lg.file': '파일 / 모듈', 'lg.symbol': '심볼 / 함수', 'lg.test': '테스트 / 게이트', 'lg.agent': '에이전트', 'lg.terminal': '터미널'
     }
@@ -794,7 +795,7 @@
   }
   const nodeElementById = new Map();
   node.each(function(row) { nodeElementById.set(row.id, this); });
-  const nodeRadius = row => Math.max(9, Math.min(14, 8 + Math.sqrt(row.degree || 0)));
+  const nodeRadius = row => Math.max(6, Math.min(16, 4.5 + 1.5 * Math.sqrt(row.degree || 0)));
   node.append('circle').attr('class', 'oms-graph-select-ring').attr('r', row => nodeRadius(row) + 5);
   node.append('circle').attr('class', 'oms-graph-focus-halo').attr('r', row => nodeRadius(row) + 10);
   node.append('circle').attr('class', 'oms-graph-focus-ring').attr('r', row => nodeRadius(row) + 10);
@@ -894,7 +895,43 @@
       }
       row.vx = 0; row.vy = 0; row.fx = null; row.fy = null; row._pinned = false;
     });
-    if (!isExecution) seedHubRings();
+    if (!isExecution) { seedHubRings(); applyFans(); }
+  }
+  // A parent with more than FAN_MIN ownership children keeps them on concentric rings (angle order by id).
+  const FAN_MIN = 24;
+  const fans = [];
+  (function buildFans() {
+    const claimed = new Set();
+    const kids = new Map();
+    links.filter(row => row._group === 'ownership' && row.source !== row.target).forEach(row => {
+      if (!kids.has(row.source.id)) kids.set(row.source.id, []);
+      kids.get(row.source.id).push(row.target);
+    });
+    [...kids.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1)).forEach(([id, list]) => {
+      const children = [...new Map(list.filter(c => !claimed.has(c.id) && c.id !== id).map(c => [c.id, c])).values()]
+        .sort((a, b) => (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
+      if (children.length <= FAN_MIN) return;
+      const parent = byId.get(id);
+      const slots = [];
+      let placed = 0;
+      for (let ring = 0; placed < children.length; ring += 1) {
+        const radius = nodeRadius(parent) + 30 + ring * 22;
+        const count = Math.min(children.length - placed, Math.max(1, Math.floor(2 * Math.PI * radius / 22)));
+        for (let i = 0; i < count; i += 1) {
+          const angle = 2 * Math.PI * i / count + ring * .6;
+          slots.push({child: children[placed + i], dx: Math.cos(angle) * radius, dy: Math.sin(angle) * radius});
+        }
+        placed += count;
+      }
+      slots.forEach(slot => claimed.add(slot.child.id));
+      fans.push({parent, slots});
+    });
+  })();
+  function applyFans() {
+    fans.forEach(({parent, slots}) => slots.forEach(({child, dx, dy}) => {
+      if (child.fx !== null && child.fx !== undefined) return;
+      child.x = parent.x + dx; child.y = parent.y + dy; child.vx = 0; child.vy = 0;
+    }));
   }
   // Leaves of a large hub start on concentric rings by angle, so they never begin as one overlapping knot.
   function seedHubRings() {
@@ -993,7 +1030,9 @@
       row.vx *= .6; row.vy *= .6;
       row.x += row.vx; row.y += row.vy;
     });
+    applyFans();
     collide(.7);
+    applyFans();
     if (nodes.length) {
       let mx = 0; let my = 0;
       nodes.forEach(row => { mx += row.x; my += row.y; });
@@ -1005,6 +1044,7 @@
   function relax() {
     for (let pass = 0; pass < 200; pass += 1) {
       const moved = collide(1);
+      applyFans();
       clampToWorld();
       if (!moved) break;
     }
@@ -1160,10 +1200,21 @@
     rows.forEach(row => {
       const r = nodeRadius(row);
       minX = Math.min(minX, row.x - r); maxX = Math.max(maxX, row.x + r);
-      minY = Math.min(minY, row.y - r); maxY = Math.max(maxY, row.y + r + 16);
+      minY = Math.min(minY, row.y - r); maxY = Math.max(maxY, row.y + r);
     });
     const pad = fitPad();
-    const k = clampK(Math.min(1.25, (width - pad * 2) / Math.max(1, maxX - minX), (height - pad * 2) / Math.max(1, maxY - minY)));
+    const fitK = (x0, x1, y0, y1) => clampK(Math.min(1.25, (width - pad * 2) / Math.max(1, x1 - x0), (height - pad * 2) / Math.max(1, y1 - y0)));
+    let k = fitK(minX, maxX, minY, maxY);
+    // Visible labels are screen-sized, so widen the bounds by their extent at the first-pass scale and refit.
+    const shown = rows.filter(row => row.show_label);
+    if (shown.length) {
+      shown.forEach(row => {
+        const half = (shortLabel(row).length * CHAR_W + 6) / 2 / k;
+        minX = Math.min(minX, row.x - half); maxX = Math.max(maxX, row.x + half);
+        maxY = Math.max(maxY, row.y + nodeRadius(row) + (LABEL_GAP + LABEL_H) / k);
+      });
+      k = fitK(minX, maxX, minY, maxY);
+    }
     return {x: width / 2 - (minX + maxX) / 2 * k, y: height / 2 - (minY + maxY) / 2 * k, k};
   }
   function fitAll(ms = 380) {
@@ -1696,8 +1747,18 @@
     }
   });
   let lastWidth = 0;
+  let lastStageHeight = 0;
+  let refitTimer = 0;
   const observer = new ResizeObserver(entries => {
     const nextWidth = Math.max(280, Math.floor(entries[0].contentRect.width || 736));
+    const stageHeight = Math.floor(entries[0].contentRect.height || 0);
+    // A height-only change (stage settled after first paint) refits once, debounced; it never re-lays out.
+    if (Math.abs(nextWidth - lastWidth) < 5 && lastWidth && Math.abs(stageHeight - lastStageHeight) >= 5 && !userMoved) {
+      lastStageHeight = stageHeight;
+      clearTimeout(refitTimer);
+      refitTimer = setTimeout(() => { if (!userMoved) fitAll(); }, 120);
+    }
+    lastStageHeight = stageHeight || lastStageHeight;
     if (Math.abs(nextWidth - lastWidth) < 5) return;
     lastWidth = nextWidth;
     const previousWidth = width;
