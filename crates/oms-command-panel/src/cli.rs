@@ -9,6 +9,7 @@ const FLAGS: &[&str] = &[
     "health",
     "desktop-usage",
     "desktop-chat",
+    "desktop-work-items",
     "sessions",
     "next-attention",
     "switch",
@@ -409,6 +410,17 @@ impl Options {
             )?;
             self.integer("page", 1, 1, crate::desktop_board::MAX_PAGE)?;
         }
+        if self.has("desktop-work-items") {
+            require(
+                self.has("json")
+                    && self
+                        .flags
+                        .iter()
+                        .all(|s| matches!(s.as_str(), "json" | "desktop-work-items"))
+                    && self.values.keys().all(|s| s == "repo"),
+                "--desktop-work-items accepts only --json and --repo",
+            )?;
+        }
         self.choice("dispatch", oms_panel_core::routing::ROLES)?;
         self.choice("workload", oms_panel_core::routing::TIERS)?;
         for key in ["orchestrator", "focus-orchestrator"] {
@@ -483,6 +495,7 @@ impl Options {
             "metrics",
             "desktop-usage",
             "desktop-chat",
+            "desktop-work-items",
             "sessions",
             "usage",
             "compare",

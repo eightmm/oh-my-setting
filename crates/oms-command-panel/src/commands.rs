@@ -777,6 +777,13 @@ pub(crate) fn run_mode(
             .ok_or_else(|| Error::new("desktop view needs a selected repository"))?;
         return crate::desktop_board::run(&repo, &execution, source, options, services, stop);
     }
+    if options.has("desktop-work-items") {
+        // The desktop connection selects the checkout independently of process-wide Room variables.
+        let (state, _) = resolve_repositories(options, cwd, None, false)?;
+        let repo =
+            state.ok_or_else(|| Error::new("desktop work items needs a selected repository"))?;
+        return crate::desktop_board::work_items(&repo, services, stop);
+    }
     let env_room = std::env::var_os("OMS_ROOM_REPO").map(PathBuf::from);
     let (repo_opt, exec_opt) =
         resolve_repositories(options, cwd, env_room.as_deref(), default_main)?;

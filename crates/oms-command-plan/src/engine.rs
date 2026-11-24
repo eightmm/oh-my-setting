@@ -334,6 +334,27 @@ impl Snapshot {
         )
     }
 }
+fn task_defaults(task: &mut Value) -> Result<()> {
+    for (name, value) in [
+        ("lease_epoch", number(0)),
+        ("lease_id", string("")),
+        ("repair_count", number(0)),
+        ("repair_artifact", string("")),
+        ("executor_id", string("")),
+        ("executor_soul_sha256", string("")),
+        ("autopilot_owner_id", string("")),
+    ] {
+        task.default(name, value)?;
+    }
+    Ok(())
+}
+
+/// Revision used by `plan list --json` for a persisted task, including legacy defaults.
+pub fn stored_task_revision(raw: &[u8]) -> Result<String> {
+    let mut task = json::parse(raw)?;
+    task_defaults(&mut task)?;
+    json::hash(&task)
+}
 pub struct Plan<'a> {
     pub context: Context,
     pub store: Store,
@@ -462,17 +483,7 @@ impl<'a> Plan<'a> {
             let mut task = task.clone();
             task.object()?;
             assignment(task.opt("assignment").unwrap_or(&empty()))?;
-            for (name, value) in [
-                ("lease_epoch", number(0)),
-                ("lease_id", string("")),
-                ("repair_count", number(0)),
-                ("repair_artifact", string("")),
-                ("executor_id", string("")),
-                ("executor_soul_sha256", string("")),
-                ("autopilot_owner_id", string("")),
-            ] {
-                task.default(name, value)?;
-            }
+            task_defaults(&mut task)?;
             crate::decision::validate(&self.store, &task)?;
             normalized.set(id, task)?;
         }

@@ -278,7 +278,10 @@ fn cross_host_project_reads() {
         );
         let listed = c.call("tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
+        assert!(tools.iter().any(
+            |t| t["name"] == "oms_panel_work_items" && t["annotations"]["readOnlyHint"] == true
+        ));
         let graph_tool = tools
             .iter()
             .find(|t| t["name"] == "oms_panel_project_graph")
@@ -521,6 +524,19 @@ fn mcp_app_binding_boundaries() {
         std::fs::read(source.join("last-call.json")).unwrap(),
         before
     );
+    let work = json!({"schema":1,"items":[],"omitted":0,"availability":"ready"});
+    fixture_settings(&source, json!({"stdout":work.to_string()}));
+    assert_eq!(
+        payload(&c.tool("oms_panel_work_items", json!({"project":"fixture"}))),
+        work
+    );
+    let argv = record(&source)["argv"].clone();
+    assert!(
+        argv.as_array()
+            .unwrap()
+            .ends_with(&[json!("--desktop-work-items"), json!("--json")])
+    );
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     // Replacing the alias target with a symlink is refused on the next call.
     let link = source.join("link-checkout");
     std::os::unix::fs::symlink(&repo, &link).unwrap();
@@ -571,6 +587,10 @@ fn mcp_app_binding_boundaries() {
     let mut reopened = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
     bad(
         &ask(&mut reopened, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(
+        &reopened.tool("oms_panel_work_items", json!({"project":"fixture"})),
         "OMS_PANEL_REPO",
     );
     bad(&ask(&mut reopened, json!({}), json!({})), "OMS_PANEL_REPO");
@@ -830,13 +850,13 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 15);
+    assert_eq!(tools.as_array().unwrap().len(), 16);
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v10.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v11.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -862,6 +882,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v7.html"),
         json!("ui://oms/conversation-panel/v8.html"),
         json!("ui://oms/conversation-panel/v9.html"),
+        json!("ui://oms/conversation-panel/v10.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
