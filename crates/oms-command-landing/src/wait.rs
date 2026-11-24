@@ -21,20 +21,26 @@ struct Selected<'a> {
 
 impl Selected<'_> {
     fn activity(&self) -> (&'static str, Option<String>) {
-        let owner = match self.observer.probe() {
-            oms_lock::Status::Held => format!("{}.ci-holder", self.stamp),
-            oms_lock::Status::Unknown => return ("unverified", None),
-            oms_lock::Status::Free => {
-                match self.lock.probe() {
-                    oms_lock::Status::Free => return ("not-held", None),
-                    oms_lock::Status::Unknown => return ("unverified", None),
-                    oms_lock::Status::Held => {}
+        match self.observer.probe() {
+            oms_lock::Status::Held => self.holder(&format!("{}.ci-holder", self.stamp)),
+            observer => match self.lock.probe() {
+                oms_lock::Status::Held => {
+                    let holder = self.holder("active-holder");
+                    if observer == oms_lock::Status::Free || holder.0 == "held" {
+                        holder
+                    } else {
+                        ("unverified", None)
+                    }
                 }
-                "active-holder".to_owned()
-            }
-        };
+                oms_lock::Status::Free if observer == oms_lock::Status::Free => ("not-held", None),
+                _ => ("unverified", None),
+            },
+        }
+    }
+
+    fn holder(&self, name: &str) -> (&'static str, Option<String>) {
         let Some(holder) =
-            reconcile::read_private(&self.root, &owner).and_then(|bytes| V::parse(&bytes).ok())
+            reconcile::read_private(&self.root, name).and_then(|bytes| V::parse(&bytes).ok())
         else {
             return ("unverified", None);
         };

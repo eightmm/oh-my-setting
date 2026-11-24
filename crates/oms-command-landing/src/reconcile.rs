@@ -203,6 +203,15 @@ fn observe(
     let row = tri!(c, V::parse(&raw), R, "receipt-invalid");
     let gate = row.get("gate").get("command").text().unwrap_or_default();
     let head_branch = string(&row, "head_branch");
+    // The target can move while a publish-only writer is observing CI. Its
+    // immutable pre-CI checkpoint then remains running with no final outcome.
+    // The same PR, recorded push/base, merged tree and full CI proofs below
+    // still apply; a gate-only or contradictory terminal receipt cannot qualify.
+    let published_running = row.get("state").text() == Some("running")
+        && !row.has("finished_at")
+        && !row.has("merge")
+        && row.get("ci").get("conclusion").text() == Some("pending")
+        && row.get("push").get("moved") == &1usize.into();
     let full_gate = oms_command_plan::floor::split(gate, false)
         .is_ok_and(|words| words == ["bash", "scripts/check.sh", "--parallel"]);
     need!(
@@ -215,7 +224,8 @@ fn observe(
             && string(&row, "target") == target
             && string(&row, "mode") == "pr"
             && row.get("gate").get("rc") == &0usize.into()
-            && matches!(string(&row, "state").as_str(), "awaiting-merge" | "passed")
+            && (published_running
+                || matches!(row.get("state").text(), Some("awaiting-merge" | "passed")))
             && row.get("push").get("rc") == &0usize.into()
             && row.get("push").get("head_branch").text() == Some(head_branch.as_str())
             && crate::helpers::recorded_base(&row).ok().flatten().is_some()

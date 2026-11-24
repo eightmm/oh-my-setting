@@ -2362,7 +2362,20 @@ esac
 
 #[test]
 fn land_to_github_opens_a_pr_and_merges_only_with_merge() {
+    check_publish_then_merge(false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn released_flock_allows_the_same_published_request_to_merge() {
+    check_publish_then_merge(true);
+}
+
+fn check_publish_then_merge(flock: bool) {
     let iso = Isolated::new();
+    if flock {
+        std::os::unix::fs::symlink(which("flock"), iso.bin.join("flock")).unwrap();
+    }
     let (repo, bare) = iso.with_github_remote("pr");
     let head = iso.commit_as(
         &repo,
@@ -2463,8 +2476,15 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
         "target-moved",
         "interrupted",
         "legacy-writer",
+        #[cfg(target_os = "linux")]
+        "flock-interrupted",
     ] {
         let iso = Isolated::new();
+        let flock = scenario == "flock-interrupted";
+        let interrupted = flock || scenario == "interrupted";
+        if flock {
+            std::os::unix::fs::symlink(which("flock"), iso.bin.join("flock")).unwrap();
+        }
         let (a, bare) = iso.with_remote("ci-concurrent");
         let b = iso.home.path().join("checkout-b");
         iso.git(
@@ -2516,7 +2536,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             ("OMS_GH_BIN", gh_a.to_str().unwrap()),
             ("OMS_LOCK_TIMEOUT", "2"),
         ];
-        if scenario == "interrupted" {
+        if interrupted {
             env.push(("OMS_CT_INTERRUPT_AT", cancel.to_str().unwrap()));
         }
         std::thread::scope(|scope| {
@@ -2530,7 +2550,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                 std::thread::sleep(Duration::from_millis(20));
             }
             let status = iso.run("land", &a, &["status", "--json", "--active-exit"]);
-            assert_eq!(status.0, 0, "{status:?}");
+            assert_eq!(status.0, if flock { 4 } else { 0 }, "{status:?}");
             let row = V::parse(status.1.as_bytes()).unwrap();
             assert_eq!(row.get("pr_number"), &7usize.into());
             let stamp = row.get("request").text().unwrap();
@@ -2578,7 +2598,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             } else if scenario == "receipt-changed" {
                 expected.push(b' ');
                 fs::write(&receipt, &expected).unwrap();
-            } else if scenario == "interrupted" {
+            } else if interrupted {
                 fs::write(&cancel, b"").unwrap();
             } else if scenario == "target-moved" {
                 iso.git(&bare, &["update-ref", "refs/heads/main", &head]);
@@ -2607,7 +2627,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                     .try_acquire();
                 assert!(matches!(legacy_write, Err(oms_lock::Error::Busy)));
             }
-            if scenario != "interrupted" {
+            if !interrupted {
                 fs::write(iso.home.path().join("release-ci"), b"").unwrap();
             }
             let final_result = running.join().unwrap();
@@ -2617,8 +2637,14 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             } else {
                 assert_ne!(final_result.0, 0, "{final_result:?}");
                 assert_eq!(fs::read(&receipt).unwrap(), expected);
-                if scenario == "interrupted" {
+                if interrupted {
                     assert_eq!(final_result.0, 130, "{final_result:?}");
+                    fs::write(iso.home.path().join("release-ci"), b"").unwrap();
+                    let resume = iso.run_with_services("land", &a, &args, &env[..2]);
+                    assert_eq!(resume.0, 0, "{resume:?}");
+                    let resumed = V::parse(&fs::read(&receipt).unwrap()).unwrap();
+                    assert_eq!(resumed.get("request").text(), Some(stamp));
+                    assert_eq!(resumed.get("state").text(), Some("awaiting-merge"));
                 }
                 if legacy_guard.is_some() {
                     assert_eq!(final_result.0, 75);
@@ -2787,6 +2813,15 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
 
 #[test]
 fn land_reconcile_observes_a_merged_pr_after_the_target_moved_and_writes_nothing() {
+    check_read_only_reconciliation(false);
+}
+
+#[test]
+fn land_reconcile_observes_a_squash_during_publish_only_ci_without_finishing_its_receipt() {
+    check_read_only_reconciliation(true);
+}
+
+fn check_read_only_reconciliation(squash_during_ci: bool) {
     let iso = Isolated::new();
     let (repo, bare) = iso.with_github_remote("recon");
     let head = iso.commit_as(&repo, "feat.txt", "feat\n", &["feat: recover", "Reason."]);
@@ -2834,11 +2869,27 @@ exec '{real_git}' "$@"
        *) exit 1;;
      esac ;;"#,
         );
+    let fake = if squash_during_ci {
+        fake.replace(
+            "\"run list\")",
+            &format!(r#""run list")
+                if [ ! -f "$HOME/squashed" ]; then
+                    git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$commit^{{tree}}")" || exit 1
+                    : > "$HOME/squashed"
+                fi"#, bare = bare.display()),
+        )
+    } else {
+        fake
+    };
     fs::write(&gh, fake).unwrap();
     let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
     let args = ["--gate", "true", "--ignore-siblings", "--no-update"];
     let r = iso.run_with_services("land", &repo, &args, &env);
-    assert_eq!(r.0, 0, "{r:?}");
+    if squash_during_ci {
+        assert_refused(&r, "ref changed during CI");
+    } else {
+        assert_eq!(r.0, 0, "{r:?}");
+    }
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     let receipt = V::parse(status.as_bytes()).expect("status json");
     let (code, observed, err) = iso.run(
@@ -2855,7 +2906,14 @@ exec '{real_git}' "$@"
     );
     assert_eq!(code, 0, "{err}");
     let observed = V::parse(observed.as_bytes()).unwrap();
-    assert_eq!(observed.get("receipt_state").text(), Some("awaiting-merge"));
+    assert_eq!(
+        observed.get("receipt_state").text(),
+        Some(if squash_during_ci {
+            "running"
+        } else {
+            "awaiting-merge"
+        })
+    );
     assert_eq!(observed.get("phase").text(), Some("pr-recorded"));
     let branch = receipt.get("head_branch").text().unwrap().to_owned();
     // main moved, then the PR merged with exactly the reviewed tree (PR 469 pattern)
@@ -2877,8 +2935,13 @@ exec '{real_git}' "$@"
         )
     };
     let moved = commit(&format!("{main_before}^{{tree}}"), &main_before, "moved");
-    let merge = commit(&format!("{head}^{{tree}}"), &moved, "squash");
-    iso.git(&bare, &["update-ref", "refs/heads/main", &merge]);
+    let merge = if squash_during_ci {
+        iso.git_out(&bare, &["rev-parse", "refs/heads/main"])
+    } else {
+        let merge = commit(&format!("{head}^{{tree}}"), &moved, "squash");
+        iso.git(&bare, &["update-ref", "refs/heads/main", &merge]);
+        merge
+    };
     iso.git(&repo, &["fetch", "-q", "origin", "main"]);
     strip_group_world_write(&repo);
     let home = iso.home.path();
@@ -2938,6 +3001,28 @@ exec '{real_git}' "$@"
         "{r:?}"
     );
     assert_eq!(observed(), before);
+    if squash_during_ci {
+        let stamp = receipt.get("request").text().unwrap();
+        let directory = fs::read_dir(home.join(".local/state/oh-my-setting/land"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let path = directory.join(format!("{stamp}.json"));
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(reconcile(&["--request", stamp]).0, 0);
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        let mut partial = V::parse(&raw).unwrap();
+        partial.set("push", obj([("rc", "pending".into())]));
+        fs::write(&path, partial.json(false).unwrap()).unwrap();
+        assert_eq!(
+            reconcile(&[]).1.get("reason").text(),
+            Some("receipt-identity-mismatch")
+        );
+        assert!(!fs::read_to_string(&log).unwrap().contains("pr merge"));
+        return;
+    }
     for (what, reason, setup) in [
         ("foreign", "pr-foreign-repository", 0),
         ("moved head", "pr-head-moved", 1),
@@ -3237,7 +3322,7 @@ fn land_wait_follows_only_the_exact_private_receipt_and_holder() {
     settings.temp_dir = iso.tmp.clone();
     settings.lock_dir = None;
     settings.mode = oms_lock::Mode::Mkdir;
-    let lock = oms_lock::Lock::for_file(&directory.join("active"), settings).unwrap();
+    let lock = oms_lock::Lock::for_file(&directory.join("active"), settings.clone()).unwrap();
     let guard = lock.try_acquire().unwrap();
     let pid = std::process::id();
     let birth = oms_command_operations::lock::process_start(pid).unwrap();
@@ -3292,6 +3377,39 @@ fn land_wait_follows_only_the_exact_private_receipt_and_holder() {
         Some("unmatched")
     );
     drop(guard);
+    #[cfg(target_os = "linux")]
+    {
+        // A released flock inode alone cannot identify a holder. Only a live
+        // global writer with this exact checkout request is a positive match.
+        std::os::unix::fs::symlink(which("flock"), iso.bin.join("flock")).unwrap();
+        settings.mode = oms_lock::Mode::Flock;
+        let owner = oms_lock::Lock::for_file(
+            &directory.join(format!("{stamp}.ci-owner")),
+            settings.clone(),
+        )
+        .unwrap();
+        owner.try_acquire().unwrap().release().unwrap();
+        let global = oms_lock::Lock::for_file(&directory.join("active"), settings).unwrap();
+        let live = global.try_acquire().unwrap();
+        assert_eq!(
+            json(wait(stamp, &[])).get("activity").text(),
+            Some("unverified")
+        );
+        holder.set("receipt", format!("{stamp}.json"));
+        holder.set(
+            "start",
+            oms_command_operations::lock::process_start(pid).unwrap(),
+        );
+        let bytes = holder.json(false).unwrap();
+        fs::write(&holder_path, &bytes).unwrap();
+        assert_eq!(json(wait(stamp, &[])).get("activity").text(), Some("held"));
+        assert_eq!(fs::read(&holder_path).unwrap(), bytes);
+        live.release().unwrap();
+        assert_eq!(
+            json(wait(stamp, &[])).get("activity").text(),
+            Some("unverified")
+        );
+    }
     running.set("repo", "unrelated");
     fs::write(&path, running.json(false).unwrap()).unwrap();
     assert_ne!(wait(stamp, &[]).0, 0);

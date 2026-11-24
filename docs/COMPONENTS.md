@@ -1319,6 +1319,9 @@ status, install, claim, push or merge. It requires a trusted (owner-only, no-fol
 saved receipt whose request identity recomputes from this repo, remote, target and gate, then
 a GitHub PR observed `MERGED` with the receipt's number, URL, same-repository head, ref and
 exact head, a merge commit reachable from the live target, and an identical reviewed tree.
+If the PR merged while its publisher was waiting for CI, the recorded gate, successful
+push, base and PR identity can establish the same result from a still-running receipt.
+The saved receipt keeps its original state.
 The PR gate links to the actual hosted `test.yml` pull-request run and successful gate job
 on that head and run attempt. If GitHub omits the run’s PR membership after merge, the
 source branch must identify a single PR across all states. The complete hosted job list

@@ -1256,14 +1256,21 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let stamp = request_stamp(&snapshot.head, &request_parts)?;
     let receipt = directory.join(format!("{stamp}.json"));
     let _active = storage::lock(&directory.join("active"), c.interrupted)?;
-    if mode == Mode::Pr
-        && storage::file_lock(&directory.join(pr_observation::owner_name(&stamp)))?.probe()
-            != oms_lock::Status::Free
-    {
-        return Err(Error::new(
-            75,
-            "exact request already observing CI or ownership unknown; use land wait",
-        ));
+    if mode == Mode::Pr {
+        // Every observer claims its request while holding active. While we hold
+        // active, a successful nonblocking acquisition proves no observer can
+        // race our admission. A read-only flock probe cannot establish this.
+        let claim = storage::file_lock(&directory.join(pr_observation::owner_name(&stamp)))?
+            .try_acquire()
+            .map_err(|error| match error {
+                oms_lock::Error::Busy => {
+                    Error::new(75, "exact request already observing CI; use land wait")
+                }
+                _ => Error::new(error.exit_code(), error.to_string()),
+            })?;
+        claim
+            .release()
+            .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
     }
     let holder = obj([
         ("receipt", format!("{stamp}.json").into()),
