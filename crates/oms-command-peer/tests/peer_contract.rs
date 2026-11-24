@@ -1920,6 +1920,510 @@ fn review_classification_and_validation() {
     });
 }
 #[test]
+fn review_gate_timeout_and_pinned_base() {
+    let name = "review_gate_timeout_and_pinned_base";
+    let git_stdout = |repo: &Repo, git_args: &[&str]| -> String {
+        let mut command = Command::new("git");
+        let output = clean_env_child(&mut command)
+            .arg("-C")
+            .arg(&repo.0)
+            .args(git_args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+
+    // #457: real wall-clock timeout via OMS_PEER_TIMEOUT=1s must be reported as timed out,
+    // never as interrupted, even when the timed-out child prints "error: interrupted" on SIGTERM.
+    provider_isolated_with_env(name, "timeout-1s", &[("OMS_PEER_TIMEOUT", "1s")], || {
+        use oms_command_peer::storage;
+        let repo = provider_repo();
+        repo.write("lib.rs", "pub fn answer() -> i32 { 1 }\n");
+        repo.git(&["add", "lib.rs"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        let base_sha = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        repo.write("lib.rs", "pub fn answer() -> i32 { 2 }\n");
+        let diff_bytes = Command::new("git")
+            .arg("-C")
+            .arg(&repo.0)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "HEAD",
+                "--",
+            ])
+            .output()
+            .unwrap()
+            .stdout
+            .len();
+        assert!(diff_bytes > 0);
+
+        struct SlowSeatExecutor;
+        impl Executor for SlowSeatExecutor {
+            fn execute(
+                &self,
+                mut request: Invocation,
+                stop: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                if request.argv[0] != "git" {
+                    request.argv = vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "trap 'printf \"error: interrupted\\n\" >&2; exit 130' TERM INT; sleep 30"
+                            .into(),
+                    ];
+                }
+                Native.execute(request, stop)
+            }
+        }
+
+        let dir = ".oms/review-timeout-1s";
+        let output = oms_command_peer::run_with_executor(
+            "peer-review",
+            &args(&[
+                "--providers",
+                "codex",
+                "--model",
+                "fixture",
+                "--gate",
+                "--no-verify",
+                "--prompt",
+                "check timeout reporting",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-graph-context",
+                "--artifact-dir",
+                dir,
+            ]),
+            &repo.0,
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            &STOP,
+            &SlowSeatExecutor,
+        );
+        assert_eq!(output.0, 2, "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.1);
+        assert!(
+            stdout.contains("codex: timed out after 1s"),
+            "stdout must report wall-clock timeout: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("diff {diff_bytes} bytes")),
+            "stdout must record prompt diff size: {stdout}"
+        );
+        assert!(
+            stdout.contains("elapsed "),
+            "stdout must record elapsed seconds: {stdout}"
+        );
+        assert!(
+            !stdout.to_lowercase().contains("interrupted"),
+            "timeout stdout must not say interrupted: {stdout}"
+        );
+
+        let seat_name = storage::names(&repo.0, Path::new(dir), ".md")
+            .unwrap()
+            .into_iter()
+            .find(|n| n.starts_with("codex-"))
+            .expect("seat artifact");
+        let artifact = String::from_utf8(
+            storage::read(&repo.0, &Path::new(dir).join(&seat_name), false).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            artifact.contains("error: timed out after 1s"),
+            "artifact diagnostics must record timeout: {artifact}"
+        );
+        assert!(
+            !artifact.contains("error: interrupted"),
+            "timeout artifact must not record error: interrupted: {artifact}"
+        );
+
+        let verdicts_name = storage::names(&repo.0, Path::new(dir), ".json")
+            .unwrap()
+            .into_iter()
+            .find(|n| n.starts_with("_verdicts-"))
+            .expect("verdicts json");
+        let verdicts =
+            V::parse(&storage::read(&repo.0, &Path::new(dir).join(&verdicts_name), false).unwrap())
+                .unwrap();
+        assert_eq!(verdicts.get("base").text(), Some(base_sha.as_str()));
+        let seat = &verdicts.get("seats").array()[0];
+        assert_eq!(seat.get("verdict").text(), Some("timed_out"));
+        assert_eq!(seat.get("timeout_secs").py(), "1");
+        assert_eq!(seat.get("diff_bytes").py(), diff_bytes.to_string());
+        let elapsed_secs: u64 = seat.get("elapsed_secs").py().parse().unwrap();
+        assert!(
+            elapsed_secs >= 1,
+            "expected elapsed >= 1s, got {elapsed_secs}"
+        );
+        assert!(
+            seat.get("detail")
+                .text()
+                .is_some_and(|d| d.contains("timed out after 1s") && !d.contains("interrupted")),
+            "{seat:?}"
+        );
+
+        let inspected = run(&repo, &repo.0, "peer-review", &["verdicts", dir, "--json"]);
+        assert_eq!(inspected.0, 2);
+        let inspected_json = V::parse(&inspected.1).unwrap();
+        assert_eq!(
+            inspected_json.get("seats").array()[0].get("verdict").text(),
+            Some("timed_out")
+        );
+        let inspected_text = run(&repo, &repo.0, "peer-review", &["verdicts", dir]);
+        assert_eq!(inspected_text.0, 2);
+        let text_out = String::from_utf8_lossy(&inspected_text.1);
+        assert!(text_out.contains("codex: timed out after 1s"), "{text_out}");
+        assert!(!text_out.contains("interrupted"), "{text_out}");
+    });
+
+    // #457 large-diff timeout hint + interrupted wording preservation + #458 pinned --base SHA.
+    provider_isolated_with_env(name, "default-wall", &[], || {
+        use oms_command_peer::storage;
+        let repo = provider_repo();
+        repo.write("lib.rs", "pub fn v() -> i32 { 1 }\n");
+        repo.git(&["add", "lib.rs"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "initial base",
+        ]);
+        let base_v1 = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", &base_v1]);
+
+        // Build a second commit on a side ref to simulate origin/main advancing during review.
+        repo.git(&["checkout", "-qb", "other-main"]);
+        repo.write("other.rs", "pub fn merged_pr() -> i32 { 99 }\n");
+        repo.git(&["add", "other.rs"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "merged elsewhere",
+        ]);
+        let base_v2 = git_stdout(&repo, &["rev-parse", "HEAD"]);
+
+        repo.git(&["checkout", "-qb", "feature", &base_v1]);
+        repo.write("lib.rs", "pub fn v() -> i32 { 2 }\n");
+        repo.git(&["add", "lib.rs"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "feature change",
+        ]);
+        let feature_diff_bytes = Command::new("git")
+            .arg("-C")
+            .arg(&repo.0)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                &base_v1,
+                "--",
+            ])
+            .output()
+            .unwrap()
+            .stdout
+            .len();
+        assert!(feature_diff_bytes > 0);
+
+        enum Mode {
+            MoveBaseRef,
+            AdvanceHead,
+            InterruptedSeat,
+            LargeDiffTimeout,
+        }
+        struct GateProbe<'a> {
+            repo: &'a Repo,
+            mode: Mode,
+            base_v2: &'a str,
+        }
+        impl Executor for GateProbe<'_> {
+            fn execute(
+                &self,
+                request: Invocation,
+                stop: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                if request.argv[0] == "git" {
+                    return Native.execute(request, stop);
+                }
+                if request.argv[0] == "bash" {
+                    return Ok(Completed {
+                        code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        complete: true,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::ZERO,
+                    });
+                }
+                match self.mode {
+                    Mode::MoveBaseRef => {
+                        self.repo
+                            .git(&["update-ref", "refs/remotes/origin/main", self.base_v2]);
+                        Ok(Completed {
+                            code: 0,
+                            stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
+                            stderr: Vec::new(),
+                            complete: true,
+                            cleanup_complete: Some(true),
+                            owned_cleanup: None,
+                            elapsed: Duration::from_secs(4),
+                        })
+                    }
+                    Mode::AdvanceHead => {
+                        self.repo.git(&[
+                            "-c",
+                            "user.name=Fixture",
+                            "-c",
+                            "user.email=fixture@example.invalid",
+                            "commit",
+                            "--allow-empty",
+                            "-qm",
+                            "head moved during review",
+                        ]);
+                        Ok(Completed {
+                            code: 0,
+                            stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
+                            stderr: Vec::new(),
+                            complete: true,
+                            cleanup_complete: Some(true),
+                            owned_cleanup: None,
+                            elapsed: Duration::from_secs(2),
+                        })
+                    }
+                    Mode::InterruptedSeat => Ok(Completed {
+                        code: 130,
+                        stdout: Vec::new(),
+                        stderr: b"warning: child caught signal\nerror: interrupted\n".to_vec(),
+                        complete: false,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::from_secs(3),
+                    }),
+                    Mode::LargeDiffTimeout => Ok(Completed {
+                        code: 124,
+                        stdout: Vec::new(),
+                        stderr: b"error: interrupted\n".to_vec(),
+                        complete: false,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::from_secs(1200),
+                    }),
+                }
+            }
+        }
+
+        let run_case = |mode: Mode, dir: &str, stop: &AtomicBool| {
+            let probe = GateProbe {
+                repo: &repo,
+                mode,
+                base_v2: &base_v2,
+            };
+            oms_command_peer::run_with_executor(
+                "peer-review",
+                &args(&[
+                    "--providers",
+                    "codex",
+                    "--model",
+                    "fixture",
+                    "--gate",
+                    "--base",
+                    "refs/remotes/origin/main",
+                    "--verify",
+                    "true",
+                    "--prompt",
+                    "verify pinned base and diagnostics",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--no-graph-context",
+                    "--artifact-dir",
+                    dir,
+                ]),
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                stop,
+                &probe,
+            )
+        };
+
+        // 1. Moving refs/remotes/origin/main during the review must NOT invalidate the gate.
+        let moved = run_case(Mode::MoveBaseRef, ".oms/review-pinned-base", &STOP);
+        let moved_out = String::from_utf8_lossy(&moved.1);
+        assert_eq!(
+            moved.0, 0,
+            "moving base ref must not invalidate gate: {moved:?}"
+        );
+        assert!(!moved_out.contains("review scope changed"), "{moved_out}");
+        assert!(
+            moved_out.contains(&format!("base: {base_v1}")),
+            "stdout must record resolved base SHA: {moved_out}"
+        );
+        assert!(
+            moved_out.contains(&format!("elapsed 4s, diff {feature_diff_bytes} bytes")),
+            "{moved_out}"
+        );
+        let verdicts_name = storage::names(&repo.0, Path::new(".oms/review-pinned-base"), ".json")
+            .unwrap()
+            .into_iter()
+            .find(|n| n.starts_with("_verdicts-"))
+            .expect("verdicts json");
+        let verdicts = V::parse(
+            &storage::read(
+                &repo.0,
+                &Path::new(".oms/review-pinned-base").join(&verdicts_name),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verdicts.get("base").text(), Some(base_v1.as_str()));
+        assert_eq!(
+            verdicts.get("seats").array()[0].get("elapsed_secs").py(),
+            "4"
+        );
+        assert_eq!(
+            verdicts.get("seats").array()[0].get("diff_bytes").py(),
+            feature_diff_bytes.to_string()
+        );
+
+        // Reset origin/main back to base_v1 for subsequent cases.
+        repo.git(&["update-ref", "refs/remotes/origin/main", &base_v1]);
+
+        // 2. An interrupted seat keeps the interrupted wording (not timed out).
+        let interrupted_seat =
+            run_case(Mode::InterruptedSeat, ".oms/review-interrupted-seat", &STOP);
+        assert_eq!(interrupted_seat.0, 2, "{interrupted_seat:?}");
+        let int_out = String::from_utf8_lossy(&interrupted_seat.1);
+        assert!(int_out.contains("codex: interrupted"), "{int_out}");
+        assert!(!int_out.contains("timed out"), "{int_out}");
+        let int_verdicts_name =
+            storage::names(&repo.0, Path::new(".oms/review-interrupted-seat"), ".json")
+                .unwrap()
+                .into_iter()
+                .find(|n| n.starts_with("_verdicts-"))
+                .expect("verdicts json");
+        let int_verdicts = V::parse(
+            &storage::read(
+                &repo.0,
+                &Path::new(".oms/review-interrupted-seat").join(&int_verdicts_name),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            int_verdicts.get("seats").array()[0].get("verdict").text(),
+            Some("interrupted")
+        );
+        let inspected_int = run(
+            &repo,
+            &repo.0,
+            "peer-review",
+            &["verdicts", ".oms/review-interrupted-seat"],
+        );
+        assert_eq!(inspected_int.0, 2);
+        let inspected_int_out = String::from_utf8_lossy(&inspected_int.1);
+        assert!(
+            inspected_int_out.contains("codex: interrupted"),
+            "{inspected_int_out}"
+        );
+        assert!(
+            !inspected_int_out.contains("timed out"),
+            "{inspected_int_out}"
+        );
+
+        // Real cancellation via AtomicBool keeps interrupted wording.
+        let cancelled_flag = AtomicBool::new(true);
+        let cancelled = run_case(Mode::MoveBaseRef, ".oms/review-cancelled", &cancelled_flag);
+        assert_eq!(cancelled.0, 130);
+        let cancel_err = String::from_utf8_lossy(&cancelled.2);
+        assert!(cancel_err.contains("interrupted"), "{cancel_err}");
+        assert!(!cancel_err.contains("timed out"), "{cancel_err}");
+
+        // 3. Large diff timeout at default 20m suggests raising OMS_PEER_TIMEOUT.
+        let large_body = (0..400)
+            .map(|i| {
+                format!(
+                    "pub fn generated_line_{i:04}() -> usize {{ {i} }} // padding-padding-padding\n"
+                )
+            })
+            .collect::<String>();
+        repo.write("lib.rs", &large_body);
+        let large_diff_bytes = Command::new("git")
+            .arg("-C")
+            .arg(&repo.0)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                &base_v1,
+                "--",
+            ])
+            .output()
+            .unwrap()
+            .stdout
+            .len();
+        assert!(
+            large_diff_bytes >= 16 * 1024,
+            "large_diff_bytes={large_diff_bytes}"
+        );
+        let large_timeout = run_case(Mode::LargeDiffTimeout, ".oms/review-large-timeout", &STOP);
+        assert_eq!(large_timeout.0, 2, "{large_timeout:?}");
+        let large_out = String::from_utf8_lossy(&large_timeout.1);
+        assert!(
+            large_out.contains("codex: timed out after 20m")
+                && large_out.contains("OMS_PEER_TIMEOUT")
+                && large_out.contains(&format!("elapsed 1200s, diff {large_diff_bytes} bytes")),
+            "{large_out}"
+        );
+        assert!(
+            !large_out.to_lowercase().contains("interrupted"),
+            "{large_out}"
+        );
+
+        // 4. Changing HEAD during the review still invalidates the gate.
+        repo.write("lib.rs", "pub fn v() -> i32 { 2 }\n");
+        let head_moved = run_case(Mode::AdvanceHead, ".oms/review-head-moved", &STOP);
+        assert_eq!(head_moved.0, 2, "{head_moved:?}");
+        let head_out = String::from_utf8_lossy(&head_moved.1);
+        assert!(
+            head_out.contains("review scope changed during provider calls; gate incomplete"),
+            "{head_out}"
+        );
+    });
+}
+#[test]
 fn unavailable_services_refuse() {
     use oms_runtime::Services;
     let services = oms_runtime::services::Unavailable;
