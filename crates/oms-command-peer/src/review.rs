@@ -35,36 +35,38 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             return fail(format!("--{option} requires --gate"));
         }
     }
-    if args.has("covers") {
-        let repo = storage::repository(context, &args.path("repo", context.cwd))?;
-        if crate::delegate::verification(&args, &repo, false)?.is_none() {
-            return fail("--covers requires a gate verify command");
-        }
-        coverage(&args, &repo, context)?;
-    }
     if args.has("candidate-patch") {
         return fail(
             "candidate review requires native indexed-patch admission and a pinned private checkout; no reviewer started",
         );
     }
-    if args.has("gate")
-        && !args.has("no-diff")
-        && !peer::dry(&args, "peer-review")
-        && !args.has("export-only")
-    {
+    if args.has("gate") {
         let repo = storage::repository(context, &args.path("repo", context.cwd))?;
-        let untracked = process::git(
-            context,
-            &repo,
-            &["ls-files", "--others", "--exclude-standard", "-z"],
-        )?;
-        if untracked
-            .split(|b| *b == 0)
-            .any(|p| !p.is_empty() && !p.starts_with(b".oms/"))
-        {
-            return fail(
-                "blocking gate cannot review untracked content; stage it or add intent-to-add first",
-            );
+        let verify = crate::delegate::verification(&args, &repo, false)?;
+        if args.has("covers") {
+            if verify.is_none() {
+                return fail("--covers requires a gate verify command");
+            }
+            coverage(&args, &repo, context)?;
+        }
+        args.set_flag("_review-verify-resolved");
+        if let Some(command) = verify {
+            args.set_value("_review-verify", command);
+        }
+        if !args.has("no-diff") && !peer::dry(&args, "peer-review") && !args.has("export-only") {
+            let untracked = process::git(
+                context,
+                &repo,
+                &["ls-files", "--others", "--exclude-standard", "-z"],
+            )?;
+            if untracked
+                .split(|b| *b == 0)
+                .any(|p| !p.is_empty() && !p.starts_with(b".oms/"))
+            {
+                return fail(
+                    "blocking gate cannot review untracked content; stage it or add intent-to-add first",
+                );
+            }
         }
     }
     if args.has("since-last") {
@@ -695,7 +697,13 @@ pub(crate) fn finish(
         code = 2;
         output.push_str("review scope changed during provider calls; gate incomplete\n");
     }
-    if let Some(command) = crate::delegate::verification(args, repo, false)? {
+    let verify_command = if args.has("_review-verify-resolved") {
+        args.has("_review-verify")
+            .then(|| args.get("_review-verify").to_owned())
+    } else {
+        crate::delegate::verification(args, repo, false)?
+    };
+    if let Some(command) = verify_command {
         let checked = crate::delegate::verify(&command, repo, context)?;
         let mut exit = if checked.complete { checked.code } else { 125 };
         let after = scope(args, repo, context)?.0;

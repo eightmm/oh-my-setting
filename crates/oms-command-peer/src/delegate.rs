@@ -786,6 +786,53 @@ fn brief_label(question: &str) -> String {
     "peer-delegate".into()
 }
 
+fn bound_task_id(args: &Args) -> Option<String> {
+    for key in ["plan-task", "task-id"] {
+        let value = args.get(key).trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    if args.has("observe-plan-binding")
+        && let Ok(binding) = V::parse(args.get("observe-plan-binding").as_bytes())
+        && let Some(id) = binding
+            .get("task_id")
+            .text()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    {
+        return Some(id.to_owned());
+    }
+    None
+}
+
+fn active_task_id(packet: &[u8]) -> Option<&[u8]> {
+    if oms_command_task::packet::metadata(packet, "status").map(oms_command_task::packet::trim)
+        == Some(b"closed")
+    {
+        return None;
+    }
+    oms_command_task::packet::metadata(packet, "task_id")
+        .map(oms_command_task::packet::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn should_attach_task_packet(args: &Args, read: bool, packet: &[u8]) -> bool {
+    if args.has("no-task") || packet.is_empty() {
+        return false;
+    }
+    if args.has("task") {
+        return true;
+    }
+    if read {
+        return false;
+    }
+    let Some(bound) = bound_task_id(args) else {
+        return false;
+    };
+    active_task_id(packet).is_some_and(|active| active == bound.as_bytes())
+}
+
 pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
     if args.has("observe-plan-binding") {
@@ -879,9 +926,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     );
     prompt.push_layer("task", &question);
     prompt.push_layer("framing", &format!("\n\nOutput: return patch artifacts and concise changed files, checks, uncertainty and blockers.\nDone when: the authorized task and its required verification are complete, or no work can advance without the owner.\nBase revision: {base}\n"));
-    if args.has("task") && !args.has("no-task") || !read && !args.has("no-task") {
+    if !args.has("no-task") && (args.has("task") || (!read && bound_task_id(args).is_some())) {
         let packet = storage::read(&repo, Path::new(".oms/task/current.md"), true)?;
-        if !packet.is_empty() {
+        if should_attach_task_packet(args, read, &packet) {
             prompt.untrusted("task", "task", "recorded context", &packet)?;
         }
     }
@@ -1751,5 +1798,117 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"preserve");
         assert!(sym_wrapper.join("owner.json").is_symlink());
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn task_packet_attachment_matches_task_bindings_and_flags() {
+        let parse = |raw: &[&str]| {
+            let argv: Vec<OsString> = raw.iter().map(OsString::from).collect();
+            peer::parse(&argv).unwrap()
+        };
+        let active =
+            b"# Active Agent Task\n\n- task_id: task-459\n- status: active\n\n## Goal\nWork\n";
+        let closed =
+            b"# Active Agent Task\n\n- task_id: task-459\n- status: closed\n\n## Goal\nWork\n";
+        let unnamed = b"# Active Agent Task\n\n- status: active\n\n## Goal\nWork\n";
+
+        assert!(!should_attach_task_packet(&parse(&[]), false, active));
+        assert!(!should_attach_task_packet(
+            &parse(&["--task-id", "other"]),
+            false,
+            active
+        ));
+        assert!(should_attach_task_packet(
+            &parse(&["--task-id", "task-459"]),
+            false,
+            active
+        ));
+        assert!(should_attach_task_packet(
+            &parse(&["--plan-task", "task-459"]),
+            false,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--plan-task", "other"]),
+            false,
+            active
+        ));
+        assert!(should_attach_task_packet(
+            &parse(&[
+                "--observe-plan-binding",
+                r#"{"plan_id":"plan_00000000000000000000000000000000","task_id":"task-459"}"#,
+            ]),
+            false,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&[
+                "--observe-plan-binding",
+                r#"{"plan_id":"plan_00000000000000000000000000000000","task_id":"other"}"#,
+            ]),
+            false,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--observe-plan-binding", "not-json"]),
+            false,
+            active
+        ));
+
+        // Read delegations stay opt-in via --task even when bound to the same task.
+        assert!(!should_attach_task_packet(
+            &parse(&["--task-id", "task-459"]),
+            true,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--plan-task", "task-459"]),
+            true,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--observe-plan-binding", r#"{"task_id":"task-459"}"#]),
+            true,
+            active
+        ));
+        assert!(should_attach_task_packet(&parse(&["--task"]), true, active));
+
+        // Explicit --task / --no-task flags take precedence.
+        assert!(should_attach_task_packet(
+            &parse(&["--task"]),
+            false,
+            active
+        ));
+        assert!(should_attach_task_packet(
+            &parse(&["--task"]),
+            false,
+            closed
+        ));
+        assert!(should_attach_task_packet(
+            &parse(&["--task"]),
+            false,
+            unnamed
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--task", "--no-task"]),
+            false,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--plan-task", "task-459", "--no-task"]),
+            false,
+            active
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--task-id", "task-459"]),
+            false,
+            closed
+        ));
+        assert!(!should_attach_task_packet(
+            &parse(&["--task-id", "task-459"]),
+            false,
+            unnamed
+        ));
+        assert!(!should_attach_task_packet(&parse(&["--task"]), false, b""));
     }
 }

@@ -86,7 +86,8 @@ Options:
                        the landing gate still runs the base verification floor.
   --keep-worktree      Keep the worktree for manual inspection.
   --memory             Attach shared harness memory.
-  --task               Attach the active task packet (default for writes).
+  --task               Attach the active task packet (default for writes only
+                       when --task-id matches the active task's id).
   --ml-context         Attach the compact ML context digest.
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable task context.

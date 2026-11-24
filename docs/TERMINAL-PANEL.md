@@ -740,7 +740,7 @@ both select **Continue current Main**. Choice 2 focuses the existing Board,
 where a verified managed Codex Main can switch with `s`. An eligible managed
 Claude Main on Linux uses the same key. The picker shows **Open the Board**
 when there are no installed alternatives or when the outgoing Claude Main
-lacks host process verification. For a fresh Main, the picker offers the
+does not support assisted switching. For a fresh Main, the picker offers the
 installed entries below in this order. Use `--repo PATH` for the checkout
 and `--room ID` for the Room on startup.
 
