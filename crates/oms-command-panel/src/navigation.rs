@@ -62,16 +62,34 @@ pub fn call_identity(call: &serde_json::Value) -> CallIdentity {
 }
 
 impl Navigation {
+    #[cfg(test)]
     pub fn apply(&mut self, key: &Key, count: usize, height: usize) -> Action {
+        if self.editing && *key == Key::Escape {
+            self.filter = self.filter_before_edit.take().unwrap_or_default();
+            self.selection_before_edit = None;
+            self.editing = false;
+            self.selected = 0;
+            self.offset = 0;
+            return Action::None;
+        }
+        if !self.editing && !self.detail && *key == Key::Char('/') {
+            self.filter_before_edit = Some(self.filter.clone());
+            self.selection_before_edit = None;
+            self.editing = true;
+            return Action::None;
+        }
+        if !self.editing && *key == Key::Char('b') {
+            self.attention_only = !self.attention_only;
+            self.selection_before_attention = None;
+            self.selected = 0;
+            self.offset = 0;
+            return Action::None;
+        }
+        self.apply_other(key, count, height)
+    }
+    fn apply_other(&mut self, key: &Key, count: usize, height: usize) -> Action {
         if self.editing {
             match key {
-                Key::Escape => {
-                    self.filter = self.filter_before_edit.take().unwrap_or_default();
-                    self.selection_before_edit = None;
-                    self.editing = false;
-                    self.selected = 0;
-                    self.offset = 0;
-                }
                 Key::Enter => {
                     self.filter_before_edit = None;
                     self.selection_before_edit = None;
@@ -99,11 +117,6 @@ impl Navigation {
             Key::Char('u' | '9') | Key::Repaint => return Action::Refresh,
             Key::Char('U') => return Action::Quota,
             Key::Char('c') => return Action::Council,
-            Key::Char('/') if !self.detail => {
-                self.filter_before_edit = Some(self.filter.clone());
-                self.selection_before_edit = None;
-                self.editing = true;
-            }
             Key::Escape => {
                 if self.detail || self.help || self.health {
                     self.detail = false;
@@ -115,12 +128,6 @@ impl Navigation {
             }
             Key::Char('g' | 't') => self.view = View::Tree,
             Key::Tab => self.view = self.view.next(),
-            Key::Char('b') => {
-                self.attention_only = !self.attention_only;
-                self.selection_before_attention = None;
-                self.selected = 0;
-                self.offset = 0;
-            }
             Key::Char('k') => self.health = !self.health,
             Key::Char('?') | Key::Function(12) => self.help = !self.help,
             Key::Enter => {
@@ -190,6 +197,8 @@ impl Navigation {
                 let after = after_visible(self);
                 if let Some(saved) = self.selection_before_attention.take() {
                     self.restore_saved(saved, &after, height);
+                } else if current_saved.identity.is_some() {
+                    self.restore_saved(current_saved, &after, height);
                 } else {
                     self.selected = 0;
                     self.offset = 0;
@@ -201,7 +210,7 @@ impl Navigation {
         let was_view = self.view;
         let was_filter = self.filter.clone();
         let was_editing = self.editing;
-        let action = self.apply(key, before.len(), height);
+        let action = self.apply_other(key, before.len(), height);
         if self.view != was_view || (!was_editing && self.filter != was_filter) {
             let after = after_visible(self);
             self.restore_saved(current_saved, &after, height);

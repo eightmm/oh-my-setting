@@ -1035,18 +1035,29 @@ struct ReadTranscript {
 }
 
 fn transcript_candidates(call: &Value) -> Vec<String> {
-    let mut ids = Vec::new();
-    for raw in [
+    let attempt_raws = [
         call.get("attempt_id").and_then(Value::as_str),
         call.get("call_id").and_then(Value::as_str),
-        call.get("participant").and_then(Value::as_str),
-        call.get("refs")
-            .and_then(|r| r.get("panel_room_participant"))
-            .and_then(Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    ];
+    let has_attempt_id = attempt_raws
+        .into_iter()
+        .flatten()
+        .any(|raw| !raw.is_empty());
+    let candidate_raws: Vec<&str> = if has_attempt_id {
+        attempt_raws.into_iter().flatten().collect()
+    } else {
+        [
+            call.get("participant").and_then(Value::as_str),
+            call.get("refs")
+                .and_then(|r| r.get("panel_room_participant"))
+                .and_then(Value::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    };
+    let mut ids = Vec::new();
+    for raw in candidate_raws {
         if crate::identifier(raw).is_ok() && !ids.iter().any(|existing| existing == raw) {
             ids.push(raw.to_owned());
         }
@@ -1751,7 +1762,7 @@ mod tests {
         let logs_dir = repo.0.join(".oms/panel-state/dispatch-logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
         std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let transcript_file = logs_dir.join("call-alpha.transcript");
+        let transcript_file = logs_dir.join("call-att-1.transcript");
         std::fs::write(&transcript_file, jsonl.as_bytes()).unwrap();
         std::fs::set_permissions(&transcript_file, std::fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -1766,7 +1777,7 @@ mod tests {
 
         // Symlinked transcript is refused and reports not captured.
         let outside = repo.write_file("outside.txt", b"should-not-read\n");
-        std::os::unix::fs::symlink(&outside, logs_dir.join("call-sym.transcript")).unwrap();
+        std::os::unix::fs::symlink(&outside, logs_dir.join("call-att-2.transcript")).unwrap();
         let sym_report = serde_json::json!({
             "kind": "oms-panel-results",
             "rows": [{
@@ -1784,7 +1795,7 @@ mod tests {
 
         // Hardlinked transcript is refused.
         let hard_src = repo.write_file("hard.txt", b"hardlink-body\n");
-        std::fs::hard_link(&hard_src, logs_dir.join("call-hard.transcript")).unwrap();
+        std::fs::hard_link(&hard_src, logs_dir.join("call-att-3.transcript")).unwrap();
         let hard_report = serde_json::json!({
             "kind": "oms-panel-results",
             "rows": [{
@@ -2294,6 +2305,7 @@ mod tests {
             file
         };
         let shared = write_tx("call-worker.transcript", "SHARED_PARTICIPANT_FALLBACK");
+        let legacy = write_tx("call-legacy.transcript", "PARTICIPANT_ONLY_LEGACY");
         let att1 = write_tx("att-1.transcript", "ATTEMPT_ONE_UNIQUE_EVENT");
         let att2 = write_tx("att-2.transcript", "ATTEMPT_TWO_UNIQUE_EVENT");
 
@@ -2304,6 +2316,8 @@ mod tests {
                 "calls": [
                     { "participant": "call-worker", "attempt_id": "att-1" },
                     { "participant": "call-worker", "attempt_id": "att-2" },
+                    { "participant": "call-worker", "attempt_id": "att-missing-retry" },
+                    { "participant": "call-legacy" },
                     { "participant": "call-missing", "attempt_id": "att-3" },
                 ]
             }]
@@ -2317,9 +2331,15 @@ mod tests {
         let text = wide.join("\n");
         assert!(text.contains("ATTEMPT_ONE_UNIQUE_EVENT"), "{text}");
         assert!(text.contains("ATTEMPT_TWO_UNIQUE_EVENT"), "{text}");
+        assert!(text.contains("PARTICIPANT_ONLY_LEGACY"), "{text}");
         assert!(
             !text.contains("SHARED_PARTICIPANT_FALLBACK"),
-            "attempt_id must take priority over shared participant: {text}"
+            "attempt_id must not fall back to shared participant: {text}"
+        );
+        assert!(
+            wide.iter()
+                .any(|l| l.contains("att-missing-retry") && l.contains(TRANSCRIPT_NOT_CAPTURED)),
+            "missing retry attempt must report not captured instead of shared participant: {wide:?}"
         );
         assert!(
             wide.iter()
@@ -2328,7 +2348,7 @@ mod tests {
         );
 
         // Delete transcript files from disk; width changes must reuse cached data.
-        for f in [&shared, &att1, &att2] {
+        for f in [&shared, &legacy, &att1, &att2] {
             std::fs::remove_file(f).unwrap();
         }
         let narrow = reader.lines(&repo.0, &report, 28).unwrap().join("\n");
