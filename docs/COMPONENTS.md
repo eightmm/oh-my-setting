@@ -1388,9 +1388,14 @@ Manual CLI `resolve` keeps its established command-wide scope. JSON views expose
 the latest failure's `verification`/`failure_sha256` separately from the last
 `resolution_verification` and its explicit prior hashes. The ledger retains
 schema 2; readers must understand the additional `verified` event for complete
-views. Older strict readers count it as invalid rather than treating a partial
-pass as a command-wide resolution. Upgrade the native readers together; no
-migration of old rows is required.
+views. Partial receipts use `observed_fingerprint` for the exact ledger subject.
+Legacy memory clients interpret a top-level `fingerprint` as an update to the
+failure's open/closed status. Keeping that key on fail and resolved records
+preserves manual resolutions even when an older memory client reads a later
+partial receipt. Current readers also accept previously written `verified`
+rows with `fingerprint`. An older strict state reader counts a partial receipt
+as invalid and refuses ledger compaction. Upgrade state and bundle readers for
+complete evidence and retention, without migrating existing rows.
 
 Attempt bundles match these native reference IDs even outside the timestamp
 window and label them `native-reference-attempt`. Other included rows are

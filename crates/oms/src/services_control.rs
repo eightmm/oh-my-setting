@@ -5617,7 +5617,7 @@ done
             &osv(&[
                 "show",
                 "--fingerprint",
-                resolved.text("fingerprint"),
+                resolved.text("observed_fingerprint"),
                 "--json",
             ]),
             repo.path(),
@@ -5741,7 +5741,13 @@ done
         let resolve_manually = || {
             let (code, _, err) = oms_command_state::run(
                 "fail-ledger",
-                &osv(&["resolve", "--cmd", command]),
+                &osv(&[
+                    "resolve",
+                    "--cmd",
+                    command,
+                    "--how",
+                    "operator handled failure",
+                ]),
                 repo.path(),
                 &stop,
             );
@@ -5803,10 +5809,29 @@ done
         verify(&mut task, 0);
         let latest = rows().pop().unwrap();
         assert_eq!(latest.text("event"), "verified");
+        assert!(
+            latest.opt("fingerprint").is_none(),
+            "legacy memory must not reopen the manual resolution"
+        );
+        assert_eq!(
+            latest.text("observed_fingerprint"),
+            reset.text("fingerprint")
+        );
         assert!(matches!(
             latest.get("verification").get("prior_failures"),
             oms_command_plan::json::Value::Null
         ));
+        let (code, out, err) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["show", "--fingerprint", reset.text("fingerprint"), "--json"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let shown: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(shown["failure"]["resolved"], true);
+        assert_eq!(shown["failure"]["how"], reset.text("how"));
+        assert!(shown["failure"].get("resolution_verification").is_none());
         assert!(candidates().is_empty());
         assert!(status(&mut task).contains("verification: fresh"));
     }

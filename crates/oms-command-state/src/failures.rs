@@ -29,6 +29,16 @@ fn ledger_path(ctx: &Context<'_>, state: &Path) -> PathBuf {
         .unwrap_or_else(|| state.join(STORE))
 }
 
+/// A partial receipt has its own subject key. Legacy memory readers otherwise
+/// treat any top-level fingerprint on a non-resolved row as a fresh failure.
+pub(crate) fn row_fingerprint(row: &Value) -> &str {
+    if row.text("event") == "verified" && row.opt("observed_fingerprint").is_some() {
+        row.text("observed_fingerprint")
+    } else {
+        row.text("fingerprint")
+    }
+}
+
 fn verification(row: &Value) -> Option<&Value> {
     let evidence = row.opt("verification")?;
     let digest =
@@ -41,7 +51,8 @@ fn verification(row: &Value) -> Option<&Value> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
     };
-    (evidence.text("scope") == "agent-task-reference-v1"
+    (row.get("schema").int().ok() == Some(2)
+        && evidence.text("scope") == "agent-task-reference-v1"
         && evidence.text("action") == "verification-rerun"
         && !evidence.text("active_task_id").is_empty()
         && ["snapshot_attempt_id", "outcome_attempt_id"]
@@ -103,7 +114,7 @@ fn open_failures<'a>(rows: &'a [Value], fingerprint: &str) -> Result<OpenFailure
     let mut pending = BTreeMap::new();
     for row in rows[start..]
         .iter()
-        .filter(|row| row.text("fingerprint") == fingerprint)
+        .filter(|row| row_fingerprint(row) == fingerprint)
     {
         if row.text("event") == "fail" {
             pending.insert(json::hash(row)?, row);
@@ -260,7 +271,9 @@ pub fn valid_row(row: &Value) -> bool {
         .unwrap_or(0);
     if ![1, 2].contains(&schema)
         || !["fail", "resolved", "verified"].contains(&row.text("event"))
-        || row.text("fingerprint").trim().is_empty()
+        || row_fingerprint(row).trim().is_empty()
+        || (row.opt("observed_fingerprint").is_some()
+            && (row.text("event") != "verified" || row.opt("fingerprint").is_some()))
     {
         return false;
     }
@@ -324,7 +337,7 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
             bad += 1;
             continue;
         }
-        let fp = row.text("fingerprint");
+        let fp = row_fingerprint(row);
         let index = match found.iter().position(|(key, _)| key == fp) {
             Some(i) => i,
             None => {
@@ -346,7 +359,11 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
         };
         let entry = &mut found[index].1;
         if row.text("event") == "verified" {
-            entry.resolution_verification = verification(row).cloned().unwrap_or(Value::Null);
+            // A receipt racing a completed resolution still belongs in history.
+            // Its proof must not replace that resolution's own provenance.
+            if !entry.resolved {
+                entry.resolution_verification = verification(row).cloned().unwrap_or(Value::Null);
+            }
             continue;
         }
         if row.text("event") == "resolved" {
@@ -637,7 +654,14 @@ fn run_observed(
             ("event", string(event)),
             ("ts", string(timestamp(now)?)),
             ("agent", string("agent")),
-            ("fingerprint", string(&fp)),
+            (
+                if resolves {
+                    "fingerprint"
+                } else {
+                    "observed_fingerprint"
+                },
+                string(&fp),
+            ),
             ("how", string(how)),
         ]);
         if let Some(evidence) = evidence {
