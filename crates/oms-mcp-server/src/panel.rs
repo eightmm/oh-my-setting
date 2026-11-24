@@ -1648,7 +1648,8 @@ impl Server<'_> {
         ];
         // Codex supplies threadId on each call, outside model/widget arguments.
         // Only its native consumer hash leaves this process; it grants no authority.
-        if let Some(thread) = meta["threadId"].as_str().filter(|v| uuid(v)) {
+        let thread = meta["threadId"].as_str().filter(|v| uuid(v));
+        if let Some(thread) = thread {
             argv.extend([
                 "--conversation-digest".into(),
                 crate::storage::hash(thread)[..32].into(),
@@ -1662,11 +1663,34 @@ impl Server<'_> {
             return Err("Unsupported OMS panel snapshot version.".into());
         }
         let mut dashboard = report["dashboard"].clone();
-        if partial {
+        let main = &dashboard["conversationMain"];
+        let room_id = |v: &Value| {
+            v.as_str().is_some_and(|s| {
+                (1..=160).contains(&s.len())
+                    && !s.starts_with(['-', '.'])
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
+        };
+        let harness_unverified = !main["harness"].is_null()
+            && !(thread.is_some()
+                && dashboard["conversationBinding"] == "matched"
+                && main["source"] == "room-session"
+                && main["provider"] == "codex"
+                && main["state"] == "joined"
+                && room_id(&main["room"])
+                && room_id(&main["participant"])
+                && matches!(main["harness"].as_str(), Some("codex" | "pi")));
+        if harness_unverified {
+            dashboard["conversationMain"]["harness"] = Value::Null;
+        }
+        if partial || harness_unverified {
             let was_degraded = dashboard["degraded"] == true;
             dashboard["degraded"] = json!(true);
             if dashboard["observation"].is_object()
-                && (!was_degraded || dashboard["observation"]["completeness"] == "complete")
+                && (harness_unverified
+                    || !was_degraded
+                    || dashboard["observation"]["completeness"] == "complete")
             {
                 if dashboard["observation"]["completeness"] == "complete" {
                     dashboard["observation"]["completeness"] = json!("partial");
