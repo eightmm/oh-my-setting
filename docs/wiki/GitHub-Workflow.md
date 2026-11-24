@@ -25,6 +25,13 @@ from the same repository. See [project mode](https://github.com/eightmm/oh-my-se
 Optionally, view the same issues and PRs in a GitHub Projects
 [table, board or roadmap](https://docs.github.com/en/issues/planning-and-tracking-with-projects/customizing-views-in-your-project/changing-the-layout-of-a-view).
 
+The [control surface roadmap](https://github.com/eightmm/oh-my-setting/blob/main/docs/CONTROL-SURFACE-ROADMAP.md) defines the initial
+`OMS Development` Project fields and views for the shared UI/plugin work. Its
+epic records the actual Project URL and setup evidence. Project statuses track
+development; moving a card to Ready never starts an OMS run, spends budget,
+consumes approval or merges a PR. Existing Issue/Plan/PR bindings remain canonical;
+optional Projects v2 metadata synchronization is a separate follow-up.
+
 ## 3. Verified PR
 
 1. Name OMS work branches `oms/*` and write commits as `<type>: <description>`.

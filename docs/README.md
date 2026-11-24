@@ -32,6 +32,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
 | [Graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) | Current Rust/search gaps, five reference projects, reusable implementation packets and retrieval evaluation |
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
+| [Control surface and plugins roadmap](CONTROL-SURFACE-ROADMAP.md) | One-repository delivery plan for shared UI, provider session adapters, ChatGPT/Codex integrations and GitHub Project tracking over existing owners |
 | [Multi-agent and multi-host plan](MULTI-AGENT-MULTI-HOST-PLAN.md) | Proposed behavior, staged delivery and acceptance for parallel agents, Git integration and remote clusters and opt-in Stages A–F runtime implementation |
 | [Context inspection](CONTEXT-INSPECTION.md) | Saved context manifest inspection and digest verification |
 | [Pinned source intake](INTENT-SOURCE-INTAKE.md) | SHA-pinned local file and GitHub issue intake for `oms intent draft` |
