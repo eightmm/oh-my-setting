@@ -109,7 +109,9 @@ impl Transaction {
         })
     }
     pub fn copy(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace(target, |p| copy_staged(source, p))
+        self.replace(target, |p| {
+            copy(source, p, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))
+        })
     }
     pub fn files(&mut self, target: &Path, files: &[(&str, &[u8], u32)]) -> Result<()> {
         self.files_mode(target, files, false)
@@ -470,7 +472,9 @@ impl Transaction {
     /// Snapshot provider-owned files before letting its CLI rewrite them. A kill
     /// before sealing retains the undo copy and refuses uncertain recovery.
     pub fn publish_external(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace_mode(target, true, false, |p| external_copy_staged(source, p))
+        self.replace_mode(target, true, false, |p| {
+            external_copy(source, p, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))
+        })
     }
     pub fn prepare_external(&mut self, targets: &[PathBuf]) -> Result<usize> {
         let start = self.journal.changes.len();
@@ -502,7 +506,7 @@ impl Transaction {
             });
             self.save()?;
             if old.is_some() {
-                let hid = external_copy_staged(&target, &undo)?;
+                let hid = external_copy(&target, &undo, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))?;
                 if hid != hidden_old_skill
                     || external_identity_with_hidden(&undo, hidden_old_skill)? != old
                     || external_identity(&target)? != old
@@ -674,7 +678,26 @@ fn can_hide_skill(dir: &Path) -> Result<bool> {
     }
     Ok(!r::exists(&dir.join(HIDDEN_SKILL_FILE)))
 }
+fn rename_entry_noreplace(dir: &fs::File, from: &str, to: &str) -> Result<()> {
+    match rustix::fs::renameat_with(dir, from, dir, to, rustix::fs::RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::EXIST) => {
+            r::fail("skill visibility transition destination already exists")
+        }
+        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP) => {
+            match rustix::fs::statat(dir, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => return r::fail("skill visibility transition destination already exists"),
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(e) => return Err(std::io::Error::from(e).into()),
+            }
+            rustix::fs::renameat(dir, from, dir, to)
+                .map_err(|e| r::Error::from(std::io::Error::from(e)))
+        }
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
+}
 fn rename_skill_entry(dir: &Path, from: &str, to: &str) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     let m = match fs::symlink_metadata(dir) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -683,29 +706,32 @@ fn rename_skill_entry(dir: &Path, from: &str, to: &str) -> Result<()> {
     if !m.is_dir() || m.file_type().is_symlink() {
         return Ok(());
     }
-    let src = dir.join(from);
-    let dst = dir.join(to);
-    let src_meta = match fs::symlink_metadata(&src) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+    let dir_file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32)
+        .open(dir)?;
+    let src_stat = match rustix::fs::statat(&dir_file, from, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+    {
+        Ok(st) => st,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(std::io::Error::from(e).into()),
     };
-    if src_meta.is_dir() {
+    if rustix::fs::FileType::from_raw_mode(src_stat.st_mode) == rustix::fs::FileType::Directory {
         return Ok(());
     }
-    if r::exists(&dst) {
-        return r::fail("skill visibility transition destination already exists");
-    }
-    let orig_mode = m.mode() & 0o777;
+    let orig_mode = dir_file.metadata()?.mode() & 0o7777;
     let writable = orig_mode & 0o200 != 0;
     if !writable {
-        fs::set_permissions(dir, fs::Permissions::from_mode(orig_mode | 0o200))?;
+        dir_file.set_permissions(fs::Permissions::from_mode(orig_mode | 0o200))?;
     }
-    let res = fs::rename(&src, &dst)
-        .and_then(|()| fs::File::open(dir)?.sync_all())
-        .map_err(r::Error::from);
+    let res = rename_entry_noreplace(&dir_file, from, to)
+        .and_then(|()| dir_file.sync_all().map_err(r::Error::from));
     if !writable {
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(orig_mode));
+        let restore = dir_file
+            .set_permissions(fs::Permissions::from_mode(orig_mode))
+            .map_err(r::Error::from);
+        res?;
+        return restore;
     }
     res
 }
@@ -824,38 +850,12 @@ fn identity_with_hidden(path: &Path, allow_hidden_skill: bool) -> Result<Option<
     }
     Ok(Some(format!("{:x}", h.finalize())))
 }
-fn copy_staged(source: &Path, target: &Path) -> Result<bool> {
+fn copy(source: &Path, target: &Path, rename_top: Option<(&str, &str)>) -> Result<bool> {
     let m = fs::symlink_metadata(source)?;
     if m.file_type().is_symlink() {
         return r::fail("managed copies cannot contain symlinks");
     }
-    if m.is_dir() {
-        let hide = !r::exists(&source.join(HIDDEN_SKILL_FILE));
-        let mut hid = false;
-        fs::create_dir(target)?;
-        for e in fs::read_dir(source)? {
-            let e = e?;
-            let name = e.file_name();
-            let dest = if hide && name == SKILL_FILE && !fs::symlink_metadata(e.path())?.is_dir() {
-                hid = true;
-                target.join(HIDDEN_SKILL_FILE)
-            } else {
-                target.join(&name)
-            };
-            copy(&e.path(), &dest)?;
-        }
-        r::sync_dir(target)?;
-        Ok(hid)
-    } else {
-        copy(source, target)?;
-        Ok(false)
-    }
-}
-fn copy(source: &Path, target: &Path) -> Result<()> {
-    let m = fs::symlink_metadata(source)?;
-    if m.file_type().is_symlink() {
-        return r::fail("managed copies cannot contain symlinks");
-    }
+    let mut renamed = false;
     if m.is_file() {
         r::new_file(
             target,
@@ -863,16 +863,27 @@ fn copy(source: &Path, target: &Path) -> Result<()> {
             m.permissions().mode() & 0o777,
         )?;
     } else if m.is_dir() {
+        let active_rename = rename_top.filter(|(_, to)| !r::exists(&source.join(to)));
         fs::create_dir(target)?;
         for e in fs::read_dir(source)? {
             let e = e?;
-            copy(&e.path(), &target.join(e.file_name()))?;
+            let name = e.file_name();
+            let dest = if let Some((from, to)) = active_rename
+                && name == from
+                && !fs::symlink_metadata(e.path())?.is_dir()
+            {
+                renamed = true;
+                target.join(to)
+            } else {
+                target.join(&name)
+            };
+            copy(&e.path(), &dest, None)?;
         }
         r::sync_dir(target)?;
     } else {
         return r::fail("managed copy source is not a file or directory");
     }
-    Ok(())
+    Ok(renamed)
 }
 
 pub(crate) fn external_read(path: &Path) -> Result<Vec<u8>> {
@@ -936,52 +947,37 @@ fn external_identity_with_hidden(path: &Path, allow_hidden_skill: bool) -> Resul
     visit(path, &mut h, 0, allow_hidden_skill)?;
     Ok(Some(format!("{:x}", h.finalize())))
 }
-fn external_copy_staged(source: &Path, target: &Path) -> Result<bool> {
+fn external_copy(source: &Path, target: &Path, rename_top: Option<(&str, &str)>) -> Result<bool> {
     let m = fs::symlink_metadata(source)?;
-    if m.is_dir() && !m.file_type().is_symlink() {
-        let hide = !r::exists(&source.join(HIDDEN_SKILL_FILE));
-        let mut hid = false;
-        fs::create_dir(target)?;
-        fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
-        for row in fs::read_dir(source)? {
-            let row = row?;
-            let name = row.file_name();
-            let dest = if hide && name == SKILL_FILE && !fs::symlink_metadata(row.path())?.is_dir()
-            {
-                hid = true;
-                target.join(HIDDEN_SKILL_FILE)
-            } else {
-                target.join(&name)
-            };
-            external_copy(&row.path(), &dest)?;
-        }
-        fs::set_permissions(target, fs::Permissions::from_mode(m.mode() & 0o777))?;
-        r::sync_dir(target)?;
-        Ok(hid)
-    } else {
-        external_copy(source, target)?;
-        Ok(false)
-    }
-}
-fn external_copy(source: &Path, target: &Path) -> Result<()> {
-    let m = fs::symlink_metadata(source)?;
+    let mut renamed = false;
     if m.file_type().is_symlink() {
         symlink(fs::read_link(source)?, target)?;
     } else if m.is_file() {
         r::new_file(target, &external_read(source)?, m.mode() & 0o777)?;
     } else if m.is_dir() {
+        let active_rename = rename_top.filter(|(_, to)| !r::exists(&source.join(to)));
         fs::create_dir(target)?;
         fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
         for row in fs::read_dir(source)? {
             let row = row?;
-            external_copy(&row.path(), &target.join(row.file_name()))?;
+            let name = row.file_name();
+            let dest = if let Some((from, to)) = active_rename
+                && name == from
+                && !fs::symlink_metadata(row.path())?.is_dir()
+            {
+                renamed = true;
+                target.join(to)
+            } else {
+                target.join(&name)
+            };
+            external_copy(&row.path(), &dest, None)?;
         }
         fs::set_permissions(target, fs::Permissions::from_mode(m.mode() & 0o777))?;
         r::sync_dir(target)?;
     } else {
         return r::fail("provider snapshot refuses special files");
     }
-    Ok(())
+    Ok(renamed)
 }
 
 #[cfg(test)]
@@ -1050,7 +1046,7 @@ mod tests {
         {
             let mut tx = Transaction::begin(&paths).unwrap();
             tx.replace(&target, |staged| {
-                let hid = copy_staged(&source_v2, staged)?;
+                let hid = copy(&source_v2, staged, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))?;
                 assert!(hid);
                 assert!(
                     !staged.join(SKILL_FILE).exists(),
@@ -1175,7 +1171,7 @@ mod tests {
         let crash_staged = skills.join(".oms-stage-crash.1");
         fs::rename(&target, &crash_undo).unwrap();
         hide_skill(&crash_undo).unwrap();
-        assert!(copy_staged(&source_v2, &target).unwrap());
+        assert!(copy(&source_v2, &target, Some((SKILL_FILE, HIDDEN_SKILL_FILE))).unwrap());
         assert!(!target.join(SKILL_FILE).exists());
         assert!(target.join(HIDDEN_SKILL_FILE).is_file());
         let journal_dir = paths.config.join("native-lifecycle");
@@ -1214,7 +1210,14 @@ mod tests {
         // Crash after `save()` before `rename(target, undo)`: staged holds hidden v2.
         let pre_undo = skills.join(".oms-undo-pre.2");
         let pre_staged = skills.join(".oms-stage-pre.2");
-        assert!(copy_staged(&source_v2, &pre_staged).unwrap());
+        assert!(
+            copy(
+                &source_v2,
+                &pre_staged,
+                Some((SKILL_FILE, HIDDEN_SKILL_FILE))
+            )
+            .unwrap()
+        );
         let journal = json!({
             "schema": 1,
             "committed": false,
@@ -1305,5 +1308,74 @@ mod tests {
             "literal\n"
         );
         assert_eq!(identity(&odd_target).unwrap(), odd_id);
+
+        // Read-only sticky directory round-trips full permission bits through stage and rollback.
+        let ro_target = skills.join("oms-ro-sticky");
+        write_skill_dir(&ro_target, "---\nname: oms-ro\n---\nv1\n");
+        fs::set_permissions(&ro_target, fs::Permissions::from_mode(0o1500)).unwrap();
+        struct RestoreWritable(PathBuf);
+        impl Drop for RestoreWritable {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            }
+        }
+        let _ro_guard = RestoreWritable(ro_target.clone());
+        assert_eq!(
+            fs::symlink_metadata(&ro_target).unwrap().mode() & 0o7777,
+            0o1500
+        );
+        let ro_old_ext_id = external_identity(&ro_target).unwrap();
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.publish_external(&ro_target, &source_v2).unwrap();
+            let change = tx.journal.changes.last().unwrap();
+            assert!(!change.undo.join(SKILL_FILE).exists());
+            assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
+            assert_eq!(
+                fs::symlink_metadata(&change.undo).unwrap().mode() & 0o7777,
+                0o1500,
+                "hiding SKILL.md on a read-only sticky undo dir must preserve special mode bits"
+            );
+        }
+        assert_eq!(
+            fs::symlink_metadata(&ro_target).unwrap().mode() & 0o7777,
+            0o1500
+        );
+        assert_eq!(external_identity(&ro_target).unwrap(), ro_old_ext_id);
+        assert_eq!(
+            fs::read_to_string(ro_target.join(SKILL_FILE)).unwrap(),
+            "---\nname: oms-ro\n---\nv1\n"
+        );
+        assert!(!ro_target.join(HIDDEN_SKILL_FILE).exists());
+
+        // A foreign SKILL.md present at the unhide destination is refused, not overwritten.
+        let foreign_dir = skills.join("oms-foreign-unhide");
+        fs::create_dir_all(&foreign_dir).unwrap();
+        fs::write(
+            foreign_dir.join(HIDDEN_SKILL_FILE),
+            b"---\nname: oms-demo\n---\nhidden\n",
+        )
+        .unwrap();
+        fs::write(foreign_dir.join(SKILL_FILE), b"foreign-content\n").unwrap();
+        fs::set_permissions(&foreign_dir, fs::Permissions::from_mode(0o1500)).unwrap();
+        let _foreign_guard = RestoreWritable(foreign_dir.clone());
+        let err = unhide_skill(&foreign_dir).unwrap_err();
+        assert!(
+            err.1.contains("already exists"),
+            "unexpected error: {}",
+            err.1
+        );
+        assert_eq!(
+            fs::read_to_string(foreign_dir.join(SKILL_FILE)).unwrap(),
+            "foreign-content\n"
+        );
+        assert_eq!(
+            fs::read_to_string(foreign_dir.join(HIDDEN_SKILL_FILE)).unwrap(),
+            "---\nname: oms-demo\n---\nhidden\n"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&foreign_dir).unwrap().mode() & 0o7777,
+            0o1500
+        );
     }
 }
