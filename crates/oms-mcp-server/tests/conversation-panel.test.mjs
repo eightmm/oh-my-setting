@@ -83,7 +83,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : {structuredContent:value};
+        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : params.name === 'oms_panel_project_graph' && value?.structuredContent ? value : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -442,6 +442,34 @@ test('TUI partial totals and failed next pages preserve the last observed rows a
   assert.doesNotMatch(p.get('tui-status').textContent,/전체 0|합계 0/);
 });
 
+test('managed worktree history is localized display-only evidence with independent canonical counts', async () => {
+  const source={id:'worktree-1',label:'wt-0123456789ab (detached)',status:'ready'};
+  const managedScratch={status:'partial',unverifiedCheckouts:1,unexaminedCheckouts:2,omittedAttempts:3,omittedSources:4,
+    sources:[source],attempts:[{id:'duplicate',sourceId:source.id,provider:'claude',tool:'peer-review',state:'queued',updatedAt:'2026-01-02T03:04:05Z'}]};
+  const p=await panel(['one'],{active:1,attempts:[{id:'duplicate',tool:'peer-ask'}],managedScratch});
+  assert.equal(p.get('scratch-history').hidden,false);
+  assert.match(p.get('scratch-rows').textContent,/wt-0123456789ab.*Claude.*peer-review.*기록된 상태 · 대기열에 등록.*기록 시각/);
+  assert.match(p.get('scratch-status').textContent,/실행 기록 3개 생략.*작업트리 4개 생략.*소유 미확인 1개.*미조회 2개/);
+  assert.equal(p.get('active').textContent,'1'); assert.doesNotMatch(p.get('activity').textContent,/peer-review/);
+  const calls=p.calls.length;
+  await choose(p,'en');
+  assert.match(p.get('scratch-heading').textContent,/Managed worktree history/);
+  assert.match(p.get('scratch-rows').textContent,/Recorded state · Queued.*Recorded at/);
+  assert.match(p.get('scratch-status').textContent,/Only part.*3 execution records omitted.*4 worktrees omitted/);
+  assert.equal(p.calls.length,calls);
+  for(const status of ['unavailable','future-status']) {
+    p.run('renderScratch('+JSON.stringify({...managedScratch,status})+')');
+    assert.match(p.get('scratch-status').textContent,/unavailable/); assert.equal(p.get('scratch-rows').textContent,'');
+  }
+  p.run('renderScratch({status:"ready",sources:[],attempts:[]})');
+  assert.match(p.get('scratch-status').textContent,/No worktree executions/);
+  p.run('renderScratch('+JSON.stringify({...managedScratch,status:'ready',sources:[],unverifiedCheckouts:0,unexaminedCheckouts:0,omittedAttempts:0,omittedSources:0})+')');
+  assert.match(p.get('scratch-status').textContent,/Only part/);
+  assert.equal(p.get('scratch-rows').textContent,'');
+  p.run('clearProject()');assert.equal(p.get('scratch-history').hidden,true);
+  const legacy=await panel(['one'],{active:1});assert.equal(legacy.get('scratch-history').hidden,true);
+});
+
 test('a compact snapshot reports only positive omissions and keeps empty samples uncertain', async () => {
   const p = await panel(['one'], {attemptsTrimmed:2,operationsTrimmed:1,attentionTrimmed:0,activeAttemptsTrimmed:3,
     active:0,activeAttempts:[],attempts:[],reviews:{available:true},
@@ -506,7 +534,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.6.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.0');
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
@@ -633,26 +661,56 @@ test('settings page, permission failure and project change discard prior catalog
 });
 
 
-test('Project pages use the linked board ID, expose field hints and only offer a draft for eligible issues',async () => {
+test('Project pages explain each native recommendation in both languages and keep unverified items read-only',async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   const board={id:'PVT_scope',number:2,url:'https://github.com/orgs/org/projects/2',title:'Release'};
+  const issue=(n,advice,kind='candidate')=>({...openItem,number:n,url:'https://github.com/org/repo/issues/'+n,
+    class:kind,fields:{Status:{name:'Ready'}},recommendation:advice});
   const calls=[];
   p.host.tools={oms_panel_git_status:args=>{
     if (!args.boardId) return {...workData,github:{...workData.github,work:{projects:{status:'available',items:[board]}}}};
     calls.push(args);
-    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:['Phase']}},status:'available',nextCursor:args.cursor?null:'board.next',
-      items:[{...openItem,class:args.cursor?'blocked':'candidate',fields:{Status:{name:'Ready'}}}]}}};
+    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:[]}},status:'available',incomplete:!args.cursor,nextCursor:args.cursor?null:'board.next',
+      items:args.cursor?[issue(9,{state:'excluded',reason:'blocked'},'blocked')]:[
+        issue(1,{state:'recommended',reason:'ready_with_priority'}),
+        issue(2,{state:'excluded',reason:'status_not_ready'}),
+        issue(3,{state:'unverified',reason:'dependencies_unknown'}),
+        issue(4,undefined,'plan_linked'),
+        issue(5,{state:'recommended',reason:'unrecognized-code'}),
+        issue(6,{state:'future-state',reason:'ready_with_priority'}),
+        issue(7,{state:'recommended',reason:'ready_with_priority'},'blocked')
+      ]}}};
   }};
   await p.event('tab-git','click');p.get('git-kind').value='projects';await p.event('git-kind','change');
   const box=p.get('git-catalog').children.at(-1).children.at(-1);
   const [next,back,note,rows]=box.children.filter(x=>typeof x==='object');
   assert.equal(calls.length,0);next.dispatchEvent(new Event('click'));await setImmediate();
   assert.deepEqual({...calls[0]},{boardId:'PVT_scope',project:'one'});
-  assert.match(rows.textContent,/검토 후보.*Status Ready.*작업 목표 작성/);
-  assert.match(note.textContent,/Phase/);
-  next.dispatchEvent(new Event('click'));await setImmediate();
-  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/선행 이슈 진행 중/);
-  assert.doesNotMatch(rows.textContent,/작업 목표 작성/);assert.equal(next.hidden,true);assert.equal(back.hidden,false);
+  const cards=rows.children.filter(c=>typeof c==='object');
+  assert.match(cards[0].textContent,/추천 · Ready.*Status Ready.*작업 목표 작성/);
+  assert.match(cards[1].textContent,/제외 · 상태가 Ready가 아닙니다/);
+  assert.match(cards[2].textContent,/추천 보류 · 선행 이슈/);
+  assert.match(cards[3].textContent,/서버가 추천 정보를 보내지 않았습니다/);
+  assert.match(cards[3].textContent,/Plan/);
+  for (const card of cards.slice(4)) assert.match(card.textContent,/추천 보류 · 추천 상태나 판단 근거/);
+  for (const card of cards.slice(1)) assert.doesNotMatch(card.textContent,/작업 목표 작성/);
+  assert.match(note.textContent,/이 페이지에 표시된 항목별/);
+  const draft=cards[0].children.at(-1);
+  assert.match(draft.getAttribute('aria-label'),/1/);
+  p.get('language-choice').value='en';await p.event('language-choice','change');
+  assert.match(cards[0].textContent,/Recommended · Ready at priority P0–P2/);
+  assert.match(cards[1].textContent,/Excluded · Status is not Ready/);
+  assert.match(cards[2].textContent,/Unverified · Blocker information is incomplete/);
+  assert.match(cards[3].textContent,/server did not provide a recommendation/);
+  assert.match(note.textContent,/per item on this page/);
+  draft.dispatchEvent(new Event('click'));
+  assert.equal(p.get('git-editor').hidden,false);
+  assert.match(p.get('git-goal').value,/https:\/\/github\.com\/org\/repo\/issues\/1/);
+  assert.ok(p.get('git-goal').focused);
+  assert.equal(calls.length,1);
+  p.document.activeElement=next;next.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/Excluded · Blocked by an open prerequisite/);
+  assert.equal(next.hidden,true);assert.equal(back.hidden,false);assert.equal(note.focused,1);
   assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>c.name==='oms_start_main'));
 });
 
@@ -805,6 +863,27 @@ test('selected function shows distinct direction, relation and confidence once p
   assert.match(p.get('graph-list').textContent,/← 참조 · 추론/);
 });
 
+test('only the selected, current symbol exposes its widget-only declaration',async()=>{
+  const id='symbol:src/lib.rs::function:inspect',sym={id,path:'src/lib.rs',kind:'function',label:'inspect'};
+  let freshness='cached', detail={id,line:11,endLine:14,signature:'pub fn inspect()'};
+  const p=await panel(['one'],{}, {locale:'en',context:true,tools:{oms_panel_project_graph:args=>({
+    structuredContent:{schema:1,kind:'oms-panel-project-graph',nodes:[sym],edges:[],scope:{focusNode:args.node},provenance:{source:'indexed-graph',indexFreshness:freshness},
+      selection:args.node===id?{status:'found',node:sym}:null},_meta:{graphDefinition:detail}})}});
+  await p.event('tab-project','click');
+  assert.doesNotMatch(p.get('graph-info').textContent,/pub fn|lines 11/);
+  p.get('graph-list').children[0].children.find(e=>e?.dispatchEvent).dispatchEvent(new Event('click'));await setImmediate();
+  assert.match(p.get('graph-info').textContent,/src\/lib.rs · lines 11–14/);
+  assert.match(p.get('graph-info').textContent,/pub fn inspect/);
+  await p.event('graph-attach','click');
+  assert.ok(!JSON.stringify(p.host.contexts).includes('pub fn inspect'));
+  p.get('language-choice').value='ko';await p.event('language-choice','change');assert.match(p.get('graph-info').textContent,/11–14행/);
+  for(const state of ['stale','wrong-id','missing']) {
+    if(state==='stale')freshness='stale';else {freshness='cached';detail=state==='wrong-id'?{...detail,id:'symbol:other::x'}:undefined;}
+    await p.event('graph-reload','click');
+    assert.doesNotMatch(p.get('graph-info').textContent,/pub fn/);assert.match(p.get('graph-info').textContent,/소스 선언 미확인/);
+  }
+});
+
 test('standard hosts retain selectable command help; provenance and inferred associations are explicit', async () => {
   const p=await panel(['one','two'],{}, {message:true,readOnly:true});
   p.host.tools={
@@ -851,6 +930,9 @@ const focusCount = p => [...p.elements.values()].reduce((sum, element) => sum + 
 test('Korean and English catalogs match, and every static node and message key resolves', async () => {
   const p = await panel(['one']);
   const ko = p.run('MSG.ko'), en = p.run('MSG.en');
+  const catalog = p.run('catalogRows').split('\n').map(line => line.split(' | '));
+  assert.ok(catalog.every(row => row.length === 3 && row[0] && row[2]), 'one key and two language columns per row');
+  assert.equal(new Set(catalog.map(row => row[0])).size, catalog.length, 'translation keys are unique');
   assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
   for (const key of Object.keys(ko)) {
     const holders = [...ko[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort(), english = [...en[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort();
@@ -1747,6 +1829,11 @@ test('follow-up honesty: distinct starting/supported/passed/active/planned/open 
   ]);
   assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
   assert.equal(p.get('lead-count').textContent, ' (2)');
+  p.run('clearProject()');
+  await choose(p, 'ko');
+  assert.equal(p.get('work-dot').hidden, true);
+  assert.equal(p.get('work-dot').textContent, '');
+  assert.equal(p.get('lead-count').textContent, '');
 });
 
 test('every ko/en catalog key is referenced by markup, script, or an explicit dynamic prefix', async () => {
@@ -1759,7 +1846,7 @@ test('every ko/en catalog key is referenced by markup, script, or an explicit dy
   for (const m of bodyHtml.matchAll(/\bdata-i18n-attr="([^"]+)"/g)) {
     for (const pair of m[1].split(';').filter(Boolean)) markupKeys.add(pair.split(':')[1]);
   }
-  const catalogBlock = script.match(/const MSG(?:_PAIRS)? = \{[\s\S]+?\n\};/);
+  const catalogBlock = script.match(/const catalogRows = `[\s\S]+?`;/);
   assert.ok(catalogBlock, 'message catalog block exists');
   const codeWithoutCatalog = script.replace(catalogBlock[0], '');
   const codeLiterals = new Set();
@@ -1770,6 +1857,7 @@ test('every ko/en catalog key is referenced by markup, script, or an explicit dy
     'g.': new Set(p.run('taskGroups').map(([name]) => name)),
     'sv.': new Set(p.run('settingViews')),
     'state.': new Set(Object.keys(p.run('STATE_META'))),
+    'git.rec.': new Set(['recommended','excluded','unverified',...p.run('uncertainBoardReasons')]),
     'git.class.': new Set(['candidate','blocked','unverified','plan_linked','board_in_progress','closed_board','duplicate','archived','unknown','draft','foreign','epic','closed','pull_request']),
     'git.check.': new Set(Object.keys(p.run('CHECK_META'))),
     'obs.': new Set(['complete','partial','unknown']),

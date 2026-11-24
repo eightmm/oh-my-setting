@@ -240,7 +240,12 @@ fn verify_checkout(selected: &Path) -> Result<(PathBuf, CheckoutKind)> {
     }
 }
 
-pub(crate) fn dispatch(args: &Args, selected: &Path, cancel: &AtomicBool) -> Result<CommandResult> {
+pub(crate) fn dispatch(
+    args: &Args,
+    selected: &Path,
+    cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
+) -> Result<CommandResult> {
     validate_args(args)?;
     let (repo, checkout_kind) = verify_checkout(selected)?;
     let limit = args.int("limit").clamp(1, MAX_LIMIT);
@@ -257,6 +262,7 @@ pub(crate) fn dispatch(args: &Args, selected: &Path, cancel: &AtomicBool) -> Res
         depth,
         include_tests,
         cancel,
+        packaged_helper,
     )?;
     enforce_byte_budget(&mut payload, args.flag("pretty"))?;
     let out = if args.flag("json") {
@@ -264,6 +270,7 @@ pub(crate) fn dispatch(args: &Args, selected: &Path, cancel: &AtomicBool) -> Res
     } else {
         render_text(&payload).into_bytes()
     };
+    check(cancel)?;
     Ok((0, out, Vec::new()))
 }
 
@@ -453,6 +460,7 @@ fn build_projection(
     depth: i64,
     include_tests: bool,
     cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
 ) -> Result<Value> {
     check(cancel)?;
     let scan = scan_repo_paths(repo, checkout_kind, cancel)?;
@@ -503,6 +511,8 @@ fn build_projection(
                 limit,
                 depth,
                 include_tests,
+                cancel,
+                packaged_helper,
             ));
         }
         IndexAttempt::Empty {
@@ -609,6 +619,156 @@ fn indexed_row(row: &Value) -> Value {
     json!({"id":id,"path":path,"kind":kind,"language":language_for_path(path),"label":sanitize(label,120)})
 }
 
+// A matching manifest version alone cannot detect an unindexed working-tree edit.
+// Only the selected, tracked symbol may contribute declaration text.
+fn selected_definition(
+    repo: &Path,
+    graph: &Graph,
+    symbol: &Value,
+    freshness: &str,
+    cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
+) -> Option<Value> {
+    let path = s(symbol, "path");
+    let metadata = &symbol["metadata"];
+    if freshness != "cached"
+        || !s(symbol, "id").starts_with("symbol:")
+        || is_excluded_path(path)
+        || metadata["span_complete"] == false
+        || metadata["signature_truncated"] == true
+        || metadata["scope_truncated"] == true
+    {
+        return None;
+    }
+    let signature = metadata["signature"].as_str()?;
+    let line = metadata["line"].as_u64()?;
+    let end_line = metadata["end_line"].as_u64()?;
+    if line == 0
+        || end_line < line
+        || signature.is_empty()
+        || signature.len() > 320
+        || signature.trim() != signature
+        || signature
+            .chars()
+            .any(|c| !(c.is_alphanumeric() || " _:&<>,()[]?+-*!.='".contains(c)))
+        || signature.contains('\'')
+            && (s(symbol, "language") != "rust"
+                || signature
+                    .split('\'')
+                    .skip(1)
+                    .any(|tail| !tail.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')))
+        || scrub(signature) != signature
+    {
+        return None;
+    }
+    let file = graph
+        .nodes
+        .get(&format!("file:{path}"))
+        .or_else(|| graph.nodes.get(&format!("test:{path}")))?;
+    let digest = s(symbol, "source_digest");
+    if digest.len() != 64 || s(file, "source_digest") != digest {
+        return None;
+    }
+    let data = oms_safe_fs::Root::open(repo)
+        .ok()?
+        .read(
+            path,
+            2 * 1024 * 1024,
+            oms_safe_fs::Policy {
+                single_link: true,
+                ..oms_safe_fs::Policy::source()
+            },
+        )
+        .ok()?;
+    if sha(&data) != digest {
+        return None;
+    }
+    let text = std::str::from_utf8(&data).ok()?;
+    if end_line > text.lines().count() as u64 {
+        return None;
+    }
+    // Do not emit synthesized signatures, body excerpts or a signature stored
+    // at an unrelated location. Match only this bounded declaration prefix.
+    let header = text
+        .lines()
+        .skip((line - 1) as usize)
+        .take(((end_line - line + 1).min(12)) as usize)
+        .flat_map(str::split_whitespace)
+        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+        .take(640)
+        .collect::<String>();
+    let name = s(symbol, "name");
+    if name.is_empty() {
+        return None;
+    }
+    let language = s(symbol, "language");
+    let header = if language == "shell" {
+        header.strip_prefix("function ").unwrap_or(&header)
+    } else if language == "rust" {
+        ["pub(crate) ", "pub(super) ", "pub(self) "]
+            .iter()
+            .find_map(|prefix| header.strip_prefix(prefix))
+            .unwrap_or(&header)
+    } else {
+        &header
+    };
+    let tail = header.strip_prefix(signature)?.trim_start();
+    if !tail.starts_with(['{', ':', ';']) {
+        return None;
+    }
+    let valid_name = |declaration: &str| {
+        declaration.strip_prefix(name).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_')
+        })
+    };
+    let valid_decl = match language {
+        "shell" => signature == format!("{name}()"),
+        "rust" | "python" => {
+            let mut words = signature.split_whitespace().skip_while(|word| {
+                matches!(
+                    *word,
+                    "pub" | "async" | "unsafe" | "const" | "default" | "extern"
+                )
+            });
+            matches!(
+                (language, words.next()),
+                ("rust", Some("fn" | "struct" | "enum" | "trait" | "mod"))
+                    | ("python", Some("def" | "class"))
+            ) && words.next().is_some_and(valid_name)
+        }
+        _ => false,
+    };
+    if !valid_decl {
+        return None;
+    }
+    // A declaration-shaped prefix does not prove identity. Reproduce the
+    // producer's scoped IDs and spans from the selected file's verified bytes.
+    let parsed =
+        build::selected_source_nodes(path, text, packaged_helper.map(Path::to_owned), cancel)
+            .ok()?;
+    let mut matches = parsed.iter().filter(|node| node["id"] == symbol["id"]);
+    let exact = matches.next()?;
+    if matches.next().is_some()
+        || ["name", "kind", "path", "language", "source_digest"]
+            .iter()
+            .any(|key| exact[key] != symbol[key])
+        || [
+            "qualname",
+            "line",
+            "end_line",
+            "signature",
+            "span_complete",
+            "scope_truncated",
+            "signature_truncated",
+        ]
+        .iter()
+        .any(|key| exact["metadata"][key] != metadata[key])
+    {
+        return None;
+    }
+    Some(json!({"id":symbol["id"],"line":line,"endLine":end_line,"signature":signature}))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_indexed_projection(
     repo: &Path,
@@ -622,6 +782,8 @@ fn build_indexed_projection(
     limit: i64,
     depth: i64,
     include_tests: bool,
+    cancel: &AtomicBool,
+    packaged_helper: Option<&Path>,
 ) -> Value {
     let repo_name = repo_basename(repo);
     let include_tests = include_tests || (!node.is_empty() && graph.is_test(node));
@@ -664,6 +826,12 @@ fn build_indexed_projection(
                 })
                 .collect();
             selection = json!({"status":"found","node":selected,"breadcrumbs":crumbs,"neighbors":neighbors,"omittedNeighbors":rows.len().saturating_sub(neighbors.len())});
+            if node.starts_with("symbol:")
+                && let Some(detail) =
+                    selected_definition(repo, graph, record, freshness, cancel, packaged_helper)
+            {
+                selection["definition"] = detail;
+            }
         } else {
             miss = Some("not_found");
             selection = json!({"status":"not_found","node":null,"neighbors":[],"breadcrumbs":[]});

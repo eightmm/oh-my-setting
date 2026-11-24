@@ -331,6 +331,11 @@ pub fn project(root: &Path) -> Value {
             }
             match std::str::from_utf8(&bytes) {
                 Ok(text) => {
+                    let (sections, _) = oms_contract_markdown::sections(text);
+                    let _ = row.set(
+                        "goal",
+                        string(oms_contract_markdown::project_goal(&sections)),
+                    );
                     let states: Vec<_> = text
                         .lines()
                         .filter_map(|l| l.strip_prefix("- State:").map(str::trim))

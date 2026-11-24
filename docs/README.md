@@ -28,11 +28,14 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | Reference | For |
 |---|---|
 | [Contributing](../CONTRIBUTING.md) | Scoped checks, publication, style and compatibility |
+| [OMS self-hosted development](OMS-SELF-HOSTED-DEVELOPMENT.md) | Assessment of scoped OMS preference, bounded dogfooding goals and reuse of existing development workflows |
 | [GitHub Workflow (Wiki)](https://github.com/eightmm/oh-my-setting/wiki/GitHub-Workflow) | From an issue and OMS plan to a verified PR and merge evidence |
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
 | [Graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) | Current Rust/search gaps, five reference projects, reusable implementation packets and retrieval evaluation |
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
+| [Control surface and plugins roadmap](CONTROL-SURFACE-ROADMAP.md) | One-repository delivery plan for shared UI, provider session adapters, host plugins and GitHub Project tracking over existing owners |
+| [MCP host compatibility](MCP-HOST-COMPATIBILITY.md) | Official Codex/ChatGPT, Claude and Antigravity UI paths, host-specific limits and separate document/fixture/live evidence |
 | [Multi-agent and multi-host plan](MULTI-AGENT-MULTI-HOST-PLAN.md) | Proposed behavior, staged delivery and acceptance for parallel agents, Git integration and remote clusters and opt-in Stages A–F runtime implementation |
 | [Context inspection](CONTEXT-INSPECTION.md) | Saved context manifest inspection and digest verification |
 | [Pinned source intake](INTENT-SOURCE-INTAKE.md) | SHA-pinned local file and GitHub issue intake for `oms intent draft` |
@@ -48,6 +51,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Control and session contract](CONTROL-SESSION-CONTRACT.md) | Source-mapped identity, authority and per-operation capability contract for the four Main harnesses (issue #432) |
 | [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
+| [Agreed GUI direction](CONTROL-SURFACE-UX.md) | Task/results-first screens, separate relationship views, interactive example and implementation acceptance |
 
 ## Overall Main and provider orchestration
 

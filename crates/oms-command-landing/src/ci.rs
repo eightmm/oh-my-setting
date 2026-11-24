@@ -47,6 +47,240 @@ pub(crate) fn api(c: &Context<'_>, endpoint: &str) -> Result<V> {
         Duration::from_secs(30),
     )
 }
+
+/// A bounded read of one exact current run attempt, retained in the existing
+/// CI ledger. This never dispatches a workflow and never certifies another
+/// workflow, commit, repository, or a later rerun of the same run id.
+pub fn observe_attempt(
+    repo: &Path,
+    state: &Path,
+    identity: &V,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> Result<V> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let remaining = || {
+        deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|v| !v.is_zero())
+            .ok_or_else(|| Error::new(124, "CI observation deadline exceeded"))
+    };
+    let fields = [
+        "repository",
+        "head_sha",
+        "workflow_id",
+        "run_id",
+        "run_attempt",
+    ];
+    require(
+        matches!(identity, V::Obj(keys) if keys.len() == fields.len()
+            && fields.iter().all(|name| identity.has(name))),
+        "malformed CI wait identity",
+    )?;
+    let repository = string(identity, "repository");
+    let (owner, name) = repository
+        .split_once('/')
+        .ok_or_else(|| Error::new(2, "invalid CI repository"))?;
+    require(
+        crate::report::github_slug(owner, name)? == repository,
+        "invalid CI repository",
+    )?;
+    let head = string(identity, "head_sha");
+    require(
+        [40, 64].contains(&head.len())
+            && head
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && ["workflow_id", "run_id", "run_attempt"]
+                .iter()
+                .all(|key| identity.get(key).integer(true)),
+        "invalid CI head or run attempt",
+    )?;
+    let git_text = |args: &[&str]| -> Result<String> {
+        let out = process(
+            repo,
+            [
+                "git",
+                "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ]
+            .into_iter()
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect(),
+            None,
+            remaining()?.min(Duration::from_secs(2)),
+            interrupted,
+            &[],
+        )?;
+        if out.code == 130 {
+            return Err(Error::new(130, "CI lookup interrupted"));
+        }
+        require(out.code == 0, "CI repository identity unavailable")?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    let current = || -> Result<()> {
+        require(
+            crate::report::github_remote(&git_text(&["remote", "get-url", "origin"])?)?
+                .eq_ignore_ascii_case(&repository)
+                && git_text(&["rev-parse", "--verify", "HEAD"])? == head,
+            "CI wait repository or HEAD changed",
+        )
+    };
+    current()?;
+    let context = Context {
+        cwd: repo,
+        source: repo,
+        interrupted,
+        services: &crate::Unavailable,
+    };
+    let get = |endpoint: &str| {
+        gh(
+            &context,
+            &[
+                "api",
+                "--method",
+                "GET",
+                "-H",
+                "Accept: application/vnd.github+json",
+                endpoint,
+            ],
+            remaining()?.min(Duration::from_secs(8)),
+        )
+    };
+    let endpoint = format!(
+        "repos/{repository}/actions/runs/{}",
+        identity.get("run_id").py()
+    );
+    let run = get(&endpoint)?;
+    let validate = |row: &V| -> Result<()> {
+        require(
+            row.get("id") == identity.get("run_id")
+                && row.get("workflow_id") == identity.get("workflow_id")
+                && row.get("run_attempt") == identity.get("run_attempt")
+                && row.get("head_sha") == identity.get("head_sha")
+                && string(row.get("repository"), "full_name").eq_ignore_ascii_case(&repository),
+            "CI observation belongs to another repository, head, workflow or run attempt",
+        )
+    };
+    validate(&run)?;
+    let jobs = get(&format!(
+        "{endpoint}/attempts/{}/jobs?per_page=100",
+        identity.get("run_attempt").py()
+    ))?;
+    require(
+        matches!(jobs.get("jobs"), V::Arr(_))
+            && jobs.get("jobs").array().len() <= 100
+            && jobs.get("total_count").py() == jobs.get("jobs").array().len().to_string()
+            && jobs.get("jobs").array().iter().all(|job| {
+                job.get("run_id") == identity.get("run_id")
+                    && job.get("run_attempt") == identity.get("run_attempt")
+                    && job.get("head_sha") == identity.get("head_sha")
+                    && string(job, "run_url")
+                        .eq_ignore_ascii_case(&format!("https://api.github.com/{endpoint}"))
+            }),
+        "incomplete or mixed CI job-attempt observation",
+    )?;
+    let after = get(&endpoint)?;
+    validate(&after)?;
+    require(
+        ["status", "conclusion", "updated_at"]
+            .iter()
+            .all(|key| run.get(key) == after.get(key)),
+        "CI run changed during observation; reconcile again",
+    )?;
+    require(
+        string(&run, "status") != "completed"
+            || jobs
+                .get("jobs")
+                .array()
+                .iter()
+                .all(|job| string(job, "status") == "completed"),
+        "completed CI run has incomplete job observations",
+    )?;
+    let mut job_ids = BTreeSet::new();
+    let mut selected_jobs = Vec::new();
+    for job in jobs.get("jobs").array() {
+        require(
+            job.get("id").integer(true) && job_ids.insert(job.get("id").py()),
+            "invalid or duplicate CI job identity",
+        )?;
+        selected_jobs.push(obj([
+            "id",
+            "run_id",
+            "run_attempt",
+            "head_sha",
+            "name",
+            "status",
+            "conclusion",
+            "started_at",
+            "completed_at",
+        ]
+        .into_iter()
+        .map(|key| (key, job.get(key).clone()))));
+    }
+    selected_jobs.sort_by_key(|job| job.get("id").py());
+    let mut row = obj([
+        ("schema", 1usize.into()),
+        ("kind", "exact-run-attempt".into()),
+        ("identity", identity.clone()),
+        ("status", run.get("status").clone()),
+        ("conclusion", run.get("conclusion").clone()),
+        ("jobs", V::Arr(selected_jobs)),
+    ]);
+    // The result fingerprint excludes lookup time, so duplicate observations
+    // retain one identity even when the process restarts or polls the next day.
+    use sha2::{Digest, Sha256};
+    row.set(
+        "observation_sha256",
+        format!("{:x}", Sha256::digest(row.json(false)?)),
+    );
+    row.set("updated_at", run.get("updated_at").clone());
+    row.set("ts", now());
+    let ledger = state.join(".oms/ci.jsonl");
+    crate::check(interrupted)?;
+    // A read-only observer does not wait behind a long-lived writer. The
+    // caller can observe again; no stale success is returned on contention.
+    let mut settings =
+        oms_lock::Settings::from_env().map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+    settings.timeout = remaining()?;
+    let _guard = oms_lock::Lock::for_file(&ledger, settings)
+        .map_err(|e| Error::new(e.exit_code(), e.to_string()))?
+        .try_acquire()
+        .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+    current()?;
+    let raw = storage::root(state)?
+        .read_no_follow(
+            Path::new(".oms/ci.jsonl"),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .map_err(|e| Error::new(2, format!("CI ledger unreadable: {e:?}")))?;
+    let prior = storage::parse_rows(&raw)?;
+    if !prior
+        .iter()
+        .any(|old| old.get("observation_sha256") == row.get("observation_sha256"))
+    {
+        let mut next = raw.clone();
+        next.extend(row.json(false)?);
+        next.push(b'\n');
+        require(
+            next.len() <= 8 * 1024 * 1024,
+            "CI ledger exceeds observation bound",
+        )?;
+        storage::replace(
+            state,
+            Path::new(".oms/ci.jsonl"),
+            if ledger.exists() { Some(&raw) } else { None },
+            &next,
+        )?;
+    }
+    Ok(row)
+}
 pub fn query_repo(destination: &str) -> Result<String> {
     require(
         !destination.trim().is_empty() && !destination.chars().any(char::is_control),

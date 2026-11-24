@@ -349,7 +349,7 @@ solo session은 직접 작업한다. 2026-11-23 main에서는 Claude Code panel 
 | [Task verify](../crates/oms-command-task/src/lib.rs), [native failure observer](../crates/oms/src/services_control.rs) | Exit 0의 failure resolve가 최종 verification receipt 수락보다 먼저 호출된다. 최종 task/contract/repository/CAS 거절이 있어도 advisory failure가 해제될 수 있다. | 아래 별도 correctness PR; DR-03의 검증 근거를 보존하는 선행 수정 |
 | [Runtime benchmark](../crates/oms-runtime/src/benchmark.rs) | 양쪽 basis가 같은 결측값이면 numeric delta를 허용한다. 기록이 없는 manual/skill 합계 0도 차이로 계산한다. | 아래 별도 correctness PR; RF-06의 기존 비교 경계 |
 | [Session handoff](../crates/oms-command-autonomy/src/handoff.rs), [decision selection](../crates/oms-command-autonomy/src/advisory.rs) | 전체 `truncated` 수는 있으나 어느 section이 빠졌는지 남지 않는다. Unavailable/withheld 설명 자체가 byte trimming에서 빠질 수 있고 decision/goal 선별 손실도 모두 표현하지 않는다. | REL-01의 consumer coverage 후속 |
-| [Attempt failure projection](../crates/oms-command-attempt-bundle/src/bundle.rs) | 시간 구간으로 failure를 모으며 다른 작업의 failure일 수 있음을 이미 표시한다. [FailureObservation](../crates/oms-command-task/src/services.rs)에는 task/attempt/accepted receipt identity가 없다. | [DR-03/04](MEMORY-CONSOLIDATION.md)의 출처 연결·재사용 적격성 |
+| [Attempt failure projection](../crates/oms-command-attempt-bundle/src/bundle.rs) | Native [FailureObservation](../crates/oms-command-task/src/services.rs)은 실제 task/reference-operation/accepted packet identity를 보존한다. Legacy·시간 구간 후보는 계속 advisory이며 repair 원인이나 현재 검증을 입증하지 않는다. | 아래 [DR-03/04](MEMORY-CONSOLIDATION.md)의 구현 범위·재사용 적격성 |
 | [Native state adapter](../crates/oms/src/services_control.rs), [state projection](../crates/oms-command-state/src/state_projection.rs) | Native state 계열의 canonical runtime envelope 연결은 이미 존재한다. Producer 실패는 degraded이며 library-only fallback과 구분된다. | [Feature scope](FEATURE-SCOPE.md)의 오래된 설명을 이 변경에서 정정; 새 envelope 연결 작업 없음 |
 | [Recipe resume](../crates/oms-command-state/src/recipe.rs), [experiment](../crates/oms-runtime/src/experiment.rs) | Plan·command·environment 등 기존 실행 identity와 연구 계약이 있다. 일반 checkpoint engine이나 별도 실험 대장이 필요한 근거는 확인하지 않았다. | 기존 receipt·run ledger·선택형 contract의 caller별 보강 |
 
@@ -405,10 +405,14 @@ tag를 보존한다. 표시할 것은 source별 내용의 진실성이나 검증
 
 ### DR-03/04: 실패 경험은 exact 연결부터
 
-기존 fail-ledger와 attempt bundle에 실제 producer가 가진 optional task/attempt/receipt
-correlation을 연결하는 범위를 먼저 설계한다. 기록에 없는 ID를 시간 근접성으로 만들어
-넣지 않는다. Legacy row는 읽을 수 있어야 하며 시간 구간의 후보 연결은 계속 불확실하다.
-Command-level resolve의 범위를 silently 바꾸지 않고 별도 호환성·concurrent-task 사례를 검토한다.
+기존 fail-ledger와 attempt bundle은 native task verify가 실제로 가진 optional
+task/reference-attempt/receipt correlation을 보존한다. Snapshot과 최종 outcome의 실제
+reference-operation ID를 사용하며 worker/Lead ID로 해석하지 않는다. 실행 전에 선택한
+같은 task·정확한 command의 failure hash만 수락된 receipt에 연결한다. 시간 근접성이나
+실행 중 들어온 failure를 사용해 인과관계를 만들지 않는다. Native pass는 모든 open row가
+exact 근거로 덮이기 전에는 `verified` observation만 남긴다. Legacy row와 명시적 manual
+resolve의 기존 범위는 유지하며 시간 구간의 후보 연결은 계속 불확실하다. Canonical native
+observer와 bundle fixture가 다른 task·늦게 추가된 failure·결측·범위 초과·legacy 호환성을 검사한다.
 
 검증된 복구 절차로 재사용하려면 failure, 수행한 action, 수락된 검증 근거가 정확한
 identity로 이어져야 한다. 실패·미결·효과 없는 조치도 기존 불확실성을 유지해 보존한다.

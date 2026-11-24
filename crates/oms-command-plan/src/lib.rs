@@ -2,7 +2,8 @@
 //! Schema-3 plan authority and the `agent-plan` CLI entrypoints (`owns`, `run*`).
 //! Process routing and provider integration belong to the caller.
 //!
-//! All state changes enter through `Plan::execute`; receipts are checked again on
+//! `Plan::execute` and its narrow bound-delegate adapter share the command and
+//! owner-lock path; receipts are checked again on
 //! reads. No worker exit, room membership, or caller-supplied success flag grants
 //! completion. See README.md for producer interfaces and publication recovery.
 
@@ -13,6 +14,7 @@ mod cli;
 pub mod completion;
 mod contracts;
 pub mod decision;
+pub mod discussion;
 mod engine;
 pub mod floor;
 pub mod json;
@@ -30,7 +32,8 @@ pub mod team;
 pub mod team_request;
 
 pub use cli::{owns, run, run_with_io, run_with_services};
-pub use engine::{Context, Plan, Snapshot, stored_task_revision};
+pub use engine::{Context, DelegateBinding, Plan, ReviewFence, Snapshot, stored_task_revision};
+pub use product::{completed_patch_landing, patch_landing_receipt_digest};
 pub use request::{Action, Request};
 pub use services::{Services, UnavailableServices};
 pub const USAGE: &str = include_str!("usage.txt");

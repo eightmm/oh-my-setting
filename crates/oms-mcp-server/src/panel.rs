@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v11.html";
+const URI: &str = "ui://oms/conversation-panel/v13.html";
+const V12: &str = "ui://oms/conversation-panel/v12.html";
+const V11: &str = "ui://oms/conversation-panel/v11.html";
 const V10: &str = "ui://oms/conversation-panel/v10.html";
 const V9: &str = "ui://oms/conversation-panel/v9.html";
 const V8: &str = "ui://oms/conversation-panel/v8.html";
@@ -494,32 +496,31 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         Ok(data)
     }) {
-        Ok(data) => {
+        Ok(mut data) => {
+            // Selected declarations are for the widget. Sharing a node with the
+            // conversation carries only its existing scoped reference.
+            let definition =
+                if data["kind"] == "oms-panel-project-graph" && data["selection"].is_object() {
+                    data["selection"]
+                        .as_object_mut()
+                        .and_then(|s| s.remove("definition"))
+                } else {
+                    None
+                };
             let mut text = data.to_string();
-            if data["kind"] == "oms-panel-project-graph"
-                && text.len() + json!(&text).to_string().len() + 1024 > 60_000
+            if data["dashboard"]["managedScratch"].is_object()
+                && text.len() + json!(&text).to_string().len() + 1024 > crate::OUTPUT_LIMIT
             {
-                let nodes = data["nodes"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                let ids = nodes
-                    .iter()
-                    .take(4)
-                    .filter_map(|n| n["id"].as_str())
-                    .map(|id| id.chars().take(80).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                text = format!(
-                    "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
-                    data["status"].as_str().unwrap_or("unknown"),
-                    data["provenance"]["source"].as_str().unwrap_or("unknown"),
-                    nodes.len(),
-                    data["edges"].as_array().map_or(0, Vec::len),
-                    ids
-                );
+                if text.len() + 1024 > crate::OUTPUT_LIMIT {
+                    return response(Err("OMS panel snapshot exceeds its output limit.".into()));
+                }
+                text = "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into();
             }
-            json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false})
+            let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false});
+            if let Some(detail) = definition {
+                result["_meta"]["graphDefinition"] = detail;
+            }
+            result
         }
         Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),
     }
@@ -605,7 +606,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12)
                 ) =>
             {
                 json!({"contents":[{
@@ -665,6 +666,9 @@ impl Server<'_> {
                     &params["_meta"]
                 };
                 let result = self.panel_call(name, args, meta);
+                if name == GRAPH {
+                    return self.graph_reply(id, params, result);
+                }
                 if name == ASSIGN_RESULT {
                     match result {
                         Ok(data)
@@ -722,6 +726,59 @@ impl Server<'_> {
         reply(
             id,
             self.complete(result, params, method.starts_with("resources/")),
+        )
+    }
+
+    fn graph_reply(&self, id: &Value, params: &Value, data: PanelResult<Value>) -> Value {
+        let mut frame = reply(id, self.complete(response(data), params, false));
+        // write_response uses this ASCII encoding and appends one newline.
+        let fits = |frame: &Value| {
+            crate::value::encode(frame, true, false, false, false)
+                .as_bytes()
+                .len()
+                < crate::OUTPUT_LIMIT
+        };
+        if frame["result"]["isError"] != false || fits(&frame) {
+            return frame;
+        }
+        let graph = &frame["result"]["structuredContent"];
+        let nodes = graph["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let ids = nodes
+            .iter()
+            .take(4)
+            .filter_map(|n| n["id"].as_str())
+            .map(|id| id.chars().take(80).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
+            graph["status"].as_str().unwrap_or("unknown"),
+            graph["provenance"]["source"].as_str().unwrap_or("unknown"),
+            nodes.len(),
+            graph["edges"].as_array().map_or(0, Vec::len),
+            ids
+        );
+        for summary in [
+            text.as_str(),
+            "Project graph available in structuredContent.",
+        ] {
+            frame["result"]["content"] = json!([{"type":"text","text":summary}]);
+            if fits(&frame) {
+                return frame;
+            }
+        }
+        reply(
+            id,
+            self.complete(
+                response(Err(
+                    "OMS project graph exceeds the response limit. Request fewer nodes.".into(),
+                )),
+                params,
+                false,
+            ),
         )
     }
 

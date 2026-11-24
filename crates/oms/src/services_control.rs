@@ -467,6 +467,41 @@ impl oms_command_plan::Services for ControlServices<'_> {
             .map_err(|_| plan_error("cannot resolve physical repository"))?;
         Ok((state != own).then_some(state))
     }
+    fn query_state_root(
+        &self,
+        repo: &Path,
+        requested: &Path,
+    ) -> oms_command_plan::Result<Option<PathBuf>> {
+        use oms_reference::repository::{Resolver, managed_scratch_parent};
+        // Context already resolved Git's physical root. Check the original
+        // scratch spelling as well: a substituted checkout must not turn into
+        // a normal read of the symlink target's unrelated Plan.
+        let selected = requested
+            .ancestors()
+            .find_map(|path| managed_scratch_parent(path).map(|parent| (path, parent)));
+        if selected.is_none() && managed_scratch_parent(repo).is_none() {
+            return self.state_root(repo);
+        }
+        let resolver = Resolver::from_env().map_err(plan_error)?;
+        if resolver.child {
+            return self.state_root(repo);
+        }
+        if let Some((worktree, parent)) = selected
+            && !([worktree, &parent]
+                .iter()
+                .all(|p| std::fs::symlink_metadata(p).is_ok_and(|entry| entry.is_dir()))
+                && std::fs::canonicalize(worktree).is_ok_and(|path| repo.starts_with(&path)))
+        {
+            return Err(plan_error("selected scratch checkout was substituted"));
+        }
+        if managed_scratch_parent(repo).is_none() {
+            return self.state_root(repo);
+        }
+        resolver
+            .verified_scratch_repository(repo, self.interrupted)
+            .map(Some)
+            .map_err(plan_error)
+    }
     fn lifecycle_writer(
         &self,
         repo: &Path,
@@ -499,9 +534,12 @@ impl oms_command_plan::Services for ControlServices<'_> {
         let child = self
             .run_supervised(spawn, self.interrupted)
             .map_err(plan_error)?;
+        let exit = child.code.clamp(0, 255) as u8;
         Ok(PlanExecution {
-            exit: child.code.clamp(0, 255) as u8,
-            runner_exit: 0,
+            exit,
+            // Plan expects the runner to propagate the observed command status.
+            // Incomplete cleanup or drainage has already returned an error above.
+            runner_exit: exit,
             timed_out: child.timed_out,
             output_limited: child.output_limited,
             launch_error: false,
@@ -715,6 +753,299 @@ impl<'a> ControlServices<'a> {
 }
 
 impl oms_command_autonomy::Services for ControlServices<'_> {
+    fn classify_autonomy_failure(
+        &self,
+        text: &str,
+        exit: i32,
+    ) -> oms_command_autonomy::Result<Value> {
+        let args = vec![
+            "classify".into(),
+            "--exit".into(),
+            exit.to_string().into(),
+            "--".into(),
+            text.into(),
+        ];
+        let (code, raw, _) = oms_command_failure::run(&args, &self.source, self.interrupted);
+        if code != 0 {
+            return Err(autonomy_error(
+                code,
+                "native failure classification unavailable",
+            ));
+        }
+        oms_command_autonomy::value::parse(&raw)
+    }
+
+    fn discovery_section(
+        &self,
+        repo: &Path,
+        section: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        if section != "acceptance" {
+            return Err(autonomy_error(2, "native discovery section unavailable"));
+        }
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|e| autonomy_error(2, e))?;
+        let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+        let runtime = oms_runtime::storage::Runtime::open(
+            &roots.execution_repo,
+            &roots.state_repo,
+            &self.source,
+            &services,
+            interrupted,
+        )?;
+        let envelope = oms_runtime::projection::envelope(&runtime)?;
+        oms_command_autonomy::value::parse(&oms_runtime::value::canonical(&envelope)?)
+    }
+
+    fn external_observation(
+        &self,
+        repo: &Path,
+        state: &Path,
+        binding: &Value,
+        refresh: bool,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|e| autonomy_error(2, e))?;
+        let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+        if roots.state_repo != state {
+            return Err(autonomy_error(2, "external wait state repository changed"));
+        }
+        let runtime = oms_runtime::storage::Runtime::open(
+            &roots.execution_repo,
+            &roots.state_repo,
+            &self.source,
+            &services,
+            interrupted,
+        )?;
+        let binding = oms_runtime::value::from_serde(binding)?;
+        let row = oms_runtime::external::observe(&runtime, &binding, refresh)?;
+        oms_command_autonomy::value::parse(&oms_runtime::value::canonical(&row)?)
+    }
+
+    fn experience_context(
+        &self,
+        repo: &Path,
+        query: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        use oms_command_autonomy::value;
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|e| autonomy_error(2, e))?;
+        let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+        let runtime = oms_runtime::storage::Runtime::open(
+            &roots.execution_repo,
+            &roots.state_repo,
+            &self.source,
+            &services,
+            interrupted,
+        )?;
+        let head = &runtime.repository.head;
+        let clean_output = self
+            .run_supervised(
+                Spawn::new(
+                    self.scope,
+                    [
+                        "git",
+                        "--no-optional-locks",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all",
+                    ]
+                    .map(OsString::from)
+                    .to_vec(),
+                    Duration::from_secs(2),
+                    64 * 1024,
+                )
+                .cwd(repo),
+                interrupted,
+            )
+            .map_err(|e| autonomy_error(2, e))?;
+        let current_clean = clean_output.code == 0 && clean_output.stdout.is_empty();
+        let tree_output = self
+            .run_supervised(
+                Spawn::new(
+                    self.scope,
+                    ["git", "--no-optional-locks", "rev-parse", "HEAD^{tree}"]
+                        .map(OsString::from)
+                        .to_vec(),
+                    Duration::from_secs(2),
+                    128,
+                )
+                .cwd(repo),
+                interrupted,
+            )
+            .map_err(|e| autonomy_error(2, e))?;
+        let tree = String::from_utf8_lossy(&tree_output.stdout)
+            .trim()
+            .to_owned();
+        let spec = runtime
+            .bytes("PROJECT.md", 1024 * 1024)?
+            .ok_or_else(|| autonomy_error(2, "experience requires the current project contract"))?;
+        let spec_sha = value::hash(spec.as_ref());
+        let progress = runtime
+            .bytes(".oms/plan/progress.jsonl", 4 * 1024 * 1024)?
+            .unwrap_or_default();
+        if !progress.is_empty() && !progress.ends_with(b"\n") {
+            return Err(autonomy_error(
+                2,
+                "experience progress source has a torn tail",
+            ));
+        }
+        let mut facts = Vec::new();
+        for line in progress.split(|b| *b == b'\n').filter(|v| !v.is_empty()) {
+            if facts.len() >= 4096 {
+                return Err(autonomy_error(2, "experience source row bound exceeded"));
+            }
+            facts.push(value::parse(line)?);
+        }
+        let args = [
+            "show",
+            "--repo",
+            roots
+                .state_repo
+                .to_str()
+                .ok_or_else(|| autonomy_error(2, "experience requires a Unicode repository"))?,
+            "--recent",
+            "32",
+            "--json",
+        ]
+        .map(OsString::from);
+        let mut read_journal =
+            oms_command_autonomy::Invocation::new("journal", repo, args.to_vec());
+        read_journal.wall = Duration::from_secs(5);
+        read_journal.output_limit = 256 * 1024;
+        // The journal's own lock remains authoritative, inside a bounded
+        // native observer process so a busy writer cannot stall planning.
+        let (journal_code, journal_raw, _) = self
+            .invoke_with_scope(&read_journal, self.scope, interrupted)
+            .unwrap_or((2, Vec::new(), Vec::new()));
+        let journal = if journal_code == 0 && journal_raw.len() <= 256 * 1024 {
+            value::parse(&journal_raw)?
+        } else {
+            Value::Null
+        };
+        let mut entries = vec![];
+        let mut seen = std::collections::BTreeSet::new();
+        for event in journal["events"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+        {
+            let id = value::text(&event["source"], "id");
+            if !matches!(
+                value::text(&event["source"], "type"),
+                "autopilot" | "goal-drive"
+            ) {
+                continue;
+            }
+            let Some(fact) = facts
+                .iter()
+                .rev()
+                .find(|r| r["run_id"] == id || r["result_sha256"] == id)
+            else {
+                continue;
+            };
+            if !current_clean
+                || tree_output.code != 0
+                || fact["worktree_clean"] != true
+                || fact["tree"] != tree
+                || fact["spec_sha256"] != spec_sha
+                || !(fact["base_sha"] == head.as_str() || fact["head"] == head.as_str())
+            {
+                continue;
+            }
+            if !matches!(
+                value::text(fact, "kind"),
+                "terminal" | "autopilot-external-result"
+            ) {
+                continue;
+            }
+            if fact["kind"] == "autopilot-external-result" {
+                let Ok(current) = oms_runtime::external::observe(
+                    &runtime,
+                    &oms_runtime::value::from_serde(&fact["binding"])?,
+                    false,
+                ) else {
+                    continue;
+                };
+                let current = value::parse(&oms_runtime::value::canonical(&current)?)?;
+                if current["identity_valid"] != true
+                    || current["status"] != "terminal"
+                    || current["result_sha256"] != fact["result_sha256"]
+                {
+                    continue;
+                }
+            }
+            let sha = value::hash(value::canonical(fact)?);
+            if !seen.insert(sha.clone()) {
+                continue;
+            }
+            let item = serde_json::json!({"kind":"observed-outcome","journal_event_id":event["event_id"],"source_path":".oms/plan/progress.jsonl","source_sha256":sha,
+                "head":head,"spec_sha256":spec_sha,"status":fact["status"],"reason":fact["reason"],"cause":fact["cause"],
+                "outcome":fact["observation"]["outcome"],"progress_sha256":fact["observation"]["progress_sha256"],"result_sha256":fact["result_sha256"]});
+            if value::canonical(&item)?.len() <= 2048 {
+                entries.push(item);
+            }
+            if entries.len() == 6 {
+                break;
+            }
+        }
+        // The existing provider view applies curation, retirement, source
+        // citation validation and query-ranked project/global fallback. Only
+        // its relevant section is retained; unrelated recency is not injected.
+        let (memory_code, memory_raw, _) = oms_command_memory::provider_context(
+            repo,
+            &query.chars().take(300).collect::<String>(),
+            interrupted,
+        );
+        let memory = if memory_code == 0 {
+            String::from_utf8_lossy(&memory_raw)
+                .find("### relevant recall (")
+                .map(|at| {
+                    String::from_utf8_lossy(&memory_raw)[at..]
+                        .chars()
+                        .take(4096)
+                        .collect::<String>()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        runtime.invalidate(Path::new("PROJECT.md"));
+        let final_view = oms_runtime::Services::repository_view(&services, repo)?;
+        if final_view.head != *head
+            || final_view.worktree_state != runtime.repository.worktree_state
+            || runtime
+                .bytes("PROJECT.md", 1024 * 1024)?
+                .as_ref()
+                .is_none_or(|raw| value::hash(raw.as_ref()) != spec_sha)
+        {
+            return Err(autonomy_error(
+                2,
+                "experience applicability changed during read",
+            ));
+        }
+        let result = serde_json::json!({"schema":1,"advisory":true,"repo_head":head,"spec_sha256":spec_sha,
+            "source_refs":[{"path":".oms/plan/progress.jsonl","sha256":value::hash(progress.as_ref())}],
+            "entries":entries,"memory_recall":memory,"journal_available":journal_code==0,"memory_available":memory_code==0,
+            "authority":"reference only; current source and fresh verification govern"});
+        if value::canonical(&result)?.len() > 16 * 1024 {
+            return Err(autonomy_error(2, "experience context exceeds byte bound"));
+        }
+        Ok(result)
+    }
+
     /// Resolves explicit assignments and `config/panel-routing.json` tier defaults
     /// using the native `oms-command-peer` routing table, failing closed on missing
     /// tiers or `provider-default`.
@@ -1486,6 +1817,10 @@ impl oms_command_landing::Services for ControlServices<'_> {
 }
 
 impl oms_command_state::HostServices for ControlServices<'_> {
+    fn scratch_activity(&self, repo: &Path, stop: &AtomicBool) -> Option<oms_command_state::Value> {
+        let display = oms_panel_core::scratch_activity::observe(repo, stop);
+        oms_command_state::json::parse(&serde_json::to_vec(&display).ok()?).ok()
+    }
     fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
         self
     }
@@ -2863,6 +3198,15 @@ impl oms_command_task::Services for ControlTask<'_> {
             ))
         }
     }
+    fn failure_candidates(
+        &mut self,
+        repo: &Path,
+        active_task_id: &[u8],
+        command: &[u8],
+    ) -> oms_command_task::Result<Vec<String>> {
+        oms_command_state::task_failure_candidates(repo, active_task_id, command, self.interrupted)
+            .map_err(|error| task_error(error.to_string()))
+    }
     fn observe_failure(
         &mut self,
         request: FailureObservation<'_>,
@@ -2870,9 +3214,15 @@ impl oms_command_task::Services for ControlTask<'_> {
         let command = OsString::from_vec(request.command.to_vec());
         let mut args: Vec<OsString> = vec!["--repo".into(), request.repo.as_os_str().to_owned()];
         if request.exit == 0 {
-            // A passing gate clears its own row; the shell ignored this result.
+            // The ledger records the accepted rerun and clears the aggregate
+            // only when its exact evidence covers every currently open row.
             args.extend(["resolve".into(), "--cmd".into(), command]);
-            let _ = oms_command_state::run("fail-ledger", &args, request.repo, self.interrupted);
+            let _ = oms_command_state::observe_task_verification(
+                &args,
+                request.repo,
+                self.interrupted,
+                request.verification,
+            );
             return Ok(Vec::new());
         }
         args.extend([
@@ -2888,8 +3238,12 @@ impl oms_command_task::Services for ControlTask<'_> {
             args.push("--summary".into());
             args.push(OsString::from_vec(request.summary.to_vec()));
         }
-        let (code, stdout, stderr) =
-            oms_command_state::run("fail-ledger", &args, request.repo, self.interrupted);
+        let (code, stdout, stderr) = oms_command_state::observe_task_verification(
+            &args,
+            request.repo,
+            self.interrupted,
+            request.verification,
+        );
         if code != 0 {
             return Err(task_error("fail-ledger did not record the failure"));
         }
@@ -3336,20 +3690,455 @@ mod tests {
             (supervised.code, supervised.stdout, supervised.stderr),
             (3, b"out".to_vec(), b"err".to_vec())
         );
-        let plan = oms_command_plan::Services::supervise(
+        for exit in [0, 1, 7] {
+            let plan = oms_command_plan::Services::supervise(
+                &control,
+                &SupervisedCommand {
+                    argv: sh(&format!("printf plan; exit {exit}")),
+                    cwd: root.path().to_owned(),
+                    wall: Duration::from_secs(20),
+                    output_limit: 1024,
+                    label: "t",
+                    remove_environment: Vec::new(),
+                    environment: Vec::new(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (plan.exit, plan.runner_exit, plan.output.as_slice()),
+                (exit, exit, b"plan".as_slice())
+            );
+            assert!(
+                !plan.launch_error
+                    && !plan.supervision_error
+                    && !plan.timed_out
+                    && !plan.output_limited
+            );
+        }
+        // Exercise the actual acceptance consumer too: an ordinary failed
+        // check must remain a failure, so goal-drive can dispatch the first
+        // worker. The Plan supervision-mismatch guard is left intact.
+        let repo = Tmp::repo(&[(".gitignore", ".oms/\n"), ("check.sh", "exit 1\n")]);
+        let plan_call = |args: &[&str]| {
+            oms_command_plan::run_with_services(
+                &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                repo.path(),
+                &stop,
+                &control,
+            )
+        };
+        let (code, out, err) = plan_call(&[
+            "init",
+            "--goal",
+            "make the failing check pass",
+            "--accept",
+            "bash check.sh",
+            "--accept-files",
+            "check.sh",
+        ]);
+        assert_eq!(
+            code,
+            0,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        let (code, out, err) = plan_call(&["accept"]);
+        assert_eq!(
+            code,
+            3,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        assert!(String::from_utf8_lossy(&out).contains("plan-accept: fail (exit 1,"));
+        assert!(!String::from_utf8_lossy(&out).contains("acceptance-supervision-failed"));
+    }
+
+    #[test]
+    fn goal_commit_reads_only_certified_managed_landing_patches() {
+        use oms_command_plan::{Action, Context, Plan, Request, json};
+        use std::os::unix::fs::MetadataExt;
+
+        let project = "# Project\n## Status\n- State: confirmed\n## Goal\n- Goal: commit the exact landed patch\n## Scope\n- Allowed: a.txt\n## Acceptance\n- [id:C1] The assigned change is checked\n## Verification\n- Required checks: bash check.sh\n- Required check files: check.sh\n";
+        let repo = Tmp::repo(&[
+            (".gitignore", ".oms/\n"),
+            ("a.txt", "before\n"),
+            ("check.sh", "test \"$(cat a.txt)\" = after\n"),
+            ("PROJECT.md", project),
+        ]);
+        git(repo.path(), &["config", "user.name", "t"]);
+        git(repo.path(), &["config", "user.email", "t@example.invalid"]);
+        let spec_sha = json::sha(project.as_bytes());
+        let branch = format!("oms/autopilot-{}", &spec_sha[..12]);
+        git(repo.path(), &["switch", "-qc", &branch]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let control = services(&stop, repo.path(), Vec::new());
+        let context = Context::from_environment_at(
+            &Request::new(Action::Status),
+            repo.path(),
+            repo.path(),
+            None,
+        )
+        .unwrap();
+        let plan = Plan::open(context, &control, &stop).unwrap();
+        plan.execute(
+            &Request::new(Action::Init)
+                .with("goal", "commit the exact landed patch")
+                .with("accept", "bash check.sh"),
+        )
+        .unwrap();
+        let ordinary = oms_command_plan::storage::Store::open(repo.path()).unwrap();
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        let plan_sha = json::sha(plan.load().unwrap().raw.unwrap());
+        let proposal = serde_json::json!({"schema":1,"kind":"agent-plan-proposal","spec_sha256":spec_sha,"plan_sha256":plan_sha,"base_sha":base,"id_prefix":"t","allowed_envelope":["a.txt"],"acceptance_files":["check.sh"],
+            "tasks":[{"id":"t1","title":"implement the assigned change","allowed":["a.txt"],"verify":"bash check.sh","depends":[],"covers":["C1"]}]});
+        let proposal_raw = serde_json::to_vec(&proposal).unwrap();
+        let proposal_sha = json::sha(&proposal_raw);
+        let proposal_path = repo.path().join(".oms/plan/proposal-milestone.json");
+        ordinary
+            .publish_once(&proposal_path, &proposal_raw, 1024 * 1024)
+            .unwrap();
+        plan.execute(
+            &Request::new(Action::ApplyProposal)
+                .with("proposal", proposal_path.as_os_str())
+                .with("expected-proposal-sha256", &proposal_sha)
+                .with("expected-plan-sha256", &plan_sha)
+                .with("allowed-envelope", "a.txt")
+                .with("accept-files", "check.sh"),
+        )
+        .unwrap();
+        let issued = plan
+            .execute(
+                &Request::new(Action::Claim)
+                    .with("id", "t1")
+                    .with("provider", "claude")
+                    .flag("json"),
+            )
+            .unwrap();
+        let issued = json::parse(&issued.stdout).unwrap();
+        let lease = issued.text("lease_id");
+        std::fs::write(repo.path().join("a.txt"), "after\n").unwrap();
+        let patch = format!("{}\n", git(repo.path(), &["diff", "--binary"]));
+        git(repo.path(), &["checkout", "--", "a.txt"]);
+        let source = repo.path().join(".oms/source.patch");
+        let report = repo.path().join(".oms/report.md");
+        std::fs::write(&source, &patch).unwrap();
+        std::fs::write(&report, "The assigned change passed its check.\n").unwrap();
+        let digest = json::sha(patch.as_bytes());
+        let landing = "land-20261123T000000Z-0123456789abcdef";
+        let frozen = repo
+            .path()
+            .join(format!(".oms/landing-patches/{landing}.patch"));
+        let capture = {
+            let mut producer = oms_reference::producer::Producer::open(repo.path(), &stop).unwrap();
+            let capture = producer
+                .allocate(&source, landing, &digest, repo.path(), &stop)
+                .unwrap();
+            producer.publish(&capture, &frozen, &stop).unwrap();
+            capture
+        };
+        let _capture = Tmp(capture.parent().unwrap().to_owned());
+        assert_eq!(std::fs::metadata(&frozen).unwrap().nlink(), 2);
+        // The general Plan store must continue refusing multiply linked files.
+        assert!(
+            ordinary
+                .read(&frozen, 16 * 1024 * 1024)
+                .unwrap_err()
+                .message
+                .contains("unsafe plan ownership, permissions or links")
+        );
+        plan.execute(
+            &Request::new(Action::Review)
+                .with("id", "t1")
+                .with("lease-id", lease)
+                .with("artifact", report.as_os_str())
+                .with("patch", source.as_os_str()),
+        )
+        .unwrap();
+        plan.execute(
+            &Request::new(Action::Land)
+                .with("id", "t1")
+                .with("lease-id", lease)
+                .with("expected-review-patch", source.as_os_str())
+                .with("expected-review-patch-sha256", &digest)
+                .with("expected-review-verify", "bash check.sh")
+                .with("expected-review-executor-id", "")
+                .with("expected-review-executor-soul-sha256", "")
+                .with("expected-review-lease-id", lease),
+        )
+        .unwrap();
+        let snapshot = plan.load().unwrap();
+        let landing_receipt = json::receipt_digest(snapshot.task("t1").unwrap()).unwrap();
+        plan.execute(
+            &Request::new(Action::Finish)
+                .with("id", "t1")
+                .with("lease-id", lease)
+                .with("expected-landing-receipt-sha256", &landing_receipt)
+                .with("patch", frozen.as_os_str()),
+        )
+        .unwrap();
+        let snapshot = plan.load().unwrap();
+        let task = snapshot.task("t1").unwrap();
+        assert_eq!(task.get("covers").strings().unwrap(), ["C1"]);
+        assert!(task.get("completion_receipt").object().is_err());
+        assert!(task.get("landing").object().is_err());
+        let intent = serde_json::json!({"schema":1,"event":"intent","landing_id":landing,
+            "task":"t1","worktree":repo.path(),"plan_id":snapshot.plan.text("plan_id"),
+            "lease":lease,"plan_receipt_sha":landing_receipt,"plan_done_receipt_sha":json::receipt_digest(task).unwrap(),
+            "patch_sha":digest,"base_sha":base,"patch":frozen,"approval":"","approval_version":""});
+        let mut landing_record = json::parse(&serde_json::to_vec(&intent).unwrap()).unwrap();
+        let hash = oms_command_plan::patch_landing_receipt_digest(&landing_record).unwrap();
+        landing_record
+            .set("receipt_sha", json::string(hash))
+            .unwrap();
+        ordinary
+            .append(".oms/landings.jsonl", &landing_record)
+            .unwrap();
+        std::fs::write(repo.path().join("a.txt"), "after\n").unwrap();
+        let run = || {
+            oms_command_autonomy::run_with_services(
+                "goal-drive",
+                &["--commit-task".into(), "t1".into()],
+                repo.path(),
+                &stop,
+                &control,
+            )
+        };
+        let (code, _, _) = run();
+        assert_ne!(code, 0, "outstanding intent cannot authorize a commit");
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), base);
+        let ledger = repo.path().join(".oms/landings.jsonl");
+        let before_terminal = std::fs::read(&ledger).unwrap();
+        landing_record
+            .set("event", json::string("complete"))
+            .unwrap();
+        ordinary
+            .append(".oms/landings.jsonl", &landing_record)
+            .unwrap();
+        let (code, out, err) = run();
+        assert_eq!(
+            code,
+            0,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        assert!(String::from_utf8_lossy(&out).contains("committed task=t1 commit="));
+        let committed = git(repo.path(), &["rev-parse", "HEAD"]);
+        assert_ne!(committed, base);
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD^"]), base);
+        assert!(git(repo.path(), &["status", "--porcelain"]).is_empty());
+
+        // Read the actual local Finish through the public status and native
+        // criterion projection. A task's coverage declaration is insufficient;
+        // this execution feedback comes from a successful supervised check.
+        let verified = oms_command_plan::Services::supervise(
             &control,
-            &SupervisedCommand {
-                argv: sh("printf plan; exit 0"),
-                cwd: root.path().to_owned(),
+            &oms_command_plan::services::SupervisedCommand {
+                argv: sh("bash check.sh"),
+                cwd: repo.path().to_owned(),
                 wall: Duration::from_secs(20),
                 output_limit: 1024,
-                label: "t",
+                label: "milestone-check",
                 remove_environment: Vec::new(),
                 environment: Vec::new(),
             },
         )
         .unwrap();
-        assert_eq!((plan.exit, plan.output.as_slice()), (0, b"plan".as_slice()));
+        assert_eq!((verified.exit, verified.runner_exit), (0, 0));
+        assert!(!verified.launch_error && !verified.supervision_error && !verified.timed_out);
+        let source_path = ".oms/artifacts/_verify-scope-milestone.json";
+        let source_bytes = serde_json::to_vec(
+            &serde_json::json!({"head":committed,"exit":verified.exit,"covers":["C1"]}),
+        )
+        .unwrap();
+        ordinary
+            .publish_once(source_path, &source_bytes, 1024)
+            .unwrap();
+        ordinary
+            .publish_once(".oms/artifacts/index.jsonl", b"", 0)
+            .unwrap();
+        let verification = serde_json::json!({"schema":1,"kind":"review-verify","event_id":"evt_milestone","operation_id":"review-milestone","provider":"local","verified_head":committed,
+            "plan_id":snapshot.plan.text("plan_id"),"covers":["C1"],"source":source_path,"source_sha256":json::sha(&source_bytes),"exit":verified.exit,
+            "dependency_digests":{"PROJECT.md":spec_sha,".oms/plan/tasks.json":json::sha(ordinary.read(".oms/plan/tasks.json", 8*1024*1024).unwrap())}});
+        ordinary
+            .append(
+                ".oms/artifacts/index.jsonl",
+                &json::parse(&serde_json::to_vec(&verification).unwrap()).unwrap(),
+            )
+            .unwrap();
+        let route = serde_json::json!({"model":"fixture","fallback_model":"","reasoning_effort":"auto","timeout":"1m"});
+        let receipt = serde_json::json!({"schema":1,"kind":"autopilot-run","stage":"parked","repo":repo.path(),"spec_sha256":spec_sha,
+            "providers":{"planner":"claude","worker":"claude","reviewer":"codex"},"routing":{"provider_timeout":"1m","planner":route,"worker":route,"reviewer":route},
+            "contract":{"allowed":"a.txt","base":"main","base_sha":base,"remote":"origin","max_cycles":4,"initial_tasks":1,"replan_tasks":1,"auto_repair":false,"retry_known":false,"review_mode":"gate","draft_pr":false,"allow_verifier_change":false,"allow_floor_change":"","collaboration":"off","milestones":[{"id":"first","criteria":["C1"]}]},
+            "proposal":{"path":proposal_path,"sha256":proposal_sha},"branch":branch,"owner_id":format!("owner_{}","1".repeat(32)),"updated":"2026-11-23T00:00:00Z"});
+        oms_command_autonomy::receipt::validate(&receipt).unwrap();
+        ordinary
+            .publish_once(
+                ".oms/plan/autopilot-run.json",
+                &serde_json::to_vec(&receipt).unwrap(),
+                64 * 1024,
+            )
+            .unwrap();
+        // The in-process test harness supplies only the repository view and
+        // invokes the existing Plan owner directly. Whole-tree supervision is
+        // exercised by the separate native_entry_contract milestone fixture.
+        struct MilestoneHost<'a, 'b> {
+            control: &'a ControlServices<'b>,
+            stop: &'a AtomicBool,
+        }
+        impl oms_command_plan::Services for MilestoneHost<'_, '_> {
+            fn read_managed_patch(
+                &self,
+                state: &Path,
+                path: &Path,
+                limit: usize,
+            ) -> oms_command_plan::Result<Option<Vec<u8>>> {
+                self.control.read_managed_patch(state, path, limit)
+            }
+            fn group_membership_resolver(
+                &self,
+            ) -> Option<oms_command_plan::services::GroupResolver> {
+                self.control.group_membership_resolver()
+            }
+        }
+        impl oms_runtime::Services for MilestoneHost<'_, '_> {
+            fn repository_view(
+                &self,
+                repo: &Path,
+            ) -> oms_runtime::Result<oms_runtime::services::RepositoryView> {
+                Ok(oms_runtime::services::RepositoryView {
+                    head: git(repo, &["rev-parse", "HEAD"]),
+                    branch: git(repo, &["symbolic-ref", "--short", "HEAD"]),
+                    worktree_state: String::new(),
+                })
+            }
+            fn plan_status(
+                &self,
+                repo: &Path,
+                state: &Path,
+                _: &[u8],
+            ) -> oms_runtime::Result<Vec<u8>> {
+                assert_eq!(repo, state);
+                let (code, out, err) = oms_command_plan::run_with_services(
+                    &["status".into(), "--json".into()],
+                    repo,
+                    self.stop,
+                    self.control,
+                );
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                Ok(out)
+            }
+            fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+                self.control.group_membership_resolver()
+            }
+        }
+        impl oms_command_autonomy::Services for MilestoneHost<'_, '_> {
+            fn discovery_section(
+                &self,
+                repo: &Path,
+                section: &str,
+                stop: &AtomicBool,
+            ) -> oms_command_autonomy::Result<Value> {
+                assert_eq!(section, "acceptance");
+                let runtime = oms_runtime::storage::Runtime::open(repo, repo, repo, self, stop)?;
+                let projection = oms_runtime::projection::envelope(&runtime)?;
+                oms_command_autonomy::value::parse(&oms_runtime::value::canonical(&projection)?)
+            }
+        }
+        let status_host = MilestoneHost {
+            control: &control,
+            stop: &stop,
+        };
+        let criterion = || {
+            let (code, out, err) = oms_command_autonomy::run_with_services(
+                "autopilot",
+                &["status".into()],
+                repo.path(),
+                &stop,
+                &status_host,
+            );
+            assert_eq!(
+                code,
+                0,
+                "{}{}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            );
+            let status: Value = serde_json::from_slice(&out).unwrap();
+            status["next_action"]["progress"]["criteria"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{status}"))
+                .iter()
+                .find(|c| c["id"] == "C1")
+                .unwrap()
+                .clone()
+        };
+        let proof = criterion();
+        assert_eq!(proof["state"], "verified", "{proof}");
+        assert!(
+            proof["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["status"] == "verified"
+                    && e["stale"] == false
+                    && e["signal"] == "execution_feedback")
+        );
+        assert_eq!(proof["claimed_tasks"], serde_json::json!(["t1"]));
+        assert_eq!(proof["completed_tasks"], serde_json::json!(["t1"]));
+        let valid = std::fs::read(&ledger).unwrap();
+        std::fs::write(&ledger, b"").unwrap();
+        assert_eq!(
+            criterion()["completed_tasks"],
+            serde_json::json!([]),
+            "done alone is not completed landing proof"
+        );
+        for (field, foreign) in [
+            ("lease", "lease-foreign".to_owned()),
+            ("plan_id", format!("plan_{}", "f".repeat(32))),
+            ("plan_done_receipt_sha", "f".repeat(64)),
+            ("patch_sha", "f".repeat(64)),
+            (
+                "worktree",
+                repo.path().join("foreign").to_string_lossy().into_owned(),
+            ),
+        ] {
+            let mut changed = landing_record.clone();
+            changed.set(field, json::string(foreign)).unwrap();
+            std::fs::write(&ledger, &before_terminal).unwrap();
+            ordinary.append(".oms/landings.jsonl", &changed).unwrap();
+            assert_eq!(
+                criterion()["completed_tasks"],
+                serde_json::json!([]),
+                "foreign {field} must not complete the task"
+            );
+        }
+        std::fs::write(&ledger, &valid).unwrap();
+        assert_eq!(criterion()["completed_tasks"], serde_json::json!(["t1"]));
+
+        // A real publication's anchor identity alone is insufficient after its
+        // bytes change. Re-entry must neither commit nor accept those bytes.
+        std::fs::write(&frozen, "changed capture\n").unwrap();
+        let (code, _, err) = run();
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert!(String::from_utf8_lossy(&err).contains("native generation anchor changed"));
+        assert_eq!(criterion()["completed_tasks"], serde_json::json!([]));
+        std::fs::write(&frozen, &patch).unwrap();
+
+        // Matching bytes with two links do not create a native certificate.
+        let retained = frozen.with_extension("retained");
+        std::fs::rename(&frozen, &retained).unwrap();
+        let foreign = repo.path().join(".oms/foreign.patch");
+        std::fs::write(&foreign, &patch).unwrap();
+        std::fs::hard_link(&foreign, &frozen).unwrap();
+        assert_eq!(std::fs::metadata(&frozen).unwrap().nlink(), 2);
+        let (code, _, err) = run();
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert!(String::from_utf8_lossy(&err).contains("landing publication replaced"));
+        assert_eq!(criterion()["completed_tasks"], serde_json::json!([]));
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), committed);
     }
 
     #[test]
@@ -5381,6 +6170,7 @@ done
                     command: b"make check",
                     exit,
                     summary: b"FAIL one",
+                    verification: None,
                 },
             )
         };
@@ -5451,6 +6241,369 @@ done
         assert!(status(&mut task).contains("verification: fresh"));
         std::fs::write(repo.path().join("a"), "y").unwrap();
         assert!(status(&mut task).contains("verification: stale"));
+        // Restore the source and finish this task before the independent lineage scenario.
+        std::fs::write(repo.path().join("a"), "x").unwrap();
+        let (code, log) = run(&mut task, &["close"]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&log));
+
+        // Same command, different tasks and a failure appended after selection:
+        // only failures observed for this exact task before rerun may be linked.
+        let command = "if test -f .oms/late-failure.json; then cat .oms/late-failure.json >> .oms/failures.jsonl; fi; test -f proof-ready";
+        let call = |task: &mut ControlTask<'_>, args: &[&str]| {
+            oms_command_task::run_with_services(&osv(args), repo.path(), &stop, task)
+        };
+        let (code, _, err) = call(
+            &mut task,
+            &[
+                "init",
+                "--goal",
+                "exact recovery fixture",
+                "--verify",
+                command,
+            ],
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let packet_path = repo.path().join(".oms/task/current.md");
+        let packet_a = std::fs::read(&packet_path).unwrap();
+        let task_a = oms_command_task::packet::metadata(&packet_a, "task_id")
+            .unwrap()
+            .to_vec();
+        let ledger_path = repo.path().join(".oms/failures.jsonl");
+        let rows = || {
+            std::fs::read_to_string(&ledger_path)
+                .unwrap()
+                .lines()
+                .map(|line| oms_command_plan::json::parse(line.as_bytes()).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let digest =
+            |row: &oms_command_plan::json::Value| oms_command_plan::json::hash(row).unwrap();
+        let verify = |task: &mut ControlTask<'_>, expected: i32| {
+            let (code, _, err) = call(task, &["verify"]);
+            assert_eq!(code, expected, "{}", String::from_utf8_lossy(&err));
+        };
+        verify(&mut task, 1);
+        let failure_a = rows().pop().unwrap();
+        assert_eq!(failure_a.get("verification").text("result"), "failed");
+        assert_eq!(
+            failure_a
+                .get("verification")
+                .text("active_task_id")
+                .as_bytes(),
+            task_a
+        );
+        assert_eq!(
+            failure_a
+                .get("verification")
+                .get("prior_failures")
+                .array()
+                .unwrap()
+                .len(),
+            0
+        );
+
+        std::fs::write(
+            &packet_path,
+            oms_command_task::packet::set_metadata(&packet_a, "task_id", b"task-other"),
+        )
+        .unwrap();
+        verify(&mut task, 1);
+        let failure_b = rows().pop().unwrap();
+        std::fs::write(&packet_path, &packet_a).unwrap();
+        let before_late = std::fs::read(&ledger_path).unwrap();
+        verify(&mut task, 1);
+        let late_failure = rows().pop().unwrap();
+        // Replay a genuine producer record at the deterministic execution seam.
+        std::fs::write(&ledger_path, before_late).unwrap();
+        std::fs::write(
+            repo.path().join(".oms/late-failure.json"),
+            oms_command_plan::json::encoded(&late_failure).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("proof-ready"), "ready\n").unwrap();
+        verify(&mut task, 0);
+        let resolved = rows().pop().unwrap();
+        assert_eq!(
+            resolved.text("event"),
+            "verified",
+            "other and late failures stay open"
+        );
+        let evidence = resolved.get("verification");
+        assert_eq!(evidence.text("result"), "accepted");
+        assert_eq!(evidence.text("active_task_id").as_bytes(), task_a);
+        assert_eq!(
+            evidence.text("command_sha256"),
+            oms_command_task::command_hash(command.as_bytes())
+        );
+        assert_eq!(
+            evidence.text("outcome_sha256"),
+            oms_command_plan::json::sha(std::fs::read(&packet_path).unwrap())
+        );
+        assert_eq!(
+            evidence.text("verified_state").as_bytes(),
+            oms_command_task::packet::metadata(
+                &std::fs::read(&packet_path).unwrap(),
+                "verified_state"
+            )
+            .unwrap()
+        );
+        let prior = evidence.get("prior_failures").array().unwrap();
+        assert_eq!(prior, &[oms_command_plan::json::string(digest(&failure_a))]);
+        assert!(!prior.contains(&oms_command_plan::json::string(digest(&failure_b))));
+        assert!(!prior.contains(&oms_command_plan::json::string(digest(&late_failure))));
+        assert_eq!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop
+            )
+            .unwrap(),
+            [digest(&late_failure)]
+        );
+        assert_eq!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                b"task-other",
+                command.as_bytes(),
+                &stop
+            )
+            .unwrap(),
+            [digest(&failure_b)]
+        );
+        // The exact IDs are native packet reference operations in the lifecycle
+        // ledger, not guessed worker/Lead attempt IDs or time-window matches.
+        let lifecycle =
+            std::fs::read_to_string(repo.path().join(".oms/lifecycle/events.jsonl")).unwrap();
+        for key in ["snapshot_attempt_id", "outcome_attempt_id"] {
+            assert!(!evidence.text(key).is_empty());
+            assert!(lifecycle.lines().any(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["attempt_id"].as_str()
+                    == Some(evidence.text(key))
+            }));
+        }
+        let (code, out, err) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&[
+                "show",
+                "--fingerprint",
+                resolved.text("observed_fingerprint"),
+                "--json",
+            ]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let shown: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(shown["failure"]["resolved"], false);
+        assert_eq!(shown["failure"]["failure_sha256"], digest(&late_failure));
+        assert_eq!(
+            shown["failure"]["resolution_verification"]["prior_failures"][0],
+            digest(&failure_a)
+        );
+        let (code, _, _) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["check", "--cmd", command, "--ignore-state"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(
+            code, 3,
+            "partial accepted evidence must not clear retry guards"
+        );
+        let (code, out, err) = oms_command_memory::run_with_source(
+            &osv(&["search", "--text", "proof-ready", "--json"]),
+            repo.path(),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let entries = String::from_utf8(out).unwrap();
+        assert!(!entries.is_empty());
+        for line in entries.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["kind"], "failure", "{line}");
+        }
+        let (code, out, err) = oms_command_memory::run_with_source(
+            &osv(&["health", "--json"]),
+            repo.path(),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let health: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(health["failures"]["open_fingerprints"], 1);
+
+        // Later exact passes can accumulate safely; the fingerprint closes
+        // only after every open failure has its own accepted task/command link.
+        std::fs::remove_file(repo.path().join(".oms/late-failure.json")).unwrap();
+        verify(&mut task, 0);
+        assert_eq!(rows().pop().unwrap().text("event"), "verified");
+        std::fs::write(
+            &packet_path,
+            oms_command_task::packet::set_metadata(&packet_a, "task_id", b"task-other"),
+        )
+        .unwrap();
+        verify(&mut task, 0);
+        assert_eq!(rows().pop().unwrap().text("event"), "resolved");
+        let (code, _, _) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["check", "--cmd", command, "--ignore-state"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0);
+        std::fs::write(&packet_path, &packet_a).unwrap();
+
+        // Missing/invalid/over-bound evidence stays unknown; no empty success.
+        let accepted_ledger = std::fs::read(&ledger_path).unwrap();
+        std::fs::write(
+            &ledger_path,
+            [accepted_ledger.as_slice(), b"torn-row\n"].concat(),
+        )
+        .unwrap();
+        assert!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop
+            )
+            .is_err()
+        );
+        verify(&mut task, 0);
+        let last = std::fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned();
+        let last = oms_command_plan::json::parse(last.as_bytes()).unwrap();
+        assert_eq!(last.text("event"), "verified");
+        assert!(matches!(
+            last.get("verification").get("prior_failures"),
+            oms_command_plan::json::Value::Null
+        ));
+        let mut bounded = Vec::new();
+        for index in 0..129 {
+            let mut row = failure_a.clone();
+            let mut identity = row.get("verification").clone();
+            identity
+                .set(
+                    "outcome_attempt_id",
+                    oms_command_plan::json::string(format!("fixture-outcome-{index}")),
+                )
+                .unwrap();
+            row.set("verification", identity).unwrap();
+            bounded.extend(oms_command_plan::json::encoded(&row).unwrap());
+        }
+        std::fs::write(&ledger_path, bounded).unwrap();
+        assert!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop
+            )
+            .is_err()
+        );
+
+        let resolve_manually = || {
+            let (code, _, err) = oms_command_state::run(
+                "fail-ledger",
+                &osv(&[
+                    "resolve",
+                    "--cmd",
+                    command,
+                    "--how",
+                    "operator handled failure",
+                ]),
+                repo.path(),
+                &stop,
+            );
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            let row = rows().pop().unwrap();
+            assert_eq!(row.text("event"), "resolved");
+            assert!(row.opt("verification").is_none());
+            row
+        };
+        resolve_manually();
+        let candidates = || {
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop,
+            )
+            .unwrap()
+        };
+        assert!(
+            candidates().is_empty(),
+            "manual resolution resets old identities"
+        );
+
+        let proof = repo.path().join("proof-ready");
+        std::fs::remove_file(&proof).unwrap();
+        verify(&mut task, 1);
+        let fresh_failure = rows().pop().unwrap();
+        let fresh_digest = digest(&fresh_failure);
+        assert_eq!(candidates().as_slice(), std::slice::from_ref(&fresh_digest));
+        std::fs::write(&proof, "ready\n").unwrap();
+        verify(&mut task, 0);
+        let settled = rows().pop().unwrap();
+        assert_eq!(settled.text("event"), "resolved");
+        assert_eq!(
+            settled
+                .get("verification")
+                .get("prior_failures")
+                .array()
+                .unwrap(),
+            &[oms_command_plan::json::string(fresh_digest)]
+        );
+        assert!(status(&mut task).contains("verification: fresh"));
+
+        // The command's successful receipt still stands if a manual reset occurs
+        // after selection. It cannot claim recovery of that reset failure.
+        std::fs::remove_file(&proof).unwrap();
+        verify(&mut task, 1);
+        assert_eq!(candidates().len(), 1);
+        let before_reset = std::fs::read(&ledger_path).unwrap();
+        let reset = resolve_manually();
+        std::fs::write(&ledger_path, before_reset).unwrap();
+        std::fs::write(
+            repo.path().join(".oms/late-failure.json"),
+            oms_command_plan::json::encoded(&reset).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&proof, "ready\n").unwrap();
+        verify(&mut task, 0);
+        let latest = rows().pop().unwrap();
+        assert_eq!(latest.text("event"), "verified");
+        assert!(
+            latest.opt("fingerprint").is_none(),
+            "legacy memory must not reopen the manual resolution"
+        );
+        assert_eq!(
+            latest.text("observed_fingerprint"),
+            reset.text("fingerprint")
+        );
+        assert!(matches!(
+            latest.get("verification").get("prior_failures"),
+            oms_command_plan::json::Value::Null
+        ));
+        let (code, out, err) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["show", "--fingerprint", reset.text("fingerprint"), "--json"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let shown: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(shown["failure"]["resolved"], true);
+        assert_eq!(shown["failure"]["how"], reset.text("how"));
+        assert!(shown["failure"].get("resolution_verification").is_none());
+        assert!(candidates().is_empty());
+        assert!(status(&mut task).contains("verification: fresh"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const EVENTS: &str = ".oms/lifecycle/events.jsonl";
 const ARTIFACTS: &str = ".oms/artifacts/index.jsonl";
 const FAILURES: &str = ".oms/failures.jsonl";
+const ROW_LIMIT: usize = 50;
 const NOTICE: &str = "Observation only: recorded facts and pointers, no commands, prompts, answers or tool output. Never verification, approval or a statement of cause.";
 const ROW_FIELDS: &[&str] = &[
     "event_id",
@@ -108,14 +109,17 @@ fn unreadable(source: &str) -> V {
         ("rows", V::Arr(vec![])),
     ])
 }
-fn section(source: &str, mut rows: Vec<V>) -> V {
+fn section(source: &str, rows: Vec<V>) -> V {
     let total = rows.len();
-    rows.truncate(50);
+    counted_section(source, rows, total)
+}
+fn counted_section(source: &str, mut rows: Vec<V>, total: usize) -> V {
+    rows.truncate(ROW_LIMIT);
     obj([
         ("source", source.into()),
         ("readable", true.into()),
         ("rows_total", total.into()),
-        ("rows_omitted", total.saturating_sub(50).into()),
+        ("rows_omitted", total.saturating_sub(ROW_LIMIT).into()),
         ("rows", V::Arr(rows)),
     ])
 }
@@ -197,6 +201,105 @@ fn artifacts(root: &Root, attempt: &V) -> V {
     shown.sort_by_key(|r| r.default("ts", "").py());
     section(ARTIFACTS, shown)
 }
+fn ledger_fingerprint(row: &V) -> Option<&str> {
+    let key = if row.has("observed_fingerprint") {
+        if row.get("event").text() != Some("verified") || row.has("fingerprint") {
+            return None;
+        }
+        "observed_fingerprint"
+    } else {
+        "fingerprint"
+    };
+    row.get(key).text().filter(|s| !s.trim().is_empty())
+}
+fn canonical_envelope(row: &V) -> bool {
+    let nonempty = |key| row.get(key).text().is_some_and(|v| !v.trim().is_empty());
+    let count = |key| matches!(row.get(key), V::Num(n) if n.parse::<i128>().is_ok_and(|v| v >= 0));
+    matches!(row.get("schema"), V::Num(schema) if schema == "2")
+        && ledger_fingerprint(row).is_some()
+        && nonempty("agent")
+        && nonempty("ts")
+        && [
+            "kind",
+            "cmd",
+            "summary",
+            "next",
+            "how",
+            "state_fingerprint",
+            "failure_code",
+            "recovery",
+        ]
+        .iter()
+        .all(|k| !row.has(k) || row.get(k).text().is_some())
+        && ["count", "exit"].iter().all(|k| !row.has(k) || count(k))
+        && (!row.has("resolved") || matches!(row.get("resolved"), V::Bool(_)))
+        && match row.get("event").text() {
+            Some("fail") => nonempty("kind") && nonempty("cmd") && count("exit"),
+            Some("verified" | "resolved") => true,
+            _ => false,
+        }
+}
+fn reference_verification(row: &V) -> Option<V> {
+    let evidence = row.get("verification");
+    let digest = |value: &V| {
+        value
+            .text()
+            .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    let prior = evidence.get("prior_failures");
+    let valid_prior = match prior {
+        V::Null => evidence.has("prior_failures") && row.get("event").text() != Some("resolved"),
+        V::Arr(keys) if keys.len() <= 128 => {
+            let mut seen = std::collections::BTreeSet::new();
+            keys.iter().all(|key| {
+                digest(key) && seen.insert(key.text().unwrap_or_default().to_ascii_lowercase())
+            })
+        }
+        _ => false,
+    };
+    if !valid_prior
+        || evidence.get("scope").text() != Some("agent-task-reference-v1")
+        || evidence.get("action").text() != Some("verification-rerun")
+        || !evidence.get("active_task_id").text().is_some_and(id)
+        || !["snapshot_attempt_id", "outcome_attempt_id"]
+            .iter()
+            .all(|k| evidence.get(k).text().is_some_and(id))
+        || !["snapshot_sha256", "outcome_sha256", "command_sha256"]
+            .iter()
+            .all(|k| digest(evidence.get(k)))
+        || !matches!(
+            (row.get("event").text(), evidence.get("result").text()),
+            (Some("fail"), Some("failed")) | (Some("resolved" | "verified"), Some("accepted"))
+        )
+    {
+        return None;
+    }
+    let mut out = obj([]);
+    for key in [
+        "scope",
+        "active_task_id",
+        "action",
+        "snapshot_attempt_id",
+        "snapshot_sha256",
+        "outcome_attempt_id",
+        "outcome_sha256",
+        "command_sha256",
+        "result",
+        "prior_failures",
+    ] {
+        out.set(key, evidence.get(key).clone());
+    }
+    // Receipt scope is retained exactly; arbitrarily large/missing state is
+    // unknown rather than silently abbreviated into a different identity.
+    if evidence.get("result").text() == Some("accepted") {
+        let state = evidence
+            .get("verified_state")
+            .text()
+            .filter(|state| !state.is_empty() && state.len() <= 512)?;
+        out.set("verified_state", state);
+    }
+    Some(out)
+}
 fn failures(root: &Root, attempt: &V, cwd: &Path) -> V {
     let override_ = std::env::var_os("OMS_FAIL_LEDGER")
         .filter(|v| !v.is_empty())
@@ -204,19 +307,49 @@ fn failures(root: &Root, attempt: &V, cwd: &Path) -> V {
     let path = override_
         .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
         .unwrap_or_else(|| PathBuf::from(FAILURES));
-    let Ok(rows) = source::rows(root, &path, false) else {
-        return unreadable(FAILURES);
-    };
     let first = stamp(attempt.get("created_at"));
     let last = stamp(attempt.get("updated_at"));
-    let mut found = vec![];
-    for (i, row) in rows.iter().enumerate() {
-        if let (Some(t), Some(first), Some(last)) = (stamp(row.get("ts")), first, last)
-            && t >= first
-            && t <= last
-        {
-            let mut item = obj([("line", (i + 1).into())]);
-            for k in ["ts", "fingerprint", "kind", "event", "exit", "agent"] {
+    let mut exact_rows = Vec::new();
+    let mut nearby = Vec::new();
+    let mut total = 0;
+    let mut correlated = false;
+    let result = source::visit_state_rows(root, &path, |line, row, framed| {
+        let native = matches!(row.get("schema"),V::Num(n) if n == "2");
+        let legacy = !row.has("schema") || matches!(row.get("schema"),V::Num(n) if n == "1");
+        if !legacy && (!native || !canonical_envelope(&row)) {
+            return;
+        }
+        let evidence =
+            if native && (row.has("verification") || row.get("event").text() == Some("verified")) {
+                // A torn or malformed proof cannot take a valid observation's display slot.
+                if !framed {
+                    return;
+                }
+                let Some(proof) = reference_verification(&row) else {
+                    return;
+                };
+                Some(proof)
+            } else {
+                None
+            };
+        correlated |= evidence.is_some();
+        let exact = evidence.as_ref().is_some_and(|v| {
+            ["snapshot_attempt_id", "outcome_attempt_id"]
+                .iter()
+                .any(|key| v.get(key) == attempt.get("attempt_id"))
+        });
+        let window = matches!((stamp(row.get("ts")), first, last), (Some(t), Some(first), Some(last)) if t >= first && t <= last);
+        if !exact && !window {
+            return;
+        }
+        total += 1;
+        let bucket = if exact { &mut exact_rows } else { &mut nearby };
+        if bucket.len() < ROW_LIMIT {
+            let mut item = obj([("line", line.into())]);
+            if let Some(fp) = ledger_fingerprint(&row) {
+                item.set("fingerprint", V::from(fp).short(80));
+            }
+            for k in ["ts", "kind", "event", "exit", "agent"] {
                 if row.has(k) {
                     let v = row.get(k).short(80);
                     if v != V::Null {
@@ -224,11 +357,35 @@ fn failures(root: &Root, attempt: &V, cwd: &Path) -> V {
                     }
                 }
             }
-            found.push(item);
+            if let Some(evidence) = evidence {
+                item.set("verification", evidence);
+                item.set(
+                    "correlation",
+                    if exact {
+                        "native-reference-attempt"
+                    } else {
+                        "time-window-only"
+                    },
+                );
+            }
+            bucket.push(item);
+        }
+    });
+    if result.is_err() {
+        return unreadable(FAILURES);
+    }
+    if correlated {
+        for item in &mut nearby {
+            item.set("correlation", "time-window-only");
         }
     }
-    let mut out = section(FAILURES, found);
-    out.set("match","rows stamped inside the attempt's time window; the ledger records no attempt id, so these may belong to other work");
+    exact_rows.extend(nearby.into_iter().take(ROW_LIMIT - exact_rows.len()));
+    let mut out = counted_section(FAILURES, exact_rows, total);
+    out.set("match", if correlated {
+        "native reference-operation IDs match exactly; other rows are time-window candidates that may belong to other work; neither proves a repair cause or current verification"
+    } else {
+        "rows stamped inside the attempt's time window; the ledger records no attempt id, so these may belong to other work"
+    });
     out
 }
 fn pointer(root: &Root, attempt: &V, explicit: Option<&Path>) -> (Option<PathBuf>, V) {

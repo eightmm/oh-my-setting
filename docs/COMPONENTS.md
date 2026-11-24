@@ -1360,6 +1360,52 @@ anything. Tune with `OMS_STALL_WINDOW`, `OMS_STALL_ERROR_REPEAT`,
 default 86400); `0` disables a rule or the age cutoff. The ledger records
 failures and the pass that resolves one, not every command, so "same action,
 same successful result" repeats cannot be seen there.
+
+Native `agent-task verify` observations carry a `verification` object
+in the existing schema-2 ledger. Its scope is
+`agent-task-reference-v1`: the active packet task ID, exact command digest,
+actual snapshot and outcome reference-operation attempt IDs, and hashes of the
+packet bytes each operation published. An accepted outcome additionally retains
+the verified repository state. These reference operations are not worker or Lead
+attempts. A failure has `result: failed`; a successful observation is emitted only
+after the final receipt and reference finish are accepted.
+
+Before execution, the native observer selects up to 128 canonical failure-row
+hashes for the same active task and exact command. The final append rechecks those
+identities; another task's failure or a failure appended during the rerun is not
+added to `prior_failures`. An empty list means no matching native failures were
+observed; `null` means the source was unavailable, invalid, over the bound, or
+changed so the selected identities could not be confirmed. Native passes append
+the additive `verified` event while any open row lacks exact accepted evidence;
+this is an accepted observation, not a new failure or a command-wide resolution.
+Exact observations can accumulate across tasks. Only when every currently open
+row is covered does a native pass append `resolved`. Retry guards, state views
+and memory therefore keep an unrelated or later failure open. Counts remain
+conservative at fingerprint scope until that aggregate closes. Legacy failures
+without identity remain advisory and require explicit manual resolution.
+
+Manual CLI `resolve` keeps its established command-wide scope. JSON views expose
+the latest failure's `verification`/`failure_sha256` separately from the last
+`resolution_verification` and its explicit prior hashes. The ledger retains
+schema 2; readers must understand the additional `verified` event for complete
+views. Partial receipts use `observed_fingerprint` for the exact ledger subject.
+Legacy memory clients interpret a top-level `fingerprint` as an update to the
+failure's open/closed status. Keeping that key on fail and resolved records
+preserves manual resolutions even when an older memory client reads a later
+partial receipt. Current readers also accept previously written `verified`
+rows with `fingerprint`. An older strict state reader counts a partial receipt
+as invalid and refuses ledger compaction. Upgrade state and bundle readers for
+complete evidence and retention, without migrating existing rows.
+
+Attempt bundles match these native reference IDs even outside the timestamp
+window and label them `native-reference-attempt`. Other included rows are
+`time-window-only` candidates when the ledger contains native correlations;
+legacy-only bundles retain their original warning and bytes. The recorded action
+is a verification rerun. The chain proves neither the cause of a repair nor
+success in another environment or current tree, and does not grant memory review,
+task completion, or execution authority. There is no CLI option for supplying
+accepted evidence. Existing memory review, hygiene and supersede/retire apply.
+
 `oms agent-memory recall` and `search` also cover the failure ledger. An open
 failure carries its recorded next step (`record --next`), and the newest failure
 of a resolved fingerprint carries how it was fixed (`resolve --how`), each as one
@@ -1710,12 +1756,12 @@ checked. One that names an id the spec does not carry is recorded as
 looks unimplemented and never marks a criterion satisfied. A run with no
 eligible work creates no proposal and exits successfully. Otherwise it prints
 the proposal, evidence packet, and candidate report paths with their SHA-256
-digests. With `--collaboration auto`, the council reviews the contract without
-the packet. Every `--collaboration auto` council is first asked to judge the
-requirements themselves under three headings, Contradictions, Missing
-situations and Unverifiable criteria, quoting the contract line and writing
-none where nothing applies; its answer stays untrusted evidence for the planner
-and nothing parses or gates on those headings. Applying a proposal requires `--expected-proposal-sha256` for the
+digests. With `--collaboration auto`, the council receives the contract,
+current plan and bounded discovery packet as untrusted observations. Its native
+response contract preserves alternatives, evidence, counterarguments,
+verification, deltas and disagreements; a separate synthesis is validated before
+decomposition. Structural completeness does not establish a requirement's truth
+or acceptance. Applying a proposal requires `--expected-proposal-sha256` for the
 reviewed proposal bytes. `oms autopilot propose --discover` uses discovery for
 the initial tranche only; when no eligible work is found, its receipt remains
 at proposing so the attempt can be retried. In GitHub project mode applied tasks
@@ -1923,35 +1969,43 @@ task-state contradictions, residual intents, and active/retired lineage conflict
 
 ### Collaborative planning
 
-With `--collaboration auto`, initial planning and the bounded remainder proposal trigger
-the panel council with one rebuttal round: its seats come from the same policy as
-`oms panel --council` (Codex, Claude and Antigravity at the deep tier), and an
-unavailable family refuses before any call, naming the family. Every seat must finish
-and meet `--deliberation`'s per-seat response contract: alternatives, evidence,
-counterargument, verification and explicit deltas/disagreements. JSON-only task lists
-or empty sections fail closed. A seat whose answer is otherwise complete but lacks
-required headings is asked once, in the same round, to restate its own answer under
-every heading; the restatement is used only if it passes, and both answers stay in the
-artifacts.
+With explicit `--collaboration auto`, initial planning and the one bounded
+remainder proposal call the existing Codex, Claude and Antigravity council with
+one rebuttal round. These are the current fixed native seats; this mode does not
+adopt panel council customization. Registry and transport checks run before
+provider execution. Every required seat and declared round must finish with a
+usable response. Nonempty alternatives, evidence, counterargument and
+verification sections are required, with explicit deltas and disagreements in
+rebuttals. Missing, refused or malformed responses stop planning; there is no
+automatic restatement or claim that headings prove sound reasoning.
 
-The council receives only contract data; JSON decomposition instructions stay in the
-planner call. Structure is checked mechanically; reasoning still needs parent judgment.
-Planner reasoning effort applies only to decomposition; the council keeps provider
-defaults, disclosed before dispatch alongside its retained log path. That path remains
-available for parent inspection after early child failure, even when the child did not
-emit its own summary. The bounded synthesis feeds the planner as untrusted evidence
-before normal exact parent proposal review.
+The caller explicitly requests synthesis on the planner's resolved advisor
+route. The additive `--synthesis-json` contract binds the question digest, run,
+complete provider/round matrix, requested synthesis model, artifact digests and
+exact output byte ranges. The planner receives only that validated advisory
+synthesis and the original bounded inputs. Planner model and effort apply to
+synthesis and decomposition, while other council seats keep their own routes.
+Requested model metadata does not claim the actual served model or independent
+reasoning; existing usage receipts retain observed model/fallback evidence. Every
+decomposition also uses `agent-call --output-json`: the same validator binds its
+fresh artifact and exact stdout byte range, excluding prompt and diagnostics
+from task extraction. Failed, refused, incomplete or timed-out calls stop first.
 
-Without the option, `oms autopilot` selects auto only when the review mode is gate, the
-routes satisfy the rule below and all three council families are available (never a
-partial council); otherwise it stays off and prints one line saying why.
-`--collaboration off` opts out. The durable contract retains the effective mode through
-resume and enforces gated opposite-provider review. Codex routes for the planner,
-workers and reviewer (not the council seats) are pinned to a GPT-6-or-newer version of
-Astra, Sol, Terra or Luna, including reviewed assignments and optional capacity fallbacks.
-Claude Code can implement with `--worker claude`, leaving Codex as the reviewer; each
-campaign keeps one implementation transport to preserve independent review. The existing
-provider-neutral behavior is unchanged when the mode is off. No background daemon or
+A native immutable decision manifest retains the discussion with exact
+spec/plan/base/scope bindings. Its reference is covered by the reviewed proposal
+SHA and copied to applied tasks. Generation rechecks source bytes after
+planning; direct Plan apply, replay and autopilot resume revalidate the retained
+question and artifacts without rerunning the council. Auto apply/resume require
+this lineage. Changed, missing, foreign or malformed evidence refuses admission.
+No task is admitted merely because participants completed or agreed.
+
+Omitting the option selects `off`. The frozen autopilot contract retains the
+explicit mode through resume, requires gated review by a different provider and
+keeps one implementation transport per campaign. Planner/worker/reviewer routes
+use the existing registry, exact-model/effort validation and physical execution
+capabilities. Auto mode adds no model-generation name allowlist and does not
+turn an unavailable read/write transport into a supported one. Existing scope,
+cycle and parent proposal-review boundaries remain in force; no new daemon or
 publication permission is added.
 
 #### Whole-change review scope

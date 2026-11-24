@@ -133,6 +133,12 @@ pub enum ResourceAction {
 }
 
 pub trait Services {
+    /// Refresh an already identified operation in the owning producer. The
+    /// implementation may only query/reconcile; submission and cancellation
+    /// are separate commands with their original authority checks.
+    fn refresh_external(&self, _repo: &Path, _state: &Path, _binding: &Value) -> Result<()> {
+        Err(unavailable("external observation"))
+    }
     /// Native resource producer owns policy validation, actual host generation,
     /// exact state-root custody and dispatch CAS. No execution permit is returned.
     fn resource_action(

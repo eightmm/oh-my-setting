@@ -46,6 +46,350 @@ impl Drop for Fixture {
     }
 }
 struct Native;
+
+#[test]
+fn external_wait_relations_refuse_foreign_late_results_and_keep_negative_experiments() {
+    if child_test(
+        "external_wait_relations_refuse_foreign_late_results_and_keep_negative_experiments",
+    ) {
+        return;
+    }
+    use serde_json::json;
+    let f = Fixture::new();
+    let stop = AtomicBool::new(false);
+    let mut rt = oms_runtime::storage::Runtime::open(&f.0, &f.0, &f.0, &Native, &stop).unwrap();
+    rt.repository.head = "a".repeat(40);
+    let write = |path: &str, rows: &[serde_json::Value]| {
+        let p = f.0.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let text = rows.iter().map(|v| format!("{v}\n")).collect::<String>();
+        std::fs::write(p, text).unwrap();
+    };
+    let observe = |binding: &serde_json::Value| {
+        oms_runtime::external::observe(
+            &rt,
+            &oms_runtime::value::from_serde(binding).unwrap(),
+            false,
+        )
+        .map(|v| {
+            serde_json::from_slice::<serde_json::Value>(&oms_runtime::value::canonical(&v).unwrap())
+                .unwrap()
+        })
+    };
+    let ci = json!({"schema":1,"source":"ci","identity":{"repository":"example/repo","head_sha":"a".repeat(40),"workflow_id":7,"run_id":9,"run_attempt":1}});
+    assert_eq!(observe(&ci).unwrap()["identity_valid"], false);
+    let mut run = json!({"schema":1,"kind":"exact-run-attempt","identity":ci["identity"],"status":"in_progress","conclusion":null,"jobs":[]});
+    write(".oms/ci.jsonl", &[run.clone()]);
+    assert_eq!(observe(&ci).unwrap()["status"], "running");
+    run["status"] = "completed".into();
+    run["conclusion"] = "failure".into();
+    write(".oms/ci.jsonl", &[run.clone(), run.clone()]);
+    let terminal = observe(&ci).unwrap();
+    assert_eq!(terminal["status"], "terminal");
+    run["updated_at"] = "tomorrow".into();
+    write(".oms/ci.jsonl", &[run.clone()]);
+    assert_eq!(
+        observe(&ci).unwrap()["result_sha256"],
+        terminal["result_sha256"]
+    );
+    run["identity"]["run_attempt"] = 2.into();
+    write(".oms/ci.jsonl", &[run]);
+    assert!(
+        observe(&ci)
+            .unwrap_err()
+            .message
+            .contains("attempt changed")
+    );
+
+    let ssh = json!({"schema":1,"source":"ssh","identity":{"op_id":"operation-1","op_tag":"start-1","command_sha256":"b".repeat(64),"snapshot":""}});
+    let mut op = ssh["identity"].clone();
+    op["schema"] = 1.into();
+    op["state"] = "intent".into();
+    write(".oms/runtime/remote-ops/operation-1.json", &[op.clone()]);
+    assert_eq!(observe(&ssh).unwrap()["status"], "pending");
+    op["state"] = "succeeded".into();
+    op["exit_code"] = 0.into();
+    write(".oms/runtime/remote-ops/operation-1.json", &[op.clone()]);
+    assert!(
+        observe(&ssh).is_err(),
+        "completion without exact start proof must refuse"
+    );
+    op["remote_meta"] = ssh["identity"].clone();
+    write(".oms/runtime/remote-ops/operation-1.json", &[op.clone()]);
+    assert_eq!(observe(&ssh).unwrap()["status"], "terminal");
+    op["remote_meta"]["op_tag"] = "old-operation".into();
+    write(".oms/runtime/remote-ops/operation-1.json", &[op]);
+    assert!(observe(&ssh).is_err());
+
+    let slurm = json!({"schema":1,"source":"slurm","identity":{"key":"submission-a","attempt":"attempt-a","job_id":"44","cluster_name":"alpha"}});
+    let intent = json!({"schema":1,"type":"intent","key":"submission-a","attempt":"attempt-a"});
+    let submitted = json!({"schema":1,"type":"submitted","key":"submission-a","attempt":"attempt-a","job_id":"44","cluster_name":"alpha"});
+    let mut result = json!({"schema":1,"type":"reconciled","key":"submission-a","attempt":"attempt-a","job_id":"44","source":"sacct","state":"succeeded","scheduler_exit":"0:0"});
+    write(
+        ".oms/slurm-submits.jsonl",
+        &[intent.clone(), submitted.clone(), result.clone()],
+    );
+    assert_eq!(
+        observe(&slurm).unwrap()["status"],
+        "terminal",
+        "submitted cluster can supply an unspecified intent cluster"
+    );
+    result["job_id"] = "45".into();
+    write(
+        ".oms/slurm-submits.jsonl",
+        &[intent.clone(), submitted.clone(), result.clone()],
+    );
+    assert!(observe(&slurm).is_err());
+    result["type"] = "failed".into();
+    write(
+        ".oms/slurm-submits.jsonl",
+        &[intent.clone(), submitted.clone(), result],
+    );
+    assert!(
+        observe(&slurm).is_err(),
+        "an allocated job cannot resolve through a generic submission failure"
+    );
+    let mut later = intent.clone();
+    later["attempt"] = "attempt-b".into();
+    write(".oms/slurm-submits.jsonl", &[intent, submitted, later]);
+    assert!(
+        observe(&slurm).is_err(),
+        "an old result must not resolve a newer submission attempt"
+    );
+
+    let raw = json!({"schema":2,"question":"q","hypothesis":"h","prediction":"p","baseline":{"x":1},"treatment":{"independent_change":"x"},"controlled_variables":{},"metrics":{"primary":{"name":"score","direction":"maximize"}},"seeds":[0],"success":{"min_improvement":1}});
+    let contract = oms_runtime::experiment::register(
+        &rt,
+        &oms_runtime::value::from_serde(&raw).unwrap(),
+        "exp",
+    )
+    .unwrap();
+    let contract_digest = contract.text("contract_digest");
+    let row = |arm: &str, run: &str, score: i32| json!({"schema":1,"run_id":run,"experiment_id":"exp","contract_digest":contract_digest,"arm":arm,"seed":0,"exit":0,"command_exit":0,"metric":"score","metric_value":score,"metrics":{"score":score},"metrics_valid":true,"stale_metrics":false,"metrics_digest":"e".repeat(64)});
+    let baseline = row("baseline", "experiment-run-b", 10);
+    let mut treatment = row("treatment", "experiment-run-t", 5);
+    write(
+        ".oms/experiments/runs.jsonl",
+        &[baseline.clone(), treatment.clone()],
+    );
+    let mut binding = json!({"schema":1,"source":"experiment","identity":{"experiment_id":"exp","run_id":"experiment-run-t","contract_digest":contract_digest,"request_sha256":""}});
+    let negative = observe(&binding).unwrap();
+    assert_eq!(negative["progress"], true);
+    assert_eq!(
+        negative["experiment"]["summary"]["verdict"],
+        "not_supported"
+    );
+    treatment["run_id"] = "experiment-run-t2".into();
+    write(
+        ".oms/experiments/runs.jsonl",
+        &[baseline.clone(), treatment.clone()],
+    );
+    binding["identity"]["run_id"] = "experiment-run-t2".into();
+    assert_eq!(
+        observe(&binding).unwrap()["progress_sha256"],
+        negative["progress_sha256"],
+        "a new wrapper around the same measurement does not create progress"
+    );
+    treatment["metrics"] = json!({"score":6});
+    write(
+        ".oms/experiments/runs.jsonl",
+        &[baseline.clone(), treatment.clone()],
+    );
+    let repeated = observe(&binding).unwrap();
+    assert_eq!(
+        repeated["progress_sha256"], negative["progress_sha256"],
+        "a changed measurement for an already completed preregistered cell is not new progress"
+    );
+    assert_ne!(repeated["result_sha256"], negative["result_sha256"]);
+    treatment["metrics"] = json!({});
+    write(
+        ".oms/experiments/runs.jsonl",
+        &[baseline.clone(), treatment.clone()],
+    );
+    assert_eq!(
+        observe(&binding).unwrap()["progress"],
+        false,
+        "metrics_valid alone is not proof"
+    );
+    treatment["seed"] = 9.into();
+    write(".oms/experiments/runs.jsonl", &[baseline, treatment]);
+    assert!(observe(&binding).is_err());
+}
+#[test]
+fn experiment_next_and_checkpoint_use_frozen_cells_and_checked_bytes() {
+    if child_test("experiment_next_and_checkpoint_use_frozen_cells_and_checked_bytes") {
+        return;
+    }
+    use oms_runtime::value::{canonical, from_serde, sha};
+    use serde_json::json;
+    let f = Fixture::new();
+    let spec = json!({"schema":2,"question":"q","hypothesis":"h","prediction":"p","baseline":{"config_digest":"b".repeat(64)},"treatment":{"independent_change":"x","config_digest":"c".repeat(64)},"controlled_variables":{"code_base":"frozen-code","dataset_split":"frozen-split"},"metrics":{"primary":{"name":"score","direction":"maximize"}},"seeds":[0],"success":{"min_improvement":1},"budget":{"runs":3}});
+    std::fs::write(f.0.join("experiment.json"), spec.to_string()).unwrap();
+    let register = f.run(
+        &["experiment", "register", "experiment.json", "--id", "exp"],
+        false,
+    );
+    assert_eq!(
+        register.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&register.stderr)
+    );
+    let registered: serde_json::Value = serde_json::from_slice(&register.stdout).unwrap();
+    let digest = registered["contract_digest"].clone();
+    let next = || {
+        let out = f.run(&["experiment", "next", "--id", "exp"], false);
+        assert_eq!(out.code, 0, "{}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let write = |rows: &[serde_json::Value]| {
+        std::fs::write(
+            f.0.join(".oms/experiments/runs.jsonl"),
+            rows.iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap()
+    };
+    assert_eq!(next()["next_action"]["kind"], "input-required");
+    assert_eq!(next()["next_action"]["arm"], "baseline");
+    assert_eq!(next()["next_action"]["requires_parent_plan"], true);
+    let mut baseline = json!({"schema":1,"run_id":"experiment-run-baseline","experiment_id":"exp","contract_digest":digest,"arm":"baseline","seed":0,"profile":"remote","request_sha256":"d".repeat(64),"snapshot":"a".repeat(64),"state":"running","exit":75,"metrics_valid":false});
+    write(&[baseline.clone()]);
+    assert_eq!(next()["next_action"]["kind"], "wait");
+    assert_eq!(
+        next()["next_action"]["wait_binding"]["identity"]["run_id"],
+        baseline["run_id"]
+    );
+    baseline["state"] = "succeeded".into();
+    baseline["exit"] = 0.into();
+    baseline["metrics_valid"] = true.into();
+    baseline["metrics_digest"] = "e".repeat(64).into();
+    baseline["metrics"] = json!({"score":10});
+    let mut failed = baseline.clone();
+    failed["run_id"] = "experiment-run-first-failed".into();
+    failed["state"] = "failed".into();
+    failed["exit"] = 1.into();
+    failed["metrics_valid"] = false.into();
+    write(&[failed.clone(), baseline.clone()]);
+    assert_eq!(
+        next()["next_action"]["arm"],
+        "treatment",
+        "a successful retry supersedes prior failed evidence for the same cell"
+    );
+    let mut treatment = baseline.clone();
+    treatment["run_id"] = "experiment-run-treatment".into();
+    treatment["arm"] = "treatment".into();
+    treatment["metrics"] = json!({"score":5});
+    write(&[failed, baseline.clone(), treatment.clone()]);
+    assert_eq!(next()["summary"]["verdict"], "not_supported");
+    assert_eq!(next()["next_action"]["kind"], "review-hypothesis");
+    treatment["metrics"] = json!({});
+    write(&[baseline.clone(), treatment.clone()]);
+    assert_eq!(next()["next_action"]["kind"], "inspect");
+    // Non-finite and duplicate seed inputs never become complete evidence.
+    let invalid = treatment
+        .to_string()
+        .replace("\"metrics\":{}", "\"metrics\":{\"score\":NaN}");
+    std::fs::write(
+        f.0.join(".oms/experiments/runs.jsonl"),
+        format!("{baseline}\n{invalid}\n"),
+    )
+    .unwrap();
+    assert_eq!(f.run(&["experiment", "next", "--id", "exp"], false).code, 2);
+    let mut duplicate = spec.clone();
+    duplicate["seeds"] = json!([0, 0]);
+    std::fs::write(f.0.join("duplicate.json"), duplicate.to_string()).unwrap();
+    assert_eq!(
+        f.run(
+            &[
+                "experiment",
+                "register",
+                "duplicate.json",
+                "--id",
+                "duplicate"
+            ],
+            false
+        )
+        .code,
+        2
+    );
+    write(&[baseline.clone()]);
+    std::fs::create_dir(f.0.join("checkpoints")).unwrap();
+    std::fs::write(f.0.join("checkpoints/latest.pt"), b"model-state").unwrap();
+    let normalized: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(f.0.join(".oms/experiments/contracts/exp.json")).unwrap(),
+    )
+    .unwrap();
+    let evaluation = json!({"metrics":normalized["metrics"],"success":normalized["success"],"invariant_pack":normalized["invariant_pack"]});
+    let manifest = json!({"schema":1,"experiment_id":"exp","run_id":baseline["run_id"],"contract_digest":digest,"arm":"baseline","seed":0,"snapshot":baseline["snapshot"],"code_base":"frozen-code","dataset_split":"frozen-split","config_digest":"b".repeat(64),"evaluation_sha256":sha(canonical(&from_serde(&evaluation).unwrap()).unwrap()),"step":42,"rng_state_sha256":"f".repeat(64),"checkpoint":{"path":"checkpoints/latest.pt","size":11,"sha256":sha(b"model-state")}});
+    let check = |m: &serde_json::Value| {
+        std::fs::write(f.0.join("checkpoint.json"), m.to_string()).unwrap();
+        f.run(
+            &[
+                "experiment",
+                "checkpoint",
+                "--id",
+                "exp",
+                "--run-id",
+                "experiment-run-baseline",
+                "--manifest",
+                "checkpoint.json",
+                "--path-only",
+            ],
+            false,
+        )
+    };
+    for timeout in ["18446744073709551615", "-1"] {
+        std::fs::write(f.0.join("checkpoint.json"), manifest.to_string()).unwrap();
+        assert_eq!(
+            f.run(
+                &[
+                    "experiment",
+                    "checkpoint",
+                    "--id",
+                    "exp",
+                    "--run-id",
+                    "experiment-run-baseline",
+                    "--manifest",
+                    "checkpoint.json",
+                    "--timeout-seconds",
+                    timeout
+                ],
+                false
+            )
+            .code,
+            2
+        );
+    }
+    let valid = check(&manifest);
+    assert_eq!(valid.code, 0, "{}", String::from_utf8_lossy(&valid.stderr));
+    assert_eq!(valid.stdout, b"checkpoints/latest.pt\n");
+    for (field, value) in [
+        ("seed", json!(1)),
+        ("run_id", json!("experiment-run-foreign")),
+        ("snapshot", json!("9".repeat(64))),
+        ("dataset_split", json!("foreign")),
+        ("config_digest", json!("9".repeat(64))),
+        ("evaluation_sha256", json!("9".repeat(64))),
+        ("step", json!(-1)),
+        ("rng_state_sha256", json!("")),
+    ] {
+        let mut wrong = manifest.clone();
+        wrong[field] = value;
+        assert_ne!(check(&wrong).code, 0, "{field}");
+    }
+    std::fs::write(f.0.join("checkpoints/latest.pt"), b"model-other").unwrap();
+    assert_ne!(
+        check(&manifest).code,
+        0,
+        "same-size changed bytes are refused"
+    );
+    std::fs::remove_file(f.0.join("checkpoints/latest.pt")).unwrap();
+    std::os::unix::fs::symlink("../experiment.json", f.0.join("checkpoints/latest.pt")).unwrap();
+    assert_ne!(check(&manifest).code, 0, "links are refused");
+}
+
 impl Services for Native {
     fn task_status(&self, _: &Path, _: &Path, _: &[u8]) -> Result<Vec<u8>> {
         Ok(

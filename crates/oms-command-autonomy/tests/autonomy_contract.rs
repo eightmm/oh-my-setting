@@ -199,6 +199,11 @@ impl FeedbackMock {
         );
         self.plan(repo, &["claim", "--id", id, "--provider", "codex"]);
         let task = self.plan(repo, &["show", "--id", id]);
+        write_private(
+            &repo.join(".oms/worker-artifact"),
+            b"retained worker report\n",
+        );
+        write_private(&repo.join(".oms/worker-patch"), b"retained worker patch\n");
         self.plan(
             repo,
             &[
@@ -208,9 +213,9 @@ impl FeedbackMock {
                 "--lease-id",
                 task["lease_id"].as_str().unwrap(),
                 "--artifact",
-                "worker-artifact",
+                ".oms/worker-artifact",
                 "--patch",
-                "worker-patch",
+                ".oms/worker-patch",
             ],
         );
     }
@@ -351,7 +356,44 @@ impl Services for FeedbackMock {
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
         match call.tool.as_str() {
-            "fail-ledger" => Ok((0, vec![], vec![])),
+            "fail-ledger" => {
+                if self.mode == "review-replaced"
+                    && call.args.first().is_some_and(|arg| arg == "check")
+                {
+                    fs::write(
+                        call.cwd.join(".oms/worker-artifact"),
+                        b"replacement report\n",
+                    )
+                    .unwrap();
+                }
+                if self.mode == "head-before-delegate"
+                    && call.args.first().is_some_and(|arg| arg == "check")
+                {
+                    let output = Command::new("git")
+                        .arg("-C")
+                        .arg(&call.cwd)
+                        .args([
+                            "-c",
+                            "commit.gpgsign=false",
+                            "-c",
+                            "user.name=t",
+                            "-c",
+                            "user.email=t@example.invalid",
+                            "commit",
+                            "--allow-empty",
+                            "-qm",
+                            "head moved after runner froze base",
+                        ])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Ok((0, vec![], vec![]))
+            }
             "peer-delegate" => {
                 self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let args: Vec<_> = call
@@ -360,7 +402,32 @@ impl Services for FeedbackMock {
                     .map(|s| s.to_string_lossy().into_owned())
                     .collect();
                 let arg = |name: &str| args.windows(2).find(|w| w[0] == name).unwrap()[1].clone();
-                assert_eq!(arg("--repair"), "0");
+                assert!(!args.iter().any(|arg| arg == "--repair"));
+                let binding =
+                    serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
+                if self.mode.starts_with("unknown-after-start") {
+                    self.plan(
+                        &call.cwd,
+                        &[
+                            "start",
+                            "--id",
+                            arg("--plan-task").as_str(),
+                            "--lease-id",
+                            binding["lease_id"].as_str().unwrap(),
+                        ],
+                    );
+                    if self.mode == "unknown-after-start-error" {
+                        return Err(oms_command_autonomy::Error::new(
+                            2,
+                            "worker response unavailable",
+                        ));
+                    }
+                    return Ok((
+                        124,
+                        vec![],
+                        b"worker timed out without acknowledgement".to_vec(),
+                    ));
+                }
                 assert!(args.iter().any(|a| a == "--terminalize-resumed-repair"));
                 let packet: serde_json::Value =
                     serde_json::from_slice(&fs::read(arg("--review-artifact")).unwrap()).unwrap();
@@ -374,24 +441,79 @@ impl Services for FeedbackMock {
                 let id = arg("--plan-task");
                 let task = self.plan(&call.cwd, &["show", "--id", &id]);
                 assert_eq!(task["repair_count"], 1);
-                self.plan(
-                    &call.cwd,
-                    &[
-                        "review",
-                        "--id",
-                        &id,
-                        "--lease-id",
-                        task["lease_id"].as_str().unwrap(),
-                        "--artifact",
-                        "repaired-artifact",
-                        "--patch",
-                        "repaired-patch",
-                    ],
+                assert_eq!(binding["task_id"], id);
+                assert_eq!(binding["lease_id"], task["lease_id"]);
+                assert_eq!(binding["lease_epoch"], task["lease_epoch"]);
+                assert_eq!(binding["task_sha256"], task["task_sha256"]);
+                write_private(
+                    &call.cwd.join(".oms/repaired-artifact"),
+                    b"retained repair report\n",
                 );
+                write_private(
+                    &call.cwd.join(".oms/repaired-patch"),
+                    b"retained repair patch\n",
+                );
+                use oms_command_plan::{Action, Context, DelegateBinding, Plan, Request};
+                let request = Request::new(Action::Start)
+                    .with("id", id.as_str())
+                    .with("lease-id", task["lease_id"].as_str().unwrap());
+                let stop = AtomicBool::new(false);
+                let context = Context::from_environment(&request, &call.cwd).unwrap();
+                let plan = Plan::open(context, self, &stop).unwrap();
+                let issued =
+                    DelegateBinding::parse(&serde_json::to_vec(&binding).unwrap()).unwrap();
+                let running = plan.execute_bound_task(&request, &issued, None).unwrap();
+                let operation = call
+                    .environment
+                    .iter()
+                    .find(|(key, _)| key == "OMS_OPERATION_ID")
+                    .and_then(|(_, value)| value.to_str())
+                    .unwrap();
+                let index = json!({
+                    "schema": 1, "kind": "delegate", "event_id": "evt_fixture",
+                    "attempt_id": "att_fixture", "operation_id": if self.mode == "foreign-operation" {
+                        "op_different"
+                    } else { operation },
+                    "task_id": id, "provider": "codex", "base_sha": binding["base_sha"],
+                    "exit": 0, "verify_exit": 0, "verification": "passed", "state": "review",
+                    "no_change": false, "plan_binding": binding,
+                    "artifact": ".oms/repaired-artifact",
+                    "artifact_sha256": oms_command_plan::json::sha(b"retained repair report\n"),
+                    "patch": ".oms/repaired-patch",
+                    "patch_sha256": oms_command_plan::json::sha(b"retained repair patch\n"),
+                });
+                let mut index_raw = serde_json::to_vec(&index).unwrap();
+                index_raw.push(b'\n');
+                write_private(&call.cwd.join(".oms/artifacts/index.jsonl"), &index_raw);
+                let index = oms_command_plan::json::parse(&index_raw).unwrap();
+                plan.execute_bound_task(
+                    &Request::new(Action::Review)
+                        .with("id", id)
+                        .with("lease-id", task["lease_id"].as_str().unwrap())
+                        .with("artifact", ".oms/repaired-artifact")
+                        .with("patch", ".oms/repaired-patch"),
+                    &running,
+                    Some(&index),
+                )
+                .unwrap();
                 Ok((0, vec![], vec![]))
             }
             "patch-land" => {
                 self.lands.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.mode == "review-replaced" {
+                    let proof = call
+                        .args
+                        .windows(2)
+                        .find(|args| args[0] == "--expected-plan-review")
+                        .unwrap();
+                    let proof =
+                        serde_json::from_str::<serde_json::Value>(proof[1].to_str().unwrap())
+                            .unwrap();
+                    assert_eq!(
+                        proof["report_sha256"],
+                        oms_command_plan::json::sha(b"retained worker report\n")
+                    );
+                }
                 Ok((1, vec![], b"fixture admission hold".to_vec()))
             }
             other => panic!("unexpected command: {other}"),
@@ -408,7 +530,8 @@ fn feedback_repair_requires_authority_and_keeps_admission_caps_and_repeated_fail
     }
     let mock = FeedbackMock::new("normal");
     let repo = mock.fixture();
-    assert_eq!(mock.run(&repo, "one", false).0, 1);
+    let initial = mock.run(&repo, "one", false);
+    assert_eq!(initial.0, 1, "{}", String::from_utf8_lossy(&initial.2));
     assert_eq!(FeedbackMock::count(&mock.reads), 0);
     assert_eq!(FeedbackMock::count(&mock.sends), 0);
     assert!(!repo.0.join(".oms/feedback/repairs.jsonl").exists());
@@ -482,6 +605,118 @@ fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
             1
         );
     }
+}
+
+#[test]
+fn plan_run_retains_exact_running_lease_on_unknown_worker_outcome() {
+    if scrubbed_child("plan_run_retains_exact_running_lease_on_unknown_worker_outcome") {
+        return;
+    }
+    for mode in ["unknown-after-start-error", "unknown-after-start-timeout"] {
+        let mock = FeedbackMock::new(mode);
+        let repo = mock.fixture();
+        mock.plan(
+            &repo.0,
+            &[
+                "add",
+                "--id",
+                "fresh",
+                "--title",
+                "ordinary worker",
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+            ],
+        );
+        let run = |selector: &[&str]| {
+            let mut argv = ["--to", "codex"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            argv.extend(selector.iter().map(OsString::from));
+            run_with_services("plan-run", &argv, &repo.0, &AtomicBool::new(false), &mock)
+        };
+        let out = run(&["--id", "fresh"]);
+        assert_ne!(out.0, 0, "{out:?}");
+        let running = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+        assert_eq!(running["state"], "running");
+        assert!(!running["lease_id"].as_str().unwrap().is_empty());
+        assert_ne!(run(&["--next"]).0, 0);
+        assert_eq!(FeedbackMock::count(&mock.sends), 1);
+        assert_eq!(
+            mock.plan(&repo.0, &["show", "--id", "fresh"])["lease_id"],
+            running["lease_id"]
+        );
+    }
+}
+
+#[test]
+fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
+    if scrubbed_child("plan_run_does_not_refresh_its_frozen_base_after_preflight") {
+        return;
+    }
+    let mock = FeedbackMock::new("head-before-delegate");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "ordinary claimed worker",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let result = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "fresh".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_ne!(result.0, 0);
+    assert!(
+        String::from_utf8_lossy(&result.2).contains("base moved before claiming"),
+        "{result:?}"
+    );
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
+    let task = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+    assert_eq!(
+        task["state"], "ready",
+        "only the newly issued original lease is released"
+    );
+}
+
+#[test]
+fn plan_run_never_rebinds_a_selected_review_or_worker_operation() {
+    if scrubbed_child("plan_run_never_rebinds_a_selected_review_or_worker_operation") {
+        return;
+    }
+    let mock = FeedbackMock::new("review-replaced");
+    let repo = mock.fixture();
+    assert_eq!(mock.run(&repo, "one", false).0, 1);
+    assert_eq!(FeedbackMock::count(&mock.lands), 1);
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
+
+    let mock = FeedbackMock::new("foreign-operation");
+    let repo = mock.fixture();
+    let result = mock.run(&repo, "one", true);
+    assert_ne!(result.0, 0);
+    assert!(
+        String::from_utf8_lossy(&result.2).contains("different delegation operation"),
+        "{result:?}"
+    );
+    assert_eq!(FeedbackMock::count(&mock.lands), 0);
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "one"])["state"],
+        "review"
+    );
 }
 
 #[test]
@@ -875,6 +1110,42 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
         "proposal": {"path": "", "sha256": ""}, "branch": "oms/autopilot-aaaaaaaaaaaa", "owner_id": "", "updated": "2026-01-01T00:00:00Z"
     });
     receipt::validate(&row).unwrap();
+    let mut automatic = row.clone();
+    automatic["contract"]["collaboration"] = "auto".into();
+    for (role, model) in [
+        ("planner", "gpt-5.6-sol"),
+        ("worker", "gemini-pro-orchestrator-argon"),
+        ("reviewer", "claude-sonnet-5-5"),
+    ] {
+        automatic["routing"][role]["model"] = model.into();
+    }
+    automatic["providers"]["worker"] = "antigravity".into();
+    receipt::validate(&automatic).unwrap();
+    for (field, bad) in [
+        ("provider", "missing"),
+        ("model", ""),
+        ("review", "advisory"),
+        ("reviewer", "antigravity"),
+    ] {
+        let mut invalid = automatic.clone();
+        match field {
+            "provider" => invalid["providers"]["worker"] = bad.into(),
+            "model" => invalid["routing"]["worker"]["model"] = bad.into(),
+            "review" => invalid["contract"]["review_mode"] = bad.into(),
+            _ => invalid["providers"]["reviewer"] = bad.into(),
+        }
+        assert!(receipt::validate(&invalid).is_err(), "{field}");
+    }
+    for (provider, model) in [
+        ("antigravity", "gemini-pro-orchestrator-argon"),
+        ("codex", "gpt-5.6-sol"),
+    ] {
+        let task = value::canonical(&json!({"assignment": {"provider": provider, "model": model}}))
+            .unwrap();
+        let task = oms_context::parse_json(&task).unwrap();
+        oms_command_task::assignment::validate_collaboration(&task, provider).unwrap();
+        assert!(oms_command_task::assignment::validate_collaboration(&task, "claude").is_err());
+    }
     for (field, limit) in [
         ("max_cycles", 10),
         ("initial_tasks", 12),
@@ -928,6 +1199,237 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
     );
     row["stage"] = "approved".into();
     assert!(receipt::validate(&row).is_err(), "blocked outside review");
+}
+
+fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
+    use oms_command_plan::discussion::{
+        COUNCIL_INITIAL_PRECEDENCE, COUNCIL_INITIAL_ROLE, COUNCIL_INITIAL_SECTIONS,
+        COUNCIL_REBUTTAL_SECTIONS, COUNCIL_REBUTTAL_TASK, COUNCIL_ROUND_BYTES,
+        COUNCIL_SYNTHESIS_BYTES, COUNCIL_SYNTHESIS_PREFIX, COUNCIL_SYNTHESIS_SECTIONS,
+        CouncilOutput, council_peer_answer, encode_council_synthesis,
+    };
+    let run = "fixture-run";
+    let providers = ["codex", "claude", "antigravity"];
+    let initial = format!(
+        "{COUNCIL_INITIAL_ROLE}{COUNCIL_INITIAL_PRECEDENCE}Question:\n{prompt}\n\nRepository context: omitted.\n{COUNCIL_INITIAL_SECTIONS}"
+    );
+    let first_answers = providers.map(|provider| format!(
+        "Alternatives: inspect or defer\nEvidence: tracked {provider} source\nCounterargument: evidence may be incomplete\nVerification: run the existing check\n"
+    ));
+    let next_answers = first_answers.clone().map(|answer| {
+        format!(
+            "{answer}Changed from previous round: none\nRemaining disagreements: evidence scope\n"
+        )
+    });
+    let quotes = |answers: &[String], budget| {
+        providers
+            .iter()
+            .zip(answers)
+            .enumerate()
+            .map(|(index, (provider, answer))| {
+                council_peer_answer(provider, answer, budget, &format!("{index:032x}"))
+            })
+            .collect::<String>()
+    };
+    let previous = quotes(&first_answers, COUNCIL_ROUND_BYTES / providers.len());
+    let rebuttal =
+        format!("Question:\n{prompt}{COUNCIL_REBUTTAL_TASK}{previous}{COUNCIL_REBUTTAL_SECTIONS}");
+    let final_answers = quotes(&next_answers, COUNCIL_SYNTHESIS_BYTES);
+    let synthesis_prompt =
+        format!("{COUNCIL_SYNTHESIS_PREFIX}{prompt}\n{final_answers}{COUNCIL_SYNTHESIS_SECTIONS}");
+    let mut files = std::collections::BTreeMap::new();
+    let mut row = |provider: &str,
+                   round: u64,
+                   synthesis: bool,
+                   actual_prompt: &str,
+                   answer: &str| {
+        let tool = if synthesis { "_synthesis" } else { "peer-ask" };
+        let artifact = if synthesis {
+            format!("_synthesis-{run}.md")
+        } else if round == 0 {
+            format!("{provider}-fixture-{run}.md")
+        } else {
+            format!("{provider}-fixture-{run}-r{round}.md")
+        };
+        let mut bytes = format!("# OMS {tool}\n\n- provider: {provider}\n- model: fixture-model\n- run: {run}\n- round: {round}\n\n## Prompt\n\n{actual_prompt}\n\n## Output\n\n").into_bytes();
+        let output_start = bytes.len();
+        bytes.extend_from_slice(answer.as_bytes());
+        bytes.extend_from_slice(b"\n\n## Exit\n\n0\n");
+        let observation = CouncilOutput {
+            provider: provider.into(),
+            requested_model: "fixture-model".into(),
+            round,
+            artifact: artifact.clone(),
+            artifact_sha256: value::hash(&bytes),
+            output_start,
+            output_bytes: answer.len(),
+            output_sha256: value::hash(answer),
+            complete: true,
+            exit: 0,
+            quality: "ok".into(),
+        };
+        files.insert(artifact, bytes);
+        observation
+    };
+    let mut participants = Vec::new();
+    for (round, actual_prompt, answers) in [
+        (0, initial.as_str(), &first_answers),
+        (1, rebuttal.as_str(), &next_answers),
+    ] {
+        for (provider, answer) in providers.iter().zip(answers) {
+            participants.push(row(provider, round, false, actual_prompt, answer));
+        }
+    }
+    let synthesis = row(
+        "codex",
+        0,
+        true,
+        &synthesis_prompt,
+        "Decision: inspect the fixture\nEvidence: tracked source\nRemaining disagreements: none claimed\nVerification: run the existing check\n",
+    );
+    (
+        encode_council_synthesis(prompt, run, 1, &participants, &synthesis).unwrap(),
+        files,
+    )
+}
+
+#[test]
+fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
+    use oms_command_plan::discussion::{lint_council_response, validate_council_synthesis};
+    let prompt = "Discuss the bounded fixture work";
+    let providers = ["codex", "claude", "antigravity"];
+    let (raw, files) = council_fixture(prompt);
+    let validate =
+        |raw: &[u8], question: &str, files: &std::collections::BTreeMap<String, Vec<u8>>| {
+            validate_council_synthesis(
+                raw,
+                question,
+                &providers,
+                ("codex", "fixture-model"),
+                1,
+                |name| {
+                    files
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| oms_command_plan::Error {
+                            code: 2,
+                            message: "missing fixture artifact".into(),
+                        })
+                },
+            )
+        };
+    let checked = validate(&raw, prompt, &files).unwrap();
+    assert_eq!(checked.run, "fixture-run");
+    assert_eq!(checked.artifacts.len(), 7);
+    assert!(checked.answer.starts_with("Decision:"));
+    assert!(validate(&raw, "different question", &files).is_err());
+    let report = value::parse(&raw).unwrap();
+    for mutation in [
+        "missing",
+        "duplicate",
+        "foreign",
+        "stale",
+        "route",
+        "path",
+        "digest",
+        "range",
+        "incomplete",
+        "refused",
+        "extra",
+    ] {
+        let mut changed = report.clone();
+        match mutation {
+            "missing" => {
+                changed["participants"].as_array_mut().unwrap().pop();
+            }
+            "duplicate" => changed["participants"][1] = changed["participants"][0].clone(),
+            "foreign" => changed["participants"][0]["provider"] = "other".into(),
+            "stale" => changed["run"] = "earlier-run".into(),
+            "route" => changed["synthesis"]["requested_model"] = "another-model".into(),
+            "path" => changed["synthesis"]["artifact"] = "../outside.md".into(),
+            "digest" => changed["synthesis"]["artifact_sha256"] = "0".repeat(64).into(),
+            "range" => changed["synthesis"]["output_start"] = 0.into(),
+            "incomplete" => changed["synthesis"]["complete"] = false.into(),
+            "refused" => changed["synthesis"]["quality"] = "blocked".into(),
+            _ => changed["synthesis"]["unreviewed"] = true.into(),
+        }
+        assert!(
+            validate(&value::pretty(&changed).unwrap(), prompt, &files).is_err(),
+            "{mutation}"
+        );
+    }
+    let mut advertised = report.clone();
+    let foreign = "different question";
+    advertised["prompt_sha256"] = value::hash(foreign).into();
+    let err = validate(&value::pretty(&advertised).unwrap(), foreign, &files)
+        .err()
+        .unwrap();
+    assert!(
+        err.message.contains("native council prompt differs"),
+        "{}",
+        err.message
+    );
+
+    for (participant, from, to) in [
+        (Some(0), prompt, "another requested discussion"),
+        (
+            Some(3),
+            "Evidence: tracked claude source",
+            "Evidence: unrelated context",
+        ),
+        (
+            Some(4),
+            "Evidence: tracked claude source",
+            "Evidence: unrelated context",
+        ),
+        (
+            None,
+            "Changed from previous round: none",
+            "Changed from previous round: foreign context",
+        ),
+    ] {
+        let mut advertised = report.clone();
+        let mut changed_files = files.clone();
+        let row = if let Some(index) = participant {
+            &mut advertised["participants"][index]
+        } else {
+            &mut advertised["synthesis"]
+        };
+        let artifact = changed_files
+            .get_mut(row["artifact"].as_str().unwrap())
+            .unwrap();
+        let start = row["output_start"].as_u64().unwrap() as usize;
+        let rewritten = std::str::from_utf8(&artifact[..start])
+            .unwrap()
+            .replacen(from, to, 1);
+        assert_ne!(rewritten.as_bytes(), &artifact[..start]);
+        row["output_start"] = rewritten.len().into();
+        artifact.splice(..start, rewritten.into_bytes());
+        row["artifact_sha256"] = value::hash(&artifact).into();
+        let err = validate(&value::pretty(&advertised).unwrap(), prompt, &changed_files)
+            .err()
+            .unwrap();
+        assert!(
+            err.message.contains("native council prompt differs"),
+            "{}",
+            err.message
+        );
+    }
+
+    let duplicate = String::from_utf8(raw.clone()).unwrap().replacen(
+        "\"schema\": 1",
+        "\"schema\": 1, \"schema\": 1",
+        1,
+    );
+    assert!(validate(duplicate.as_bytes(), prompt, &files).is_err());
+    for answer in [
+        "fixture answer",
+        "Decision:\nEvidence:\nRemaining disagreements:\nVerification:\n",
+        "Decision:\n# unrelated\nbody\nEvidence: source\nRemaining disagreements: none\nVerification: check",
+        "Decision: one\nDecision: two\nEvidence: source\nRemaining disagreements: none\nVerification: check",
+    ] {
+        assert!(lint_council_response(answer, 0, true).is_err());
+    }
 }
 
 #[test]
@@ -1223,6 +1725,52 @@ impl Services for Planner {
     ) -> oms_command_autonomy::Result<CommandResult> {
         assert_eq!(call.tool, "agent-call");
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call.args.iter().any(|arg| arg == "--output-json") {
+            let option = |key: &str| {
+                call.args
+                    .windows(2)
+                    .find(|pair| pair[0] == key)
+                    .and_then(|pair| pair[1].to_str())
+                    .unwrap_or("")
+            };
+            let provider = option("--to");
+            let model = if option("--model").is_empty() {
+                "fixture-model"
+            } else {
+                option("--model")
+            };
+            let run = format!("fixture-{n}");
+            let name = format!("{provider}-answer-{run}.md");
+            let path = Path::new(option("--artifact-dir")).join(&name);
+            let answer = self.answer.lock().unwrap().clone();
+            let mut raw = format!("# OMS agent-call\n\n- provider: {provider}\n- model: {model}\n- run: {run}\n- round: 0\n\n## Prompt\n\n{}\n\n## Output\n\n", option("--prompt")).into_bytes();
+            let start = raw.len();
+            raw.extend_from_slice(answer.as_bytes());
+            raw.extend_from_slice(b"\n\n## Exit\n\n0\n");
+            write_private(&path, &raw);
+            let output = oms_command_plan::discussion::CouncilOutput {
+                provider: provider.into(),
+                requested_model: model.into(),
+                round: 0,
+                artifact: name,
+                artifact_sha256: value::hash(&raw),
+                output_start: start,
+                output_bytes: answer.len(),
+                output_sha256: value::hash(&answer),
+                complete: true,
+                exit: 0,
+                quality: "ok".into(),
+            };
+            return Ok((
+                0,
+                oms_command_plan::discussion::encode_agent_output(
+                    option("--prompt"),
+                    &run,
+                    &output,
+                )?,
+                vec![],
+            ));
+        }
         let path = self.repo.join(format!(".oms/answers/{n}.md"));
         write_private(&path, self.answer.lock().unwrap().as_bytes());
         Ok((
@@ -1329,6 +1877,188 @@ fn proposals(repo: &Repo) -> usize {
         })
         .count()
     })
+}
+
+#[test]
+fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model() {
+    if scrubbed_child("autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model")
+    {
+        return;
+    }
+
+    struct Routes(Planner);
+    impl oms_command_plan::Services for Routes {
+        fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+            oms_command_plan::Services::group_membership_resolver(&self.0)
+        }
+    }
+    impl Services for Routes {
+        fn state_repository(
+            &self,
+            work: &Path,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<PathBuf> {
+            Ok(work.to_owned())
+        }
+        fn resolve_route(
+            &self,
+            _: &Path,
+            assignment: &serde_json::Value,
+            _: &str,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<oms_command_autonomy::services::ModelRoute> {
+            use oms_command_autonomy::services::ModelRoute;
+            Ok(ModelRoute {
+                provider: value::text(assignment, "provider").into(),
+                model_class: "fixture".into(),
+                primary: "receipt-model".into(),
+                fallback: String::new(),
+                effort: "auto".into(),
+                fallback_effort: "auto".into(),
+            })
+        }
+        fn invoke(
+            &self,
+            call: &Invocation,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<CommandResult> {
+            panic!(
+                "receipt admission dispatched provider command {}",
+                call.tool
+            );
+        }
+    }
+
+    use oms_command_plan::decision::CATALOG;
+    use oms_command_plan::discussion::planning_question;
+    let repo = Repo::github("git@github.com:example-org/fixture-fork.git", Some(SPEC));
+    repo.git(&["branch", "-M", "main"]);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo.0)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let head = String::from_utf8(output.stdout).unwrap();
+    let head = head.trim();
+    let spec = value::hash(SPEC);
+    let directory = format!(".oms/plan/council-{}", "0".repeat(32));
+    let question_file = format!("{directory}/question.md");
+    let proposal_file = ".oms/plan/fixture-proposal.json";
+    let run_file = ".oms/plan/autopilot-run.json";
+    let write_proposal = |question: &str| {
+        let (report, files) = council_fixture(question);
+        repo.write(&question_file, question);
+        for (name, bytes) in files {
+            repo.write(&format!("{directory}/{name}"), bytes);
+        }
+        let manifest = json!({
+            "schema": 1, "kind": "oms-planning-discussion", "spec_sha256": spec,
+            "plan_sha256": "absent", "base_sha": head, "allowed_envelope": ["src"],
+            "question": {"path": question_file, "sha256": value::hash(question)},
+            "providers": ["codex", "claude", "antigravity"], "rounds": 1,
+            "synthesis_route": {"provider": "codex", "requested_model": "fixture-model"},
+            "report": value::parse(&report).unwrap(),
+        });
+        let manifest = value::pretty(&manifest).unwrap();
+        let digest = value::hash(&manifest);
+        let path = format!("{CATALOG}/{digest}.json");
+        repo.write(&path, manifest);
+        let proposal = json!({
+            "schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec,
+            "plan_sha256": "absent", "base_sha": head, "id_prefix": "",
+            "allowed_envelope": ["src"], "acceptance_files": ["tests/check.sh"],
+            "discussion": {"path": path, "sha256": digest},
+            "tasks": value::parse(ANSWER.as_bytes()).unwrap()["tasks"],
+        });
+        let proposal = value::pretty(&proposal).unwrap();
+        let sha = value::hash(&proposal);
+        repo.write(proposal_file, proposal);
+        sha
+    };
+    let host = Routes(repo.planner(ANSWER));
+    let run = |tool, arguments: &[&str]| {
+        let (code, _, err) = run_with_services(
+            tool,
+            &arguments.iter().map(OsString::from).collect::<Vec<_>>(),
+            &repo.0,
+            &AtomicBool::new(false),
+            &host,
+        );
+        (code, String::from_utf8(err).unwrap())
+    };
+    for question in [
+        planning_question(&["src"], head, "foreign specification", None, ""),
+        planning_question(&["src"], head, SPEC, Some("foreign prior plan"), ""),
+        planning_question(&["src"], "different-head", SPEC, None, ""),
+        planning_question(&["docs"], head, SPEC, None, ""),
+    ] {
+        let sha = write_proposal(&question);
+        let (code, err) = run(
+            "plan-from-spec",
+            &["--apply", proposal_file, "--expected-proposal-sha256", &sha],
+        );
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("discussion question differs from planning inputs"),
+            "{err}"
+        );
+    }
+
+    let sha = write_proposal(&planning_question(&["src"], head, SPEC, None, ""));
+    let (code, err) = run(
+        "autopilot",
+        &[
+            "run",
+            "--base",
+            "main",
+            "--planner",
+            "codex",
+            "--collaboration",
+            "auto",
+            "--review-mode",
+            "gate",
+            "--proposal",
+            proposal_file,
+            "--expected-proposal-sha256",
+            &sha,
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("discussion synthesis route differs from the frozen planner route"),
+        "{err}"
+    );
+    assert!(!repo.0.join(run_file).exists());
+
+    let route = json!({"model": "fixture-model", "fallback_model": "", "reasoning_effort": "auto", "timeout": "1s"});
+    let mut receipt = json!({
+        "schema": 1, "kind": "autopilot-run", "stage": "proposal-review", "repo": repo.0,
+        "spec_sha256": spec, "providers": {"planner": "codex", "worker": "codex", "reviewer": "claude"},
+        "routing": {"provider_timeout": "1s", "planner": route, "worker": route, "reviewer": route},
+        "contract": {"allowed": "src", "base": "main", "base_sha": head, "remote": "origin",
+            "max_cycles": 1, "initial_tasks": 1, "replan_tasks": 1, "auto_repair": false,
+            "retry_known": false, "review_mode": "gate", "draft_pr": false, "allow_verifier_change": false,
+            "allow_floor_change": "", "collaboration": "auto"},
+        "proposal": {"path": repo.0.join(proposal_file), "sha256": sha},
+        "branch": format!("oms/autopilot-{}", &spec[..12]), "owner_id": format!("owner_{}", "a".repeat(32)),
+        "updated": value::now(),
+    });
+    repo.write(run_file, value::pretty(&receipt).unwrap());
+    let (_, err) = run("autopilot", &["run"]);
+    assert!(err.contains("parent proposal review required"), "{err}");
+    receipt["routing"]["planner"]["model"] = "receipt-model".into();
+    let altered = value::pretty(&receipt).unwrap();
+    repo.write(run_file, &altered);
+    let (code, err) = run("autopilot", &["run"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("discussion synthesis route differs from the frozen planner route"),
+        "{err}"
+    );
+    assert_eq!(fs::read(repo.0.join(run_file)).unwrap(), altered);
+    assert!(!repo.0.join(".oms/plan/tasks.json").exists());
 }
 
 #[test]

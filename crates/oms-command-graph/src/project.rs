@@ -163,7 +163,7 @@ pub(crate) fn dispatch(
         return benchmark::dispatch(args, repo, _cwd, cancel, helper);
     }
     if args.action == "panel" {
-        return panel::dispatch(args, repo, cancel);
+        return panel::dispatch(args, repo, cancel, helper);
     }
     let state = state_dir(repo)?;
     let action = args.action.as_str();

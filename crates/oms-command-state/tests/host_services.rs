@@ -1262,6 +1262,15 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     let host = PlanOnlyHost(GroupPlan);
     let snapshot = state(repo.path(), &host);
     assert!(!snapshot.get("task").get("stale").truth(), "{snapshot:?}");
+    assert_eq!(
+        snapshot.get("runtime").get("objective").text("source"),
+        "plan"
+    );
+    assert_eq!(
+        snapshot.get("runtime").get("objective").text("text"),
+        "Live plan goal"
+    );
+    assert_eq!(snapshot.get("task").text("goal"), "Old 6-day handoff goal");
     assert!(snapshot.get("task").get("dormant").truth(), "{snapshot:?}");
     assert_eq!(
         snapshot.get("task").text("next"),
@@ -1334,6 +1343,10 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     );
     fs::write(&packet_path, &stale_packet).unwrap();
     let stale_json = state(repo.path(), &host);
+    assert_eq!(
+        stale_json.get("runtime").get("objective").text("source"),
+        "plan"
+    );
     assert!(
         stale_json.get("task").get("stale").truth(),
         "{stale_json:?}"
@@ -1395,6 +1408,14 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     assert!(!fresh_json.get("task").get("stale").truth());
     assert!(!fresh_json.get("task").get("dormant").truth());
     assert_eq!(fresh_json.get("task").text("next"), "Fresh next step");
+    assert_eq!(
+        fresh_json.get("runtime").get("objective").text("source"),
+        "task"
+    );
+    assert_eq!(
+        fresh_json.get("runtime").get("objective").text("text"),
+        "Fresh handoff goal"
+    );
     let (code, out, err) = run_with_host(
         "state",
         &args(&["--repo", &repo.path().to_string_lossy()]),
@@ -1499,4 +1520,94 @@ fn state_honors_task_ttl_above_72h_as_dormant_not_stale() {
     assert!(rendered.contains("dormant (idle 8d)"), "{rendered}");
     assert!(!rendered.contains("stale (idle"), "{rendered}");
     assert!(!rendered.contains("Keep in JSON"), "{rendered}");
+}
+
+#[test]
+fn partial_receipts_survive_compaction_until_the_fingerprint_retires() {
+    let repo = TempRepo::new();
+    seed_gc(repo.path());
+    let digest = "a".repeat(64);
+    let evidence = |result: &str| {
+        let state = if result == "accepted" {
+            ",\"verified_state\":\"tree\""
+        } else {
+            ""
+        };
+        format!(
+            "\"verification\":{{\"scope\":\"agent-task-reference-v1\",\"active_task_id\":\"task\",\"action\":\"verification-rerun\",\"snapshot_attempt_id\":\"s\",\"snapshot_sha256\":\"{digest}\",\"outcome_attempt_id\":\"o\",\"outcome_sha256\":\"{digest}\",\"command_sha256\":\"{digest}\",\"result\":\"{result}\",\"prior_failures\":[\"{digest}\"]{state}}}"
+        )
+    };
+    let ledger = [
+        // Retired legacy pair: the only rows bounded compaction may drop.
+        "{\"event\":\"fail\",\"ts\":\"2020-01-01T00:00:00Z\",\"fingerprint\":\"old\",\"kind\":\"cmd\",\"cmd\":\"x\",\"exit\":1}".to_owned(),
+        "{\"event\":\"resolved\",\"ts\":\"2020-01-01T00:00:01Z\",\"fingerprint\":\"old\"}".to_owned(),
+        format!("{{\"schema\":2,\"event\":\"fail\",\"ts\":\"2020-01-01T00:00:02Z\",\"agent\":\"a\",\"fingerprint\":\"open\",\"kind\":\"verify\",\"cmd\":\"y\",\"exit\":1,{}}}", evidence("failed")),
+        // Accept the previously written shape and the observation-only owner key.
+        format!("{{\"schema\":2,\"event\":\"verified\",\"ts\":\"2020-01-01T00:00:03Z\",\"agent\":\"a\",\"fingerprint\":\"open\",{}}}", evidence("accepted")),
+        format!("{{\"schema\":2,\"event\":\"verified\",\"ts\":\"2020-01-01T00:00:04Z\",\"agent\":\"a\",\"observed_fingerprint\":\"open\",{}}}", evidence("accepted")),
+    ]
+    .join("\n")
+        + "\n";
+    put(repo.path(), ".oms/failures.jsonl", &ledger, 0o600);
+    let open = |repo: &Path| {
+        let failures = view_json("state", repo).get("failures").clone();
+        assert_eq!(failures.get("invalid_rows").int().unwrap(), 0);
+        failures.get("open_total").int().unwrap()
+    };
+    // An ambiguous owner must not clear either fingerprint or permit compaction.
+    let collision = ledger.replace(
+        "\"observed_fingerprint\":\"open\"",
+        "\"observed_fingerprint\":\"open\",\"fingerprint\":\"old\"",
+    );
+    put(repo.path(), ".oms/failures.jsonl", &collision, 0o600);
+    let malformed = view_json("state", repo.path());
+    assert_eq!(
+        malformed.get("failures").get("invalid_rows").int().unwrap(),
+        1
+    );
+    assert_ne!(gc(repo.path(), &CustomHost { plan: GroupPlan }).0, 0);
+    put(repo.path(), ".oms/failures.jsonl", &ledger, 0o600);
+    assert_eq!(open(repo.path()), 1);
+    let (code, out, err) = gc(repo.path(), &CustomHost { plan: GroupPlan });
+    assert_eq!(code, 0, "{err}");
+    let report = json::parse(out.as_bytes()).unwrap();
+    let dropped: Vec<_> = report
+        .get("items")
+        .array()
+        .unwrap()
+        .iter()
+        .filter(|i| i.text("kind") == "failures")
+        .map(|i| i.get("rows").int().unwrap())
+        .collect();
+    assert_eq!(dropped, [2]);
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".oms/failures.jsonl")).unwrap(),
+        ledger
+    );
+    let apply = || {
+        let (code, _, err) = run_with_host(
+            "gc",
+            &args(&[
+                "--apply",
+                "--json",
+                "--repo",
+                &repo.path().to_string_lossy(),
+            ]),
+            repo.path(),
+            &AtomicBool::new(false),
+            &mut Dummy,
+            &CustomHost { plan: GroupPlan },
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        fs::read_to_string(repo.path().join(".oms/failures.jsonl")).unwrap()
+    };
+    let remaining = apply();
+    assert_eq!(remaining.lines().count(), 3);
+    assert_eq!(open(repo.path()), 1);
+    assert!(remaining.contains("observed_fingerprint"));
+    let closed = remaining
+        + "{\"event\":\"resolved\",\"ts\":\"2020-01-02T00:00:00Z\",\"fingerprint\":\"open\"}\n";
+    put(repo.path(), ".oms/failures.jsonl", &closed, 0o600);
+    assert_eq!(open(repo.path()), 0);
+    assert!(apply().is_empty());
 }

@@ -702,6 +702,56 @@ fn atomic_replaced_temp_is_neither_published_nor_deleted() {
 }
 
 #[test]
+fn atomic_checked_mutation_refuses_names_or_body_changed_during_approval() {
+    for drift in ["destination", "temp-name", "temp-body"] {
+        let f = Fixture::new();
+        let destination = f.0.join("file");
+        let parked = f.0.join("parked");
+        std::fs::write(&destination, b"old").unwrap();
+        let root = Root::open(&f.0).unwrap();
+        let result: Result<_, MutationError<Infallible>> = root.atomic_mutate_checked(
+            Path::new("file"),
+            options(),
+            |_| Ok(b"new".to_vec()),
+            || {
+                let temp = temp_path(&f.0);
+                assert_eq!(std::fs::read(&temp).unwrap(), b"new");
+                match drift {
+                    "destination" => {
+                        std::fs::rename(&destination, &parked).unwrap();
+                        std::fs::write(&destination, b"external").unwrap();
+                    }
+                    "temp-name" => {
+                        std::fs::rename(&temp, &parked).unwrap();
+                        std::fs::write(&temp, b"external").unwrap();
+                    }
+                    "temp-body" => std::fs::write(&temp, b"unapproved").unwrap(),
+                    _ => unreachable!(),
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(refused(ByteError::Changed)), "{drift}");
+        if drift == "destination" {
+            assert_eq!(std::fs::read(&destination).unwrap(), b"external");
+            assert_eq!(std::fs::read(&parked).unwrap(), b"old");
+        } else {
+            assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        }
+        if drift == "temp-name" {
+            assert_eq!(std::fs::read(temp_path(&f.0)).unwrap(), b"external");
+            assert_eq!(std::fs::read(&parked).unwrap(), b"new");
+        } else {
+            assert!(
+                !names(&f.0)
+                    .iter()
+                    .any(|name| name.as_bytes().starts_with(b".file.tmp."))
+            );
+        }
+    }
+}
+
+#[test]
 fn atomic_destination_ancestor_root_and_probe_races_refuse_publication() {
     for action in [
         "replace", "rewrite", "remove", "link", "hard", "parent", "root", "probe", "appeared",
@@ -922,6 +972,7 @@ fn private_create_rejects_late_collision_without_overwriting() {
             ..options()
         },
         |_| Ok::<_, Infallible>(b"new".to_vec()),
+        None::<fn() -> Result<(), Infallible>>,
         |stage| {
             if stage == Stage::Rename {
                 std::fs::write(&path, b"concurrent").unwrap();

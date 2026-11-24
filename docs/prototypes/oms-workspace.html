@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>OMS 작업 공간 — 독립 실행 화면 시안</title>
+<style>
+html{color-scheme:light dark}
+body{margin:0;padding:24px;background:light-dark(#eef1f4,#0d1015)}
+#oms-ui-concept{max-width:1120px;margin:auto}
+#oms-ui-concept .oms-symbol{display:inline-block;min-width:16px;text-align:center}
+#oms-ui-concept button:focus-visible,#oms-ui-concept textarea:focus-visible{outline:2px solid var(--oms-accent);outline-offset:3px}
+@media(max-width:580px){body{padding:0}}
+#oms-ui-concept{--oms-bg:light-dark(#f5f6f8,#14181e);--oms-surface:light-dark(#fff,#1b2028);--oms-soft:light-dark(#eceff3,#252c36);--oms-text:light-dark(#19232d,#edf0f5);--oms-sub:light-dark(#5f6c7c,#a8b4c4);--oms-line:light-dark(#dde3ea,#333d49);--oms-accent:light-dark(#16756a,#78d4c5);--oms-tint:light-dark(#eaf5f2,#203a37);--oms-warn:light-dark(#875717,#edc073);--oms-warn-bg:light-dark(#faf2e4,#392f20);--oms-blue:light-dark(#345f9b,#a1c1f1);--oms-blue-bg:light-dark(#edf2fa,#27364b);font-family:Inter,"Noto Sans KR",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.55;color:var(--oms-text);color-scheme:light dark}
+#oms-ui-concept *{box-sizing:border-box}
+#oms-ui-concept [hidden]{display:none!important}
+#oms-ui-concept button,#oms-ui-concept textarea{font:inherit}
+#oms-ui-concept button{color:inherit}
+#oms-ui-concept h2,#oms-ui-concept h3,#oms-ui-concept h4,#oms-ui-concept p{margin:0}
+#oms-ui-concept h2{font-size:24px;line-height:1.3;font-weight:500;letter-spacing:-.7px}
+#oms-ui-concept h3{font-size:16px;font-weight:500;letter-spacing:-.3px}
+#oms-ui-concept h4{font-size:14px;font-weight:500}
+#oms-ui-concept .oms-app{background:var(--oms-bg);border:1px solid var(--oms-line);border-radius:16px;overflow:hidden}
+#oms-ui-concept .oms-top{min-height:68px;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:var(--oms-surface);border-bottom:1px solid var(--oms-line)}
+#oms-ui-concept .oms-brand{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:500;letter-spacing:-.6px}
+#oms-ui-concept .oms-logo{width:29px;height:29px;border-radius:9px;background:var(--oms-text);color:var(--oms-surface);display:grid;place-items:center}
+#oms-ui-concept .oms-repo{padding-left:16px;border-left:1px solid var(--oms-line);font-size:12px;color:var(--oms-sub)}
+#oms-ui-concept .oms-example{margin-left:auto;font-size:11px;white-space:nowrap;color:var(--oms-sub)}
+#oms-ui-concept .oms-shell{display:grid;grid-template-columns:132px minmax(0,1fr);min-height:620px}
+#oms-ui-concept .oms-nav{background:var(--oms-surface);border-right:1px solid var(--oms-line);padding:18px 10px;display:flex;flex-direction:column;gap:6px}
+#oms-ui-concept .oms-navbutton{border:0;background:transparent;display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:9px;text-align:left;min-height:44px;color:var(--oms-sub)}
+#oms-ui-concept .oms-navbutton[aria-pressed=true]{background:var(--oms-soft);color:var(--oms-text);font-weight:500}
+#oms-ui-concept .oms-navbutton:hover{background:var(--oms-soft)}
+#oms-ui-concept .oms-nav-meta{margin-top:auto;padding:18px 10px 2px;border-top:1px solid var(--oms-line);font-size:11px;color:var(--oms-sub)}
+#oms-ui-concept .oms-nav-meta strong{display:block;font-size:12px;font-weight:500;color:var(--oms-text);margin-top:4px}
+#oms-ui-concept .oms-workarea{min-width:0;display:grid;grid-template-columns:minmax(0,1fr)}
+#oms-ui-concept .oms-workarea[data-open=true]{grid-template-columns:minmax(0,1fr) 310px}
+#oms-ui-concept .oms-pages{min-width:0;padding:25px}
+#oms-ui-concept .oms-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:22px}
+#oms-ui-concept .oms-sub{color:var(--oms-sub);font-size:12px}
+#oms-ui-concept .oms-page-head .oms-sub{margin-top:5px}
+#oms-ui-concept .oms-kicker{font-size:11px;font-weight:500;color:var(--oms-sub);margin-bottom:6px;letter-spacing:.3px}
+#oms-ui-concept .oms-goal{padding:0 0 20px;border-bottom:1px solid var(--oms-line);margin-bottom:20px}
+#oms-ui-concept .oms-goal h3{font-size:17px}
+#oms-ui-concept .oms-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:20px 0 10px}
+#oms-ui-concept .oms-section-head h3{font-size:13px}
+#oms-ui-concept .oms-card{background:var(--oms-surface);border:1px solid var(--oms-line);border-radius:12px;padding:17px;min-width:0}
+#oms-ui-concept .oms-card-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+#oms-ui-concept .oms-attention{border-color:light-dark(#d8c8a9,#67573b);background:var(--oms-surface)}
+#oms-ui-concept .oms-card p{font-size:12px;color:var(--oms-sub);margin-top:6px}
+#oms-ui-concept .oms-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px}
+#oms-ui-concept .oms-button{border:1px solid var(--oms-line);background:var(--oms-surface);padding:8px 11px;min-height:38px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;gap:7px;font-size:12px;font-weight:500}
+#oms-ui-concept .oms-button:hover{background:var(--oms-soft)}
+#oms-ui-concept .oms-button-primary{background:var(--oms-text);color:var(--oms-surface);border-color:var(--oms-text)}
+#oms-ui-concept .oms-button-primary:hover{background:var(--oms-text);opacity:.87}
+#oms-ui-concept .oms-plain{border:0;background:transparent;color:var(--oms-sub);font-size:12px;padding:7px 0;display:inline-flex;gap:6px;align-items:center;min-height:32px}
+#oms-ui-concept .oms-badge{display:inline-flex;align-items:center;gap:5px;border-radius:6px;padding:3px 7px;font-size:11px;font-weight:500;background:var(--oms-soft);color:var(--oms-sub)}
+#oms-ui-concept .oms-badge.warn{background:var(--oms-warn-bg);color:var(--oms-warn)}
+#oms-ui-concept .oms-badge.run{background:var(--oms-blue-bg);color:var(--oms-blue)}
+#oms-ui-concept .oms-badge.done{background:var(--oms-tint);color:var(--oms-accent)}
+#oms-ui-concept .oms-person{font-size:11px;color:var(--oms-sub)}
+#oms-ui-concept .oms-task-button{display:block;width:100%;text-align:left;color:var(--oms-text);background:var(--oms-surface);border:1px solid var(--oms-line);border-radius:12px;padding:16px;min-width:0}
+#oms-ui-concept .oms-task-button:hover{border-color:var(--oms-sub)}
+#oms-ui-concept .oms-task-button h4{margin-top:10px}
+#oms-ui-concept .oms-task-button p{font-size:12px;color:var(--oms-sub);margin-top:5px}
+#oms-ui-concept .oms-task-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;color:var(--oms-sub);margin-top:15px;flex-wrap:wrap}
+#oms-ui-concept .oms-check-strip{display:flex;gap:4px;margin:12px 0 0}
+#oms-ui-concept .oms-check-strip span{height:4px;flex:1;background:var(--oms-soft);border-radius:4px}
+#oms-ui-concept .oms-check-strip span.checked{background:var(--oms-accent)}
+#oms-ui-concept .oms-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+#oms-ui-concept .oms-result-button{display:flex;gap:14px;align-items:center;width:100%;border:1px solid var(--oms-line);background:var(--oms-surface);border-radius:12px;padding:14px;text-align:left}
+#oms-ui-concept .oms-result-button h4{margin-bottom:4px}
+#oms-ui-concept .oms-mini{flex:none;width:98px;height:72px;border-radius:7px;background:var(--oms-bg);border:1px solid var(--oms-line);display:grid;grid-template-columns:18px 1fr;overflow:hidden}
+#oms-ui-concept .oms-mini-rail{background:var(--oms-soft);padding:8px 5px;display:flex;flex-direction:column;gap:6px}
+#oms-ui-concept .oms-mini-rail span{height:5px;border-radius:2px;background:var(--oms-sub);opacity:.35}
+#oms-ui-concept .oms-mini-body{padding:8px;display:grid;gap:5px}
+#oms-ui-concept .oms-mini-line{height:4px;background:var(--oms-line);width:62%;border-radius:3px}
+#oms-ui-concept .oms-mini-box{border-radius:3px;background:var(--oms-surface);border:1px solid var(--oms-line);height:17px}
+#oms-ui-concept .oms-mini-box.tinted{background:var(--oms-tint);border-color:var(--oms-tint)}
+#oms-ui-concept .oms-board{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px 14px}
+#oms-ui-concept .oms-column-label{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:12px;font-weight:500;margin-bottom:10px;color:var(--oms-sub)}
+#oms-ui-concept .oms-team-main{padding:18px;border-radius:12px;background:var(--oms-surface);border:1px solid var(--oms-line);display:flex;align-items:center;gap:13px}
+#oms-ui-concept .oms-avatar{width:36px;height:36px;flex:none;border:1px solid var(--oms-line);background:var(--oms-soft);border-radius:10px;display:grid;place-items:center}
+#oms-ui-concept .oms-team-list{margin:0 0 0 20px;padding:15px 0 0 24px;border-left:1px solid var(--oms-line);display:grid;gap:10px}
+#oms-ui-concept .oms-team-member{position:relative}
+#oms-ui-concept .oms-team-member:before{content:"";position:absolute;top:25px;left:-24px;width:24px;height:1px;background:var(--oms-line)}
+#oms-ui-concept .oms-relations{container-type:inline-size;min-width:0}
+#oms-ui-concept .oms-relation-switch{display:flex;gap:5px;padding:4px;background:var(--oms-soft);border-radius:9px;width:fit-content;margin-bottom:12px}
+#oms-ui-concept .oms-relation-toggle{border:0;background:transparent;color:var(--oms-sub);border-radius:6px;padding:8px 12px;font-size:12px;min-height:38px}
+#oms-ui-concept .oms-relation-toggle[aria-pressed=true]{background:var(--oms-surface);color:var(--oms-text)}
+#oms-ui-concept .oms-relation-legend{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--oms-sub);margin:14px 0 18px}
+#oms-ui-concept .oms-relation-legend span:first-child{width:24px;height:1px;background:var(--oms-sub);position:relative}
+#oms-ui-concept .oms-relation-legend span:first-child:after{content:"";position:absolute;right:0;top:-3px;border-left:5px solid var(--oms-sub);border-top:3px solid transparent;border-bottom:3px solid transparent}
+#oms-ui-concept .oms-relationship-graph{display:grid;position:relative;gap:44px 18px;padding:3px 0 10px;min-width:0;isolation:isolate}
+#oms-ui-concept .oms-relationship-graph svg.oms-relationship-lines{position:absolute;inset:0;width:100%;height:100%;z-index:-1;overflow:visible;pointer-events:none}
+#oms-ui-concept .oms-relationship-lines path{stroke:var(--oms-sub);stroke-width:1.15;fill:none;opacity:.75}
+#oms-ui-concept .oms-relationship-lines marker path{fill:var(--oms-sub);stroke:none;opacity:1}
+#oms-ui-concept .oms-graph-node{border:1px solid var(--oms-line);border-radius:11px;background:var(--oms-surface);padding:14px 12px;min-width:0;align-self:center;text-align:left;width:100%}
+#oms-ui-concept button.oms-graph-node:hover{border-color:var(--oms-sub)}
+#oms-ui-concept button.oms-graph-node[data-selected=true]{border-color:var(--oms-accent);box-shadow:0 0 0 1px var(--oms-accent)}
+#oms-ui-concept .oms-graph-node h4{font-size:13px;line-height:1.45;margin-top:6px}
+#oms-ui-concept .oms-graph-node p{font-size:11px;color:var(--oms-sub);margin-top:6px}
+#oms-ui-concept .oms-graph-node .oms-kicker{font-size:11px;margin-bottom:3px}
+#oms-ui-concept .oms-graph-node.oms-graph-main{background:var(--oms-tint);border-color:var(--oms-tint)}
+#oms-ui-concept .oms-graph-role{background:var(--oms-bg);padding-top:12px;padding-bottom:12px}
+#oms-ui-concept .oms-graph-task-link{font-size:11px;color:var(--oms-sub);display:flex;align-items:center;gap:5px;margin-top:12px}
+#oms-ui-concept .oms-role-graph{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:auto auto auto}
+#oms-ui-concept .oms-role-graph [data-node=main]{grid-column:2;grid-row:1}
+#oms-ui-concept .oms-role-graph [data-node=role-code]{grid-column:1;grid-row:2}
+#oms-ui-concept .oms-role-graph [data-node=task-connection]{grid-column:1;grid-row:3}
+#oms-ui-concept .oms-role-graph [data-node=role-agy]{grid-column:2;grid-row:2}
+#oms-ui-concept .oms-role-graph [data-node=task-mobile]{grid-column:2;grid-row:3}
+#oms-ui-concept .oms-role-graph [data-node=role-review]{grid-column:3;grid-row:2}
+#oms-ui-concept .oms-role-graph [data-node=task-cards]{grid-column:3;grid-row:3}
+#oms-ui-concept .oms-dependency-graph{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:auto auto;gap:48px 28px}
+#oms-ui-concept .oms-dependency-graph [data-node=task-cards]{grid-column:1;grid-row:1}
+#oms-ui-concept .oms-dependency-graph [data-node=task-layout]{grid-column:2;grid-row:1}
+#oms-ui-concept .oms-dependency-graph [data-node=task-connection]{grid-column:2;grid-row:2}
+#oms-ui-concept .oms-dependency-graph [data-node=task-mobile]{grid-column:3;grid-row:1 / span 2}
+@container(max-width:620px){#oms-ui-concept .oms-role-graph{grid-template-columns:minmax(88px,.72fr) minmax(0,1.28fr);grid-template-rows:auto auto auto auto;gap:22px 24px}#oms-ui-concept .oms-role-graph [data-node=main]{grid-column:1 / span 2;grid-row:1}#oms-ui-concept .oms-role-graph [data-node=role-code]{grid-column:1;grid-row:2}#oms-ui-concept .oms-role-graph [data-node=task-connection]{grid-column:2;grid-row:2}#oms-ui-concept .oms-role-graph [data-node=role-agy]{grid-column:1;grid-row:3}#oms-ui-concept .oms-role-graph [data-node=task-mobile]{grid-column:2;grid-row:3}#oms-ui-concept .oms-role-graph [data-node=role-review]{grid-column:1;grid-row:4}#oms-ui-concept .oms-role-graph [data-node=task-cards]{grid-column:2;grid-row:4}#oms-ui-concept .oms-dependency-graph{grid-template-columns:minmax(0,1fr);grid-template-rows:repeat(4,auto);padding-left:23px;gap:29px}#oms-ui-concept .oms-dependency-graph [data-node]{grid-column:1;grid-row:auto}#oms-ui-concept .oms-graph-node{padding:12px 10px}#oms-ui-concept .oms-relation-toggle{min-height:44px}}
+#oms-ui-concept .oms-result-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+#oms-ui-concept .oms-artifact{border:1px solid var(--oms-line);border-radius:12px;background:var(--oms-surface);padding:12px;text-align:left;min-width:0}
+#oms-ui-concept .oms-artifact .oms-mini{width:100%;height:124px;grid-template-columns:30px 1fr;margin-bottom:13px}
+#oms-ui-concept .oms-artifact .oms-mini-body{padding:13px;gap:8px}
+#oms-ui-concept .oms-artifact .oms-mini-box{height:29px}
+#oms-ui-concept .oms-report-thumb{height:124px;background:var(--oms-bg);border-radius:7px;display:grid;align-content:center;gap:9px;padding:16px;margin-bottom:13px;font-size:12px}
+#oms-ui-concept .oms-report-thumb span{display:flex;align-items:center;gap:7px}
+#oms-ui-concept .oms-inspector{min-width:0;padding:20px;background:var(--oms-surface);border-left:1px solid var(--oms-line)}
+#oms-ui-concept .oms-inspector h3{font-size:18px;line-height:1.4;margin:12px 0 8px}
+#oms-ui-concept .oms-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;padding:3px;background:var(--oms-bg);border-radius:8px;margin:20px 0 18px}
+#oms-ui-concept .oms-tab{border:0;background:transparent;padding:7px 0;border-radius:6px;font-size:11px;color:var(--oms-sub);min-height:34px}
+#oms-ui-concept .oms-tab[aria-pressed=true]{background:var(--oms-surface);color:var(--oms-text);box-shadow:0 1px 3px light-dark(#00000014,#00000030)}
+#oms-ui-concept .oms-detail-block{margin-bottom:21px}
+#oms-ui-concept .oms-detail-block h4{font-size:12px;margin-bottom:9px}
+#oms-ui-concept .oms-detail-block p{font-size:12px;color:var(--oms-sub)}
+#oms-ui-concept .oms-checklist{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+#oms-ui-concept .oms-checklist li{display:flex;align-items:flex-start;gap:8px;font-size:12px}
+#oms-ui-concept .oms-checklist li i,#oms-ui-concept .oms-checklist li svg{flex:none;margin-top:2px;color:var(--oms-sub)}
+#oms-ui-concept .oms-checklist .is-done i,#oms-ui-concept .oms-checklist .is-done svg{color:var(--oms-accent)}
+#oms-ui-concept .oms-step{display:flex;gap:10px;align-items:flex-start;margin:12px 0;font-size:12px}
+#oms-ui-concept .oms-step-number{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;background:var(--oms-soft);flex:none;font-size:11px}
+#oms-ui-concept .oms-inspector-footer{border-top:1px solid var(--oms-line);padding-top:16px;margin-top:20px}
+#oms-ui-concept .oms-large-preview{border:1px solid var(--oms-line);background:var(--oms-bg);border-radius:10px;padding:14px;margin-bottom:12px}
+#oms-ui-concept .oms-preview-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px;font-size:12px;font-weight:500}
+#oms-ui-concept .oms-preview-row{padding:12px;background:var(--oms-surface);border:1px solid var(--oms-line);border-radius:8px;margin-top:8px;font-size:12px}
+#oms-ui-concept .oms-preview-row span{display:block;font-size:11px;color:var(--oms-sub);margin-top:5px}
+#oms-ui-concept .oms-event{display:flex;gap:9px;padding:12px 0;border-bottom:1px solid var(--oms-line);font-size:12px}
+#oms-ui-concept .oms-event i,#oms-ui-concept .oms-event svg{flex:none;margin-top:2px;color:var(--oms-sub)}
+#oms-ui-concept .oms-form{padding-top:14px}
+#oms-ui-concept .oms-form label{display:block;font-size:12px;margin-bottom:7px}
+#oms-ui-concept textarea{width:100%;resize:vertical;min-height:100px;border:1px solid var(--oms-line);border-radius:8px;padding:10px;background:var(--oms-bg);color:var(--oms-text);font-size:14px}
+#oms-ui-concept .oms-notice{margin:0;padding:10px 20px;border-top:1px solid var(--oms-line);background:var(--oms-surface);font-size:11px;color:var(--oms-sub);min-height:38px;display:flex;align-items:center;gap:7px}
+#oms-ui-concept .oms-draft-preview{margin-top:10px;padding:10px;border-radius:8px;background:var(--oms-soft);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+#oms-ui-concept svg{width:16px;height:16px;flex:none}
+@media(max-width:900px){#oms-ui-concept .oms-workarea[data-open=true]{grid-template-columns:minmax(0,1fr)}#oms-ui-concept .oms-workarea[data-open=true] .oms-pages{display:none}#oms-ui-concept .oms-inspector{border-left:0;padding:24px;max-width:100%}#oms-ui-concept .oms-inspector h3{font-size:22px}#oms-ui-concept .oms-inspector .oms-detail-block{max-width:540px}#oms-ui-concept .oms-inspector .oms-tabs{max-width:540px}}
+@media(max-width:580px){#oms-ui-concept .oms-top{padding:15px;gap:9px}#oms-ui-concept .oms-repo{padding-left:0;border:0;width:100%;font-size:11px}#oms-ui-concept .oms-example{margin-left:0;font-size:11px}#oms-ui-concept .oms-shell{display:block;min-height:0}#oms-ui-concept .oms-nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:7px;border-right:0;border-bottom:1px solid var(--oms-line);gap:2px}#oms-ui-concept .oms-navbutton{justify-content:center;padding:10px 3px;font-size:12px;gap:5px}#oms-ui-concept .oms-nav-meta{display:none}#oms-ui-concept .oms-pages{padding:19px 15px}#oms-ui-concept .oms-two,#oms-ui-concept .oms-board,#oms-ui-concept .oms-result-grid{grid-template-columns:minmax(0,1fr)}#oms-ui-concept .oms-page-head{margin-bottom:18px}#oms-ui-concept h2{font-size:22px}#oms-ui-concept .oms-goal h3{font-size:16px}#oms-ui-concept .oms-card{padding:15px}#oms-ui-concept .oms-inspector{padding:18px 15px}#oms-ui-concept .oms-button,#oms-ui-concept .oms-tab,#oms-ui-concept .oms-plain{min-height:44px}#oms-ui-concept .oms-notice{padding:10px 15px;align-items:flex-start}#oms-ui-concept .oms-result-button{gap:10px}#oms-ui-concept .oms-mini{width:82px;height:69px}#oms-ui-concept textarea{font-size:16px}}
+@media(prefers-reduced-motion:no-preference){#oms-ui-concept button{transition:background .12s,border-color .12s}}
+</style>
+</head>
+<body>
+<div id="oms-ui-concept" aria-label="OMS 작업 공간의 상호작용 가능한 화면 구성 시안">
+  <noscript>이 시안의 화면 전환에는 JavaScript가 필요합니다. 기본 화면과 예시 정보는 아래에서 확인할 수 있습니다.</noscript>
+  <div class="oms-app">
+    <header class="oms-top">
+      <div class="oms-brand"><span class="oms-logo" aria-hidden="true">O</span>OMS</div>
+      <div class="oms-repo">oh-my-setting / 공통 작업 화면</div>
+      <span class="oms-example">화면 시안 · 모든 데이터는 예시</span>
+    </header>
+    <div class="oms-shell">
+      <nav class="oms-nav" aria-label="OMS 메뉴">
+        <button class="oms-navbutton" type="button" data-page="now" aria-pressed="true">지금</button>
+        <button class="oms-navbutton" type="button" data-page="work" aria-pressed="false">작업</button>
+        <button class="oms-navbutton" type="button" data-page="results" aria-pressed="false">결과</button>
+        <button class="oms-navbutton" type="button" data-page="team" aria-pressed="false">관계도</button>
+        <div class="oms-nav-meta">전체 조율<strong>Main · Claude</strong></div>
+      </nav>
+      <div class="oms-workarea" data-open="false">
+        <main class="oms-pages">
+          <section data-view="now">
+            <div class="oms-page-head"><div><h2>지금</h2><p class="oms-sub">필요한 판단과 달라진 결과부터.</p></div><span class="oms-badge">구성 예시</span></div>
+            <div class="oms-goal"><div class="oms-kicker">이번 목표</div><h3>어느 에이전트에서든 같은 OMS 작업 화면</h3></div>
+            <article class="oms-card oms-attention" id="oms-decision-card">
+              <div class="oms-card-top"><span class="oms-badge warn" id="oms-decision-status">판단 필요</span><span class="oms-person">Main이 제안함</span></div>
+              <h3>첫 화면 구성을 정할까요?</h3>
+              <p>목표 · 필요한 판단 · 진행 작업을 먼저 보여주는 구성</p>
+              <div class="oms-actions"><button type="button" class="oms-button oms-button-primary" data-task="layout">계획 보기</button><button type="button" class="oms-plain" data-task="layout" data-detail="preview">화면 미리보기</button></div>
+            </article>
+            <div class="oms-section-head"><h3>진행 중인 작업</h3><button class="oms-plain" type="button" data-page="work">모두 보기</button></div>
+            <button class="oms-task-button" type="button" data-task="connection">
+              <div class="oms-card-top"><span class="oms-badge run">검증 중</span><span class="oms-person">구현 담당 · Codex</span></div>
+              <h4>연결 상태를 한눈에 확인하기</h4><p>연결 끊김과 재연결 화면을 확인하고 있어요.</p>
+              <div class="oms-task-foot"><span>검증 항목 2 / 3 확인</span><span>상세 보기 →</span></div>
+              <div class="oms-check-strip" aria-hidden="true"><span class="checked"></span><span class="checked"></span><span></span></div>
+            </button>
+            <div class="oms-section-head"><h3>새로 나온 결과</h3><button class="oms-plain" type="button" data-page="results">모두 보기</button></div>
+            <button class="oms-result-button" type="button" data-task="layout" data-detail="preview">
+              <div class="oms-mini" aria-hidden="true"><div class="oms-mini-rail"><span></span><span></span><span></span></div><div class="oms-mini-body"><div class="oms-mini-line"></div><div class="oms-mini-box tinted"></div><div class="oms-mini-box"></div></div></div>
+              <div><h4>요약 패널 배치안</h4><div class="oms-sub">계획과 결과를 카드로 확인</div><div class="oms-sub">미리보기 열기 →</div></div>
+            </button>
+          </section>
+          <section data-view="work" hidden>
+            <div class="oms-page-head"><div><h2>작업</h2><p class="oms-sub">카드를 선택하면 같은 작업의 상세가 열려요.</p></div></div>
+            <div class="oms-board">
+              <div><div class="oms-column-label"><span>예정</span><span>1</span></div><button class="oms-task-button" type="button" data-task="mobile"><span class="oms-badge">준비</span><h4>좁은 화면의 목록과 상세</h4><p>모바일에서도 한 화면에 한 작업씩.</p><div class="oms-task-foot"><span>호스트 연동 · AGY</span><span>선행: 배치 · 연결 상태</span></div></button></div>
+              <div><div class="oms-column-label"><span>진행</span><span>1</span></div><button class="oms-task-button" type="button" data-task="connection"><span class="oms-badge run">검증 중</span><h4>연결 상태 표시</h4><p>재연결 후 선택한 작업 유지.</p><div class="oms-task-foot"><span>구현 · Codex</span><span>검증 2 / 3</span></div></button></div>
+              <div><div class="oms-column-label"><span>검토</span><span>1</span></div><button class="oms-task-button" type="button" data-task="layout"><span class="oms-badge warn" data-layout-badge>구성 선택</span><h4>첫 화면 구성</h4><p>목표와 필요한 판단부터.</p><div class="oms-task-foot"><span>전체 조율 · Main</span><span>배치안 보기 →</span></div></button></div>
+              <div><div class="oms-column-label"><span>완료</span><span>1</span></div><button class="oms-task-button" type="button" data-task="cards"><span class="oms-badge done">수락됨</span><h4>작업 카드 기본 구성</h4><p>상태 · 담당 · 다음 행동.</p><div class="oms-task-foot"><span>검토 · Claude</span><span>완료 조건 3 / 3</span></div></button></div>
+            </div>
+          </section>
+          <section data-view="team" hidden>
+            <div class="oms-page-head"><div><h2>관계도</h2><p class="oms-sub">누가 맡았는지, 어떤 작업이 먼저인지.</p></div></div>
+            <div class="oms-relations">
+              <div class="oms-relation-switch" aria-label="관계도 종류"><button type="button" class="oms-relation-toggle" data-relation="roles" aria-pressed="true">담당 구조</button><button type="button" class="oms-relation-toggle" data-relation="dependencies" aria-pressed="false">작업 의존성</button></div>
+              <div data-relation-view="roles">
+                <div class="oms-relation-legend"><span aria-hidden="true"></span><span>Main의 조율과 역할별 담당 작업</span></div>
+                <div class="oms-relationship-graph oms-role-graph" data-graph="roles" role="group" aria-label="Main이 구현, 호스트 연동, 검토를 조율하고 각 역할이 작업을 담당하는 구조">
+                  <svg class="oms-relationship-lines" aria-hidden="true"></svg>
+                  <div class="oms-graph-node oms-graph-main" data-node="main"><div class="oms-kicker">전체 조율</div><h4>Main · Claude</h4><p>계획 정리 · 결과 종합</p></div>
+                  <div class="oms-graph-node oms-graph-role" data-node="role-code"><div class="oms-kicker">담당 역할</div><h4>구현</h4><p>Codex</p></div>
+                  <button type="button" class="oms-graph-node" data-node="task-connection" data-task="connection"><span class="oms-badge run">검증 중</span><h4>연결 상태 표시</h4><p>검증 2 / 3 확인</p><span class="oms-graph-task-link">작업 상세</span></button>
+                  <div class="oms-graph-node oms-graph-role" data-node="role-agy"><div class="oms-kicker">담당 역할</div><h4>호스트 연동</h4><p>AGY</p></div>
+                  <button type="button" class="oms-graph-node" data-node="task-mobile" data-task="mobile"><span class="oms-badge">준비</span><h4>좁은 화면 전환</h4><p>선행 작업 확인 중</p><span class="oms-graph-task-link">작업 상세</span></button>
+                  <div class="oms-graph-node oms-graph-role" data-node="role-review"><div class="oms-kicker">담당 역할</div><h4>검토</h4><p>Claude</p></div>
+                  <button type="button" class="oms-graph-node" data-node="task-cards" data-task="cards"><span class="oms-badge done">수락됨</span><h4>작업 카드 기본 구성</h4><p>완료 조건 3 / 3</p><span class="oms-graph-task-link">작업 상세</span></button>
+                </div>
+              </div>
+              <div data-relation-view="dependencies" hidden>
+                <div class="oms-relation-legend"><span aria-hidden="true"></span><span>선행 작업 → 후속 작업</span></div>
+                <div class="oms-relationship-graph oms-dependency-graph" data-graph="dependencies" role="group" aria-label="작업 카드 구성에서 첫 화면 구성으로 이어지고, 첫 화면 구성과 연결 상태 표시가 좁은 화면 전환의 선행 작업인 관계">
+                  <svg class="oms-relationship-lines" aria-hidden="true"></svg>
+                  <button type="button" class="oms-graph-node" data-node="task-cards" data-task="cards"><span class="oms-badge done">수락됨</span><h4>작업 카드 기본 구성</h4><p>완료 조건 3 / 3</p><span class="oms-graph-task-link">작업 상세</span></button>
+                  <button type="button" class="oms-graph-node" data-node="task-layout" data-task="layout"><span class="oms-badge warn" data-layout-badge>구성 선택</span><h4>첫 화면 구성</h4><p>기본 배치 확정</p><span class="oms-graph-task-link">작업 상세</span></button>
+                  <button type="button" class="oms-graph-node" data-node="task-connection" data-task="connection"><span class="oms-badge run">검증 중</span><h4>연결 상태 표시</h4><p>재연결 검증 남음</p><span class="oms-graph-task-link">작업 상세</span></button>
+                  <button type="button" class="oms-graph-node" data-node="task-mobile" data-task="mobile"><span class="oms-badge">선행 대기</span><h4>좁은 화면 전환</h4><p>배치 · 연결 상태 필요</p><span class="oms-graph-task-link">작업 상세</span></button>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section data-view="results" hidden>
+            <div class="oms-page-head"><div><h2>결과</h2><p class="oms-sub">산출물을 먼저 보고, 근거를 펼쳐 확인해요.</p></div></div>
+            <div class="oms-result-grid">
+              <button class="oms-artifact" type="button" data-task="layout" data-detail="preview"><div class="oms-mini" aria-hidden="true"><div class="oms-mini-rail"><span></span><span></span><span></span></div><div class="oms-mini-body"><div class="oms-mini-line"></div><div class="oms-mini-box tinted"></div><div class="oms-mini-box"></div></div></div><h4>요약 패널 배치안</h4><p class="oms-sub">화면 미리보기</p></button>
+              <button class="oms-artifact" type="button" data-task="connection" data-detail="checks"><div class="oms-report-thumb" aria-hidden="true"><span>연결 상태 · 통과</span><span>끊김 안내 · 통과</span><span>재연결 · 미실행</span></div><h4>연결 상태 검증</h4><p class="oms-sub">근거와 남은 확인 항목</p></button>
+            </div>
+          </section>
+        </main>
+        <aside class="oms-inspector" aria-label="선택한 작업 상세" hidden>
+          <button class="oms-plain" type="button" data-close>목록으로</button>
+          <h3 id="oms-detail-title"></h3><div id="oms-detail-meta"></div>
+          <div class="oms-tabs" aria-label="작업 상세 보기">
+            <button class="oms-tab" type="button" data-detail-tab="summary" aria-pressed="true">요약</button>
+            <button class="oms-tab" type="button" data-detail-tab="preview" aria-pressed="false">변경</button>
+            <button class="oms-tab" type="button" data-detail-tab="checks" aria-pressed="false">검증</button>
+            <button class="oms-tab" type="button" data-detail-tab="history" aria-pressed="false">이력</button>
+          </div>
+          <div id="oms-detail-content"></div>
+          <div class="oms-inspector-footer" id="oms-detail-footer"></div>
+          <div class="oms-form" id="oms-feedback" hidden><label for="oms-feedback-text">Main에게 전달할 수정 의견</label><textarea id="oms-feedback-text" placeholder="예: 진행 중인 작업을 더 위에 보여줘."></textarea><div class="oms-actions"><button type="button" class="oms-button" data-preview-draft>작성 내용 확인</button></div><div class="oms-draft-preview" id="oms-draft-preview" hidden></div></div>
+        </aside>
+      </div>
+    </div>
+    <p class="oms-notice" id="oms-ui-notice" role="status" aria-live="polite"><span>메뉴와 작업을 눌러볼 수 있어요. 데이터·선택·의견은 이 페이지 안의 예시이며 새로고침하면 초기화돼요.</span></p>
+  </div>
+</div>
+<script>
+(()=>{
+  const root=document.getElementById('oms-ui-concept');
+  const workarea=root.querySelector('.oms-workarea');
+  const inspector=root.querySelector('.oms-inspector');
+  const content=root.querySelector('#oms-detail-content');
+  const title=root.querySelector('#oms-detail-title');
+  const meta=root.querySelector('#oms-detail-meta');
+  const footer=root.querySelector('#oms-detail-footer');
+  const notice=root.querySelector('#oms-ui-notice span');
+  const feedback=root.querySelector('#oms-feedback');
+  const feedbackText=root.querySelector('#oms-feedback-text');
+  const draftPreview=root.querySelector('#oms-draft-preview');
+  let selected=null, detail='summary', adopted=false, lastTaskButton=null;
+  const drafts={};
+  const tasks={
+    layout:{title:'첫 화면 구성',owner:'전체 조율 · Main',status:'검토 중',tone:'warn',goal:'현재 목표와 필요한 판단을 먼저 확인하고, 작업과 결과를 이어서 볼 수 있게 합니다.',checks:[['현재 목표를 한 줄로 표시',true],['카드에서 같은 작업 상세로 이동',true],['실제 호스트에서 접근성 확인',false]],events:['Main이 배치안을 정리함','작업 카드에 미리보기를 연결함','사용자의 구성 선택을 기다림']},
+    connection:{title:'연결 상태 표시',owner:'구현 담당 · Codex',status:'검증 중',tone:'run',goal:'연결이 끊겨도 읽던 작업과 마지막 확인 상태를 유지합니다.',checks:[['연결 상태 표시',true],['연결 끊김 안내',true],['재연결 후 중복 요청 방지',false]],events:['연결 상태 표시를 구현함','연결 끊김 화면 검증을 통과함','재연결 검증이 남아 있음']},
+    mobile:{title:'좁은 화면의 목록과 상세',owner:'호스트 연동 · AGY',status:'준비',tone:'',goal:'기본 배치와 연결 상태 처리를 바탕으로, 좁은 화면에서 목록과 상세를 전환하고 선택을 유지합니다.',checks:[['목록에서 상세로 이동',false],['돌아왔을 때 선택 유지',false],['터치와 키보드 조작 확인',false]],events:['기본 화면 구성과 연결 상태 표시를 선행 작업으로 연결함','두 선행 작업 확인 후 진행 예정']},
+    cards:{title:'작업 카드 기본 구성',owner:'검토 담당 · Claude',status:'수락됨',tone:'done',goal:'작업 이름, 상태와 이유, 담당자, 다음 행동을 짧게 보여줍니다.',checks:[['상태와 이유 표시',true],['담당 역할 표시',true],['카드 선택과 실행 구분',true]],events:['작업 카드 구성을 정리함','검토 결과를 제출함','Main이 완료 조건을 확인하고 수락함']}
+  };
+  const marks={'circle-check':'✓','circle-dashed':'○','circle-small':'·','check':'✓','check-check':'✓'};
+  const icon=name=>marks[name]?'<span class="oms-symbol" aria-hidden="true">'+marks[name]+'</span>':'';
+  const relationEdges={
+    roles:[['main','role-code'],['main','role-agy'],['main','role-review'],['role-code','task-connection'],['role-agy','task-mobile'],['role-review','task-cards']],
+    dependencies:[['task-cards','task-layout'],['task-layout','task-mobile'],['task-connection','task-mobile']]
+  };
+  const svgNamespace='http://www.w3.org/2000/svg';
+  function svgElement(name,attributes){const element=document.createElementNS(svgNamespace,name);Object.entries(attributes).forEach(([key,value])=>element.setAttribute(key,String(value)));return element}
+  function drawGraph(graph){
+    if(graph.closest('[hidden]'))return;
+    const bounds=graph.getBoundingClientRect();if(bounds.width<1||bounds.height<1)return;
+    const svg=graph.querySelector('.oms-relationship-lines');
+    svg.setAttribute('viewBox','0 0 '+bounds.width+' '+bounds.height);svg.replaceChildren();
+    const narrow=bounds.width<=620;
+    const markerId='oms-relation-arrow-'+graph.dataset.graph;
+    const defs=svgElement('defs',{}),marker=svgElement('marker',{id:markerId,viewBox:'0 0 8 8',refX:7,refY:4,markerWidth:7,markerHeight:7,orient:'auto'});
+    marker.append(svgElement('path',{d:'M 0 1 L 7 4 L 0 7 Z'}));defs.append(marker);svg.append(defs);
+    for(const [from,to] of relationEdges[graph.dataset.graph]){
+      if(narrow&&graph.dataset.graph==='roles'&&from==='main')continue;
+      const source=graph.querySelector('[data-node="'+from+'"]'),target=graph.querySelector('[data-node="'+to+'"]');
+      if(!source||!target)continue;
+      const a=source.getBoundingClientRect(),b=target.getBoundingClientRect();
+      const ax=a.left-bounds.left,ay=a.top-bounds.top,bx=b.left-bounds.left,by=b.top-bounds.top;
+      let path;
+      if(graph.dataset.graph==='dependencies'&&narrow&&from==='task-layout'&&to==='task-mobile'){
+        path='M '+ax+' '+(ay+a.height/2)+' H 7 V '+(by+b.height/2)+' H '+(bx-4);
+      }else if((graph.dataset.graph==='roles'&&!narrow)||(graph.dataset.graph==='dependencies'&&narrow)){
+        const startX=ax+a.width/2,startY=ay+a.height+1,endX=bx+b.width/2,endY=by-5,middleY=(startY+endY)/2;
+        path='M '+startX+' '+startY+' V '+middleY+' H '+endX+' V '+endY;
+      }else{
+        const startX=ax+a.width+1,startY=ay+a.height/2,endX=bx-5,endY=by+b.height/2,middleX=(startX+endX)/2;
+        path='M '+startX+' '+startY+' H '+middleX+' V '+endY+' H '+endX;
+      }
+      svg.append(svgElement('path',{d:path,'marker-end':'url(#'+markerId+')'}));
+    }
+  }
+  function drawRelations(){root.querySelectorAll('[data-graph]').forEach(drawGraph)}
+  if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(drawRelations);root.querySelectorAll('[data-graph]').forEach(graph=>observer.observe(graph))}
+  requestAnimationFrame(drawRelations);
+  function checklist(task,verification=false){return '<ul class="oms-checklist">'+task.checks.map(([label,done],index)=>{const complete=done;return '<li class="'+(complete?'is-done':'')+'">'+icon(complete?'circle-check':'circle-dashed')+'<span>'+label+(verification?'<span class="oms-sub" style="display:block">'+(complete?'확인됨 · 예시 근거':'미실행')+'</span>':'')+'</span></li>'}).join('')+'</ul>'}
+  function renderDetail(){
+    if(!selected)return;
+    const task=tasks[selected];
+    title.textContent=task.title;
+    meta.innerHTML='<span class="oms-badge '+task.tone+'">'+task.status+'</span><p class="oms-sub" style="margin-top:7px">'+task.owner+'</p>';
+    root.querySelectorAll('[data-detail-tab]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.detailTab===detail)));
+    if(detail==='summary'){
+      content.innerHTML='<div class="oms-detail-block"><h4>목적</h4><p>'+task.goal+'</p></div>'+(selected==='layout'?'<div class="oms-detail-block"><h4>기본 배치</h4><div class="oms-step"><span class="oms-step-number">1</span><span>현재 목표와 필요한 판단</span></div><div class="oms-step"><span class="oms-step-number">2</span><span>진행 중인 작업과 담당</span></div><div class="oms-step"><span class="oms-step-number">3</span><span>최근 결과와 화면 미리보기</span></div></div>':'')+'<div class="oms-detail-block"><h4>완료 조건</h4>'+checklist(task)+'</div>';
+    }else if(detail==='checks'){
+      content.innerHTML='<div class="oms-detail-block"><h4>확인 항목</h4>'+checklist(task,true)+'</div>';
+    }else if(detail==='history'){
+      const events=task.events.slice();if(selected==='layout'&&adopted)events.push('시안에서 이 구성을 선택함');
+      content.innerHTML='<div class="oms-detail-block"><h4>변경 흐름</h4>'+events.map(event=>'<div class="oms-event">'+icon('circle-small')+'<span>'+event+'</span></div>').join('')+'</div>';
+    }else if(selected==='mobile'){
+      content.innerHTML='<div class="oms-detail-block"><h4>아직 연결된 산출물이 없어요</h4><p>선행 작업이 끝나고 결과가 등록되면 이 작업의 미리보기를 표시합니다.</p></div>';
+    }else if(selected==='cards'){
+      content.innerHTML='<div class="oms-large-preview"><div class="oms-preview-head"><span>작업 카드 구성 · 예시</span></div><div class="oms-preview-row">연결 상태 표시<span>검증 중 · 구현 담당</span><span>검증 항목 2 / 3 확인</span><span>작업 상세 →</span></div></div>';
+    }else{
+      content.innerHTML=selected==='connection'?'<div class="oms-large-preview"><div class="oms-preview-head"><span>연결 상태</span><span class="oms-badge warn">연결 끊김</span></div><div class="oms-preview-row">연결 상태 표시<span>마지막 확인: 검증 중</span></div><div class="oms-preview-row">선택한 작업은 유지돼요<span>다시 연결되면 최신 상태를 확인합니다.</span></div></div>':'<div class="oms-large-preview"><div class="oms-preview-head"><span>OMS · 지금</span>'+icon('layers')+'</div><div class="oms-kicker">현재 목표</div><h4>공통 작업 화면 만들기</h4><div class="oms-preview-row">'+icon('circle-help')+' 판단할 일<span>첫 화면 구성 검토</span></div><div class="oms-preview-row">'+icon('flask-conical')+' 진행 중인 작업<span>연결 상태 · 검증 중</span></div><div class="oms-preview-row">'+icon('panels-top-left')+' 새로 나온 결과<span>요약 패널 배치안</span></div></div>';
+    }
+    footer.innerHTML=selected==='layout'?'<div class="oms-actions" style="margin-top:0"><button type="button" class="oms-button oms-button-primary" data-adopt '+(adopted?'disabled':'')+'>'+icon(adopted?'check':'check-check')+(adopted?'선택됨 · 시안':'이 구성 선택')+'</button><button type="button" class="oms-button" data-feedback>수정 의견 작성</button></div>':'<button type="button" class="oms-button" data-detail-tab="checks">'+icon('list-checks')+'검증 결과 보기</button>';
+  }
+  function selectTask(id,tab,button){
+    if(selected)drafts[selected]=feedbackText.value;
+    selected=id;detail=tab||'summary';lastTaskButton=button;
+    root.querySelectorAll('button.oms-graph-node').forEach(node=>node.dataset.selected=String(node.dataset.task===id));
+    feedbackText.value=drafts[id]||'';feedback.hidden=true;draftPreview.hidden=true;
+    inspector.hidden=false;workarea.dataset.open='true';renderDetail();inspector.querySelector('[data-close]').focus();
+    notice.textContent='선택한 작업: '+tasks[id].title+' · 모든 상태와 동작은 시안입니다.';
+  }
+  root.addEventListener('click',event=>{
+    const button=event.target.closest('button');if(!button||!root.contains(button))return;
+    if(button.dataset.page){
+      const page=button.dataset.page;
+      root.querySelectorAll('[data-view]').forEach(view=>view.hidden=view.dataset.view!==page);
+      root.querySelectorAll('.oms-navbutton').forEach(nav=>nav.setAttribute('aria-pressed',String(nav.dataset.page===page)));
+      if(selected)drafts[selected]=feedbackText.value;
+      inspector.hidden=true;workarea.dataset.open='false';
+      notice.textContent=({now:'현재 목표와 필요한 판단',work:'작업 목록과 단계',team:'담당 구조와 작업 의존성',results:'산출물과 검증 근거'})[page]+' · 예시 화면';
+      requestAnimationFrame(drawRelations);
+    }else if(button.dataset.relation){
+      const view=button.dataset.relation;
+      root.querySelectorAll('[data-relation-view]').forEach(panel=>panel.hidden=panel.dataset.relationView!==view);
+      root.querySelectorAll('[data-relation]').forEach(control=>control.setAttribute('aria-pressed',String(control.dataset.relation===view)));
+      notice.textContent=(view==='roles'?'Main의 조율과 역할별 담당 작업':'선행 작업과 후속 작업의 연결')+' · 작업 노드를 선택하면 상세가 열립니다.';
+      requestAnimationFrame(drawRelations);
+    }else if(button.dataset.task){selectTask(button.dataset.task,button.dataset.detail,button)}
+    else if(button.hasAttribute('data-close')){if(selected)drafts[selected]=feedbackText.value;inspector.hidden=true;workarea.dataset.open='false';if(lastTaskButton&&!lastTaskButton.closest('[hidden]'))lastTaskButton.focus();notice.textContent='목록으로 돌아왔어요. 작업을 다시 선택하면 상세를 볼 수 있어요.'}
+    else if(button.dataset.detailTab){detail=button.dataset.detailTab;renderDetail()}
+    else if(button.hasAttribute('data-adopt')){
+      adopted=true;renderDetail();
+      const badge=root.querySelector('#oms-decision-status');badge.className='oms-badge';badge.textContent='선택 기록 · 시안';
+      root.querySelectorAll('[data-layout-badge]').forEach(el=>{el.className='oms-badge';el.textContent='선택 기록 · 검토 유지'});
+      notice.textContent='시안에 배치 선택만 기록했어요. 실행·검증·작업 완료 상태는 바뀌지 않아요.';
+    }else if(button.hasAttribute('data-feedback')){feedback.hidden=!feedback.hidden;if(!feedback.hidden)feedbackText.focus()}
+    else if(button.hasAttribute('data-preview-draft')){draftPreview.hidden=false;draftPreview.textContent=feedbackText.value.trim()||'수정 의견을 입력해 주세요.';if(selected)drafts[selected]=feedbackText.value;notice.textContent='작성 내용 미리보기입니다. Main에게 전송하지 않아요.'}
+  });
+})();
+</script>
+</body>
+</html>

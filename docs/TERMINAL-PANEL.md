@@ -515,6 +515,17 @@ retained for the same Room is marked `last observed`. Detail parses live
 provider-stream activity for running calls and shows a What it did summary for
 finished calls; tree rows include the latest event.
 
+Headless calls verify the selected private account home during execution. A home
+change during the call retains an unknown receipt and the executor's cleanup
+evidence, then stops without retrying another account or model.
+
+During the reader rollout, new calls continue writing legacy receipts. Board
+retains independently measured usage and shows `?` for named-account resumed
+cumulative counters whose home continuity the receipt cannot prove. Readers
+retain any existing account-home scope evidence without storing home paths. See
+the
+[usage schema compatibility contract](../crates/oms-command-telemetry/README.md#lifetime-provider-usage-receipts).
+
 When space permits, the Weekly quota strip includes activity for each connected
 lead. Wide boards spell out `working`, `idle`, `unknown`, `pending`, or `stale`.
 When the words exceed the available width, the strip uses the suffixes `*`,
@@ -2465,6 +2476,8 @@ retirement supplies no native child-cleanup proof. Results then points to the ne
 ready task instead of recommending admission again. Native consumption and
 completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
 permissions `unknown`, and child cleanup `unsupported`.
+
+#### Recover an unsent first intent
 
 If a first assignment was interrupted before writing its packet and its frozen
 inputs have changed, the owning Main can explicitly retire the original intent.

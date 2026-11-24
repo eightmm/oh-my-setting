@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub use oms_command_plan::json::{self, Value};
 pub use oms_command_plan::{Error, Result};
 pub type Output = (i32, Vec<u8>, Vec<u8>);
+pub use failures::{observe_task_verification, task_failure_candidates};
 
 pub const COMMANDS: &[&str] = &[
     "state",
@@ -85,6 +86,10 @@ pub trait HostServices {
     }
     /// Native task status; `None` falls back to the crate's own `oms_command_task::run`.
     fn task_status(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Output> {
+        None
+    }
+    /// Optional display-only records from enrolled scratch checkouts.
+    fn scratch_activity(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Value> {
         None
     }
     /// Fresh canonical runtime evidence for this exact repository and snapshot.

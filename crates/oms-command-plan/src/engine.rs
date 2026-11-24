@@ -19,6 +19,128 @@ pub const STATES: &[&str] = &[
     "done",
     "cancelled",
 ];
+/// A caller's issued task snapshot, before any provider call. It cannot select
+/// the current claimant by task id or grant completion/landing authority.
+#[derive(Clone, Debug)]
+pub struct DelegateBinding(Value);
+impl DelegateBinding {
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        let value = json::parse_bounded(raw, 4096)?;
+        json::keys(
+            &value,
+            &[
+                "schema",
+                "plan_id",
+                "task_id",
+                "task_sha256",
+                "lease_id",
+                "lease_epoch",
+                "base_sha",
+            ],
+            &[],
+        )?;
+        require(
+            value.get("schema").is_int(1)
+                && lineage(value.text("plan_id"), "plan_")
+                && valid_id(value.text("task_id"))
+                && value.text("task_id").len() <= 160
+                && json::hex(value.text("task_sha256"), 64)
+                && lineage(value.text("lease_id"), "lease_")
+                && value.get("lease_epoch").int().is_ok_and(|n| n > 0)
+                && [40, 64]
+                    .iter()
+                    .any(|&n| json::hex(value.text("base_sha"), n)),
+            "invalid exact Plan delegation binding",
+        )?;
+        Ok(Self(value))
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        json::canonical(&self.0)
+    }
+    pub fn task_id(&self) -> &str {
+        self.0.text("task_id")
+    }
+    pub fn lease_id(&self) -> &str {
+        self.0.text("lease_id")
+    }
+    pub fn base_sha(&self) -> &str {
+        self.0.text("base_sha")
+    }
+}
+const LANDING_REVIEW_SHA256: &str = "landing_review_sha256";
+
+/// Comparison target for landing the exact Plan review selected by a runner.
+#[derive(Clone, Debug)]
+pub struct ReviewFence {
+    lease: DelegateBinding,
+    report_sha256: String,
+    patch_sha256: String,
+}
+impl ReviewFence {
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        let row = json::parse_bounded(raw, 4096)?;
+        json::keys(&row, &["binding", "report_sha256", "patch_sha256"], &[])?;
+        let lease = DelegateBinding::parse(&json::canonical(row.get("binding"))?)?;
+        let report_sha256 = row.text("report_sha256").to_owned();
+        let patch_sha256 = row.text("patch_sha256").to_owned();
+        require(
+            json::hex(&report_sha256, 64) && json::hex(&patch_sha256, 64),
+            "invalid Plan review evidence digest",
+        )?;
+        Ok(Self {
+            lease,
+            report_sha256,
+            patch_sha256,
+        })
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        json::canonical(&object([
+            ("binding", self.lease.0.clone()),
+            ("report_sha256", string(&self.report_sha256)),
+            ("patch_sha256", string(&self.patch_sha256)),
+        ]))
+    }
+    pub fn task_id(&self) -> &str {
+        self.lease.task_id()
+    }
+    pub(crate) fn lease_id(&self) -> &str {
+        self.lease.lease_id()
+    }
+    pub(crate) fn plan_id(&self) -> &str {
+        self.lease.0.text("plan_id")
+    }
+    pub fn base_sha(&self) -> &str {
+        self.lease.base_sha()
+    }
+    pub fn patch_sha256(&self) -> &str {
+        &self.patch_sha256
+    }
+    fn digest(&self) -> Result<String> {
+        Ok(json::sha(self.encode()?))
+    }
+    /// Include the review binding in the native Plan receipt without changing
+    /// the outer landing ledger digest shared by legacy consumers.
+    pub fn stamp_landing_task(&self, task: &mut Value) -> Result<()> {
+        task.set(LANDING_REVIEW_SHA256, string(self.digest()?))
+    }
+    fn require_landing_stamp(&self, task: &Value) -> Result<()> {
+        require(
+            task.text(LANDING_REVIEW_SHA256) == self.digest()?,
+            "Plan landing lacks the exact review binding",
+        )
+    }
+    fn require_task(&self, plan: &Value, task: &Value, state: &str) -> Result<()> {
+        require(
+            plan.get("plan_id") == self.lease.0.get("plan_id")
+                && task.text("id") == self.task_id()
+                && task.text("state") == state
+                && task.text("review_lease_id") == self.lease.lease_id()
+                && task.get("lease_id") == self.lease.0.get("lease_id")
+                && task.get("lease_epoch") == self.lease.0.get("lease_epoch"),
+            "Plan landing task or reviewed lease changed",
+        )
+    }
+}
 #[derive(Clone)]
 pub struct Context {
     /// Caller directory that relative request operands resolve against.
@@ -365,6 +487,7 @@ pub struct Plan<'a> {
     pub(crate) proof_deadline: Option<std::time::Instant>,
     pub(crate) group_snapshot: Option<std::sync::Arc<crate::storage::GroupProofSnapshot>>,
 }
+
 impl<'a> Plan<'a> {
     pub fn open(
         context: Context,
@@ -449,8 +572,14 @@ impl<'a> Plan<'a> {
     pub fn show_task_with_locked_snapshot(&self, id: &str) -> Result<Response> {
         let req = Request::new(Action::Show).with("id", id);
         req.validate()?;
-        let snap = self.locked(false, None, || self.read_snapshot())?;
-        self.query(&req, &mut self.load_from_snapshot(snap)?)
+        self.query(
+            &req,
+            &mut self.load_from_snapshot(self.read_locked_snapshot()?)?,
+        )
+    }
+    /// Snapshot the Plan under its writer guard while a sibling publishes Review.
+    fn read_locked_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
+        self.locked(false, None, || self.read_snapshot())
     }
     fn load_from_snapshot(&self, snap: Option<storage::FileSnapshot>) -> Result<Snapshot> {
         let raw = snap.as_ref().map(|s| s.raw.clone());
@@ -596,7 +725,496 @@ impl<'a> Plan<'a> {
         s.settled.clear();
         Ok(())
     }
+    /// Check one immutable issued lease using the current canonical snapshot.
+    /// Callers reopen Context before each check so expiry never uses launch time.
+    pub fn check_delegate_binding(&self, binding: &DelegateBinding) -> Result<Value> {
+        self.context.parent()?;
+        self.locked(false, None, || {
+            let mut snapshot = self.load()?;
+            self.delegate_task(&mut snapshot, binding)
+        })
+    }
+
+    /// Check the already-started provider leg before preparing its physical launch.
+    pub fn check_running_delegate(&self, binding: &DelegateBinding, provider: &str) -> Result<()> {
+        self.context.parent()?;
+        self.locked(false, None, || {
+            self.running_delegate(&mut self.load()?, binding, provider)
+                .map(drop)
+        })
+    }
+
+    /// Retain the canonical Plan lock across worker checkout proof and spawn.
+    /// The caller supervises the child after release.
+    pub fn with_running_delegate_before<T, E>(
+        self,
+        binding: &DelegateBinding,
+        provider: &str,
+        deadline: std::time::Instant,
+        check_checkout: impl FnMut() -> std::result::Result<(), E>,
+        spawn: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> Result<std::result::Result<T, E>> {
+        self.with_running_delegate_before_clock(
+            binding,
+            provider,
+            deadline,
+            check_checkout,
+            spawn,
+            delegation_time,
+        )
+    }
+
+    fn with_running_delegate_before_clock<T, E>(
+        self,
+        binding: &DelegateBinding,
+        provider: &str,
+        deadline: std::time::Instant,
+        mut check_checkout: impl FnMut() -> std::result::Result<(), E>,
+        spawn: impl FnOnce() -> std::result::Result<T, E>,
+        now: impl Fn() -> Result<String>,
+    ) -> Result<std::result::Result<T, E>> {
+        let (plan, guard, groups) =
+            self.delegate_writer_before(deadline, oms_lock::Lock::try_acquire)?;
+        loop {
+            plan.recheck_delegate_groups(&groups, deadline)?;
+            let checked = plan.load().and_then(|mut snapshot| {
+                let task = plan.running_delegate(&mut snapshot, binding, provider)?;
+                Ok((snapshot, task))
+            });
+            if plan.resolve_delegate_group(&groups, deadline)? {
+                continue;
+            }
+            let (mut snapshot, task) = checked?;
+            guard.check().map_err(delegate_lock_error)?;
+            Context::before(plan.interrupted, Some(deadline))?;
+            if let Err(error) = check_checkout() {
+                return Ok(Err(error));
+            }
+            Context::before(plan.interrupted, Some(deadline))?;
+            // Marker custody can change independently of the Plan writer.
+            // expired_at reloads that evidence only once the lease reaches its TTL.
+            snapshot.markers = None;
+            let expired = plan.expired_at(&mut snapshot, &task, true, &now()?);
+            if plan.resolve_delegate_group(&groups, deadline)? {
+                // Refresh all Plan and checkout proof after the account lookup.
+                continue;
+            }
+            require(
+                !expired?,
+                "Plan delegation lease expired before provider start",
+            )?;
+            guard.check().map_err(delegate_lock_error)?;
+            Context::before(plan.interrupted, Some(deadline))?;
+            return Ok(spawn());
+        }
+    }
+
+    fn delegate_writer_before(
+        mut self,
+        deadline: std::time::Instant,
+        acquire: impl FnOnce(&oms_lock::Lock) -> std::result::Result<oms_lock::Guard, oms_lock::Error>,
+    ) -> Result<(
+        Self,
+        oms_lock::Guard,
+        std::sync::Arc<crate::storage::GroupProofSnapshot>,
+    )> {
+        self.context.parent()?;
+        require(
+            self.context.canonical(),
+            "delegation requires the canonical Plan",
+        )?;
+        Context::before(self.interrupted, Some(deadline))?;
+        let mut settings = self.context.lock_settings.clone();
+        settings.timeout = settings
+            .timeout
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        Context::before(self.interrupted, Some(deadline))?;
+        let authority = oms_lock::Lock::for_file(&self.context.state_repo.join(ACTIVE), settings)
+            .map_err(delegate_lock_error)?;
+        let guard = acquire(&authority).map_err(delegate_lock_error)?;
+
+        self.proof_deadline = Some(deadline);
+        let groups = std::sync::Arc::new(crate::storage::GroupProofSnapshot::new());
+        self.group_snapshot = Some(groups.clone());
+        self.store = self.store.with_group_snapshot(Some(groups.clone()));
+        self.source = self.source.with_group_snapshot(Some(groups.clone()));
+        Ok((self, guard, groups))
+    }
+
+    fn recheck_delegate_groups(
+        &self,
+        groups: &crate::storage::GroupProofSnapshot,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        Context::before(self.interrupted, Some(deadline))?;
+        for proof in groups.proofs()? {
+            let current =
+                self.services
+                    .group_membership_before(proof.gid, deadline, self.interrupted)?;
+            require(
+                current == proof,
+                "native group ownership changed before provider start",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn resolve_delegate_group(
+        &self,
+        groups: &crate::storage::GroupProofSnapshot,
+        deadline: std::time::Instant,
+    ) -> Result<bool> {
+        let Some(gid) = groups.missing()? else {
+            return Ok(false);
+        };
+        let proof = self
+            .services
+            .group_membership_before(gid, deadline, self.interrupted)?;
+        groups.insert(gid, proof)?;
+        Ok(true)
+    }
+
+    fn running_delegate(
+        &self,
+        snapshot: &mut Snapshot,
+        binding: &DelegateBinding,
+        provider: &str,
+    ) -> Result<Value> {
+        let task = self.delegate_task(snapshot, binding)?;
+        require(
+            task.text("state") == "running" && task.text("provider") == provider,
+            "Plan provider launch no longer owns its exact running lease",
+        )?;
+        Ok(task)
+    }
+
+    /// Only Start and Review cross this adapter. The ordinary execute request,
+    /// parent/context guards, locks and mutation checks are retained below.
+    pub fn execute_bound_task(
+        &self,
+        req: &Request,
+        binding: &DelegateBinding,
+        index: Option<&Value>,
+    ) -> Result<DelegateBinding> {
+        self.context.parent()?;
+        require(
+            matches!(req.action, Action::Start | Action::Review)
+                && req.value("id")? == binding.task_id()
+                && req.value("lease-id")? == binding.lease_id()
+                && (req.action == Action::Review) == index.is_some(),
+            "bound delegation permits only its exact Start or Review",
+        )?;
+        let response = self.execute_inner(req, Some(binding), index)?;
+        require(response.code == 0, "bound Plan mutation did not complete")?;
+        DelegateBinding::parse(&response.stdout)
+    }
+
+    /// Validate and publish just the issued Start, with no opportunistic maintenance.
+    pub fn execute_bound_start_before<T>(
+        self,
+        binding: &DelegateBinding,
+        deadline: std::time::Instant,
+        checkout: impl Fn(std::time::Instant) -> Result<T>,
+        recheck_checkout: impl Fn(&T) -> Result<()>,
+    ) -> Result<DelegateBinding> {
+        let (plan, guard, groups) =
+            self.delegate_writer_before(deadline, |lock| lock.acquire(None))?;
+        let req = Request::new(Action::Start)
+            .with("id", binding.task_id())
+            .with("lease-id", binding.lease_id());
+        loop {
+            plan.recheck_delegate_groups(&groups, deadline)?;
+            let checked = crate::retirement::completed_cleanup(&plan).and_then(|_| {
+                let mut snapshot = plan.load()?;
+                let task = plan.delegate_task(&mut snapshot, binding)?;
+                Ok((snapshot, task))
+            });
+            if plan.resolve_delegate_group(&groups, deadline)? {
+                continue;
+            }
+            let (mut snapshot, task) = checked?;
+            guard.check().map_err(delegate_lock_error)?;
+            Context::before(plan.interrupted, Some(deadline))?;
+            let mut running = task.clone();
+            plan.start_task(&req, &mut running)?;
+            running.set("updated", string(&plan.context.ts))?;
+            let mut next = binding.0.clone();
+            next.set("task_sha256", string(json::hash(&running)?))?;
+            let next = DelegateBinding::parse(&json::canonical(&next)?)?;
+            let witness = checkout(deadline)?;
+            snapshot.put(binding.task_id(), running)?;
+            let raw = json::pretty(&snapshot.plan)?;
+            let old = snapshot
+                .raw
+                .take()
+                .ok_or_else(|| error("canonical Plan missing"))?;
+            let mut admitted = false;
+            let result = plan.plan_storage().mutate_checked(
+                &plan.context.plan_file,
+                Some(&old),
+                &raw,
+                MAX_JSON,
+                false,
+                Some(|| {
+                    Context::before(plan.interrupted, Some(deadline))?;
+                    snapshot.markers = None;
+                    require(
+                        !plan.expired_at(&mut snapshot, &task, true, &delegation_time()?)?,
+                        "Plan delegation lease expired before Start",
+                    )?;
+                    guard.check().map_err(delegate_lock_error)?;
+                    recheck_checkout(&witness)?;
+                    Context::before(plan.interrupted, Some(deadline))?;
+                    admitted = true;
+                    Ok(())
+                }),
+            );
+            if !admitted && plan.resolve_delegate_group(&groups, deadline)? {
+                continue;
+            }
+            result?;
+            return Ok(next);
+        }
+    }
+
+    fn delegate_task(&self, s: &mut Snapshot, binding: &DelegateBinding) -> Result<Value> {
+        require(
+            self.context.canonical(),
+            "delegation requires the canonical Plan",
+        )?;
+        s.require_contract()?;
+        let task = s.task(binding.task_id())?.clone();
+        require(
+            s.plan.get("plan_id") == binding.0.get("plan_id")
+                && ["claimed", "running"].contains(&task.text("state"))
+                && task.get("lease_id") == binding.0.get("lease_id")
+                && task.get("lease_epoch") == binding.0.get("lease_epoch")
+                && json::hash(&task)? == binding.0.text("task_sha256")
+                && self.git().text(&["rev-parse", "HEAD"])? == binding.base_sha(),
+            "Plan delegation task, lease, scope or base changed",
+        )?;
+        require(
+            crate::contracts::stale(&s.registry, &task)?.is_empty()
+                && !self.expired_at(s, &task, true, &delegation_time()?)?,
+            "Plan delegation contract is stale or its lease expired",
+        )?;
+        Ok(task)
+    }
+
     pub fn execute(&self, req: &Request) -> Result<Response> {
+        self.execute_inner(req, None, None)
+    }
+
+    fn capture_delegate_result(
+        &self,
+        req: &Request,
+        binding: &DelegateBinding,
+        snapshot: &Snapshot,
+        index: &Value,
+    ) -> Result<(Request, Value)> {
+        let task = snapshot.task(binding.task_id())?;
+        let issued = DelegateBinding::parse(&json::canonical(index.get("plan_binding"))?)?;
+        require(
+            index.get("schema").is_int(1)
+                && index.text("kind") == "delegate"
+                && receipt_id(index.text("event_id"), 160)
+                && receipt_id(index.text("attempt_id"), 160)
+                && receipt_id(index.text("operation_id"), 160)
+                && index.text("task_id") == binding.task_id()
+                && index.text("provider") == task.text("provider")
+                && index.text("base_sha") == binding.base_sha()
+                && index.get("exit").is_int(0)
+                && index.get("verify_exit").is_int(0)
+                && index.text("verification") == "passed"
+                && index.text("state") == "review"
+                && index.get("no_change") == &Value::Bool(false)
+                && ["plan_id", "task_id", "lease_id", "lease_epoch", "base_sha"]
+                    .iter()
+                    .all(|key| issued.0.get(key) == binding.0.get(key)),
+            "native delegation index does not bind this verified task result",
+        )?;
+        let rows = self.source.rows(".oms/artifacts/index.jsonl", false)?;
+        let matching = rows
+            .iter()
+            .filter(|row| row.get("event_id") == index.get("event_id"))
+            .collect::<Vec<_>>();
+        require(
+            matching.len() == 1 && matching[0] == index,
+            "native delegation index changed before capture",
+        )?;
+        for (flag, digest) in [
+            ("expected-review-artifact-sha256", "artifact_sha256"),
+            ("expected-review-patch-sha256", "patch_sha256"),
+        ] {
+            if req.has(flag) {
+                require(
+                    req.value(flag)? == index.text(digest),
+                    "explicit Review digest differs from the native delegation index",
+                )?;
+            }
+        }
+        let mut request = req.clone();
+        let mut retained = object([
+            ("schema", number(1)),
+            ("kind", string("native-delegate-review")),
+            ("plan_id", binding.0.get("plan_id").clone()),
+            ("lease_id", string(binding.lease_id())),
+            ("index", crate::decision::retain_native(&self.store, index)?),
+        ]);
+        for (field, digest, suffix, flag, limit) in [
+            (
+                "artifact",
+                "artifact_sha256",
+                ".md",
+                "expected-review-artifact-sha256",
+                MAX_JSON,
+            ),
+            (
+                "patch",
+                "patch_sha256",
+                ".patch",
+                "expected-review-patch-sha256",
+                MAX_PATCH,
+            ),
+        ] {
+            let path = index.get(field).str()?;
+            require(
+                !Path::new(path).is_absolute()
+                    && !path.is_empty()
+                    && Path::new(path)
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    && json::hex(index.text(digest), 64),
+                "native delegation evidence requires a bounded repository path and digest",
+            )?;
+            let absolute = self.context.execution_repo.join(path);
+            let supplied = Path::new(req.value(field)?);
+            let supplied = if supplied.is_absolute() {
+                supplied.to_owned()
+            } else {
+                self.context.execution_repo.join(supplied)
+            };
+            require(
+                supplied == absolute,
+                "Plan Review path differs from the native delegation index",
+            )?;
+            let bytes = self.source.read(path, limit)?;
+            require(
+                !bytes.is_empty() && json::sha(&bytes) == index.text(digest),
+                "native delegation result bytes changed before capture",
+            )?;
+            let (reference, _) =
+                self.store
+                    .immutable(".oms/plan/delegate-results", &bytes, suffix, limit)?;
+            request = request.with(
+                field,
+                self.context
+                    .state_repo
+                    .join(reference.text("path"))
+                    .as_os_str(),
+            );
+            // Carry these captured bytes through the existing admission and
+            // Finish fences as well as the delegate provenance check at Land.
+            request = request.with(flag, reference.text("sha256"));
+            retained.set(field, reference)?;
+        }
+        Ok((request, retained))
+    }
+
+    fn delegate_review_evidence(
+        &self,
+        task: &Value,
+        expected_patch: &str,
+        base: Option<&str>,
+    ) -> Result<Option<Value>> {
+        let Some(result) = task.opt("delegate_result") else {
+            return Ok(None);
+        };
+        json::keys(
+            result,
+            &[
+                "schema", "kind", "plan_id", "lease_id", "index", "artifact", "patch",
+            ],
+            &[],
+        )?;
+        require(
+            result.get("schema").is_int(1)
+                && result.text("kind") == "native-delegate-review"
+                && result.text("lease_id") == task.text("review_lease_id"),
+            "invalid native delegate review provenance",
+        )?;
+        let index_ref = result.get("index");
+        let index_raw = self.store.read(index_ref.text("path"), 64 * 1024)?;
+        require(
+            json::sha(&index_raw) == index_ref.text("sha256"),
+            "retained native delegate index changed",
+        )?;
+        let index = json::parse(&index_raw)?;
+        require(
+            index.text("task_id") == task.text("id")
+                && index.text("provider") == task.text("provider")
+                && base.is_none_or(|base| index.text("base_sha") == base)
+                && index.get("plan_binding").get("plan_id") == result.get("plan_id")
+                && index.get("plan_binding").get("lease_id") == result.get("lease_id"),
+            "retained native delegate index changed identity",
+        )?;
+        for (field, digest) in [("artifact", "artifact_sha256"), ("patch", "patch_sha256")] {
+            let reference = result.get(field);
+            let bytes = self.store.read(reference.text("path"), MAX_PATCH)?;
+            require(
+                json::sha(&bytes) == reference.text("sha256")
+                    && reference.get("sha256") == index.get(digest)
+                    && Path::new(task.text(field))
+                        == self.context.state_repo.join(reference.text("path")),
+                "retained native delegate review bytes or paths changed",
+            )?;
+        }
+        require(
+            result.get("patch").text("sha256") == expected_patch,
+            "landing patch is not the exact native delegated result",
+        )?;
+        Ok(Some(index))
+    }
+
+    /// Select only the retained, verified Review from this exact provider call.
+    pub fn check_delegate_review(
+        &self,
+        issued: &DelegateBinding,
+        operation: &str,
+    ) -> Result<Value> {
+        self.context.parent()?;
+        let mut snapshot = self.load_from_snapshot(self.read_locked_snapshot()?)?;
+        snapshot.require_contract()?;
+        let task = snapshot.task(issued.task_id())?.clone();
+        require(
+            snapshot.plan.get("plan_id") == issued.0.get("plan_id")
+                && task.text("state") == "review"
+                && task.text("lease_id") == issued.lease_id()
+                && task.text("review_lease_id") == issued.lease_id()
+                && task.get("lease_epoch") == issued.0.get("lease_epoch")
+                && self.git().text(&["rev-parse", "HEAD"])? == issued.base_sha()
+                && crate::contracts::stale(&snapshot.registry, &task)?.is_empty(),
+            "issued delegation no longer owns the exact reviewed task",
+        )?;
+        let patch = task.get("delegate_result").get("patch").text("sha256");
+        let index = self
+            .delegate_review_evidence(&task, patch, Some(issued.base_sha()))?
+            .ok_or_else(|| error("issued delegation lacks retained native review evidence"))?;
+        require(
+            index.text("operation_id") == operation && index.get("plan_binding") == &issued.0,
+            "retained native review belongs to a different delegation operation",
+        )?;
+        let mut view = self.view(&mut snapshot, &task, true)?;
+        view.set("plan_id", snapshot.plan.get("plan_id").clone())?;
+        Ok(view)
+    }
+
+    fn execute_inner(
+        &self,
+        req: &Request,
+        binding: Option<&DelegateBinding>,
+        index: Option<&Value>,
+    ) -> Result<Response> {
         use Action::*;
         req.validate()?;
         {
@@ -749,7 +1367,47 @@ impl<'a> Plan<'a> {
                     crate::retirement::cleanup(self)?;
                 }
                 let mut s = self.load()?;
-                self.mutate(req, &mut s)
+                if let Some(binding) = binding
+                    && let Err(error) = self.delegate_task(&mut s, binding)
+                {
+                    if req.action == Review {
+                        self.store.append_private_atomic(
+                            ".oms/plan/late-results.jsonl",
+                            &object([
+                                ("schema", number(1)),
+                                ("ts", string(&self.context.ts)),
+                                ("task_id", string(binding.task_id())),
+                                ("supplied_lease_id", string(binding.lease_id())),
+                                ("reason", string("stale_delegate_binding")),
+                                ("artifact", string(req.text("artifact")?)),
+                                ("patch", string(req.text("patch")?)),
+                            ]),
+                        )?;
+                    }
+                    return Err(error);
+                }
+                let captured = if let (Some(binding), Some(index)) = (binding, index) {
+                    let captured = self.capture_delegate_result(req, binding, &s, index)?;
+                    // File capture and Plan lock acquisition may consume the
+                    // lease. Neither extends the worker's issued authority.
+                    self.delegate_task(&mut s, binding)?;
+                    Some(captured)
+                } else {
+                    None
+                };
+                let selected = captured.as_ref().map_or(req, |(request, _)| request);
+                let response =
+                    self.mutate(selected, &mut s, captured.as_ref().map(|(_, proof)| proof))?;
+                if let Some(binding) = binding {
+                    let mut next = binding.0.clone();
+                    next.set(
+                        "task_sha256",
+                        string(json::hash(s.task(binding.task_id())?)?),
+                    )?;
+                    Response::json(&next)
+                } else {
+                    Ok(response)
+                }
             },
         )
     }
@@ -844,10 +1502,13 @@ impl<'a> Plan<'a> {
         Ok(())
     }
     pub(crate) fn expired(&self, s: &mut Snapshot, t: &Value, running: bool) -> Result<bool> {
+        self.expired_at(s, t, running, &self.context.ts)
+    }
+    fn expired_at(&self, s: &mut Snapshot, t: &Value, running: bool, now: &str) -> Result<bool> {
         if !(t.text("state") == "claimed" || running && t.text("state") == "running") {
             return Ok(false);
         }
-        let Some(age) = age(t, &self.context.ts) else {
+        let Some(age) = age(t, now) else {
             return Ok(false);
         };
         if age < i128::from(task_ttl(t, self.context.claim_ttl)) {
@@ -907,7 +1568,27 @@ impl<'a> Plan<'a> {
         }
         Ok(t.text("state") == "ready" || self.expired(s, t, false)?)
     }
-    fn mutate(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
+    fn start_task(&self, req: &Request, task: &mut Value) -> Result<()> {
+        require(
+            !task.get("executor_id").truth() && !task.get("executor_soul_sha256").truth(),
+            "Soul executor receipt is retired; preserve old evidence and create a fresh plan task",
+        )?;
+        let id = task.text("id");
+        let state = task.text("state");
+        require(
+            state == "claimed",
+            format!("task {id} is {state}; claim it first"),
+        )?;
+        self.lease(req, task)?;
+        task.set("state", string("running"))
+    }
+
+    fn mutate(
+        &self,
+        req: &Request,
+        s: &mut Snapshot,
+        delegate_result: Option<&Value>,
+    ) -> Result<Response> {
         use Action::*;
         match req.action {
             Init => {
@@ -974,7 +1655,19 @@ impl<'a> Plan<'a> {
         require(valid_id(id), "--id must match [A-Za-z0-9._-]+")?;
         let mut t = s.task(id)?.clone();
         let state = t.text("state").to_owned();
-        if matches!(req.action, Claim | Land | Finish) {
+        if matches!(req.action, Claim | Release | Repair | Block) && req.has("expected-task-sha256")
+        {
+            let expected = req.value("expected-task-sha256")?;
+            require(
+                json::hex(expected, 64)
+                    && json::hash(&t)? == expected
+                    && (req.action != Release || state == "claimed"),
+                "task changed before the conditional Plan transition",
+            )?;
+        }
+        if matches!(req.action, Claim | Land | Finish)
+            || req.action == Repair && req.has("expected-review-binding")
+        {
             let stale = crate::contracts::stale(&s.registry, &t)?;
             require(
                 stale.is_empty(),
@@ -1006,7 +1699,7 @@ impl<'a> Plan<'a> {
                 ));
             }
         }
-        if matches!(req.action, Claim | Start | Review | Repair | Land | Finish) {
+        if matches!(req.action, Claim | Review | Repair | Land | Finish) {
             require(
                 !t.get("executor_id").truth() && !t.get("executor_soul_sha256").truth(),
                 "Soul executor receipt is retired; preserve old evidence and create a fresh plan task",
@@ -1035,14 +1728,7 @@ impl<'a> Plan<'a> {
                 )?;
                 self.claim(req, &mut t, true)?;
             }
-            Start => {
-                require(
-                    state == "claimed",
-                    format!("task {id} is {state}; claim it first"),
-                )?;
-                self.lease(req, &t)?;
-                t.set("state", string("running"))?;
-            }
+            Start => self.start_task(req, &mut t)?,
             Touch => {
                 require(
                     ["claimed", "running"].contains(&state.as_str()),
@@ -1077,6 +1763,11 @@ impl<'a> Plan<'a> {
                 t.set("executor_id", string(""))?;
                 t.set("executor_soul_sha256", string(""))?;
                 t.set("repair_artifact", string(""))?;
+                if let Some(result) = delegate_result {
+                    t.set("delegate_result", result.clone())?;
+                } else {
+                    t.remove("delegate_result");
+                }
                 if let Some(record) = acceptance {
                     t.set("panel_accept", record)?;
                 } else {
@@ -1089,6 +1780,16 @@ impl<'a> Plan<'a> {
                 }
             }
             Repair => {
+                if req.has("expected-review-binding") {
+                    let proof =
+                        ReviewFence::parse(req.value("expected-review-binding")?.as_bytes())?;
+                    self.require_landing_review(&s.plan, &t, &proof)?;
+                    self.delegate_review_evidence(
+                        &t,
+                        proof.patch_sha256(),
+                        Some(proof.base_sha()),
+                    )?;
+                }
                 require(
                     state == "review",
                     format!("task {id} is {state}; only reviewed work can enter repair"),
@@ -1118,7 +1819,7 @@ impl<'a> Plan<'a> {
                     t.set("repair_artifact", string(req.text("artifact")?))?;
                 }
             }
-            Land => self.land(req, &mut t)?,
+            Land => self.land(req, &mut t, &s.plan)?,
             Finish => {
                 if self.finish(req, s, &mut t)? {
                     return Ok(Response::default());
@@ -1162,6 +1863,12 @@ impl<'a> Plan<'a> {
                     ),
                 )?;
                 self.lease(req, &t)?;
+                if req.has("expected-landing-receipt-sha256")
+                    || t.opt(LANDING_REVIEW_SHA256).is_some()
+                {
+                    self.context.parent()?;
+                    self.require_landing_transition(req, &s.plan, &t)?;
+                }
                 clear_claim(s, &mut t)?;
             }
             Reopen => {
@@ -1211,6 +1918,12 @@ impl<'a> Plan<'a> {
         let after = t.text("state").to_owned();
         s.put(id, t)?;
         self.save(s)?;
+        if req.action == Claim && req.has("json") {
+            let task = s.task(id)?.clone();
+            let mut issued = self.view(s, &task, true)?;
+            issued.set("plan_id", s.plan.get("plan_id").clone())?;
+            return Response::json(&issued);
+        }
         Ok(Response::text(format!("plan: {id} -> {after}")))
     }
     pub(crate) fn lease(&self, req: &Request, t: &Value) -> Result<()> {
@@ -1860,7 +2573,124 @@ impl<'a> Plan<'a> {
         lines.push(format!("plan: reclaimed {count} task(s)"));
         Ok(Response::text(lines.join("\n")))
     }
-    fn land(&self, req: &Request, t: &mut Value) -> Result<()> {
+    /// Freeze the selected review and its evidence before passing it to landing.
+    pub fn landing_review_fence(&self, snapshot: &Value, base: &str) -> Result<ReviewFence> {
+        let lease = DelegateBinding::parse(&json::canonical(&object([
+            ("schema", number(1)),
+            ("plan_id", snapshot.get("plan_id").clone()),
+            ("task_id", snapshot.get("id").clone()),
+            ("task_sha256", snapshot.get("task_sha256").clone()),
+            ("lease_id", snapshot.get("lease_id").clone()),
+            ("lease_epoch", snapshot.get("lease_epoch").clone()),
+            ("base_sha", string(base)),
+        ]))?)?;
+        self.context.parent()?;
+        self.locked(false, None, || {
+            let current = self.load()?;
+            let task = current.task(lease.task_id())?;
+            let report = self.evidence_read(task.text("artifact"), MAX_PATCH)?;
+            let patch = self.evidence_read(task.text("patch"), MAX_PATCH)?;
+            require(
+                !report.is_empty() && !patch.is_empty(),
+                "review evidence is empty",
+            )?;
+            let expected = ReviewFence {
+                lease,
+                report_sha256: json::sha(&report),
+                patch_sha256: json::sha(&patch),
+            };
+            self.require_landing_review(&current.plan, task, &expected)?;
+            self.delegate_review_evidence(task, expected.patch_sha256(), Some(base))?;
+            Ok(expected)
+        })
+    }
+
+    pub fn check_landing_review(&self, expected: &ReviewFence) -> Result<Value> {
+        self.context.parent()?;
+        self.locked(false, None, || {
+            let mut s = self.load()?;
+            let task = s.task(expected.task_id())?.clone();
+            require(
+                crate::contracts::stale(&s.registry, &task)?.is_empty(),
+                "Plan landing contracts became stale before admission",
+            )?;
+            self.require_landing_review(&s.plan, &task, expected)?;
+            self.delegate_review_evidence(
+                &task,
+                expected.patch_sha256(),
+                Some(expected.base_sha()),
+            )?;
+            let mut view = self.view(&mut s, &task, true)?;
+            view.set("plan_id", s.plan.get("plan_id").clone())?;
+            Ok(view)
+        })
+    }
+
+    fn require_landing_review(
+        &self,
+        plan: &Value,
+        task: &Value,
+        expected: &ReviewFence,
+    ) -> Result<()> {
+        expected.require_task(plan, task, "review")?;
+        self.verify_review_evidence(task)?;
+        require(
+            json::hash(task)? == expected.lease.0.text("task_sha256")
+                && self.git().text(&["rev-parse", "HEAD"])? == expected.base_sha()
+                && json::sha(&self.evidence_read(task.text("artifact"), MAX_PATCH)?)
+                    == expected.report_sha256
+                && json::sha(&self.evidence_read(task.text("patch"), MAX_PATCH)?)
+                    == expected.patch_sha256(),
+            "Plan landing review, report, patch or base changed",
+        )
+    }
+
+    pub fn check_landing_done(
+        &self,
+        snapshot: &Snapshot,
+        task_id: &str,
+        expected: Option<&ReviewFence>,
+        patch_sha256: &str,
+    ) -> Result<()> {
+        self.check_landing_result(
+            &snapshot.plan,
+            snapshot.task(task_id)?,
+            expected,
+            patch_sha256,
+        )
+    }
+
+    pub(crate) fn check_landing_result(
+        &self,
+        plan: &Value,
+        task: &Value,
+        expected: Option<&ReviewFence>,
+        patch_sha256: &str,
+    ) -> Result<()> {
+        let Some(expected) = expected else {
+            return require(
+                task.opt(LANDING_REVIEW_SHA256).is_none(),
+                "bound Plan completion requires its exact review proof",
+            );
+        };
+        expected.require_task(plan, task, "done")?;
+        expected.require_landing_stamp(task)?;
+        require(
+            patch_sha256 == expected.patch_sha256()
+                && json::sha(&self.evidence_read(task.text("artifact"), MAX_PATCH)?)
+                    == expected.report_sha256,
+            "Plan landing completed with different report or patch evidence",
+        )
+    }
+
+    fn land(&self, req: &Request, t: &mut Value, plan: &Value) -> Result<()> {
+        let review = req
+            .has("expected-review-binding")
+            .then(|| ReviewFence::parse(req.value("expected-review-binding")?.as_bytes()))
+            .transpose()?;
+        if let Some(expected) = &review {
+            self.require_landing_review(plan, t, expected)?;
+        }
         require(
             t.text("state") == "review",
             format!(
@@ -1904,6 +2734,13 @@ impl<'a> Plan<'a> {
             "--expected-review-patch-sha256 must be lowercase SHA-256",
         )?;
         require(
+            review
+                .as_ref()
+                .is_none_or(|review| review.patch_sha256() == expected),
+            "Plan landing patch differs from its exact reviewed binding",
+        )?;
+        self.delegate_review_evidence(t, expected, review.as_ref().map(ReviewFence::base_sha))?;
+        require(
             json::sha(self.evidence_read(path, MAX_PATCH)?) == expected,
             "reviewed patch bytes changed during admission",
         )?;
@@ -1924,6 +2761,9 @@ impl<'a> Plan<'a> {
             t.text("executor_id") == executor && t.text("executor_soul_sha256") == soul,
             "executor review receipt changed during admission",
         )?;
+        if let Some(review) = review {
+            review.stamp_landing_task(t)?;
+        }
         t.set("state", string("landing"))
     }
     fn finish(&self, req: &Request, s: &mut Snapshot, t: &mut Value) -> Result<bool> {
@@ -2042,26 +2882,60 @@ impl<'a> Plan<'a> {
                 t.text("state")
             ),
         )?;
-        let expected = req.value("expected-landing-receipt-sha256")?;
-        require(
-            json::hex(expected, 64),
-            "--expected-landing-receipt-sha256 must be lowercase SHA-256",
-        )?;
-        require(
-            json::receipt_digest(t)? == expected,
-            "landing receipt changed; stale finish rejected",
-        )?;
-        let mut finished = t.clone();
-        evidence(req, &mut finished)?;
-        finished.set("state", string("done"))?;
-        self.verify_review_evidence(&finished)?;
-        if req.has("refreeze-acceptance") {
-            self.refreeze(req, s, t, expected)?;
+        let review = self.require_landing_transition(req, &s.plan, t)?;
+        let mut done = t.clone();
+        evidence(req, &mut done)?;
+        done.set("state", string("done"))?;
+        if let Some(review) = review {
+            require(
+                json::sha(&self.evidence_read(t.text("artifact"), MAX_PATCH)?)
+                    == review.report_sha256
+                    && done.get("artifact") == t.get("artifact")
+                    && json::sha(&self.evidence_read(done.text("patch"), MAX_PATCH)?)
+                        == review.patch_sha256()
+                    && json::receipt_digest(&done)?
+                        == req.value("expected-landing-done-receipt-sha256")?,
+                "Plan Finish evidence or expected done receipt changed",
+            )?;
         }
-        *t = finished;
+        self.verify_review_evidence(&done)?;
+        if req.has("refreeze-acceptance") {
+            self.refreeze(req, s, t, req.value("expected-landing-receipt-sha256")?)?;
+        }
+        *t = done;
         Ok(false)
     }
-
+    fn require_landing_transition(
+        &self,
+        req: &Request,
+        plan: &Value,
+        task: &Value,
+    ) -> Result<Option<ReviewFence>> {
+        let receipt = req.value("expected-landing-receipt-sha256")?;
+        require(
+            task.text("state") == "landing"
+                && json::hex(receipt, 64)
+                && json::receipt_digest(task)? == receipt,
+            "landing receipt changed; stale transition rejected",
+        )?;
+        let proof = req
+            .has("expected-review-binding")
+            .then(|| ReviewFence::parse(req.value("expected-review-binding")?.as_bytes()))
+            .transpose()?;
+        require(
+            proof.is_some() == task.opt(LANDING_REVIEW_SHA256).is_some(),
+            "bound Plan transition requires its exact review binding",
+        )?;
+        if let Some(proof) = &proof {
+            proof.require_task(plan, task, "landing")?;
+            proof.require_landing_stamp(task)?;
+            require(
+                self.git().text(&["rev-parse", "HEAD"])? == proof.base_sha(),
+                "Plan landing base changed before terminal transition",
+            )?;
+        }
+        Ok(proof)
+    }
     fn capture_review_evidence(&self, req: &Request, task: &Value) -> Result<Option<Value>> {
         let flags = [
             "expected-review-artifact-sha256",
@@ -2683,7 +3557,24 @@ pub(crate) fn clear_claim(s: &mut Snapshot, t: &mut Value) -> Result<()> {
     }
     t.remove("claimed_by_participant");
     t.remove("review_evidence");
+    t.remove(LANDING_REVIEW_SHA256);
     Ok(())
+}
+fn delegate_lock_error(error: oms_lock::Error) -> crate::Error {
+    crate::Error {
+        code: error.exit_code(),
+        message: error.to_string(),
+    }
+}
+
+fn delegation_time() -> Result<String> {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| error("invalid delegation clock"))?;
+    Ok(DateTime::<Utc>::from_timestamp(time.as_secs() as i64, 0)
+        .ok_or_else(|| error("invalid delegation clock"))?
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string())
 }
 pub(crate) fn parse_ts(s: &str) -> Option<i128> {
     if s.len() != 20 {
@@ -3081,6 +3972,261 @@ pub(crate) fn project_snapshot(source: &Store) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_spawn_rechecks_expiry_and_late_marker_group_after_checkout() {
+        use std::cell::Cell;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::time::{Duration, Instant};
+
+        struct Repo(PathBuf);
+        impl Drop for Repo {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct Host<'a> {
+            source: &'a Path,
+            mode: &'static str,
+            group_reads: Cell<usize>,
+        }
+        impl Services for Host<'_> {
+            fn group_membership_before(
+                &self,
+                gid: u32,
+                deadline: Instant,
+                stop: &AtomicBool,
+            ) -> Result<crate::services::GroupMembership> {
+                Context::before(stop, Some(deadline))?;
+                let reads = self.group_reads.get() + 1;
+                self.group_reads.set(reads);
+                if self.mode == "moved-source" && reads == 1 {
+                    let _ = git_at(
+                        self.source,
+                        &["commit", "--allow-empty", "-qm", "source moved"],
+                    );
+                }
+                let qualified = self.mode != "unproved" && (self.mode != "revoked" || reads == 1);
+                let uid = rustix::process::getuid().as_raw();
+                Ok(crate::services::GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![uid],
+                    primary_member_uids: if qualified { vec![uid] } else { Vec::new() },
+                })
+            }
+        }
+
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let repo = Repo(temp.join(format!(
+            "oms-plan-spawn-{}",
+            storage::random_hex(16).unwrap()
+        )));
+        for path in ["", ".oms", ".oms/plan", ".oms/delegations"] {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(repo.0.join(path))
+                .unwrap();
+        }
+        fn git_at(repo: &Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("/bin/sh")
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(repo)
+                .args(["-c", "umask 077; exec git -c user.name=Fixture -c user.email=fixture@example.invalid \"$@\"", "--"])
+                .args(args)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+
+        let _ = git_at(&repo.0, &["init", "-q"]);
+        let _ = git_at(&repo.0, &["commit", "--allow-empty", "-qm", "fixture"]);
+        let base = git_at(&repo.0, &["rev-parse", "HEAD"]);
+        let _ = git_at(
+            &repo.0,
+            &["worktree", "add", "-q", "--detach", "worker", &base],
+        );
+        let worker = repo.0.join("worker");
+        let stop = AtomicBool::new(false);
+        let mut settings = oms_lock::Settings::from_env().unwrap();
+        settings.mode = oms_lock::Mode::Flock;
+        settings.cwd = repo.0.clone();
+        settings.home = repo.0.clone();
+        settings.temp_dir = repo.0.clone();
+        settings.lock_dir = None;
+        let context = Context {
+            cwd: repo.0.clone(),
+            execution_repo: repo.0.clone(),
+            state_repo: repo.0.clone(),
+            plan_file: repo.0.join(ACTIVE),
+            ts: delegation_time().unwrap(),
+            child: false,
+            delegate_depth: String::new(),
+            owner_id: String::new(),
+            room_id: String::new(),
+            participant: String::new(),
+            panel_main_attempt: String::new(),
+            attempt_id: String::new(),
+            harness_call_id: String::new(),
+            claim_ttl: 3600,
+            run_id: String::new(),
+            cycle: None,
+            lock_settings: settings,
+        };
+        let setup = Host {
+            source: &repo.0,
+            mode: "qualified",
+            group_reads: Cell::new(0),
+        };
+        let plan = Plan::open(context.clone(), &setup, &stop).unwrap();
+        plan.execute(&Request::new(Action::Init).with("goal", "fixture"))
+            .unwrap();
+        plan.execute(
+            &Request::new(Action::Add)
+                .with("id", "task")
+                .with("title", "fixture"),
+        )
+        .unwrap();
+        let issued = plan
+            .execute(
+                &Request::new(Action::Claim)
+                    .with("id", "task")
+                    .with("provider", "codex")
+                    .flag("json"),
+            )
+            .unwrap();
+        let issued = json::parse(&issued.stdout).unwrap();
+        let binding = DelegateBinding::parse(
+            &json::canonical(&object([
+                ("schema", number(1)),
+                ("plan_id", issued.get("plan_id").clone()),
+                ("task_id", string("task")),
+                ("task_sha256", issued.get("task_sha256").clone()),
+                ("lease_id", issued.get("lease_id").clone()),
+                ("lease_epoch", issued.get("lease_epoch").clone()),
+                ("base_sha", string(&base)),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let running = plan
+            .execute_bound_task(
+                &Request::new(Action::Start)
+                    .with("id", "task")
+                    .with("lease-id", binding.lease_id()),
+                &binding,
+                None,
+            )
+            .unwrap();
+        let before = plan.load().unwrap().raw.unwrap();
+        let start = DateTime::parse_from_rfc3339(issued.text("claimed_at")).unwrap();
+        let expiry = (start + chrono::TimeDelta::seconds(3600))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+
+        for mode in [
+            "expired",
+            "qualified",
+            "unproved",
+            "revoked",
+            "moved-source",
+        ] {
+            if mode == "qualified" {
+                let marker = json::encoded(&object([
+                    ("schema", number(1)),
+                    ("id", string("live-worker")),
+                    ("pid", number(std::process::id())),
+                    ("task_id", string("task")),
+                    ("lease_id", string(running.lease_id())),
+                ]))
+                .unwrap();
+                plan.store
+                    .publish_once(".oms/delegations/live-worker.json", &marker, 4096)
+                    .unwrap();
+                std::fs::set_permissions(
+                    repo.0.join(".oms/delegations"),
+                    std::fs::Permissions::from_mode(0o770),
+                )
+                .unwrap();
+            }
+            let host = Host {
+                source: &repo.0,
+                mode,
+                group_reads: Cell::new(0),
+            };
+            let checkouts = Cell::new(0);
+            let spawned = Cell::new(false);
+            let result = Plan::open(context.clone(), &host, &stop)
+                .unwrap()
+                .with_running_delegate_before_clock(
+                    &running,
+                    "codex",
+                    Instant::now() + Duration::from_secs(10),
+                    || {
+                        assert_eq!(2 * checkouts.get(), host.group_reads.get());
+                        checkouts.set(checkouts.get() + 1);
+                        if mode == "moved-source" {
+                            assert_eq!(git_at(&worker, &["rev-parse", "HEAD"]), base);
+                            assert!(
+                                git_at(&worker, &["diff", "--cached", "--name-only"]).is_empty()
+                            );
+                        }
+                        Ok::<(), crate::Error>(())
+                    },
+                    || {
+                        spawned.set(true);
+                        Ok(())
+                    },
+                    || {
+                        assert!(checkouts.get() > 0);
+                        Ok(expiry.clone())
+                    },
+                );
+            match mode {
+                "qualified" => {
+                    result.unwrap().unwrap();
+                    assert!(spawned.get());
+                    assert_eq!(host.group_reads.get(), 2);
+                    assert_eq!(checkouts.get(), 2);
+                }
+                "unproved" => {
+                    assert!(result.is_err());
+                    assert!(!spawned.get());
+                    assert_eq!(host.group_reads.get(), 2);
+                    assert_eq!(checkouts.get(), 2);
+                }
+                "revoked" | "moved-source" => {
+                    let expected = if mode == "revoked" {
+                        "native group ownership changed before provider start"
+                    } else {
+                        assert_ne!(git_at(&repo.0, &["rev-parse", "HEAD"]), base);
+                        assert_eq!(git_at(&worker, &["rev-parse", "HEAD"]), base);
+                        assert!(git_at(&worker, &["diff", "--cached", "--name-only"]).is_empty());
+                        "Plan delegation task, lease, scope or base changed"
+                    };
+                    assert_eq!(result.unwrap_err().message, expected);
+                    assert!(!spawned.get());
+                    assert_eq!(host.group_reads.get(), 2);
+                    assert_eq!(checkouts.get(), 1);
+                }
+                _ => {
+                    assert_eq!(
+                        result.unwrap_err().message,
+                        "Plan delegation lease expired before provider start"
+                    );
+                    assert!(!spawned.get());
+                    assert_eq!(host.group_reads.get(), 0);
+                    assert_eq!(checkouts.get(), 1);
+                }
+            }
+        }
+        assert_eq!(plan.load().unwrap().raw.unwrap(), before);
+    }
 
     fn origin() -> oms_github::Slug {
         oms_github::Slug::parse("example-org/example-repo").unwrap()

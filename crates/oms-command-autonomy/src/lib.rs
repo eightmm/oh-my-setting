@@ -5,6 +5,7 @@
 //! missing integrations refuse instead of invoking a legacy implementation.
 #![forbid(unsafe_code)]
 
+pub mod adaptive;
 pub mod advisory;
 pub mod campaign;
 mod campaign_usage;
@@ -83,6 +84,7 @@ pub fn run_with_services(
             "proposal",
             "context-pack",
             "campaign",
+            "wait-binding",
         ] {
             if let Some(raw) = args.values.get_mut(name)
                 && !Path::new(raw).is_absolute()
@@ -128,7 +130,22 @@ pub fn run_with_services(
                 )?;
                 runner::execute(&context, &args)
             }
-            "autopilot" => receipt::execute(&context, &args),
+            "autopilot" => {
+                let wake = if matches!(args.action.as_str(), "run" | "reenter") {
+                    adaptive::start_wake(&context)?
+                } else {
+                    None
+                };
+                let result = receipt::execute(&context, &args);
+                if let Some(wake) = wake {
+                    adaptive::finish_wake(
+                        &context,
+                        wake,
+                        result.as_ref().map(|r| r.code).unwrap_or_else(|e| e.code),
+                    )?;
+                }
+                result
+            }
             "goal-drive" => goal::execute(&context, &args),
             "install-plan" => install::execute(&context, &args),
             _ => unreachable!(),

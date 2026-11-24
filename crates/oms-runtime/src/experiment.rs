@@ -7,7 +7,10 @@ use crate::value::*;
 use crate::{Result, error, require};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+mod continuation;
 mod remote;
+pub(crate) use continuation::valid_measurement;
+pub use continuation::{checkpoint, next};
 const RUNS: &str = ".oms/experiments/runs.jsonl";
 const RESERVATIONS: &str = ".oms/experiments/budget-reservations.jsonl";
 pub fn validate(raw: &Value) -> Result<Value> {

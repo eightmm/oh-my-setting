@@ -370,7 +370,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
-   ],"children":[{"name":"launch","help":"pre-register one host command in the run ledger"},{"name":"template","help":""},{"name":"validate","help":""},{"name":"compare","help":""},{"name":"register","help":""},{"name":"show","help":""},{"name":"run","help":""},{"name":"reconcile","help":"recover an existing remote experiment"},{"name":"summarize","help":""},{"name":"sweep","help":"enumerate a hyperparameter grid as named cells; runs and submits nothing"},{"name":"evaluate","help":""},{"name":"invariants","help":""}],"groups":[]},
+   ],"children":[{"name":"launch","help":"pre-register one host command in the run ledger"},{"name":"template","help":""},{"name":"validate","help":""},{"name":"compare","help":""},{"name":"register","help":""},{"name":"show","help":""},{"name":"run","help":""},{"name":"reconcile","help":"recover an existing remote experiment"},{"name":"summarize","help":""},{"name":"next","help":"read the exact next experiment action without executing it"},{"name":"checkpoint","help":"verify checkpoint provenance and bytes before resuming"},{"name":"sweep","help":"enumerate a hyperparameter grid as named cells; runs and submits nothing"},{"name":"evaluate","help":""},{"name":"invariants","help":""}],"groups":[]},
   {"path":["experiment", "launch"],"description":"Provide all seven claim fields or --contract PATH, then -- COMMAND. Uses run-ledger and its project verification gate; preserves command output/exit. Paths resolve from --repo. Do not put secrets in recorded fields or command arguments.",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
@@ -463,6 +463,10 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
     {"names":["--id"],"required":true}
    ],"children":[],"groups":[]},
+  {"path":["experiment", "next"],"description":"Read-only next action over registered seeds, exact pending runs, finite result evidence and original budgets. Missing execution inputs route Main to the reviewed Plan; another cell command is never replayed.",
+   "arguments":[{"names":["-h","--help"],"action":"help"},{"names":["--repo"],"default":"SUPPRESS"},{"names":["--pretty"],"action":"store_true","default":"SUPPRESS"},{"names":["--id"],"required":true}],"children":[],"groups":[]},
+  {"path":["experiment", "checkpoint"],"description":"Check a bounded provenance manifest against the exact registered run and checkpoint bytes. Never deserialize model data. Application optimizer/RNG restoration remains an application contract.",
+   "arguments":[{"names":["-h","--help"],"action":"help"},{"names":["--repo"],"default":"SUPPRESS"},{"names":["--pretty"],"action":"store_true","default":"SUPPRESS"},{"names":["--id"],"required":true},{"names":["--run-id"],"required":true},{"names":["--manifest"],"required":true},{"names":["--max-bytes"],"type":"int","default":536870912},{"names":["--timeout-seconds"],"type":"int","default":30},{"names":["--path-only"],"action":"store_true"}],"children":[],"groups":[]},
   {"path":["experiment", "sweep"],"description":"",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},

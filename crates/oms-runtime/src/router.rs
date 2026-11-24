@@ -645,6 +645,14 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
             }
             "launch" => return crate::experiment::launch(rt, r),
             "summarize" => crate::experiment::summarize(rt, r.text("id", "")?)?,
+            "next" => crate::experiment::next(rt, r.text("id", "")?)?,
+            "checkpoint" => {
+                let value = crate::experiment::checkpoint(rt, r)?;
+                if r.has("path-only") {
+                    return Ok(Response::text(format!("{}\n", value.text("path"))));
+                }
+                value
+            }
             "evaluate" => crate::experiment::evaluate(
                 &rt.load_argument(r.positional(0)?)?,
                 &rt.load_argument(r.positional(1)?)?,

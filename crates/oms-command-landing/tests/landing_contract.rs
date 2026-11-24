@@ -218,7 +218,15 @@ fn child_entry() {
         raw.split(SEP).map(OsString::from).collect()
     };
     let flag = AtomicBool::new(false);
-    let (code, out, err) = if tool == "feedback-candidate" {
+    let (code, out, err) = if tool == "exact-ci-observation" {
+        let identity = V::parse(args[0].to_str().unwrap().as_bytes()).unwrap();
+        match oms_command_landing::ci::observe_attempt(&cwd, &cwd, &identity, &flag)
+            .and_then(|v| v.json(false).map_err(oms_command_landing::Error::from))
+        {
+            Ok(raw) => (0, raw, vec![]),
+            Err(e) => (e.code, vec![], e.message.into_bytes()),
+        }
+    } else if tool == "feedback-candidate" {
         let result = oms_command_landing::feedback::repair_candidate(
             &cwd,
             &cwd,
@@ -1068,6 +1076,136 @@ fn ci_status_fails_closed_without_gh() {
         assert!(out.is_empty());
         assert!(err.contains("launch failed"), "{err}");
     }
+}
+
+#[test]
+fn exact_ci_observation_binds_repo_head_run_attempt_and_rechecks_after_gets() {
+    let f = FeedbackFixture::new();
+    let head = String::from_utf8(
+        f.isolated
+            .command(&f.repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    fs::write(&f.gh,r#"#!/bin/bash
+[[ "$1 $2 $3" == 'api --method GET' ]] || exit 93
+n=0
+if [[ -f "$OMS_CT_CALLS" ]]; then read -r n < "$OMS_CT_CALLS"; fi
+n=$((n+1)); printf '%s\n' "$n" > "$OMS_CT_CALLS"
+if [[ "$OMS_CT_MODE" == interrupt ]]; then exit 130; fi
+case "${@: -1}" in
+'repos/example/project/actions/runs/9/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_JOBS";;
+'repos/example/project/actions/runs/9')
+  if [[ "$n" == 3 && "$OMS_CT_MODE" == moved ]]; then git commit --allow-empty -qm changed || exit 91; fi
+  if [[ "$n" == 3 && "$OMS_CT_MODE" == rerun ]]; then printf '%s\n' "$OMS_CT_RERUN"; else printf '%s\n' "$OMS_CT_RUN"; fi;;
+*) exit 94;;
+esac
+"#).unwrap();
+    let identity = obj([
+        ("repository", "example/project".into()),
+        ("head_sha", head.clone().into()),
+        ("workflow_id", 7usize.into()),
+        ("run_id", 9usize.into()),
+        ("run_attempt", 1usize.into()),
+    ]);
+    let run = obj([
+        ("id", 9usize.into()),
+        ("workflow_id", 7usize.into()),
+        ("run_attempt", 1usize.into()),
+        ("head_sha", head.clone().into()),
+        ("repository", obj([("full_name", "EXAMPLE/Project".into())])),
+        ("status", "completed".into()),
+        ("conclusion", "success".into()),
+        ("updated_at", "2026-11-23T10:00:00Z".into()),
+    ]);
+    let job = obj([
+        ("id", 11usize.into()),
+        ("run_id", 9usize.into()),
+        ("run_attempt", 1usize.into()),
+        ("head_sha", head.into()),
+        (
+            "run_url",
+            "https://api.github.com/repos/example/project/actions/runs/9".into(),
+        ),
+        ("name", "rust".into()),
+        ("status", "completed".into()),
+        ("conclusion", "success".into()),
+        ("steps", V::Arr(vec!["not retained".into()])),
+    ]);
+    let calls = f.isolated.home.path().join("exact-ci-calls");
+    let query = |run: &V, job: &V, mode: &str| {
+        let _ = fs::remove_file(&calls);
+        let encode = |v: &V| String::from_utf8(v.json(false).unwrap()).unwrap();
+        let mut rerun = run.clone();
+        rerun.set("run_attempt", 2usize);
+        f.isolated.run_env(
+            "exact-ci-observation",
+            &f.repo,
+            &[&encode(&identity)],
+            &[
+                ("OMS_GH_BIN", f.gh.to_str().unwrap()),
+                ("OMS_CT_CALLS", calls.to_str().unwrap()),
+                ("OMS_CT_MODE", mode),
+                ("OMS_CT_RUN", &encode(run)),
+                ("OMS_CT_RERUN", &encode(&rerun)),
+                (
+                    "OMS_CT_JOBS",
+                    &encode(&obj([
+                        ("total_count", 1usize.into()),
+                        ("jobs", V::Arr(vec![job.clone()])),
+                    ])),
+                ),
+            ],
+        )
+    };
+    let ok = query(&run, &job, "");
+    assert_eq!(ok.0, 0, "{ok:?}");
+    let ledger = f.repo.join(".oms/ci.jsonl");
+    let first = fs::read(&ledger).unwrap();
+    assert!(!String::from_utf8_lossy(&first).contains("not retained"));
+    assert_eq!(query(&run, &job, "").0, 0);
+    assert_eq!(
+        fs::read(&ledger).unwrap(),
+        first,
+        "repeated observation does not grow source stream"
+    );
+    for field in ["run_id", "run_attempt", "head_sha", "run_url"] {
+        let mut wrong = job.clone();
+        wrong.set(
+            field,
+            match field {
+                "head_sha" => "b".repeat(40).into(),
+                "run_url" => "https://api.github.com/repos/foreign/project/actions/runs/9".into(),
+                _ => V::from(99usize),
+            },
+        );
+        assert_eq!(query(&run, &wrong, "").0, 2, "{field}");
+        assert_eq!(fs::read(&ledger).unwrap(), first);
+    }
+    let mut foreign = run.clone();
+    foreign.set("repository", obj([("full_name", "foreign/project".into())]));
+    assert_eq!(query(&foreign, &job, "").0, 2);
+    assert_eq!(
+        query(&run, &job, "rerun").0,
+        2,
+        "a rerun during observation is not the old successful attempt"
+    );
+    assert_eq!(query(&run, &job, "interrupt").0, 130);
+    assert_eq!(
+        query(&run, &job, "moved").0,
+        2,
+        "local HEAD is rechecked after network observations"
+    );
+    assert_eq!(
+        fs::read(&ledger).unwrap(),
+        first,
+        "refused observations do not mutate retained evidence"
+    );
 }
 
 #[test]
@@ -4350,11 +4488,12 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         issue(11, "OPEN", mine, "", "").replace(r#""labels":{"pageInfo":{"hasNextPage":false}"#,r#""labels":{"pageInfo":{"hasNextPage":true}"#),
     ]
     .join(",");
-    let reply = |more: bool, id: &str| {
+    let board_reply = |more: bool, id: &str, fields: &str, items: &str| {
         format!(
             r#"{{"data":{{"organization":{{"login":"example-org","projectV2":{{"id":"{id}","number":3,"title":"Board","url":"{url}","closed":false,"fields":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{fields}]}},"items":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"cGFnZTE="}},"nodes":[{items}]}}}}}}}}}}"#
         )
     };
+    let reply = |more, id: &str| board_reply(more, id, &fields, &items);
     fs::write(r.dir.join("panel-board"), reply(true, "PVT_abc")).unwrap();
     fs::write(r.dir.join("panel-projects"),r#"{"data":{"repository":{"nameWithOwner":"example-org/example-repo","projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PVT_abc","url":"https://github.com/orgs/example-org/projects/3","number":3,"title":"Board","closed":false,"owner":{"__typename":"Organization","login":"example-org"},"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}]}}}}"#).unwrap();
     let run = |args: &[&str]| {
@@ -4466,6 +4605,180 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         V::Null
     ));
     assert!(r.calls().contains("-f after=cGFnZTE="));
+    // Page-local advice uses the exact four single-select identities. Browsing
+    // keeps its previous classifications even when stricter evidence is absent.
+    let assert_advice = |row: &V, state: &str, reason: &str| {
+        let sidecar = row.get("recommendation");
+        assert_eq!(sidecar.get("state").text(), Some(state));
+        assert_eq!(sidecar.get("reason").text(), Some(reason));
+    };
+    assert_advice(&rows[0], "excluded", "duplicate");
+    assert_advice(&rows[1], "excluded", "duplicate");
+    assert_advice(&rows[8], "excluded", "plan_linked");
+    assert_advice(&rows[9], "excluded", "blocked");
+    let fields = [
+        field(
+            "F_status",
+            "Status",
+            r#"{"id":"s1","name":"Ready"},{"id":"s2","name":"Backlog"}"#,
+        ),
+        field(
+            "F_prio",
+            "Priority",
+            r#"{"id":"p0","name":"P0"},{"id":"p1","name":"P1"},{"id":"p2","name":"P2"},{"id":"p3","name":"P3"}"#,
+        ),
+        field("F_area", "Area", r#"{"id":"a1","name":"Runtime"}"#),
+        field("F_phase", "Phase", r#"{"id":"f1","name":"Foundation"}"#),
+    ]
+    .join(",");
+    let ready = [
+        value("F_status", "s1", "Ready"),
+        value("F_prio", "p1", "P1"),
+        value("F_area", "a1", "Runtime"),
+        value("F_phase", "f1", "Foundation"),
+    ]
+    .join(",");
+    let cards = |field_values: &str| issue(20, "OPEN", mine, "", field_values);
+    let query_board = |schema: &str, contents: &str| {
+        fs::write(
+            r.dir.join("panel-board"),
+            board_reply(true, "PVT_abc", schema, contents),
+        )
+        .unwrap();
+        let (code, reply, err) = run(&["--project-id", "PVT_abc"]);
+        assert_eq!(code, 0, "{err}");
+        reply.unwrap().get("github").get("board").clone()
+    };
+    let examples = [
+        (cards(&ready), "recommended", "ready_with_priority"),
+        (
+            cards(&ready.replace("p1", "p0").replace("P1", "P0")),
+            "recommended",
+            "ready_with_priority",
+        ),
+        (
+            cards(&ready.replace("p1", "p2").replace("P1", "P2")),
+            "recommended",
+            "ready_with_priority",
+        ),
+        (
+            cards(&format!("{ready},{}", value("F_status", "s1", "Ready"))),
+            "unverified",
+            "item_evidence_incomplete",
+        ),
+        (
+            cards(&ready.replace("s1", "s2").replace("Ready", "Backlog")),
+            "excluded",
+            "status_not_ready",
+        ),
+        (
+            cards(&ready.replace("p1", "p3").replace("P1", "P3")),
+            "unverified",
+            "priority_unrecognized",
+        ),
+        (
+            cards(&ready.replace("Runtime", "Other")),
+            "unverified",
+            "field_selection_unverified",
+        ),
+        (
+            cards(&ready.replace("F_phase", "F_removed")),
+            "unverified",
+            "field_selection_unverified",
+        ),
+        (
+            cards(&ready).replace(
+                r#""blockedBy":{"pageInfo":{"hasNextPage":false}"#,
+                r#""blockedBy":{"pageInfo":{"hasNextPage":true}"#,
+            ),
+            "unverified",
+            "dependencies_unknown",
+        ),
+    ];
+    for (item, state, reason) in examples {
+        let page = query_board(&fields, &item);
+        assert_advice(&page.get("items").array()[0], state, reason);
+        assert_eq!(
+            page.get("incomplete"),
+            &V::Bool(true),
+            "a recommendation does not exhaust later pages"
+        );
+    }
+    let item = cards(&ready);
+    for malformed in [
+        fields.replace(r#""name":"P3""#, r#""name":"P1""#),
+        fields.replace("F_area", "F_phase"),
+        fields.replace(r#""name":"Phase""#, r#""name":"Renamed phase""#),
+    ] {
+        assert_advice(
+            &query_board(&malformed, &item).get("items").array()[0],
+            "unverified",
+            "field_schema_unverified",
+        );
+    }
+    let archived = item.replace(r#""isArchived":false"#, r#""isArchived":true"#);
+    let page = query_board(&fields, &format!("{item},{archived}"));
+    assert_advice(&page.get("items").array()[0], "excluded", "duplicate");
+    let foreign = issue(20, "OPEN", "elsewhere/project", "", &ready);
+    let page = query_board(&fields, &format!("{item},{foreign}"));
+    assert_advice(
+        &page.get("items").array()[0],
+        "recommended",
+        "ready_with_priority",
+    );
+    for errors in [r#"[{"type":"NOT_FOUND"}]"#, "null"] {
+        let partial = board_reply(false, "PVT_abc", &fields, &item).replacen(
+            '{',
+            &format!(r#"{{"errors":{errors},"#),
+            1,
+        );
+        fs::write(r.dir.join("panel-board"), partial).unwrap();
+        let page = run(&["--project-id", "PVT_abc"]).1.unwrap();
+        assert_advice(
+            &page.get("github").get("board").get("items").array()[0],
+            "unverified",
+            "partial_response",
+        );
+    }
+    let plan_file = plan.join("tasks.json");
+    for raw in [
+        "",
+        r#"{"tasks":[]}"#,
+        r#"{"tasks":{"broken":null}}"#,
+        r##"{"tasks":{"duplicate":{"issue":"#20"},"duplicate":{}}}"##,
+    ] {
+        fs::write(&plan_file, raw).unwrap();
+        let page = query_board(&fields, &item);
+        assert_eq!(
+            page.get("items").array()[0].get("class").text(),
+            Some("candidate")
+        );
+        assert_advice(
+            &page.get("items").array()[0],
+            "unverified",
+            "plan_unverified",
+        );
+    }
+    fs::remove_file(&plan_file).unwrap();
+    assert_advice(
+        &query_board(&fields, &item).get("items").array()[0],
+        "recommended",
+        "ready_with_priority",
+    );
+
+    let packet_dir = r.repo.join(".oms/task");
+    fs::create_dir_all(&packet_dir).unwrap();
+    fs::write(
+        packet_dir.join("current.md"),
+        "# Task\n- github_issue: #19\n- github_issue: #20\n",
+    )
+    .unwrap();
+    assert_advice(
+        &query_board(&fields, &item).get("items").array()[0],
+        "unverified",
+        "plan_unverified",
+    );
+
     // Missing scope reports the reason only for read:project; other scopes and FORBIDDEN
     // never leak drift-only or misleading panel reasons to the shared board panel.
     fs::write(r.dir.join("panel-board"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
@@ -5152,6 +5465,93 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
         !text.contains("open_in_done"),
         "lowercase 'done' must not fuzzy-match configured 'Done': {text}"
     );
+
+    let read_drift = || {
+        let (code, out, err) = r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project-id",
+                "PVT_abc",
+                "--drift",
+                "--json",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        V::parse(out.as_bytes())
+            .unwrap()
+            .get("github")
+            .get("drift")
+            .clone()
+    };
+    let archived = issue_card(470, "OPEN", mine, true, "");
+    let complete_board = board_reply(&std_fields, false, "", &archived);
+    for incomplete_board in [
+        complete_board.replacen('{', r#"{"errors":null,"#, 1),
+        complete_board.replace(r#""__typename":"Issue""#, r#""__typename":null"#),
+        complete_board.replace(
+            &format!(r#""nameWithOwner":"{mine}""#),
+            r#""nameWithOwner":null"#,
+        ),
+        complete_board.replace(r#""number":470"#, r#""number":null"#),
+    ] {
+        fs::write(r.dir.join("panel-board"), incomplete_board).unwrap();
+        let drift = read_drift();
+        assert_eq!(
+            drift.get("completeness").get("board").get("complete"),
+            &V::Bool(false)
+        );
+        assert_eq!(
+            drift.get("missingFromBoard").get("unverified"),
+            &V::Bool(true)
+        );
+        assert!(
+            drift
+                .get("missingFromBoard")
+                .get("items")
+                .array()
+                .is_empty()
+        );
+        assert!(
+            !drift
+                .get("unverifiedMissing")
+                .get("items")
+                .array()
+                .is_empty()
+        );
+    }
+    // A partial inventory limits the total. An item actually observed there can
+    // still be compared with a complete board, including local archived members.
+    let issues_page = work_page(&open_issue_nodes.join(","), false, "");
+    fs::write(r.dir.join("panel-board"), &complete_board).unwrap();
+    fs::write(
+        r.dir.join("panel-inventory-issues"),
+        issues_page.replacen('{', r#"{"errors":{},"#, 1),
+    )
+    .unwrap();
+    let drift = read_drift();
+    assert_eq!(
+        drift.get("completeness").get("board").get("complete"),
+        &V::Bool(true)
+    );
+    assert_eq!(
+        drift.get("completeness").get("openIssues").get("complete"),
+        &V::Bool(false)
+    );
+    assert_eq!(drift.get("partial"), &V::Bool(true));
+    assert_eq!(
+        drift.get("missingFromBoard").get("unverified"),
+        &V::Bool(false)
+    );
+    assert!(
+        drift
+            .get("missingFromBoard")
+            .get("items")
+            .array()
+            .iter()
+            .all(|v| v.get("number") != &V::Num("470".into()))
+    );
+    fs::write(r.dir.join("panel-inventory-issues"), issues_page).unwrap();
 
     // 4. Partial page: hasNextPage=true with missing cursor -> reported as partial.
     fs::write(

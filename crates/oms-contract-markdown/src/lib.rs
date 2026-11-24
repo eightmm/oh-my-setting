@@ -194,6 +194,29 @@ pub fn section_text(mapping: &Sections, names: &[&str]) -> String {
         .join("\n");
     trim(&body).to_owned()
 }
+pub fn task_goal(body: &Sections) -> String {
+    first_nonempty(&section_text(body, &["goal", "objective", "목표"]), 1000)
+}
+
+/// Project objective from the declared goal section, with the legacy preamble fallback.
+pub fn project_goal(body: &Sections) -> String {
+    let mut goal = first_nonempty(
+        &section_text(body, &["goal", "objective", "purpose", "목표", "목적"]),
+        1000,
+    );
+    if goal.is_empty() {
+        goal = first_nonempty(
+            &body
+                .iter()
+                .find(|(k, _)| k == "__preamble__")
+                .map(|(_, v)| v.join("\n"))
+                .unwrap_or_default(),
+            1000,
+        )
+    }
+    goal
+}
+
 pub fn section_text_exact(mapping: &Sections, names: &[&str]) -> String {
     let wanted: Vec<_> = names.iter().map(|s| collapse(&lower(trim(s)))).collect();
     let body = mapping

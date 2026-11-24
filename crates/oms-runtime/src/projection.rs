@@ -45,20 +45,7 @@ pub fn project(rt: &Runtime<'_>) -> Result<Value> {
         return Ok(absent());
     };
     let (body, meta) = md::sections(&text);
-    let mut goal = md::first_nonempty(
-        &md::section_text(&body, &["goal", "objective", "purpose", "목표", "목적"]),
-        1000,
-    );
-    if goal.is_empty() {
-        goal = md::first_nonempty(
-            &body
-                .iter()
-                .find(|(k, _)| k == "__preamble__")
-                .map(|(_, v)| v.join("\n"))
-                .unwrap_or_default(),
-            1000,
-        )
-    }
+    let goal = md::project_goal(&body);
     let ct = md::section_text(&body, &["constraint", "scope", "제약", "범위"]);
     let mut constraints = md::bullet_items(&ct, false);
     if constraints.is_empty() {
@@ -170,13 +157,7 @@ pub fn task(rt: &Runtime<'_>) -> Result<Value> {
             "status",
             string(bounded(status.text("status"), 40).to_lowercase()),
         ),
-        (
-            "goal",
-            string(md::first_nonempty(
-                &md::section_text(&body, &["goal", "objective", "목표"]),
-                1000,
-            )),
-        ),
+        ("goal", string(md::task_goal(&body))),
         (
             "criteria",
             list(
@@ -230,6 +211,14 @@ pub fn task(rt: &Runtime<'_>) -> Result<Value> {
         ),
         ("budget", budget),
         ("stale", b(status.get("stale").truth())),
+        ("dormant", b(status.get("dormant").truth())),
+        (
+            "current_goal_eligible",
+            b(matches!(
+                status.get("current_goal_eligible"),
+                Value::Bool(true)
+            )),
+        ),
     ]))
 }
 fn paths(v: &Value) -> Vec<String> {
@@ -717,16 +706,17 @@ pub fn base(rt: &Runtime<'_>) -> Result<Value> {
             ("forbidden", s.get("forbidden").clone()),
         ]));
     }
-    let mut objective = object([("text", string("")), ("source", string("none"))]);
-    for (name, layer) in [("task", &t), ("plan", &plan), ("project", &p)] {
-        if !layer.text("goal").is_empty() {
-            objective = object([
-                ("text", string(bounded(layer.text("goal"), 1000))),
-                ("source", string(name)),
-            ]);
-            break;
-        }
-    }
+    let (goal, source) = oms_work_inspect::current_objective(
+        if t.get("current_goal_eligible").truth() {
+            t.text("goal")
+        } else {
+            ""
+        },
+        plan.text("goal"),
+        plan.get("has_unfinished").truth(),
+        p.text("goal"),
+    );
+    let objective = object([("text", string(goal)), ("source", string(source))]);
     let criteria = criteria(&p, &t, &plan)?;
     let mut warnings = vec![];
     if !criteria.truth() {
