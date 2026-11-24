@@ -1263,9 +1263,10 @@ for (const list of tabLists) for (const [index, tab] of list.entries()) {
 
 // Task-centered navigation. Every view reads the same oms_panel_work_items projection and opens
 // one shared detail by the item's own id; labels are display text only and never identify a task.
-const taskGroups = [['planned',['pending','queued','planned','todo','ready','open']],['active',['working','starting','verifying','in_progress','running','blocked','waiting_for_input']],['review',['review','in_review']],['done',['done','completed','closed','verified']],['other',[]]];
+const taskGroups = [['planned',['pending','queued','planned','todo','ready','open']],['active',['claimed','landing','working','starting','verifying','in_progress','running','blocked','waiting_for_input']],['review',['review','in_review']],['done',['done','completed','closed','verified']],['other',[]]];
 const taskGroup = item => taskGroups.find(([, states]) => states.includes(item.state))?.[0] || 'other';
-const taskStateText = item => item.state ? stateLabel(item.state) : t('w.stateUnknown');
+const workStateLabels={ready:['예정','Ready'],claimed:['담당 배정','Claimed'],running:['진행 중','Running'],review:['검토 중','In review'],landing:['게시 절차 진행','Landing'],blocked:['막힘','Blocked'],done:['완료','Done'],cancelled:['취소됨','Cancelled']};
+const taskStateText = item => Object.hasOwn(workStateLabels,item.state) ? choice(...workStateLabels[item.state]) : item.state ? stateLabel(item.state) : t('w.stateUnknown');
 const resultStates={accepted:['결과 수락','Result accepted'],completed:['결과 완료 기록','Completion recorded'],failed:['결과 실패','Result failed'],rejected:['결과 반려','Result rejected']};
 const verifyStates={passed:['검증 통과','Verification passed'],failed:['검증 실패','Verification failed'],not_run:['검증 미실행','Verification not run'],verified:['완료 근거 확인','Completion evidence verified'],unverified:['완료 근거 미확인','Completion evidence unverified']};
 const knownState=(states,v)=>typeof v==='string' && Object.hasOwn(states,v) ? v : null;

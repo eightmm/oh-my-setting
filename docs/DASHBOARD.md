@@ -231,6 +231,12 @@ The panel preserves drafts and the selected project. It prefers a saved choice,
 then a supported host or browser language, and defaults to Korean. Recorded
 answers and evidence retain their original text.
 
+### Tasks and results
+
+**Now** shows the project goal, pending decisions, active tasks and recorded results. **Work**, **Results** and **Relationships** open the same task detail by task ID. Owner groups show recorded assignments. Prerequisites appear separately, including cycles or references outside the retrieved page. **More** opens the map, chat, activity, metrics and Git views.
+
+The read-only `oms_panel_work_items` tool projects the selected project’s plan and bound results. The detail version identifies a work record and its evidence. If that version changes during refresh, reopen the current version to review it. The panel distinguishes completed work, accepted results, failed or unrun verification, and missing evidence. The history link opens project-wide activity.
+
 ### Project map and command directory
 
 The project map loads from the selected checkout as soon as the host confirms the project. Open **Explore** to follow nodes, inspect the source and bounds, or search the repository. Git containment describes folders and files. Indexed links distinguish extracted, inferred and ambiguous relationships. Reading the map leaves the index unchanged.
