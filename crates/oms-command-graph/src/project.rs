@@ -919,12 +919,23 @@ mod bridge_dependency_tests {
         let repo = std::env::temp_dir().join(format!("oms-bridge-group-{}", std::process::id()));
         let state = repo.join(".oms/project-graph");
         std::fs::create_dir_all(&state).unwrap();
+        // Set explicit modes on every fixture path so host/sandbox umasks (e.g. 0000 or 0002)
+        // never leak world- or unintended group-write bits into the trust check.
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(repo.join(".oms"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o775)).unwrap();
-        std::fs::write(repo.join("target.rs"), "fn main() {}\n").unwrap();
+        let target_file = repo.join("target.rs");
+        std::fs::write(&target_file, "fn main() {}\n").unwrap();
+        std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let manifest = json!({"schema":2,"parser_version":9,"revision":"r","discovery":{"include":[],"exclude":[],"max_bytes":2097152},"files":{}});
         let graph = json!({"schema":2,"revision":"r","nodes":[],"edges":[]});
-        std::fs::write(state.join("manifest.json"), manifest.to_string()).unwrap();
-        std::fs::write(state.join("graph.json"), graph.to_string()).unwrap();
+        let manifest_path = state.join("manifest.json");
+        let graph_path = state.join("graph.json");
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        std::fs::write(&graph_path, graph.to_string()).unwrap();
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        std::fs::set_permissions(&graph_path, std::fs::Permissions::from_mode(0o664)).unwrap();
         let target = [PathBuf::from("target.rs")];
         let cancel = AtomicBool::new(false);
         assert!(context_dependencies_with_groups(&repo, &target, None, None, &cancel).is_err());
