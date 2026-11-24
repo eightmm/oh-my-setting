@@ -471,15 +471,20 @@ impl Services for TestServices {
     }
     fn wait_siblings(
         &self,
-        _: &Path,
+        repo: &Path,
         budget: std::time::Duration,
         _: &AtomicBool,
     ) -> oms_command_landing::Result<()> {
-        if budget.is_zero() && std::env::var_os("OMS_CT_LATE_SIBLING").is_some() {
-            return Err(oms_command_landing::Error::new(
-                75,
-                "fixture sibling active",
-            ));
+        if budget.is_zero()
+            && let Some(log) = std::env::var_os("OMS_CT_SIBLING_CHECKS")
+        {
+            RecordingServices(log.into()).log(repo.display().to_string());
+            if std::env::var_os("OMS_CT_LATE_SIBLING").as_deref() == Some(repo.as_os_str()) {
+                return Err(oms_command_landing::Error::new(
+                    75,
+                    "fixture sibling active",
+                ));
+            }
         }
         Ok(())
     }
@@ -2517,7 +2522,16 @@ fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
         if flock {
             std::os::unix::fs::symlink(which("flock"), iso.bin.join("flock")).unwrap();
         }
-        let (a, bare) = iso.with_remote("ci-concurrent");
+        let (state, bare) = iso.with_remote("ci-concurrent");
+        let a = if scenario == "late-sibling" {
+            let pid = std::process::id().to_string();
+            let (code, out, err) =
+                iso.run("scratch-worktree", &state, &["add", "--owner-pid", &pid]);
+            assert_eq!(code, 0, "{err}");
+            PathBuf::from(out.trim())
+        } else {
+            state.clone()
+        };
         let b = iso.home.path().join("checkout-b");
         iso.git(
             &a,
@@ -2607,7 +2621,7 @@ fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             .copied()
             .filter(|s| *s != "--ignore-siblings")
             .collect::<Vec<_>>();
-        let args = if scenario == "late-sibling" {
+        let args = if matches!(scenario, "late-sibling" | "late-receipt") {
             guarded.as_slice()
         } else if merge {
             merging.as_slice()
@@ -2623,8 +2637,12 @@ fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             ("OMS_GH_BIN", gh_a.to_str().unwrap()),
             ("OMS_LOCK_TIMEOUT", "2"),
         ];
-        if scenario == "late-sibling" {
-            env.push(("OMS_CT_LATE_SIBLING", "1"));
+        let checks = iso.home.path().join("final-sibling-checks");
+        if merge && matches!(scenario, "late-sibling" | "late-receipt" | "unchanged") {
+            env.push(("OMS_CT_SIBLING_CHECKS", checks.to_str().unwrap()));
+            if scenario != "late-receipt" {
+                env.push(("OMS_CT_LATE_SIBLING", state.to_str().unwrap()));
+            }
         }
         if interrupted {
             env.push(("OMS_CT_INTERRUPT_AT", cancel.to_str().unwrap()));
@@ -2771,6 +2789,24 @@ fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                     .filter(|l| l.starts_with("pr merge"))
                     .count()
             };
+            if merge {
+                match scenario {
+                    "late-sibling" => {
+                        assert_ne!(a, state);
+                        assert_eq!(
+                            fs::read_to_string(&checks).unwrap(),
+                            format!("{}\n{}\n", a.display(), state.display())
+                        );
+                        assert_eq!(final_result.0, 75, "{context}");
+                    }
+                    "late-receipt" => assert_eq!(
+                        fs::read_to_string(&checks).unwrap(),
+                        format!("{}\n", a.display())
+                    ),
+                    "unchanged" => assert!(!checks.exists(), "--ignore-siblings scanned a root"),
+                    _ => {}
+                }
+            }
             if scenario == "unchanged" {
                 assert_eq!(final_result.0, 0, "{context}");
                 let done = if merge {

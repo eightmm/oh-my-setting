@@ -762,12 +762,15 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
     let merged = {
         // Same writer -> publication lock order as the initial push. A sibling
         // which appeared during CI causes a retry, never a wait under both locks.
-        let _publication = c
-            .services
-            .publication_guard(&c.state(r.repo)?, c.interrupted)?;
+        let state = c.state(r.repo)?;
+        let _publication = c.services.publication_guard(&state, c.interrupted)?;
         if !o.has("ignore-siblings") {
             c.services
                 .wait_siblings(r.repo, Duration::ZERO, c.interrupted)?;
+            if state != r.repo {
+                c.services
+                    .wait_siblings(&state, Duration::ZERO, c.interrupted)?;
+            }
         }
         // The observed verdict predates writer reentry; a rerun may have replaced it.
         let fresh = observe_pr_ci(r, row, Duration::ZERO, None)?;
