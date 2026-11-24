@@ -1433,36 +1433,107 @@ fn panel_streams_indexes_between_sixteen_and_twenty_four_mib() {
 
     let graph_path = repo.state().join("graph.json");
     let original = fs::read(&graph_path).unwrap();
-    let mut padded: Value = serde_json::from_slice(&original).unwrap();
-    let pad_to = |graph: &mut Value, total: usize| {
-        let pad = "x".repeat(1 << 20);
-        let nodes = graph["nodes"].as_array_mut().unwrap();
-        for i in 0..total {
-            let k = i % nodes.len();
-            nodes[k][format!("pad{i}")] = json!(pad);
-        }
+    let base: Value = serde_json::from_slice(&original).unwrap();
+    assert!(
+        base["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "src/untracked_sentinel.sh")
+    );
+
+    // The field lives inside a node: oversized rows still work when most of
+    // the input is a discarded field. Fill once, without building a second DOM.
+    let large = |graph: &Value| {
+        let mut raw = serde_json::to_vec(graph).unwrap();
+        let start = raw.windows(8).position(|w| w == b"ROW_PAD!").unwrap();
+        raw.splice(start..start + 8, std::iter::repeat_n(b'x', 17 << 20));
+        assert!(raw.len() > 16 << 20 && raw.len() < 24 << 20);
+        raw
     };
-    pad_to(&mut padded, 18);
-    let raw = padded.to_string();
-    assert!(raw.len() > 16 << 20 && raw.len() < 24 << 20);
+    let mut fixture = base.clone();
+    fixture["nodes"][0]["unused"] = json!("ROW_PAD!");
+    fixture["unused_root"] = json!("ROOT_PAD");
+    let tracked_file = "file:src/lib.sh";
+    let untracked_file = "file:src/untracked_sentinel.sh";
+    fixture["edges"].as_array_mut().unwrap().push(json!({
+        "source":untracked_file, "target":tracked_file, "relation":"imports", "confidence":"EXTRACTED"
+    }));
+    let mut raw = large(&fixture);
     fs::write(&graph_path, &raw).unwrap();
     for (probe, expected) in probes.iter().zip(&small) {
         assert_eq!(&panel(probe), expected, "{probe:?}");
     }
+    let missing = panel(&["--query=untracked_sentinel"]);
+    assert_eq!(missing["provenance"]["mode"], "indexed");
+    assert_eq!(missing["status"], "empty");
+    let selected = panel(&["--node=file:src/lib.sh"]);
+    assert_eq!(selected["selection"]["status"], "found");
+    assert!(
+        selected["selection"]["neighbors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["id"] != untracked_file)
+    );
+    assert_eq!(fs::read(&graph_path).unwrap(), raw);
 
-    pad_to(&mut padded, 25);
-    fs::write(&graph_path, padded.to_string()).unwrap();
+    let mark = raw.windows(8).position(|w| w == b"ROOT_PAD").unwrap();
+    for invalid in [
+        br"\uD800xx".as_slice(),
+        &[0xff, b'b', b'c', b'd', b'e', b'f', b'g', b'h'],
+    ] {
+        raw[mark..mark + 8].copy_from_slice(invalid);
+        fs::write(&graph_path, &raw).unwrap();
+        assert_eq!(panel(&[])["provenance"]["indexState"], "invalid");
+    }
+    raw[mark..mark + 8].copy_from_slice(b"ROOT_PAD");
+    raw.truncate(raw.len() - 3);
+    fs::write(&graph_path, &raw).unwrap();
+    assert_eq!(panel(&[])["provenance"]["indexState"], "invalid");
+    raw.resize((24 << 20) + 1, b' ');
+    fs::write(&graph_path, &raw).unwrap();
     let over = panel(&[]);
     assert_eq!(over["provenance"]["mode"], "fallback");
     assert_eq!(over["provenance"]["indexState"], "invalid");
+    drop(raw);
 
-    let mut truncated = raw.into_bytes();
-    truncated.truncate(truncated.len() - 3);
-    fs::write(&graph_path, truncated).unwrap();
-    assert_eq!(panel(&[])["provenance"]["indexState"], "invalid");
+    let helper = fixture["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|row| row["id"] == "symbol:src/lib.sh::helper")
+        .unwrap();
     assert!(
-        !panel(&["--query=untracked_sentinel"])
-            .to_string()
-            .contains("untracked_sentinel.sh\"")
+        fixture["nodes"][helper]["metadata"]
+            .get("scope_truncated")
+            .is_none()
+    );
+    fixture["nodes"][helper]["metadata"]["scope_truncated"] = json!("wrong type");
+    for bytes in [serde_json::to_vec(&fixture).unwrap(), large(&fixture)] {
+        fs::write(&graph_path, bytes).unwrap();
+        let dto = panel(probes[2]);
+        assert_eq!(dto["provenance"]["mode"], "indexed");
+        assert_eq!(dto["selection"]["status"], "found");
+        assert!(dto["selection"].get("definition").is_none());
+    }
+
+    // The file fits the raw limit and its record count fits the node limit.
+    // Individually valid text fields must still respect the aggregate search budget.
+    for i in 0..1100 {
+        fixture["nodes"].as_array_mut().unwrap().push(json!({
+            "id":format!("symbol:src/lib.sh::node_{i}"),
+            "path":"src/lib.sh", "summary":"word ".repeat(800)
+        }));
+    }
+    fs::write(&graph_path, large(&fixture)).unwrap();
+    let heavy = panel(&[]);
+    assert_eq!(heavy["provenance"]["mode"], "fallback");
+    assert_eq!(heavy["provenance"]["indexState"], "invalid");
+    assert!(
+        heavy["provenance"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("budget")
     );
 }
