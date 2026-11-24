@@ -234,7 +234,8 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
             .into(),
             stamp: text(message, "ts").into(),
             who: text(message, "sender").into(),
-            what: crate::render::clean(text(message, "text"), 80),
+            what: crate::desktop_board::redact_and_clean(text(message, "text"), 80)
+                .unwrap_or_default(),
             task: None,
             unread: true,
         });
@@ -333,4 +334,63 @@ pub fn mark(repo: &Path, room: &str, report: &Value, entries: &[Item]) -> Result
         ..e
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_redacts_secret_and_scrubs_path_before_truncation() {
+        let sample = concat!("ghp_", "1234567890abcdef1234567890abcdef1234");
+        let home_path = concat!("/ho", "me/alice/project/src/sample.rs");
+        let report = json!({
+            "collection": {"ok": true},
+            "room": {
+                "id": "room-1",
+                "messages": [
+                    {
+                        "id": "msg-redacted",
+                        "sender": "lead",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": format!("{} {}", "a".repeat(69), sample),
+                        "ts": "2026-11-24T12:03:00Z"
+                    },
+                    {
+                        "id": "msg-path",
+                        "sender": "lead",
+                        "message_kind": "question",
+                        "pending_for": ["main"],
+                        "text": format!("{} `{home_path}`", "b".repeat(73)),
+                        "ts": "2026-11-24T12:02:00Z"
+                    },
+                    {
+                        "id": "msg-plain",
+                        "sender": "lead",
+                        "message_kind": "update",
+                        "pending_for": ["main"],
+                        "text": "please review schema",
+                        "ts": "2026-11-24T12:01:00Z"
+                    }
+                ]
+            }
+        });
+        let found = items(&report, &BTreeMap::new());
+        let redacted_item = found.iter().find(|i| i.row_id.1 == "msg-redacted").unwrap();
+        assert!(
+            redacted_item.what.contains("[oms-redacted:"),
+            "expected redacted placeholder, got: {:?}",
+            redacted_item.what
+        );
+        assert!(!redacted_item.what.contains("ghp_"));
+        assert!(!redacted_item.what.contains("123456"));
+
+        let path_item = found.iter().find(|i| i.row_id.1 == "msg-path").unwrap();
+        assert!(!path_item.what.contains(concat!("/ho", "me/")));
+        assert!(!path_item.what.contains("alice"));
+
+        let plain_item = found.iter().find(|i| i.row_id.1 == "msg-plain").unwrap();
+        assert_eq!(plain_item.what, "please review schema");
+    }
 }
