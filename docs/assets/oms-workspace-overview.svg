@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="770" viewBox="0 0 1080 770" role="img" aria-labelledby="title desc">
+  <title id="title">OMS 작업 중심 기본 화면의 개념 배치도</title>
+  <desc id="desc">지금, 작업, 결과, 관계도 메뉴. 기본 화면은 목표, 필요한 판단, 진행 작업, 최근 결과 순서다. 선택한 작업의 요약, 변경, 검증, 이력은 같은 상세 영역에서 확인한다. 모든 값과 상태는 예시다.</desc>
+  <style>
+    text{font-family:"Noto Sans CJK KR","Noto Sans KR",sans-serif;fill:#19232d;font-size:16px}
+    .sub{fill:#5f6c7c;font-size:15px}.heading{font-size:22px;font-weight:500}.label{font-weight:500}.small{font-size:14px}
+    .surface{fill:#fff;stroke:#dde3ea}.soft{fill:#eceff3}.rule{stroke:#dde3ea;stroke-width:1}
+  </style>
+  <rect width="1080" height="770" fill="#f5f6f8"/>
+  <text x="20" y="35" class="heading">OMS · 작업 중심 화면</text>
+  <text x="710" y="35" class="sub">개념 배치도 · 실제 실행 상태 아님</text>
+  <rect x="16" y="60" width="1048" height="690" rx="14" class="surface"/>
+  <path d="M16 115H1064M150 115V750M746 115V750" class="rule"/>
+  <text x="36" y="94" class="heading">OMS</text>
+  <text x="150" y="94" class="sub">oh-my-setting / 공통 작업 화면</text>
+  <text x="864" y="94" class="sub">화면 시안 · 예시</text>
+  <rect x="27" y="140" width="110" height="42" rx="8" class="soft"/>
+  <text x="48" y="168" class="label">지금</text>
+  <text x="48" y="220" class="sub">작업</text>
+  <text x="48" y="271" class="sub">결과</text>
+  <text x="48" y="322" class="sub">관계도</text>
+  <text x="34" y="682" class="sub">전체 조율</text>
+  <text x="34" y="711" class="label">Main · Claude</text>
+  <text x="174" y="157" class="heading">지금</text>
+  <text x="174" y="189" class="sub">이번 목표</text>
+  <text x="174" y="219" class="label">어느 에이전트에서든 같은 OMS 작업 화면</text>
+  <rect x="174" y="242" width="548" height="137" rx="10" fill="#fff" stroke="#d8c8a9"/>
+  <rect x="190" y="257" width="88" height="28" rx="5" fill="#faf2e4"/>
+  <text x="201" y="277" fill="#875717" class="small">판단 필요</text>
+  <text x="190" y="314" class="label">첫 화면 구성을 정할까요?</text>
+  <rect x="190" y="331" width="116" height="34" rx="7" fill="#19232d"/>
+  <text x="206" y="354" style="fill:#fff;font-size:15px">계획 보기 →</text>
+  <text x="330" y="354" class="sub">화면 미리보기</text>
+  <text x="174" y="412" class="label">진행 중인 작업</text>
+  <rect x="174" y="430" width="548" height="124" rx="10" class="surface"/>
+  <rect x="190" y="446" width="82" height="28" rx="5" fill="#edf2fa"/>
+  <text x="204" y="466" style="fill:#345f9b;font-size:14px">검증 중</text>
+  <text x="518" y="466" class="sub">구현 담당 · Codex</text>
+  <text x="190" y="502" class="label">연결 상태를 한눈에 확인하기</text>
+  <text x="190" y="534" class="sub">검증 항목 2 / 3 확인</text>
+  <text x="588" y="534" class="sub">상세 보기 →</text>
+  <text x="174" y="589" class="label">새로 나온 결과</text>
+  <rect x="174" y="607" width="548" height="107" rx="10" class="surface"/>
+  <rect x="190" y="622" width="106" height="76" rx="7" fill="#f5f6f8" stroke="#dde3ea"/>
+  <rect x="199" y="631" width="13" height="58" rx="3" fill="#eceff3"/>
+  <rect x="220" y="632" width="65" height="8" rx="3" fill="#dde3ea"/>
+  <rect x="220" y="648" width="65" height="17" rx="3" fill="#eaf5f2"/>
+  <rect x="220" y="673" width="65" height="16" rx="3" fill="#fff" stroke="#dde3ea"/>
+  <text x="316" y="652" class="label">요약 패널 배치안</text>
+  <text x="316" y="682" class="sub">미리보기 열기 →</text>
+  <text x="770" y="153" class="sub">← 목록으로</text>
+  <text x="770" y="193" class="heading">첫 화면 구성</text>
+  <rect x="770" y="210" width="84" height="27" rx="5" fill="#faf2e4"/>
+  <text x="784" y="229" style="fill:#875717;font-size:14px">검토 중</text>
+  <text x="770" y="262" class="sub">전체 조율 · Main</text>
+  <rect x="770" y="284" width="270" height="36" rx="7" fill="#eceff3"/>
+  <rect x="773" y="287" width="62" height="30" rx="5" fill="#fff"/>
+  <text x="790" y="308" class="small">요약</text>
+  <text x="854" y="308" class="small">변경</text>
+  <text x="919" y="308" class="small">검증</text>
+  <text x="984" y="308" class="small">이력</text>
+  <text x="770" y="356" class="label">기본 배치</text>
+  <text x="770" y="391" class="sub">1   목표와 필요한 판단</text>
+  <text x="770" y="425" class="sub">2   진행 작업과 담당</text>
+  <text x="770" y="459" class="sub">3   결과와 미리보기</text>
+  <path d="M770 484H1040" class="rule"/>
+  <text x="770" y="519" class="label">완료 조건</text>
+  <text x="770" y="554" class="sub">✓  목표를 한 줄로 표시</text>
+  <text x="770" y="588" class="sub">✓  같은 작업 상세로 연결</text>
+  <text x="770" y="622" class="sub">○  실제 호스트 접근성 확인</text>
+  <rect x="770" y="658" width="144" height="36" rx="7" fill="#19232d"/>
+  <text x="785" y="682" style="fill:#fff;font-size:15px">이 구성 선택</text>
+  <text x="770" y="724" class="small">선택 기록은 실행·검증 완료와 별개</text>
+</svg>
