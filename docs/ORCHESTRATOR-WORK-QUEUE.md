@@ -29,6 +29,11 @@ PR의 병합, source 연결, fixture 존재와 이번 실행 결과는 각각 �
 AH-02는 TM-07/08/09와 REL-01, AH-13은 CP-15의 owner를 따른다. AH-08과 AH-10의
 다음 변경은 §8의 conformance 경계와 council 좌석 항목이 같은 작업으로 소유한다.
 
+2026-11-24 [공통 제어 화면과 플러그인 로드맵](CONTROL-SURFACE-ROADMAP.md)은 기존
+AH/CP/CC/RF owner를 GitHub Issue·Project와 연결하는 delivery view다. 같은 저장소에서
+capability 계약과 읽기 전용 UI부터 진행하며, 이 큐와 기존 lifecycle 우선순위를 대체하지
+않는다. Project 상태는 실행·승인 권한이 아니고 CP-13 원격 mutation은 계약 검토 전 보류한다.
+
 ## 1. PR 지도
 
 | PR / 작업 | 실제 변경 | 조사 시점 상태 / 후속 |
