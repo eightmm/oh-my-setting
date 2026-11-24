@@ -1,5 +1,6 @@
-//! During a publish-only CI read, keep both a verifiable request owner and the
-//! receipt lock taken by older writers before they can gate or publish.
+//! While a pull-request landing (publish-only or `--merge`) reads CI, keep both
+//! a verifiable request owner and the receipt lock taken by older writers
+//! before they can gate or publish.
 use super::{Run, open_pr, save};
 use crate::{Error, Result, V, check, ci, digest, reconcile, require, storage};
 use std::time::Instant;
@@ -146,29 +147,33 @@ impl Checkpoint {
                 == Some(&self.receipt),
             "PR receipt changed during CI; final observation withheld",
         )?;
-        r.git.transport_safe()?;
-        require(
-            r.git
-                .text(&["remote", "get-url", "--push", "--all", r.remote])?
-                == r.destination
-                && r.git.snapshot()? == *r.snapshot
-                && crate::review::remote_tip(r.git, r.destination, r.target)?.as_deref()
-                    == Some(base)
-                && crate::review::remote_tip(r.git, r.destination, r.head_branch)?.as_deref()
-                    == Some(&r.snapshot.head),
-            "reviewed checkout, destination, or ref changed during CI; final observation withheld",
-        )?;
-        let pr = open_pr(r, &ci::query_repo(r.destination)?)?;
-        require(
-            pr.as_ref().is_some_and(|p| {
-                p == original_pr
-                    && p.get("isCrossRepository") == &V::Bool(false)
-                    && p.get("headRefName").text() == Some(r.head_branch)
-                    && p.get("baseRefName").text() == Some(r.target)
-            }),
-            "exact open PR changed during CI; final observation withheld",
-        )?;
+        validate_destination(r, original_pr, base)?;
         guard.check().map_err(lock_error)?;
         Ok((guard, self.receipt))
     }
+}
+
+// Remote source and base are observed separately. Only the source OID has
+// a server-side precondition on GitHub's eventual merge request.
+pub(super) fn validate_destination(r: &Run<'_>, original_pr: &V, base: &str) -> Result<()> {
+    r.git.transport_safe()?;
+    require(
+        r.git
+            .text(&["remote", "get-url", "--push", "--all", r.remote])?
+            == r.destination
+            && r.git.snapshot()? == *r.snapshot,
+        "reviewed checkout or destination changed during CI; final observation withheld",
+    )?;
+    let pr = open_pr(r, &ci::query_repo(r.destination)?)?;
+    require(
+        pr.as_ref().is_some_and(|p| p == original_pr),
+        "exact open PR changed during CI; final observation withheld",
+    )?;
+    require(
+        crate::review::remote_tip(r.git, r.destination, r.head_branch)?.as_deref()
+            == Some(&r.snapshot.head)
+            && crate::review::remote_tip(r.git, r.destination, r.target)?.as_deref() == Some(base),
+        "reviewed remote ref changed during CI; final observation withheld",
+    )?;
+    Ok(())
 }

@@ -472,9 +472,15 @@ impl Services for TestServices {
     fn wait_siblings(
         &self,
         _: &Path,
-        _: std::time::Duration,
+        budget: std::time::Duration,
         _: &AtomicBool,
     ) -> oms_command_landing::Result<()> {
+        if budget.is_zero() && std::env::var_os("OMS_CT_LATE_SIBLING").is_some() {
+            return Err(oms_command_landing::Error::new(
+                75,
+                "fixture sibling active",
+            ));
+        }
         Ok(())
     }
     fn after_land(&self, _: &Path, _: &V, _: &AtomicBool) -> oms_command_landing::Result<V> {
@@ -2339,8 +2345,13 @@ case "$1 $2" in
   "pr view")
     if [ -f '{state}.view' ]; then cat '{state}.view'
     else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
-  "run view") cat "{state}.jobs$3" 2>/dev/null || exit 1 ;;
+  "run view")
+    if [ -f "{state}.jobs$3" ]; then cat "{state}.jobs$3"
+    elif IFS= read -r oid < '{state}.ci-head'; then
+      printf '{{"status":"completed","conclusion":"{ci}","headSha":"%s","jobs":[{{"name":"project tests","status":"completed","conclusion":"{ci}"}}]}}\n' "$oid"
+    else exit 1; fi ;;
   "run list")
+    printf '%s\n' "$commit" > '{state}.ci-head'
     if [ "$event" = pull_request ]; then
       printf '[{{"databaseId":99,"status":"completed","conclusion":"{ci}","headSha":"%s"}}]\n' "$commit"
     elif [ "$event" = push ] && [ -f '{state}.pushci' ]; then
@@ -2467,18 +2478,39 @@ fn check_publish_then_merge(flock: bool) {
 }
 
 #[test]
-fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
+fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
     use std::time::{Duration, Instant};
-    for scenario in [
+    let scenarios = [
         "unchanged",
         "receipt-changed",
         "head-moved",
         "target-moved",
         "interrupted",
         "legacy-writer",
+        "pr-gone",
         #[cfg(target_os = "linux")]
         "flock-interrupted",
-    ] {
+    ];
+    // A rerun after the observed green only matters when a merge would follow.
+    let cases = scenarios
+        .map(|s| (false, s))
+        .into_iter()
+        .chain(scenarios.map(|s| (true, s)))
+        .chain(
+            [
+                "rerun-pending",
+                "rerun-failed",
+                "detail-pending",
+                "detail-failed",
+                "detail-unavailable",
+                "detail-malformed",
+                "late-target",
+                "late-sibling",
+                "late-receipt",
+            ]
+            .map(|s| (true, s)),
+        );
+    for (merge, scenario) in cases {
         let iso = Isolated::new();
         let flock = scenario == "flock-interrupted";
         let interrupted = flock || scenario == "interrupted";
@@ -2493,7 +2525,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
         );
         iso.git(&a, &["checkout", "-qb", "a"]);
         let head = iso.commit_file(&a, "a.txt");
-        iso.commit_file(&b, "b.txt");
+        let independent = iso.commit_file(&b, "b.txt");
         let (gh_a, log) = iso.fake_gh(&bare, "success");
         let original = fs::read_to_string(&gh_a).unwrap();
         let gh_b = iso.home.path().join("gh-b");
@@ -2507,22 +2539,60 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
         .unwrap();
         fs::set_permissions(&gh_b, fs::Permissions::from_mode(0o700)).unwrap();
         std::os::unix::fs::symlink(which("sleep"), iso.bin.join("sleep")).unwrap();
+        let gh_a_script = original
+            .replace(
+                "\"pr list\")",
+                r#""pr list")
+    if [ -f "$HOME/pr-gone" ]; then echo '[]'; exit 0; fi
+"#,
+            )
+            .replace(
+                "\"run view\")",
+                r#""run view")
+    if [ -f "$HOME/detail-observed" ] && [ -f "$HOME/detail" ]; then
+        IFS= read -r detail < "$HOME/detail"
+        if [ "$detail" = unavailable ]; then exit 1; fi
+        if [ "$detail" = move ]; then
+            IFS= read -r oid < "$HOME/independent-oid"
+            IFS= read -r remote < "$HOME/fixture-remote"
+            git --git-dir="$remote" update-ref refs/heads/main "$oid" || exit 1
+        else
+            printf '%s\n' "$detail"
+            exit 0
+        fi
+    fi
+    : > "$HOME/detail-observed"
+"#,
+            );
         fs::write(
             &gh_a,
-            original.replace(
+            gh_a_script.replace(
                 "\"run list\")",
                 r#""run list")
+    if [ -f "$HOME/observed" ] && [ -f "$HOME/rerun" ]; then
+        IFS= read -r verdict < "$HOME/rerun"
+        printf '[{"databaseId":99,%s,"headSha":"%s"}]\n' "$verdict" "$commit"
+        exit 0
+    fi
+    if [ -f "$HOME/observed" ] && [ -f "$HOME/tamper" ]; then
+        # Changed after writer reentry: only the merge-request CAS can see it.
+        IFS= read -r target < "$HOME/tamper"
+        printf ' ' >> "$target"
+        printf '[{"databaseId":99,"status":"completed","conclusion":"success","headSha":"%s"}]\n' "$commit"
+        exit 0
+    fi
     : > "$HOME/observing"
     for ((tick=0; tick < 500; tick++)); do
         [ ! -f "$HOME/release-ci" ] || break
         sleep 0.025
     done
     [ -f "$HOME/release-ci" ] || exit 1
+    : > "$HOME/observed"
 "#,
             ),
         )
         .unwrap();
-        let args = [
+        let publish = [
             "--pr",
             "--why",
             "fixture",
@@ -2531,16 +2601,36 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             "--no-update",
             "--ignore-siblings",
         ];
+        let merging = [publish.as_slice(), &["--merge"]].concat();
+        let guarded = merging
+            .iter()
+            .copied()
+            .filter(|s| *s != "--ignore-siblings")
+            .collect::<Vec<_>>();
+        let args = if scenario == "late-sibling" {
+            guarded.as_slice()
+        } else if merge {
+            merging.as_slice()
+        } else {
+            publish.as_slice()
+        };
+        let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+        if merge && scenario == "unchanged" {
+            fs::write(iso.home.path().join("gh.pr.squash"), b"").unwrap();
+        }
         let cancel = iso.home.path().join("interrupt");
         let mut env = vec![
             ("OMS_GH_BIN", gh_a.to_str().unwrap()),
             ("OMS_LOCK_TIMEOUT", "2"),
         ];
+        if scenario == "late-sibling" {
+            env.push(("OMS_CT_LATE_SIBLING", "1"));
+        }
         if interrupted {
             env.push(("OMS_CT_INTERRUPT_AT", cancel.to_str().unwrap()));
         }
         std::thread::scope(|scope| {
-            let running = scope.spawn(|| iso.run_with_services("land", &a, &args, &env));
+            let running = scope.spawn(|| iso.run_with_services("land", &a, args, &env));
             let start = Instant::now();
             while !iso.home.path().join("observing").exists() {
                 assert!(
@@ -2577,8 +2667,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
             let result = V::parse(observed.1.as_bytes()).unwrap();
             assert_eq!(result.get("activity").text(), Some("held"));
             assert_eq!(result.get("phase").text(), Some("pr-recorded"));
-            let duplicate =
-                iso.run_with_services("land", &a, &[args.as_slice(), &["--merge"]].concat(), &env);
+            let duplicate = iso.run_with_services("land", &a, &merging, &env);
             assert_eq!(duplicate.0, 75, "{duplicate:?}");
             assert_eq!(fs::read(&receipt).unwrap(), expected);
             let mut legacy_guard = None;
@@ -2586,7 +2675,7 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                 let other = iso.run_with_services(
                     "land",
                     &b,
-                    &args,
+                    &publish,
                     &[
                         ("OMS_GH_BIN", gh_b.to_str().unwrap()),
                         ("OMS_LOCK_TIMEOUT", "2"),
@@ -2600,11 +2689,54 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                 fs::write(&receipt, &expected).unwrap();
             } else if interrupted {
                 fs::write(&cancel, b"").unwrap();
-            } else if scenario == "target-moved" {
-                iso.git(&bare, &["update-ref", "refs/heads/main", &head]);
+            } else if scenario == "pr-gone" {
+                fs::write(iso.home.path().join("pr-gone"), b"").unwrap();
+            } else if scenario == "late-receipt" {
+                let path = format!("{}\n", receipt.display());
+                fs::write(iso.home.path().join("tamper"), path).unwrap();
+                expected.push(b' ');
+            } else if let Some(kind) = scenario.strip_prefix("rerun-") {
+                let verdict = if kind == "pending" {
+                    "\"status\":\"in_progress\",\"conclusion\":\"\""
+                } else {
+                    "\"status\":\"completed\",\"conclusion\":\"failure\""
+                };
+                fs::write(iso.home.path().join("rerun"), format!("{verdict}\n")).unwrap();
+            } else if let Some(kind) = scenario.strip_prefix("detail-") {
+                let response = match kind {
+                    "pending" => {
+                        format!(r#"{{"headSha":"{head}","status":"in_progress","conclusion":""}}"#)
+                    }
+                    "failed" => format!(
+                        r#"{{"headSha":"{head}","status":"completed","conclusion":"failure"}}"#
+                    ),
+                    "malformed" => format!(
+                        r#"{{"headSha":"{head}","status":"completed","conclusion":"success","jobs":[{{}}]}}"#
+                    ),
+                    _ => "unavailable".to_owned(),
+                };
+                fs::write(iso.home.path().join("detail"), format!("{response}\n")).unwrap();
+            } else if matches!(scenario, "target-moved" | "late-target") {
+                // The independent commit exists in B but is not on the bare mirror yet.
+                iso.git(&b, &["push", "-q", "origin", "HEAD:refs/heads/b"]);
+                if scenario == "target-moved" {
+                    iso.git(&bare, &["update-ref", "refs/heads/main", &independent]);
+                } else {
+                    fs::write(iso.home.path().join("detail"), b"move\n").unwrap();
+                    fs::write(
+                        iso.home.path().join("independent-oid"),
+                        format!("{independent}\n"),
+                    )
+                    .unwrap();
+                    fs::write(
+                        iso.home.path().join("fixture-remote"),
+                        format!("{}\n", bare.display()),
+                    )
+                    .unwrap();
+                }
             } else if scenario == "head-moved" {
                 iso.git(&bare, &["update-ref", "refs/heads/a", "refs/heads/main"]);
-            } else {
+            } else if scenario == "legacy-writer" {
                 // Previous versions take active first, publish their holder, then
                 // must take the receipt lock before gate/push/PR/merge.
                 let mut settings = oms_lock::Settings::from_env().unwrap();
@@ -2631,31 +2763,91 @@ fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                 fs::write(iso.home.path().join("release-ci"), b"").unwrap();
             }
             let final_result = running.join().unwrap();
+            let context = format!("merge={merge} {scenario}: {final_result:?}");
+            let merges = || {
+                fs::read_to_string(&log)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| l.starts_with("pr merge"))
+                    .count()
+            };
             if scenario == "unchanged" {
-                assert_eq!(final_result.0, 0, "{final_result:?}");
-                assert!(final_result.1.contains("CI success; not merged"));
+                assert_eq!(final_result.0, 0, "{context}");
+                let done = if merge {
+                    "merged PR #7"
+                } else {
+                    "CI success; not merged"
+                };
+                assert!(final_result.1.contains(done), "{context}");
+                let row = V::parse(&fs::read(&receipt).unwrap()).unwrap();
+                assert_eq!(
+                    row.get("ci").get("scope").text(),
+                    Some("unknown"),
+                    "{context}"
+                );
+
+                assert_eq!(merges(), usize::from(merge), "{context}");
+            } else if scenario.starts_with("rerun-") || scenario.starts_with("detail-") {
+                assert_eq!(final_result.0, 1, "{context}");
+                let row = V::parse(&fs::read(&receipt).unwrap()).unwrap();
+                assert_eq!(row.get("state").text(), Some("failed"), "{context}");
+                let conclusion = match scenario.split_once('-').unwrap().1 {
+                    "failed" => "failure",
+                    "pending" => "pending",
+                    _ => "unknown",
+                };
+                assert_eq!(row.get("ci").get("conclusion").text(), Some(conclusion));
+                assert!(!row.has("merge"), "{context}");
+                assert_eq!(row.get("update").get("reason").text(), Some("not-reached"));
+                assert_eq!(merges(), 0, "{context}");
             } else {
-                assert_ne!(final_result.0, 0, "{final_result:?}");
-                assert_eq!(fs::read(&receipt).unwrap(), expected);
+                assert_ne!(final_result.0, 0, "{context}");
+                assert_eq!(fs::read(&receipt).unwrap(), expected, "{context}");
+                assert_eq!(merges(), 0, "{context}");
                 if interrupted {
-                    assert_eq!(final_result.0, 130, "{final_result:?}");
+                    assert_eq!(final_result.0, 130, "{context}");
                     fs::write(iso.home.path().join("release-ci"), b"").unwrap();
-                    let resume = iso.run_with_services("land", &a, &args, &env[..2]);
+                    let resume = iso.run_with_services("land", &a, args, &env[..2]);
                     assert_eq!(resume.0, 0, "{resume:?}");
                     let resumed = V::parse(&fs::read(&receipt).unwrap()).unwrap();
                     assert_eq!(resumed.get("request").text(), Some(stamp));
-                    assert_eq!(resumed.get("state").text(), Some("awaiting-merge"));
+                    let state = if merge { "passed" } else { "awaiting-merge" };
+                    assert_eq!(resumed.get("state").text(), Some(state));
+                    assert_eq!(merges(), usize::from(merge), "{context}");
+                }
+                if scenario == "late-sibling" {
+                    assert!(
+                        final_result.2.contains("fixture sibling active"),
+                        "{context}"
+                    );
                 }
                 if legacy_guard.is_some() {
-                    assert_eq!(final_result.0, 75);
+                    assert_eq!(final_result.0, 75, "{context}");
                 }
+            }
+            let target = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+            if merge && scenario == "unchanged" {
+                assert_ne!(target, main_before);
+                assert_eq!(iso.git_out(&bare, &["rev-parse", "main^"]), main_before);
+                assert_eq!(
+                    iso.git_out(&bare, &["rev-parse", "main^{tree}"]),
+                    iso.git_out(&a, &["rev-parse", "HEAD^{tree}"])
+                );
+            } else if matches!(scenario, "target-moved" | "late-target") {
+                assert_eq!(target, independent);
+                assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/a"]), head);
+            } else {
+                assert_eq!(target, main_before);
             }
             let calls = fs::read_to_string(&log).unwrap();
             assert_eq!(
                 calls.lines().filter(|l| l.starts_with("pr create")).count(),
                 if scenario == "unchanged" { 2 } else { 1 }
             );
-            assert!(!calls.contains("pr merge"));
+            if merge && scenario == "unchanged" {
+                // B published while A was still observing, before A merged.
+                assert!(calls.rfind("pr create").unwrap() < calls.find("pr merge 7").unwrap());
+            }
         });
     }
 }
@@ -2714,6 +2906,51 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
         &[("OMS_LAND_MODE", "auto")],
     );
     assert_refused(&r, "OMS_LAND_MODE must be pr or direct");
+}
+
+#[test]
+fn land_rejects_a_foreign_or_mismatched_pr_before_binding_its_receipt() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_remote("pr-identity");
+    iso.git(&repo, &["checkout", "-qb", "candidate"]);
+    iso.commit_file(&repo, "candidate.txt");
+    let (gh, log) = iso.fake_gh(&bare, "success");
+    let original = fs::read_to_string(&gh).unwrap();
+    fs::write(iso.home.path().join("gh.pr"), b"").unwrap();
+    for (field, replacement) in [
+        (
+            r#""isCrossRepository":false"#,
+            r#""isCrossRepository":true"#,
+        ),
+        (r#""headRefName":"%s""#, r#""headRefName":"other-%s""#),
+        (r#""baseRefName":"%s""#, r#""baseRefName":"other-%s""#),
+    ] {
+        assert!(original.contains(field));
+        fs::write(&gh, original.replace(field, replacement)).unwrap();
+        let result = iso.run_with_services(
+            "land",
+            &repo,
+            &[
+                "--pr",
+                "--merge",
+                "--why",
+                "fixture",
+                "--gate",
+                "true",
+                "--ignore-siblings",
+                "--no-update",
+            ],
+            &[("OMS_GH_BIN", gh.to_str().unwrap())],
+        );
+        assert_refused(&result, "open PR does not match");
+        let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+        let row = V::parse(status.as_bytes()).unwrap();
+        assert!(!row.has("pr_number") && !row.has("pr_url") && !row.has("merge"));
+    }
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(
+        !calls.contains("pr merge") && !calls.contains("run list") && !calls.contains("pr create")
+    );
 }
 
 #[test]

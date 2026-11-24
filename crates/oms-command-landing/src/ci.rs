@@ -753,6 +753,30 @@ pub(crate) fn latest(
         Ok(None)
     }
 }
+/// Generic projects need no OMS job names, but their run and listed jobs must
+/// agree that execution actually finished successfully.
+pub(crate) fn successful_scope(run: &V, sha: &str) -> Result<&'static str> {
+    require(
+        conclusion(run, sha)? == "success",
+        "CI detail is not a completed success",
+    )?;
+    let jobs = run.get("jobs");
+    require(
+        matches!(jobs, V::Arr(rows) if !rows.is_empty())
+            && jobs.array().iter().all(|job| {
+                let name = job.get("name").text().unwrap_or("");
+                !name.is_empty()
+                    && (!job.has("status") || job.get("status").text() == Some("completed"))
+                    && matches!(
+                        job.get("conclusion").text(),
+                        Some("success" | "skipped" | "neutral")
+                    )
+            }),
+        "CI detail contains incomplete or inconsistent jobs",
+    )?;
+    Ok(full_scope(run, sha).unwrap_or("unknown"))
+}
+
 pub fn full_scope(run: &V, sha: &str) -> Result<&'static str> {
     require(
         conclusion(run, sha)? == "success",
@@ -1705,6 +1729,38 @@ mod tests {
         full_scope(&run(&borrowed), SHA)
     }
 
+    #[test]
+    fn successful_scope_separates_terminal_job_evidence_from_oms_selection() {
+        assert_eq!(
+            successful_scope(&run(&[("project CI", "success")]), SHA).unwrap(),
+            "unknown"
+        );
+        assert_eq!(
+            successful_scope(
+                &run(&[
+                    ("lint", "skipped"),
+                    ("affected_plan", "success"),
+                    ("gate", "success")
+                ]),
+                SHA
+            )
+            .unwrap(),
+            "affected"
+        );
+        let jobs = pure_rust();
+        let full: Vec<_> = jobs
+            .iter()
+            .map(|(name, conclusion)| (name.as_str(), *conclusion))
+            .collect();
+        assert_eq!(successful_scope(&run(&full), SHA).unwrap(), "full");
+        for bad in [
+            run(&[]),
+            run(&[("project CI", "failure")]),
+            run(&[("project CI", "")]),
+        ] {
+            assert!(successful_scope(&bad, SHA).is_err());
+        }
+    }
     #[test]
     fn full_scope_accepts_pure_rust_runs_without_python() {
         let jobs = pure_rust();

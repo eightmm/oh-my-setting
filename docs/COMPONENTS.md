@@ -3597,7 +3597,21 @@ Conventional Commit subject, else `oms/land-<sha12>`) and opens a PR whose body 
 `--why TEXT`, else the commit bodies; with neither, land refuses. Without `--merge`,
 land ends after CI in receipt state `awaiting-merge` with exit 0 and installs nothing.
 `--merge [--merge-method squash|merge|rebase]` merges after CI succeeds for the exact
-PR head, then installs. After a squash merge, installation proceeds when the merge
+PR head, then installs. Each merge needs `--merge` on that invocation. While CI runs,
+land releases the repository lock so other requests can publish. A second invocation
+of the same request exits 75. After CI, land waits up to `OMS_LOCK_TIMEOUT` to
+reacquire the writer and checks the original receipt, open PR, source and base.
+A merge samples same-head CI again under publication authority. Both the run
+listing and its details must confirm success. A green project-specific workflow
+can merge with unknown OMS verification scope. Installation keeps its existing
+full-verification requirement. A sibling that started during CI defers the merge
+unless the caller selected `--ignore-siblings`. The merge-request write compares
+the receipt with its saved checkpoint. If a ref or PR changed, the checkpoint
+is preserved. GitHub checks the source SHA in the merge request. A target
+change after the last observation still requires the post-merge tree/base checks.
+PRs observed with a nonzero `--ci-wait` require one exact push URL.
+
+After a squash merge, installation proceeds when the merge
 commit's tree equals the PR head tree on an unchanged base; otherwise it waits for CI
 on the target. On GitHub, `--direct` pushes straight to the target and accepts only a
 change of at most two lines in `.md` files.
@@ -3638,7 +3652,8 @@ It reports sibling worktrees with live autopilot receipts (`proposing`,
 Retrying the same commit, destination and gate resumes CI/install from its
 successful push receipt; successful stages are reused. An installation receipt
 is reused only while the installed checkout is clean and still at the same SHA.
-A repository-wide lock prevents concurrent landing gates; background launches
+A repository-wide lock prevents concurrent landing gates and publication writes (a PR
+landing releases it while observing CI); background launches
 acknowledge lock acquisition before reporting success. CI query errors are recorded immediately,
 and each query is bounded by the remaining polling deadline (at most 30 seconds).
 
