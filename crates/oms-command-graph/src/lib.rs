@@ -209,7 +209,7 @@ pub fn run_with_host(
             util::at(&cwd, raw)
         };
         if args.group == "project" && args.action == "panel" {
-            return project::panel::dispatch(&args, &selected, interrupted);
+            return project::panel::dispatch(&args, &selected, interrupted, python_helper);
         }
         let repo = util::repo_root(&selected, interrupted)?;
         match args.group.as_str() {
