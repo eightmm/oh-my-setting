@@ -3237,6 +3237,7 @@ fn review_classification_and_validation() {
             provider_calls: AtomicU64,
             verify_commands: Mutex<Vec<String>>,
             strip_fast_during_call: bool,
+            answer: Vec<u8>,
         }
         impl Executor for GateVerifyProbe<'_> {
             fn execute(
@@ -3271,7 +3272,7 @@ fn review_classification_and_validation() {
                 }
                 Ok(Completed {
                     code: 0,
-                    stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
+                    stdout: self.answer.clone(),
                     stderr: Vec::new(),
                     complete: true,
                     cleanup_complete: Some(true),
@@ -3281,6 +3282,7 @@ fn review_classification_and_validation() {
             }
         }
         let gate_repo = provider_repo();
+        let provider_answer = std::cell::RefCell::new(b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec());
         let commit_check_sh = |script: &str, message: &str| {
             gate_repo.write("scripts/check.sh", script);
             gate_repo.git(&["add", "scripts/check.sh"]);
@@ -3300,6 +3302,7 @@ fn review_classification_and_validation() {
                 provider_calls: AtomicU64::new(0),
                 verify_commands: Mutex::new(Vec::new()),
                 strip_fast_during_call: strip_fast,
+                answer: provider_answer.borrow().clone(),
             };
             let mut values = vec![
                 "--providers",
@@ -3393,6 +3396,30 @@ fn review_classification_and_validation() {
         );
         assert_eq!(calls, 1);
         assert_eq!(verified, vec!["bash scripts/check.sh fast".to_owned()]);
+
+        // #491: a prose key-marker mention with no END line redacts the rest of the answer; the
+        // verdict lines survive in canonical form so the gate still reads them.
+        *provider_answer.borrow_mut() = format!(
+            "The finding quotes a {}{} PRIVATE KEY{} line from a fixture.\nCONFIDENCE: 0.7\nGATE: pass\n",
+            "-----", "BEGIN", "-----"
+        )
+        .into_bytes();
+        let directory = ".oms/review-gate-redacted-verdict";
+        let (output, calls, _) = run_gate(&["--no-verify"], directory, false);
+        assert_eq!(output.0, 0, "{output:?}");
+        assert_eq!(calls, 1);
+        let saved = std::fs::read_dir(gate_repo.0.join(directory))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "md")
+                    && !path.file_name().unwrap().to_string_lossy().starts_with('_')
+            })
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect::<String>();
+        assert!(saved.contains("[oms-redacted:private-key]"), "{saved}");
+        assert!(!saved.contains("from a fixture"), "{saved}");
+        assert!(saved.contains("CONFIDENCE: 0.7\nGATE: pass"), "{saved}");
     });
 }
 #[test]

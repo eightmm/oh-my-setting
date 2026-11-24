@@ -1052,7 +1052,10 @@ fn call_routed(
             );
         }
     }
-    let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
+    let answer = crate::review::restore_verdict(
+        &String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned(),
+    );
     let quality = if result.complete {
         providers::answer_quality(&answer).to_owned()
     } else {

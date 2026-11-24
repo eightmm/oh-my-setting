@@ -245,8 +245,12 @@ pub fn verdict(answer: &str, code: Option<i32>, complete: bool) -> (&'static str
     if code != Some(0) || !complete || providers::answer_quality(answer) != "ok" {
         return ("incomplete", None);
     }
+    let (gate, confidence) = verdict_lines(answer);
+    (gate.unwrap_or("no-verdict"), confidence)
+}
+fn verdict_lines(answer: &str) -> (Option<&'static str>, Option<f64>) {
     let mut confidence = None;
-    let mut state = "no-verdict";
+    let mut gate = None;
     for line in answer.lines() {
         let line = line.trim_matches(|c: char| c.is_whitespace() || c == '*');
         if let Some(value) = line.strip_prefix("CONFIDENCE:") {
@@ -257,12 +261,28 @@ pub fn verdict(answer: &str, code: Option<i32>, complete: bool) -> (&'static str
                 .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
         }
         if line == "GATE: pass" {
-            state = "pass";
+            gate = Some("pass");
         } else if line == "GATE: fail" {
-            state = "fail";
+            gate = Some("fail");
         }
     }
-    (state, confidence)
+    (gate, confidence)
+}
+/// Redaction drops everything after a key marker with no END line, which can swallow a review's
+/// verdict. Verdict lines carry no free text, so a verdict lost that way is restored canonically.
+pub(crate) fn restore_verdict(raw: &str, mut redacted: String) -> String {
+    let (gate, confidence) = verdict_lines(raw);
+    if let (Some(gate), None) = (gate, verdict_lines(&redacted).0) {
+        if !redacted.is_empty() && !redacted.ends_with('\n') {
+            redacted.push('\n');
+        }
+        if let Some(confidence) = confidence {
+            redacted.push_str(&format!("CONFIDENCE: {confidence}\n"));
+        }
+        redacted.push_str("GATE: ");
+        redacted.push_str(gate);
+    }
+    redacted
 }
 fn overall(states: &[&str]) -> i32 {
     if states.is_empty() || states.iter().any(|s| !["pass", "fail"].contains(s)) {
