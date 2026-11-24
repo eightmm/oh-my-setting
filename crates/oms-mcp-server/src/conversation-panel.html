@@ -128,12 +128,15 @@ const names = {codex:'Codex', claude:'Claude', agy:'AGY', antigravity:'AGY', pi:
 const pending = new Map();
 let sequence = 0;
 let hostOrigin = '*';
-let ready = false;
+let initializing;
 let busy = false;
 let project = '';
-let openingProject = '';
+let requestedProject = null;
+let generation = 0;
+const invalidProject = Symbol('invalid project');
+// A tool result may arrive after a newer open or a manual project selection.
+const opensWithInput = new Map();
 let retryStart;
-let refreshAfterInput = false;
 let contextTypes;
 let contextKey;
 let contextQueue = Promise.resolve();
@@ -173,11 +176,23 @@ window.addEventListener('message', event => {
   if (event.source !== window.parent || (hostOrigin !== '*' && event.origin !== hostOrigin) ||
       !msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'ui/notifications/tool-input') {
-    const requested = msg.params?.arguments?.project;
-    if (typeof requested === 'string' && requested && !project && !openingProject) {
-      openingProject = requested;
-      if (busy) refreshAfterInput = true;
-      else if (ready) refresh();
+    const target = projectArgument(msg.params?.arguments?.project);
+    opensWithInput.set(target, (opensWithInput.get(target) || 0) + 1);
+    switchProject(target);
+    return;
+  }
+  if (msg.method === 'ui/notifications/tool-result') {
+    if (msg.params?.isError) {
+      switchProject(invalidProject);
+      return;
+    }
+    const result = msg.params?.structuredContent;
+    if (result?.panel === 'OMS') {
+      const target = projectArgument(result.project);
+      const count = opensWithInput.get(target);
+      if (count > 1) opensWithInput.set(target, count - 1);
+      else if (count === 1) opensWithInput.delete(target);
+      else switchProject(target);
     }
     return;
   }
@@ -190,9 +205,11 @@ window.addEventListener('message', event => {
   else call.resolve(msg.result);
 });
 
-async function tool(name, args = {}) {
+async function tool(name, args = {}, expected = generation) {
+  if (expected !== generation) throw new Error('프로젝트가 변경되었습니다.');
   const scoped = project && name !== 'oms_list_projects' ? {...args, project} : args;
   const result = await request('tools/call', {name, arguments: scoped});
+  if (expected !== generation) throw new Error('프로젝트가 변경되었습니다.');
   if (!result || result.isError) throw new Error(result?.content?.[0]?.text || 'OMS 도구 호출에 실패했습니다.');
   return result;
 }
@@ -225,39 +242,57 @@ function render(d) {
 function clearProject() {
   el('view').hidden = true;
   updateContext(null);
+  retryStart = undefined;
   el('launch').reset();
   el('brief').setCustomValidity('');
-  el('receipt').textContent = '';
-  el('approvals').replaceChildren();
+  for (const id of ['receipt','project','branch','goal','current-main','active','tasks','taskStatus','updated','approvals','leads','activity','attention']) {
+    el(id).replaceChildren();
+  }
+}
+
+function projectArgument(value) {
+  if (value == null) return null;
+  return typeof value === 'string' && value.length ? value : invalidProject;
+}
+
+function switchProject(target) {
+  if (target === requestedProject) return;
+  if (target && target === project) {
+    requestedProject = target;
+    return;
+  }
+  generation++;
+  requestedProject = target;
+  project = '';
+  clearProject();
+  el('scope').hidden = true;
+  el('project-choice').replaceChildren();
+  setBusy(false);
+  refresh();
 }
 
 function chooseProject(aliases) {
   const select = el('project-choice');
   select.replaceChildren();
   el('scope').hidden = !aliases.length;
-  if (project && !aliases.includes(project)) {
+  const target = requestedProject;
+  if (target !== null && !aliases.includes(target)) {
     project = '';
     clearProject();
+    select.add(new Option('프로젝트 선택', ''));
+    for (const alias of aliases) select.add(new Option(alias, alias));
+    el('status').textContent = '대화에서 지정한 프로젝트에 연결할 수 없습니다.';
+    return false;
   }
-  if (openingProject) {
-    if (aliases.includes(openingProject)) {
-      project = openingProject;
-      openingProject = '';
-    } else {
-      select.add(new Option('프로젝트 선택', ''));
-      for (const alias of aliases) select.add(new Option(alias, alias));
-      el('view').hidden = true;
-      el('status').textContent = '대화에서 지정한 프로젝트에 연결할 수 없습니다.';
-      return false;
-    }
-  }
-  if (!aliases.length) return true;
-  if (aliases.length === 1) project = aliases[0];
+  const selected = target || (aliases.length === 1 ? aliases[0] : '');
+  if (selected !== project) clearProject();
+  project = selected;
+  if (selected) requestedProject = selected;
   if (aliases.length > 1) select.add(new Option('프로젝트 선택', ''));
   for (const alias of aliases) select.add(new Option(alias, alias));
   select.value = project;
-  if (project) return true;
-  el('view').hidden = true;
+  if (project || !aliases.length) return true;
+  clearProject();
   el('status').textContent = 'OMS를 사용할 프로젝트를 선택하세요.';
   return false;
 }
@@ -291,6 +326,7 @@ function renderActivity(d) {
 
 function renderApprovals(rows, incomplete) {
   const list = el('approvals');
+  const expected = generation;
   list.replaceChildren();
   if (incomplete) list.append(node('p', '승인 목록을 일부만 조회했습니다.', 'muted'));
   else if (!rows.length) list.append(node('p', '대기 중인 승인 없음', 'muted'));
@@ -315,7 +351,7 @@ function renderApprovals(rows, incomplete) {
           }
           el('receipt').textContent = (decision === 'approve' ? '승인' : '거절') + ' 처리됨 · ' + result.id;
           updateContext({project:project || null, room:row.object, status:result.decision});
-        }
+        }, expected
       ));
       buttons.append(button);
     }
@@ -331,43 +367,68 @@ function setBusy(value) {
   el('project-choice').disabled = value;
   el('controls').disabled = value;
   for (const button of el('approvals').querySelectorAll('button')) button.disabled = value;
-  if (!busy && refreshAfterInput) {
-    refreshAfterInput = false;
-    refresh();
-  }
 }
 
-async function loadStatus() {
-  el('status').className = '';
-  el('status').textContent = '프로젝트 상태를 확인하는 중…';
-  try {
-    if (!ready) {
+async function initialize() {
+  if (!initializing) {
+    initializing = (async () => {
       if (window.parent === window) throw new Error('앱 대화에서 OMS 패널을 여세요.');
       const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.1.0'}, appCapabilities:{}, protocolVersion:'2026-01-26'});
       const formats = info?.hostCapabilities?.updateModelContext;
       if (formats?.text || formats?.structuredContent) contextTypes = formats;
       send({method:'ui/notifications/initialized', params:{}});
-      ready = true;
-    }
-    const registry = await tool('oms_list_projects');
+    })().catch(error => { initializing = undefined; throw error; });
+  }
+  return initializing;
+}
+
+async function recoverStart(expected) {
+  if (!retryStart) return;
+  const {main, goal, requestId} = retryStart;
+  const response = await tool('oms_start_status', {requestId}, expected);
+  const result = response.structuredContent;
+  if (result?.requestId !== requestId || result.status === 'not_found') return;
+  if (result.room !== 'oms-app-' + requestId) return;
+  if (result.status === 'reserved') {
+    el('receipt').textContent = '시작 요청 접수됨 · ' + result.room;
+  } else if (result.status === 'recorded' && result.provider === main && result.attempt) {
+    retryStart = undefined;
+    if (el('brief').value.trim() === goal) el('brief').value = '';
+    el('receipt').className = '';
+    el('receipt').textContent = names[main] + ' Main · ' + result.state + ' · ' + result.attempt;
+    updateContext({project:project || null, room:result.room, status:result.state});
+  }
+}
+
+async function loadStatus(expected) {
+  el('status').className = '';
+  el('status').textContent = '프로젝트 상태를 확인하는 중…';
+  try {
+    await initialize();
+    const registry = await tool('oms_list_projects', {}, expected);
     const aliases = registry.structuredContent?.projects;
     if (!Array.isArray(aliases)) throw new Error('프로젝트 목록 응답을 읽을 수 없습니다.');
     if (!chooseProject(aliases)) return;
     if (project && (contextKey == null || contextKey === 'null')) updateContext({project});
-    const result = await tool('oms_panel_snapshot');
+    const result = await tool('oms_panel_snapshot', {}, expected);
     const dashboard = result.structuredContent?.dashboard || result._meta?.dashboard;
     if (!dashboard) throw new Error('프로젝트 상태 응답을 읽을 수 없습니다.');
     render(dashboard);
     renderActivity(dashboard);
     try {
-      const response = await tool('oms_list_approvals');
+      const response = await tool('oms_list_approvals', {}, expected);
       const approvals = response.structuredContent?.approvals;
       if (!Array.isArray(approvals)) throw new Error('승인 목록 응답을 읽을 수 없습니다.');
       renderApprovals(approvals, response.structuredContent.incomplete);
     } catch (error) {
-      el('approvals').replaceChildren(node('p', error.message, 'error'));
+      if (expected === generation) el('approvals').replaceChildren(node('p', error.message, 'error'));
+    }
+    if (expected === generation && retryStart) {
+      try { await recoverStart(expected); }
+      catch (error) { if (expected === generation) el('status').textContent = error.message; }
     }
   } catch (error) {
+    if (generation !== expected) return;
     el('view').hidden = true;
     el('status').className = 'error';
     el('status').textContent = error.message;
@@ -376,28 +437,33 @@ async function loadStatus() {
 
 async function refresh() {
   if (busy) return;
+  const expected = generation;
   setBusy(true);
-  try { await loadStatus(); } finally { setBusy(false); }
+  try { await loadStatus(expected); } finally { if (expected === generation) setBusy(false); }
 }
 
-async function mutate(action, onSuccess) {
-  if (busy) return;
+async function mutate(action, onSuccess, expected = generation) {
+  if (busy || expected !== generation || el('view').hidden) return;
   setBusy(true);
   el('receipt').className = '';
   el('receipt').textContent = '요청을 처리하는 중…';
   try {
     const response = await action();
-    onSuccess(response.structuredContent);
+    if (expected === generation) onSuccess(response.structuredContent);
   } catch (error) {
+    if (expected !== generation) return;
     el('receipt').className = 'error';
     el('receipt').textContent = error.message;
   } finally {
-    try { await loadStatus(); } finally { setBusy(false); }
+    if (expected === generation) {
+      try { await loadStatus(expected); } finally { if (expected === generation) setBusy(false); }
+    }
   }
 }
 
 el('launch').addEventListener('submit', event => {
   event.preventDefault();
+  if (busy || el('view').hidden) return;
   const goal = el('brief').value.trim();
   if (!goal || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
     el('brief').setCustomValidity('목표를 한 줄로 1~2,000자 입력하세요.');
@@ -412,12 +478,13 @@ el('launch').addEventListener('submit', event => {
   mutate(
     () => tool('oms_start_main', {main, goal, requestId}),
     result => {
-      if (result?.room !== 'oms-app-' + requestId || result.provider !== main || result.status !== 'started') {
+      if (result?.requestId !== requestId || result.room !== 'oms-app-' + requestId || !result.attempt ||
+          result.provider !== main || result.status !== 'started') {
         throw new Error('시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요.');
       }
       retryStart = undefined;
       el('brief').value = '';
-      el('receipt').textContent = names[main] + ' Main 시작됨 · ' + result.room;
+      el('receipt').textContent = names[main] + ' Main 시작됨 · ' + result.room + ' · ' + result.attempt;
       updateContext({project:project || null, room:result.room, status:result.status});
     }
   );
@@ -425,10 +492,7 @@ el('launch').addEventListener('submit', event => {
 el('brief').addEventListener('input', () => el('brief').setCustomValidity(''));
 el('project-choice').addEventListener('change', () => {
   if (busy) return;
-  clearProject();
-  openingProject = '';
-  project = el('project-choice').value;
-  refresh();
+  switchProject(projectArgument(el('project-choice').value || null));
 });
 el('refresh').addEventListener('click', refresh);
 refresh();

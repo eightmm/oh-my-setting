@@ -15,8 +15,11 @@ before any action.
 - For a goal, use the user's chosen Main (`codex`, `claude`, `agy`, or `pi`).
   If they left the choice open, offer those choices. Pass the goal and its
   constraints as a single line to `oms_start_main` with a fresh lowercase UUID
-  as `requestId`. Reuse it for retries of the same request. Report the runtime
-  receipt. If delivery is uncertain, check status before another start.
+  as `requestId`. Report the receipt's Room and attempt. If a start response is
+  missing or inconclusive, call `oms_start_status` with the original project
+  and `requestId`. For `recorded`, report the matching Room, attempt and state.
+  For `reserved`, continue tracking that Room. Only `not_found` permits a
+  retry of the same submission, using its original UUID.
 - For progress, use `oms_panel_snapshot` and describe recorded work, including
   any unavailable status. A launch receipt alone does not establish that a
   lead completed its assignment.

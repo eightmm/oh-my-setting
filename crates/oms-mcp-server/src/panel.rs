@@ -17,6 +17,7 @@ const OPEN: &str = "oms_open_panel";
 const PROJECTS: &str = "oms_list_projects";
 const SNAPSHOT: &str = "oms_panel_snapshot";
 const START: &str = "oms_start_main";
+const START_STATUS: &str = "oms_start_status";
 const APPROVALS: &str = "oms_list_approvals";
 const DECIDE: &str = "oms_decide_approval";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
@@ -69,6 +70,13 @@ pub(super) fn definitions() -> Value {
             }),
             &["main", "goal", "requestId"],
             true
+        ),
+        make(
+            START_STATUS,
+            "Recover the original Main launch by requestId, including after it has ended.",
+            json!({"project":project,"requestId":{"type":"string","format":"uuid"}}),
+            &["requestId"],
+            false
         ),
         make(
             APPROVALS,
@@ -315,6 +323,7 @@ impl Server<'_> {
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
                     OPEN | APPROVALS | SNAPSHOT => &["project"],
+                    START_STATUS => &["project", "requestId"],
                     START => &["project", "main", "goal", "requestId"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
                     _ => return error(id, -32602, "unknown desktop tool"),
@@ -368,7 +377,7 @@ impl Server<'_> {
             let known = [
                 (
                     "room id already exists",
-                    "This start was already submitted. Refresh project status.",
+                    "This request is already reserved. Use oms_start_status with its original requestId.",
                 ),
                 (
                     "live or unverified",
@@ -384,7 +393,7 @@ impl Server<'_> {
                 ),
                 (
                     "desktop Main startup is unconfirmed",
-                    "The Main start was submitted, but its lifecycle is unconfirmed. Refresh project status.",
+                    "The Main start was submitted. Use oms_start_status with its original requestId to check its lifecycle.",
                 ),
                 (
                     "stale or mismatched",
@@ -449,7 +458,23 @@ impl Server<'_> {
         {
             return Err("This desktop control requires the parent app connection.".into());
         }
+        let request_room = || -> PanelResult<String> {
+            let key = args["requestId"]
+                .as_str()
+                .filter(|v| uuid(v))
+                .ok_or("A lowercase UUID requestId is required.")?;
+            Ok(format!("oms-app-{key}"))
+        };
         let argv = match name {
+            START_STATUS => vec![
+                "room".into(),
+                "desktop-start-status".into(),
+                "--repo".into(),
+                path,
+                "--id".into(),
+                request_room()?.into(),
+                "--json".into(),
+            ],
             START => {
                 let goal = args["goal"]
                     .as_str()
@@ -465,10 +490,6 @@ impl Server<'_> {
                     .as_str()
                     .filter(|v| matches!(*v, "codex" | "claude" | "agy" | "pi"))
                     .ok_or("Unsupported Main provider.")?;
-                let key = args["requestId"]
-                    .as_str()
-                    .filter(|v| uuid(v))
-                    .ok_or("A lowercase UUID requestId is required.")?;
                 vec![
                     "panel".into(),
                     "--repo".into(),
@@ -478,7 +499,7 @@ impl Server<'_> {
                     "--launch".into(),
                     main.into(),
                     "--room".into(),
-                    format!("oms-app-{key}").into(),
+                    request_room()?.into(),
                     format!("--task={goal}").into(),
                     "--json".into(),
                 ]
@@ -545,11 +566,31 @@ impl Server<'_> {
         match name {
             START
                 if data["status"] == "started"
+                    && data["attempt"].as_str().is_some_and(|id| !id.is_empty())
                     && data["provider"] == args["main"]
                     && data["room"]
                         == format!("oms-app-{}", args["requestId"].as_str().unwrap_or("")) =>
             {
-                Ok(json!({"status":"started","provider":data["provider"],"room":data["room"]}))
+                Ok(
+                    json!({"status":"started","provider":data["provider"],"room":data["room"],"attempt":data["attempt"],"requestId":args["requestId"]}),
+                )
+            }
+            START_STATUS
+                if data["requestId"] == args["requestId"]
+                    && match data["status"].as_str() {
+                        Some("not_found") => data["room"].is_null() && data["attempt"].is_null(),
+                        Some("reserved") => {
+                            data["room"] == request_room()? && data["attempt"].is_null()
+                        }
+                        Some("recorded") => {
+                            data["room"] == request_room()?
+                                && data["attempt"].as_str().is_some_and(|v| !v.is_empty())
+                                && data["terminal"].is_boolean()
+                        }
+                        _ => false,
+                    } =>
+            {
+                Ok(data)
             }
             APPROVALS if data["approvals"].is_array() => Ok(data),
             DECIDE
@@ -603,7 +644,7 @@ impl Server<'_> {
                 label(&row["provider"])
             };
             json!({"id":label(&row["attempt_id"]),"state":label(&row["state"]),"provider":provider,
-                   "tool":label(&row["tool"]),"role":label(&row["refs"]["panel_role"]),"task":label(&row["task_id"])})
+                   "tool":label(&row["tool"]),"room":label(&row["refs"]["panel_room_id"]),"role":label(&row["refs"]["panel_role"]),"task":label(&row["task_id"])})
         };
         let attempts = active["recent"]
             .as_array()

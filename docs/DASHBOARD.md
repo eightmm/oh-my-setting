@@ -161,6 +161,16 @@ come from runtime records. Approve or deny a specific pending question after
 reviewing it. A stale review requires a fresh decision. The approval is an
 answer to that question for its Main to consume.
 
+If the start response is lost, ask OMS to check that request in the same
+chat. `oms_start_status` looks up the original project and request UUID.
+`not_found` allows a retry with that UUID. `reserved` identifies the Room
+while launch remains unconfirmed. `recorded` returns the matching attempt
+and its state.
+
+The panel below uses seeded project data.
+
+![OMS panel with Main selection, project progress and an approval request](assets/oms-chat-panel.png)
+
 ### Register a marketplace once
 
 Choose one transport for the app's **execution host**. Both expose the same

@@ -51,6 +51,57 @@ impl Room<'_> {
         Ok(Some(item))
     }
 
+    pub(crate) fn desktop_start_status(&self, room: &str) -> Result<Value> {
+        let request = identifier(room, "room")?
+            .strip_prefix("oms-app-")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::new("expected a desktop request Room"))?;
+        let mut receipt = obj([
+            ("requestId", request.into()),
+            ("room", Value::Null),
+            ("status", "not_found".into()),
+            ("attempt", Value::Null),
+            ("provider", Value::Null),
+            ("state", Value::Null),
+            ("terminal", Value::Null),
+        ]);
+        let Some(store) = &self.store else {
+            return Ok(receipt);
+        };
+        store.check()?;
+        if !store.threads.exists(&crate::storage::Store::name(room))? {
+            return Ok(receipt);
+        }
+        let reserved = crate::project(&self.records(room)?)?;
+        if reserved.text("id") != room {
+            return Err(Error::new("desktop request Room differs"));
+        }
+        receipt.set("room", reserved["id"].clone());
+        receipt.set("status", "reserved");
+        // The full producer projection retains creation order. A later Main
+        // succession in this Room must not replace the original start receipt.
+        let operations = self.operations()?;
+        if let Some(main) = operations
+            .attempts()
+            .iter()
+            .find(|a| a.tool == "panel-main" && a.refs.text("panel_room_id") == room)
+        {
+            let harness = main.refs.text("panel_harness");
+            if main.refs.text("panel_role") != "main"
+                || !crate::main_owner_matches(harness, &main.provider)
+            {
+                return Err(Error::new("inconsistent desktop Main lifecycle"));
+            }
+            receipt.set("status", "recorded");
+            receipt.set("attempt", main.attempt_id.as_str());
+            receipt.set("provider", harness);
+            receipt.set("state", main.state.as_str());
+            receipt.set("terminal", main.terminal);
+        }
+        operations.check()?;
+        Ok(receipt)
+    }
+
     pub(crate) fn desktop_requests(&self) -> Result<Value> {
         let (rooms, mut incomplete) = self.discover()?;
         let mut requests = Vec::new();

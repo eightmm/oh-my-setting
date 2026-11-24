@@ -255,7 +255,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 6);
+    assert_eq!(tools.as_array().unwrap().len(), 7);
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
@@ -296,20 +296,23 @@ fn conversation_panel() {
     );
     assert!(!result.to_string().contains("private command"));
     let mut observed = snapshot;
-    let main = json!({"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main"}});
+    let main = json!({"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-live"}});
     observed["attempts"] =
         json!({"available":true,"active":1,"active_recent":[main],"recent":[main]});
     fixture_settings(&source, json!({"stdout":observed.to_string()}));
     let live = payload(&c.tool("oms_panel_snapshot", json!({})));
     assert_eq!(live["dashboard"]["main"]["provider"], "pi");
+    assert_eq!(live["dashboard"]["main"]["room"], "room-live");
     assert_eq!(live["dashboard"]["attempts"][0]["role"], "main");
     let start = json!({"main":"codex","goal":"--help; inspect scope","requestId":"4d6acd01-bd18-4567-bf69-ea05fb048b27"});
     let room = "oms-app-4d6acd01-bd18-4567-bf69-ea05fb048b27";
     fixture_settings(
         &source,
-        json!({"stdout":json!({"status":"started","provider":"codex","room":room}).to_string()}),
+        json!({"stdout":json!({"status":"started","provider":"codex","room":room,"attempt":"native-main"}).to_string()}),
     );
-    good(&c.tool("oms_start_main", start.clone()));
+    let receipt = payload(&c.tool("oms_start_main", start.clone()));
+    assert_eq!(receipt["attempt"], "native-main");
+    assert_eq!(receipt["requestId"], start["requestId"]);
     assert_eq!(
         record(&source)["argv"],
         json!([
@@ -383,7 +386,28 @@ fn conversation_panel() {
     );
     let mut routed = start;
     routed["project"] = json!("demo");
-    good(&c.tool("oms_start_main", routed));
+    good(&c.tool("oms_start_main", routed.clone()));
+    let recovered = json!({"requestId":routed["requestId"],"room":room,"status":"recorded","attempt":"native-main","state":"done","provider":"codex","terminal":true});
+    fixture_settings(&source, json!({"stdout":recovered.to_string()}));
+    assert_eq!(
+        payload(&c.tool(
+            "oms_start_status",
+            json!({"project":"demo","requestId":routed["requestId"]})
+        )),
+        recovered
+    );
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "room",
+            "desktop-start-status",
+            "--repo",
+            repo,
+            "--id",
+            room,
+            "--json"
+        ])
+    );
     std::fs::write(&map, "{}").unwrap();
     bad(
         &c.tool("oms_list_projects", json!({})),

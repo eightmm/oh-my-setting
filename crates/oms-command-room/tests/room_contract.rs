@@ -86,17 +86,18 @@ use oms_command_room::{
     LocalServices, Services, run_with_services,
     value::{Value, parse},
 };
-struct EmptyOperations;
-impl oms_command_room::OperationsRead for EmptyOperations {
+struct FixtureOperations<'a>(&'a [oms_command_room::Attempt]);
+impl oms_command_room::OperationsRead for FixtureOperations<'_> {
     fn attempts(&self) -> &[oms_command_room::Attempt] {
-        &[]
+        self.0
     }
     fn check(&self) -> oms_command_room::Result<()> {
         Ok(())
     }
 }
-struct FixtureServices;
-impl Services for FixtureServices {
+struct FixtureServices<'a>(&'a [oms_command_room::Attempt]);
+const EMPTY: FixtureServices = FixtureServices(&[]);
+impl Services for FixtureServices<'_> {
     fn state_repository(&self, path: &Path) -> oms_command_room::Result<PathBuf> {
         LocalServices.state_repository(path)
     }
@@ -107,11 +108,11 @@ impl Services for FixtureServices {
         &'a self,
         _: &Path,
     ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
-        Ok(Box::new(EmptyOperations))
+        Ok(Box::new(FixtureOperations(self.0)))
     }
 }
 fn run(repo: &Repo, values: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
-    run_with_services(&args(values), &repo.0, &STOP, &FixtureServices)
+    run_with_services(&args(values), &repo.0, &STOP, &EMPTY)
 }
 fn success(output: (i32, Vec<u8>, Vec<u8>)) -> Value {
     assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
@@ -171,6 +172,51 @@ fn room_lifecycle_and_cursor() {
             success(run(&repo, &["new", "--id", "room-fixture", "--json"]))["id"].as_str(),
             Some("room-fixture")
         );
+        let reserved_room = "oms-app-fixture";
+        let status_args = args(&["desktop-start-status", "--id", reserved_room, "--json"]);
+        let lookup = |attempts: &[oms_command_room::Attempt]| {
+            success(run_with_services(
+                &status_args,
+                &repo.0,
+                &STOP,
+                &FixtureServices(attempts),
+            ))
+        };
+        assert_eq!(lookup(&[]).text("status"), "not_found");
+        success(run(&repo, &["new", "--id", reserved_room, "--json"]));
+        let pending = lookup(&[]);
+        assert_eq!(pending.text("status"), "reserved");
+        assert!(pending["attempt"].is_null());
+        let first = oms_command_room::Attempt {
+            attempt_id: "first-attempt".into(),
+            tool: "panel-main".into(),
+            provider: "codex".into(),
+            state: "done".into(),
+            terminal: true,
+            reason_code: None,
+            created_at: String::new(),
+            refs: oms_command_room::value::obj([
+                ("panel_harness", "pi".into()),
+                ("panel_role", "main".into()),
+                ("panel_room_id", reserved_room.into()),
+            ]),
+        };
+        let mut later = first.clone();
+        later.attempt_id = "replacement".into();
+        later.terminal = false;
+        later.state = "working".into();
+        let mut unrelated = first.clone();
+        unrelated.refs.set("panel_room_id", "different-room");
+        let mut history = vec![unrelated.clone(); 16];
+        history.push(first);
+        history.push(later);
+        history.extend(vec![unrelated; 16]);
+        let recorded = lookup(&history);
+        assert_eq!(recorded.text("room"), reserved_room);
+        assert_eq!(recorded.text("attempt"), "first-attempt");
+        assert_eq!(recorded.text("status"), "recorded");
+        assert_eq!(recorded.text("provider"), "pi");
+        assert!(recorded.flag("terminal"));
         for who in ["owner", "reader"] {
             success(run(
                 &repo,
@@ -318,7 +364,7 @@ fn room_lifecycle_and_cursor() {
         let core = oms_command_room::Room::open(
             &repo.0,
             oms_command_room::Session::default(),
-            &FixtureServices,
+            &EMPTY,
             &STOP,
             false,
             false,
