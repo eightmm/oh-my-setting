@@ -35,7 +35,7 @@ the embedding UI. A missing Python executable is reported as unavailable
 metadata rather than becoming a native report runtime dependency.
 
 With `Unavailable`, `checkpoint`, `scratch-worktree`, `change-guard`,
-`candidate`, `land status|conflicts|batch-preview|batch-check|notes|blame-session` and plain
+`candidate`, `land status|conflicts|batch-preview|batch-check|reconcile|notes|blame-session` and plain
 `report --dry-run` run locally. `patch-admit` also runs locally (`ADMIT`)
 when no `--plan-task`, `--covers`, `--verify` or `scripts/check.sh` applies;
 under `Unavailable`, `--plan-task` refuses at `Services::plan`, `--covers` at
@@ -167,7 +167,7 @@ publication authority.
 | Attribution ledger | Observations append with canonical locks; commit projection holds the writer through deduplication. An interrupted append can leave a refused partial tail; attribution failure does not authorize or undo a landing |
 | Gate clone/index/objects | Independent private TMPDIR clone leaves the source worktree registry alone. Normal return/error removes it; hard kill can leave the disposable clone. Explicit keep-worktree retains the admission clone |
 | Scratch marker/worktree registry/gitmeta | Marker is durable before registration and removed last. Exact registry lock/backpointer checks serialize removal. Interruption leaves a vouched-for pending or partially removed scratch; unrelated entries are never pruned |
-| Host receipt/log/active-holder | Land lock honors `OMS_LOCK_TIMEOUT`; contention exits 75. Receipt/log replacements are CAS/fsynced. A stale holder is inert unless its PID birth identity and a fresh held lock agree; status probes the lock directly |
+| Host receipt/log/active-holder | Land lock honors `OMS_LOCK_TIMEOUT`; contention exits 75. A publish-only PR releases this lock while observing hosted CI. Its exact request and receipt remain fenced. `land wait` follows that request while `land status --active-exit` continues to probe the repository lock. Receipt/log replacements are CAS/fsynced. A stale holder is inert unless its PID birth identity and a fresh held lock agree; status probes the lock directly |
 | Remote target/source refs | Gate binds HEAD, raw tracked bytes and index SHA256. Explicit expected old ref/absence is used at push. A killed response is unknown and must be observed before any retry |
 | Full CI dispatch | Exact target is checked, then dispatch uncertainty is persisted before the request. A later call observes it and never blindly dispatches again |
 | PR intent/blocked/push-attempted sidecars | Intent writer and schema/digest checks retain one-way phases. Arming precedes push; an armed missing branch is never recreated. PR recovery first queries exact remote state |

@@ -217,7 +217,17 @@ fn child_entry() {
     } else {
         raw.split(SEP).map(OsString::from).collect()
     };
-    let flag = AtomicBool::new(false);
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    if let Some(marker) = std::env::var_os("OMS_CT_INTERRUPT_AT") {
+        let marker = PathBuf::from(marker);
+        let cancelled = flag.clone();
+        std::thread::spawn(move || {
+            while !marker.is_file() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            cancelled.store(true, Ordering::Release);
+        });
+    }
     let (code, out, err) = if tool == "exact-ci-observation" {
         let identity = V::parse(args[0].to_str().unwrap().as_bytes()).unwrap();
         match oms_command_landing::ci::observe_attempt(&cwd, &cwd, &identity, &flag)
@@ -2293,10 +2303,11 @@ impl Isolated {
         let body = format!(
             r#"#!{bash}
 printf '%s\n' "$*" >> '{log}'
-head=; commit=; event=; body=; match=
+head=; commit=; event=; body=; match=; base=
 args=("$@")
 for ((i = 0; i < ${{#args[@]}}; i++)); do
   case "${{args[i]}}" in
+    --base) base=${{args[i+1]}} ;;
     --head) head=${{args[i+1]}} ;;
     --commit) commit=${{args[i+1]}} ;;
     --event) event=${{args[i+1]}} ;;
@@ -2315,7 +2326,7 @@ case "$1 $2" in
       else echo '[]'; fi
     elif [ -f '{state}' ]; then
       tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
-      printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s"}}]\n' "$tip"
+      printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s","baseRefName":"%s","headRefName":"%s","isCrossRepository":false}}]\n' "$tip" "$base" "$head"
     else echo '[]'; fi ;;
   "pr create") : > '{state}'; IFS= read -rd '' text < "$body"; printf '%s' "$text" > '{state}.body'; echo https://example.invalid/pull/7 ;;
   "pr merge")
@@ -2325,10 +2336,15 @@ case "$1 $2" in
     if [ -f '{state}.squash' ]; then
       git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
     fi ;;
-  "pr view") printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)" ;;
+  "pr view")
+    if [ -f '{state}.view' ]; then cat '{state}.view'
+    else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
+  "run view") cat "{state}.jobs$3" 2>/dev/null || exit 1 ;;
   "run list")
     if [ "$event" = pull_request ]; then
       printf '[{{"databaseId":99,"status":"completed","conclusion":"{ci}","headSha":"%s"}}]\n' "$commit"
+    elif [ "$event" = push ] && [ -f '{state}.pushci' ]; then
+      printf '[{{"databaseId":98,"status":"completed","conclusion":"{ci}","headSha":"%s"}}]\n' "$commit"
     else echo '[]'; fi ;;
   *) exit 1 ;;
 esac
@@ -2438,6 +2454,187 @@ fn land_to_github_opens_a_pr_and_merges_only_with_merge() {
 }
 
 #[test]
+fn publish_only_ci_yields_to_an_independent_land_and_fences_its_receipt() {
+    use std::time::{Duration, Instant};
+    for scenario in [
+        "unchanged",
+        "receipt-changed",
+        "head-moved",
+        "target-moved",
+        "interrupted",
+        "legacy-writer",
+    ] {
+        let iso = Isolated::new();
+        let (a, bare) = iso.with_remote("ci-concurrent");
+        let b = iso.home.path().join("checkout-b");
+        iso.git(
+            &a,
+            &["worktree", "add", "-q", "-b", "b", b.to_str().unwrap()],
+        );
+        iso.git(&a, &["checkout", "-qb", "a"]);
+        let head = iso.commit_file(&a, "a.txt");
+        iso.commit_file(&b, "b.txt");
+        let (gh_a, log) = iso.fake_gh(&bare, "success");
+        let original = fs::read_to_string(&gh_a).unwrap();
+        let gh_b = iso.home.path().join("gh-b");
+        fs::write(
+            &gh_b,
+            original
+                .replace("gh.pr", "gh.pr-b")
+                .replace("\"number\":7", "\"number\":8")
+                .replace("pull/7", "pull/8"),
+        )
+        .unwrap();
+        fs::set_permissions(&gh_b, fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(which("sleep"), iso.bin.join("sleep")).unwrap();
+        fs::write(
+            &gh_a,
+            original.replace(
+                "\"run list\")",
+                r#""run list")
+    : > "$HOME/observing"
+    for ((tick=0; tick < 500; tick++)); do
+        [ ! -f "$HOME/release-ci" ] || break
+        sleep 0.025
+    done
+    [ -f "$HOME/release-ci" ] || exit 1
+"#,
+            ),
+        )
+        .unwrap();
+        let args = [
+            "--pr",
+            "--why",
+            "fixture",
+            "--gate",
+            "true",
+            "--no-update",
+            "--ignore-siblings",
+        ];
+        let cancel = iso.home.path().join("interrupt");
+        let mut env = vec![
+            ("OMS_GH_BIN", gh_a.to_str().unwrap()),
+            ("OMS_LOCK_TIMEOUT", "2"),
+        ];
+        if scenario == "interrupted" {
+            env.push(("OMS_CT_INTERRUPT_AT", cancel.to_str().unwrap()));
+        }
+        std::thread::scope(|scope| {
+            let running = scope.spawn(|| iso.run_with_services("land", &a, &args, &env));
+            let start = Instant::now();
+            while !iso.home.path().join("observing").exists() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10) && !running.is_finished(),
+                    "publisher did not enter CI observation"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let status = iso.run("land", &a, &["status", "--json", "--active-exit"]);
+            assert_eq!(status.0, 0, "{status:?}");
+            let row = V::parse(status.1.as_bytes()).unwrap();
+            assert_eq!(row.get("pr_number"), &7usize.into());
+            let stamp = row.get("request").text().unwrap();
+            let directory = fs::read_dir(iso.home.path().join(".local/state/oh-my-setting/land"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let receipt = directory.join(format!("{stamp}.json"));
+            let mut expected = fs::read(&receipt).unwrap();
+            let observed = iso.run(
+                "land",
+                &a,
+                &[
+                    "wait",
+                    "--reviewed-head",
+                    &head,
+                    "--request",
+                    stamp,
+                    "--json",
+                ],
+            );
+            let result = V::parse(observed.1.as_bytes()).unwrap();
+            assert_eq!(result.get("activity").text(), Some("held"));
+            assert_eq!(result.get("phase").text(), Some("pr-recorded"));
+            let duplicate =
+                iso.run_with_services("land", &a, &[args.as_slice(), &["--merge"]].concat(), &env);
+            assert_eq!(duplicate.0, 75, "{duplicate:?}");
+            assert_eq!(fs::read(&receipt).unwrap(), expected);
+            let mut legacy_guard = None;
+            if scenario == "unchanged" {
+                let other = iso.run_with_services(
+                    "land",
+                    &b,
+                    &args,
+                    &[
+                        ("OMS_GH_BIN", gh_b.to_str().unwrap()),
+                        ("OMS_LOCK_TIMEOUT", "2"),
+                    ],
+                );
+                assert_eq!(other.0, 0, "{other:?}");
+                assert!(other.1.contains("pull request #8 open"));
+                assert_eq!(fs::read(&receipt).unwrap(), expected);
+            } else if scenario == "receipt-changed" {
+                expected.push(b' ');
+                fs::write(&receipt, &expected).unwrap();
+            } else if scenario == "interrupted" {
+                fs::write(&cancel, b"").unwrap();
+            } else if scenario == "target-moved" {
+                iso.git(&bare, &["update-ref", "refs/heads/main", &head]);
+            } else if scenario == "head-moved" {
+                iso.git(&bare, &["update-ref", "refs/heads/a", "refs/heads/main"]);
+            } else {
+                // Previous versions take active first, publish their holder, then
+                // must take the receipt lock before gate/push/PR/merge.
+                let mut settings = oms_lock::Settings::from_env().unwrap();
+                settings.home = iso.home.path().into();
+                settings.temp_dir = iso.tmp.clone();
+                settings.cwd = a.clone();
+                settings.search_path = iso.bin.clone().into_os_string();
+                settings.lock_dir = None;
+                settings.mode = oms_lock::Mode::Mkdir;
+                let global =
+                    oms_lock::Lock::for_file(&directory.join("active"), settings.clone()).unwrap();
+                legacy_guard = Some(global.try_acquire().unwrap());
+                fs::write(
+                    directory.join("active-holder"),
+                    fs::read(directory.join(format!("{stamp}.ci-holder"))).unwrap(),
+                )
+                .unwrap();
+                let legacy_write = oms_lock::Lock::for_file(&receipt, settings)
+                    .unwrap()
+                    .try_acquire();
+                assert!(matches!(legacy_write, Err(oms_lock::Error::Busy)));
+            }
+            if scenario != "interrupted" {
+                fs::write(iso.home.path().join("release-ci"), b"").unwrap();
+            }
+            let final_result = running.join().unwrap();
+            if scenario == "unchanged" {
+                assert_eq!(final_result.0, 0, "{final_result:?}");
+                assert!(final_result.1.contains("CI success; not merged"));
+            } else {
+                assert_ne!(final_result.0, 0, "{final_result:?}");
+                assert_eq!(fs::read(&receipt).unwrap(), expected);
+                if scenario == "interrupted" {
+                    assert_eq!(final_result.0, 130, "{final_result:?}");
+                }
+                if legacy_guard.is_some() {
+                    assert_eq!(final_result.0, 75);
+                }
+            }
+            let calls = fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                calls.lines().filter(|l| l.starts_with("pr create")).count(),
+                if scenario == "unchanged" { 2 } else { 1 }
+            );
+            assert!(!calls.contains("pr merge"));
+        });
+    }
+}
+
+#[test]
 fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
     let iso = Isolated::new();
     let (repo, bare) = iso.with_remote("prfail");
@@ -2510,13 +2707,16 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
         "--why",
         "fixture",
         "--gate",
-        "true",
+        r#"bash -c 'git rev-parse HEAD >> "$HOME/gated-pr-heads"'"#,
         "--ignore-siblings",
         "--no-update",
     ];
     let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
-    assert!(r.1.contains("diverged"), "{r:?}");
+    assert!(
+        r.1.contains("diverged") && r.1.contains("merge the existing remote PR head"),
+        "{r:?}"
+    );
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
     iso.git(&bare, &["update-ref", "-d", "refs/heads/feat"]);
     let r = iso.run_with_services(
@@ -2527,13 +2727,577 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
     );
     assert_eq!(r.0, 0, "{r:?}");
     assert!(r.1.contains("CI skipped; not merged"), "{r:?}");
-    let calls = fs::read_to_string(log).expect("gh log");
+    let calls = fs::read_to_string(&log).expect("gh log");
     assert!(
         calls.contains("pr create --repo")
             && calls.contains("--head feat --title")
             && !calls.contains("pr merge"),
         "{calls}"
     );
+
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    let target = iso.commit_file(&repo, "upstream.txt");
+    iso.git(&repo, &["push", "-q", "origin", "main"]);
+    iso.git(&repo, &["checkout", "-q", "feat"]);
+    iso.commit_file(&repo, "pr-fix.txt");
+    let gated = iso.home.path().join("gated-pr-heads");
+    let original_gates = fs::read_to_string(&gated).unwrap();
+    assert_eq!(original_gates.lines().collect::<Vec<_>>(), [head.as_str()]);
+    let stale = iso.run_with_services("land", &repo, &args, &env);
+    assert_refused(&stale, "merge it into your PR branch");
+    assert_eq!(fs::read_to_string(&gated).unwrap(), original_gates);
+    assert_eq!(fs::read_to_string(&log).unwrap(), calls);
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
+
+    iso.git(&repo, &["fetch", "-q", "origin"]);
+    iso.git(&repo, &["merge", "--no-edit", "origin/main"]);
+    let updated = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 0, "{r:?}");
+    assert!(
+        r.1.contains("pull request #7 open") && r.1.contains("CI success"),
+        "{r:?}"
+    );
+    assert_eq!(
+        iso.git_out(&bare, &["rev-parse", "refs/heads/main"]),
+        target
+    );
+    assert_eq!(
+        iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]),
+        updated
+    );
+    iso.git(&bare, &["merge-base", "--is-ancestor", &head, &updated]);
+    assert_eq!(
+        fs::read_to_string(&gated)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [head.as_str(), updated.as_str()]
+    );
+    let calls = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|l| l.starts_with("pr create "))
+            .count(),
+        1
+    );
+    assert!(!calls.contains("pr merge"));
+}
+
+#[test]
+fn land_reconcile_observes_a_merged_pr_after_the_target_moved_and_writes_nothing() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_github_remote("recon");
+    let head = iso.commit_as(&repo, "feat.txt", "feat\n", &["feat: recover", "Reason."]);
+    let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+    let (gh, log) = iso.fake_gh(&bare, "success");
+    // Only transport goes to the isolated bare repo. Identity queries observe
+    // the actual configured GitHub destination for issuance and reconciliation.
+    let public = "https://github.com/owner/recon.git";
+    iso.git(&repo, &["remote", "set-url", "origin", public]);
+    let git = iso.bin.join("git");
+    fs::remove_file(&git).unwrap();
+    fs::write(
+        &git,
+        format!(
+            r#"#!{bash}
+for a in "$@"; do
+    case "$a" in ls-remote|push|fetch)
+        exec '{real_git}' -c 'url.{bare}.insteadOf={public}' "$@";;
+    esac
+done
+exec '{real_git}' "$@"
+"#,
+            bash = which("bash").display(),
+            real_git = which("git").display(),
+            bare = bare.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(which("cat"), iso.bin.join("cat")).unwrap();
+    let fake = fs::read_to_string(&gh)
+        .unwrap()
+        .replace(
+            "https://example.invalid/pull/7",
+            "https://github.com/owner/recon/pull/7",
+        )
+        .replace(
+            "case \"$1 $2\" in",
+            r#"case "$1 $2" in
+  "api --method")
+     case "${!#}" in
+       repos/owner/recon/actions/workflows/test.yml/runs*event=pull_request*) cat "$HOME/gh.run";;
+       repos/owner/recon/actions/runs/99/attempts/1/jobs*) cat "$HOME/gh.jobs";;
+       repos/owner/recon/pulls*) cat "$HOME/gh.pulls";;
+       *) exit 1;;
+     esac ;;"#,
+        );
+    fs::write(&gh, fake).unwrap();
+    let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
+    let args = ["--gate", "true", "--ignore-siblings", "--no-update"];
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 0, "{r:?}");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    let receipt = V::parse(status.as_bytes()).expect("status json");
+    let (code, observed, err) = iso.run(
+        "land",
+        &repo,
+        &[
+            "wait",
+            "--reviewed-head",
+            &head,
+            "--request",
+            receipt.get("request").text().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let observed = V::parse(observed.as_bytes()).unwrap();
+    assert_eq!(observed.get("receipt_state").text(), Some("awaiting-merge"));
+    assert_eq!(observed.get("phase").text(), Some("pr-recorded"));
+    let branch = receipt.get("head_branch").text().unwrap().to_owned();
+    // main moved, then the PR merged with exactly the reviewed tree (PR 469 pattern)
+    let commit = |tree: &str, parent: &str, msg: &str| {
+        iso.git_out(
+            &bare,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit-tree",
+                tree,
+                "-p",
+                parent,
+                "-m",
+                msg,
+            ],
+        )
+    };
+    let moved = commit(&format!("{main_before}^{{tree}}"), &main_before, "moved");
+    let merge = commit(&format!("{head}^{{tree}}"), &moved, "squash");
+    iso.git(&bare, &["update-ref", "refs/heads/main", &merge]);
+    iso.git(&repo, &["fetch", "-q", "origin", "main"]);
+    strip_group_world_write(&repo);
+    let home = iso.home.path();
+    let view = |state: &str, head: &str, cross: bool, merge: &str| {
+        fs::write(
+            home.join("gh.pr.view"),
+            format!(
+                r#"{{"number":7,"state":"{state}","url":"https://github.com/owner/recon/pull/7","statusCheckRollup":[{{"__typename":"CheckRun","name":"gate","conclusion":"SUCCESS","detailsUrl":"https://github.com/owner/recon/actions/runs/99/job/101"}}],"headRefOid":"{head}","headRefName":"{branch}","baseRefName":"main","isCrossRepository":{cross},"mergeCommit":{{"oid":"{merge}"}}}}"#
+            ),
+        )
+        .expect("view");
+    };
+    let job_id = 101;
+    let prefix = "https://github.com/owner/recon/actions/runs/99/job";
+    let run = format!(
+        r#"{{"workflow_runs":[{{"id":99,"run_attempt":1,"head_sha":"{head}","head_branch":"{branch}","status":"completed","conclusion":"success","event":"pull_request","path":".github/workflows/test.yml","repository":{{"full_name":"owner/recon","id":11}},"head_repository":{{"full_name":"owner/recon","id":11}},"pull_requests":[]}}]}}"#
+    );
+    let pulls = format!(
+        r#"[{{"number":7,"head":{{"sha":"{head}","ref":"{branch}","repo":{{"full_name":"owner/recon"}}}},"base":{{"ref":"main","repo":{{"full_name":"owner/recon"}}}}}}]"#
+    );
+    let jobs = ["gate","lint","focused","native (ubuntu-latest, copy)"].iter().enumerate().map(|(n,name)| {
+        let id=job_id+n;
+        format!(r#"{{"id":{id},"run_id":99,"run_attempt":1,"head_sha":"{head}","status":"completed","name":"{name}","conclusion":"success","html_url":"{prefix}/{id}"}}"#)
+    }).collect::<Vec<_>>().join(",");
+    let jobs = format!(r#"{{"total_count":4,"jobs":[{jobs}]}}"#);
+    fs::write(home.join("gh.run"), &run).unwrap();
+    fs::write(home.join("gh.jobs"), &jobs).unwrap();
+    fs::write(home.join("gh.pulls"), &pulls).unwrap();
+    view("MERGED", &head, false, &merge);
+    let reconcile = |extra: &[&str]| {
+        let mut a = vec!["reconcile", "--reviewed-head", head.as_str(), "--json"];
+        a.extend(extra);
+        let r = iso.run_with_services("land", &repo, &a, &env);
+        (r.0, V::parse(r.1.as_bytes()).unwrap_or(V::Null), r)
+    };
+    let observed = || {
+        (
+            iso.run("land", &repo, &["status", "--json"]).1,
+            iso.git_out(&repo, &["for-each-ref"]),
+            iso.git_out(&bare, &["for-each-ref"]),
+            iso.git_out(&repo, &["status", "--porcelain"]),
+        )
+    };
+    let before = observed();
+    // the existing delivery path still refuses the moved target
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_ne!(r.0, 0, "{r:?}");
+    assert!(r.2.contains("remote target is not an ancestor"), "{r:?}");
+    let (code, row, r) = reconcile(&[]);
+    assert_eq!(code, 0, "{r:?}");
+    assert_eq!(row.get("verdict").text(), Some("verified"), "{r:?}");
+    assert_eq!(row.get("reason").text(), Some("same-tree"), "{r:?}");
+    assert_eq!(row.get("writes").text(), Some("none"), "{r:?}");
+    assert_eq!(
+        row.get("merge_commit").text(),
+        Some(merge.as_str()),
+        "{r:?}"
+    );
+    assert_eq!(observed(), before);
+    for (what, reason, setup) in [
+        ("foreign", "pr-foreign-repository", 0),
+        ("moved head", "pr-head-moved", 1),
+        ("open", "pr-not-merged", 2),
+    ] {
+        match setup {
+            0 => view("MERGED", &head, true, &merge),
+            1 => view("MERGED", &merge, false, &merge),
+            _ => view("OPEN", &head, false, &merge),
+        }
+        let (code, row, r) = reconcile(&[]);
+        assert_eq!(code, 1, "{what}: {r:?}");
+        assert_eq!(row.get("verdict").text(), Some("refused"), "{what}: {r:?}");
+        assert_eq!(row.get("reason").text(), Some(reason), "{what}: {r:?}");
+    }
+    view("MERGED", &head, false, &merge);
+    // a conflicting or stale request selection and extra authority are refused
+    let stale = format!("{head}-{}", "0".repeat(24));
+    let (code, row, r) = reconcile(&["--request", &stale]);
+    assert_eq!(
+        (code, row.get("verdict").text()),
+        (1, Some("refused")),
+        "{r:?}"
+    );
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &["reconcile", "--reviewed-head", &head, "--merge"],
+        &env,
+    );
+    assert_eq!(r.0, 2, "{r:?}");
+    let association = format!(
+        r#"[{{"number":7,"head":{{"sha":"{head}","ref":"{branch}","repo":{{"id":11}}}},"base":{{"ref":"main","repo":{{"id":11}}}}}}]"#
+    );
+    let linked = run.replace("[]", &association);
+    fs::write(home.join("gh.run"), &linked).unwrap();
+    fs::remove_file(home.join("gh.pulls")).unwrap();
+    assert_eq!(reconcile(&[]).1.get("reason").text(), Some("same-tree"));
+    fs::write(
+        home.join("gh.run"),
+        linked.replace("\"number\":7", "\"number\":8"),
+    )
+    .unwrap();
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("pr-ci-unverified")
+    );
+    fs::write(home.join("gh.pulls"), &pulls).unwrap();
+    fs::write(home.join("gh.run"), &run).unwrap();
+    for (name, original, altered) in [
+        ("gh.run", &run, run.replace("pull_request\"", "push\"")),
+        ("gh.run", &run, run.replace("test.yml", "other.yml")),
+        ("gh.run", &run, run.replace("owner/recon", "outside/recon")),
+        ("gh.jobs", &jobs, jobs.replace("job/101", "job/999")),
+        (
+            "gh.jobs",
+            &jobs,
+            jobs.replace("run_attempt\":1", "run_attempt\":2"),
+        ),
+        (
+            "gh.pulls",
+            &pulls,
+            format!("[{0},{0}]", &pulls[1..pulls.len() - 1]),
+        ),
+    ] {
+        fs::write(home.join(name), altered).unwrap();
+        let (code, row, r) = reconcile(&[]);
+        assert_eq!(
+            (code, row.get("reason").text()),
+            (1, Some("pr-ci-unverified")),
+            "{r:?}"
+        );
+        fs::write(home.join(name), original).unwrap();
+    }
+    fs::write(home.join("gh.run"), run.replace("success", "cancelled")).unwrap();
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("pr-ci-not-successful")
+    );
+    fs::write(home.join("gh.run"), run.replace("completed", "queued")).unwrap();
+    assert_eq!(reconcile(&[]).1.get("reason").text(), Some("pr-ci-pending"));
+    fs::write(home.join("gh.run"), &run).unwrap();
+    assert_eq!(reconcile(&[]).1.get("verdict").text(), Some("verified"));
+    assert_eq!(observed(), before);
+    iso.git(&repo, &["remote", "set-url", "--push", "origin", public]);
+    iso.git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://github.com/other/recon.git",
+        ],
+    );
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("destination-ambiguous")
+    );
+    iso.git(&repo, &["config", "--unset-all", "remote.origin.pushurl"]);
+    let manifest_path = home.join("never-created-receipt");
+    let refused = iso.run_with_services(
+        "land",
+        &repo,
+        &[
+            "reconcile",
+            "--check-manifest",
+            "missing",
+            "--manifest-receipt",
+            manifest_path.to_str().unwrap(),
+            "--execute-manifest",
+            "--reviewed-head",
+            &head,
+        ],
+        &env,
+    );
+    assert_eq!(refused.0, 2);
+    assert!(!manifest_path.exists());
+    // a different merged tree on a moved base cannot be proven by name
+    let other = commit(&format!("{main_before}^{{tree}}"), &moved, "other");
+    iso.git(&bare, &["update-ref", "refs/heads/main", &other]);
+    iso.git(&repo, &["fetch", "-q", "origin", "main"]);
+    view("MERGED", &head, false, &other);
+    let (code, row, r) = reconcile(&[]);
+    assert_eq!(code, 1, "{r:?}");
+    assert_eq!(row.get("verdict").text(), Some("unverified"), "{r:?}");
+    assert_eq!(
+        row.get("reason").text(),
+        Some("merged-tree-differs"),
+        "{r:?}"
+    );
+    // An observer cannot substitute a local replacement tree for the GitHub merge.
+    iso.git(&repo, &["replace", &other, &head]);
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("merged-tree-differs")
+    );
+    iso.git(&repo, &["replace", "-d", &other]);
+    // Matching first parent + a green run cannot certify an unrelated tree.
+    let direct = commit(
+        &format!("{main_before}^{{tree}}"),
+        &main_before,
+        "unrelated",
+    );
+    iso.git(&bare, &["update-ref", "refs/heads/main", &direct]);
+    iso.git(&repo, &["fetch", "-q", "origin", "main"]);
+    view("MERGED", &head, false, &direct);
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("merged-tree-differs")
+    );
+    // an untrusted receipt is never read
+    let found = Command::new("find")
+        .args([home.to_str().unwrap(), "-name", &format!("{head}-*.json")])
+        .output()
+        .expect("find");
+    let path = String::from_utf8_lossy(&found.stdout).trim().to_owned();
+    assert!(!path.is_empty() && !path.contains('\n'), "{path}");
+    let saved = fs::read(&path).unwrap();
+    for (field, value) in [("state", "running"), ("repo", "elsewhere")] {
+        let mut wrong = V::parse(&saved).unwrap();
+        wrong.set(field, value);
+        fs::write(&path, wrong.json(false).unwrap()).unwrap();
+        assert_eq!(
+            reconcile(&[]).1.get("reason").text(),
+            Some("receipt-identity-mismatch")
+        );
+    }
+    fs::write(&path, &saved).unwrap();
+    let stamp = receipt.get("request").text().unwrap();
+    for index in 0..2048 {
+        fs::write(
+            Path::new(&path)
+                .parent()
+                .unwrap()
+                .join(format!("scan-{index}")),
+            [],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        reconcile(&[]).1.get("reason").text(),
+        Some("receipt-scan-limit-use-request")
+    );
+    assert_eq!(
+        reconcile(&["--request", stamp]).1.get("reason").text(),
+        Some("merged-tree-differs")
+    );
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).expect("chmod");
+    let (code, row, r) = reconcile(&["--request", stamp]);
+    assert_eq!(code, 1, "{r:?}");
+    assert_eq!(row.get("reason").text(), Some("receipt-untrusted"), "{r:?}");
+    let calls = fs::read_to_string(log).expect("gh log");
+    assert!(
+        !calls.contains("pr merge") && calls.matches("pr create").count() == 1,
+        "{calls}"
+    );
+}
+
+#[test]
+fn land_wait_follows_only_the_exact_private_receipt_and_holder() {
+    let iso = Isolated::new();
+    let (repo, _) = iso.with_remote("observe");
+    let head = iso.commit_file(&repo, "next.txt");
+    let result = iso.run_with_services(
+        "land",
+        &repo,
+        &["--gate", "exit 1", "--ignore-siblings"],
+        &[],
+    );
+    assert_eq!(result.0, 1, "{result:?}");
+    let row = V::parse(iso.run("land", &repo, &["status", "--json"]).1.as_bytes()).unwrap();
+    let stamp = row.get("request").text().unwrap();
+    let directory = fs::read_dir(iso.home.path().join(".local/state/oh-my-setting/land"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let path = directory.join(format!("{stamp}.json"));
+    let holder_path = directory.join("active-holder");
+    let saved = fs::read(&path).unwrap();
+    let saved_holder = fs::read(&holder_path).unwrap();
+    let wait = |request: &str, extra: &[&str]| {
+        let mut args = vec![
+            "wait",
+            "--reviewed-head",
+            &head,
+            "--request",
+            request,
+            "--json",
+        ];
+        args.extend(extra);
+        iso.run("land", &repo, &args)
+    };
+    let json = |r: (i32, String, String)| {
+        assert_eq!(r.0, 0, "{r:?}");
+        V::parse(r.1.as_bytes()).unwrap()
+    };
+    let first = json(wait(stamp, &[]));
+    assert_eq!(first.get("event").text(), Some("terminal"));
+    assert_eq!(first.get("receipt_state").text(), Some("failed"));
+    let cursor = first.get("cursor").text().unwrap();
+    assert_eq!(
+        json(wait(stamp, &["--after", cursor, "--wait-seconds", "50"])),
+        first
+    );
+    let foreign = format!("{head}-{}", "a".repeat(24));
+    assert_ne!(wait(&foreign, &[]).0, 0);
+    assert!(
+        wait(&foreign, &["--after", cursor])
+            .2
+            .contains("cursor does not match")
+    );
+    for args in [
+        vec!["--wait-seconds", "51"],
+        vec!["--merge"],
+        vec!["--request", stamp],
+    ] {
+        assert_ne!(wait(stamp, &args).0, 0);
+    }
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    assert_eq!(fs::read(&holder_path).unwrap(), saved_holder);
+
+    // If the remote head already existed, the PR writer records the exact PR
+    // and publication state without recording a successful push of its own.
+    let mut preexisting = V::parse(&saved).unwrap();
+    preexisting.set("state", "awaiting-merge");
+    preexisting.set("mode", "pr");
+    preexisting.set("gate", obj([("rc", 0usize.into())]));
+    preexisting.set("pr_number", 7usize);
+    preexisting.set("pr_url", "https://example.invalid/pull/7");
+    fs::write(&path, preexisting.json(false).unwrap()).unwrap();
+    assert_eq!(
+        json(wait(stamp, &[])).get("phase").text(),
+        Some("pr-recorded")
+    );
+
+    let mut running = V::parse(&saved).unwrap();
+    running.set("state", "running");
+    running.set(
+        "gate",
+        obj([
+            ("rc", "pending".into()),
+            ("command", "private fixture text".into()),
+        ]),
+    );
+    fs::write(&path, running.json(false).unwrap()).unwrap();
+    let orphan = json(wait(stamp, &[]));
+    assert_eq!(orphan.get("event").text(), Some("holder-unconfirmed"));
+    assert_eq!(orphan.get("activity").text(), Some("not-held"));
+
+    let mut settings = oms_lock::Settings::from_env().unwrap();
+    settings.home = iso.home.path().to_owned();
+    settings.cwd = repo.clone();
+    settings.temp_dir = iso.tmp.clone();
+    settings.lock_dir = None;
+    settings.mode = oms_lock::Mode::Mkdir;
+    let lock = oms_lock::Lock::for_file(&directory.join("active"), settings).unwrap();
+    let guard = lock.try_acquire().unwrap();
+    let pid = std::process::id();
+    let birth = oms_command_operations::lock::process_start(pid).unwrap();
+    let mut holder = obj([
+        ("receipt", format!("{stamp}.json").into()),
+        ("sha", head.clone().into()),
+        ("pid", (pid as usize).into()),
+        ("start", birth.into()),
+    ]);
+    fs::write(&holder_path, holder.json(false).unwrap()).unwrap();
+    let live = json(wait(stamp, &["--after", cursor]));
+    assert_eq!(live.get("event").text(), Some("changed"));
+    assert_eq!(live.get("activity").text(), Some("held"));
+    let cursor = live.get("cursor").text().unwrap();
+    let before = (fs::read(&path).unwrap(), fs::read(&holder_path).unwrap());
+    let end = std::thread::scope(|s| {
+        let observe = || json(wait(stamp, &["--after", cursor, "--wait-seconds", "1"]));
+        let second = s.spawn(observe);
+        let first = observe();
+        assert_eq!(second.join().unwrap(), first);
+        first
+    });
+    assert_eq!(end.get("event").text(), Some("timeout"));
+    assert_eq!(end.get("cursor").text(), Some(cursor));
+    assert_eq!(
+        before,
+        (fs::read(&path).unwrap(), fs::read(&holder_path).unwrap())
+    );
+    let output = end.json(false).unwrap();
+    let output = std::str::from_utf8(&output).unwrap();
+    for private in [
+        "private fixture text",
+        "command",
+        "pid",
+        repo.to_str().unwrap(),
+        stamp,
+    ] {
+        assert!(!output.contains(private), "{output}");
+    }
+    holder.set("start", "not-this-process");
+    fs::write(&holder_path, holder.json(false).unwrap()).unwrap();
+    assert_eq!(
+        json(wait(stamp, &["--after", cursor]))
+            .get("activity")
+            .text(),
+        Some("process-ended")
+    );
+    holder.set("receipt", format!("{foreign}.json"));
+    fs::write(&holder_path, holder.json(false).unwrap()).unwrap();
+    assert_eq!(
+        json(wait(stamp, &[])).get("activity").text(),
+        Some("unmatched")
+    );
+    drop(guard);
+    running.set("repo", "unrelated");
+    fs::write(&path, running.json(false).unwrap()).unwrap();
+    assert_ne!(wait(stamp, &[]).0, 0);
+    fs::write(&path, &saved).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    assert_ne!(wait(stamp, &[]).0, 0);
 }
 
 #[test]
