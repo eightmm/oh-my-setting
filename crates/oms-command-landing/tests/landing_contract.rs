@@ -3251,19 +3251,44 @@ impl GhRepo {
 printf '%s\n' "$*" >> '{log}'
 dir='{dir}' method=GET endpoint= body=
 args=("$@")
+after=
+for ((i = 0; i < ${{#args[@]}}; i++)); do
+  case "${{args[i]}}" in
+    after=*) after=${{args[i]#after=}} ;;
+  esac
+done
+after_key=${{after//[^a-zA-Z0-9]/_}}
 case "$1 $2" in
   "pr list") panel=panel-prs ;;
   "issue list") panel=panel-issues ;;
   "issue view"|"pr view") panel=panel-lookup ;;
   "api graphql")
     case "$*" in
-      *'projectV2(number'*) panel=panel-board ;;
-      *'work:issues('*|*'work:pullRequests('*) panel=panel-inventory ;;
+      *'projectV2(number'*)
+        panel=panel-board
+        if [ -n "$after_key" ] && {{ [ -f "$dir/panel-board-after-$after_key" ] || [ -f "$dir/panel-board-after-$after_key-timeout" ]; }}; then
+          panel="panel-board-after-$after_key"
+        fi ;;
+      *'work:issues('*)
+        panel=panel-inventory
+        if [ -n "$after_key" ] && {{ [ -f "$dir/panel-inventory-issues-after-$after_key" ] || [ -f "$dir/panel-inventory-issues-after-$after_key-timeout" ]; }}; then
+          panel="panel-inventory-issues-after-$after_key"
+        elif [ -f "$dir/panel-inventory-issues" ] || [ -f "$dir/panel-inventory-issues-timeout" ]; then
+          panel=panel-inventory-issues
+        fi ;;
+      *'work:pullRequests('*)
+        panel=panel-inventory
+        if [ -n "$after_key" ] && {{ [ -f "$dir/panel-inventory-pulls-after-$after_key" ] || [ -f "$dir/panel-inventory-pulls-after-$after_key-timeout" ]; }}; then
+          panel="panel-inventory-pulls-after-$after_key"
+        elif [ -f "$dir/panel-inventory-pulls" ] || [ -f "$dir/panel-inventory-pulls-timeout" ]; then
+          panel=panel-inventory-pulls
+        fi ;;
       *) panel=panel-projects ;;
     esac ;;
   *) panel= ;;
 esac
 if [ -n "$panel" ]; then
+  if [ -f "$dir/$panel-timeout" ]; then exit 124; fi
   [ -f "$dir/$panel" ] || exit 1
   printf '%s\n' "$(<"$dir/$panel")"
   if [ -f "$dir/$panel-failed" ]; then exit 1; fi
@@ -4441,7 +4466,8 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         V::Null
     ));
     assert!(r.calls().contains("-f after=cGFnZTE="));
-    // Missing scope reports the reason; nothing was mutated.
+    // Missing scope reports the reason only for read:project; other scopes and FORBIDDEN
+    // never leak drift-only or misleading panel reasons to the shared board panel.
     fs::write(r.dir.join("panel-board"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
     fs::write(r.dir.join("panel-board-failed"), "").unwrap();
     let (_, out, _) = run(&["--project-id", "PVT_abc"]);
@@ -4449,6 +4475,26 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     assert_eq!(
         denied.get("github").get("board").get("reason").text(),
         Some("insufficient_scope")
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires repo"}]}"#,
+    )
+    .unwrap();
+    let (_, out, _) = run(&["--project-id", "PVT_abc"]);
+    assert_eq!(
+        out.unwrap().get("github").get("board").get("reason"),
+        &V::Null
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"forbidden"}]}"#,
+    )
+    .unwrap();
+    let (_, out, _) = run(&["--project-id", "PVT_abc"]);
+    assert_eq!(
+        out.unwrap().get("github").get("board").get("reason"),
+        &V::Null
     );
     assert_eq!(r.posts(), 0);
 }
@@ -4748,4 +4794,586 @@ fn github_panel_matches_current_and_verified_linked_worktrees() {
         Some("unsupported")
     );
     assert_eq!(r.calls(), calls);
+}
+
+#[test]
+fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completeness() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "board-drift", false);
+    let url = "https://github.com/orgs/example-org/projects/3";
+    let mine = "example-org/example-repo";
+
+    // Help documents the new --drift flag, and invalid combinations fail with exit 2.
+    let (code, help, err) = inproc("github", &["--help"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(help.contains("--drift"), "{help}");
+    assert_refused(
+        &r.run(&iso, &["panel-status", "--drift"]),
+        "--drift requires --project-id NODE_ID",
+    );
+    assert_refused(
+        &r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project-id",
+                "PVT_abc",
+                "--drift",
+                "--cursor",
+                "abc.123",
+            ],
+        ),
+        "--drift cannot combine with --cursor",
+    );
+
+    let status_field = |opts: &str| {
+        format!(
+            r#"{{"__typename":"ProjectV2SingleSelectField","id":"F_status","name":"Status","options":[{opts}]}}"#
+        )
+    };
+    let value = |option: &str, name: &str| {
+        format!(
+            r#"{{"__typename":"ProjectV2ItemFieldSingleSelectValue","optionId":"{option}","name":"{name}","field":{{"id":"F_status"}}}}"#
+        )
+    };
+    let issue_card = |n: u32, state: &str, repo: &str, archived: bool, extra: &str| {
+        format!(
+            r#"{{"type":"ISSUE","isArchived":{archived},"content":{{"__typename":"Issue","number":{n},"title":"Issue {n}","state":"{state}","url":"https://github.com/{repo}/issues/{n}","repository":{{"nameWithOwner":"{repo}"}},"issueType":null,"blockedBy":{{"pageInfo":{{"hasNextPage":false}},"nodes":[]}},"labels":{{"pageInfo":{{"hasNextPage":false}},"nodes":[]}}}},"fieldValues":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{extra}]}}}}"#
+        )
+    };
+    let pr_card = |n: u32, state: &str, repo: &str, archived: bool, extra: &str| {
+        format!(
+            r#"{{"type":"PULL_REQUEST","isArchived":{archived},"content":{{"__typename":"PullRequest","number":{n},"title":"PR {n}","state":"{state}","url":"https://github.com/{repo}/pull/{n}","repository":{{"nameWithOwner":"{repo}"}}}},"fieldValues":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{extra}]}}}}"#
+        )
+    };
+    let board_reply = |fields_json: &str, more: bool, cursor: &str, items_json: &str| {
+        format!(
+            r#"{{"data":{{"organization":{{"login":"example-org","projectV2":{{"id":"PVT_abc","number":3,"title":"Roadmap","url":"{url}","closed":false,"fields":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{fields_json}]}},"items":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"{cursor}"}},"nodes":[{items_json}]}}}}}}}}}}"#
+        )
+    };
+    let work_page = |nodes: &str, more: bool, cursor: &str| {
+        format!(
+            r#"{{"data":{{"repository":{{"nameWithOwner":"{mine}","work":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"{cursor}"}},"nodes":[{nodes}]}}}}}}}}"#
+        )
+    };
+    let open_node = |n: u32, seg: &str, title: &str| {
+        format!(
+            r#"{{"number":{n},"title":"{title}","state":"OPEN","url":"https://github.com/{mine}/{seg}/{n}"}}"#
+        )
+    };
+
+    fs::write(
+        r.dir.join("panel-projects"),
+        r#"{"data":{"repository":{"nameWithOwner":"example-org/example-repo","projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PVT_abc","url":"https://github.com/orgs/example-org/projects/3","number":3,"title":"Roadmap","closed":false,"owner":{"__typename":"Organization","login":"example-org"},"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}]}}}}"#,
+    )
+    .unwrap();
+
+    // Multi-page board: page 1 -> page 2 (complete pagination).
+    let std_fields = status_field(
+        r#"{"id":"o_back","name":"Backlog"},{"id":"o_prog","name":"In Progress"},{"id":"o_done","name":"Done"}"#,
+    );
+    let page1_items = [
+        // Closed issue still in Backlog -> closed_not_done
+        issue_card(392, "CLOSED", mine, false, &value("o_back", "Backlog")),
+        // Merged PR still in In Progress -> merged_not_done
+        pr_card(448, "MERGED", mine, false, &value("o_prog", "In Progress")),
+        // Open issue marked Done -> open_in_done
+        issue_card(401, "OPEN", mine, false, &value("o_done", "Done")),
+        // Healthy open issue in Backlog -> no drift, present on board
+        issue_card(300, "OPEN", mine, false, &value("o_back", "Backlog")),
+        // Healthy closed issue in Done -> no drift
+        issue_card(299, "CLOSED", mine, false, &value("o_done", "Done")),
+        // Foreign repository item -> excluded (not drift, no details leaked)
+        issue_card(900, "CLOSED", "other-org/secret-repo", false, &value("o_back", "Backlog")),
+        // Archived foreign repository item -> excluded as foreignRepository, not archived
+        issue_card(901, "OPEN", "other-org/secret-repo", true, &value("o_back", "Backlog")),
+        // Archived local item -> excluded (not drift, even though open)
+        issue_card(350, "OPEN", mine, true, &value("o_back", "Backlog")),
+        // Draft item -> excluded
+        r#"{"type":"DRAFT_ISSUE","isArchived":false,"content":null,"fieldValues":{"pageInfo":{"hasNextPage":false},"nodes":[]}}"#.to_string(),
+    ]
+    .join(",");
+    let page2_items = [
+        // Closed PR with unset Status -> closed_not_done (status: null)
+        pr_card(410, "CLOSED", mine, false, ""),
+        // Open PR on board -> not missing
+        pr_card(420, "OPEN", mine, false, &value("o_prog", "In Progress")),
+    ]
+    .join(",");
+    fs::write(
+        r.dir.join("panel-board"),
+        board_reply(&std_fields, true, "page1cur", &page1_items),
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-page1cur"),
+        board_reply(&std_fields, false, "page2cur", &page2_items),
+    )
+    .unwrap();
+
+    // Open issues: #300 and #401 (on board), #350 (archived on board), plus 21 missing open issues (#450..#470) to test bounding + omitted count!
+    let mut open_issue_nodes = vec![
+        open_node(300, "issues", "On board open"),
+        open_node(401, "issues", "Issue 401"),
+        open_node(350, "issues", "Archived open"),
+    ];
+    for n in 450..=470 {
+        open_issue_nodes.push(open_node(n, "issues", &format!("Missing issue {n}")));
+    }
+    fs::write(
+        r.dir.join("panel-inventory-issues"),
+        work_page(&open_issue_nodes.join(","), false, ""),
+    )
+    .unwrap();
+    let open_pr_nodes = [
+        open_node(420, "pull", "On board PR"),
+        open_node(461, "pull", "Missing PR 461"),
+    ]
+    .join(",");
+    fs::write(
+        r.dir.join("panel-inventory-pulls"),
+        work_page(&open_pr_nodes, false, ""),
+    )
+    .unwrap();
+
+    // 1. Complete JSON readout.
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !out.contains("other-org/secret-repo")
+            && !out.contains("Issue 900")
+            && !out.contains("Issue 901"),
+        "foreign repo details must not leak: {out}"
+    );
+    let doc = V::parse(out.as_bytes()).expect("drift json");
+    let observed = doc.get("github").get("observedAt").text().unwrap();
+    assert!(
+        observed.ends_with('Z') && observed.contains('T'),
+        "{observed}"
+    );
+    let d = doc.get("github").get("drift");
+    assert_eq!(d.get("status").text(), Some("available"));
+    assert_eq!(d.get("observedAt").text(), Some(observed));
+    assert_eq!(d.get("partial"), &V::Bool(false));
+    assert_eq!(d.get("incomplete"), &V::Bool(false));
+    assert_eq!(d.get("completeness").get("complete"), &V::Bool(true));
+    assert_eq!(
+        d.get("completeness").get("board").get("pages"),
+        &V::Num("2".into())
+    );
+    let opts: Vec<_> = d
+        .get("statusField")
+        .get("options")
+        .array()
+        .iter()
+        .filter_map(|v| v.text())
+        .collect();
+    assert_eq!(opts, ["Backlog", "In Progress", "Done"]);
+    assert_eq!(
+        d.get("statusField").get("doneMatchRule").text(),
+        Some("exact_configured_names")
+    );
+    assert_eq!(d.get("statusField").get("hasDoneOption"), &V::Bool(true));
+    let matched: Vec<_> = d
+        .get("statusField")
+        .get("doneMatchedOptions")
+        .array()
+        .iter()
+        .filter_map(|v| v.text())
+        .collect();
+    assert_eq!(matched, ["Done"]);
+
+    // Status drift assertions: closed issue #392, merged PR #448, open issue #401, closed PR #410.
+    let sd = d.get("statusDrift");
+    assert_eq!(sd.get("total"), &V::Num("4".into()));
+    assert_eq!(sd.get("closedNotDone"), &V::Num("2".into()));
+    assert_eq!(sd.get("mergedNotDone"), &V::Num("1".into()));
+    assert_eq!(sd.get("openInDone"), &V::Num("1".into()));
+    let sd_summary: Vec<_> = sd
+        .get("items")
+        .array()
+        .iter()
+        .map(|i| {
+            (
+                i.get("kind").text().unwrap(),
+                i.get("number").py(),
+                i.get("state").text().unwrap(),
+                i.get("status").text(),
+                i.get("drift").text().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        sd_summary,
+        [
+            (
+                "pull",
+                "448".into(),
+                "MERGED",
+                Some("In Progress"),
+                "merged_not_done"
+            ),
+            ("pull", "410".into(), "CLOSED", None, "closed_not_done"),
+            ("issue", "401".into(), "OPEN", Some("Done"), "open_in_done"),
+            (
+                "issue",
+                "392".into(),
+                "CLOSED",
+                Some("Backlog"),
+                "closed_not_done"
+            ),
+        ]
+    );
+
+    // Missing from board: 21 open issues + 1 open PR = 22 total, bounded to 20 shown + 2 omitted.
+    let missing = d.get("missingFromBoard");
+    assert_eq!(missing.get("unverified"), &V::Bool(false));
+    assert_eq!(missing.get("total"), &V::Num("22".into()));
+    assert_eq!(missing.get("issuesTotal"), &V::Num("21".into()));
+    assert_eq!(missing.get("pullRequestsTotal"), &V::Num("1".into()));
+    assert_eq!(missing.get("items").array().len(), 20);
+    assert_eq!(missing.get("omitted"), &V::Num("2".into()));
+    assert!(
+        !missing
+            .get("items")
+            .array()
+            .iter()
+            .any(|i| i.get("number").py() == "350"),
+        "archived item is excluded, not missing-from-board drift"
+    );
+    let unverified_missing = d.get("unverifiedMissing");
+    assert_eq!(unverified_missing.get("total"), &V::Num("0".into()));
+    assert!(unverified_missing.get("items").array().is_empty());
+
+    // Excluded (not drift): 2 foreign (including 1 archived foreign), 1 archived local, 1 draft.
+    let ex = d.get("excluded");
+    assert_eq!(ex.get("foreignRepository"), &V::Num("2".into()));
+    assert_eq!(ex.get("archived"), &V::Num("1".into()));
+    assert_eq!(ex.get("draft"), &V::Num("1".into()));
+    assert_eq!(ex.get("total"), &V::Num("4".into()));
+
+    // 2. Short human text readout.
+    let (code, text, err) = r.run(
+        &iso,
+        &["panel-status", "--project-id", "PVT_abc", "--drift"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.contains("Board drift: Roadmap (#3, PVT_abc)"),
+        "{text}"
+    );
+    assert!(text.contains("Observed at: "), "{text}");
+    assert!(
+        text.contains(
+            "Completeness: complete\n  board: complete (11 items / 2 pages)\n  open issues: complete (24 items / 1 pages)\n  open PRs: complete (2 items / 1 pages)\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("Status options: Backlog, In Progress, Done"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Done-like options: Done\n  rule: exact configured names only ("),
+        "{text}"
+    );
+    assert!(
+        text.contains("pull #448 [MERGED] status=\"In Progress\" (merged_not_done)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("issue #392 [CLOSED] status=\"Backlog\" (closed_not_done)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("issue #401 [OPEN] status=\"Done\" (open_in_done)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Missing from board (open in repo): 22 (21 issues, 1 PRs; showing 20, 2 more omitted)"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("2 more not shown"), "{text}");
+    assert!(
+        text.contains("Excluded (not drift): 4 (foreign repository: 2, archived: 1, draft: 1)"),
+        "{text}"
+    );
+    for line in text.lines() {
+        assert!(
+            line.chars().count() <= 120,
+            "drift line exceeds 120 columns ({} chars): {line}",
+            line.chars().count()
+        );
+    }
+
+    // 3. Board with NO configured done-like option (exact names only, no fuzzy guess for "Shipped" / "done").
+    let no_done_fields = status_field(
+        r#"{"id":"o_back","name":"Backlog"},{"id":"o_ship","name":"Shipped"},{"id":"o_lower","name":"done"}"#,
+    );
+    let no_done_items = [
+        issue_card(392, "CLOSED", mine, false, &value("o_ship", "Shipped")),
+        issue_card(393, "OPEN", mine, false, &value("o_lower", "done")),
+    ]
+    .join(",");
+    fs::write(
+        r.dir.join("panel-board"),
+        board_reply(&no_done_fields, false, "", &no_done_items),
+    )
+    .unwrap();
+    let (code, text, err) = r.run(
+        &iso,
+        &["panel-status", "--project-id", "PVT_abc", "--drift"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.contains("Status options: Backlog, Shipped, done"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Done-like options: none on board\n  rule: exact configured names only ("),
+        "{text}"
+    );
+    assert!(
+        text.contains("issue #392 [CLOSED] status=\"Shipped\" (closed_not_done)"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("open_in_done"),
+        "lowercase 'done' must not fuzzy-match configured 'Done': {text}"
+    );
+
+    // 4. Partial page: hasNextPage=true with missing cursor -> reported as partial.
+    fs::write(
+        r.dir.join("panel-board"),
+        board_reply(&std_fields, true, "", &page1_items),
+    )
+    .unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let partial_doc = V::parse(out.as_bytes()).unwrap();
+    let pd = partial_doc.get("github").get("drift");
+    assert_eq!(pd.get("partial"), &V::Bool(true));
+    assert_eq!(pd.get("reason").text(), Some("partial_response"));
+    assert_eq!(
+        pd.get("completeness").get("board").get("complete"),
+        &V::Bool(false)
+    );
+    assert_eq!(pd.get("missingFromBoard").get("unverified"), &V::Bool(true));
+    assert_eq!(pd.get("missingFromBoard").get("total"), &V::Num("0".into()));
+    assert!(pd.get("missingFromBoard").get("items").array().is_empty());
+    assert_eq!(
+        pd.get("unverifiedMissing").get("total"),
+        &V::Num("23".into())
+    );
+
+    // 5. Rate limit on page 2 -> reported as partial with rate_limited reason.
+    fs::write(
+        r.dir.join("panel-board"),
+        board_reply(&std_fields, true, "page1cur", &page1_items),
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-page1cur"),
+        r#"{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#,
+    )
+    .unwrap();
+    fs::write(r.dir.join("panel-board-after-page1cur-failed"), "").unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let rl_doc = V::parse(out.as_bytes()).unwrap();
+    let rld = rl_doc.get("github").get("drift");
+    assert_eq!(rld.get("partial"), &V::Bool(true));
+    assert_eq!(rld.get("reason").text(), Some("rate_limited"));
+    assert_eq!(
+        rld.get("missingFromBoard").get("unverified"),
+        &V::Bool(true)
+    );
+    let (_, rl_text, _) = r.run(
+        &iso,
+        &["panel-status", "--project-id", "PVT_abc", "--drift"],
+    );
+    assert!(
+        rl_text.contains(
+            "Completeness: partial - rate limit (rate_limited)\n  board: partial (rate_limited;"
+        ),
+        "{rl_text}"
+    );
+    assert!(
+        rl_text.contains("Missing from board (open in repo): unverified (board read partial)"),
+        "{rl_text}"
+    );
+    for line in rl_text.lines() {
+        assert!(
+            line.chars().count() <= 120,
+            "partial drift line exceeds 120 columns ({} chars): {line}",
+            line.chars().count()
+        );
+    }
+    fs::remove_file(r.dir.join("panel-board-after-page1cur-failed")).unwrap();
+
+    // 6. Timeout on page 2 -> reported as partial with timeout reason; PR #420 from page 2
+    // must NOT be reported missing, and unseen items go under unverifiedMissing.
+    fs::write(r.dir.join("panel-board-after-page1cur-timeout"), "").unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let to_doc = V::parse(out.as_bytes()).unwrap();
+    let tod = to_doc.get("github").get("drift");
+    assert_eq!(tod.get("partial"), &V::Bool(true));
+    assert_eq!(tod.get("reason").text(), Some("timeout"));
+    let to_missing = tod.get("missingFromBoard");
+    assert_eq!(to_missing.get("unverified"), &V::Bool(true));
+    assert_eq!(to_missing.get("total"), &V::Num("0".into()));
+    assert_eq!(to_missing.get("issuesTotal"), &V::Num("0".into()));
+    assert_eq!(to_missing.get("pullRequestsTotal"), &V::Num("0".into()));
+    assert!(
+        to_missing.get("items").array().is_empty(),
+        "PR #420 must not be reported missing when board walk timed out: {out}"
+    );
+    let to_unverified = tod.get("unverifiedMissing");
+    assert_eq!(to_unverified.get("total"), &V::Num("23".into()));
+    assert_eq!(to_unverified.get("issuesTotal"), &V::Num("21".into()));
+    assert_eq!(to_unverified.get("pullRequestsTotal"), &V::Num("2".into()));
+    assert_eq!(to_unverified.get("items").array().len(), 20);
+    assert_eq!(to_unverified.get("omitted"), &V::Num("3".into()));
+    let (code, to_text, err) = r.run(
+        &iso,
+        &["panel-status", "--project-id", "PVT_abc", "--drift"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        to_text.contains("Missing from board (open in repo): unverified (board read partial)"),
+        "{to_text}"
+    );
+    assert!(
+        to_text.contains(
+            "Not seen on read pages (board read partial): 23 (21 issues, 2 PRs; showing 20, 3 more omitted)"
+        ),
+        "{to_text}"
+    );
+    assert!(
+        !to_text.contains("Missing from board (open in repo): 23"),
+        "{to_text}"
+    );
+    for line in to_text.lines() {
+        assert!(
+            line.chars().count() <= 120,
+            "timeout drift line exceeds 120 columns ({} chars): {line}",
+            line.chars().count()
+        );
+    }
+    fs::remove_file(r.dir.join("panel-board-after-page1cur-timeout")).unwrap();
+
+    // 7. Missing permission (INSUFFICIENT_SCOPES and drift-only FORBIDDEN) reported with reason in JSON and text.
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#,
+    )
+    .unwrap();
+    fs::write(r.dir.join("panel-board-failed"), "").unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let denied = V::parse(out.as_bytes()).unwrap();
+    let dd = denied.get("github").get("drift");
+    assert_eq!(dd.get("status").text(), Some("unavailable"));
+    assert_eq!(dd.get("partial"), &V::Bool(true));
+    assert_eq!(dd.get("reason").text(), Some("insufficient_scope"));
+    assert_eq!(dd.get("missingFromBoard").get("unverified"), &V::Bool(true));
+    let (_, denied_text, _) = r.run(
+        &iso,
+        &["panel-status", "--project-id", "PVT_abc", "--drift"],
+    );
+    assert!(
+        denied_text.contains("Completeness: partial - permission missing (insufficient_scope)"),
+        "{denied_text}"
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"resource forbidden"}]}"#,
+    )
+    .unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let forbidden = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(
+        forbidden.get("github").get("drift").get("reason").text(),
+        Some("forbidden")
+    );
+    fs::remove_file(r.dir.join("panel-board-failed")).unwrap();
+
+    // 8. Unlinked board is never guessed.
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_other",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let unlinked = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(
+        unlinked.get("github").get("drift").get("reason").text(),
+        Some("board_not_in_catalog")
+    );
+
+    // Strictly read-only: zero POST requests across all cases.
+    assert_eq!(r.posts(), 0);
 }
