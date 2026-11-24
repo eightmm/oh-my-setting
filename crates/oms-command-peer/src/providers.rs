@@ -2558,7 +2558,11 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 return Err(error);
             }
         };
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed = started.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
+        if result.elapsed.is_zero() {
+            result.elapsed = elapsed;
+        }
         let (decoded, terminal) = if team_protocol.is_some() {
             (
                 String::from_utf8_lossy(&result.stdout).into_owned(),
