@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { setImmediate } from 'node:timers/promises';
 import test from 'node:test';
-import { runInNewContext } from 'node:vm';
+import { createContext, runInContext } from 'node:vm';
 
 const html = readFileSync(new URL('../src/conversation-panel.html', import.meta.url), 'utf8');
 const script = html.match(/<script>([\s\S]+?)<\/script>/)[1];
@@ -21,7 +21,8 @@ class Element extends EventTarget {
   append(...children) { this.children.push(...children); }
   prepend(...children) { this.children.unshift(...children); }
   setAttribute(name,value) { this.attributes.set(name,value); }
-  focus() {}
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  focus() { this.focused = (this.focused ?? 0) + 1; }
   select() { this.selected = true; }
   replaceChildren(...children) { this.children = children; }
   querySelectorAll() { return []; }
@@ -70,7 +71,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
     }
     if (method === 'ui/message') { host.messages.push(params); result = {isError:host.rejectMessage === true}; }
     if (method === 'tools/call') {
@@ -89,10 +90,23 @@ async function panel(projects, dashboard = {}, options = {}) {
     }
     queueMicrotask(() => notify({id, result}));
   }};
-  const document = {getElementById:get, createElement:() => new Element()};
-  runInNewContext(script, {window, document, Option:Element, setTimeout, clearTimeout, crypto:{randomUUID}});
+  // Static localized nodes: reuse the id-ed stub when present so tests can read them.
+  const staticNodes = [...html.matchAll(/<([a-z0-9]+)((?:\s[^<>]*)?\sdata-i18n(?:-attr)?="[^<>]*)>([^<]*)/g)].map(([, , attrs, inner]) => {
+    const attr = name => attrs.match(new RegExp('\\s' + name + '="([^"]*)"'))?.[1];
+    const node = elements.get(attr('id')) ?? new Element();
+    for (const name of ['data-i18n', 'data-i18n-attr']) if (attr(name)) node.attributes.set(name, attr(name));
+    if (attr('data-i18n')) node.textContent = inner;
+    for (const pair of (attr('data-i18n-attr') ?? '').split(';').filter(Boolean)) node.attributes.set(pair.split(':')[0], attr(pair.split(':')[0]));
+    node.initialText = inner;
+    return node;
+  });
+  const document = {getElementById:get, createElement:() => new Element(), title:'',
+    querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
+  const context = createContext({window, document, Option:Element, setTimeout, clearTimeout, crypto:{randomUUID},
+    ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
+  runInContext(script, context);
   await setImmediate();
-  return {get, calls, host, notify,
+  return {get, elements, calls, host, notify, staticNodes, document, run: expression => runInContext(expression, context),
     async event(id, type) {
       get(id).dispatchEvent(new Event(type, {cancelable:true}));
       if (type === 'click') get(id).onclick?.();
@@ -697,4 +711,192 @@ test('connection details surface bounded non-atomic observation revision across 
   await p.event('refresh', 'click');
   assert.equal(p.get('observation-revision').textContent, '미확인');
   assert.equal(p.get('observation-completeness').textContent, '관측 상태 미확인');
+});
+
+// Localization: Korean (default) and English, chosen by the user or negotiated.
+const LANG_KEY = 'oms.panel.language';
+const memoryStorage = initial => ({data:new Map(initial ? [[LANG_KEY, initial]] : []), sets:0,
+  getItem(key) { return this.data.get(key) ?? null; }, setItem(key, value) { this.sets++; this.data.set(key, value); }});
+const deniedStorage = () => ({getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }});
+async function choose(p, value) {
+  p.get('language-choice').value = value;
+  await p.event('language-choice', 'change');
+}
+const focusCount = p => [...p.elements.values()].reduce((sum, element) => sum + (element.focused ?? 0), 0);
+
+test('Korean and English catalogs match, and every static node and message key resolves', async () => {
+  const p = await panel(['one']);
+  const ko = p.run('MSG.ko'), en = p.run('MSG.en');
+  assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
+  for (const key of Object.keys(ko)) {
+    const holders = [...ko[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort(), english = [...en[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort();
+    assert.deepEqual(english, holders, key);
+  }
+  for (const node of p.staticNodes) {
+    const key = node.attributes.get('data-i18n');
+    if (key) { assert.ok(Object.hasOwn(ko, key), key); assert.equal(ko[key], node.initialText, key); }
+    for (const pair of (node.attributes.get('data-i18n-attr') ?? '').split(';').filter(Boolean)) {
+      const [name, attrKey] = pair.split(':');
+      assert.equal(ko[attrKey], node.attributes.get(name), attrKey);
+    }
+  }
+  const prefixes = new Set(Object.keys(ko).filter(key => key.includes('.')).map(key => key.split('.')[0]));
+  const literals = [...script.matchAll(/'([A-Za-z]+(?:\.[A-Za-z_]+)+)'/g)].map(m => m[1]).filter(key => prefixes.has(key.split('.')[0]));
+  assert.ok(literals.length > 40);
+  for (const key of literals) assert.ok(Object.hasOwn(ko, key), key);
+  for (const key of [...script.matchAll(/\bt\(\s*'([^']+)'/g)].map(m => m[1]).filter(key => !key.endsWith('.'))) assert.ok(Object.hasOwn(ko, key), key);
+  const families = {state:['working','starting','verifying','review','in_review','done','blocked','waiting_for_input'],
+    'git.class':['candidate','blocked','unverified','plan_linked','board_in_progress','closed_board','duplicate','archived','unknown','draft','foreign','epic','closed','pull_request'],
+    'git.check':['failed','pending','passed','other','unknown'], ev:['info','events','files','diff','transcript'],
+    src:['git','task','plan','attempts','artifacts','acceptance','conversation'], srcState:['unavailable','partial','ambiguous','stale'],
+    sv:['connections','modelcatalog','routes','attribution'], obs:['complete','partial','unknown']};
+  for (const [family, members] of Object.entries(families)) for (const member of members) assert.ok(Object.hasOwn(ko, family + '.' + member), family + '.' + member);
+  assert.ok(Buffer.byteLength(html) < 192 * 1024);
+});
+
+for (const [name, options, expected] of [
+  ['Korean navigator', {navigator:{languages:['ko-KR','en']}}, 'ko'],
+  ['English navigator', {navigator:{languages:['en-GB']}}, 'en'],
+  ['first supported navigator language', {navigator:{languages:['ja','en-US']}}, 'en'],
+  ['unsupported navigator falls back to Korean', {navigator:{languages:['ja']}}, 'ko'],
+  ['single navigator.language', {navigator:{language:'en'}}, 'en'],
+  ['no navigator', {}, 'ko'],
+  ['host locale over navigator', {navigator:{languages:['ko']}, locale:'en-US'}, 'en'],
+  ['unsupported host locale falls to navigator', {navigator:{languages:['en']}, locale:'ja-JP'}, 'en'],
+  ['stored choice over host and navigator', {navigator:{languages:['en']}, locale:'en', storage:memoryStorage('ko')}, 'ko'],
+  ['invalid stored value is ignored', {navigator:{languages:['en']}, storage:memoryStorage('fr')}, 'en'],
+  ['storage denied falls back to navigator', {navigator:{languages:['en']}, storage:deniedStorage()}, 'en'],
+]) {
+  test('language negotiation: ' + name, async () => {
+    const p = await panel(['one'], {goal:'목표 goal'}, options);
+    assert.equal(p.run('lang'), expected);
+    assert.equal(p.get('language-choice').value, expected);
+    assert.equal(p.get('tab-chat').textContent, expected === 'en' ? 'Chat' : '대화');
+    assert.equal(p.get('goal').textContent, '목표 goal');
+    assert.equal(p.get('status').textContent, '');
+    assert.equal(p.get('current-scope').textContent, expected === 'en' ? 'Current Main' : '현재 Main');
+  });
+}
+
+test('changing language is instant: no refetch, no reset, draft/focus/side effects untouched, user content intact', async () => {
+  const storage = memoryStorage();
+  const lead = {provider:'claude', role:'lead', task:'작업 task', room:'r', state:'working', participant:'lead-1'};
+  const p = await panel(['one','two'], {goal:'Ship 한국어 / English', conversationMain:{...matchedMain, participants:[{room:'r', participant:'lead-1', provider:'claude'}]},
+    activeAttempts:[lead], active:1, attempts:[], degraded:true, acceptance:{available:true, verified:1, total:3, complete:false}}, {message:true, storage});
+  p.get('project-choice').value = 'one'; await p.event('project-choice', 'change');
+  const row = {id:'ap1', version:1, digest:'d1', summary:'승인 summary 그대로', action:'Main scope decision', object:'room-one', sender:'codex'};
+  p.host.tools = {oms_list_approvals:() => ({approvals:[row]}),
+    oms_panel_git_status:() => ({git:{available:true, branch:'main', dirty:false}, github:{status:'available', repository:'org/repo',
+      pullRequests:[{number:7, title:'PR 제목', headBranch:'topic', baseBranch:'main', scope:'linkedWorktree', matchesLocalHead:false, draft:true, checks:{passed:1, failed:0, pending:2, other:0}}]}}),
+    oms_panel_usage:() => ({providers:[{provider:'codex', windows:[{used:0, name:'주간'}]}], attempts:[{id:'a1', provider:'codex', tokens:null, source:null}], providerTotals:[]})};
+  await p.event('refresh', 'click');
+  await p.event('tab-git', 'click'); await p.event('tab-usage', 'click'); await p.event('tab-overview', 'click');
+  p.get('brief').value = '내 초안 draft';
+  assert.equal(p.get('approvals-heading').textContent, '승인 요청 1건');
+  assert.match(p.get('leads').textContent, /Claude Lead작업 task작업 중/);
+  assert.match(p.get('git-content').textContent, /연결된 워크트리 · 로컬 HEAD 불일치/);
+
+  const calls = p.calls.length, messages = p.host.messages.length, focused = focusCount(p), projectName = p.get('project').textContent;
+  await choose(p, 'en');
+  assert.equal(p.calls.length, calls);
+  assert.equal(p.host.messages.length, messages);
+  assert.equal(focusCount(p), focused);
+  assert.equal(p.run('lang'), 'en');
+  assert.equal(storage.data.get(LANG_KEY), 'en');
+  assert.equal(p.get('project').textContent, projectName);
+  assert.equal(p.get('brief').value, '내 초안 draft');
+  assert.equal(p.get('view').hidden, false);
+  // UI-owned text switches...
+  assert.equal(p.get('approvals-heading').textContent, 'Approval requests (1)');
+  assert.equal(p.get('tab-overview').textContent, 'Overview');
+  assert.equal(p.get('goal-heading').textContent, 'Project goal');
+  assert.equal(p.get('status').textContent, 'Some status could not be collected.');
+  assert.match(p.get('leads').textContent, /Claude Lead.*Working/);
+  assert.match(p.get('criteria').textContent, /Completion criteria verified · 1 \/ 3 · Incomplete/);
+  assert.match(p.get('git-content').textContent, /Linked worktree · Differs from local HEAD/);
+  assert.match(p.get('git-content').textContent, /Checks · passed 1 · failed 0 · pending 2 · other 0/);
+  assert.match(p.get('usage-content').textContent, /0% used/);
+  assert.match(p.get('usage-content').textContent, /Tokens Unknown/);
+  assert.equal(p.document.title, 'OMS · Project control');
+  // ...while user and backend text is untouched.
+  assert.equal(p.get('goal').textContent, 'Ship 한국어 / English');
+  assert.match(p.get('leads').textContent, /작업 task/);
+  assert.match(p.get('approvals').textContent, /승인 summary 그대로/);
+  assert.match(p.get('git-content').textContent, /PR 제목/);
+  assert.match(p.get('usage-content').textContent, /주간/);
+  // Approval buttons are labelled but never fired by a language change.
+  assert.match(p.get('approvals').textContent, /Approve this requestDeny this request/);
+  assert.equal(p.calls.some(c => ['oms_decide_approval', 'oms_start_main'].includes(c.name)), false);
+
+  await choose(p, 'ko');
+  assert.equal(p.calls.length, calls);
+  assert.equal(p.get('approvals-heading').textContent, '승인 요청 1건');
+  assert.equal(p.get('status').textContent, '일부 상태를 수집하지 못했습니다.');
+  assert.match(p.get('git-content').textContent, /연결된 워크트리 · 로컬 HEAD 불일치/);
+  assert.equal(p.get('goal').textContent, 'Ship 한국어 / English');
+  assert.equal(p.get('brief').value, '내 초안 draft');
+});
+
+test('language choice survives reopen, tolerates denied or absent storage, and host changes yield to it', async () => {
+  const storage = memoryStorage();
+  const first = await panel(['one'], {}, {navigator:{languages:['ko']}, storage});
+  await choose(first, 'en');
+  assert.equal(storage.sets, 1);
+  const reopened = await panel(['one'], {}, {navigator:{languages:['ko']}, storage});
+  assert.equal(reopened.run('lang'), 'en');
+  assert.equal(reopened.get('language-choice').value, 'en');
+  assert.equal(reopened.get('refresh').textContent, 'Refresh');
+  assert.equal(storage.sets, 1);
+
+  const denied = await panel(['one'], {}, {navigator:{languages:['ko']}, storage:deniedStorage()});
+  await choose(denied, 'en');
+  assert.equal(denied.get('tab-chat').textContent, 'Chat');
+  await choose(denied, 'ko');
+  assert.equal(denied.get('tab-chat').textContent, '대화');
+
+  // Without an explicit choice the host follows its own locale; with one it does not.
+  const auto = await panel(['one'], {}, {navigator:{languages:['ko']}});
+  auto.notify({method:'ui/notifications/host-context-changed', params:{locale:'en-US'}});
+  assert.equal(auto.run('lang'), 'en');
+  await choose(auto, 'ko');
+  auto.notify({method:'ui/notifications/host-context-changed', params:{locale:'en-US'}});
+  assert.equal(auto.run('lang'), 'ko');
+  assert.equal(auto.get('language-choice').value, 'ko');
+});
+
+test('localized errors follow the language while host and backend text stays verbatim', async () => {
+  const p = await panel(['one'], {}, {navigator:{languages:['ko']}});
+  p.host.tools = {oms_panel_usage:() => ({}), oms_panel_git_status:() => { throw new Error('rate limited 원문'); }};
+  await p.event('tab-usage', 'click');
+  assert.equal(p.get('usage-status').textContent, '사용량 응답을 확인할 수 없습니다.');
+  await p.event('tab-git', 'click');
+  assert.equal(p.get('git-status').textContent, 'rate limited 원문');
+  await choose(p, 'en');
+  assert.equal(p.get('usage-status').textContent, 'Cannot read the usage response.');
+  assert.equal(p.get('git-status').textContent, 'rate limited 원문');
+  const connected = await panel(['one'], {}, {navigator:{languages:['en']}});
+  assert.equal(connected.get('connection-runtime').textContent, 'OMS connected · project status loaded · Last checked ' + connected.run('checkedAt'));
+  assert.match(connected.get('connection-host').textContent, /^HTML rendered · /);
+});
+
+test('a Git draft keeps its typed text across languages and a later provider change swaps the prefix once', async () => {
+  const p = await panel(['one'], {conversationMain:matchedMain}, {message:true, navigator:{languages:['ko']}});
+  await pickIssue(p);
+  p.get('git-provider').value = 'codex'; await p.event('git-provider', 'change');
+  const draft = p.get('git-goal').value + ' 직접 쓴 문장';
+  p.get('git-goal').value = draft; await p.event('git-goal', 'input');
+  assert.match(draft, /^Codex Lead에게 다음 작업을 배정해 주세요\. /);
+  assert.equal(p.get('git-item').textContent, '이슈 #9 · Review input boundaries');
+  const calls = p.calls.length;
+  await choose(p, 'en');
+  assert.equal(p.get('git-goal').value, draft);
+  assert.equal(p.get('git-item').textContent, 'Issue #9 · Review input boundaries');
+  assert.equal(p.get('git-send').textContent, 'Send to current Main conversation');
+  assert.equal(p.calls.length, calls);
+  assert.equal(p.host.messages.length, 0);
+  p.get('git-provider').value = 'claude'; await p.event('git-provider', 'change');
+  assert.match(p.get('git-goal').value, /^Please assign the following work to the Claude Lead\. .*직접 쓴 문장$/);
+  assert.equal((p.get('git-goal').value.match(/Lead/g) || []).length, 1);
+  p.get('git-provider').value = 'codex'; await choose(p, 'ko'); await p.event('git-provider', 'change');
+  assert.match(p.get('git-goal').value, /^Codex Lead에게 다음 작업을 배정해 주세요\. .*직접 쓴 문장$/);
 });
