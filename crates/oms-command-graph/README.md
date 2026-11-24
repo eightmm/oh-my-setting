@@ -77,9 +77,10 @@ No workspace sibling source or dependency feature was changed.
 parser's options, children, help and usage. `graph.html` extends the legacy
 interactive template (staying synchronized with
 `oms-mcp-server/src/project-graph.html`) with precomputed search haystacks,
-zoom-tier label thresholds, and `/` + `Escape` search shortcuts. Without D3,
-a deterministic SVG grid uses the same search, filters, node inspection and
-zoom/reset controls; the CDN script loads asynchronously.
+zoom-tier label thresholds, and `/` + `Escape` search shortcuts. The page is
+self-contained: its deterministic SVG force layout, camera, search, filters and
+node inspection run offline with no external script (see
+`docs/GRAPH-ENGINEERING.md`).
 The captured grammar is migration history; current CLI changes update the native
 schema, assets and callers together. The native schema exposes `project
 benchmark --count N --revision REF --output FILE --snapshot FILE` and `project

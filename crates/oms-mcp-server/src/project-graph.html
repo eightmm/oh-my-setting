@@ -343,7 +343,7 @@
       scopeNeighbors: 'Focus + 1 hop', scopeTwo: 'Focus + 2 hops', change: 'Change impact', allChanges: 'All change states',
       node: 'Selected node', filters: 'Filters · {n} active', zoomOut: 'Zoom out', reset: 'Reset view', zoomIn: 'Zoom in',
       clear: 'Clear filters', toolbar: 'Graph view actions', controls: 'Graph controls', svgLabel: 'Interactive dependency graph',
-      svgDesc: 'Use search, filters, Tab, Enter, Space, arrow keys, plus, minus and 0 to explore this bounded graph.',
+      svgDesc: 'Use search, filters, Tab, Enter, Space, arrow keys, plus, minus and 0 to explore this bounded graph. Press p on a node to pin or unpin it; double-click a pinned node or Reset view also unpins.',
       legendProject: 'Project assurance and node kind legend', legendExec: 'Execution status and node kind legend',
       legendNote: 'Structural evidence only; colors and symbols do not assert that tests pass.',
       draft: 'Instruction draft', copy: 'Copy text', ask: 'Send to chat', badges: 'Selected node status and kind',
@@ -383,7 +383,7 @@
       scopeNeighbors: '초점 + 1단계', scopeTwo: '초점 + 2단계', change: '변경 영향', allChanges: '모든 변경 상태',
       node: '선택한 노드', filters: '필터 · {n}개 적용', zoomOut: '축소', reset: '보기 초기화', zoomIn: '확대',
       clear: '필터 지우기', toolbar: '그래프 보기 동작', controls: '그래프 컨트롤', svgLabel: '상호작용 가능한 의존 그래프',
-      svgDesc: '검색, 필터, Tab, Enter, Space, 방향키, +, -, 0 키로 이 제한된 그래프를 탐색하세요.',
+      svgDesc: '검색, 필터, Tab, Enter, Space, 방향키, +, -, 0 키로 이 제한된 그래프를 탐색하세요. 노드에서 p 키로 고정/해제하고, 고정된 노드를 더블클릭하거나 보기 초기화로도 해제할 수 있습니다.',
       legendProject: '프로젝트 보증 및 노드 종류 범례', legendExec: '실행 상태 및 노드 종류 범례',
       legendNote: '구조적 근거일 뿐이며 색과 기호가 테스트 통과를 뜻하지는 않습니다.',
       draft: '지시 초안', copy: '텍스트 복사', ask: '대화에 보내기', badges: '선택한 노드의 상태와 종류',
@@ -830,6 +830,7 @@
   let width = measuredWidth || 736;
   let height = 520;
   let worldH = 520;
+  let worldW = width;
   let selectedId = (nodes.find(row => row.focus) || nodes[0] || {}).id || '';
   let tabStopId = selectedId;
   let zoomScale = 1;
@@ -873,8 +874,8 @@
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
   function executionX(row) {
-    if (width <= 480) return width / 2;
-    return width * (row.index % 2 === 0 ? .27 : .68);
+    if (width <= 480) return worldW / 2;
+    return worldW * (row.index % 2 === 0 ? .27 : .68);
   }
   function executionY(row) {
     const columns = width <= 480 ? 1 : 2;
@@ -888,17 +889,28 @@
     const baseHeight = width <= 480 ? narrowH : 520;
     const maxCollide = nodes.reduce((acc, row) => Math.max(acc, collideRadius(row)), 14);
     const cell = Math.pow(maxCollide * 2 + 6, 2) * 2.4;
-    const needed = Math.ceil(nodes.length * cell / Math.max(1, width - PAD * 2)) + PAD * 2;
-    // The world grows with density on every layout; narrow stages keep the viewport-capped height and the camera fit zooms out.
-    worldH = Math.max(baseHeight, needed);
-    height = width <= 480 ? baseHeight : worldH;
-    svg.attr('viewBox', `0 0 ${width} ${height}`).attr('data-world', `${width}x${worldH}`);
+    const narrow = width <= 480;
+    if (narrow) {
+      // Density grows the world by AREA at the stage's aspect ratio, so the camera fit fills the stage instead of a thin column.
+      const area = nodes.length * cell;
+      const wh = width * baseHeight;
+      const sum = width + baseHeight;
+      const grow = (PAD * 2 * sum + Math.sqrt(Math.pow(PAD * 2 * sum, 2) - 4 * wh * (Math.pow(PAD * 2, 2) - area))) / (2 * wh);
+      const scale = Math.max(1, grow);
+      worldW = Math.round(width * scale); worldH = Math.round(baseHeight * scale);
+      height = baseHeight;
+    } else {
+      const needed = Math.ceil(nodes.length * cell / Math.max(1, width - PAD * 2)) + PAD * 2;
+      worldW = width; worldH = Math.max(baseHeight, needed);
+      height = worldH;
+    }
+    svg.attr('viewBox', `0 0 ${width} ${height}`).attr('data-world', `${worldW}x${worldH}`);
     // The svg box equals the viewBox in CSS px, so 1 world unit is 1 px at k=1 and nothing is letterboxed.
     if (svgElement.style) svgElement.style.height = `${height}px`;
   }
   function seedPositions() {
     seed = 0x2545f491;
-    const spacing = Math.sqrt(width * worldH / Math.max(nodes.length, 1)) * .45;
+    const spacing = Math.sqrt(worldW * worldH / Math.max(nodes.length, 1)) * .45;
     nodes.forEach((row, index) => {
       if (isExecution) {
         row.x = executionX(row) + (rand() - .5) * 24;
@@ -906,7 +918,7 @@
       } else {
         const angle = index * 2.399963;
         const radius = spacing * Math.sqrt(index + .5);
-        row.x = width / 2 + Math.cos(angle) * radius;
+        row.x = worldW / 2 + Math.cos(angle) * radius;
         row.y = worldH / 2 + Math.sin(angle) * radius;
       }
       row.vx = 0; row.vy = 0; row.fx = null; row.fy = null; row._pinned = false;
@@ -996,7 +1008,7 @@
   }
   function clampToWorld() {
     nodes.forEach(row => {
-      row.x = Math.max(PAD, Math.min(width - PAD, Number.isFinite(row.x) ? row.x : width / 2));
+      row.x = Math.max(PAD, Math.min(worldW - PAD, Number.isFinite(row.x) ? row.x : worldW / 2));
       row.y = Math.max(PAD, Math.min(worldH - PAD, Number.isFinite(row.y) ? row.y : worldH / 2));
     });
   }
@@ -1039,7 +1051,7 @@
         row.vx += (executionX(row) - row.x) * .3 * alpha;
         row.vy += (executionY(row) - row.y) * .3 * alpha;
       } else {
-        row.vx += (width / 2 - row.x) * .055 * alpha * Math.max(1, Math.min(4, worldH / width));
+        row.vx += (worldW / 2 - row.x) * .055 * alpha * Math.max(1, Math.min(4, worldH / worldW));
         row.vy += (worldH / 2 - row.y) * .055 * alpha;
       }
       if (row.fx !== null && row.fx !== undefined) { row.x = row.fx; row.y = row.fy; row.vx = 0; row.vy = 0; return; }
@@ -1052,7 +1064,7 @@
     if (nodes.length) {
       let mx = 0; let my = 0;
       nodes.forEach(row => { mx += row.x; my += row.y; });
-      mx = mx / nodes.length - width / 2; my = my / nodes.length - worldH / 2;
+      mx = mx / nodes.length - worldW / 2; my = my / nodes.length - worldH / 2;
       nodes.forEach(row => { if (row.fx === null || row.fx === undefined) { row.x -= mx; row.y -= my; } });
     }
     clampToWorld();
@@ -1332,6 +1344,11 @@
       .classed('is-flow', flows)
       .attr('marker-end', row => row._group === 'ownership' ? null : `url(#${markerId}-${flows(row) ? 5 : relationIndex.get(row.relation)})`);
   }
+  function togglePin(row) {
+    if (row._pinned) { setPinned(row, false); settle(.3, 90); return; }
+    row.fx = row.x; row.fy = row.y;
+    setPinned(row, true);
+  }
   function setPinned(row, pinned) {
     row._pinned = pinned;
     if (!pinned) { row.fx = null; row.fy = null; }
@@ -1549,7 +1566,7 @@
   let suppressClick = false;
   node.on('click', (_event, row) => {
     if (suppressClick) { suppressClick = false; return; }
-    selectNode(row.id); applyFilters(); focusOn(row.id);
+    selectNode(row.id); applyFilters(); ensureVisible(row);
   });
   node.on('pointerenter', (_event, row) => { hoverId = row.id; updateHighlight(); showTip(row); });
   node.on('pointerleave', () => {
@@ -1597,6 +1614,7 @@
       if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomBy(1.35); }
       else if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomBy(1 / 1.35); }
       else if (event.key === '0') { event.preventDefault(); fitAll(); }
+      else if (event.key === 'p' || event.key === 'P') { event.preventDefault(); togglePin(row); }
     }
   });
   root.addEventListener('keydown', () => { keyboardMode = true; }, true);
@@ -1654,8 +1672,11 @@
     if (!selectedId || !byId.has(selectedId)) {
       selectNode((nodes.find(row => row.focus) || nodes[0] || {}).id || '');
     }
+    const pinned = nodes.filter(row => row._pinned);
+    pinned.forEach(row => setPinned(row, false));
     applyFilters();
     fitAll();
+    if (pinned.length) settle(.3, 90);
   });
   zoomIn.addEventListener('click', () => zoomBy(1.35));
   zoomOut.addEventListener('click', () => zoomBy(1 / 1.35));
@@ -1687,6 +1708,7 @@
     const p = toView(event);
     pointers.set(event.pointerId, p);
     camAnim = null;
+    capture(event.pointerId);
     if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       gesture = {type: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2}};
@@ -1699,11 +1721,13 @@
       gesture = {type: 'node', id: event.pointerId, row, sx: event.clientX, sy: event.clientY, moved: false, dx: row.x - w.x, dy: row.y - w.y};
     } else {
       gesture = {type: 'pan', id: event.pointerId};
-      capture(event.pointerId);
     }
+    capture(event.pointerId);
   });
   svgElement.addEventListener('pointermove', event => {
     if (!pointers.has(event.pointerId) || !gesture) return;
+    // A buttonless mouse move means the release was missed: end the gesture instead of dragging on hover.
+    if (event.buttons === 0 && event.pointerType === 'mouse') { endPointer(event); return; }
     const previous = pointers.get(event.pointerId);
     const p = toView(event);
     pointers.set(event.pointerId, p);
@@ -1723,29 +1747,41 @@
       if (!gesture.moved) {
         if (Math.hypot(event.clientX - gesture.sx, event.clientY - gesture.sy) < 4) return;
         gesture.moved = true; userMoved = true;
-        capture(event.pointerId); hideTip(); setPinned(gesture.row, true);
+        hideTip(); setPinned(gesture.row, true);
       }
       const row = gesture.row;
-      row.fx = Math.max(PAD, Math.min(width - PAD, (p.x - cam.x) / cam.k + gesture.dx));
+      row.fx = Math.max(PAD, Math.min(worldW - PAD, (p.x - cam.x) / cam.k + gesture.dx));
       row.fy = Math.max(PAD, Math.min(worldH - PAD, (p.y - cam.y) / cam.k + gesture.dy));
       row.x = row.fx; row.y = row.fy;
       if (reducedMotion()) paint();
       else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); scheduleSim(); }
     }
   });
-  const endPointer = event => {
+  function endPointer(event) {
     if (!pointers.has(event.pointerId)) return;
     pointers.delete(event.pointerId);
-    if (gesture && gesture.type === 'node' && gesture.id === event.pointerId && gesture.moved) {
-      suppressClick = true;
-      if (reducedMotion()) settle(.3, 90);
+    try { svgElement.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    if (gesture && gesture.type === 'node' && gesture.id === event.pointerId) {
+      if (gesture.moved) {
+        suppressClick = true;
+        if (reducedMotion()) settle(.3, 90);
+      } else if (event.type === 'pointerup') {
+        // Capture retargets the native click to the svg, so a plain tap selects here.
+        selectNode(gesture.row.id); applyFilters(); ensureVisible(gesture.row);
+      }
     }
     if (gesture && (gesture.type !== 'node' || gesture.id === event.pointerId)) gesture = null;
-  };
+  }
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, endPointer);
   svgElement.addEventListener('dblclick', event => {
     event.preventDefault();
-    const row = nodeOf(event);
+    // Pointer capture can retarget the native dblclick to the svg, so fall back to hit-testing the point.
+    let row = nodeOf(event);
+    if (!row && typeof document.elementFromPoint === 'function' && Number.isFinite(event.clientX)) {
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      const el = hit && typeof hit.closest === 'function' ? hit.closest('.oms-graph-node') : null;
+      row = el ? el.__data__ : null;
+    }
     if (!row) { fitAll(); return; }
     if (row._pinned) { setPinned(row, false); settle(.3, 90); }
   });
@@ -1809,21 +1845,22 @@
     lastStageHeight = stageHeight || lastStageHeight;
     if (Math.abs(nextWidth - lastWidth) < 5) return;
     lastWidth = nextWidth;
-    const previousWidth = width;
     const previousWorldH = worldH;
+    const previousWorldW = worldW;
     const modeChanged = layoutMode(nextWidth) !== layoutMode(width);
     width = nextWidth;
     root.setAttribute('data-layout', layoutMode(width));
     computeWorld();
     relabel();
     nodes.forEach(row => {
-      row.x *= width / previousWidth; row.y *= worldH / previousWorldH;
-      if (row.fx !== null && row.fx !== undefined) { row.fx *= width / previousWidth; row.fy *= worldH / previousWorldH; }
+      row.x *= worldW / previousWorldW; row.y *= worldH / previousWorldH;
+      if (row.fx !== null && row.fx !== undefined) { row.fx *= worldW / previousWorldW; row.fy *= worldH / previousWorldH; }
     });
     if (modeChanged) applyFilters();
     paint();
-    if (modeChanged) settle(.35, 150);
-    else if (!userMoved) fitAll();
+    // Rescaled positions are only approximately collision-free: relax and refit on every width change.
+    if (!userMoved) fitAll(0);
+    settle(.35, 150);
   });
   observer.observe(stage);
   computeWorld();

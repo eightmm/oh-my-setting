@@ -282,13 +282,17 @@ for (const [w, expectedLayout, minHeight] of [[320, 'narrow', 400], [768, 'mediu
   assert.ok(vbH >= minHeight, `200-node stage height ${vbH} >= ${minHeight} at width ${w}`);
   if (expectedLayout === 'narrow') assert.ok(vbH <= 400, `narrow stage height ${vbH} stays viewport-capped`);
   const world = view.svg.attributes['data-world'].match(/^(\d+)x(\d+)$/);
-  assert.ok(world && Number(world[1]) === w && Number(world[2]) >= vbH, 'world extent is at least the stage');
+  assert.ok(world && Number(world[1]) >= w && Number(world[2]) >= vbH, 'world extent is at least the stage');
+  const worldW = Number(world[1]);
   const worldH = Number(world[2]);
-  if (expectedLayout === 'narrow') assert.ok(worldH > vbH, `narrow world ${worldH} grows past the stage ${vbH}`);
+  if (expectedLayout === 'narrow') {
+    assert.ok(worldH > vbH, `narrow world ${worldH} grows past the stage ${vbH}`);
+    assert.ok(Math.abs(worldW / worldH - w / vbH) < .02, `narrow world ${worldW}x${worldH} keeps the stage aspect ${w}x${vbH}`);
+  } else assert.equal(worldW, w);
   const pts = view.nodes.map((n, idx) => {
     const [, x, y] = n.attributes.transform.match(/^translate\(([\d.]+),([\d.]+)\)$/);
     const r = Math.max(9, Math.min(14, 8 + Math.sqrt(denseData.nodes[idx].degree || 0)));
-    assert.ok(Number(x) >= 18 && Number(x) <= vbW - 18, `200-node x=${x} within width ${vbW}`);
+    assert.ok(Number(x) >= 18 && Number(x) <= worldW - 18, `200-node x=${x} within world ${worldW}`);
     assert.ok(Number(y) >= 18 && Number(y) <= worldH - 18, `200-node y=${y} within world ${worldH}`);
     return {x: Number(x), y: Number(y), r};
   });
@@ -303,6 +307,21 @@ for (const [w, expectedLayout, minHeight] of [[320, 'narrow', 400], [768, 'mediu
   const tabStops = view.nodes.filter(n => n.attributes.tabindex === '0');
   assert.equal(tabStops.length, 1, `200-node graph must expose only 1 tab stop at width ${w}`);
   assert.equal(tabStops[0], view.nodes[0]);
+}
+
+// A same-class resize relaxes the rescaled positions: no overlap after 1200 -> 780 px with 200 nodes.
+{
+  const view = render(denseData, {width: 1200});
+  view.resize(780);
+  const pts = view.nodes.map((n, idx) => {
+    const [, x, y] = n.attributes.transform.match(/^translate\(([\d.]+),([\d.]+)\)$/);
+    return {x: Number(x), y: Number(y), r: Math.max(6, Math.min(16, 4.5 + 1.5 * Math.sqrt(denseData.nodes[idx].degree || 0))) + 3};
+  });
+  for (let i = 0; i < pts.length; i += 1) {
+    for (let j = i + 1; j < pts.length; j += 1) {
+      assert.ok(Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) >= pts[i].r + pts[j].r - .6, `resize overlap ${i}/${j}`);
+    }
+  }
 }
 
 // 3. Non-color status and node kind encoding (shapes, glyphs, patterns, legend, badges).
@@ -557,9 +576,7 @@ for (const kind of ['project', 'execution']) {
   // Selecting a node moves/zooms the view; Reset and Escape return to fit-all.
   const before = camera(first);
   first.nodes[5].fire('click');
-  assert.notDeepEqual(camera(first), before, 'click must focus the view on the node');
-  const focused = camera(first); const row5 = pts[5];
-  assert.ok(Math.abs(focused.x + row5.x * focused.k - 368) < 1 && Math.abs(focused.y + row5.y * focused.k - stageH / 2) < 1, 'selected node is centred');
+  assert.deepEqual(camera(first), before, 'click keeps the fitted view when the node is already visible');
   first.nodes[5].fire('keydown', {key: 'Escape'});
   assert.deepEqual(camera(first), before, 'Esc returns to fit-all');
   assert.equal(first.document.activeElement, first.get('search'), 'Escape from a node moves focus to the visible search input');
@@ -579,8 +596,15 @@ for (const kind of ['project', 'execution']) {
   svgPts.fire('pointerup', {pointerId: 1});
   assert.equal(first.nodes[0].attributes['data-pinned'], 'true');
   assert.match(first.nodes[0].attributes['aria-label'], /pinned/);
+  first.nodes[0].fire('click');
   svgPts.fire('dblclick', {target: first.nodes[0]});
-  assert.equal(first.nodes[0].attributes['data-pinned'], 'false');
+  assert.equal(first.nodes[0].attributes['data-pinned'], 'false', 'click then double-click unpins');
+  first.nodes[1].fire('keydown', {key: 'p'});
+  assert.equal(first.nodes[1].attributes['data-pinned'], 'true', 'p pins a focused node');
+  first.nodes[2].fire('keydown', {key: 'p'}); first.nodes[1].fire('keydown', {key: 'p'});
+  assert.equal(first.nodes[1].attributes['data-pinned'], 'false', 'p unpins');
+  first.nodes[1].fire('keydown', {key: 'p'}); first.get('reset').fire('click');
+  assert.ok(first.nodes.every(n => n.attributes['data-pinned'] !== 'true'), 'Reset view releases every pin');
 }
 // Reduced motion computes the settled layout before first paint and never requests animation frames.
 {
@@ -599,7 +623,7 @@ for (const kind of ['project', 'execution']) {
   const settled = camera(view);
   assert.ok(settled.k > 0 && !Number.isNaN(settled.x));
   const startPositions = positions(view);
-  view.nodes[2].fire('click'); view.drain();
+  view.nodes[2].fire('keydown', {key: 'Enter'}); view.drain();
   assert.notDeepEqual(camera(view), settled);
   assert.deepEqual(positions(view), startPositions, 'camera moves do not move nodes');
 }
