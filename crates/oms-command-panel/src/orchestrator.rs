@@ -6494,17 +6494,20 @@ pub(crate) mod codex_chat_fixture {
 
     impl BoardSpy {
         pub(crate) fn new(label: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
             let repo = std::env::temp_dir()
                 .canonicalize()
                 .unwrap()
                 .join(format!("oms-board-chat-{}-{label}", std::process::id()));
             std::fs::create_dir(&repo).unwrap();
-            std::fs::create_dir_all(repo.join(".oms/lifecycle")).unwrap();
-            std::fs::write(
-                repo.join(".oms/lifecycle/events.jsonl"),
-                b"fixture ledger\n",
-            )
-            .unwrap();
+            let lifecycle = repo.join(".oms/lifecycle");
+            std::fs::create_dir_all(&lifecycle).unwrap();
+            for dir in [&repo, &repo.join(".oms"), &lifecycle] {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let events = lifecycle.join("events.jsonl");
+            std::fs::write(&events, b"fixture ledger\n").unwrap();
+            std::fs::set_permissions(&events, std::fs::Permissions::from_mode(0o600)).unwrap();
             let mut account_host =
                 account_binding::test_support::FakeHost::new(repo.join("fixture-state"));
             let pid = std::process::id();
@@ -12383,7 +12386,9 @@ pub(crate) mod tests {
                 r#"{{"schema":1,"event_id":"aevt_11111111111111111111111100000003","ts":"2026-11-19T00:00:02Z","attempt_id":"{MAIN}","seq":3,"event_type":"attempt.state_changed","from_state":"starting","to_state":"working","actor":{{"kind":"owner","name":"agent-events"}}}}"#
             )
             .unwrap();
-            std::fs::write(lifecycle.join("events.jsonl"), &out).unwrap();
+            let events = lifecycle.join("events.jsonl");
+            std::fs::write(&events, &out).unwrap();
+            std::fs::set_permissions(&events, std::fs::Permissions::from_mode(0o600)).unwrap();
             out
         }
 
@@ -13787,6 +13792,9 @@ pub(crate) mod tests {
                 );
                 return;
             }
+            // Pin a private umask in this isolated child process so git/state
+            // fixtures do not inherit a group- or world-writable host umask.
+            rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
             // Each transport failure is an independent live reservation. Reusing
             // one Lead across these unrelated tasks would violate its contract.
             for scenario in 0..12 {

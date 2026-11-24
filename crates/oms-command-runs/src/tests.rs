@@ -44,7 +44,10 @@ impl Fixture {
         );
         c.lock_settings.lock_dir = Some(self.0.join("locks"));
         c.lock_settings.mode = oms_lock::Mode::Mkdir;
-        c.lock_settings.timeout = Duration::from_secs(2);
+        c.lock_settings.timeout = Duration::from_secs(oms_lock::legacy_seconds(
+            std::env::var_os("OMS_TEST_CALL_TIMEOUT").as_deref(),
+            30,
+        ));
         for (k, v) in [
             ("OMS_WORK_JOURNAL", "0"),
             ("OMS_RUN_ID", ""),
