@@ -23,7 +23,7 @@ button:disabled{opacity:.5;cursor:default}
 header,.cluster,.between{display:flex;align-items:center;gap:.55rem}
 header,.between{justify-content:space-between}
 .cluster,.between{flex-wrap:wrap}
-header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);padding:.45rem 0;gap:.4rem}
+header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);padding:.45rem 0;gap:.4rem;flex-wrap:wrap}
 header .wordmark{display:flex;align-items:center;gap:.42rem;min-width:0;margin-right:auto}
 header:has(#scope:not([hidden])) #project{display:none}
 .brand{place-items:center;display:grid;grid-template-columns:repeat(2,.3rem);grid-template-rows:repeat(2,.3rem);gap:2px;width:1.5rem;height:1.5rem;border-radius:.4rem;background:var(--tint);align-content:center;justify-content:center;flex-shrink:0}
@@ -37,8 +37,8 @@ header:has(#scope:not([hidden])) #project{display:none}
 select{max-width:100%;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);min-height:2rem;border-radius:.4rem;padding:.15rem .45rem}
 #project-choice{max-width:min(11rem,42vw);min-height:2rem;font-size:.8rem}
 #language-choice{flex:0 0 auto;max-width:5.4rem;min-height:2rem;font-size:.78rem}
-#refresh{font-size:.78rem;white-space:nowrap;min-height:2rem;padding:.2rem .55rem;flex-shrink:0}
-#refresh:hover:not(:disabled){border-color:var(--brand);background:var(--tint)}
+#display-mode,#refresh{font-size:.78rem;white-space:nowrap;min-height:2rem;padding:.2rem .55rem;flex-shrink:0}
+#display-mode:hover:not(:disabled),#refresh:hover:not(:disabled){border-color:var(--brand);background:var(--tint)}
 #status,#receipt{font-size:.84rem}
 #status:not(:empty),#receipt:not(:empty){margin-top:.55rem}
 #status.degraded{padding:.5rem .75rem;border-radius:var(--r);background:var(--warm-bg);border:1px solid color-mix(in srgb,var(--warm) 35%,var(--line));border-left:3px solid var(--warm);color:var(--ink)}
@@ -200,7 +200,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 #overview-backlog{display:flex;width:100%;align-items:center;justify-content:space-between;padding:.45rem 0;margin:.15rem 0 .35rem;font-size:.84rem;min-height:2.25rem;color:var(--muted);text-align:left;border:0;background:transparent}
 #overview-backlog:hover{color:var(--ink)}
 @media (max-width:28rem){main{padding-inline:.8rem}.metrics{grid-template-columns:1fr 1fr}#goal{font-size:1rem}.project-meta{width:100%}#task-body dl{grid-template-columns:minmax(0,1fr)}}
-@media (max-width:23rem){header h1{position:absolute;clip-path:inset(50%)}#project{font-size:.94rem}#refresh{padding-inline:.4rem}#language-choice{max-width:4.6rem}}
+@media (max-width:23rem){header h1{position:absolute;clip-path:inset(50%)}#project{font-size:.94rem}#display-mode,#refresh{padding-inline:.4rem}#language-choice{max-width:4.6rem}}
 @media (prefers-reduced-motion:reduce){button,details>summary::before{transition:none}}
 .connection-controls{margin-block:.65rem}
 #source-details .connection-fields{display:grid;grid-template-columns:minmax(6rem,.9fr) minmax(0,1.3fr);gap:.22rem .65rem;margin:.45rem 0}
@@ -287,245 +287,246 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 </head>
 <body>
 <main>
-  <header>
-    <div class="wordmark"><span class="brand" aria-hidden="true"><i></i><i></i><i></i><i></i></span><h1>OMS</h1><strong id="project"></strong></div>
-    <div id="scope" hidden><label for="project-choice" class="sr-only" data-i18n="project">프로젝트</label><select id="project-choice"></select></div>
-    <select id="language-choice" aria-label="언어 (Language)" data-i18n-attr="aria-label:language"><option value="ko" lang="ko">한국어</option><option value="en" lang="en">English</option></select>
-    <button id="refresh" disabled data-i18n="refresh">새로고침</button>
-  </header>
-  <p id="status" role="status">OMS 연결 중…</p>
-  <p id="receipt" role="status"></p>
-  <noscript><p class="muted" lang="ko">이 호스트에서 패널 UI를 실행할 수 없으면 텍스트 MCP 도구(oms_list_projects, oms_panel_snapshot) 또는 CLI(oms dashboard)로 같은 관측 리비전과 상태를 확인하세요.</p><p class="muted" lang="en">If this host cannot run the panel UI, use the text MCP tools (oms_list_projects, oms_panel_snapshot) or the CLI (oms dashboard) to check the same observation revision and status.</p></noscript>
-  <div id="view" hidden>
-    <div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" hidden></button><span id="current-main" class="muted"></span></div>
-    <nav class="tabs" id="tabs-primary" role="tablist" aria-label="프로젝트 보기" data-i18n-attr="aria-label:tabs">
-      <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview" data-i18n="tab.overview">지금</button>
-      <button id="tab-work" role="tab" aria-selected="false" aria-controls="pane-work" tabindex="-1" data-i18n="tab.work">작업</button>
-      <button id="tab-results" role="tab" aria-selected="false" aria-controls="pane-results" tabindex="-1" data-i18n="tab.results">결과</button>
-      <button id="tab-relations" role="tab" aria-selected="false" aria-controls="pane-relations" tabindex="-1" data-i18n="tab.relations">관계도</button>
-    </nav>
-    <details id="more-views" class="more-views"><summary id="more-summary" data-i18n="moreViews">더 보기 · 프로젝트 지도 · 대화 · 지표 · Git</summary>
-    <nav class="tabs" id="tabs-secondary" role="tablist" aria-label="더 보기 화면" data-i18n-attr="aria-label:tabsMore">
-      <button id="tab-project" role="tab" aria-selected="false" aria-controls="pane-project"></button>
-      <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1" data-i18n="tab.chat">대화</button>
-      <button id="tab-activity" role="tab" aria-selected="false" aria-controls="pane-activity" tabindex="-1" data-i18n="tab.activity">활동</button>
-      <button id="tab-usage" role="tab" aria-selected="false" aria-controls="pane-usage" tabindex="-1" data-i18n="tab.usage">지표</button>
-      <button id="tab-git" role="tab" aria-selected="false" aria-controls="pane-git" tabindex="-1">Git · PR</button>
-    </nav></details>
-    <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
-    <section id="approval-card" class="card" aria-labelledby="approvals-heading">
-      <div class="section-head"><h2 id="approvals-heading">승인 요청</h2><span id="approval-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span class="state-word" data-i18n="state.waiting">확인 필요</span></span></div>
-      <p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
-    </section>
-    <p id="approval-idle" class="approval-idle muted" role="status"></p>
-    <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
-      <button id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
-    <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-      <h2 id="leads-heading" class="section-head"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><div id="leads" class="leads"></div>
-    </section>
-    <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
-    <section class="card" id="now-work" aria-labelledby="now-heading">
-      <h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
-      <div id="now-active" class="rows"></div>
-    </section>
-    <section class="card" id="goal-card" aria-labelledby="goal-heading">
-      <h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
-      <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
-      <div id="plan-strip" class="plan-strip" aria-label="프로젝트 작업 검증" data-i18n-attr="aria-label:planStrip" hidden>
-        <span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted" data-i18n="planVerified">계획 작업 검증</span>
-        <button id="plan-open" data-i18n="planOpen">계획 보기 ›</button>
-      </div>
-    </section>
-    <section class="card" id="latest-results" aria-labelledby="now-results-heading">
-      <h2 id="now-results-heading" data-i18n="w.nowResults" class="section-label">작업 결과</h2>
-      <div id="now-results" class="rows"></div>
-      <div class="evidence"><p id="reviews" class="muted"></p></div>
-      <ul id="latest-operations" hidden></ul>
-    </section>
-    <details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
-      <p id="peer-proof" class="muted" data-i18n="peer.proof" hidden>이 작업방의 Main 참여를 확인했습니다. 검토를 요청하면 다른 작업방의 소유 기록까지 확인한 뒤 호출합니다.</p>
-      <form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
-        <label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
-        <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" class="form-input" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
-        <button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
-      </fieldset></form><p id="peer-status" class="muted" role="status"></p>
-      <div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
-        <button id="peer-repair" type="button" hidden data-i18n="peer.repair">작업방에 실행 기록 연결</button><button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
-    </details>
-      <details class="card" id="provider-options"><summary data-i18n="providerOptions">Lead 후보 · Codex, Claude, AGY</summary>
-        <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
-        <button id="provider-load" data-i18n="providerLoad">호스트 상태 조회</button>
-      </details>
-    <button id="overview-backlog"><span data-i18n="backlog">GitHub 열린 작업 전체 맡기기</span> <span aria-hidden="true">↗</span></button>
-    <details id="launcher" class="card"><summary data-i18n="launcher">별도 Main에 새 목표 전달</summary>
-    <form id="launch">
-      <fieldset id="controls"><legend data-i18n="chooseMain">새 Main 선택</legend>
-        <div class="choices">
-          <label class="choice"><input type="radio" name="main" value="codex" checked><span>Codex</span></label>
-          <label class="choice"><input type="radio" name="main" value="claude"><span>Claude</span></label>
-          <label class="choice"><input type="radio" name="main" value="agy"><span>AGY</span></label>
-          <label class="choice"><input type="radio" name="main" value="pi"><span>Pi</span></label>
-        </div>
-        <label for="brief" data-i18n="briefLabel">새 작업 목표</label>
-        <input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
-        <button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
-      </fieldset>
-    </form></details>
-    <details class="card" id="project-records">
-      <summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span></summary>
-      <dl class="metrics">
-        <div><dt data-i18n="metricActive">종료 기록 없는 시도</dt><dd id="active"></dd></div>
-        <div><dt data-i18n="metricTasks">계획된 작업</dt><dd id="tasks"></dd></div>
-        <div><dt data-i18n="metricState">현재 상태</dt><dd id="taskStatus"></dd></div>
-      </dl>
-      <h3 class="small-title" data-i18n="historyTeam">프로젝트 Main·Lead 기록</h3><ul id="repo-team"></ul>
-      <h3 class="small-title" data-i18n="historyOps">최근 보관된 결과물</h3><ul id="operations"></ul>
-      <h3 class="small-title" data-i18n="historyRuns">최근 실행 기록</h3><ul id="activity"></ul>
-        <section id="scratch-history" aria-labelledby="scratch-heading" hidden>
-          <h3 id="scratch-heading" data-i18n="scratch.heading">관리된 작업트리 기록</h3>
-          <p id="scratch-status" class="muted" role="status"></p><ul id="scratch-rows"></ul>
-        </section>
-    </details>
-    <section class="map-preview" id="map-preview" aria-labelledby="map-title">
-      <div class="map-heading"><h2 id="map-title"></h2><div><button class="map-link" id="feature-open"></button> <button class="map-link" id="map-open"></button></div></div>
-      <div class="map-field" id="map-field" hidden><div class="map-parents" id="map-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="map-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="map-parent-list"></ul></div><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children" data-relation-group="ownership"></ul><div class="map-deps" id="map-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="map-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="map-dep-list"></ul></div></div>
-      <p role="status" id="map-status"></p>
-    </section>
-    </div>
-    <section class="card" id="pane-work" role="tabpanel" aria-labelledby="tab-work" hidden>
-      <h2 id="work-heading" data-i18n="tab.work">작업</h2><p id="work-status" class="muted" role="status"></p><div id="work-groups"></div>
-    </section>
-    <section class="card" id="pane-results" role="tabpanel" aria-labelledby="tab-results" hidden>
-      <h2 id="results-heading" data-i18n="tab.results">결과</h2><p id="results-status" class="muted" role="status"></p><div id="results-list" class="rows"></div>
-    </section>
-    <section class="card" id="pane-relations" role="tabpanel" aria-labelledby="tab-relations" hidden>
-      <h2 id="relations-heading" data-i18n="tab.relations">관계도</h2><p id="relations-status" class="muted" role="status"></p>
-      <section aria-labelledby="owners-heading" data-relation-group="ownership"><h3 id="owners-heading" data-i18n="w.owners">담당 연결</h3><p id="owners-note" class="muted"></p><div id="owners-list" class="rows"></div></section>
-      <section aria-labelledby="deps-heading" data-relation-group="dependency"><h3 id="deps-heading" data-i18n="w.deps">작업 의존성</h3><p id="deps-note" class="muted"></p><div id="deps-list" class="rows"></div></section>
-    </section>
-    <section class="card" id="pane-task" aria-labelledby="task-heading" hidden>
-      <div class="detail-title"><button id="task-back" data-i18n="w.back">← 목록으로</button><h2 id="task-heading" tabindex="-1"></h2></div>
-      <p id="task-note" class="muted" role="status"></p>
-      <div id="task-tabs" class="tabs" role="tablist" aria-label="작업 상세 구분" data-i18n-attr="aria-label:taskSections">
-        <button id="task-tab-overview" role="tab" aria-selected="true" aria-controls="task-body" data-i18n="task.overview">요약</button>
-        <button id="task-tab-changes" role="tab" aria-selected="false" aria-controls="task-body" tabindex="-1" data-i18n="task.changes">변경</button>
-        <button id="task-tab-verification" role="tab" aria-selected="false" aria-controls="task-body" tabindex="-1" data-i18n="task.verification">검증</button>
-        <button id="task-tab-history" role="tab" aria-selected="false" aria-controls="task-body" tabindex="-1" data-i18n="task.history">이력</button>
-      </div>
-      <div id="task-body" role="tabpanel" tabindex="0"></div>
-    </section>
-    <section id="pane-project" role="tabpanel" aria-labelledby="tab-project" hidden>
-      <section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading"></h2><button id="graph-reload" class="map-link"></button></div>
-        <nav class="explorer-bar" id="graph-path"></nav>
-        <label class="sr-only" id="graph-filter-label" for="graph-filter"></label><input class="explorer-filter" id="graph-filter" type="search">
-        <div class="explorer-options"><button id="graph-search"></button> <label id="graph-confidence-label" for="graph-confidence"></label> <select id="graph-confidence"><option value="recorded" id="graph-recorded"></option><option value="all" id="graph-all"></option></select></div>
-        <div id="explore-map" class="map-field detail-map" hidden><div class="map-parents" id="explore-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="explore-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="explore-parent-list"></ul></div><span class="map-focus" id="explore-root"></span><div class="detail-map-groups"><ul class="map-row" id="explore-children" data-relation-group="ownership"></ul><div class="map-deps" id="explore-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="explore-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="explore-dep-list"></ul></div></div></div>
-        <button id="graph-attach" hidden></button><span id="graph-attached" role="status" class="explorer-status"></span>
-        <p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button id="graph-more" hidden></button>
-      </section>
-      <section class="explorer-view" aria-labelledby="feature-title"><h2 id="feature-title"></h2><div id="feature-links" class="feature-links"></div>
-        <label for="feature-filter" id="feature-filter-label" class="sr-only"></label><input class="explorer-filter" id="feature-filter" type="search">
-        <p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" hidden></button>
-        <section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label"></label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button id="feature-native" hidden></button><button id="feature-send"></button><button id="feature-dismiss"></button></div><p id="feature-outcome" role="status"></p></section>
-      </section>
-    </section>
-    <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
-      <div class="detail-title"><h2 data-i18n="chatHeading">작업방 대화</h2><button id="chat-back" data-i18n="chatBack" hidden>이전 보기로</button></div>
-      <div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자" data-i18n-attr="aria-label:chatMembers"></div>
-        <div><h3 id="chat-title"></h3><p id="chat-status" class="muted" role="status"></p>
-          <button id="chat-older" data-i18n="chatOlder" hidden>이전 메시지</button>
-          <ol class="messages" id="chat-messages" aria-label="시간순 작업방 메시지" data-i18n-attr="aria-label:chatMessages" tabindex="0"></ol>
-          <div id="chat-result"></div>
-          <div id="review-share" hidden>
-            <button id="review-choose" data-i18n="share.choose">검토 결과 첨부</button>
-            <div id="review-preview" hidden>
-              <label for="review-text" data-i18n="share.label">선택한 답변</label>
-              <textarea id="review-text" readonly rows="5"></textarea>
-              <div class="cluster">
-                <button id="review-submit" data-i18n="share.send">현재 대화로 보내기</button>
-                <button id="review-copy" data-i18n="share.copy">답변 복사</button>
-                <button id="review-cancel" data-i18n="share.cancel">취소</button>
-              </div>
-            </div>
-            <p id="review-share-status" role="status" class="muted"></p>
-          </div>
-          <div id="chat-native"></div>
-          <section class="history" id="chat-evidence" aria-label="호출별 실행 근거" data-i18n-attr="aria-label:evidenceRegion" hidden>
-            <label for="evidence-attempt" data-i18n="evidenceCall">기록된 호출</label> <select id="evidence-attempt"></select>
-            <div id="evidence-actions" class="cluster"></div>
-            <p id="evidence-status" role="status" class="muted"></p><pre id="evidence-lines" hidden></pre>
-            <div class="cluster"><button id="evidence-prev" data-i18n="evidencePrev" hidden>근거 이전 페이지</button><button id="evidence-next" data-i18n="evidenceNext" hidden>근거 다음 페이지</button></div>
-          </section>
-        </div>
-      </div>
-    </section>
-    <section class="card" id="pane-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
-      <h2 data-i18n="activityHeading">프로젝트 활동</h2><p id="core-state"></p><p id="command-state" class="muted"></p>
-      <section class="history"><div class="cluster"><label for="tui-view" data-i18n="tuiLabel">OMS TUI 상세</label><select id="tui-view">
-        <option value="" data-i18n="tui.choose">보기 선택</option>
-        <optgroup label="런타임" data-i18n-attr="label:tui.runtime"><option value="overview" data-i18n="tui.overview">개요</option><option value="health" data-i18n="tui.health">건강 상태</option><option value="providers" data-i18n="tui.providers">공급자</option><option value="metrics" data-i18n="tui.metrics">지표</option><option value="capacity" data-i18n="tui.capacity">용량</option><option value="log" data-i18n="tui.log">로그</option></optgroup>
-        <optgroup label="협업" data-i18n-attr="label:tui.collab"><option value="teams" data-i18n="tui.teams">팀</option><option value="sessions" data-i18n="tui.sessions">세션</option><option value="plan" data-i18n="tui.plan">계획</option><option value="attention" data-i18n="tui.attention">확인할 항목</option><option value="results" data-i18n="tui.results">결과</option><option value="debate" data-i18n="tui.debate">토론</option></optgroup>
-        <optgroup label="실행" data-i18n-attr="label:tui.run"><option value="routes" data-i18n="tui.routes">경로</option><option value="workspaces" data-i18n="tui.workspaces">워크스페이스</option><option value="jobs" data-i18n="tui.jobs">작업</option><option value="past" data-i18n="tui.past">지난 실행</option></optgroup>
-      </select></div><p id="tui-status" role="status" class="muted"></p>
-      <div id="tui-rows" class="table-wrap" role="region" aria-label="선택한 OMS TUI 기록" data-i18n-attr="aria-label:tuiRegion" tabindex="0"></div>
-      <div class="cluster"><button id="tui-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="tui-next" data-i18n="nextPage" hidden>다음 페이지</button></div></section>
-      <h3 class="small-title" data-i18n="timeline">명령·작업 타임라인</h3><ul id="command-list"></ul>
-    </section>
-    <section class="card" id="pane-usage" role="tabpanel" aria-labelledby="tab-usage" tabindex="0" hidden>
-      <h2 data-i18n="usageHeading">토큰 사용량</h2><p id="usage-status" class="muted" role="status"></p>
-      <div id="usage-content"></div>
-    </section>
-    <section class="card" id="pane-git" role="tabpanel" aria-labelledby="tab-git" hidden>
-      <h2>Git · GitHub PR</h2><p id="git-local"></p><p id="git-status" class="muted" role="status"></p>
-      <button class="link-action" id="git-backlog" data-i18n="gitBacklog" hidden>열린 작업 전체를 Main에 맡기기</button>
-      <section id="git-editor" class="card" aria-label="GitHub 항목 작업 목표" data-i18n-attr="aria-label:gitEditor" hidden>
-        <h3 id="git-item"></h3>
-        <button id="issue-review" hidden data-i18n="git.review">이슈 버전 확인</button>
-        <p id="issue-evidence" role="status" class="muted" style="white-space:pre-line;overflow-wrap:anywhere"></p><label for="git-provider" data-i18n="gitAssignee">배정 요청 대상</label>
-        <select id="git-provider"><option value="" data-i18n="gitAuto">Main이 Lead 선택</option><option value="codex">Codex Lead</option>
-          <option value="claude">Claude Lead</option><option value="agy">AGY Lead</option></select>
-        <label for="git-goal" data-i18n="gitGoalLabel">대화에 전달할 목표</label><textarea id="git-goal" rows="3" maxlength="2000"></textarea>
-        <div class="cluster"><button id="git-compose" hidden></button><button class="primary" id="git-send" hidden></button>
-          <button id="git-copy" data-i18n="gitCopy">목표 복사</button><button id="git-new" data-i18n="gitNew">별도 Main 목표로 사용</button></div>
-        <p class="muted" id="git-editor-status" role="status"></p>
-      </section>
-      <label class="git-filter" for="git-kind"><span data-i18n="gitView">GitHub 보기</span> <select id="git-kind">
-        <option value="checkout" data-i18n="gitKind.checkout">체크아웃 PR · 검사</option><option value="issues" data-i18n="gitKind.issues">저장소 이슈</option>
-        <option value="pullRequests" data-i18n="gitKind.pullRequests">저장소 PR</option><option value="projects">GitHub Projects</option>
-      </select></label>
-      <div id="git-content" class="rows"></div><p id="git-catalog-status" role="status" class="muted"></p>
-      <form id="git-find" class="cluster" hidden><label for="git-number" data-i18n="gitFind">번호로 찾기</label>
-        <input id="git-number" type="text" inputmode="numeric" pattern="[1-9][0-9]{0,9}" maxlength="10" required>
-        <button type="submit" data-i18n="gitLookup">조회</button></form>
-      <div id="git-match" aria-live="polite"></div><div id="git-catalog" class="rows"></div>
-    </section>
-  </div>
-    <details class="card" id="source-details"><summary data-i18n="source">연결 정보</summary>
-      <p class="muted" id="main-scope"></p><p id="main-state"></p>
-      <dl class="identity" id="identity"><dt data-i18n="room">작업방</dt><dd id="room"></dd><dt data-i18n="participant">참여자</dt><dd id="participant"></dd></dl>
-      <dl class="identity" id="observation-meta"><dt data-i18n="obsRevision">관측 리비전</dt><dd id="observation-revision"></dd><dt data-i18n="obsBasis">관측 기준</dt><dd id="observation-basis"></dd><dt data-i18n="obsCompleteness">수집 상태</dt><dd id="observation-completeness"></dd></dl>
-      <p class="muted" id="observation-sources"></p>
-      <p class="project-meta"><span id="branch"></span><time id="updated"></time></p>
-      <h3 data-i18n="appAndOms">앱과 OMS</h3><p class="muted" id="connection-host"></p><p id="connection-runtime" role="status">OMS 연결 확인 중</p>
-      <details><summary data-i18n="hostSupport">호스트별 지원과 연결 경로</summary>
-        <p data-i18n="hostSupport1">Codex Desktop은 대화 탭을 제공합니다. CLI와 IDE는 프로젝트의 OMS MCP 도구 또는 로컬 OMS 스킬을 사용합니다.</p>
-        <p data-i18n="hostSupport2">Claude Chat은 원격 HTTPS 커넥터, Desktop은 로컬 stdio도 지원합니다. 사이드 패널은 계정·대화별 배포 대상에 따라 달라집니다. Claude Code의 네이티브 Mod는 별도 기능입니다. 터미널 2.1.287+, Desktop 내 Code 2.1.286+, VS Code 확장 2.1.299+에서는 설정에 따라 지원하며 2.1.304+에서는 플래그가 필요 없습니다.</p>
-        <p data-i18n="hostSupport3">Antigravity App 2.34.0+는 로컬 stdio 또는 구성된 원격 MCP로 패널을 엽니다. CLI와 IDE에서는 텍스트 도구를 사용합니다. 로컬 OMS에는 터널이 필요하지 않습니다.</p>
-      </details>
-      <div class="cluster connection-controls"><label><span data-i18n="connectionView">연결 내역</span> <select id="connection-view">
-        <option value="connections" data-i18n="cv.connections">하네스와 준비 상태</option><option value="modelcatalog" data-i18n="cv.modelcatalog">모델·강도 카탈로그</option>
-        <option value="routes" data-i18n="cv.routes">예상 라우팅 · 계정</option><option value="attribution" data-i18n="cv.attribution">실행 응답 근거</option></select></label>
-        <label id="connection-harness-label"><span data-i18n="harness">하네스</span> <select id="connection-harness"><option value="codex">Codex</option><option value="claude">Claude</option><option value="agy">AGY</option><option value="pi">Pi</option></select></label>
-        <button id="connection-refresh" data-i18n="connectionRefresh">연결 내역 다시 조회</button></div>
-      <p id="connection-note" class="muted"></p><p id="connection-status" role="status"></p>
-      <div id="connection-rows" class="rows"></div>
-      <div class="cluster"><button id="connection-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="connection-next" data-i18n="nextPage" hidden>다음 페이지</button>
-      <button id="connection-draft" data-i18n="connectionDraft" hidden>이 하네스로 새 목표 작성</button></div>
-    </details>
+<header>
+<div class="wordmark"><span class="brand" aria-hidden="true"><i></i><i></i><i></i><i></i></span><h1>OMS</h1><strong id="project"></strong></div>
+<div id="scope" hidden><label for="project-choice" class="sr-only" data-i18n="project">프로젝트</label><select id="project-choice"></select></div>
+<select id="language-choice" aria-label="언어 (Language)" data-i18n-attr="aria-label:language"><option value="ko" lang="ko">한국어</option><option value="en" lang="en">English</option></select>
+<button id="display-mode" type="button" hidden></button>
+<button id="refresh" disabled data-i18n="refresh">새로고침</button>
+</header>
+<p id="status" role="status">OMS 연결 중…</p>
+<p id="receipt" role="status"></p>
+<noscript><p class="muted" lang="ko">이 호스트에서 패널 UI를 실행할 수 없으면 텍스트 MCP 도구(oms_list_projects, oms_panel_snapshot) 또는 CLI(oms dashboard)로 같은 관측 리비전과 상태를 확인하세요.</p><p class="muted" lang="en">If this host cannot run the panel UI, use the text MCP tools (oms_list_projects, oms_panel_snapshot) or the CLI (oms dashboard) to check the same observation revision and status.</p></noscript>
+<div id="view" hidden>
+<div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" hidden></button><span id="current-main" class="muted"></span></div>
+<nav class="tabs" id="tabs-primary" role="tablist" aria-label="프로젝트 보기" data-i18n-attr="aria-label:tabs">
+<button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview" data-i18n="tab.overview">지금</button>
+<button id="tab-work" role="tab" aria-selected="false" aria-controls="pane-work" tabindex="-1" data-i18n="tab.work">작업</button>
+<button id="tab-results" role="tab" aria-selected="false" aria-controls="pane-results" tabindex="-1" data-i18n="tab.results">결과</button>
+<button id="tab-relations" role="tab" aria-selected="false" aria-controls="pane-relations" tabindex="-1" data-i18n="tab.relations">관계도</button>
+</nav>
+<details id="more-views" class="more-views"><summary id="more-summary" data-i18n="moreViews">더 보기 · 프로젝트 지도 · 대화 · 지표 · Git</summary>
+<nav class="tabs" id="tabs-secondary" role="tablist" aria-label="더 보기 화면" data-i18n-attr="aria-label:tabsMore">
+<button id="tab-project" role="tab" aria-selected="false" aria-controls="pane-project"></button>
+<button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1" data-i18n="tab.chat">대화</button>
+<button id="tab-activity" role="tab" aria-selected="false" aria-controls="pane-activity" tabindex="-1" data-i18n="tab.activity">활동</button>
+<button id="tab-usage" role="tab" aria-selected="false" aria-controls="pane-usage" tabindex="-1" data-i18n="tab.usage">지표</button>
+<button id="tab-git" role="tab" aria-selected="false" aria-controls="pane-git" tabindex="-1">Git · PR</button>
+</nav></details>
+<div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
+<section id="approval-card" class="card" aria-labelledby="approvals-heading">
+<div class="section-head"><h2 id="approvals-heading">승인 요청</h2><span id="approval-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span class="state-word" data-i18n="state.waiting">확인 필요</span></span></div>
+<p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
+</section>
+<p id="approval-idle" class="approval-idle muted" role="status"></p>
+<details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
+<button id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
+<section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
+<h2 id="leads-heading" class="section-head"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><div id="leads" class="leads"></div>
+</section>
+<section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
+<section class="card" id="now-work" aria-labelledby="now-heading">
+<h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
+<div id="now-active" class="rows"></div>
+</section>
+<section class="card" id="goal-card" aria-labelledby="goal-heading">
+<h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
+<div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
+<div id="plan-strip" class="plan-strip" aria-label="프로젝트 작업 검증" data-i18n-attr="aria-label:planStrip" hidden>
+<span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted" data-i18n="planVerified">계획 작업 검증</span>
+<button id="plan-open" data-i18n="planOpen">계획 보기 ›</button>
+</div>
+</section>
+<section class="card" id="latest-results" aria-labelledby="now-results-heading">
+<h2 id="now-results-heading" data-i18n="w.nowResults" class="section-label">작업 결과</h2>
+<div id="now-results" class="rows"></div>
+<div class="evidence"><p id="reviews" class="muted"></p></div>
+<ul id="latest-operations" hidden></ul>
+</section>
+<details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
+<p id="peer-proof" class="muted" data-i18n="peer.proof" hidden>이 작업방의 Main 참여를 확인했습니다. 검토를 요청하면 다른 작업방의 소유 기록까지 확인한 뒤 호출합니다.</p>
+<form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
+<label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
+<label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" class="form-input" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
+<button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
+</fieldset></form><p id="peer-status" class="muted" role="status"></p>
+<div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
+<button id="peer-repair" type="button" hidden data-i18n="peer.repair">작업방에 실행 기록 연결</button><button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
+</details>
+<details class="card" id="provider-options"><summary data-i18n="providerOptions">Lead 후보 · Codex, Claude, AGY</summary>
+<p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
+<button id="provider-load" data-i18n="providerLoad">호스트 상태 조회</button>
+</details>
+<button id="overview-backlog"><span data-i18n="backlog">GitHub 열린 작업 전체 맡기기</span> <span aria-hidden="true">↗</span></button>
+<details id="launcher" class="card"><summary data-i18n="launcher">별도 Main에 새 목표 전달</summary>
+<form id="launch">
+<fieldset id="controls"><legend data-i18n="chooseMain">새 Main 선택</legend>
+<div class="choices">
+<label class="choice"><input type="radio" name="main" value="codex" checked><span>Codex</span></label>
+<label class="choice"><input type="radio" name="main" value="claude"><span>Claude</span></label>
+<label class="choice"><input type="radio" name="main" value="agy"><span>AGY</span></label>
+<label class="choice"><input type="radio" name="main" value="pi"><span>Pi</span></label>
+</div>
+<label for="brief" data-i18n="briefLabel">새 작업 목표</label>
+<input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
+<button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
+</fieldset>
+</form></details>
+<details class="card" id="project-records">
+<summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span></summary>
+<dl class="metrics">
+<div><dt data-i18n="metricActive">종료 기록 없는 시도</dt><dd id="active"></dd></div>
+<div><dt data-i18n="metricTasks">계획된 작업</dt><dd id="tasks"></dd></div>
+<div><dt data-i18n="metricState">현재 상태</dt><dd id="taskStatus"></dd></div>
+</dl>
+<h3 class="small-title" data-i18n="historyTeam">프로젝트 Main·Lead 기록</h3><ul id="repo-team"></ul>
+<h3 class="small-title" data-i18n="historyOps">최근 보관된 결과물</h3><ul id="operations"></ul>
+<h3 class="small-title" data-i18n="historyRuns">최근 실행 기록</h3><ul id="activity"></ul>
+<section id="scratch-history" aria-labelledby="scratch-heading" hidden>
+<h3 id="scratch-heading" data-i18n="scratch.heading">관리된 작업트리 기록</h3>
+<p id="scratch-status" class="muted" role="status"></p><ul id="scratch-rows"></ul>
+</section>
+</details>
+<section class="map-preview" id="map-preview" aria-labelledby="map-title">
+<div class="map-heading"><h2 id="map-title"></h2><div><button class="map-link" id="feature-open"></button> <button class="map-link" id="map-open"></button></div></div>
+<div class="map-field" id="map-field" hidden><div class="map-parents" id="map-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="map-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="map-parent-list"></ul></div><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children" data-relation-group="ownership"></ul><div class="map-deps" id="map-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="map-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="map-dep-list"></ul></div></div>
+<p role="status" id="map-status"></p>
+</section>
+</div>
+<section class="card" id="pane-work" role="tabpanel" aria-labelledby="tab-work" hidden>
+<h2 id="work-heading" data-i18n="tab.work">작업</h2><p id="work-status" class="muted" role="status"></p><div id="work-groups"></div>
+</section>
+<section class="card" id="pane-results" role="tabpanel" aria-labelledby="tab-results" hidden>
+<h2 id="results-heading" data-i18n="tab.results">결과</h2><p id="results-status" class="muted" role="status"></p><div id="results-list" class="rows"></div>
+</section>
+<section class="card" id="pane-relations" role="tabpanel" aria-labelledby="tab-relations" hidden>
+<h2 id="relations-heading" data-i18n="tab.relations">관계도</h2><p id="relations-status" class="muted" role="status"></p>
+<section aria-labelledby="owners-heading" data-relation-group="ownership"><h3 id="owners-heading" data-i18n="w.owners">담당 연결</h3><p id="owners-note" class="muted"></p><div id="owners-list" class="rows"></div></section>
+<section aria-labelledby="deps-heading" data-relation-group="dependency"><h3 id="deps-heading" data-i18n="w.deps">작업 의존성</h3><p id="deps-note" class="muted"></p><div id="deps-list" class="rows"></div></section>
+</section>
+<section class="card" id="pane-task" aria-labelledby="task-heading" hidden>
+<div class="detail-title"><button id="task-back" data-i18n="w.back">← 목록으로</button><h2 id="task-heading" tabindex="-1"></h2></div>
+<p id="task-note" class="muted" role="status"></p>
+<div id="task-tabs" class="tabs" role="tablist" aria-label="작업 상세 구분" data-i18n-attr="aria-label:taskSections">
+<button id="task-tab-overview" role="tab" aria-selected="true" aria-controls="task-body" data-i18n="task.overview">요약</button>
+<button id="task-tab-changes" role="tab" aria-selected="false" aria-controls="task-body" tabindex="-1" data-i18n="task.changes">변경</button>
+<button id="task-tab-verification" role="tab" aria-selected="false" aria-controls="task-body" tabindex="-1" data-i18n="task.verification">검증</button>
+<button id="task-tab-history" role="tab" aria-selected="false" aria-controls="task-body" tabindex="-1" data-i18n="task.history">이력</button>
+</div>
+<div id="task-body" role="tabpanel" tabindex="0"></div>
+</section>
+<section id="pane-project" role="tabpanel" aria-labelledby="tab-project" hidden>
+<section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading"></h2><button id="graph-reload" class="map-link"></button></div>
+<nav class="explorer-bar" id="graph-path"></nav>
+<label class="sr-only" id="graph-filter-label" for="graph-filter"></label><input class="explorer-filter" id="graph-filter" type="search">
+<div class="explorer-options"><button id="graph-search"></button> <label id="graph-confidence-label" for="graph-confidence"></label> <select id="graph-confidence"><option value="recorded" id="graph-recorded"></option><option value="all" id="graph-all"></option></select></div>
+<div id="explore-map" class="map-field detail-map" hidden><div class="map-parents" id="explore-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="explore-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="explore-parent-list"></ul></div><span class="map-focus" id="explore-root"></span><div class="detail-map-groups"><ul class="map-row" id="explore-children" data-relation-group="ownership"></ul><div class="map-deps" id="explore-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="explore-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="explore-dep-list"></ul></div></div></div>
+<button id="graph-attach" hidden></button><span id="graph-attached" role="status" class="explorer-status"></span>
+<p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button id="graph-more" hidden></button>
+</section>
+<section class="explorer-view" aria-labelledby="feature-title"><h2 id="feature-title"></h2><div id="feature-links" class="feature-links"></div>
+<label for="feature-filter" id="feature-filter-label" class="sr-only"></label><input class="explorer-filter" id="feature-filter" type="search">
+<p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" hidden></button>
+<section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label"></label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button id="feature-native" hidden></button><button id="feature-send"></button><button id="feature-dismiss"></button></div><p id="feature-outcome" role="status"></p></section>
+</section>
+</section>
+<section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
+<div class="detail-title"><h2 data-i18n="chatHeading">작업방 대화</h2><button id="chat-back" data-i18n="chatBack" hidden>이전 보기로</button></div>
+<div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자" data-i18n-attr="aria-label:chatMembers"></div>
+<div><h3 id="chat-title"></h3><p id="chat-status" class="muted" role="status"></p>
+<button id="chat-older" data-i18n="chatOlder" hidden>이전 메시지</button>
+<ol class="messages" id="chat-messages" aria-label="시간순 작업방 메시지" data-i18n-attr="aria-label:chatMessages" tabindex="0"></ol>
+<div id="chat-result"></div>
+<div id="review-share" hidden>
+<button id="review-choose" data-i18n="share.choose">검토 결과 첨부</button>
+<div id="review-preview" hidden>
+<label for="review-text" data-i18n="share.label">선택한 답변</label>
+<textarea id="review-text" readonly rows="5"></textarea>
+<div class="cluster">
+<button id="review-submit" data-i18n="share.send">현재 대화로 보내기</button>
+<button id="review-copy" data-i18n="share.copy">답변 복사</button>
+<button id="review-cancel" data-i18n="share.cancel">취소</button>
+</div>
+</div>
+<p id="review-share-status" role="status" class="muted"></p>
+</div>
+<div id="chat-native"></div>
+<section class="history" id="chat-evidence" aria-label="호출별 실행 근거" data-i18n-attr="aria-label:evidenceRegion" hidden>
+<label for="evidence-attempt" data-i18n="evidenceCall">기록된 호출</label> <select id="evidence-attempt"></select>
+<div id="evidence-actions" class="cluster"></div>
+<p id="evidence-status" role="status" class="muted"></p><pre id="evidence-lines" hidden></pre>
+<div class="cluster"><button id="evidence-prev" data-i18n="evidencePrev" hidden>근거 이전 페이지</button><button id="evidence-next" data-i18n="evidenceNext" hidden>근거 다음 페이지</button></div>
+</section>
+</div>
+</div>
+</section>
+<section class="card" id="pane-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+<h2 data-i18n="activityHeading">프로젝트 활동</h2><p id="core-state"></p><p id="command-state" class="muted"></p>
+<section class="history"><div class="cluster"><label for="tui-view" data-i18n="tuiLabel">OMS TUI 상세</label><select id="tui-view">
+<option value="" data-i18n="tui.choose">보기 선택</option>
+<optgroup label="런타임" data-i18n-attr="label:tui.runtime"><option value="overview" data-i18n="tui.overview">개요</option><option value="health" data-i18n="tui.health">건강 상태</option><option value="providers" data-i18n="tui.providers">공급자</option><option value="metrics" data-i18n="tui.metrics">지표</option><option value="capacity" data-i18n="tui.capacity">용량</option><option value="log" data-i18n="tui.log">로그</option></optgroup>
+<optgroup label="협업" data-i18n-attr="label:tui.collab"><option value="teams" data-i18n="tui.teams">팀</option><option value="sessions" data-i18n="tui.sessions">세션</option><option value="plan" data-i18n="tui.plan">계획</option><option value="attention" data-i18n="tui.attention">확인할 항목</option><option value="results" data-i18n="tui.results">결과</option><option value="debate" data-i18n="tui.debate">토론</option></optgroup>
+<optgroup label="실행" data-i18n-attr="label:tui.run"><option value="routes" data-i18n="tui.routes">경로</option><option value="workspaces" data-i18n="tui.workspaces">워크스페이스</option><option value="jobs" data-i18n="tui.jobs">작업</option><option value="past" data-i18n="tui.past">지난 실행</option></optgroup>
+</select></div><p id="tui-status" role="status" class="muted"></p>
+<div id="tui-rows" class="table-wrap" role="region" aria-label="선택한 OMS TUI 기록" data-i18n-attr="aria-label:tuiRegion" tabindex="0"></div>
+<div class="cluster"><button id="tui-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="tui-next" data-i18n="nextPage" hidden>다음 페이지</button></div></section>
+<h3 class="small-title" data-i18n="timeline">명령·작업 타임라인</h3><ul id="command-list"></ul>
+</section>
+<section class="card" id="pane-usage" role="tabpanel" aria-labelledby="tab-usage" tabindex="0" hidden>
+<h2 data-i18n="usageHeading">토큰 사용량</h2><p id="usage-status" class="muted" role="status"></p>
+<div id="usage-content"></div>
+</section>
+<section class="card" id="pane-git" role="tabpanel" aria-labelledby="tab-git" hidden>
+<h2>Git · GitHub PR</h2><p id="git-local"></p><p id="git-status" class="muted" role="status"></p>
+<button class="link-action" id="git-backlog" data-i18n="gitBacklog" hidden>열린 작업 전체를 Main에 맡기기</button>
+<section id="git-editor" class="card" aria-label="GitHub 항목 작업 목표" data-i18n-attr="aria-label:gitEditor" hidden>
+<h3 id="git-item"></h3>
+<button id="issue-review" hidden data-i18n="git.review">이슈 버전 확인</button>
+<p id="issue-evidence" role="status" class="muted" style="white-space:pre-line;overflow-wrap:anywhere"></p><label for="git-provider" data-i18n="gitAssignee">배정 요청 대상</label>
+<select id="git-provider"><option value="" data-i18n="gitAuto">Main이 Lead 선택</option><option value="codex">Codex Lead</option>
+<option value="claude">Claude Lead</option><option value="agy">AGY Lead</option></select>
+<label for="git-goal" data-i18n="gitGoalLabel">대화에 전달할 목표</label><textarea id="git-goal" rows="3" maxlength="2000"></textarea>
+<div class="cluster"><button id="git-compose" hidden></button><button class="primary" id="git-send" hidden></button>
+<button id="git-copy" data-i18n="gitCopy">목표 복사</button><button id="git-new" data-i18n="gitNew">별도 Main 목표로 사용</button></div>
+<p class="muted" id="git-editor-status" role="status"></p>
+</section>
+<label class="git-filter" for="git-kind"><span data-i18n="gitView">GitHub 보기</span> <select id="git-kind">
+<option value="checkout" data-i18n="gitKind.checkout">체크아웃 PR · 검사</option><option value="issues" data-i18n="gitKind.issues">저장소 이슈</option>
+<option value="pullRequests" data-i18n="gitKind.pullRequests">저장소 PR</option><option value="projects">GitHub Projects</option>
+</select></label>
+<div id="git-content" class="rows"></div><p id="git-catalog-status" role="status" class="muted"></p>
+<form id="git-find" class="cluster" hidden><label for="git-number" data-i18n="gitFind">번호로 찾기</label>
+<input id="git-number" type="text" inputmode="numeric" pattern="[1-9][0-9]{0,9}" maxlength="10" required>
+<button type="submit" data-i18n="gitLookup">조회</button></form>
+<div id="git-match" aria-live="polite"></div><div id="git-catalog" class="rows"></div>
+</section>
+</div>
+<details class="card" id="source-details"><summary data-i18n="source">연결 정보</summary>
+<p class="muted" id="main-scope"></p><p id="main-state"></p>
+<dl class="identity" id="identity"><dt data-i18n="room">작업방</dt><dd id="room"></dd><dt data-i18n="participant">참여자</dt><dd id="participant"></dd></dl>
+<dl class="identity" id="observation-meta"><dt data-i18n="obsRevision">관측 리비전</dt><dd id="observation-revision"></dd><dt data-i18n="obsBasis">관측 기준</dt><dd id="observation-basis"></dd><dt data-i18n="obsCompleteness">수집 상태</dt><dd id="observation-completeness"></dd></dl>
+<p class="muted" id="observation-sources"></p>
+<p class="project-meta"><span id="branch"></span><time id="updated"></time></p>
+<h3 data-i18n="appAndOms">앱과 OMS</h3><p class="muted" id="connection-host"></p><p id="connection-runtime" role="status">OMS 연결 확인 중</p>
+<details><summary data-i18n="hostSupport">호스트별 지원과 연결 경로</summary>
+<p data-i18n="hostSupport1">Codex Desktop은 대화 탭을 제공합니다. CLI와 IDE는 프로젝트의 OMS MCP 도구 또는 로컬 OMS 스킬을 사용합니다.</p>
+<p data-i18n="hostSupport2">Claude Chat은 원격 HTTPS 커넥터, Desktop은 로컬 stdio도 지원합니다. 사이드 패널은 계정·대화별 배포 대상에 따라 달라집니다. Claude Code의 네이티브 Mod는 별도 기능입니다. 터미널 2.1.287+, Desktop 내 Code 2.1.286+, VS Code 확장 2.1.299+에서는 설정에 따라 지원하며 2.1.304+에서는 플래그가 필요 없습니다.</p>
+<p data-i18n="hostSupport3">Antigravity App 2.34.0+는 로컬 stdio 또는 구성된 원격 MCP로 패널을 엽니다. CLI와 IDE에서는 텍스트 도구를 사용합니다. 로컬 OMS에는 터널이 필요하지 않습니다.</p>
+</details>
+<div class="cluster connection-controls"><label><span data-i18n="connectionView">연결 내역</span> <select id="connection-view">
+<option value="connections" data-i18n="cv.connections">하네스와 준비 상태</option><option value="modelcatalog" data-i18n="cv.modelcatalog">모델·강도 카탈로그</option>
+<option value="routes" data-i18n="cv.routes">예상 라우팅 · 계정</option><option value="attribution" data-i18n="cv.attribution">실행 응답 근거</option></select></label>
+<label id="connection-harness-label"><span data-i18n="harness">하네스</span> <select id="connection-harness"><option value="codex">Codex</option><option value="claude">Claude</option><option value="agy">AGY</option><option value="pi">Pi</option></select></label>
+<button id="connection-refresh" data-i18n="connectionRefresh">연결 내역 다시 조회</button></div>
+<p id="connection-note" class="muted"></p><p id="connection-status" role="status"></p>
+<div id="connection-rows" class="rows"></div>
+<div class="cluster"><button id="connection-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="connection-next" data-i18n="nextPage" hidden>다음 페이지</button>
+<button id="connection-draft" data-i18n="connectionDraft" hidden>이 하네스로 새 목표 작성</button></div>
+</details>
 </main>
 <script>
 'use strict';
-const el = id => document.getElementById(id);
+const el = id => document.getElementById(id), on = (id, ev, fn) => el(id).addEventListener(ev, fn);
 const names = {codex:'Codex', claude:'Claude', agy:'AGY', antigravity:'AGY', pi:'Pi'};
 // Localization. UI-owned text uses message keys (MSG) and is bound to its element,
 // so a language change re-renders text in place without refetching or rebuilding.
@@ -1135,6 +1136,8 @@ surf.unknown | 호스트 미확인 | Unknown host
 host.html | HTML 표시됨 ·  | HTML rendered ·\x20
 host.noReply | 호스트 응답 미확인 | Host response unknown
 host.mode |  · 표시 모드 {v} |  · Display mode {v}
+host.expand | 크게 보기 | Expand
+host.collapse | 대화로 돌아가기 | Back to chat
 host.unknownRest |  · 사이드 패널·네이티브 Mod·전송 경로(로컬/터널/원격) 미확인 |  · side panel, native Mods and transport path (local/tunnel/remote) unknown
 host.readOnly |  · 읽기 전용 프로필 |  · Read-only profile
 host.control |  · 대화 제어 프로필 |  · Conversation-control profile
@@ -1234,7 +1237,8 @@ const pendingErrors = [];
 let retryStart;
 let contextTypes;
 let canOpenLinks = false, canMessage = false, canCompose = false, readOnly = false;
-let hostSurface = {k:'unknown'}, hostVersion = '', displayMode = '', handshake = false;
+const MODES = ['inline','fullscreen','pip'];
+let hostSurface = {k:'unknown'}, hostVersion = '', displayMode = '', hostModes = [], autoExpanded = false, modeBusy = false, handshake = false;
 let connectionState = 'conn.checking', connectionReady = false, profileKnown = false, checkedAt = '';
 let connectionPage = 1, connectionNext = null;
 let gitData, gitItem, draftProvider = '', sentBrief, sendingBrief, providerData;
@@ -1428,7 +1432,7 @@ function paintGraph(loading = false) {
   el('graph-more').hidden=!partial || graphLimit>=60;
 }
 
-el('graph-attach').addEventListener('click',async()=>{
+on('graph-attach','click',async()=>{
   const selected=graphData?.selection?.node,button=el('graph-attach'),expected=generation;
   if (!contextTypes?.text || !explorerBound || button.hidden || button.disabled || !selected ||
       selected.id!==graphTrail.at(-1)?.id || typeof selected.kind!=='string') return;
@@ -1438,16 +1442,16 @@ el('graph-attach').addEventListener('click',async()=>{
     ? choice('노드 참조를 전달했습니다.','Node reference shared.') : choice('첨부를 확인할 수 없습니다.','Attachment unconfirmed.');
   if(expected===generation) button.disabled=false;
 });
-el('map-open').addEventListener('click',()=>{showTab('project',true);el('graph-filter').focus();});
+on('map-open','click',()=>{showTab('project',true);el('graph-filter').focus();});
 function openFeatureSearch() {showTab('project',true);el('feature-filter').focus();}
-el('feature-open').addEventListener('click',openFeatureSearch);
+on('feature-open','click',openFeatureSearch);
 window.addEventListener('keydown',event=>{
   if (!explorerBound || event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented || event.isComposing || event.target?.isContentEditable ||
       ['INPUT','TEXTAREA','SELECT'].includes(event.target?.tagName)) return;
   if (event.key === '?') {event.preventDefault();openFeatureSearch();}
   if (event.key === '/' && currentTab === 'project') {event.preventDefault();el('graph-filter').focus();}
 });
-el('graph-filter').addEventListener('input',()=>paintGraph());
+on('graph-filter','input',()=>paintGraph());
 function submitGraphQuery() {
   const query=el('graph-filter').value.trim();
   if (!query) return;
@@ -1456,16 +1460,16 @@ function submitGraphQuery() {
   }
   graphTrail=[];readGraph(undefined,query);
 }
-el('graph-search').addEventListener('click',submitGraphQuery);
+on('graph-search','click',submitGraphQuery);
 el('graph-filter').maxLength=128;
-el('graph-filter').addEventListener('keydown',e=>{
+on('graph-filter','keydown',e=>{
   if(e.isComposing) return;
   if(e.key==='Enter'){e.preventDefault();submitGraphQuery();}
   if(e.key==='Escape'){e.preventDefault();goToLevel(0);}
 });
-el('graph-confidence').addEventListener('change',()=>paintGraph());
-el('graph-reload').addEventListener('click',()=>readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit));
-el('graph-more').addEventListener('click',()=>readGraph(graphTrail.at(-1)?.id,graphQuery,60));
+on('graph-confidence','change',()=>paintGraph());
+on('graph-reload','click',()=>readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit));
+on('graph-more','click',()=>readGraph(graphTrail.at(-1)?.id,graphQuery,60));
 const commandKorean = {
  advise:'결정 전 다른 에이전트의 조언 받기','agent-call':'공급자 실행과 시도 상태 확인','agent-events':'실행 이벤트 조회','agent-memory':'에이전트 기억 저장 및 찾기','agent-plan':'작업 계획과 의존성 관리','agent-role':'작업 역할과 규칙 확인','agent-supervisor':'에이전트 작업 감독','agent-task':'현재 작업과 인수인계 관리','apply-project-template':'프로젝트 규칙 템플릿 적용','approval-inbox':'승인 대기 요청 조회','artifact-index':'산출물 색인 조회','artifact-view':'저장된 산출물과 결과 읽기','auto-update':'OMS 자동 업데이트 설정',autopilot:'자동화 작업 실행 관리',candidate:'변경 후보와 검증 근거 관리','change-guard':'변경 경계 점검',checkpoint:'현재 진행 상태 기록','ci-status':'지속적 통합 검사 결과 확인',cite:'출처와 근거 인용',cleanup:'작업 파일 정리','connect-services':'외부 서비스 연결 확인',consult:'다른 에이전트와 협의',dashboard:'프로젝트 상태 개요','data-manifest':'데이터 분할과 변경 추적',deps:'프로젝트 의존성·버전 확인',doctor:'설치와 도구 상태 진단','draft-pr':'검증된 변경을 초안 PR로 제출','experiment-board':'실험 비교와 상태 조회',external:'외부 도구 연결','fail-ledger':'실패 기록과 재발 확인',gc:'오래된 상태 정리',github:'GitHub 이슈 및 PR 연동','goal-drive':'목표 진행과 완료 근거 확인',graph:'코드 구조와 관계 탐색',harness:'공급자 하네스 조회와 조정',hud:'현재 세션 요약',inbox:'확인할 작업과 요청 조회',init:'프로젝트 초기 설정',input:'입력 요청 관리','install-profile':'설치 프로필 선택',intent:'작업 의도에 맞는 명령 찾기','job-digest':'작업 실행 로그 요약',journal:'작업 일지 기록과 검색',land:'검증과 PR 게시 흐름',lease:'작업 소유권과 임대 확인','model-doctor':'모델 연결 상태 진단',models:'모델 및 공급자 카탈로그','output-digest':'명령 출력 요약',panel:'작업방과 에이전트 제어판','patch-admit':'패치 수락 전 검사','patch-land':'검증된 패치 반영','peer-ask':'다른 공급자에게 질문','peer-delegate':'다른 공급자에 작업 위임','peer-review':'다른 공급자의 검토 요청','plan-from-spec':'명세를 계획으로 변환','plan-run':'작업 계획 실행','project-doctor':'프로젝트 구성 진단','project-private':'프로젝트 전용 설정','provider-permissions':'공급자 권한 점검',recipe:'로컬 작업 절차 관리','remove-project-template':'프로젝트 관리 템플릿 제거',report:'오류 및 기능 요청 보고서',room:'공유 작업방과 메시지 관리',run:'작업 실행과 기록 연결','run-ledger':'실험 실행 기록','run-reconcile':'장시간 실행 결과 조정',runtime:'실행 상태와 근거 조회','scratch-worktree':'격리된 Git 작업공간 관리',session:'세션 검색 및 복구','session-handoff':'세션 인수인계 요약','skill-doctor':'스킬 설치 및 중복 진단','skill-forge':'프로젝트 스킬 생성','slurm-lint':'Slurm 작업 스크립트 점검','slurm-submit':'Slurm 작업 제출',snapshot:'상태 스냅샷 생성',state:'프로젝트 상태 조회','state-verify':'프로젝트 상태 검증',status:'설치 상태 확인','sync-shared':'공유 규칙 동기화',thread:'작업 스레드 기록',tick:'작업 스케줄 조정','tsp-queue':'로컬 작업 대기열 관리',uninstall:'OMS 설치 제거',update:'OMS 버전 업데이트'
 };
@@ -1519,11 +1523,11 @@ function editFeature(c) {
   el('feature-editor').hidden=false;el('feature-outcome').textContent=canCompose?'':choice('이 호스트에서는 질문을 복사해 대화에 붙여넣을 수 있습니다.','Copy this question into the chat on this host.');
   draft.focus();draft.select();
 }
-el('feature-native').addEventListener('click',()=>featureRoutes.find(([name])=>name===draftCommand)?.[3]());
-el('feature-filter').addEventListener('input',()=>{commandRows=8;paintFeatures();});
-el('feature-more').addEventListener('click',()=>{commandRows+=12;paintFeatures();});
-el('feature-dismiss').addEventListener('click',()=>{draftCommand='';el('feature-draft').value='';el('feature-editor').hidden=true;el('feature-filter').focus();});
-el('feature-send').addEventListener('click',async()=>{
+on('feature-native','click',()=>featureRoutes.find(([name])=>name===draftCommand)?.[3]());
+on('feature-filter','input',()=>{commandRows=8;paintFeatures();});
+on('feature-more','click',()=>{commandRows+=12;paintFeatures();});
+on('feature-dismiss','click',()=>{draftCommand='';el('feature-draft').value='';el('feature-editor').hidden=true;el('feature-filter').focus();});
+on('feature-send','click',async()=>{
   const command=draftCommand, expected=generation,text=el('feature-draft').value.trim(), button=el('feature-send');
   if(!explorerBound || !command || !text || text.length>1000 || button.disabled) return;
   if(!canCompose) {
@@ -1733,7 +1737,7 @@ function paintGoalFold() {
   el('goal').className=!btn.hidden && !expanded ? 'goal-short' : '';
   put(btn,()=>expanded ? choice('목표 접기','Collapse goal') : choice('목표 전체 보기','Read full goal'));
 }
-el('goal-expand').addEventListener('click',()=>{
+on('goal-expand','click',()=>{
   const btn=el('goal-expand');btn.setAttribute('aria-expanded',String(btn.getAttribute('aria-expanded')!=='true'));paintGoalFold();
 });
 const detailSections = ['overview', 'changes', 'verification', 'history'];
@@ -1793,8 +1797,8 @@ bindTabs(detailSections, 'task-tab-', (name, focus) => {
   paintTaskDetail();
   if (focus) el('task-tab-' + name).focus();
 });
-el('task-back').addEventListener('click', () => closeTask(true));
-el('pane-task').addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeTask(true); } });
+on('task-back','click', () => closeTask(true));
+on('pane-task','keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeTask(true); } });
 
 function validRead(key, ticket, expected) {
   return !disposed && expected === generation && jobs.get(key) === ticket;
@@ -1907,6 +1911,7 @@ window.addEventListener('message', event => {
       generation++;
       jobs.clear(); clearChat();
       setBusy(true, true);
+      syncDisplayMode();
       el('view').hidden = true;
       put('status', () => t('closed'));
       for (const call of pending.values()) {
@@ -1923,7 +1928,9 @@ window.addEventListener('message', event => {
   if (disposed) return;
   if (msg.method === 'ui/notifications/host-context-changed') {
     if (msg.params && typeof msg.params === 'object') {
+      if ('availableDisplayModes' in msg.params) hostModes = parseModes(msg.params.availableDisplayModes);
       if ('displayMode' in msg.params) applyDisplayMode(msg.params.displayMode);
+      else if ('availableDisplayModes' in msg.params) syncDisplayMode();
       if ('locale' in msg.params) { hostLocale = typeof msg.params.locale === 'string' ? msg.params.locale : ''; setLanguage(negotiateLang(), false); }
     }
     return;
@@ -2070,7 +2077,7 @@ function gitAction(kind,item) {
 function resetIssueReview() {
   jobs.delete('issue-review'); put('issue-evidence',() => '');
 }
-el('issue-review').addEventListener('click',() => {
+on('issue-review','click',() => {
   const item = gitItem, source = gitData;
   if (!gitReady || item?.kind !== 'issue' || item.stale || jobs.has('issue-review')) return;
   const button = el('issue-review');
@@ -2105,8 +2112,8 @@ function prepareBacklog() {
   const url = 'https://github.com/' + repo;
   editGitGoal({kind:'backlog',url,label:() => t('git.backlogLabel',{repo})}, t('git.backlogBody',{url}));
 }
-el('git-backlog').addEventListener('click',prepareBacklog);
-el('overview-backlog').addEventListener('click',() => {
+on('git-backlog','click',prepareBacklog);
+on('overview-backlog','click',() => {
   overviewBacklog = true;
   showTab('git',true);
   if (gitReady) { overviewBacklog = false; prepareBacklog(); }
@@ -2232,10 +2239,10 @@ function boardDetails(container, board) {
   }
   read.addEventListener('click',() => load(index+1)); back.addEventListener('click',() => load(index-1));
 }
-el('git-kind').addEventListener('change',() => {
+on('git-kind','change',() => {
   jobs.delete('git-lookup'); el('git-number').value = ''; el('git-match').replaceChildren(); renderGitCatalog();
 });
-el('git-find').addEventListener('submit',event => {
+on('git-find','submit',event => {
   event.preventDefault();
   const list = el('git-kind').value, repo = gitData?.github?.repository;
   const field = el('git-number'), result = el('git-match');
@@ -2278,14 +2285,14 @@ function updateSendButton() {
   el('git-compose').hidden=!canCompose; el('git-compose').disabled=Boolean(!gitReady || gitItem?.stale || sendingBrief || !el('git-goal').value.trim());
   el('git-new').disabled = Boolean(!gitReady || gitItem?.stale || !el('git-goal').value.trim());
 }
-el('git-provider').addEventListener('change', () => {
+on('git-provider','change', () => {
   const field = el('git-goal'), previous = LANGS.map(l => leadPrefix(draftProvider, l)).find(prefix => field.value.startsWith(prefix));
   const body = previous != null ? field.value.slice(previous.length) : field.value;
   draftProvider = el('git-provider').value;
   field.value = leadPrefix(draftProvider) + body; rememberGitGoal();
 });
-el('git-goal').addEventListener('input',rememberGitGoal);
-el('git-copy').addEventListener('click',async () => {
+on('git-goal','input',rememberGitGoal);
+on('git-copy','click',async () => {
   const field = el('git-goal'), expected = generation, item = gitItem;
   if (!item || !field.value.trim()) return;
   try {
@@ -2298,7 +2305,7 @@ el('git-copy').addEventListener('click',async () => {
     put('git-editor-status', () => t('git.selected'));
   }
 });
-el('git-compose').addEventListener('click',async()=>{
+on('git-compose','click',async()=>{
   const text=el('git-goal').value.trim(),item=gitItem,expected=generation,button=el('git-compose');
   if (!canCompose || !gitReady || item?.stale || !item || !text || button.disabled) return;
   const ticket=Symbol();sendingBrief=ticket;updateSendButton();
@@ -2309,7 +2316,7 @@ el('git-compose').addEventListener('click',async()=>{
   } catch {if (expected===generation && gitItem===item) el('git-editor-status').textContent=choice('입력창을 확인하거나 목표를 복사하세요.','Check the composer or copy the goal.');}
   finally {if(sendingBrief===ticket){sendingBrief=undefined;updateSendButton();}}
 });
-el('git-send').addEventListener('click', async () => {
+on('git-send','click', async () => {
   const bound = !readOnly && !el('header-main').hidden;
   const room = bound ? dashboardData?.conversationMain?.room : null, text = el('git-goal').value.trim(), item = gitItem;
   if ((!bound && !readOnly) || !item || !text || el('git-send').hidden || el('git-send').disabled) return;
@@ -2328,7 +2335,7 @@ el('git-send').addEventListener('click', async () => {
     if (sendingBrief === marker) { sendingBrief = undefined; updateSendButton(); }
   }
 });
-el('git-new').addEventListener('click', () => {
+on('git-new','click', () => {
   if (readOnly || !gitReady || !gitItem || gitItem.stale) return;
   const field = el('brief'), draft = el('git-goal').value.trim().replace(/\s+/g,' ');
   if (!draft) return;
@@ -2647,7 +2654,7 @@ function currentReview(item) {
   return currentTab === 'chat' && item && item === reviewAttachment && item.room === peerScope(dashboardData) &&
     selectedMember?.room === item.room && selectedMember.participant === item.participant && !el('view').hidden;
 }
-el('review-choose').addEventListener('click',() => {
+on('review-choose','click',() => {
   const item = reviewAttachment;
   const state = item && sentReviews.get(item.key);
   if (!currentReview(item) || (state && state !== 'unknown')) return;
@@ -2670,10 +2677,10 @@ function dismissReview(focus) {
   else el('review-share-status').textContent = '';
   if (focus) (locked ? el('chat-title') : el('review-choose')).focus();
 }
-el('review-cancel').addEventListener('click',() => {
+on('review-cancel','click',() => {
   if (currentReview(reviewAttachment) && !el('review-cancel').disabled) dismissReview(true);
 });
-el('review-copy').addEventListener('click',async () => {
+on('review-copy','click',async () => {
   const item = reviewAttachment;
   if (!currentReview(item) || el('review-preview').hidden) return;
   try {
@@ -2685,7 +2692,7 @@ el('review-copy').addEventListener('click',async () => {
     el('review-text').focus(); el('review-text').select(); put('review-share-status',() => t('share.select'));
   }
 });
-el('review-submit').addEventListener('click',async () => {
+on('review-submit','click',async () => {
   const item = reviewAttachment;
   if (!currentReview(item) || !canMessage || el('review-preview').hidden || sentReviews.has(item.key)) return;
   sentReviews.set(item.key,'pending');
@@ -2805,9 +2812,9 @@ function readEvidence(section,page) {
     el('evidence-prev').hidden = page === 1; el('evidence-next').hidden = evidenceNext == null;
   }, error => { put(status, () => error.message); });
 }
-el('evidence-attempt').addEventListener('change',() => chooseEvidence(el('evidence-attempt').value));
-el('evidence-prev').addEventListener('click',() => { if (evidencePage > 1) readEvidence(evidenceSection,evidencePage - 1); });
-el('evidence-next').addEventListener('click',() => { if (evidenceNext != null) readEvidence(evidenceSection,evidenceNext); });
+on('evidence-attempt','change',() => chooseEvidence(el('evidence-attempt').value));
+on('evidence-prev','click',() => { if (evidencePage > 1) readEvidence(evidenceSection,evidencePage - 1); });
+on('evidence-next','click',() => { if (evidenceNext != null) readEvidence(evidenceSection,evidenceNext); });
 function renderMemberList() {
   const list = el('chat-members');
   list.replaceChildren();
@@ -2893,8 +2900,8 @@ function loadChat(before) {
     older.disabled = false;
   });
 }
-el('chat-older').addEventListener('click', () => { if (olderCursor != null && !jobs.has('chat')) loadChat(olderCursor); });
-el('chat-back').addEventListener('click', () => {
+on('chat-older','click', () => { if (olderCursor != null && !jobs.has('chat')) loadChat(olderCursor); });
+on('chat-back','click', () => {
   if (!backTarget) return;
   const {tab,origin} = backTarget; backTarget = undefined; el('chat-back').hidden = true;
   showTab(tab); (origin?.isConnected ? origin : el('tab-' + tab)).focus({preventScroll:true});
@@ -2932,15 +2939,15 @@ function resetTui() {
   el('tui-rows').replaceChildren(); el('tui-status').textContent = '';
   el('tui-prev').hidden = el('tui-next').hidden = true;
 }
-el('tui-view').addEventListener('change', () => { resetTui(); loadTui(); });
+on('tui-view','change', () => { resetTui(); loadTui(); });
 function openTui(view) {
   if (el('tui-view').value !== view) { el('tui-view').value = view; resetTui(); }
   showTab('activity',true);
 }
-el('plan-open').addEventListener('click', () => openTui('plan'));
-el('attention-open').addEventListener('click', () => openTui('attention'));
-el('tui-next').addEventListener('click', () => { if (tuiNext != null) loadTui(tuiNext); });
-el('tui-prev').addEventListener('click', () => { if (tuiPages.length > 1) loadTui(tuiPages.at(-2)); });
+on('plan-open','click', () => openTui('plan'));
+on('attention-open','click', () => openTui('attention'));
+on('tui-next','click', () => { if (tuiNext != null) loadTui(tuiNext); });
+on('tui-prev','click', () => { if (tuiPages.length > 1) loadTui(tuiPages.at(-2)); });
 
 function paintAvatar(element, person) {
   const provider = String(person.provider || '').toLowerCase();
@@ -2990,8 +2997,8 @@ function loadProviderOptions() {
     control.disabled = false;
   },error => { rows.replaceChildren(); providerData = undefined; put(status, () => error.message); control.disabled = false; });
 }
-el('provider-load').addEventListener('click',loadProviderOptions);
-el('provider-options').addEventListener('toggle',() => {
+on('provider-load','click',loadProviderOptions);
+on('provider-options','toggle',() => {
   if (el('provider-options').open && !providerData) loadProviderOptions();
 });
 function peerScope(d, allowPartial = false) {
@@ -3040,11 +3047,11 @@ async function peerAction(check, repair = false) {
     if (current()) { el('peer-controls').disabled = true; el('peer-check').disabled = false; el('peer-check').hidden = false; }
   }
 }
-el('peer-form').addEventListener('submit',event => {event.preventDefault(); peerAction(false);});
-el('peer-check').addEventListener('click',() => peerAction(true));
-el('peer-repair').addEventListener('click',() => peerAction(false,true));
-el('peer-chat').addEventListener('click',() => {if (peerMember && peerRoom === peerScope(dashboardData,true)) selectMember(peerMember,el('peer-chat'));});
-el('peer-next').addEventListener('click',() => {
+on('peer-form','submit',event => {event.preventDefault(); peerAction(false);});
+on('peer-check','click',() => peerAction(true));
+on('peer-repair','click',() => peerAction(false,true));
+on('peer-chat','click',() => {if (peerMember && peerRoom === peerScope(dashboardData,true)) selectMember(peerMember,el('peer-chat'));});
+on('peer-next','click',() => {
   if (busy || !peerMember || peerRoom !== peerScope(dashboardData,true)) return;
   clearPeer(peerRoom); el('peer-assignment').open = true; el('peer-task').focus();
 });
@@ -3287,9 +3294,23 @@ function hostFacts() {
     + (displayMode ? t('host.mode',{v:displayMode}) : '') + t('host.unknownRest'));
   put('connection-runtime', () => t(connectionState) + (profileKnown ? t(readOnly ? 'host.readOnly' : 'host.control') : '') + (checkedAt ? t('host.checked',{v:checkedAt}) : ''));
 }
-function applyDisplayMode(mode) {
-  displayMode = ['inline','fullscreen','pip'].includes(mode) ? mode : '';
-  hostFacts();
+const parseModes=l=>Array.isArray(l)?[...new Set(l.filter(m=>MODES.includes(m)))]:[];
+const expandMode=()=>hostModes.includes('fullscreen')?'fullscreen':hostModes.includes('pip')?'pip':'';
+function nextDisplayMode(){
+  const has=m=>hostModes.includes(m);
+  if(!hostModes.length)return null;
+  if(displayMode==='fullscreen'||displayMode==='pip')
+    return has('inline')?{mode:'inline',key:'host.collapse'}:displayMode==='pip'&&has('fullscreen')?{mode:'fullscreen',key:'host.expand'}:displayMode==='fullscreen'&&has('pip')?{mode:'pip',key:'host.collapse'}:null;
+  const mode=displayMode==='inline'||hostModes.length>1?expandMode():'';
+  return mode?{mode,key:'host.expand'}:null;
+}
+function syncDisplayMode(){const b=el('display-mode'),n=nextDisplayMode();b.hidden=!n;b.disabled=disposed||modeBusy||!n;if(n)put(b,()=>t(n.key));}
+function applyDisplayMode(m){displayMode=MODES.includes(m)?m:'';hostFacts();syncDisplayMode();}
+async function requestDisplayMode(mode){
+  if(disposed||modeBusy||!MODES.includes(mode))return;
+  modeBusy=true;syncDisplayMode();
+  try{const r=await request('ui/request-display-mode',{mode},5000);if(!disposed&&MODES.includes(r?.mode))applyDisplayMode(r.mode);}
+  catch{}finally{modeBusy=false;syncDisplayMode();}
 }
 const settingViews = ['connections','modelcatalog','routes','attribution'];
 function resetConnectionRows() {
@@ -3356,12 +3377,12 @@ function loadConnection(page = 1) {
     el('connection-prev').hidden = page <= 1;
   });
 }
-el('source-details').addEventListener('toggle',() => { if (el('source-details').open) { hostFacts(); loadConnection(); } else resetConnectionRows(); });
+on('source-details','toggle',() => { if (el('source-details').open) { hostFacts(); loadConnection(); } else resetConnectionRows(); });
 for (const id of ['connection-view','connection-harness']) el(id).addEventListener('change',() => loadConnection());
-el('connection-refresh').addEventListener('click',() => connectionReady ? loadConnection(connectionPage) : refresh());
-el('connection-prev').addEventListener('click',() => { if (connectionPage > 1) loadConnection(connectionPage - 1); });
-el('connection-next').addEventListener('click',() => { if (connectionNext != null) loadConnection(connectionNext); });
-el('connection-draft').addEventListener('click',() => {
+on('connection-refresh','click',() => connectionReady ? loadConnection(connectionPage) : refresh());
+on('connection-prev','click',() => { if (connectionPage > 1) loadConnection(connectionPage - 1); });
+on('connection-next','click',() => { if (connectionNext != null) loadConnection(connectionNext); });
+on('connection-draft','click',() => {
   if (readOnly || disposed || !connectionReady || el('connection-draft').hidden) return;
   el('launch').elements.main.value = el('connection-harness').value || 'codex';
   showTab('overview'); el('launcher').open = true; el('brief').focus();
@@ -3371,12 +3392,13 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw uiError('openApp');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.2'}, appCapabilities:{availableDisplayModes:['inline','fullscreen']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.2'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || {k:'surf.unknown'};
       hostLocale = typeof info?.hostContext?.locale === 'string' ? info.hostContext.locale : '';
       setLanguage(negotiateLang(), false);
       hostVersion = /^\d+\.\d+\.\d+(?:[.-][A-Za-z0-9.-]{1,20})?$/.test(info?.hostInfo?.version || '') ? info.hostInfo.version : '';
+      hostModes = parseModes(info?.hostContext?.availableDisplayModes);
       applyDisplayMode(info?.hostContext?.displayMode);
       const formats = info?.hostCapabilities?.updateModelContext;
       canOpenLinks = Boolean(info?.hostCapabilities?.openLinks);
@@ -3385,6 +3407,7 @@ async function initialize() {
       canCompose = Boolean(canMessage && extension && typeof extension === 'object' && !Array.isArray(extension));
       if (formats?.text || formats?.structuredContent) contextTypes = formats;
       send({method:'ui/notifications/initialized', params:{}});
+      if (!autoExpanded && displayMode === 'inline') { const m = expandMode(); if (m) { autoExpanded = true; requestDisplayMode(m); } }
     })().catch(error => { initializing = undefined; throw error; });
   }
   return initializing;
@@ -3522,7 +3545,7 @@ async function mutate(action, onSuccess, expected = generation, recoverAfter = (
   }
 }
 
-el('launch').addEventListener('submit', event => {
+on('launch','submit', event => {
   event.preventDefault();
   if (readOnly || busy || el('view').hidden) return;
   const goal = el('brief').value.trim();
@@ -3563,14 +3586,15 @@ el('launch').addEventListener('submit', event => {
     () => started
   );
 });
-el('brief').addEventListener('input', () => { briefInvalid = false; el('brief').setCustomValidity(''); });
-el('project-choice').addEventListener('change', () => {
+on('brief','input', () => { briefInvalid = false; el('brief').setCustomValidity(''); });
+on('project-choice','change', () => {
   if (el('project-choice').disabled) return;
   seenInputOrManual = true;
   switchProject(projectArgument(el('project-choice').value || null));
 });
-el('refresh').addEventListener('click', refresh);
-el('language-choice').addEventListener('change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });
+on('display-mode','click',()=>{const n=nextDisplayMode();if(n)requestDisplayMode(n.mode);});
+on('refresh','click', refresh);
+on('language-choice','change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });
 initLanguage();
 refresh();
 </script>
