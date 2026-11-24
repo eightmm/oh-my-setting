@@ -2504,7 +2504,32 @@ fn project_issue_requirements_bind_preview_generation_council_and_admission() {
     respond(&closed);
     assert_ne!(apply(&path, &digest).0, 0);
     assert!(!active.exists());
-    respond(&issue);
+    let mut observed = issue.clone();
+    for invalid in [
+        url.replace("/issues/", "/ISSUES/"),
+        url.replace("https://github.com/", "HTTPS://GITHUB.COM/"),
+    ] {
+        observed["html_url"] = invalid.as_str().into();
+        respond(&observed);
+        assert_ne!(preview().0, 0, "{invalid}");
+        assert_ne!(apply(&path, &digest).0, 0, "{invalid}");
+        assert!(!active.exists());
+        let (code, data, err) = intake(
+            "intent",
+            &repo,
+            &planner,
+            &["draft", "--from-issue", url, "--dry-run"],
+        );
+        assert_eq!(code, 0, "{err}");
+        let legacy = value::parse(data.as_bytes()).unwrap();
+        assert_eq!(legacy["source"]["reference"], invalid);
+        assert_eq!(legacy["source"]["sha256"], pin);
+    }
+    observed["html_url"] = "https://github.com/Example-Org/EXAMPLE-repo/issues/7".into();
+    respond(&observed);
+    let (code, data, err) = preview();
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(value::parse(data.as_bytes()).unwrap(), selected);
     let (code, _, err) = apply(&path, &digest);
     assert_eq!(code, 0, "{err}");
     let saved = fs::read(&active).unwrap();

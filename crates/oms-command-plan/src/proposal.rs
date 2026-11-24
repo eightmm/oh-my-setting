@@ -39,12 +39,16 @@ pub fn issue_document(
     require_open: bool,
 ) -> Result<(Value, String)> {
     let row = json::parse_bounded(raw, 512 * 1024)?;
+    let observed_url = row.text("html_url");
     require(
         (!require_open || (row.opt("body").is_some() && row.text("state") == "open"))
             && row.opt("pull_request").is_none()
             && row.get("number").int()? == i128::from(number)
             && u64::try_from(row.get("id").int()?).is_ok_and(|id| id > 0)
-            && row.text("html_url").eq_ignore_ascii_case(url)
+            && observed_url.eq_ignore_ascii_case(url)
+            && (!require_open
+                || observed_url.starts_with("https://github.com/")
+                    && observed_url.ends_with(&format!("/issues/{number}")))
             && valid_revision(row.text("updated_at"))
             && !row.text("title").is_empty()
             && row.text("title").chars().count() <= 1024,
@@ -63,7 +67,7 @@ pub fn issue_document(
         ("title", row.get("title").clone()),
         ("body", string(body)),
     ]);
-    Ok((frozen, row.text("html_url").to_owned()))
+    Ok((frozen, observed_url.to_owned()))
 }
 
 impl Plan<'_> {
