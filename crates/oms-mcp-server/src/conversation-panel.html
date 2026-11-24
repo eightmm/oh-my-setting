@@ -5,305 +5,284 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OMS · 프로젝트 제어</title>
 <style>
-:root {
-  color-scheme: light dark;
-  --bg: #f6f7f8; --surface: #fff; --ink: #14171a; --muted: #5d636a;
-  --line: #e1e4e7; --tint: #eef0f2; --brand: #1f5a4d; --on-brand: #fff;
-  --main-line: #b4c3be; --warm: #84520f; --warm-bg: #fbf5e9; --error: #a13029; --info: #3f77d4;
-  --r: .5rem; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0a0a0c; --surface: #131316; --ink: #f1f1f3; --muted: #9b9ea8;
-    --line: #26272c; --tint: #1c1d21; --brand: #a3d8bf; --on-brand: #0e2419;
-    --main-line: #3c4743; --warm: #efd19b; --warm-bg: #231e15; --error: #ffa39b; --info: #7ba5ee;
-  }
-}
-* { box-sizing: border-box; }
-body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Noto Sans CJK KR", system-ui, sans-serif; overflow-wrap: anywhere; -webkit-font-smoothing: antialiased; }
-main { max-width: 42rem; margin: auto; padding: 0 clamp(.75rem, 3vw, 1.1rem) 1.5rem; }
-h1, h2, h3, h4, p, ul, dl, dd, fieldset, legend { margin: 0; padding: 0; }
-h1 { font-size: .95rem; letter-spacing: -.02em; font-weight: 750; }
-h2, legend { font-size: .95rem; font-weight: 700; }
-h3 { font-size: .88rem; font-weight: 650; }
-button, input, select { font: inherit; }
-button { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); color: var(--ink); min-height: 1.95rem; padding: .25rem .65rem; cursor: pointer; transition: border-color .12s, background .12s; }
-button:hover:not(:disabled) { border-color: var(--brand); }
-button:disabled { opacity: .5; cursor: default; }
-:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-header, .cluster, .between, .entry { display: flex; align-items: center; gap: .55rem; }
-header, .between { justify-content: space-between; }
-.cluster, .between, .entry { flex-wrap: wrap; }
-#status, #receipt { font-size: .84rem; }
-#status:not(:empty), #receipt:not(:empty) { margin-top: .7rem; }
-.error { color: var(--error); }
-#receipt { white-space: pre-wrap; }
-#project { font-size: 1.12rem; letter-spacing: -.03em; font-weight: 750; }
-#branch, time, .muted, dt { color: var(--muted); font-size: .8rem; }
-.card, .lead { min-width: 0; background: transparent; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: .85rem 0; }
-.card { margin-top: 0; }
-.identity dt { align-self: baseline; }
-details > summary { cursor: pointer; font-weight: 600; }
-#launch { margin-top: .7rem; }
-fieldset { border: 0; min-width: 0; }
-fieldset legend { margin-bottom: .45rem; color: var(--muted); font-size: .8rem; font-weight: 600; }
-.choices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin: 0 0 .7rem; padding: 2px; background: var(--tint); border-radius: var(--r); }
-.choice { position: relative; text-align: center; }
-.choice input { position: absolute; width: 100%; height: 100%; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
-.choice span { display: block; border-radius: .4rem; padding: .38rem .15rem; font-weight: 600; font-size: .84rem; color: var(--muted); }
-.choice input:checked + span { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--main-line), 0 1px 2px #0002; }
-.choice input:focus-visible + span { outline: 2px solid var(--brand); outline-offset: 1px; }
-.choice input:disabled + span { opacity: .55; }
-#brief { display: block; width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); min-height: 2.5rem; padding: .5rem .65rem; margin: .3rem 0 .65rem; }
-#brief:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent); }
-.primary { background: var(--brand); color: var(--on-brand); border-color: var(--brand); font-weight: 650; min-height: 2.3rem; padding-inline: 1.1rem; }
-#start { width: 100%; }
-.evidence, .history { margin-top: .7rem; }
-.history summary { cursor: pointer; font-weight: 600; }
-.metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: .5rem; margin: .65rem 0; }
-.metrics div { padding-left: .6rem; border-left: 2px solid var(--line); min-width: 0; }
-dd { font-weight: 650; font-variant-numeric: tabular-nums; }
-ul { list-style: none; }
-.entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; padding: .4rem 0; border-top: 1px solid var(--line); }
-.entry > strong { font-size: .8rem; }
-.entry small { display: block; color: var(--muted); }
-.approval + .approval { border-top: 1px solid var(--line); }
-.approval summary { cursor: pointer; white-space: pre-wrap; }
-.approval p { white-space: pre-wrap; margin: .3rem 0; }
-.review { color: var(--warm); background: var(--warm-bg); border-color: color-mix(in srgb, var(--warm) 40%, var(--line)); font-weight: 650; }
-.tabs button[aria-selected="false"]:hover { background: var(--tint); border-color: transparent; }
-.meta-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .6rem; align-items: start; }
-.link-action { background: transparent; color: var(--brand); border-color: var(--main-line); font-size: .8rem; font-weight: 650; }
-#current-main label { cursor: pointer; }
-.usage-window { display: grid; grid-template-columns: minmax(0,1fr) minmax(3rem,7rem); gap: .4rem; align-items: center; }
-meter { width: 100%; accent-color: var(--brand); }
-.small-title { margin: .9rem 0 .35rem; color: var(--muted); font-size: .76rem; letter-spacing: .04em; }
-.rows { display: grid; gap: 0; margin-top: .4rem; }
-.rows article, .message { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: .6rem 0; min-width: 0; }
-.rows article p + p, .message p { margin-top: .2rem; }
-.rows article h3 { font-size: .9rem; }
-.rows article h3 a { color: var(--ink); text-decoration-color: var(--main-line); }
-.rows article h3 a:hover { color: var(--brand); }
-.rows article ul { margin-top: .35rem; }
-.detail-title { display: flex; flex-wrap: wrap; gap: .4rem .75rem; justify-content: space-between; align-items: baseline; margin-bottom: .5rem; }
-.selection { display: grid; gap: .3rem; align-content: start; }
-.selection button[aria-pressed="true"] { border-color: var(--brand); background: var(--tint); }
-.selection small { display: block; color: var(--muted); }
-.chat-grid { display: grid; gap: .85rem; }
-.messages { padding: 0; list-style: none; display: grid; gap: 0; max-height: 26rem; overflow: auto; }
-.message p { white-space: pre-wrap; }
-#evidence-lines { margin: .5rem 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .8rem/1.55 var(--mono); background: var(--tint); border-radius: var(--r); padding: .6rem .7rem; }
-#evidence-actions { margin-top: .5rem; }
-#evidence-actions button[aria-pressed="true"] { border-color: var(--brand); background: var(--tint); }
-.table-wrap { overflow: auto; max-width: 100%; }
-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
-th, td { text-align: left; vertical-align: top; padding: .4rem .55rem; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 600; font-size: .76rem; }
-.table-wrap td { min-width: 5rem; max-width: 24rem; }
-#chat-older { margin-bottom: .5rem; }
-a { color: var(--brand); text-underline-offset: .18em; }
-@media (min-width: 38rem) {
-  .chat-grid { grid-template-columns: minmax(9rem,1fr) minmax(0,2.4fr); }
-}
-.wordmark { flex-wrap: nowrap; min-width: 0; gap: .45rem; }
-.brand { place-items: center; display: grid; grid-template-columns: repeat(2, .3rem); grid-template-rows: repeat(2, .3rem); gap: 2px; width: 1.5rem; height: 1.5rem; border-radius: .4rem; background: var(--tint); align-content: center; justify-content: center; }
-.brand i { width: 100%; height: 100%; background: var(--ink); border-radius: 1px; }
-.brand i:last-child { background: var(--brand); }
-.wordmark h1 { flex-shrink: 0; }
-.project-line time, #branch { font-size: .74rem; }
-#scope label { color: var(--muted); font-size: .78rem; }
-select { max-width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--line); min-height: 1.8rem; border-radius: .4rem; padding: .12rem .4rem; }
-#refresh { font-size: .76rem; white-space: nowrap; min-height: 1.6rem; padding: 0 .55rem; background: transparent; color: var(--muted); border-color: transparent; }
-#refresh:hover:not(:disabled) { color: var(--ink); border-color: var(--line); }
-.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--brand); }
-#approval-card h2, .section-label { font-size: .72rem; }
-.approval { padding: .35rem 0 0; }
-.approval[open] > div { padding: .35rem .1rem; }
-.approval code { font-size: .74rem; display: block; color: var(--muted); margin: .35rem 0; font-family: var(--mono); }
-.approval .cluster { margin-top: .5rem; }
-#approval-card:not(.awaiting-action) { padding: .4rem 0; }
-#approval-card:not(.awaiting-action) #approvals { color: var(--muted); font-size: .78rem; }
-#goal.goal-short {display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-#goal-expand {padding:.2rem .45rem;min-height:1.8rem}
-#goal-card > h2, .section-label { font-weight: 650; color: var(--muted); }
-.measure { display: grid; gap: .3rem; }
-.measure p { font-size: .76rem; color: var(--muted); }
-progress { width: 100%; height: .28rem; border: 0; border-radius: .4rem; overflow: hidden; appearance: none; background: var(--line); accent-color: var(--brand); }
-progress::-webkit-progress-bar { background: var(--line); }
-progress::-webkit-progress-value { background: var(--brand); }
-progress::-moz-progress-bar { background: var(--brand); }
-.identity { display: flex; flex-wrap: wrap; gap: .1rem .4rem; margin-top: .45rem; padding-top: .45rem; border-top: 1px dashed var(--line); }
-.identity dt, .identity dd, #main-state { font-size: .76rem; }
-.identity dd { font-weight: 500; }
-#observation-revision { font-family: var(--mono); }
-.identity dt:not(:first-child) { margin-left: .4rem; }
-#main-state { color: var(--muted); }
-#current-main { font-size: 1.15rem; line-height: 1.3; margin: .1rem 0; letter-spacing: -.02em; font-weight: 750; }
-.main-card .meta-row { align-items: center; }
-.avatar { display: inline-grid; place-items: center; width: 1.3rem; height: 1.3rem; flex: 0 0 auto; border-radius: .3rem; background: #c6c8cd; color: #202329; font: 700 .68rem/1 var(--mono); }
-.avatar-codex { background: #b5d8c4; color: #1c392b; }
-.avatar-claude { background: #e8b7a1; color: #48281d; }
-.avatar-agy, .avatar-antigravity { background: #c2c2e7; color: #30304c; }
-.avatar-pi { background: #b3d1e9; color: #223b4f; }
-.selection button { text-align: left; min-width: 0; display: flex; gap: .5rem; align-items: center; }
-#launcher { padding: .6rem 0; }
-#launcher summary, .history summary { font-size: .82rem; }
-#launcher summary { color: var(--brand); }
-.history { margin-top: .5rem; }
-#scope { gap: .4rem; float: right; margin: .4rem 0 .15rem .5rem; }
-#scope + #status:not(:empty) { clear: both; }
-.project-line { margin-top: .75rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: .1rem .55rem; }
-.project-meta { display: inline-flex; flex-wrap: wrap; gap: .05rem .55rem; }
-.project-line time { margin: 0; }
-.tabs { display: flex; border-bottom: 1px solid var(--line); margin: .55rem 0 .15rem; gap: .1rem; clear: both; overflow-x: auto; scrollbar-width: none; }
-.tabs::-webkit-scrollbar { display: none; }
-.tabs button { min-width: 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font-weight: 600; min-height: 2.1rem; color: var(--muted); font-size: .84rem; flex: 0 0 auto; padding: .25rem .6rem; white-space: nowrap; margin-bottom: -1px; }
-header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); padding: .5rem 0; margin: 0; }
-#goal { line-height: 1.38; font-weight: 700; letter-spacing: -.03em; font-size: 1.22rem; margin: .2rem 0 .45rem; }
-.section-label { letter-spacing: .06em; }
-#approval-card.awaiting-action { background: var(--warm-bg); border: 1px solid color-mix(in srgb,var(--warm) 34%,var(--line)); border-left: 3px solid var(--warm); border-radius: var(--r); padding: .7rem .85rem; margin-block: .6rem; }
-#approval-card.awaiting-action h2 { color: var(--warm); }
-.work-dot, #approval-card.awaiting-action h2::before { content: ''; display: inline-block; width: .42rem; height: .42rem; border-radius: 50%; margin-right: .4rem; }
-#approval-card.awaiting-action h2::before { background: var(--warm); }
-.work-dot { background: var(--info); box-shadow: 0 0 0 3px color-mix(in srgb, var(--info) 20%, transparent); }
-.leads-region { padding: .8rem 0 .5rem; }
-.leads-region h2 { font-size: .72rem; letter-spacing: .06em; color: var(--muted); font-weight: 650; }
-.leads { display: grid; grid-template-columns: 1fr; gap: 0; margin-top: .2rem; }
-.leads > p { padding-top: .4rem; }
-.plan-strip { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; padding-block: .5rem; }
-.plan-strip strong { font-variant-numeric: tabular-nums; }
-#plan-marker { width: .85rem; height: .85rem; border-radius: 100%; background: conic-gradient(var(--brand) var(--verified),var(--line) 0); mask-image: radial-gradient(circle,transparent 44%,black 48%); }
-#plan-open { margin-left: auto; border: 0; padding: 0 .2rem; color: var(--muted); background: transparent; font-size: .78rem; }
-.work-threads, .team-title { margin-top: 0; }
-.work-threads { padding: .8rem 0 .4rem; border-top: 1px solid var(--line); }
-.work-threads h2 { font-size: .72rem; letter-spacing: .06em; color: var(--muted); font-weight: 650; }
-.team-title { font-size: .72rem; letter-spacing: .06em; color: var(--muted); font-weight: 650; padding: .85rem 0 .35rem; }
-.work-threads button { width: 100%; display: grid; grid-template-columns: .5rem minmax(0,1fr) auto; align-items: baseline; text-align: left; gap: .45rem; border-radius: var(--r); margin-top: .35rem; padding: .5rem .65rem; color: var(--ink); }
-.thread-dot { width: .42rem; height: .42rem; border-radius: 50%; background: var(--muted); }
-.thread-open { background: var(--info); }
-.work-threads button strong, .work-threads button small { display: block; }
-.work-threads button small { margin-top: .1rem; color: var(--muted); font-size: .75rem; font-weight: 500; }
-.work-threads button > span:last-child { color: var(--muted); }
-#pane-chat, #pane-activity, #pane-usage, #pane-git { border-top: 0; }
-@media (max-width: 28rem) {
-  main { padding-inline: .65rem; }
-  .leads { grid-template-columns: 1fr; }
-  .entry { grid-template-columns: minmax(0,1fr); gap: .15rem; }
-  .metrics { grid-template-columns: 1fr 1fr; }
-  #goal { font-size: 1.1rem; }
-  #scope { float: none; margin-left: 0; }
-  .project-meta { width: 100%; }
-  .meta-row .link-action { max-width: 6.5rem; }
-  .main-card { padding: .65rem .7rem; }
-}
-#provider-options { margin-top: .5rem; border-top: 1px solid var(--line); padding-top: .4rem; }
-#provider-options summary,#provider-options button { font-size: .8rem; }#provider-rows { margin: .3rem 0; }
-.git-filter { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; margin: .65rem 0; font-size: .82rem; }
-#git-number { width: 8rem; max-width: 100%; font: inherit; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: .4rem; padding: .28rem .45rem; }
-#git-find { margin: .45rem 0; }
-#git-editor label { display: block; font-size: .82rem; margin: .6rem 0 .2rem; }
-#git-goal, #review-text { display: block; width: 100%; min-height: 5rem; resize: vertical; margin: 0 0 .5rem; padding: .5rem; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: .4rem; }
-#git-editor-status:not(:empty),#git-catalog-status:not(:empty) { margin-top: .3rem; }
-#git-catalog details { border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
-#git-catalog button,#git-content .draft-action { margin-top: .35rem; }
-#goal-card { border-top: 0; }
-header { display: flex; flex-wrap: nowrap; gap: .45rem; }
-header .wordmark { display: flex; align-items: center; gap: .46rem; min-width: 0; margin-right: auto; }
-#project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#language-choice { flex: 0 0 auto; max-width: 5.6rem; min-height: 1.6rem; font-size: .76rem; }#scope { margin: 0; flex: 0 1 auto; }#project-choice { max-width: min(9rem,24vw); }#refresh { flex-shrink: 0; }
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
-.main-line { display:flex; gap:.6rem; align-items:center; min-height:2.1rem; color:var(--muted); font-size:.76rem; }
-#header-main { display:inline-flex; align-items:center; gap:.35rem; min-height:1.8rem; border:0; padding:0 .3rem; background:transparent; color:var(--ink); font-weight:650; }
-#header-main::after { content:'›'; color:var(--muted); }
-#current-main { margin:0; font-size:.8rem; }
-#goal-card { margin:.65rem 0 .85rem; padding:.85rem .95rem .7rem; background:var(--surface); border:1px solid var(--line); border-radius:.7rem; }
-#goal-card h2,.leads-region h2,.work-threads h2 { font-size:.78rem; letter-spacing:0; }
-h2,h3,.work-title strong,#goal { word-break:keep-all; overflow-wrap:anywhere; text-wrap:pretty; }
-#goal { text-wrap:balance; font-size:1.08rem; line-height:1.5; margin:.25rem 0 .6rem; }
-#plan-strip { border-top:1px solid var(--line); margin-top:.63rem; padding:.45rem 0 0; }
-#approval-card.awaiting-action { margin-top:.8rem; }
-.leads-region { padding:.25rem 0 .7rem; border:0; }
-.leads { margin-top:.45rem; gap:.35rem; }
-.lead { width:100%; display:grid; grid-template-columns:1.8rem minmax(0,1fr) auto auto; gap:.55rem; align-items:center; text-align:left; padding:.52rem .65rem; margin:0; background:var(--surface); border:1px solid var(--line); border-radius:.55rem; }
-button.lead:hover,button.lead:focus-visible { background:var(--tint); }
-.lead .avatar { width:1.65rem; height:1.65rem; border-radius:.48rem; }
-.work-title { display:grid; gap:.05rem; }.work-title small,.lead-state { color:var(--muted); font-size:.72rem; }.work-title strong { font-size:.88rem; font-weight:650; }
-.lead-state { text-align:right; }.lead-state::before { content:''; display:inline-block; vertical-align:.08rem; width:.32rem; height:.32rem; border-radius:50%; margin-right:.3rem; background:var(--muted); }.lead-state.observed::before { background:var(--info); }
-.arrow { color:var(--muted); }
-#overview-backlog { display:flex; width:100%; align-items:center; justify-content:space-between; padding:.48rem 0; margin:.2rem 0 .45rem; font-size:.84rem; min-height:2.1rem; color:var(--muted); text-align:left; border:0; background:transparent; }
-#overview-backlog:hover { color:var(--ink); } #overview-backlog span[aria-hidden] { color:var(--muted); }
-@media (max-width: 28rem) { main { padding-inline: .92rem; } }
-@media (max-width: 23rem) { header h1 { position: absolute; clip-path: inset(50%); }#project { font-size: .94rem; }#refresh { padding-inline: .18rem; } }
-
-#git-editor { border: 1px solid var(--main-line); border-radius: var(--r); padding: .7rem .8rem; margin: .6rem 0; }
-#project-records > summary, #alerts > summary { color: var(--ink); }
-@media (prefers-reduced-motion: reduce) { button { transition: none; } }
-.connection-controls { margin-block:.65rem; }
-#source-details .connection-fields { display:grid; grid-template-columns:minmax(6rem,.9fr) minmax(0,1.3fr); gap:.22rem .65rem; margin:.45rem 0; }
-.connection-fields dt { color:var(--muted); }.connection-fields dd { margin:0; overflow-wrap:anywhere; }
-#source-details article + article { border-top:1px solid var(--line); padding-top:.4rem; }
-[hidden] { display: none !important; }
-.map-heading {display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}
-.map-heading h2 {font-size:.93rem}
-.map-link {background:none;border:0;color:var(--brand);font-size:.79rem;font-weight:650;padding:.35rem .15rem}
-.map-preview {padding:.65rem 0 .6rem;border-bottom:1px solid var(--line)}
-.map-preview p,.explorer-status {font-size:.77rem;color:var(--muted)}
-.map-field {padding:.6rem .55rem .45rem;border:1px solid var(--line);border-radius:.65rem;background-color:var(--surface);background-image:radial-gradient(var(--line) .8px,transparent .8px);background-size:11px 11px;margin-top:.25rem}
-.map-focus {font:650 .81rem var(--mono);max-width:100%;margin:0 auto;display:table;border:1px solid var(--main-line);border-radius:.4rem;background:var(--surface);padding:.3rem .65rem;text-align:center;overflow-wrap:anywhere}
-.map-row {display:flex;justify-content:center;gap:.45rem;position:relative;list-style:none;margin:.5rem 0 .1rem}
-.map-row.connected {padding-top:.8rem;margin-top:0}
-.map-row.connected::before {position:absolute;content:"";width:1px;height:.44rem;background:var(--main-line);top:0;left:50%}
-.map-row li {min-width:0;flex:1;max-width:12rem;position:relative}
-.map-row.connected li::before,.map-row.connected li::after {content:"";position:absolute;pointer-events:none}
-.map-row.connected li::before {width:calc(100% + .45rem);left:-.225rem;top:-.38rem;border-top:1px solid var(--main-line)}
-.map-row.connected li:first-child::before {width:calc(50% + .225rem);left:50%}
-.map-row.connected li:last-child::before {width:calc(50% + .225rem)}
-.map-row.connected li:only-child::before {display:none}
-.map-row.connected li::after {left:50%;top:-.38rem;height:.38rem;border-left:1px solid var(--main-line)}
-.map-node {display:block;width:100%;min-height:2.55rem;line-height:1.15;overflow:hidden;text-align:left;background:var(--bg);padding:.33rem .45rem}
-.map-node strong,.map-node small {display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.map-node strong {font:600 .76rem var(--mono)}
-.map-node small {font-size:.65rem;color:var(--muted);margin-top:.22rem}
-.explorer-bar {display:flex;align-items:center;flex-wrap:wrap;gap:.3rem;margin:.5rem 0}
-.explorer-bar button,.feature-links button {min-height:2.1rem}
-.explorer-bar .current {font-family:var(--mono)}
-.explorer-view {padding:.8rem 0;border-bottom:1px solid var(--line)}
-.explorer-filter {width:100%;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:.45rem;padding:.4rem .55rem;margin:.45rem 0}
-.explorer-list {list-style:none;max-height:21rem;overflow:auto}
-.explorer-list li + li {border-top:1px solid var(--line)}
-.explorer-item {display:flex;align-items:center;justify-content:space-between;text-align:left;width:100%;border:0;border-radius:0;min-height:2.6rem;background:transparent;padding:.45rem .2rem;gap:.6rem}
-.explorer-item strong,.explorer-item small {display:block}
-.explorer-item strong {font:600 .83rem var(--mono)}
-.explorer-item small {font-size:.76rem;line-height:1.4;color:var(--muted)}
-.feature-links {display:flex;flex-wrap:wrap;gap:.3rem;margin:.5rem 0}
-.feature-links button {font-size:.8rem}
-.feature-draft {width:100%;box-sizing:border-box;min-height:4rem;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:.4rem;padding:.5rem}
-
-.explorer-options {display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;font-size:.78rem}.explorer-options button {min-height:2rem}.explorer-options label {margin-left:auto;color:var(--muted)}
-.detail-map {display:grid;grid-template-columns:minmax(4.4rem,1fr) minmax(0,2.15fr);align-items:center;column-gap:1.45rem;margin:.15rem 0 .4rem;padding:.65rem}
-.detail-map[hidden] {display:none}
-.detail-map .map-focus {margin:0;position:relative}
-.detail-map .map-row {display:block;margin:0;padding:0}
-.detail-map .map-row li {max-width:none;margin:0;padding:.12rem 0}
-.detail-map .connected::before {left:-.75rem;top:50%;height:1px;width:.75rem}
-.detail-map .connected li::before,.detail-map .connected li::after {left:-.75rem}
-.detail-map .connected li::before {width:0;border:0;border-left:1px solid var(--main-line);height:100%;top:0}
-.detail-map .connected li:first-child::before {height:50%;top:50%;left:-.75rem;width:0}
-.detail-map .connected li:last-child::before {height:50%;width:0}
-.detail-map .connected li::after {top:50%;height:0;width:.75rem;border:0;border-top:1px solid var(--main-line)}
-.detail-map .map-node {min-height:2.4rem}
-
-.more-views { margin: .15rem 0 .3rem; } .more-views > summary { font-size: .8rem; color: var(--muted); padding: .3rem 0; cursor: pointer; }
-.task-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .1rem .6rem; width: 100%; text-align: left; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; padding: .6rem .1rem; min-height: 2.6rem; }
-.task-row[aria-current="true"] { border-left: 3px solid var(--brand); padding-left: .5rem; }
-.task-row strong, .task-row small { display: block; min-width: 0; } .task-row small { color: var(--muted); font-size: .76rem; grid-column: 1 / -1; }
-.task-state { font-size: .78rem; font-weight: 650; }
-#task-tabs { margin-top: .2rem; } #task-body { padding-top: .5rem; } #task-body dl { display: grid; gap: .3rem .7rem; grid-template-columns: minmax(5rem,.5fr) minmax(0,1.5fr); } #task-body dd { font-weight: 500; }
-#pane-relations h3 { margin-top: .9rem; } .unavailable { color: var(--muted); font-style: italic; }
-@media (max-width: 28rem) { .task-row { grid-template-columns: minmax(0,1fr); } #task-body dl { grid-template-columns: minmax(0,1fr); } }
-.waiting-dashboard .main-line,.waiting-dashboard #pane-overview > :not(.map-preview):not(#now-work),.waiting-dashboard #source-details {display:none}
-.waiting-dashboard #tabs-secondary button:not(#tab-project) {visibility:hidden}
-.waiting-dashboard #more-summary {display:none}
+:root{color-scheme:light dark;--bg:#f6f7f8;--surface:#fff;--ink:#14171a;--muted:#5d636a;--line:#e1e4e7;--control-border:#767e87;--tint:#eef0f2;--brand:#1f5a4d;--on-brand:#fff;--main-line:#b4c3be;--warm:#84520f;--warm-bg:#fbf5e9;--attention:#9a3412;--attention-bg:#fff7ed;--accent:#0f766e;--accent-bg:#f0fdfa;--success:#15803d;--success-bg:#f0fdf4;--success-muted:#1f5a4d;--success-muted-bg:#eef6f3;--error:#b42318;--error-bg:#fef2f2;--info:#1d4ed8;--info-bg:#eff6ff;--r:.5rem;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0a0a0c;--surface:#131316;--ink:#f1f1f3;--muted:#9b9ea8;--line:#26272c;--control-border:#6b7280;--tint:#1c1d21;--brand:#a3d8bf;--on-brand:#0e2419;--main-line:#3c4743;--warm:#fbbf24;--warm-bg:#292112;--attention:#fb923c;--attention-bg:#2b1b12;--accent:#2dd4bf;--accent-bg:#102624;--success:#4ade80;--success-bg:#11261a;--success-muted:#86efac;--success-muted-bg:#13261d;--error:#f97066;--error-bg:#2c1616;--info:#60a5fa;--info-bg:#14213d}}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic","Noto Sans CJK KR",system-ui,sans-serif;overflow-wrap:anywhere;-webkit-font-smoothing:antialiased}
+main{max-width:42rem;margin:auto;padding:0 clamp(.75rem,3vw,1.1rem) 1.5rem}
+h1,h2,h3,h4,p,ul,dl,dd,fieldset,legend{margin:0;padding:0}
+h1{font-size:.95rem;letter-spacing:-.02em;font-weight:750}
+h2,legend{font-size:.95rem;font-weight:700}
+h3{font-size:.88rem;font-weight:650}
+h2,h3,.work-title strong,#goal{word-break:keep-all;overflow-wrap:anywhere;text-wrap:pretty}
+button,input,select,textarea{font:inherit}
+button{border:1px solid var(--control-border);border-radius:var(--r);background:var(--surface);color:var(--ink);min-height:2rem;padding:.25rem .65rem;cursor:pointer;transition:border-color .12s,background .12s}
+button:hover:not(:disabled){border-color:var(--brand)}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+header,.cluster,.between{display:flex;align-items:center;gap:.55rem}
+header,.between{justify-content:space-between}
+.cluster,.between{flex-wrap:wrap}
+header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);padding:.45rem 0;gap:.4rem}
+header .wordmark{display:flex;align-items:center;gap:.42rem;min-width:0;margin-right:auto}
+header:has(#scope:not([hidden])) #project{display:none}
+.brand{place-items:center;display:grid;grid-template-columns:repeat(2,.3rem);grid-template-rows:repeat(2,.3rem);gap:2px;width:1.5rem;height:1.5rem;border-radius:.4rem;background:var(--tint);align-content:center;justify-content:center;flex-shrink:0}
+.brand i{width:100%;height:100%;background:var(--ink);border-radius:1px}
+.brand i:last-child{background:var(--brand)}
+.wordmark h1{flex-shrink:0}
+#project{font-size:1.08rem;letter-spacing:-.03em;font-weight:750}
+#project,.alerts-preview,.map-node strong,.map-node small,.map-dep-chip strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#scope{margin:0;flex:0 1 auto;min-width:0}
+#scope label{color:var(--muted);font-size:.78rem}
+select{max-width:100%;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);min-height:2rem;border-radius:.4rem;padding:.15rem .45rem}
+#project-choice{max-width:min(11rem,42vw);min-height:2rem;font-size:.8rem}
+#language-choice{flex:0 0 auto;max-width:5.4rem;min-height:2rem;font-size:.78rem}
+#refresh{font-size:.78rem;white-space:nowrap;min-height:2rem;padding:.2rem .55rem;flex-shrink:0}
+#refresh:hover:not(:disabled){border-color:var(--brand);background:var(--tint)}
+#status,#receipt{font-size:.84rem}
+#status:not(:empty),#receipt:not(:empty){margin-top:.55rem}
+#status.degraded{padding:.5rem .75rem;border-radius:var(--r);background:var(--warm-bg);border:1px solid color-mix(in srgb,var(--warm) 35%,var(--line));border-left:3px solid var(--warm);color:var(--ink)}
+.error{color:var(--error)}
+#receipt{white-space:pre-wrap}
+#branch,time,.muted,dt{color:var(--muted);font-size:.8rem}
+#branch{font-size:.74rem}
+.card{min-width:0;border-top:1px solid var(--line);padding:.65rem 0}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap}
+.identity dt{align-self:baseline}
+details>summary{cursor:pointer;font-weight:600;min-height:2.25rem;display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;padding-block:.25rem;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:'▸';color:var(--muted);font-size:.8em;flex-shrink:0;transition:transform .12s}
+details[open]>summary::before{transform:rotate(90deg)}
+.alerts-preview{font-weight:400;font-size:.78rem;min-width:0;flex:1 1 8rem}
+.approval-idle{font-size:.78rem;padding:.25rem 0}
+.approval-idle:empty{display:none}
+.state-chip,.count-badge{--c:var(--muted);--cbg:var(--tint);display:inline-flex;align-items:center;gap:.26rem;white-space:nowrap;font-size:.74rem;font-weight:650;line-height:1.25;padding:.12rem .42rem;border-radius:.35rem;color:var(--c);background:var(--cbg);border:1px solid color-mix(in srgb,var(--c) 34%,transparent);flex-shrink:0}
+.count-badge{font-variant-numeric:tabular-nums;border-color:var(--line)}
+.state-glyph{font-family:var(--mono);font-size:.82em}
+.state-chip[data-role="info"]{--c:var(--info);--cbg:var(--info-bg)}
+.state-chip[data-role="warning"]{--c:var(--warm);--cbg:var(--warm-bg)}
+.state-chip[data-role="attention"]{--c:var(--attention);--cbg:var(--attention-bg)}
+.state-chip[data-role="accent"]{--c:var(--accent);--cbg:var(--accent-bg)}
+.state-chip[data-role="success"]{--c:var(--success);--cbg:var(--success-bg)}
+.state-chip[data-role="success-muted"]{--c:var(--success-muted);--cbg:var(--success-muted-bg)}
+.state-chip[data-role="error"]{--c:var(--error);--cbg:var(--error-bg)}
+.state-meta{display:inline-flex;align-items:center;gap:.3rem;flex-wrap:wrap;justify-content:flex-end}
+#launch{margin-top:.7rem}
+fieldset{border:0;min-width:0}
+fieldset legend{margin-bottom:.45rem;color:var(--muted);font-size:.8rem;font-weight:600}
+.choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;margin:0 0 .7rem;padding:2px;background:var(--tint);border-radius:var(--r)}
+.choice{position:relative;text-align:center}
+.choice input{position:absolute;width:100%;height:100%;inset:0;margin:0;opacity:0;cursor:pointer}
+.choice span{display:block;border-radius:.4rem;padding:.38rem .15rem;font-weight:600;font-size:.84rem;color:var(--muted)}
+.choice input:checked+span{background:var(--surface);color:var(--ink);box-shadow:0 0 0 1px var(--control-border),0 1px 2px #0002}
+.choice input:focus-visible+span{outline:2px solid var(--brand);outline-offset:1px}
+.choice input:disabled+span{opacity:.55}
+input:not([type="radio"]):not([type="checkbox"]),textarea,.form-input{display:block;width:100%;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);border-radius:var(--r);min-height:2.25rem;padding:.4rem .6rem}
+input:not([type="radio"]):not([type="checkbox"]):focus,textarea:focus,.form-input:focus{border-color:var(--brand)}
+#brief{min-height:2.5rem;margin:.3rem 0 .65rem}
+#peer-task{margin:.25rem 0 .55rem}
+.primary{background:var(--brand);color:var(--on-brand);border-color:var(--brand);font-weight:650;min-height:2.3rem;padding-inline:1.1rem}
+#start{width:100%}
+.evidence,.history{margin-top:.5rem}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem;margin:.6rem 0}
+.metrics div{padding-left:.6rem;border-left:2px solid var(--line);min-width:0}
+dd{font-weight:650;font-variant-numeric:tabular-nums}
+ul{list-style:none}
+.entry{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:.35rem .6rem;padding:.4rem 0;border-top:1px solid var(--line)}
+.entry>strong{font-size:.8rem}
+.entry small,.selection small{display:block;color:var(--muted)}
+.approval+.approval{border-top:1px solid var(--line)}
+.approval summary{white-space:pre-wrap}
+.approval p{white-space:pre-wrap;margin:.3rem 0}
+.review{color:var(--warm);background:var(--warm-bg);border-color:color-mix(in srgb,var(--warm) 55%,var(--control-border));font-weight:650}
+.tabs{display:flex;flex-wrap:wrap;row-gap:.15rem;border-bottom:1px solid var(--line);margin:.5rem 0 .15rem;gap:.1rem;clear:both}
+.tabs button{min-width:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;font-weight:600;min-height:2.1rem;color:var(--muted);font-size:.84rem;flex:0 0 auto;padding:.25rem .6rem;white-space:nowrap;margin-bottom:-1px}
+.tabs button[aria-selected="false"]:hover{background:var(--tint);border-color:transparent}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--brand)}
+.link-action{background:transparent;color:var(--brand);border-color:var(--control-border);font-size:.8rem;font-weight:650}
+.usage-window{display:grid;grid-template-columns:minmax(0,1fr) minmax(3rem,7rem);gap:.4rem;align-items:center}
+meter{width:100%;accent-color:var(--brand)}
+.small-title{margin:.75rem 0 .3rem;color:var(--muted);font-size:.76rem;letter-spacing:.04em}
+.rows{display:grid;margin-top:.35rem}
+.rows article,.message{border:0;border-top:1px solid var(--line);padding:.55rem 0;min-width:0}
+.rows article p+p,.message p{margin-top:.2rem}
+.rows article h3{font-size:.9rem}
+.rows article h3 a{color:var(--ink);text-decoration-color:var(--main-line)}
+.rows article h3 a:hover{color:var(--brand)}
+.rows article ul{margin-top:.35rem}
+.detail-title{display:flex;flex-wrap:wrap;gap:.4rem .75rem;justify-content:space-between;align-items:baseline;margin-bottom:.5rem}
+.selection{display:grid;gap:.3rem;align-content:start}
+.selection button{text-align:left;min-width:0;display:flex;gap:.5rem;align-items:center}
+.selection button[aria-pressed="true"],#evidence-actions button[aria-pressed="true"]{border-color:var(--brand);background:var(--tint)}
+.chat-grid{display:grid;gap:.85rem}
+.messages{padding:0;list-style:none;display:grid;max-height:26rem;overflow:auto}
+.message p{white-space:pre-wrap}
+#evidence-lines{margin:.5rem 0;white-space:pre-wrap;overflow-wrap:anywhere;font:.8rem/1.55 var(--mono);background:var(--tint);border-radius:var(--r);padding:.6rem .7rem}
+#evidence-actions{margin-top:.5rem}
+.table-wrap{overflow:auto;max-width:100%}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th,td{text-align:left;vertical-align:top;padding:.4rem .55rem;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:600;font-size:.76rem}
+.table-wrap td{min-width:5rem;max-width:24rem}
+#chat-older{margin-bottom:.5rem}
+a{color:var(--brand);text-underline-offset:.18em}
+@media (min-width:38rem){.chat-grid{grid-template-columns:minmax(9rem,1fr) minmax(0,2.4fr)}}
+#approval-card h2,.section-label,#goal-card h2,.leads-region h2,.work-threads h2{font-size:.76rem;font-weight:650;color:var(--muted)}
+.approval{padding:.25rem 0 0}
+.approval[open]>div{padding:.35rem .1rem}
+.approval code{font-size:.74rem;display:block;color:var(--muted);margin:.35rem 0;font-family:var(--mono)}
+.approval .cluster{margin-top:.5rem}
+#approval-card:not(.awaiting-action){padding:.4rem 0}
+#approval-card:not(.awaiting-action) #approvals{color:var(--muted);font-size:.78rem}
+#approval-card.awaiting-action{background:var(--warm-bg);border:1px solid color-mix(in srgb,var(--warm) 38%,var(--line));border-left:3px solid var(--warm);border-radius:var(--r);padding:.65rem .8rem;margin-block:.5rem}
+#approval-card.awaiting-action h2{color:var(--warm)}
+#goal.goal-short{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#goal-expand{padding:.2rem .5rem;min-height:2rem}
+#goal-card{margin:.5rem 0;padding:.7rem .85rem;background:var(--surface);border:1px solid var(--line);border-radius:.65rem}
+#goal{line-height:1.42;font-weight:700;letter-spacing:-.02em;font-size:1.04rem;margin:.2rem 0 .45rem;text-wrap:balance}
+.measure{display:grid;gap:.3rem}
+.measure p{font-size:.76rem;color:var(--muted)}
+progress{width:100%;height:.28rem;border:0;border-radius:.4rem;overflow:hidden;appearance:none;background:var(--line);accent-color:var(--brand)}
+progress::-webkit-progress-bar{background:var(--line)}
+progress::-webkit-progress-value{background:var(--brand)}
+progress::-moz-progress-bar{background:var(--brand)}
+.identity{display:flex;flex-wrap:wrap;gap:.1rem .4rem;margin-top:.45rem;padding-top:.45rem;border-top:1px dashed var(--line)}
+.identity dt,.identity dd,#main-state{font-size:.76rem}
+.identity dd{font-weight:500}
+#observation-revision,.explorer-bar .current{font-family:var(--mono)}
+.identity dt:not(:first-child){margin-left:.4rem}
+#main-state,.arrow,.connection-fields dt,.work-threads button>span:last-child,#overview-backlog span[aria-hidden]{color:var(--muted)}
+#current-main{font-size:.8rem;font-weight:750}
+.avatar{display:inline-grid;place-items:center;width:1.3rem;height:1.3rem;flex:0 0 auto;border-radius:.3rem;background:#c6c8cd;color:#202329;font:700 .68rem/1 var(--mono)}
+.avatar-codex{background:#b5d8c4;color:#1c392b}
+.avatar-claude{background:#e8b7a1;color:#48281d}
+.avatar-agy,.avatar-antigravity{background:#c2c2e7;color:#30304c}
+.avatar-pi{background:#b3d1e9;color:#223b4f}
+#launcher{padding:.45rem 0}
+#launcher summary,.history summary{font-size:.82rem}
+#launcher summary{color:var(--brand)}
+.project-meta{display:inline-flex;flex-wrap:wrap;gap:.05rem .55rem}
+.leads-region{padding:.45rem 0 .5rem;border:0}
+.leads{display:grid;grid-template-columns:1fr;gap:.35rem;margin-top:.4rem}
+.leads>p{padding-top:.25rem}
+.plan-strip{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding-block:.4rem 0}
+.plan-strip strong{font-variant-numeric:tabular-nums}
+#plan-strip{border-top:1px solid var(--line);margin-top:.5rem;padding:.45rem 0 0}
+#plan-marker{width:.85rem;height:.85rem;border-radius:100%;background:conic-gradient(var(--brand) var(--verified),var(--line) 0);mask-image:radial-gradient(circle,transparent 44%,black 48%)}
+#plan-open{margin-left:auto;border:0;padding:0 .2rem;color:var(--muted);background:transparent;font-size:.78rem}
+.work-threads{padding:.5rem 0 .4rem;border-top:1px solid var(--line)}
+.work-threads button{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;text-align:left;gap:.45rem;border-radius:var(--r);margin-top:.35rem;padding:.5rem .65rem;color:var(--ink)}
+.work-threads button strong,.work-threads button small,.explorer-item strong,.explorer-item small,.task-row strong,.task-row small{display:block;min-width:0}
+.work-threads button small{margin-top:.1rem;color:var(--muted);font-size:.75rem;font-weight:500}
+#pane-chat,#pane-activity,#pane-usage,#pane-git{border-top:0}
+#provider-options{margin-top:.35rem;border-top:1px solid var(--line);padding-top:.25rem}
+#provider-options summary,#provider-options button{font-size:.8rem}
+#provider-rows{margin:.3rem 0}
+.git-filter{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;margin:.65rem 0;font-size:.82rem}
+#git-number{width:8rem;max-width:100%;display:inline-block}
+#git-find{margin:.45rem 0}
+#git-editor{border:1px solid var(--control-border);border-radius:var(--r);padding:.7rem .8rem;margin:.6rem 0}
+#git-editor label{display:block;font-size:.82rem;margin:.6rem 0 .2rem}
+#git-goal,#review-text{min-height:5rem;resize:vertical;margin:0 0 .5rem}
+#git-editor-status:not(:empty),#git-catalog-status:not(:empty){margin-top:.3rem}
+#git-catalog details{border-bottom:1px solid var(--line);padding-bottom:.4rem}
+#git-catalog button,#git-content .draft-action{margin-top:.35rem}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%)}
+.main-line{display:flex;gap:.55rem;align-items:center;min-height:2rem;color:var(--muted);font-size:.76rem}
+#header-main{display:inline-flex;align-items:center;gap:.35rem;min-height:2rem;border:0;padding:0 .3rem;background:transparent;color:var(--ink);font-weight:650}
+#header-main::after{content:'›';color:var(--muted)}
+.lead{min-width:0;width:100%;display:grid;grid-template-columns:1.8rem minmax(0,1fr) auto auto;gap:.55rem;align-items:center;text-align:left;padding:.5rem .65rem;background:var(--surface);border:1px solid var(--control-border);border-radius:.55rem}
+button.lead:hover,button.lead:focus-visible{background:var(--tint)}
+.lead .avatar{width:1.65rem;height:1.65rem;border-radius:.48rem}
+.work-title{display:grid;gap:.05rem}
+.work-title small{color:var(--muted);font-size:.72rem}
+.work-title strong{font-size:.88rem;font-weight:650}
+#overview-backlog{display:flex;width:100%;align-items:center;justify-content:space-between;padding:.45rem 0;margin:.15rem 0 .35rem;font-size:.84rem;min-height:2.25rem;color:var(--muted);text-align:left;border:0;background:transparent}
+#overview-backlog:hover{color:var(--ink)}
+@media (max-width:28rem){main{padding-inline:.8rem}.metrics{grid-template-columns:1fr 1fr}#goal{font-size:1rem}.project-meta{width:100%}#task-body dl{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:23rem){header h1{position:absolute;clip-path:inset(50%)}#project{font-size:.94rem}#refresh{padding-inline:.4rem}#language-choice{max-width:4.6rem}}
+@media (prefers-reduced-motion:reduce){button,details>summary::before{transition:none}}
+.connection-controls{margin-block:.65rem}
+#source-details .connection-fields{display:grid;grid-template-columns:minmax(6rem,.9fr) minmax(0,1.3fr);gap:.22rem .65rem;margin:.45rem 0}
+.connection-fields dd{overflow-wrap:anywhere}
+#source-details article+article{border-top:1px solid var(--line);padding-top:.4rem}
+[hidden]{display:none!important}
+.map-heading{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}
+.map-heading h2{font-size:.93rem}
+.map-link{background:none;border:0;color:var(--brand);font-size:.79rem;font-weight:650;padding:.35rem .2rem}
+.map-preview{padding:.6rem 0 .55rem;border-top:1px solid var(--line)}
+.map-preview p,.explorer-status{font-size:.77rem;color:var(--muted)}
+.map-field{padding:.6rem .55rem .5rem;border:1px solid var(--line);border-radius:.65rem;background-color:var(--surface);background-image:radial-gradient(var(--line) .8px,transparent .8px);background-size:11px 11px;margin-top:.25rem}
+.map-focus{font:650 .81rem var(--mono);max-width:100%;margin:0 auto;display:table;border:1px solid var(--control-border);border-radius:.4rem;background:var(--surface);padding:.3rem .65rem;text-align:center;overflow-wrap:anywhere}
+.map-row{display:flex;justify-content:center;gap:.45rem;position:relative;margin:.5rem 0 .1rem}
+.map-row.connected{padding-top:.8rem;margin-top:0}
+.map-row.connected::before{position:absolute;content:"";width:1px;height:.44rem;background:var(--main-line);top:0;left:50%}
+.map-row li{min-width:0;flex:1;max-width:12rem;position:relative}
+.map-row.connected li::before,.map-row.connected li::after{content:"";position:absolute;pointer-events:none}
+.map-row.connected li::before{width:calc(100% + .45rem);left:-.225rem;top:-.38rem;border-top:1px solid var(--main-line)}
+.map-row.connected li:first-child::before{width:calc(50% + .225rem);left:50%}
+.map-row.connected li:last-child::before{width:calc(50% + .225rem)}
+.map-row.connected li:only-child::before{display:none}
+.map-row.connected li::after{left:50%;top:-.38rem;height:.38rem;border-left:1px solid var(--main-line)}
+.map-node{display:block;width:100%;min-height:2.55rem;line-height:1.15;overflow:hidden;text-align:left;background:var(--bg);padding:.33rem .45rem}
+.map-node strong,.map-node small{display:block}
+.map-node strong{font:600 .76rem var(--mono)}
+.map-node small{font-size:.65rem;color:var(--muted);margin-top:.22rem}
+.map-parents{margin-bottom:.45rem;padding-bottom:.4rem;border-bottom:1px dashed var(--line)}
+.map-parents .map-row{margin:.2rem 0 0}
+.map-deps{margin-top:.55rem;padding-top:.45rem;border-top:1px dashed var(--line)}
+.map-deps-label{display:block;font-size:.7rem;font-weight:650;color:var(--muted);margin-bottom:.3rem}
+.map-dep-chips{display:flex;flex-wrap:wrap;gap:.35rem}
+.map-dep-chip{display:inline-flex;align-items:center;gap:.32rem;min-height:2rem;padding:.22rem .5rem;border:1px dashed var(--control-border);border-radius:999px;background:var(--bg);color:var(--ink);font-size:.74rem;text-align:left;max-width:100%}
+.map-dep-chip:hover:not(:disabled){border-style:solid;border-color:var(--brand);background:var(--tint)}
+.map-dep-chip .dep-arrow{font-family:var(--mono);color:var(--info);font-weight:700}
+.map-dep-chip strong{font:600 .74rem var(--mono)}
+.map-dep-chip small{color:var(--muted);font-size:.68rem;white-space:nowrap}
+.explorer-bar{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem;margin:.5rem 0}
+.explorer-bar button,.feature-links button{min-height:2.1rem}
+.explorer-view{padding:.8rem 0;border-bottom:1px solid var(--line)}
+.explorer-filter{margin:.45rem 0}
+.explorer-list{max-height:21rem;overflow:auto}
+.explorer-list li+li{border-top:1px solid var(--line)}
+.explorer-item{display:flex;align-items:center;justify-content:space-between;text-align:left;width:100%;border:0;border-radius:0;min-height:2.6rem;background:transparent;padding:.45rem .2rem;gap:.6rem}
+.explorer-item strong{font:600 .83rem var(--mono)}
+.explorer-item small{font-size:.76rem;line-height:1.4;color:var(--muted)}
+.feature-links{display:flex;flex-wrap:wrap;gap:.3rem;margin:.5rem 0}
+.feature-links button{font-size:.8rem}
+.feature-draft{min-height:4rem}
+.explorer-options{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;font-size:.78rem}
+.explorer-options button{min-height:2rem}
+.explorer-options label{margin-left:auto;color:var(--muted)}
+.detail-map{display:grid;grid-template-columns:minmax(4.4rem,1fr) minmax(0,2.15fr);align-items:center;column-gap:1.45rem;margin:.15rem 0 .4rem;padding:.65rem}
+.detail-map .map-parents{grid-column:1/-1;margin-bottom:.35rem}
+.detail-map .map-parents .map-row{display:flex;flex-wrap:wrap;gap:.35rem}
+.detail-map .map-focus{margin:0;position:relative}
+.detail-map .map-row{display:block;margin:0;padding:0}
+.detail-map .map-row li{max-width:none;margin:0;padding:.12rem 0}
+.detail-map .connected::before{left:-.75rem;top:50%;height:1px;width:.75rem}
+.detail-map .connected li::before,.detail-map .connected li::after{left:-.75rem}
+.detail-map .connected li::before{width:0;border:0;border-left:1px solid var(--main-line);height:100%;top:0}
+.detail-map .connected li:first-child::before{height:50%;top:50%}
+.detail-map .connected li:last-child::before{height:50%}
+.detail-map .connected li::after{top:50%;height:0;width:.75rem;border:0;border-top:1px solid var(--main-line)}
+.detail-map .map-node{min-height:2.4rem}
+.detail-map-groups{min-width:0}
+.detail-map .map-deps{margin-top:.45rem;padding-top:.4rem}
+.more-views{margin:.15rem 0 .3rem}
+.more-views>summary{font-size:.8rem;color:var(--muted)}
+.task-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:.15rem .6rem;width:100%;text-align:left;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent;padding:.55rem .1rem;min-height:2.6rem}
+.task-row[aria-current="true"]{border-left:3px solid var(--brand);padding-left:.5rem}
+.task-row small{color:var(--muted);font-size:.76rem;grid-column:1 / -1}
+#task-tabs{margin-top:.2rem}
+#task-body{padding-top:.5rem}
+#task-body dl{display:grid;gap:.3rem .7rem;grid-template-columns:minmax(5rem,.5fr) minmax(0,1.5fr)}
+#task-body dd{font-weight:500}
+#pane-relations h3{margin-top:.9rem}
+.unavailable{color:var(--muted);font-style:italic}
+.waiting-dashboard .main-line,.waiting-dashboard #pane-overview>:not(.map-preview):not(#now-work):not(#latest-results),.waiting-dashboard #source-details{display:none}
+.waiting-dashboard #tabs-secondary button:not(#tab-project){visibility:hidden}
+.waiting-dashboard #more-summary{display:none}
+@media (forced-colors:active){:focus-visible{outline:2px solid Highlight;outline-offset:2px}button,input,select,textarea,.state-chip,.count-badge,.map-dep-chip{border:1px solid ButtonBorder}.tabs button[aria-selected="true"]{border-bottom:2px solid Highlight}#status.degraded,#approval-card.awaiting-action{border:1px solid CanvasText;border-left:4px solid Highlight}.choice input:checked+span{outline:2px solid Highlight}.primary{background:Highlight;color:HighlightText;border-color:Highlight}}
 </style>
 </head>
 <body>
@@ -327,7 +306,7 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
     </nav>
     <details id="more-views" class="more-views"><summary id="more-summary" data-i18n="moreViews">더 보기 · 프로젝트 지도 · 대화 · 지표 · Git</summary>
     <nav class="tabs" id="tabs-secondary" role="tablist" aria-label="더 보기 화면" data-i18n-attr="aria-label:tabsMore">
-      <button id="tab-project" role="tab" aria-selected="false" aria-controls="pane-project">프로젝트 지도</button>
+      <button id="tab-project" role="tab" aria-selected="false" aria-controls="pane-project"></button>
       <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1" data-i18n="tab.chat">대화</button>
       <button id="tab-activity" role="tab" aria-selected="false" aria-controls="pane-activity" tabindex="-1" data-i18n="tab.activity">활동</button>
       <button id="tab-usage" role="tab" aria-selected="false" aria-controls="pane-usage" tabindex="-1" data-i18n="tab.usage">지표</button>
@@ -335,10 +314,20 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
     </nav></details>
     <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
     <section id="approval-card" class="card" aria-labelledby="approvals-heading">
-      <h2 id="approvals-heading">승인 요청</h2><p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
+      <div class="section-head"><h2 id="approvals-heading">승인 요청</h2><span id="approval-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span class="state-word" data-i18n="state.waiting">확인 필요</span></span></div>
+      <p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
     </section>
-    <details class="card" id="alerts"><summary data-i18n="alerts">확인이 필요한 항목</summary><ul id="attention"></ul>
+    <p id="approval-idle" class="approval-idle muted" role="status"></p>
+    <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
       <button type="button" id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
+    <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
+      <div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span></h2><span id="work-dot" class="count-badge" hidden></span></div><div id="leads" class="leads"></div>
+    </section>
+    <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
+    <section class="card" id="now-work" aria-labelledby="now-heading">
+      <h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
+      <div id="now-active" class="rows"></div>
+    </section>
     <section class="card" id="goal-card" aria-labelledby="goal-heading">
       <h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button type="button" id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
       <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
@@ -347,24 +336,16 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
         <button id="plan-open" type="button" data-i18n="planOpen">계획 보기 ›</button>
       </div>
     </section>
-    <section class="card" id="now-work" aria-labelledby="now-heading">
-      <h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
-      <div id="now-active" class="rows"></div>
-      <h3 id="now-results-heading" data-i18n="w.nowResults" class="small-title">작업 결과</h3><div id="now-results" class="rows"></div>
+    <section class="card" id="latest-results" aria-labelledby="now-results-heading">
+      <h2 id="now-results-heading" data-i18n="w.nowResults" class="section-label">작업 결과</h2>
+      <div id="now-results" class="rows"></div>
+      <div class="evidence"><p id="reviews" class="muted"></p></div>
+      <ul id="latest-operations" hidden></ul>
     </section>
-    <section class="map-preview" aria-labelledby="map-title">
-      <div class="map-heading"><h2 id="map-title">프로젝트 지도</h2><div><button type="button" class="map-link" id="feature-open">기능 찾기</button> <button type="button" class="map-link" id="map-open">지도 열기 ↗</button></div></div>
-      <div class="map-field" id="map-field" hidden><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children"></ul></div>
-      <p role="status" id="map-status"></p>
-    </section>
-    <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-      <h2 id="leads-heading"><span id="work-dot" class="work-dot" aria-hidden="true" hidden></span><span id="lead-scope">Main 아래의 Lead 활동</span></h2><div id="leads" class="leads"></div>
-    </section>
-    <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
     <details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
       <form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
         <label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
-        <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
+        <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" class="form-input" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
         <button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
       </fieldset></form><p id="peer-status" class="muted" role="status"></p>
       <div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
@@ -385,28 +366,30 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
           <label class="choice"><input type="radio" name="main" value="pi"><span>Pi</span></label>
         </div>
         <label for="brief" data-i18n="briefLabel">새 작업 목표</label>
-        <input id="brief" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
+        <input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
         <button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
       </fieldset>
     </form></details>
     <details class="card" id="project-records">
-      <summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span> <span id="approval-idle" class="muted" role="status"></span></summary>
+      <summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span></summary>
       <dl class="metrics">
         <div><dt data-i18n="metricActive">종료 기록 없는 시도</dt><dd id="active"></dd></div>
         <div><dt data-i18n="metricTasks">계획된 작업</dt><dd id="tasks"></dd></div>
         <div><dt data-i18n="metricState">현재 상태</dt><dd id="taskStatus"></dd></div>
       </dl>
-      <div class="evidence">
-        <p id="reviews" class="muted"></p>
-      </div>
-      <details class="history"><summary data-i18n="historyTeam">프로젝트 Main·Lead 기록</summary><ul id="repo-team"></ul></details>
-      <details class="history"><summary data-i18n="historyOps">최근 보관된 결과물</summary><ul id="operations"></ul></details>
-      <details class="history"><summary data-i18n="historyRuns">최근 실행 기록</summary><ul id="activity"></ul>
+      <h3 class="small-title" data-i18n="historyTeam">프로젝트 Main·Lead 기록</h3><ul id="repo-team"></ul>
+      <h3 class="small-title" data-i18n="historyOps">최근 보관된 결과물</h3><ul id="operations"></ul>
+      <h3 class="small-title" data-i18n="historyRuns">최근 실행 기록</h3><ul id="activity"></ul>
         <section id="scratch-history" aria-labelledby="scratch-heading" hidden>
           <h3 id="scratch-heading" data-i18n="scratch.heading">관리된 작업트리 기록</h3>
           <p id="scratch-status" class="muted" role="status"></p><ul id="scratch-rows"></ul>
-        </section></details>
+        </section>
     </details>
+    <section class="map-preview" id="map-preview" aria-labelledby="map-title">
+      <div class="map-heading"><h2 id="map-title"></h2><div><button type="button" class="map-link" id="feature-open"></button> <button type="button" class="map-link" id="map-open"></button></div></div>
+      <div class="map-field" id="map-field" hidden><div class="map-parents" id="map-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="map-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="map-parent-list"></ul></div><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children" data-relation-group="ownership"></ul><div class="map-deps" id="map-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="map-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="map-dep-list"></ul></div></div>
+      <p role="status" id="map-status"></p>
+    </section>
     </div>
     <section class="card" id="pane-work" role="tabpanel" aria-labelledby="tab-work" hidden>
       <h2 id="work-heading" data-i18n="tab.work">작업</h2><p id="work-status" class="muted" role="status"></p><div id="work-groups"></div>
@@ -416,8 +399,8 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
     </section>
     <section class="card" id="pane-relations" role="tabpanel" aria-labelledby="tab-relations" hidden>
       <h2 id="relations-heading" data-i18n="tab.relations">관계도</h2><p id="relations-status" class="muted" role="status"></p>
-      <section aria-labelledby="owners-heading"><h3 id="owners-heading" data-i18n="w.owners">담당 연결</h3><p id="owners-note" class="muted"></p><div id="owners-list" class="rows"></div></section>
-      <section aria-labelledby="deps-heading"><h3 id="deps-heading" data-i18n="w.deps">작업 의존성</h3><p id="deps-note" class="muted"></p><div id="deps-list" class="rows"></div></section>
+      <section aria-labelledby="owners-heading" data-relation-group="ownership"><h3 id="owners-heading" data-i18n="w.owners">담당 연결</h3><p id="owners-note" class="muted"></p><div id="owners-list" class="rows"></div></section>
+      <section aria-labelledby="deps-heading" data-relation-group="dependency"><h3 id="deps-heading" data-i18n="w.deps">작업 의존성</h3><p id="deps-note" class="muted"></p><div id="deps-list" class="rows"></div></section>
     </section>
     <section class="card" id="pane-task" aria-labelledby="task-heading" hidden>
       <div class="detail-title"><button id="task-back" data-i18n="w.back" type="button">← 목록으로</button><h2 id="task-heading" tabindex="-1"></h2></div>
@@ -431,18 +414,18 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
       <div id="task-body" role="tabpanel" tabindex="0"></div>
     </section>
     <section id="pane-project" role="tabpanel" aria-labelledby="tab-project" hidden>
-      <section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading">프로젝트 구조</h2><button id="graph-reload" type="button" class="map-link">다시 조회</button></div>
-        <nav class="explorer-bar" id="graph-path" aria-label="탐색 경로"></nav>
-        <label class="sr-only" id="graph-filter-label" for="graph-filter">현재 노드 검색</label><input class="explorer-filter" id="graph-filter" type="search" placeholder="이름 또는 경로로 찾기">
-        <div class="explorer-options"><button type="button" id="graph-search">저장소에서 찾기</button> <label id="graph-confidence-label" for="graph-confidence">관계</label> <select id="graph-confidence"><option value="recorded" id="graph-recorded">추출·구조</option><option value="all" id="graph-all">추론 포함</option></select></div>
-        <div id="explore-map" class="map-field detail-map" hidden><span class="map-focus" id="explore-root"></span><ul class="map-row" id="explore-children"></ul></div>
-        <button type="button" id="graph-attach" hidden>대화에 첨부</button><span id="graph-attached" role="status" class="explorer-status"></span>
-        <p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button type="button" id="graph-more" hidden>더 보기</button>
+      <section class="explorer-view" aria-labelledby="explore-heading"><div class="map-heading"><h2 id="explore-heading"></h2><button id="graph-reload" type="button" class="map-link"></button></div>
+        <nav class="explorer-bar" id="graph-path"></nav>
+        <label class="sr-only" id="graph-filter-label" for="graph-filter"></label><input class="explorer-filter" id="graph-filter" type="search">
+        <div class="explorer-options"><button type="button" id="graph-search"></button> <label id="graph-confidence-label" for="graph-confidence"></label> <select id="graph-confidence"><option value="recorded" id="graph-recorded"></option><option value="all" id="graph-all"></option></select></div>
+        <div id="explore-map" class="map-field detail-map" hidden><div class="map-parents" id="explore-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="explore-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="explore-parent-list"></ul></div><span class="map-focus" id="explore-root"></span><div class="detail-map-groups"><ul class="map-row" id="explore-children" data-relation-group="ownership"></ul><div class="map-deps" id="explore-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="explore-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="explore-dep-list"></ul></div></div></div>
+        <button type="button" id="graph-attach" hidden></button><span id="graph-attached" role="status" class="explorer-status"></span>
+        <p id="graph-info" class="explorer-status" role="status"></p><ul id="graph-list" class="explorer-list"></ul><button type="button" id="graph-more" hidden></button>
       </section>
-      <section class="explorer-view" aria-labelledby="feature-title"><h2 id="feature-title">OMS 기능 찾기</h2><div id="feature-links" class="feature-links"></div>
-        <label for="feature-filter" id="feature-filter-label" class="sr-only">OMS 기능 검색</label><input class="explorer-filter" id="feature-filter" type="search" placeholder="목적이나 OMS 명령으로 찾기">
-        <p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" type="button" hidden>더 보기</button>
-        <section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label">대화에 보낼 질문</label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button type="button" id="feature-native" hidden></button><button type="button" id="feature-send">현재 대화에 보내기</button><button type="button" id="feature-dismiss">닫기</button></div><p id="feature-outcome" role="status"></p></section>
+      <section class="explorer-view" aria-labelledby="feature-title"><h2 id="feature-title"></h2><div id="feature-links" class="feature-links"></div>
+        <label for="feature-filter" id="feature-filter-label" class="sr-only"></label><input class="explorer-filter" id="feature-filter" type="search">
+        <p id="feature-status" class="explorer-status" role="status"></p><ul id="feature-list" class="explorer-list"></ul><button id="feature-more" type="button" hidden></button>
+        <section id="feature-editor" hidden><label for="feature-draft" id="feature-draft-label"></label><textarea id="feature-draft" class="feature-draft" maxlength="1000"></textarea><div class="explorer-bar"><button type="button" id="feature-native" hidden></button><button type="button" id="feature-send"></button><button type="button" id="feature-dismiss"></button></div><p id="feature-outcome" role="status"></p></section>
       </section>
     </section>
     <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
@@ -499,7 +482,7 @@ button.lead:hover,button.lead:focus-visible { background:var(--tint); }
         <select id="git-provider"><option value="" data-i18n="gitAuto">Main이 Lead 선택</option><option value="codex">Codex Lead</option>
           <option value="claude">Claude Lead</option><option value="agy">AGY Lead</option></select>
         <label for="git-goal" data-i18n="gitGoalLabel">대화에 전달할 목표</label><textarea id="git-goal" rows="3" maxlength="2000"></textarea>
-        <div class="cluster"><button type="button" id="git-compose" hidden>입력창에 넣기</button><button type="button" class="primary" id="git-send" hidden>현재 Main 대화에 보내기</button>
+        <div class="cluster"><button type="button" id="git-compose" hidden></button><button type="button" class="primary" id="git-send" hidden></button>
           <button type="button" id="git-copy" data-i18n="gitCopy">목표 복사</button><button type="button" id="git-new" data-i18n="gitNew">별도 Main 목표로 사용</button></div>
         <p class="muted" id="git-editor-status" role="status"></p>
       </section>
@@ -623,297 +606,599 @@ function initLanguage() {
   el('language-choice').value = lang;
   if (lang !== 'ko') { relocalize(); explorerLabels(); paintTasks(); }
 }
-const MSG = {
-ko: {
-  'scratch.unavailable':'작업트리 기록을 확인할 수 없습니다.', 'scratch.empty':'이 프로젝트에 기록된 작업트리 실행이 없습니다.',
-  'scratch.partial':'일부 기록만 확인했습니다.', 'scratch.omitted':'실행 기록 {n}개 생략', 'scratch.unverified':'소유 미확인 {n}개', 'scratch.unexamined':'미조회 {n}개',
-  'scratch.sources':'작업트리 {n}개 생략', 'scratch.recorded':'기록된 상태 · {s}', 'scratch.at':'기록 시각 · {at}',
-  'share.manual':'이 호스트에서는 복사한 뒤 대화에 붙여넣으세요.',
-  'peer.hint':"확인할 코드나 질문을 입력하세요",
-  'peer.role':"연구원",
-  'peer.result':"읽기 전용 검토 결과",
-  'peer.reading':"요청 기록 확인 중…",
-  'peer.sending':"검토 요청을 보내는 중…",
-  'peer.mismatch':"요청 기록이 일치하지 않습니다.",
-  'peer.absent':"기록된 요청이 없습니다.",
-  'peer.badActor':"검토자 기록이 일치하지 않습니다.",
-  'peer.accepted':"{p} 검토 요청 접수 · {title}",
-  'peer.unknown':"검토자 시작 여부를 확인하지 못했습니다. 같은 요청의 상태를 확인하세요.",
-  'peer.error':"{error} · 요청 상태를 확인하세요.",
-  'peer.working':"검토자가 응답을 작성 중입니다.",
-  'peer.empty':"호출이 끝났습니다. 조회한 기록에 답변이 없습니다.",
-  'peer.failed':"검토 호출이 실패했습니다.",
-  'peer.unconfirmed':"검토 요청은 기록되었고 실행 상태는 미확인입니다.",
-  'share.preview':"{p}의 답변을 확인한 뒤 전달하세요.",
-  'share.partial':"{p}의 답변 중 아래에 표시된 부분만 전달합니다.",
-  'share.copied':"선택한 답변을 복사했습니다.",
-  'share.select':"답변을 선택했습니다. 복사해 현재 대화에 붙여넣으세요.",
-  'share.already':"이 결과는 이미 전송을 요청했습니다. 현재 대화에서 확인하세요.",
-  'share.sending':"선택한 답변을 보내는 중…",
-  'share.sent':"선택한 답변을 현재 대화로 보냈습니다.",
-  'share.rejected':"호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다.",
-  'share.unknown':"호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요.",
-  title:'OMS · 프로젝트 제어', language:'언어 (Language)',
-  unknown:'미확인', noInfo:'정보 없음', providerUnknown:'공급자 미확인', statusUnknown:'상태 미확인', partial:'일부 조회', noRecords:'기록 없음',
-  projectDefault:'OMS 프로젝트', selectProject:'프로젝트 선택', draft:'초안', pageN:'{page}페이지',
-  closed:'패널이 닫혔습니다.', timeout:'응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요.', hostFail:'앱이 요청을 처리하지 못했습니다.',
-  projChanged:'프로젝트가 변경되었습니다.', toolFail:'OMS 도구 호출에 실패했습니다.', linkFail:'앱에서 링크를 열 수 없습니다.', openApp:'앱 대화에서 OMS 패널을 여세요.',
-  tabs:'프로젝트 보기',
-  'tabsMore':'더 보기 화면', 'taskSections':'작업 상세 구분', 'w.loading':'작업 목록을 읽는 중…', 'w.unavailable':'작업 목록을 사용할 수 없습니다: {v}', 'w.bad':'작업 목록 형식을 확인할 수 없습니다.', 'w.count':'작업 {n}개', 'w.omitted':'{n}개는 표시 범위 밖입니다.', 'w.dropped':'식별자가 없는 항목 {n}개는 제외했습니다.', 'w.dup':'식별자가 겹친 작업 {n}개는 구분할 수 없어 제외했습니다.', 'w.empty':'관측된 작업이 없습니다.', 'w.noneActive':'진행 중인 작업이 없습니다.', 'w.noneResults':'결과가 기록된 작업이 없습니다.', 'w.noResultCount':'결과가 기록되지 않은 작업 {n}개', 'w.owner':'담당: {v}', 'w.ownerUnknown':'담당 미확인', 'w.stateUnknown':'상태 미확인', 'w.id':'ID {v}', 'g.planned':'예정', 'g.active':'진행', 'g.review':'검토', 'g.done':'완료', 'g.other':'기타 상태', 'w.na':'미확인', 'w.evidenceNo':'검증 근거 없음', 'w.ownersNote':'작업 기록에 적힌 담당 값으로만 묶습니다. 보고·상하 관계나 provider 소속은 추론하지 않습니다.', 'w.depsNote':'선행 작업 → 후속 작업 관계만 표시하며 담당 연결과 섞지 않습니다.', 'w.depsUnknown':'선행 정보 미확인', 'w.depsNone':'선행 작업 없음', 'w.pre':'선행: {v}', 'w.post':'후속: {v}', 'w.missingDep':'{id} (목록에 없음)', 'w.cycle':'순환 의존이 관측되어 그대로 표시합니다: {v}', 'w.gone':'이 작업은 현재 관측 결과에 없습니다: {id}', 'w.revChanged':'작업 상세 버전이 변경되었습니다 ({a} → {b}).', 'w.detailUnavailable':'작업 상세를 읽을 수 없습니다.', 'w.fState':'상태', 'w.fOwner':'담당(작업 기록)', 'w.fIssue':'이슈', 'w.fPre':'선행 작업', 'w.fPost':'후속 작업', 'w.fRev':'작업 상세 버전', 'w.fId':'작업 ID', 'w.fResult':'결과 참조', 'w.fVerify':'검증 근거', 'w.noPreview':'이 작업 기록에는 미리보기 또는 diff가 포함되지 않았습니다.', 'w.resultNone':'결과가 기록되지 않았습니다.', 'w.verifyNone':'검증 근거가 기록되지 않았습니다. 미실행인지 누락인지 구분할 수 없습니다.', 'w.verifyNoRev':'이 기록의 상세 버전을 확인할 수 없습니다.', 'w.histNone':'이 작업에 연결된 이벤트·시도 기록의 범위를 확인할 수 없어 표시하지 않습니다.', 'w.histOpen':'프로젝트 전체 활동 열기 (이 작업 전용 아님)', 'w.viewAll':'작업 전체 보기',
-  planStrip:'프로젝트 작업 검증',
-  briefPlaceholder:'Main이 Lead들과 수행할 목표를 입력하세요.',
-  chatMembers:'대화 참여자', chatMessages:'시간순 작업방 메시지',
-  evidenceRegion:'호출별 실행 근거',
-  'tui.runtime':'런타임', 'tui.collab':'협업', 'tui.run':'실행',
-  tuiRegion:'선택한 OMS TUI 기록',
-  gitEditor:'GitHub 항목 작업 목표',
-  'sv.connections':'설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다.',
-  'sv.modelcatalog':'로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다.',
-  'sv.routes':'프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다.',
-  'sv.attribution':'선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다.',
-  'state.queued':'대기열에 등록', 'state.waiting_input':'입력 대기', 'state.waiting_approval':'승인 대기', 'state.failed':'실패', 'state.cancelled':'취소됨', 'state.timed_out':'시간 초과', 'state.abandoned':'중단됨',
-  'state.working':'작업 중', 'state.starting':'시작 중', 'state.verifying':'검증 중', 'state.review':'검토 중', 'state.in_review':'검토 중', 'state.done':'완료', 'state.blocked':'차단됨', 'state.waiting_for_input':'입력 대기',
-  'kind.issue':'이슈 #', 'kind.pr':'PR #',
-  'git.unknown':'현재 체크아웃의 Git 상태 미확인', 'git.detached':'분리된 HEAD', 'git.dirty':'작업 트리 변경 있음', 'git.clean':'작업 트리 깨끗함', 'git.dirtyUnknown':'작업 트리 미확인',
-  'git.upstream':'추적 브랜치 {v}', 'git.ahead':'앞섬 {n}', 'git.behind':'뒤처짐 {n}',
-  'git.prefix':'{p} Lead에게 다음 작업을 배정해 주세요. ', 'git.prefixAny':'담당 Lead를 정해 다음 작업을 배정해 주세요. ',
-  'git.draft':'작업 목표 작성', 'git.draftAria':'{label} 작업 목표 작성', 'git.editorHint':'대화로 보내면 Main이 이 목표로 작업을 시작할 수 있습니다.',
-  'git.noRepo':'현재 프로젝트의 GitHub 저장소를 확인할 수 없습니다.', 'git.backlogLabel':'{repo} · 전체 열린 작업',
-  'git.backlogBody':'{url} 저장소의 모든 열린 이슈와 PR을 마지막 페이지까지 조회하세요. 기존 PR과 검증 결과, 중복 및 의존성을 확인하고 작업 순서를 정하세요. oms_panel_git_status의 inventory를 issues와 pullRequests로 각각 조회하고 nextCursor가 없을 때까지 다음 페이지를 읽으세요. 조회 실패·누락은 미확인으로 표시하세요. 각 작업을 적합한 Lead와 진행하고 결과, 검증 근거, 남은 항목을 대화에 보고하세요. 게시나 병합은 별도의 명시적 승인 후 진행하세요.',
-  'git.loading':'GitHub PR과 검사를 조회하는 중…', 'git.remoteUnsupported':'GitHub PR 조회를 지원하지 않는 원격 저장소', 'git.prUnavailable':'GitHub PR 조회 불가', 'git.noOpenPr':'조회한 체크아웃에 연결된 열린 PR 없음',
-  'git.scope':'GitHub Projects 읽기 권한(read:project)이 필요합니다.', 'git.listUnsupported':'이 저장소에서 지원하지 않는 목록입니다.', 'git.listFail':'GitHub 목록을 조회할 수 없습니다.',
-  'git.shown':'{n}건 표시', 'git.noItems':'조회된 항목 없음', 'git.boardUnknown':'보드 식별 정보 미확인', 'git.boardView':'보드 상세 보기', 'git.boardLoading':'보드 조회 중…',
-  'git.timeout':'GitHub 조회 시간이 초과됐습니다.', 'git.rateLimit':'GitHub 요청 한도에 도달했습니다.', 'git.boardNotInCatalog':'현재 저장소에서 확인한 연결 목록에 이 보드가 없습니다.', 'git.boardUnverified':'이 저장소에서 보드와 연결 정보를 확인할 수 없습니다.',
-  'git.class.candidate':'검토 후보', 'git.class.blocked':'선행 이슈 진행 중', 'git.class.unverified':'추가 확인 필요', 'git.class.plan_linked':'기존 Plan 연결', 'git.class.board_in_progress':'보드에서 진행 중',
-  'git.class.closed_board':'닫힌 보드', 'git.class.duplicate':'중복', 'git.class.archived':'보관됨', 'git.class.unknown':'분류 미확인', 'git.class.draft':'초안', 'git.class.foreign':'다른 저장소',
-  'git.class.epic':'에픽', 'git.class.closed':'닫힘', 'git.class.pull_request':'PR',
-  'git.rec.scope':'이 페이지에 표시된 항목별 판단입니다.',
-  'git.rec.recommended':'추천 · {reason}', 'git.rec.excluded':'제외 · {reason}', 'git.rec.unverified':'추천 보류 · {reason}',
-  'git.rec.ready_with_priority':'Ready이고 우선순위가 P0~P2이며 열린 선행 이슈나 기존 Plan 연결이 발견되지 않았습니다.',
-  'git.rec.status_not_ready':'상태가 Ready가 아닙니다.', 'git.rec.priority_unrecognized':'우선순위가 P0·P1·P2 중 하나인지 확인할 수 없습니다.',
-  'git.rec.partial_response':'GitHub가 일부 정보만 반환했습니다.', 'git.rec.plan_unverified':'기존 Plan 또는 작업 연결을 확인할 수 없습니다.',
-  'git.rec.field_schema_unverified':'보드 필드나 선택 항목의 식별자를 확인할 수 없습니다.', 'git.rec.dependencies_unknown':'선행 이슈 정보를 모두 확인하지 못했습니다.',
-  'git.rec.item_evidence_incomplete':'이슈 또는 보드 항목 정보가 불완전합니다.', 'git.rec.field_selection_unverified':'선택된 필드 값을 확인할 수 없습니다.',
-  'git.rec.absent':'서버가 추천 정보를 보내지 않았습니다.', 'git.rec.unknown':'추천 상태나 판단 근거를 확인할 수 없습니다.',
-  'git.page':'{page}쪽 · {n}건', 'git.missingFields':'확인되지 않은 필드 {v}',
-  'git.badNumber':'1~9999999999 사이의 정수 번호를 입력하세요.', 'git.finding':'GitHub 항목을 찾는 중…', 'git.closed':'이미 닫힌 항목입니다.', 'git.notOpenNow':'현재 열린 상태를 확인할 수 없습니다.', 'git.notFound':'이 저장소에서 해당 열린 항목을 확인할 수 없습니다.',
-  'git.sendMain':'현재 Main 대화에 보내기', 'git.share':'현재 대화에 공유', 'git.copied':'목표를 복사했습니다.', 'git.selected':'목표를 선택했습니다. 복사해 현재 대화에서 사용할 수 있습니다.',
-  'git.sending':'현재 대화로 전달하는 중…', 'git.sentMain':'현재 Main 대화에 배정 요청을 전달했습니다.', 'git.shared':'현재 대화에 목표를 공유했습니다.',
-  'git.sendUnknown':'전달 여부를 대화에서 확인하세요. 작성한 목표는 복사할 수 있습니다.', 'git.tooLong':'기존 목표와 합치면 2,000자를 넘습니다. 전달할 내용을 줄이세요.',
-  'git.badResponse':'Git·PR 응답을 확인할 수 없습니다.', 'git.staleItem':'새 목록에서 열린 상태를 확인하지 못했습니다. 번호로 다시 조회해 선택하세요.',
-  'git.openAria':'{repo} {text} GitHub에서 열기', 'git.linkedWorktree':'연결된 워크트리', 'git.currentCheckout':'현재 체크아웃',
-  'git.headMatch':'로컬 HEAD 일치', 'git.headDiffer':'로컬 HEAD 불일치', 'git.headUnknown':'HEAD 비교 미확인',
-  'git.checksUnknown':'검사 상태 미확인', 'git.noChecks':'보고된 검사 없음', 'git.checks':'검사 · 통과 {p} · 실패 {f} · 대기 {w} · 기타 {o}',
-  'git.check.failed':'실패', 'git.check.pending':'대기', 'git.check.passed':'통과', 'git.check.other':'기타', 'git.check.unknown':'상태 미확인',
-  'usage.loading':'기록된 사용량을 조회하는 중…', 'usage.badResponse':'사용량 응답을 확인할 수 없습니다.', 'usage.totals':'프로젝트 누적 · 물리 호출 영수증',
-  'usage.totalsUnknown':'프로젝트 호출 영수증 수집 상태 미확인', 'usage.totalsNone':'기록된 프로젝트 호출 영수증 없음',
-  'usage.tokens':'보고된 토큰 소계 {tokens} · 사용량 보고 {r}/{c}회', 'usage.reportedCost':'보고 비용', 'usage.estimatedCost':'추정 비용', 'usage.noRecord':'기록 없음', 'usage.costLine':'{title} {cost} · {n}회',
-  'usage.hostUsage':'호스트 공급자 사용량', 'usage.lastObserved':'마지막 관측 ', 'usage.used':'{n}% 사용', 'usage.unknown':'사용률 미확인', 'usage.stale':'오래된 기록', 'usage.ago':'{n}분 전 기록', 'usage.resets':'초기화 {d}',
-  'usage.window':'구간', 'usage.windowAria':'{name} 사용률', 'usage.windowsOmitted':'표시 한도 밖의 사용 구간 {n}개', 'usage.context':'컨텍스트 {n}%', 'usage.cacheShare':'캐시 읽기 비중 {n}%',
-  'usage.recent':'최근 7일 OMS 위임 · 호출 {c} · 입력 {i} · 출력 {o} · 캐시 읽기 {r}', 'usage.none':'수집된 공급자 사용량 없음', 'usage.attempts':'프로젝트 시도별 토큰 기록',
-  'usage.tokenCount':'토큰 {n}', 'usage.receipt':'실행 영수증', 'usage.events':'이벤트 기록', 'usage.sourceUnknown':'출처 미확인', 'usage.reportedCalls':'사용량 보고 {r}/{c}회', 'usage.eventCost':'이벤트 기록 비용 {v}',
-  'usage.b.calls':'호출 {n}', 'usage.b.input':'입력 {n}', 'usage.b.output':'출력 {n}', 'usage.b.cacheRead':'캐시 읽기 {n}', 'usage.b.cacheWrite':'캐시 쓰기 {n}',
-  'usage.attemptsNone':'최근 시도에 귀속된 토큰 기록 없음', 'usage.attemptsOmitted':'표시 한도 밖의 시도 {n}건',
-  goalNone:'기록된 목표 없음', 'obs.basis':'다중 원장 관측 (비원자적)', 'obs.basisUnknown':'관측 기준 미확인', 'obs.complete':'전체 관측', 'obs.partial':'일부 관측', 'obs.unknown':'관측 상태 미확인',
-  'obs.omitted':'생략 {n}건', 'obs.trimmed':'축약 {n}건', 'src.git':'Git', 'src.task':'작업', 'src.plan':'계획', 'src.attempts':'실행', 'src.artifacts':'결과물', 'src.acceptance':'수락 근거', 'src.conversation':'대화',
-  'srcState.unavailable':'미확인', 'srcState.partial':'일부 수집', 'srcState.ambiguous':'연결 불명확', 'srcState.stale':'만료된 기록',
-  'obs.needsAttention':'확인 필요 · {v}', 'obs.latestArtifact':'저장소 최근 결과물 {v}', 'obs.lastChecked':'최근 조회 {d}',
-  'omit.attempts':'최근 실행', 'omit.operations':'결과물', 'omit.attention':'주의 항목', 'omit.active':'미종료 실행', labelCount:'{label} {n}건',
-  degraded:'일부 상태를 수집하지 못했습니다.', omittedRecords:'요약에서 생략된 기록 · {v}',
-  'conn.checking':'OMS 연결 확인 중', 'conn.unknownProject':'프로젝트 연결 미확인', 'conn.selectProject':'OMS 연결됨 · 프로젝트 선택 필요', 'conn.loaded':'OMS 연결됨 · 프로젝트 상태 조회됨', 'conn.failed':'OMS 연결 또는 프로젝트 조회 실패',
-  'conn.needsConnection':'OMS와 프로젝트 연결을 확인한 뒤 조회할 수 있습니다.', 'conn.loading':'연결 내역을 확인하는 중…', 'conn.rows':'{n}건 표시', 'conn.none':'확인된 기록 없음',
-  'conn.fail':'현재 연결 내역을 확인할 수 없습니다. OMS 연결과 프로젝트 권한을 확인하고 다시 조회하세요.', 'conn.checkPermissions':'프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요.',
-  'project.unreachable':'대화에서 지정한 프로젝트에 연결할 수 없습니다.', 'project.choose':'OMS를 사용할 프로젝트를 선택하세요.', 'member.left':'참여 종료', 'member.omitted':'추가 참여자 {n}명 생략',
-  'evidence.choose':'호출 선택', 'evidence.missing':'조회된 작업방 호출 목록에서 해당 시도를 확인할 수 없습니다.', 'evidence.partial':'최근 호출 목록 일부 표시', 'evidence.loading':'{name} 조회 중…',
-  'evidence.mismatch':'선택한 호출과 근거 응답이 일치하지 않습니다.', 'evidence.changed':'보관된 근거가 바뀌었습니다. 실행 정보를 다시 확인하세요.', 'evidence.truncated':'긴 줄 일부 표시',
-  'ev.info':'실행 정보', 'ev.events':'이벤트', 'ev.files':'변경 파일', 'ev.diff':'패치', 'ev.transcript':'기록된 답변',
-  'chat.title':'참여자 대화', 'chat.pick':'메시지를 읽을 참여자를 선택하세요.', 'chat.noMembers':'현재 대화와 연결된 작업방 참여자 미확인', 'chat.loading':'작업방 메시지를 조회하는 중…', 'chat.loadingOlder':'이전 메시지를 조회하는 중…',
-  'chat.mismatch':'선택한 작업방·참여자와 메시지 응답이 일치하지 않습니다.', 'chat.result':'기록된 실행 결과', 'chat.partial':'일부 표시', 'chat.native':'Codex 원래 대화 열기', 'chat.count':'작업방 기록 {n}건', 'chat.none':'기록된 작업방 메시지 없음',
-  'tui.loading':'TUI 기록을 조회하는 중…', 'tui.mismatch':'선택한 TUI 보기와 응답이 일치하지 않습니다.', 'tui.unavailable':'이 TUI 보기를 조회할 수 없습니다.', 'tui.shown':'표시 {n}건',
-  'tui.noneOnPage':'이 페이지에서 확인된 기록 없음', 'tui.confirmedTotal':'확인된 합계 {n}건', 'tui.total':'전체 {n}건',
-  'thread.aria':'{task} · {p} 대화 열기', 'prov.loading':'호스트 공급자 상태를 확인하는 중…', 'prov.unavailable':'호스트 공급자 상태를 확인할 수 없습니다.', 'prov.usable':'호스트 사용 가능', 'prov.unusable':'호스트 사용 불가',
-  'prov.installed':'설치됨 · 사용 가능 여부 미확인', 'prov.notInstalled':'설치되지 않음', 'prov.unknown':'사용 가능 여부 미확인', 'prov.partial':'호스트 목록 일부 조회', 'prov.basis':'현재 프로젝트 호스트 기준',
-  'main.repoScope':'저장소 Main', 'main.current':'현재 Main', 'main.unknown':'Main 미확인', 'main.joined':'작업방 소유자로 참여 중', 'main.partialRooms':' · 작업방 목록 일부 조회',
-  'main.noOwner':'이 대화와 연결된 작업방 소유자를 확인할 수 없습니다.', 'main.repoRecorded':'저장소에 기록된 Main', 'main.thisConversation':'이 대화의 Main', 'main.repoLeads':'저장소의 Lead 활동', 'main.roomLead':'작업방 Lead',
-  'main.noRepoMain':'저장소 실행 기록에서 Main을 확인할 수 없습니다.', 'main.headerAria':'이 대화의 {name} 작업방 대화 보기',
-  'lead.none':'미종료 Lead 기록 없음', 'lead.unseen':'조회한 기록에서 미종료 Lead를 확인하지 못했습니다.', 'lead.taskUnknown':'작업 미확인', 'lead.aria':'{assignee} · {task} · {p} 대화 열기',
-  'act.planned':'계획된 작업 {n}', 'act.partialRuntime':'런타임 일부 조회', 'act.attempts':'실행 시도 {n}', 'act.open':'미종료 {n}', 'act.executing':'실행 상태 {n}', 'act.unknown':'OMS 명령 집계 미확인',
-  'act.attempt':'실행 시도', 'act.artifact':'결과물', 'act.timeUnknown':'시각 미확인', 'act.viewEvidence':'호출 근거 보기', 'act.viewEvidenceAria':'{id} 호출 근거 보기', 'act.exit':'종료 코드 {n}',
-  'act.noEvents':'조회된 실행 기록 없음', 'act.roomUnknown':'작업방 미확인', 'act.noTeam':'조회한 기록에서 Main·Lead 미확인', 'act.recentUnknown':'최근 실행 기록 미확인', 'act.recentNone':'최근 실행 기록 없음',
-  'act.criteria':'완료 기준 검증 · {v} / {n}개', 'act.complete':' · 완료', 'act.incomplete':' · 미완료', 'act.completeUnknown':' · 완료 여부 미확인', 'act.criteriaUnknown':'완료 기준 미확인',
-  'act.reviews':'보관된 리뷰 기록 · 통과 {p} · 실패 {f} · 판정 없음 {u}', 'act.reviewsUnknown':'보관된 리뷰 기록 미확인', 'act.opsNone':'최근 보관된 결과물 없음', 'act.opsUnknown':'최근 결과물 미확인',
-  'appr.count':'승인 요청 {n}건', 'appr.list':'승인 목록', 'appr.partial':'승인 목록을 일부만 조회했습니다.', 'appr.idle':'대기 중인 승인 없음', 'appr.scope':'결정 범위 · Main이 요청한 다음 작업',
-  'appr.action':'작업 · {v}', 'appr.target':'대상 · {v}', 'appr.sender':'요청자 · {v}', 'appr.approve':'이 요청 승인', 'appr.deny':'이 요청 거절', 'appr.mismatch':'결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요.',
-  'appr.approved':'승인 처리됨 · {id}', 'appr.denied':'거절 처리됨 · {id}', 'appr.checking':'승인 목록을 확인하는 중…', 'appr.bad':'승인 목록 응답을 읽을 수 없습니다.',
-  'surf.codexApp':'Codex 앱', 'surf.kindUnknown':'{b} · 화면 종류 미확인', 'surf.unknown':'호스트 미확인', 'host.html':'HTML 표시됨 · ', 'host.noReply':'호스트 응답 미확인', 'host.mode':' · 표시 모드 {v}',
-  'host.unknownRest':' · 사이드 패널·네이티브 Mod·전송 경로(로컬/터널/원격) 미확인', 'host.readOnly':' · 읽기 전용 프로필', 'host.control':' · 대화 제어 프로필', 'host.checked':' · 마지막 조회 {v}',
-  'cf.installed':'설치됨', 'cf.notInstalled':'미설치', 'cf.authRequired':'인증 필요', 'cf.authVerified':'인증 확인', 'cf.yes':'예', 'cf.no':'아니오', 'cf.verifiedSession':'검증된 세션 필요', 'cf.unsupported':'미지원',
-  'cl.ready':'실행 준비', 'cl.missingTool':'필수 도구 누락', 'cl.observe':'관찰', 'cl.memberConfirmed':'현재 대화의 Main 멤버십 확인', 'cl.sessionUnknown':'현재 세션 미확인', 'cl.control':'대화 제어', 'cl.readOnly':'읽기 전용', 'cl.perRequest':'각 요청에서 작업방·권한 확인',
-  'guide.codex':'Codex 로그인 안내', 'guide.claude':'Claude 로그인 안내', 'guide.agy':'Antigravity 공식 안내', 'guide.pi':'Pi의 CodexGateway 로그인 안내',
-  'start.reserved':'별도 Main 시작 요청 접수됨 · {room}', 'start.recorded':'{p} Main · {state} · {attempt}', 'start.unknown':'시작 상태를 확인할 수 없습니다. 진행 상황을 새로고침하세요.',
-  'start.started':'{p} Main 시작됨 · {room} · {attempt}', 'start.badResponse':'시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요.', goalRule:'목표를 한 줄로 1~2,000자 입력하세요.',
-  'status.stale':'이전 조회 결과를 표시하고 있습니다. 새 상태를 확인하는 중…', 'status.checking':'대화의 Main과 프로젝트 상태를 확인하는 중…', 'status.badList':'프로젝트 목록 응답을 읽을 수 없습니다.', 'status.badSnapshot':'프로젝트 상태 응답을 읽을 수 없습니다.',
-  'mutate.working':'요청을 처리하는 중…'
-},
-en: {
-  'scratch.heading':'Managed worktree history', 'scratch.unavailable':'Worktree records are unavailable.', 'scratch.empty':'No worktree executions recorded for this project.',
-  'scratch.partial':'Only part of the history was observed.', 'scratch.omitted':'{n} execution records omitted', 'scratch.unverified':'{n} unverified', 'scratch.unexamined':'{n} unexamined',
-  'scratch.sources':'{n} worktrees omitted', 'scratch.recorded':'Recorded state · {s}', 'scratch.at':'Recorded at · {at}',
-  'share.manual':'Copy the answer and paste it into this conversation on this host.',
-  'peer.assign':"Request a read-only review",
-  'peer.legend':"Reviewer for this room",
-  'peer.provider':"Provider",
-  'peer.prompt':"Review request",
-  'peer.hint':"Enter the code to check or a question",
-  'peer.start':"Call one reviewer",
-  'peer.check':"Check request status",
-  'peer.chat':"Open review conversation",
-  'peer.next':"Request another review",
-  'peer.role':"Researcher",
-  'peer.result':"Read-only review",
-  'peer.reading':"Checking the request record…",
-  'peer.sending':"Submitting the review request…",
-  'peer.mismatch':"The request record does not match.",
-  'peer.absent':"No recorded request.",
-  'peer.badActor':"The recorded reviewer does not match.",
-  'peer.accepted':"{p} review requested · {title}",
-  'peer.unknown':"Reviewer start is unconfirmed. Check this request’s status.",
-  'peer.error':"{error} · Check this request’s status.",
-  'peer.working':"The reviewer is preparing an answer.",
-  'peer.empty':"The call ended. No answer was found in the records retrieved.",
-  'peer.failed':"The review call failed.",
-  'peer.unconfirmed':"Review request recorded. Execution status is unconfirmed.",
-  'share.choose':"Attach review result",
-  'share.label':"Selected answer",
-  'share.send':"Send to this conversation",
-  'share.copy':"Copy answer",
-  'share.cancel':"Cancel",
-  'share.preview':"Review the answer from {p} before sharing.",
-  'share.partial':"Only the portion of the answer from {p} shown here will be shared.",
-  'share.copied':"Selected answer copied.",
-  'share.select':"Answer selected. Copy and paste it into this conversation.",
-  'share.already':"Sending this result was already requested. Check the conversation.",
-  'share.sending':"Sending the selected answer…",
-  'share.sent':"Selected answer sent to this conversation.",
-  'share.rejected':"The host declined to send the answer. You can copy it instead.",
-  'share.unknown':"Delivery is unconfirmed. Check the conversation before copying the answer.",
-  title:'OMS · Project control', language:'Language (언어)', project:'Project', refresh:'Refresh',
-  unknown:'Unknown', noInfo:'No data', providerUnknown:'Unknown provider', statusUnknown:'Status unknown', partial:'Partially retrieved', noRecords:'No records',
-  projectDefault:'OMS project', selectProject:'Select a project', draft:'Draft', pageN:'Page {page}', prevPage:'Previous page', nextPage:'Next page',
-  closed:'The panel was closed.', timeout:'The request timed out. Refresh to check the result.', hostFail:'The app could not process the request.',
-  projChanged:'The project changed.', toolFail:'The OMS tool call failed.', linkFail:'The app cannot open the link.', openApp:'Open the OMS panel from an app conversation.',
-  'tab.chat':'Chat', 'tab.activity':'Activity', tabs:'Project views',
-  'tab.overview':'Now', 'tab.work':'Work', 'tab.results':'Results', 'tab.relations':'Relationships', 'tab.usage':'Metrics', 'tabsMore':'More views', 'moreViews':'More · Project map · Chat · Metrics · Git', 'taskSections':'Task detail sections', 'task.overview':'Summary', 'task.changes':'Changes', 'task.verification':'Verification', 'task.history':'History', 'w.back':'← Back to list', 'w.now':'Work in progress', 'w.nowResults':'Task results', 'w.owners':'Owner linkage', 'w.deps':'Task dependencies', 'w.loading':'Reading work items…', 'w.unavailable':'Work items are unavailable: {v}', 'w.bad':'The work item response was not recognized.', 'w.count':'{n} work items', 'w.omitted':'{n} more are outside the shown range.', 'w.dropped':'{n} items without an id were left out.', 'w.dup':'{n} items with a repeated id cannot be told apart and were left out.', 'w.empty':'No work items observed.', 'w.noneActive':'No work in progress.', 'w.noneResults':'No work item has a recorded result.', 'w.noResultCount':'{n} work items have no recorded result', 'w.owner':'Owner: {v}', 'w.ownerUnknown':'Owner unknown', 'w.stateUnknown':'State unknown', 'w.id':'ID {v}', 'g.planned':'Planned', 'g.active':'In progress', 'g.review':'Review', 'g.done':'Done', 'g.other':'Other states', 'w.na':'Unavailable', 'w.evidenceNo':'No verification evidence', 'w.ownersNote':'Grouped only by the owner value in the work record. Reporting lines and provider membership are not inferred.', 'w.depsNote':'Shows only prerequisite → follow-up edges, never mixed with owner linkage.', 'w.depsUnknown':'Prerequisites unavailable', 'w.depsNone':'No prerequisites', 'w.pre':'Before: {v}', 'w.post':'After: {v}', 'w.missingDep':'{id} (not in list)', 'w.cycle':'A dependency cycle was observed and is shown as recorded: {v}', 'w.gone':'This task is not in the current observation: {id}', 'w.revChanged':'Task detail version changed since opened ({a} → {b}).', 'w.detailUnavailable':'Task details could not be read.', 'w.fState':'State', 'w.fOwner':'Owner (work record)', 'w.fIssue':'Issue', 'w.fPre':'Prerequisites', 'w.fPost':'Follow-ups', 'w.fRev':'Task detail version', 'w.fId':'Task ID', 'w.fResult':'Result reference', 'w.fVerify':'Verification evidence', 'w.noPreview':'No preview or diff is included in this work record.', 'w.resultNone':'No result is recorded.', 'w.verifyNone':'No verification evidence is recorded; not-run and missing cannot be told apart.', 'w.verifyNoRev':'The detail version of this record is unknown.', 'w.histNone':'The scope of events and attempts linked to this task is unknown, so none are shown.', 'w.histOpen':'Open project-wide activity (not specific to this task)', 'w.viewAll':'View all work',
-  alerts:'Items needing attention', alertsOpen:'View attention items', goalHeading:'Project goal', planStrip:'Project task verification', planVerified:'Planned tasks verified', planOpen:'View plan ›',
-  threads:'Other work conversations', providerOptions:'Lead candidates · Codex, Claude, AGY', providerLoad:'Check host status', backlog:'Hand all open GitHub work to Main',
-  launcher:'Send a new goal to a separate Main', chooseMain:'Choose a new Main', briefLabel:'New work goal', briefPlaceholder:'Enter the goal Main will pursue with its Leads.', start:'Send goal',
-  records:'Full project record', metricActive:'Attempts without a closing record', metricTasks:'Planned tasks', metricState:'Current state',
-  historyTeam:'Project Main and Lead records', historyOps:'Recently stored artifacts', historyRuns:'Recent executions',
-  chatHeading:'Room conversation', chatBack:'Back to previous view', chatMembers:'Conversation participants', chatOlder:'Earlier messages', chatMessages:'Room messages in time order',
-  evidenceRegion:'Execution evidence by call', evidenceCall:'Recorded call', evidencePrev:'Previous evidence page', evidenceNext:'Next evidence page',
-  activityHeading:'Project activity', tuiLabel:'OMS TUI details', 'tui.choose':'Choose a view', 'tui.runtime':'Runtime', 'tui.collab':'Collaboration', 'tui.run':'Execution',
-  'tui.overview':'Overview', 'tui.health':'Health', 'tui.providers':'Providers', 'tui.metrics':'Metrics', 'tui.capacity':'Capacity', 'tui.log':'Log',
-  'tui.teams':'Teams', 'tui.sessions':'Sessions', 'tui.plan':'Plan', 'tui.attention':'Attention', 'tui.results':'Results', 'tui.debate':'Debate',
-  'tui.routes':'Routes', 'tui.workspaces':'Workspaces', 'tui.jobs':'Jobs', 'tui.past':'Past runs', tuiRegion:'Selected OMS TUI records', timeline:'Command and job timeline',
-  usageHeading:'Token usage', gitBacklog:'Hand all open work to Main', gitEditor:'GitHub item work goal', gitAssignee:'Assign request to', gitAuto:'Main chooses the Lead',
-  gitGoalLabel:'Goal to send to the conversation', gitCopy:'Copy goal', gitNew:'Use as a separate Main goal', gitView:'GitHub view',
-  'gitKind.checkout':'Checkout PRs · checks', 'gitKind.issues':'Repository issues', 'gitKind.pullRequests':'Repository PRs', gitFind:'Find by number', gitLookup:'Look up',
-  source:'Connection info', room:'Room', participant:'Participant', obsRevision:'Observation revision', obsBasis:'Observation basis', obsCompleteness:'Collection status', appAndOms:'App and OMS',
-  hostSupport:'Support and connection paths by host',
-  hostSupport1:'Codex Desktop provides a chat tab. CLI and IDE use the project\'s OMS MCP tools or local OMS skills.',
-  hostSupport2:'Claude Chat supports remote HTTPS connectors; Desktop also supports local stdio. Side-panel availability depends on the account and per-conversation rollout. Claude Code\'s native Mods are a separate feature: terminal 2.1.287+, Code in Desktop 2.1.286+ and the VS Code extension 2.1.299+ support them depending on settings, and 2.1.304+ needs no flag.',
-  hostSupport3:'Antigravity App 2.34.0+ opens the panel through local stdio or a configured remote MCP. CLI and IDE use text tools. Local OMS needs no tunnel.',
-  connectionView:'Connection details', 'cv.connections':'Harnesses and readiness', 'cv.modelcatalog':'Model and effort catalog', 'cv.routes':'Expected routing · accounts', 'cv.attribution':'Execution response evidence',
-  harness:'Harness', connectionRefresh:'Reload connection details', connectionDraft:'Draft a new goal with this harness',
-  'sv.connections':'Installation is checked on the PATH of the host running OMS. Authentication and actual runnability are checked separately.',
-  'sv.modelcatalog':'Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.',
-  'sv.routes':'Expected routing for the project\'s next call. Only confirmed logical aliases are shown for accounts.',
-  'sv.attribution':'Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.',
-  'state.queued':'Queued', 'state.waiting_input':'Waiting for input', 'state.waiting_approval':'Waiting for approval', 'state.failed':'Failed', 'state.cancelled':'Cancelled', 'state.timed_out':'Timed out', 'state.abandoned':'Abandoned',
-  'state.working':'Working', 'state.starting':'Starting', 'state.verifying':'Verifying', 'state.review':'In review', 'state.in_review':'In review', 'state.done':'Done', 'state.blocked':'Blocked', 'state.waiting_for_input':'Waiting for input',
-  'kind.issue':'Issue #', 'kind.pr':'PR #',
-  'git.unknown':'Git status of the current checkout is unknown', 'git.detached':'Detached HEAD', 'git.dirty':'Working tree has changes', 'git.clean':'Working tree clean', 'git.dirtyUnknown':'Working tree unknown',
-  'git.upstream':'Upstream {v}', 'git.ahead':'Ahead {n}', 'git.behind':'Behind {n}',
-  'git.prefix':'Please assign the following work to the {p} Lead. ', 'git.prefixAny':'Please choose a Lead and assign the following work. ',
-  'git.draft':'Draft work goal', 'git.draftAria':'{label}: draft work goal', 'git.editorHint':'Once sent to the conversation, Main can start working on this goal.',
-  'git.noRepo':'Cannot determine this project\'s GitHub repository.', 'git.backlogLabel':'{repo} · all open work',
-  'git.backlogBody':'List every open issue and PR in the {url} repository through the last page. Check existing PRs, verification results, duplicates and dependencies, then decide the work order. Query the oms_panel_git_status inventory separately for issues and pullRequests and read further pages until nextCursor is absent. Mark failed or missing lookups as unknown. Run each task with a suitable Lead and report results, verification evidence and remaining items in the conversation. Publish or merge only after separate explicit approval.',
-  'git.loading':'Loading GitHub PRs and checks…', 'git.remoteUnsupported':'Remote repository does not support GitHub PR lookup', 'git.prUnavailable':'GitHub PR lookup unavailable', 'git.noOpenPr':'No open PR linked to the checked-out branch',
-  'git.scope':'GitHub Projects read permission (read:project) is required.', 'git.listUnsupported':'This repository does not support this list.', 'git.listFail':'Cannot retrieve the GitHub list.',
-  'git.shown':'{n} shown', 'git.noItems':'No items found', 'git.boardUnknown':'Board identity unknown', 'git.boardView':'View board details', 'git.boardLoading':'Loading board…',
-  'git.timeout':'GitHub lookup timed out.', 'git.rateLimit':'GitHub rate limit reached.', 'git.boardNotInCatalog':'This board is not in the connected list found for this repository.', 'git.boardUnverified':'Cannot verify the board and its link to this repository.',
-  'git.class.candidate':'Candidate', 'git.class.blocked':'Blocked by an open prerequisite', 'git.class.unverified':'Needs verification', 'git.class.plan_linked':'Linked to an existing Plan', 'git.class.board_in_progress':'In progress on the board',
-  'git.class.closed_board':'Closed board', 'git.class.duplicate':'Duplicate', 'git.class.archived':'Archived', 'git.class.unknown':'Unclassified', 'git.class.draft':'Draft', 'git.class.foreign':'Other repository',
-  'git.class.epic':'Epic', 'git.class.closed':'Closed', 'git.class.pull_request':'PR',
-  'git.rec.scope':'Readiness is assessed per item on this page.',
-  'git.rec.recommended':'Recommended · {reason}', 'git.rec.excluded':'Excluded · {reason}', 'git.rec.unverified':'Unverified · {reason}',
-  'git.rec.ready_with_priority':'Ready at priority P0–P2, with no open blockers or existing Plan link observed.',
-  'git.rec.status_not_ready':'Status is not Ready.', 'git.rec.priority_unrecognized':'Priority could not be confirmed as P0, P1 or P2.',
-  'git.rec.partial_response':'GitHub returned partial data.', 'git.rec.plan_unverified':'Existing Plan or task links could not be verified.',
-  'git.rec.field_schema_unverified':'Board field or option identities could not be verified.', 'git.rec.dependencies_unknown':'Blocker information is incomplete.',
-  'git.rec.item_evidence_incomplete':'Issue or board item details are incomplete.', 'git.rec.field_selection_unverified':'Selected field values could not be verified.',
-  'git.rec.absent':'The server did not provide a recommendation.', 'git.rec.unknown':'The recommendation or its reason could not be verified.',
-  'git.page':'Page {page} · {n} items', 'git.missingFields':'Unverified fields {v}',
-  'git.badNumber':'Enter an integer between 1 and 9999999999.', 'git.finding':'Looking up the GitHub item…', 'git.closed':'This item is already closed.', 'git.notOpenNow':'Cannot confirm that it is currently open.', 'git.notFound':'Cannot find that open item in this repository.',
-  'git.sendMain':'Send to current Main conversation', 'git.share':'Share to current conversation', 'git.copied':'Goal copied.', 'git.selected':'Goal selected. Copy it to use in the current conversation.',
-  'git.sending':'Sending to the current conversation…', 'git.sentMain':'Assignment request sent to the current Main conversation.', 'git.shared':'Goal shared to the current conversation.',
-  'git.sendUnknown':'Check the conversation to see whether it was delivered. You can copy the goal you wrote.', 'git.tooLong':'Combined with the existing goal it exceeds 2,000 characters. Shorten what you send.',
-  'git.badResponse':'Cannot read the Git/PR response.', 'git.staleItem':'The new list did not confirm it is open. Look it up by number again and select it.',
-  'git.openAria':'Open {repo} {text} on GitHub', 'git.linkedWorktree':'Linked worktree', 'git.currentCheckout':'Current checkout',
-  'git.headMatch':'Matches local HEAD', 'git.headDiffer':'Differs from local HEAD', 'git.headUnknown':'HEAD comparison unknown',
-  'git.checksUnknown':'Check status unknown', 'git.noChecks':'No checks reported', 'git.checks':'Checks · passed {p} · failed {f} · pending {w} · other {o}',
-  'git.check.failed':'Failed', 'git.check.pending':'Pending', 'git.check.passed':'Passed', 'git.check.other':'Other', 'git.check.unknown':'Status unknown',
-  'usage.loading':'Loading recorded usage…', 'usage.badResponse':'Cannot read the usage response.', 'usage.totals':'Project totals · physical call receipts',
-  'usage.totalsUnknown':'Project call receipt collection status unknown', 'usage.totalsNone':'No project call receipts recorded',
-  'usage.tokens':'Reported token subtotal {tokens} · usage reported in {r}/{c} calls', 'usage.reportedCost':'Reported cost', 'usage.estimatedCost':'Estimated cost', 'usage.noRecord':'No record', 'usage.costLine':'{title} {cost} · {n} calls',
-  'usage.hostUsage':'Host provider usage', 'usage.lastObserved':'Last observed ', 'usage.used':'{n}% used', 'usage.unknown':'Usage unknown', 'usage.stale':'Stale record', 'usage.ago':'Recorded {n} min ago', 'usage.resets':'Resets {d}',
-  'usage.window':'Window', 'usage.windowAria':'{name} usage', 'usage.windowsOmitted':'{n} usage windows beyond the display limit', 'usage.context':'Context {n}%', 'usage.cacheShare':'Cache read share {n}%',
-  'usage.recent':'OMS delegation, last 7 days · calls {c} · input {i} · output {o} · cache read {r}', 'usage.none':'No provider usage collected', 'usage.attempts':'Token records by project attempt',
-  'usage.tokenCount':'Tokens {n}', 'usage.receipt':'Execution receipt', 'usage.events':'Event log', 'usage.sourceUnknown':'Source unknown', 'usage.reportedCalls':'Usage reported in {r}/{c} calls', 'usage.eventCost':'Event-log cost {v}',
-  'usage.b.calls':'Calls {n}', 'usage.b.input':'Input {n}', 'usage.b.output':'Output {n}', 'usage.b.cacheRead':'Cache read {n}', 'usage.b.cacheWrite':'Cache write {n}',
-  'usage.attemptsNone':'No token records attributed to recent attempts', 'usage.attemptsOmitted':'{n} attempts beyond the display limit',
-  goalNone:'No goal recorded', 'obs.basis':'Multi-ledger observation (non-atomic)', 'obs.basisUnknown':'Observation basis unknown', 'obs.complete':'Full observation', 'obs.partial':'Partial observation', 'obs.unknown':'Observation status unknown',
-  'obs.omitted':'Omitted {n}', 'obs.trimmed':'Trimmed {n}', 'src.git':'Git', 'src.task':'Tasks', 'src.plan':'Plan', 'src.attempts':'Executions', 'src.artifacts':'Artifacts', 'src.acceptance':'Acceptance evidence', 'src.conversation':'Conversation',
-  'srcState.unavailable':'Unknown', 'srcState.partial':'Partially collected', 'srcState.ambiguous':'Ambiguous link', 'srcState.stale':'Stale record',
-  'obs.needsAttention':'Needs attention · {v}', 'obs.latestArtifact':'Latest repository artifact {v}', 'obs.lastChecked':'Last checked {d}',
-  'omit.attempts':'Recent executions', 'omit.operations':'Artifacts', 'omit.attention':'Attention items', 'omit.active':'Open executions', labelCount:'{label} {n}',
-  degraded:'Some status could not be collected.', omittedRecords:'Records omitted from the summary · {v}',
-  'conn.checking':'Checking OMS connection', 'conn.unknownProject':'Project connection unknown', 'conn.selectProject':'OMS connected · select a project', 'conn.loaded':'OMS connected · project status loaded', 'conn.failed':'OMS connection or project lookup failed',
-  'conn.needsConnection':'You can look this up after the OMS and project connection is confirmed.', 'conn.loading':'Checking connection details…', 'conn.rows':'{n} shown', 'conn.none':'No records confirmed',
-  'conn.fail':'Cannot retrieve connection details. Check the OMS connection and project permissions, then try again.', 'conn.checkPermissions':'Check project permissions and the host MCP connection, then try again.',
-  'project.unreachable':'Cannot connect to the project specified in the conversation.', 'project.choose':'Select a project to use with OMS.', 'member.left':'Left', 'member.omitted':'{n} more participants omitted',
-  'evidence.choose':'Select a call', 'evidence.missing':'That attempt is not in the retrieved room call list.', 'evidence.partial':'Showing part of the recent call list', 'evidence.loading':'Loading {name}…',
-  'evidence.mismatch':'The evidence response does not match the selected call.', 'evidence.changed':'The stored evidence changed. Check the run info again.', 'evidence.truncated':'Long lines truncated',
-  'ev.info':'Run info', 'ev.events':'Events', 'ev.files':'Changed files', 'ev.diff':'Patch', 'ev.transcript':'Recorded reply',
-  'chat.title':'Participant conversation', 'chat.pick':'Select a participant to read messages.', 'chat.noMembers':'No room participants linked to this conversation found', 'chat.loading':'Loading room messages…', 'chat.loadingOlder':'Loading earlier messages…',
-  'chat.mismatch':'The message response does not match the selected room and participant.', 'chat.result':'Recorded execution result', 'chat.partial':'Partially shown', 'chat.native':'Open original Codex conversation', 'chat.count':'{n} room records', 'chat.none':'No room messages recorded',
-  'tui.loading':'Loading TUI records…', 'tui.mismatch':'The response does not match the selected TUI view.', 'tui.unavailable':'Cannot load this TUI view.', 'tui.shown':'{n} shown',
-  'tui.noneOnPage':'No records confirmed on this page', 'tui.confirmedTotal':'Confirmed total {n}', 'tui.total':'Total {n}',
-  'thread.aria':'Open conversation: {task} · {p}', 'prov.loading':'Checking host provider status…', 'prov.unavailable':'Cannot determine host provider status.', 'prov.usable':'Available on host', 'prov.unusable':'Unavailable on host',
-  'prov.installed':'Installed · availability unknown', 'prov.notInstalled':'Not installed', 'prov.unknown':'Availability unknown', 'prov.partial':'Host list partially retrieved', 'prov.basis':'Based on the current project host',
-  'main.repoScope':'Repository Main', 'main.current':'Current Main', 'main.unknown':'Main unknown', 'main.joined':'Joined as room owner', 'main.partialRooms':' · Room list partially retrieved',
-  'main.noOwner':'Cannot determine the room owner linked to this conversation.', 'main.repoRecorded':'Main recorded in the repository', 'main.thisConversation':'Main of this conversation', 'main.repoLeads':'Repository Lead activity', 'main.roomLead':'Room Lead',
-  'main.noRepoMain':'Cannot determine Main from repository execution records.', 'main.headerAria':'View the room conversation of {name} for this conversation',
-  'lead.none':'No open Lead records', 'lead.unseen':'No open Lead found in the retrieved records.', 'lead.taskUnknown':'Task unknown', 'lead.aria':'Open conversation: {assignee} · {task} · {p}',
-  'act.planned':'Planned tasks {n}', 'act.partialRuntime':'Runtime partially retrieved', 'act.attempts':'Execution attempts {n}', 'act.open':'Open {n}', 'act.executing':'Executing {n}', 'act.unknown':'OMS command totals unknown',
-  'act.attempt':'Execution attempt', 'act.artifact':'Artifact', 'act.timeUnknown':'Time unknown', 'act.viewEvidence':'View call evidence', 'act.viewEvidenceAria':'View call evidence for {id}', 'act.exit':'Exit code {n}',
-  'act.noEvents':'No execution records retrieved', 'act.roomUnknown':'Room unknown', 'act.noTeam':'No Main or Lead found in the retrieved records', 'act.recentUnknown':'Recent execution records unknown', 'act.recentNone':'No recent execution records',
-  'act.criteria':'Completion criteria verified · {v} / {n}', 'act.complete':' · Complete', 'act.incomplete':' · Incomplete', 'act.completeUnknown':' · Completion unknown', 'act.criteriaUnknown':'Completion criteria unknown',
-  'act.reviews':'Stored review records · passed {p} · failed {f} · no verdict {u}', 'act.reviewsUnknown':'Stored review records unknown', 'act.opsNone':'No recent stored artifacts', 'act.opsUnknown':'Recent artifacts unknown',
-  'appr.count':'Approval requests ({n})', 'appr.list':'Approvals', 'appr.partial':'Only part of the approval list was retrieved.', 'appr.idle':'No pending approvals', 'appr.scope':'Decision scope · next work requested by Main',
-  'appr.action':'Action · {v}', 'appr.target':'Target · {v}', 'appr.sender':'Requester · {v}', 'appr.approve':'Approve this request', 'appr.deny':'Deny this request', 'appr.mismatch':'The decision response does not match the request. Check the approval list.',
-  'appr.approved':'Approved · {id}', 'appr.denied':'Denied · {id}', 'appr.checking':'Checking approvals…', 'appr.bad':'Cannot read the approval list response.',
-  'surf.codexApp':'Codex App', 'surf.kindUnknown':'{b} · surface unknown', 'surf.unknown':'Unknown host', 'host.html':'HTML rendered · ', 'host.noReply':'Host response unknown', 'host.mode':' · Display mode {v}',
-  'host.unknownRest':' · side panel, native Mods and transport path (local/tunnel/remote) unknown', 'host.readOnly':' · Read-only profile', 'host.control':' · Conversation-control profile', 'host.checked':' · Last checked {v}',
-  'cf.installed':'Installed', 'cf.notInstalled':'Not installed', 'cf.authRequired':'Authentication required', 'cf.authVerified':'Authenticated', 'cf.yes':'Yes', 'cf.no':'No', 'cf.verifiedSession':'Verified session required', 'cf.unsupported':'Unsupported',
-  'cl.ready':'Ready to run', 'cl.missingTool':'Required tool missing', 'cl.observe':'Observation', 'cl.memberConfirmed':'Main membership in this conversation confirmed', 'cl.sessionUnknown':'Current session unconfirmed', 'cl.control':'Conversation control', 'cl.readOnly':'Read-only', 'cl.perRequest':'Room and permissions checked on each request',
-  'guide.codex':'Codex sign-in guide', 'guide.claude':'Claude sign-in guide', 'guide.agy':'Antigravity official guide', 'guide.pi':'Pi CodexGateway sign-in guide',
-  'start.reserved':'Separate Main start request received · {room}', 'start.recorded':'{p} Main · {state} · {attempt}', 'start.unknown':'Cannot determine the start status. Refresh to check progress.',
-  'start.started':'{p} Main started · {room} · {attempt}', 'start.badResponse':'Cannot confirm the start response. Refresh to check progress.', goalRule:'Enter the goal on one line, 1–2,000 characters.',
-  'status.stale':'Showing the previous result. Checking the new status…', 'status.checking':'Checking the conversation\'s Main and project status…', 'status.badList':'Cannot read the project list response.', 'status.badSnapshot':'Cannot read the project status response.',
-  'mutate.working':'Processing the request…'
+// One row per key, with Korean and English text. Static Korean labels come from the markup.
+const MSG = {ko:{}, en:{}};
+const catalogRows = `share.manual | 이 호스트에서는 복사한 뒤 대화에 붙여넣으세요. | Copy the answer and paste it into this conversation on this host.
+peer.assign |  | Request a read-only review
+peer.legend |  | Reviewer for this room
+peer.provider |  | Provider
+peer.prompt |  | Review request
+peer.hint | 확인할 코드나 질문을 입력하세요 | Enter the code to check or a question
+peer.start |  | Call one reviewer
+peer.check |  | Check request status
+peer.chat |  | Open review conversation
+peer.next |  | Request another review
+peer.role | 연구원 | Researcher
+peer.result | 읽기 전용 검토 결과 | Read-only review
+peer.reading | 요청 기록 확인 중… | Checking the request record…
+peer.sending | 검토 요청을 보내는 중… | Submitting the review request…
+peer.mismatch | 요청 기록이 일치하지 않습니다. | The request record does not match.
+peer.absent | 기록된 요청이 없습니다. | No recorded request.
+peer.badActor | 검토자 기록이 일치하지 않습니다. | The recorded reviewer does not match.
+peer.accepted | {p} 검토 요청 접수 · {title} | {p} review requested · {title}
+peer.unknown | 검토자 시작 여부를 확인하지 못했습니다. 같은 요청의 상태를 확인하세요. | Reviewer start is unconfirmed. Check this request’s status.
+peer.error | {error} · 요청 상태를 확인하세요. | {error} · Check this request’s status.
+peer.working | 검토자가 응답을 작성 중입니다. | The reviewer is preparing an answer.
+peer.empty | 호출이 끝났습니다. 조회한 기록에 답변이 없습니다. | The call ended. No answer was found in the records retrieved.
+peer.failed | 검토 호출이 실패했습니다. | The review call failed.
+peer.unconfirmed | 검토 요청은 기록되었고 실행 상태는 미확인입니다. | Review request recorded. Execution status is unconfirmed.
+share.choose |  | Attach review result
+share.label |  | Selected answer
+share.send |  | Send to this conversation
+share.copy |  | Copy answer
+share.cancel |  | Cancel
+share.preview | {p}의 답변을 확인한 뒤 전달하세요. | Review the answer from {p} before sharing.
+share.partial | {p}의 답변 중 아래에 표시된 부분만 전달합니다. | Only the portion of the answer from {p} shown here will be shared.
+share.copied | 선택한 답변을 복사했습니다. | Selected answer copied.
+share.select | 답변을 선택했습니다. 복사해 현재 대화에 붙여넣으세요. | Answer selected. Copy and paste it into this conversation.
+share.already | 이 결과는 이미 전송을 요청했습니다. 현재 대화에서 확인하세요. | Sending this result was already requested. Check the conversation.
+share.sending | 선택한 답변을 보내는 중… | Sending the selected answer…
+share.sent | 선택한 답변을 현재 대화로 보냈습니다. | Selected answer sent to this conversation.
+share.rejected | 호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다. | The host declined to send the answer. You can copy it instead.
+share.unknown | 호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요. | Delivery is unconfirmed. Check the conversation before copying the answer.
+title | OMS · 프로젝트 제어 | OMS · Project control
+language | 언어 (Language) | Language (언어)
+project |  | Project
+refresh |  | Refresh
+unknown | 미확인 | Unknown
+noInfo | 정보 없음 | No data
+providerUnknown | 공급자 미확인 | Unknown provider
+statusUnknown | 상태 미확인 | Status unknown
+partial | 일부 조회 | Partially retrieved
+noRecords | 기록 없음 | No records
+projectDefault | OMS 프로젝트 | OMS project
+selectProject | 프로젝트 선택 | Select a project
+draft | 초안 | Draft
+pageN | {page}페이지 | Page {page}
+prevPage | 이전 페이지 | Previous page
+nextPage | 다음 페이지 | Next page
+closed | 패널이 닫혔습니다. | The panel was closed.
+timeout | 응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요. | The request timed out. Refresh to check the result.
+hostFail | 앱이 요청을 처리하지 못했습니다. | The app could not process the request.
+projChanged | 프로젝트가 변경되었습니다. | The project changed.
+toolFail | OMS 도구 호출에 실패했습니다. | The OMS tool call failed.
+linkFail | 앱에서 링크를 열 수 없습니다. | The app cannot open the link.
+openApp | 앱 대화에서 OMS 패널을 여세요. | Open the OMS panel from an app conversation.
+tab.chat |  | Chat
+tab.activity |  | Activity
+tabs | 프로젝트 보기 | Project views
+tab.overview |  | Now
+tab.work |  | Work
+tab.results |  | Results
+tab.relations |  | Relationships
+tab.usage |  | Metrics
+tabsMore | 더 보기 화면 | More views
+moreViews |  | More · Project map · Chat · Metrics · Git
+taskSections | 작업 상세 구분 | Task detail sections
+task.overview |  | Summary
+task.changes |  | Changes
+task.verification |  | Verification
+task.history |  | History
+w.back | ← 목록으로 | ← Back to list
+w.now | 진행 중인 작업 | Work in progress
+w.nowResults | 작업 결과 | Task results
+w.owners |  | Owner linkage
+w.deps |  | Task dependencies
+w.loading | 작업 목록을 읽는 중… | Reading work items…
+w.unavailable | 작업 목록을 사용할 수 없습니다: {v} | Work items are unavailable: {v}
+w.bad | 작업 목록 형식을 확인할 수 없습니다. | The work item response was not recognized.
+w.count | 작업 {n}개 | {n} work items
+w.omitted | {n}개는 표시 범위 밖입니다. | {n} more are outside the shown range.
+w.dropped | 식별자가 없는 항목 {n}개는 제외했습니다. | {n} items without an id were left out.
+w.dup | 식별자가 겹친 작업 {n}개는 구분할 수 없어 제외했습니다. | {n} items with a repeated id cannot be told apart and were left out.
+w.empty | 관측된 작업이 없습니다. | No work items observed.
+w.noneActive | 진행 중인 작업이 없습니다. | No work in progress.
+w.noneResults | 결과가 기록된 작업이 없습니다. | No work item has a recorded result.
+w.noResultCount | 결과가 기록되지 않은 작업 {n}개 | {n} work items have no recorded result
+w.owner | 담당: {v} | Owner: {v}
+w.ownerUnknown | 담당 미확인 | Owner unknown
+w.stateUnknown | 상태 미확인 | State unknown
+w.id | ID {v} | ID {v}
+g.planned | 예정 | Planned
+g.active | 진행 | In progress
+g.review | 검토 | Review
+g.done | 완료 | Done
+g.other | 기타 상태 | Other states
+w.na | 미확인 | Unavailable
+w.evidenceNo | 검증 근거 없음 | No verification evidence
+w.ownersNote | 작업 기록에 적힌 담당 값으로만 묶습니다. 보고·상하 관계나 provider 소속은 추론하지 않습니다. | Grouped only by the owner value in the work record. Reporting lines and provider membership are not inferred.
+w.depsNote | 선행 작업 → 후속 작업 관계만 표시하며 담당 연결과 섞지 않습니다. | Shows only prerequisite → follow-up edges, never mixed with owner linkage.
+w.depsUnknown | 선행 정보 미확인 | Prerequisites unavailable
+w.depsNone | 선행 작업 없음 | No prerequisites
+w.pre | 선행: {v} | Before: {v}
+w.post | 후속: {v} | After: {v}
+w.missingDep | {id} (목록에 없음) | {id} (not in list)
+w.cycle | 순환 의존이 관측되어 그대로 표시합니다: {v} | A dependency cycle was observed and is shown as recorded: {v}
+w.gone | 이 작업은 현재 관측 결과에 없습니다: {id} | This task is not in the current observation: {id}
+w.revChanged | 작업 상세 버전이 변경되었습니다 ({a} → {b}). | Task detail version changed since opened ({a} → {b}).
+w.detailUnavailable | 작업 상세를 읽을 수 없습니다. | Task details could not be read.
+w.fState | 상태 | State
+w.fOwner | 담당(작업 기록) | Owner (work record)
+w.fIssue | 이슈 | Issue
+w.fPre | 선행 작업 | Prerequisites
+w.fPost | 후속 작업 | Follow-ups
+w.fRev | 작업 상세 버전 | Task detail version
+w.fId | 작업 ID | Task ID
+w.fResult | 결과 참조 | Result reference
+w.fVerify | 검증 근거 | Verification evidence
+w.noPreview | 이 작업 기록에는 미리보기 또는 diff가 포함되지 않았습니다. | No preview or diff is included in this work record.
+w.resultNone | 결과가 기록되지 않았습니다. | No result is recorded.
+w.verifyNone | 검증 근거가 기록되지 않았습니다. 미실행인지 누락인지 구분할 수 없습니다. | No verification evidence is recorded; not-run and missing cannot be told apart.
+w.verifyNoRev | 이 기록의 상세 버전을 확인할 수 없습니다. | The detail version of this record is unknown.
+w.histNone | 이 작업에 연결된 이벤트·시도 기록의 범위를 확인할 수 없어 표시하지 않습니다. | The scope of events and attempts linked to this task is unknown, so none are shown.
+w.histOpen | 프로젝트 전체 활동 열기 (이 작업 전용 아님) | Open project-wide activity (not specific to this task)
+w.viewAll | 작업 전체 보기 | View all work
+alerts |  | Items needing attention
+alerts.count | {n}건 | {n} items
+alertsOpen |  | View attention items
+goalHeading |  | Project goal
+planStrip | 프로젝트 작업 검증 | Project task verification
+planVerified |  | Planned tasks verified
+planOpen |  | View plan ›
+map.parent |  | Parent
+map.deps |  | Dependencies
+threads |  | Other work conversations
+providerOptions |  | Lead candidates · Codex, Claude, AGY
+providerLoad |  | Check host status
+backlog |  | Hand all open GitHub work to Main
+launcher |  | Send a new goal to a separate Main
+chooseMain |  | Choose a new Main
+briefLabel |  | New work goal
+briefPlaceholder | Main이 Lead들과 수행할 목표를 입력하세요. | Enter the goal Main will pursue with its Leads.
+start |  | Send goal
+records |  | Full project record
+metricActive |  | Attempts without a closing record
+metricTasks |  | Planned tasks
+metricState |  | Current state
+historyTeam |  | Project Main and Lead records
+historyOps |  | Recently stored artifacts
+historyRuns |  | Recent executions
+chatHeading |  | Room conversation
+chatBack | 이전 보기로 | Back to previous view
+chatMembers | 대화 참여자 | Conversation participants
+chatOlder | 이전 메시지 | Earlier messages
+chatMessages | 시간순 작업방 메시지 | Room messages in time order
+evidenceRegion | 호출별 실행 근거 | Execution evidence by call
+evidenceCall |  | Recorded call
+evidencePrev | 근거 이전 페이지 | Previous evidence page
+evidenceNext | 근거 다음 페이지 | Next evidence page
+activityHeading |  | Project activity
+tuiLabel |  | OMS TUI details
+tui.choose |  | Choose a view
+tui.runtime | 런타임 | Runtime
+tui.collab | 협업 | Collaboration
+tui.run | 실행 | Execution
+tui.overview |  | Overview
+tui.health |  | Health
+tui.providers |  | Providers
+tui.metrics |  | Metrics
+tui.capacity |  | Capacity
+tui.log |  | Log
+tui.teams |  | Teams
+tui.sessions |  | Sessions
+tui.plan |  | Plan
+tui.attention |  | Attention
+tui.results |  | Results
+tui.debate |  | Debate
+tui.routes |  | Routes
+tui.workspaces |  | Workspaces
+tui.jobs |  | Jobs
+tui.past |  | Past runs
+tuiRegion | 선택한 OMS TUI 기록 | Selected OMS TUI records
+timeline |  | Command and job timeline
+usageHeading |  | Token usage
+gitBacklog | 열린 작업 전체를 Main에 맡기기 | Hand all open work to Main
+gitEditor | GitHub 항목 작업 목표 | GitHub item work goal
+gitAssignee |  | Assign request to
+gitAuto |  | Main chooses the Lead
+gitGoalLabel |  | Goal to send to the conversation
+gitCopy |  | Copy goal
+gitNew |  | Use as a separate Main goal
+gitView |  | GitHub view
+gitKind.checkout |  | Checkout PRs · checks
+gitKind.issues |  | Repository issues
+gitKind.pullRequests |  | Repository PRs
+gitFind |  | Find by number
+gitLookup |  | Look up
+source |  | Connection info
+room |  | Room
+participant |  | Participant
+obsRevision |  | Observation revision
+obsBasis |  | Observation basis
+obsCompleteness |  | Collection status
+appAndOms |  | App and OMS
+hostSupport |  | Support and connection paths by host
+hostSupport1 |  | Codex Desktop provides a chat tab. CLI and IDE use the project's OMS MCP tools or local OMS skills.
+hostSupport2 |  | Claude Chat supports remote HTTPS connectors; Desktop also supports local stdio. Side-panel availability depends on the account and per-conversation rollout. Claude Code's native Mods are a separate feature: terminal 2.1.287+, Code in Desktop 2.1.286+ and the VS Code extension 2.1.299+ support them depending on settings, and 2.1.304+ needs no flag.
+hostSupport3 |  | Antigravity App 2.34.0+ opens the panel through local stdio or a configured remote MCP. CLI and IDE use text tools. Local OMS needs no tunnel.
+connectionView |  | Connection details
+cv.connections |  | Harnesses and readiness
+cv.modelcatalog |  | Model and effort catalog
+cv.routes |  | Expected routing · accounts
+cv.attribution |  | Execution response evidence
+harness |  | Harness
+connectionRefresh |  | Reload connection details
+connectionDraft | 이 하네스로 새 목표 작성 | Draft a new goal with this harness
+sv.connections | 설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다. | Installation is checked on the PATH of the host running OMS. Authentication and actual runnability are checked separately.
+sv.modelcatalog | 로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다. | Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.
+sv.routes | 프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다. | Expected routing for the project's next call. Only confirmed logical aliases are shown for accounts.
+sv.attribution | 선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다. | Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.
+state.running | 실행 중 | Running
+state.working | 실행 중 | Running
+state.starting | 실행 중 | Running
+state.claimed | 점유됨 | Claimed
+state.landing | 착지 중 | Landing
+state.verifying | 검증 중 | Verifying
+state.review | 검토 중 | In review
+state.in_review | 검토 중 | In review
+state.waiting |  | Needs you
+state.waiting_for_input | 확인 필요 | Needs you
+state.blocked | 차단됨 | Blocked
+state.ready | 준비됨 | Ready
+state.queued | 대기 중 | Pending
+state.done | 완료 | Done
+state.completed | 완료 | Completed
+state.exited | 종료됨 | Exited
+state.accepted | 검증 완료 | Verified
+state.closed | 닫힘 | Closed
+state.cancelled | 취소됨 | Cancelled
+state.abandoned | 중단됨 | Abandoned
+state.interrupted | 중단됨 | Interrupted
+state.failed | 실패 | Failed
+state.rejected | 반려됨 | Rejected
+state.timed_out | 시간 초과 | Timed out
+state.orphaned | 연결 끊김 | Orphaned
+state.guard_stop | 가드 정지 | Guard stop
+state.partial | 일부 | Partial
+state.degraded | 저하 | Degraded
+state.stale | 일부·만료 | Stale
+state.unknown | 미확인 | Unknown
+kind.issue | 이슈 # | Issue #
+kind.pr | PR # | PR #
+git.unknown | 현재 체크아웃의 Git 상태 미확인 | Git status of the current checkout is unknown
+git.detached | 분리된 HEAD | Detached HEAD
+git.dirty | 작업 트리 변경 있음 | Working tree has changes
+git.clean | 작업 트리 깨끗함 | Working tree clean
+git.dirtyUnknown | 작업 트리 미확인 | Working tree unknown
+git.upstream | 추적 브랜치 {v} | Upstream {v}
+git.ahead | 앞섬 {n} | Ahead {n}
+git.behind | 뒤처짐 {n} | Behind {n}
+git.prefix | {p} Lead에게 다음 작업을 배정해 주세요.  | Please assign the following work to the {p} Lead.\x20
+git.prefixAny | 담당 Lead를 정해 다음 작업을 배정해 주세요.  | Please choose a Lead and assign the following work.\x20
+git.draft | 작업 목표 작성 | Draft work goal
+git.draftAria | {label} 작업 목표 작성 | {label}: draft work goal
+git.editorHint | 대화로 보내면 Main이 이 목표로 작업을 시작할 수 있습니다. | Once sent to the conversation, Main can start working on this goal.
+git.noRepo | 현재 프로젝트의 GitHub 저장소를 확인할 수 없습니다. | Cannot determine this project's GitHub repository.
+git.backlogLabel | {repo} · 전체 열린 작업 | {repo} · all open work
+git.backlogBody | {url} 저장소의 모든 열린 이슈와 PR을 마지막 페이지까지 조회하세요. 기존 PR과 검증 결과, 중복 및 의존성을 확인하고 작업 순서를 정하세요. oms_panel_git_status의 inventory를 issues와 pullRequests로 각각 조회하고 nextCursor가 없을 때까지 다음 페이지를 읽으세요. 조회 실패·누락은 미확인으로 표시하세요. 각 작업을 적합한 Lead와 진행하고 결과, 검증 근거, 남은 항목을 대화에 보고하세요. 게시나 병합은 별도의 명시적 승인 후 진행하세요. | List every open issue and PR in the {url} repository through the last page. Check existing PRs, verification results, duplicates and dependencies, then decide the work order. Query the oms_panel_git_status inventory separately for issues and pullRequests and read further pages until nextCursor is absent. Mark failed or missing lookups as unknown. Run each task with a suitable Lead and report results, verification evidence and remaining items in the conversation. Publish or merge only after separate explicit approval.
+git.loading | GitHub PR과 검사를 조회하는 중… | Loading GitHub PRs and checks…
+git.remoteUnsupported | GitHub PR 조회를 지원하지 않는 원격 저장소 | Remote repository does not support GitHub PR lookup
+git.prUnavailable | GitHub PR 조회 불가 | GitHub PR lookup unavailable
+git.noOpenPr | 조회한 체크아웃에 연결된 열린 PR 없음 | No open PR linked to the checked-out branch
+git.scope | GitHub Projects 읽기 권한(read:project)이 필요합니다. | GitHub Projects read permission (read:project) is required.
+git.listUnsupported | 이 저장소에서 지원하지 않는 목록입니다. | This repository does not support this list.
+git.listFail | GitHub 목록을 조회할 수 없습니다. | Cannot retrieve the GitHub list.
+git.shown | {n}건 표시 | {n} shown
+git.noItems | 조회된 항목 없음 | No items found
+git.boardUnknown | 보드 식별 정보 미확인 | Board identity unknown
+git.boardView | 보드 상세 보기 | View board details
+git.boardLoading | 보드 조회 중… | Loading board…
+git.timeout | GitHub 조회 시간이 초과됐습니다. | GitHub lookup timed out.
+git.rateLimit | GitHub 요청 한도에 도달했습니다. | GitHub rate limit reached.
+git.boardNotInCatalog | 현재 저장소에서 확인한 연결 목록에 이 보드가 없습니다. | This board is not in the connected list found for this repository.
+git.boardUnverified | 이 저장소에서 보드와 연결 정보를 확인할 수 없습니다. | Cannot verify the board and its link to this repository.
+git.class.candidate | 검토 후보 | Candidate
+git.class.blocked | 선행 이슈 진행 중 | Blocked by an open prerequisite
+git.class.unverified | 추가 확인 필요 | Needs verification
+git.class.plan_linked | 기존 Plan 연결 | Linked to an existing Plan
+git.class.board_in_progress | 보드에서 진행 중 | In progress on the board
+git.class.closed_board | 닫힌 보드 | Closed board
+git.class.duplicate | 중복 | Duplicate
+git.class.archived | 보관됨 | Archived
+git.class.unknown | 분류 미확인 | Unclassified
+git.class.draft | 초안 | Draft
+git.class.foreign | 다른 저장소 | Other repository
+git.class.epic | 에픽 | Epic
+git.class.closed | 닫힘 | Closed
+git.class.pull_request | PR | PR
+git.page | {page}쪽 · {n}건 | Page {page} · {n} items
+git.missingFields | 확인되지 않은 필드 {v} | Unverified fields {v}
+git.badNumber | 1~9999999999 사이의 정수 번호를 입력하세요. | Enter an integer between 1 and 9999999999.
+git.finding | GitHub 항목을 찾는 중… | Looking up the GitHub item…
+git.closed | 이미 닫힌 항목입니다. | This item is already closed.
+git.notOpenNow | 현재 열린 상태를 확인할 수 없습니다. | Cannot confirm that it is currently open.
+git.notFound | 이 저장소에서 해당 열린 항목을 확인할 수 없습니다. | Cannot find that open item in this repository.
+git.sendMain | 현재 Main 대화에 보내기 | Send to current Main conversation
+git.share | 현재 대화에 공유 | Share to current conversation
+git.copied | 목표를 복사했습니다. | Goal copied.
+git.selected | 목표를 선택했습니다. 복사해 현재 대화에서 사용할 수 있습니다. | Goal selected. Copy it to use in the current conversation.
+git.sending | 현재 대화로 전달하는 중… | Sending to the current conversation…
+git.sentMain | 현재 Main 대화에 배정 요청을 전달했습니다. | Assignment request sent to the current Main conversation.
+git.shared | 현재 대화에 목표를 공유했습니다. | Goal shared to the current conversation.
+git.sendUnknown | 전달 여부를 대화에서 확인하세요. 작성한 목표는 복사할 수 있습니다. | Check the conversation to see whether it was delivered. You can copy the goal you wrote.
+git.tooLong | 기존 목표와 합치면 2,000자를 넘습니다. 전달할 내용을 줄이세요. | Combined with the existing goal it exceeds 2,000 characters. Shorten what you send.
+git.badResponse | Git·PR 응답을 확인할 수 없습니다. | Cannot read the Git/PR response.
+git.staleItem | 새 목록에서 열린 상태를 확인하지 못했습니다. 번호로 다시 조회해 선택하세요. | The new list did not confirm it is open. Look it up by number again and select it.
+git.openAria | {repo} {text} GitHub에서 열기 | Open {repo} {text} on GitHub
+git.linkedWorktree | 연결된 워크트리 | Linked worktree
+git.currentCheckout | 현재 체크아웃 | Current checkout
+git.headMatch | 로컬 HEAD 일치 | Matches local HEAD
+git.headDiffer | 로컬 HEAD 불일치 | Differs from local HEAD
+git.headUnknown | HEAD 비교 미확인 | HEAD comparison unknown
+git.checksUnknown | 검사 상태 미확인 | Check status unknown
+git.noChecks | 보고된 검사 없음 | No checks reported
+git.checks | 검사 · 통과 {p} · 실패 {f} · 대기 {w} · 기타 {o} | Checks · passed {p} · failed {f} · pending {w} · other {o}
+git.check.failed | 실패 | Failed
+git.check.pending | 대기 중 | Pending
+git.check.passed | 통과 | Passed
+git.check.other | 기타 | Other
+git.check.unknown | 미확인 | Unknown
+usage.loading | 기록된 사용량을 조회하는 중… | Loading recorded usage…
+usage.badResponse | 사용량 응답을 확인할 수 없습니다. | Cannot read the usage response.
+usage.totals | 프로젝트 누적 · 물리 호출 영수증 | Project totals · physical call receipts
+usage.totalsUnknown | 프로젝트 호출 영수증 수집 상태 미확인 | Project call receipt collection status unknown
+usage.totalsNone | 기록된 프로젝트 호출 영수증 없음 | No project call receipts recorded
+usage.tokens | 보고된 토큰 소계 {tokens} · 사용량 보고 {r}/{c}회 | Reported token subtotal {tokens} · usage reported in {r}/{c} calls
+usage.reportedCost | 보고 비용 | Reported cost
+usage.estimatedCost | 추정 비용 | Estimated cost
+usage.noRecord | 기록 없음 | No record
+usage.costLine | {title} {cost} · {n}회 | {title} {cost} · {n} calls
+usage.hostUsage | 호스트 공급자 사용량 | Host provider usage
+usage.lastObserved | 마지막 관측  | Last observed\x20
+usage.used | {n}% 사용 | {n}% used
+usage.unknown | 사용률 미확인 | Usage unknown
+usage.stale | 오래된 기록 | Stale record
+usage.ago | {n}분 전 기록 | Recorded {n} min ago
+usage.resets | 초기화 {d} | Resets {d}
+usage.window | 구간 | Window
+usage.windowAria | {name} 사용률 | {name} usage
+usage.windowsOmitted | 표시 한도 밖의 사용 구간 {n}개 | {n} usage windows beyond the display limit
+usage.context | 컨텍스트 {n}% | Context {n}%
+usage.cacheShare | 캐시 읽기 비중 {n}% | Cache read share {n}%
+usage.recent | 최근 7일 OMS 위임 · 호출 {c} · 입력 {i} · 출력 {o} · 캐시 읽기 {r} | OMS delegation, last 7 days · calls {c} · input {i} · output {o} · cache read {r}
+usage.none | 수집된 공급자 사용량 없음 | No provider usage collected
+usage.attempts | 프로젝트 시도별 토큰 기록 | Token records by project attempt
+usage.tokenCount | 토큰 {n} | Tokens {n}
+usage.receipt | 실행 영수증 | Execution receipt
+usage.events | 이벤트 기록 | Event log
+usage.sourceUnknown | 출처 미확인 | Source unknown
+usage.reportedCalls | 사용량 보고 {r}/{c}회 | Usage reported in {r}/{c} calls
+usage.eventCost | 이벤트 기록 비용 {v} | Event-log cost {v}
+usage.b.calls | 호출 {n} | Calls {n}
+usage.b.input | 입력 {n} | Input {n}
+usage.b.output | 출력 {n} | Output {n}
+usage.b.cacheRead | 캐시 읽기 {n} | Cache read {n}
+usage.b.cacheWrite | 캐시 쓰기 {n} | Cache write {n}
+usage.attemptsNone | 최근 시도에 귀속된 토큰 기록 없음 | No token records attributed to recent attempts
+usage.attemptsOmitted | 표시 한도 밖의 시도 {n}건 | {n} attempts beyond the display limit
+goalNone | 기록된 목표 없음 | No goal recorded
+obs.basis | 다중 원장 관측 (비원자적) | Multi-ledger observation (non-atomic)
+obs.basisUnknown | 관측 기준 미확인 | Observation basis unknown
+obs.complete | 전체 관측 | Full observation
+obs.partial | 일부 관측 | Partial observation
+obs.unknown | 관측 상태 미확인 | Observation status unknown
+obs.omitted | 생략 {n}건 | Omitted {n}
+obs.trimmed | 축약 {n}건 | Trimmed {n}
+src.git | Git | Git
+src.task | 작업 | Tasks
+src.plan | 계획 | Plan
+src.attempts | 실행 | Executions
+src.artifacts | 결과물 | Artifacts
+src.acceptance | 수락 근거 | Acceptance evidence
+src.conversation | 대화 | Conversation
+srcState.unavailable | 미확인 | Unknown
+srcState.partial | 일부 수집 | Partially collected
+srcState.ambiguous | 연결 불명확 | Ambiguous link
+srcState.stale | 만료된 기록 | Stale record
+obs.needsAttention | 확인 필요 · {v} | Needs attention · {v}
+obs.latestArtifact | 저장소 최근 결과물 {v} | Latest repository artifact {v}
+obs.lastChecked | 최근 조회 {d} | Last checked {d}
+omit.attempts | 최근 실행 | Recent executions
+omit.operations | 결과물 | Artifacts
+omit.attention | 주의 항목 | Attention items
+omit.active | 미종료 실행 | Open executions
+labelCount | {label} {n}건 | {label} {n}
+degraded | 일부 상태를 수집하지 못했습니다. | Some status could not be collected.
+omittedRecords | 요약에서 생략된 기록 · {v} | Records omitted from the summary · {v}
+conn.checking | OMS 연결 확인 중 | Checking OMS connection
+conn.unknownProject | 프로젝트 연결 미확인 | Project connection unknown
+conn.selectProject | OMS 연결됨 · 프로젝트 선택 필요 | OMS connected · select a project
+conn.loaded | OMS 연결됨 · 프로젝트 상태 조회됨 | OMS connected · project status loaded
+conn.failed | OMS 연결 또는 프로젝트 조회 실패 | OMS connection or project lookup failed
+conn.needsConnection | OMS와 프로젝트 연결을 확인한 뒤 조회할 수 있습니다. | You can look this up after the OMS and project connection is confirmed.
+conn.loading | 연결 내역을 확인하는 중… | Checking connection details…
+conn.rows | {n}건 표시 | {n} shown
+conn.none | 확인된 기록 없음 | No records confirmed
+conn.fail | 현재 연결 내역을 확인할 수 없습니다. OMS 연결과 프로젝트 권한을 확인하고 다시 조회하세요. | Cannot retrieve connection details. Check the OMS connection and project permissions, then try again.
+conn.checkPermissions | 프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요. | Check project permissions and the host MCP connection, then try again.
+project.unreachable | 대화에서 지정한 프로젝트에 연결할 수 없습니다. | Cannot connect to the project specified in the conversation.
+project.choose | OMS를 사용할 프로젝트를 선택하세요. | Select a project to use with OMS.
+member.left | 참여 종료 | Left
+member.omitted | 추가 참여자 {n}명 생략 | {n} more participants omitted
+evidence.choose | 호출 선택 | Select a call
+evidence.missing | 조회된 작업방 호출 목록에서 해당 시도를 확인할 수 없습니다. | That attempt is not in the retrieved room call list.
+evidence.partial | 최근 호출 목록 일부 표시 | Showing part of the recent call list
+evidence.loading | {name} 조회 중… | Loading {name}…
+evidence.mismatch | 선택한 호출과 근거 응답이 일치하지 않습니다. | The evidence response does not match the selected call.
+evidence.changed | 보관된 근거가 바뀌었습니다. 실행 정보를 다시 확인하세요. | The stored evidence changed. Check the run info again.
+evidence.truncated | 긴 줄 일부 표시 | Long lines truncated
+ev.info | 실행 정보 | Run info
+ev.events | 이벤트 | Events
+ev.files | 변경 파일 | Changed files
+ev.diff | 패치 | Patch
+ev.transcript | 기록된 답변 | Recorded reply
+chat.title | 참여자 대화 | Participant conversation
+chat.pick | 메시지를 읽을 참여자를 선택하세요. | Select a participant to read messages.
+chat.noMembers | 현재 대화와 연결된 작업방 참여자 미확인 | No room participants linked to this conversation found
+chat.loading | 작업방 메시지를 조회하는 중… | Loading room messages…
+chat.loadingOlder | 이전 메시지를 조회하는 중… | Loading earlier messages…
+chat.mismatch | 선택한 작업방·참여자와 메시지 응답이 일치하지 않습니다. | The message response does not match the selected room and participant.
+chat.result | 기록된 실행 결과 | Recorded execution result
+chat.partial | 일부 표시 | Partially shown
+chat.native | Codex 원래 대화 열기 | Open original Codex conversation
+chat.count | 작업방 기록 {n}건 | {n} room records
+chat.none | 기록된 작업방 메시지 없음 | No room messages recorded
+tui.loading | TUI 기록을 조회하는 중… | Loading TUI records…
+tui.mismatch | 선택한 TUI 보기와 응답이 일치하지 않습니다. | The response does not match the selected TUI view.
+tui.unavailable | 이 TUI 보기를 조회할 수 없습니다. | Cannot load this TUI view.
+tui.shown | 표시 {n}건 | {n} shown
+tui.noneOnPage | 이 페이지에서 확인된 기록 없음 | No records confirmed on this page
+tui.confirmedTotal | 확인된 합계 {n}건 | Confirmed total {n}
+tui.total | 전체 {n}건 | Total {n}
+thread.aria | {task} · {p} 대화 열기 | Open conversation: {task} · {p}
+prov.loading | 호스트 공급자 상태를 확인하는 중… | Checking host provider status…
+prov.unavailable | 호스트 공급자 상태를 확인할 수 없습니다. | Cannot determine host provider status.
+prov.usable | 호스트 사용 가능 | Available on host
+prov.unusable | 호스트 사용 불가 | Unavailable on host
+prov.installed | 설치됨 · 사용 가능 여부 미확인 | Installed · availability unknown
+prov.notInstalled | 설치되지 않음 | Not installed
+prov.unknown | 사용 가능 여부 미확인 | Availability unknown
+prov.partial | 호스트 목록 일부 조회 | Host list partially retrieved
+prov.basis | 현재 프로젝트 호스트 기준 | Based on the current project host
+main.repoScope | 저장소 Main | Repository Main
+main.current | 현재 Main | Current Main
+main.unknown | Main 미확인 | Main unknown
+main.joined | 작업방 소유자로 참여 중 | Joined as room owner
+main.partialRooms |  · 작업방 목록 일부 조회 |  · Room list partially retrieved
+main.noOwner | 이 대화와 연결된 작업방 소유자를 확인할 수 없습니다. | Cannot determine the room owner linked to this conversation.
+main.repoRecorded | 저장소에 기록된 Main | Main recorded in the repository
+main.thisConversation | 이 대화의 Main | Main of this conversation
+main.repoLeads | 저장소의 Lead 활동 | Repository Lead activity
+main.roomLead | 작업방 Lead | Room Lead
+main.noRepoMain | 저장소 실행 기록에서 Main을 확인할 수 없습니다. | Cannot determine Main from repository execution records.
+main.headerAria | 이 대화의 {name} 작업방 대화 보기 | View the room conversation of {name} for this conversation
+lead.none | 미종료 Lead 기록 없음 | No open Lead records
+lead.unseen | 조회한 기록에서 미종료 Lead를 확인하지 못했습니다. | No open Lead found in the retrieved records.
+lead.taskUnknown | 작업 미확인 | Task unknown
+lead.aria | {assignee} · {task} · {p} 대화 열기 | Open conversation: {assignee} · {task} · {p}
+lead.count | Lead {n}개 | {n} Leads
+lead.countOne | Lead {n}개 | {n} Lead
+act.planned | 계획된 작업 {n} | Planned tasks {n}
+act.partialRuntime | 런타임 일부 조회 | Runtime partially retrieved
+act.attempts | 실행 시도 {n} | Execution attempts {n}
+act.open | 미종료 {n} | Open {n}
+act.executing | 실행 상태 {n} | Executing {n}
+act.unknown | OMS 명령 집계 미확인 | OMS command totals unknown
+act.attempt | 실행 시도 | Execution attempt
+act.artifact | 결과물 | Artifact
+act.timeUnknown | 시각 미확인 | Time unknown
+act.viewEvidence | 호출 근거 보기 | View call evidence
+act.viewEvidenceAria | {id} 호출 근거 보기 | View call evidence for {id}
+act.exit | 종료 코드 {n} | Exit code {n}
+act.noEvents | 조회된 실행 기록 없음 | No execution records retrieved
+act.roomUnknown | 작업방 미확인 | Room unknown
+act.noTeam | 조회한 기록에서 Main·Lead 미확인 | No Main or Lead found in the retrieved records
+act.recentUnknown | 최근 실행 기록 미확인 | Recent execution records unknown
+act.recentNone | 최근 실행 기록 없음 | No recent execution records
+act.criteria | 완료 기준 검증 · {v} / {n}개 | Completion criteria verified · {v} / {n}
+act.complete |  · 완료 |  · Complete
+act.incomplete |  · 미완료 |  · Incomplete
+act.completeUnknown |  · 완료 여부 미확인 |  · Completion unknown
+act.criteriaUnknown | 완료 기준 미확인 | Completion criteria unknown
+act.reviews | 보관된 리뷰 기록 · 통과 {p} · 실패 {f} · 판정 없음 {u} | Stored review records · passed {p} · failed {f} · no verdict {u}
+act.reviewsUnknown | 보관된 리뷰 기록 미확인 | Stored review records unknown
+act.opsNone | 최근 보관된 결과물 없음 | No recent stored artifacts
+act.opsUnknown | 최근 결과물 미확인 | Recent artifacts unknown
+appr.count | 승인 요청 {n}건 | Approval requests ({n})
+appr.list | 승인 목록 | Approvals
+appr.partial | 승인 목록을 일부만 조회했습니다. | Only part of the approval list was retrieved.
+appr.idle | ✓ 대기 중인 승인 없음 | ✓ No pending approvals
+appr.scope | 결정 범위 · Main이 요청한 다음 작업 | Decision scope · next work requested by Main
+appr.action | 작업 · {v} | Action · {v}
+appr.target | 대상 · {v} | Target · {v}
+appr.sender | 요청자 · {v} | Requester · {v}
+appr.approve | 이 요청 승인 | Approve this request
+appr.deny | 이 요청 거절 | Deny this request
+appr.mismatch | 결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요. | The decision response does not match the request. Check the approval list.
+appr.approved | 승인 처리됨 · {id} | Approved · {id}
+appr.denied | 거절 처리됨 · {id} | Denied · {id}
+appr.checking | 승인 목록을 확인하는 중… | Checking approvals…
+appr.bad | 승인 목록 응답을 읽을 수 없습니다. | Cannot read the approval list response.
+surf.codexApp | Codex 앱 | Codex App
+surf.kindUnknown | {b} · 화면 종류 미확인 | {b} · surface unknown
+surf.unknown | 호스트 미확인 | Unknown host
+host.html | HTML 표시됨 ·  | HTML rendered ·\x20
+host.noReply | 호스트 응답 미확인 | Host response unknown
+host.mode |  · 표시 모드 {v} |  · Display mode {v}
+host.unknownRest |  · 사이드 패널·네이티브 Mod·전송 경로(로컬/터널/원격) 미확인 |  · side panel, native Mods and transport path (local/tunnel/remote) unknown
+host.readOnly |  · 읽기 전용 프로필 |  · Read-only profile
+host.control |  · 대화 제어 프로필 |  · Conversation-control profile
+host.checked |  · 마지막 조회 {v} |  · Last checked {v}
+cf.installed | 설치됨 | Installed
+cf.notInstalled | 미설치 | Not installed
+cf.authRequired | 인증 필요 | Authentication required
+cf.authVerified | 인증 확인 | Authenticated
+cf.yes | 예 | Yes
+cf.no | 아니오 | No
+cf.verifiedSession | 검증된 세션 필요 | Verified session required
+cf.unsupported | 미지원 | Unsupported
+cl.ready | 실행 준비 | Ready to run
+cl.missingTool | 필수 도구 누락 | Required tool missing
+cl.observe | 관찰 | Observation
+cl.memberConfirmed | 현재 대화의 Main 멤버십 확인 | Main membership in this conversation confirmed
+cl.sessionUnknown | 현재 세션 미확인 | Current session unconfirmed
+cl.control | 대화 제어 | Conversation control
+cl.readOnly | 읽기 전용 | Read-only
+cl.perRequest | 각 요청에서 작업방·권한 확인 | Room and permissions checked on each request
+guide.codex | Codex 로그인 안내 | Codex sign-in guide
+guide.claude | Claude 로그인 안내 | Claude sign-in guide
+guide.agy | Antigravity 공식 안내 | Antigravity official guide
+guide.pi | Pi의 CodexGateway 로그인 안내 | Pi CodexGateway sign-in guide
+start.reserved | 별도 Main 시작 요청 접수됨 · {room} | Separate Main start request received · {room}
+start.recorded | {p} Main · {state} · {attempt} | {p} Main · {state} · {attempt}
+start.unknown | 시작 상태를 확인할 수 없습니다. 진행 상황을 새로고침하세요. | Cannot determine the start status. Refresh to check progress.
+start.started | {p} Main 시작됨 · {room} · {attempt} | {p} Main started · {room} · {attempt}
+start.badResponse | 시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요. | Cannot confirm the start response. Refresh to check progress.
+goalRule | 목표를 한 줄로 1~2,000자 입력하세요. | Enter the goal on one line, 1–2,000 characters.
+status.partial | ~ 일부 | ~ Partial
+status.stale | 이전 조회 결과를 표시하고 있습니다. 새 상태를 확인하는 중… | Showing the previous result. Checking the new status…
+status.checking | 대화의 Main과 프로젝트 상태를 확인하는 중… | Checking the conversation's Main and project status…
+status.badList | 프로젝트 목록 응답을 읽을 수 없습니다. | Cannot read the project list response.
+status.badSnapshot | 프로젝트 상태 응답을 읽을 수 없습니다. | Cannot read the project status response.
+mutate.working | 요청을 처리하는 중… | Processing the request…
+scratch.heading |  | Managed worktree history
+scratch.unavailable | 작업트리 기록을 확인할 수 없습니다. | Worktree records are unavailable.
+scratch.empty | 이 프로젝트에 기록된 작업트리 실행이 없습니다. | No worktree executions recorded for this project.
+scratch.partial | 일부 기록만 확인했습니다. | Only part of the history was observed.
+scratch.omitted | 실행 기록 {n}개 생략 | {n} execution records omitted
+scratch.unverified | 소유 미확인 {n}개 | {n} unverified
+scratch.unexamined | 미조회 {n}개 | {n} unexamined
+scratch.sources | 작업트리 {n}개 생략 | {n} worktrees omitted
+scratch.recorded | 기록된 상태 · {s} | Recorded state · {s}
+scratch.at | 기록 시각 · {at} | Recorded at · {at}
+state.waiting_input | 입력 대기 | Waiting for input
+state.waiting_approval | 승인 대기 | Waiting for approval
+git.rec.scope | 이 페이지에 표시된 항목별 판단입니다. | Readiness is assessed per item on this page.
+git.rec.recommended | 추천 · {reason} | Recommended · {reason}
+git.rec.excluded | 제외 · {reason} | Excluded · {reason}
+git.rec.unverified | 추천 보류 · {reason} | Unverified · {reason}
+git.rec.ready_with_priority | Ready이고 우선순위가 P0~P2이며 열린 선행 이슈나 기존 Plan 연결이 발견되지 않았습니다. | Ready at priority P0–P2, with no open blockers or existing Plan link observed.
+git.rec.status_not_ready | 상태가 Ready가 아닙니다. | Status is not Ready.
+git.rec.priority_unrecognized | 우선순위가 P0·P1·P2 중 하나인지 확인할 수 없습니다. | Priority could not be confirmed as P0, P1 or P2.
+git.rec.partial_response | GitHub가 일부 정보만 반환했습니다. | GitHub returned partial data.
+git.rec.plan_unverified | 기존 Plan 또는 작업 연결을 확인할 수 없습니다. | Existing Plan or task links could not be verified.
+git.rec.field_schema_unverified | 보드 필드나 선택 항목의 식별자를 확인할 수 없습니다. | Board field or option identities could not be verified.
+git.rec.dependencies_unknown | 선행 이슈 정보를 모두 확인하지 못했습니다. | Blocker information is incomplete.
+git.rec.item_evidence_incomplete | 이슈 또는 보드 항목 정보가 불완전합니다. | Issue or board item details are incomplete.
+git.rec.field_selection_unverified | 선택된 필드 값을 확인할 수 없습니다. | Selected field values could not be verified.
+git.rec.absent | 서버가 추천 정보를 보내지 않았습니다. | The server did not provide a recommendation.
+git.rec.unknown | 추천 상태나 판단 근거를 확인할 수 없습니다. | The recommendation or its reason could not be verified.
+scratch.queued | 대기열에 등록 | Queued`;
+for (const line of catalogRows.split('\n')) {
+  const [key,ko,en] = line.split(' | ');
+  if (ko) MSG.ko[key] = ko;
+  if (en) MSG.en[key] = en;
 }
-};
 // Preserve the first-paint Korean labels as the static translation source.
 for (const e of document.querySelectorAll('[data-i18n]')) {
   const key = e.getAttribute('data-i18n');
@@ -953,7 +1238,7 @@ let currentTab = 'overview', dashboardData, members = [], selectedMember, olderC
 let availableAttempts = [], evidenceId, evidenceSection, evidencePage = 1, evidenceNext, evidenceProofs = {};
 const evidenceKeys = ['info','events','files','diff','transcript'];
 let tuiPages = [], tuiNext;
-const jobs = new Map(), loaded = new Set(), tabScroll = new Map();
+const jobs = new Map(), loaded = new Set(), tabScroll = new Map(), approvalState = new Map();
 
 // The map and the command directory use the selected project's read-only tools.
 let explorerBound = false, graphData, graphError = '', graphTrail = [], graphQuery = '', graphLimit = 40;
@@ -996,7 +1281,8 @@ function graphLink(e, direction) {
   const rel=e.relation;
   const labels={calls:['호출','Calls'],imports:['가져오기','Imports'],import:['가져오기','Imports'],references:['참조','References'],tests:['테스트 연결','Test link']};
   const confidence={EXTRACTED:['추출','Extracted'],INFERRED:['추론','Inferred'],AMBIGUOUS:['불확실','Ambiguous'],STRUCTURAL:['구조','Structural']};
-  const name=rel==='contains' ? (direction==='out' ? choice('하위 항목','Child') : choice('상위 항목','Parent')) :
+  const name=rel==='contains'||rel==='owns' ? (direction==='out' ? choice('하위 항목','Child') : choice('상위 항목','Parent')) :
+    rel==='parent' ? (direction==='out' ? choice('상위 항목','Parent') : choice('하위 항목','Child')) :
     Object.hasOwn(labels,rel) ? choice(...labels[rel]) : rel;
   const prefix=direction==='out' ? '→ ' : direction==='in' ? '← ' : '↻ ';
   return prefix+name+' · '+(Object.hasOwn(confidence,e.confidence) ? choice(...confidence[e.confidence]) : choice('미확인','Unconfirmed'));
@@ -1039,63 +1325,74 @@ function paintGraph(loading = false) {
   }
   const state = loading ? choice('프로젝트 구조를 읽는 중…','Reading project structure…') : graphError ||
     (!data ? choice('프로젝트 연결 대기','Waiting for project') : '');
-  const tree = el('map-children'), detailed=el('explore-children'), list = el('graph-list'); tree.replaceChildren(); detailed.replaceChildren(); list.replaceChildren();
-  el('map-field').hidden = el('explore-map').hidden = true; el('graph-more').hidden = true;
-  el('graph-info').textContent = el('map-status').textContent = state;
+  const tree=el('map-children'),detailed=el('explore-children'),list=el('graph-list'),mapDeps=el('map-dep-list'),exploreDeps=el('explore-dep-list'),mapParents=el('map-parent-list'),exploreParents=el('explore-parent-list');
+  for(const c of [tree,detailed,list,mapDeps,exploreDeps,mapParents,exploreParents]) c.replaceChildren();
+  el('map-field').hidden=el('explore-map').hidden=el('graph-more').hidden=el('map-deps').hidden=el('explore-deps').hidden=el('map-parents').hidden=el('explore-parents').hidden=true;
+  el('graph-info').textContent=el('map-status').textContent=state;
   const selected=data?.selection?.node;
-  el('graph-attach').hidden=!(contextTypes?.text && graphTrail.length && data?.selection?.status==='found' && selected?.id === graphTrail.at(-1).id);
-  if (!data || loading) return;
-  const focus = data.scope?.focusNode || data.nodes.find(n=>n.focus)?.id || data.nodes.find(n=>n.id==='dir:.')?.id ||
-    data.nodes.reduce((best,r)=>!best || (r.degree || 0)>(best.degree || 0) ? r : best,null)?.id;
-  const local = data.nodes.find(n => n.id === focus);
-  const candidates = data.nodes.filter(r => r && typeof r.id === 'string' && r.id !== focus);
-  const byNeighbor = new Map();
-  const allRelations=el('graph-confidence').value === 'all';
-  function showRelation(e) {return allRelations || ['STRUCTURAL','EXTRACTED'].includes(e.confidence);}
-  function remember(id,edge,direction) {
-    if (!id || !showRelation(edge) || typeof edge.relation!=='string') return;
-    if (!byNeighbor.has(id)) byNeighbor.set(id,new Map());
-    const key=JSON.stringify([direction,edge.relation,edge.confidence]);
-    byNeighbor.get(id).set(key,{edge,direction});
+  el('graph-attach').hidden=!(contextTypes?.text && graphTrail.length && data?.selection?.status==='found' && selected?.id===graphTrail.at(-1).id);
+  if(!data || loading) return;
+  const focus=data.scope?.focusNode||data.nodes.find(n=>n.focus)?.id||data.nodes.find(n=>n.id==='dir:.')?.id||data.nodes.reduce((b,r)=>!b||(r.degree||0)>(b.degree||0)?r:b,null)?.id;
+  const local=data.nodes.find(n=>n.id===focus),candidates=data.nodes.filter(r=>r && typeof r.id==='string' && r.id!==focus);
+  const byNeighbor=new Map(),allRelations=el('graph-confidence').value==='all',ownershipRelations=new Set(['contains','owns','parent']);
+  const showRelation=e=>allRelations||['STRUCTURAL','EXTRACTED'].includes(e.confidence);
+  function remember(id,edge,direction){
+    if(!id||!showRelation(edge)||typeof edge.relation!=='string') return;
+    if(!byNeighbor.has(id)) byNeighbor.set(id,new Map());
+    byNeighbor.get(id).set(JSON.stringify([direction,edge.relation,edge.confidence]),{edge,direction});
   }
-  for (const e of data.edges) {
-    if (e.source===focus) remember(e.target,e,e.target===focus?'self':'out');
-    else if (e.target===focus) remember(e.source,e,'in');
-  }
-  for (const n of data.selection?.neighbors || []) {
-    if (!n || !showRelation(n) || typeof n.id!=='string' || !['in','out'].includes(n.direction)) continue;
+  for(const e of data.edges){if(e.source===focus) remember(e.target,e,e.target===focus?'self':'out'); else if(e.target===focus) remember(e.source,e,'in');}
+  for(const n of data.selection?.neighbors||[]){
+    if(!n||!showRelation(n)||typeof n.id!=='string'||!['in','out'].includes(n.direction)) continue;
     remember(n.id,n,n.id===focus?'self':n.direction);
-    if (!candidates.some(x=>x.id===n.id) && n.id!==focus) candidates.push(n);
+    if(!candidates.some(x=>x.id===n.id)&&n.id!==focus) candidates.push(n);
   }
-  if(local && byNeighbor.has(focus)) candidates.push(local);
-  const connected = candidates.filter(r => byNeighbor.has(r.id));
-  const rows = [...connected,...candidates.filter(r => !byNeighbor.has(r.id))];
-  const input = el('graph-filter').value.trim();
-  const query = input === graphQuery ? '' : input.toLocaleLowerCase();
-  const filtered = rows.filter(r => !query || [r.label,r.path,r.kind,r.id].some(x=>String(x || '').toLocaleLowerCase().includes(query)));
-  const group = connected.length ? connected : rows;
-  tree.className = 'map-row' + (connected.length ? ' connected' : '');
-  el('map-root').textContent = el('explore-root').textContent = local?.label || rootLabel;
-  el('map-field').hidden = el('explore-map').hidden = !data.nodes.length;
-  detailed.className = tree.className;
-  function item(r,location) {
-    const compact=location!=='list';
-    const title = r.label || r.path || r.id;
-    const relations=Array.from(byNeighbor.get(r.id)?.values() || [], link=>graphLink(link.edge,link.direction));
-    const extras=relations.length>1 ? ' +'+(relations.length-1) : '';
-    const size = Number.isSafeInteger(r.file_count) && r.file_count>0 ? choice('파일 '+formatCount(r.file_count)+'개',formatCount(r.file_count)+(r.file_count===1?' file':' files')) : '';
-    const description=[graphKind(r.kind),size].filter(Boolean).join(' · ');
-    const button = explorerButton('',()=>enterNode(r),compact?'map-node':'explorer-item');
-    const rest = Number.isSafeInteger(r.omitted_children) && r.omitted_children > 0 ? choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children') : '';
-    button.title = [r.path || title,description,...relations,rest].filter(Boolean).join(' · ');
+  if(local&&byNeighbor.has(focus)) candidates.push(local);
+  const connected=candidates.filter(r=>byNeighbor.has(r.id)),unconnected=candidates.filter(r=>!byNeighbor.has(r.id)),rows=[...connected,...unconnected];
+  const input=el('graph-filter').value.trim(),query=input===graphQuery?'':input.toLocaleLowerCase();
+  const filtered=rows.filter(r=>!query||[r.label,r.path,r.kind,r.id].some(x=>String(x||'').toLocaleLowerCase().includes(query)));
+  const linksFor=id=>Array.from(byNeighbor.get(id)?.values()||[]);
+  const isParentLink=l=>((l.edge.relation==='contains'||l.edge.relation==='owns')&&l.direction==='in')||(l.edge.relation==='parent'&&l.direction==='out');
+  const isChildLink=l=>((l.edge.relation==='contains'||l.edge.relation==='owns')&&l.direction==='out')||(l.edge.relation==='parent'&&l.direction==='in');
+  const parents=connected.filter(r=>linksFor(r.id).some(isParentLink)),parentIds=new Set(parents.map(r=>r.id));
+  const owned=connected.filter(r=>!parentIds.has(r.id)&&linksFor(r.id).some(isChildLink));
+  const depRows=connected.filter(r=>linksFor(r.id).some(l=>!ownershipRelations.has(l.edge.relation)));
+  const treeGroup=owned.length?owned:(!parents.length&&!depRows.length?unconnected:[]),filteredParents=parents.filter(r=>filtered.includes(r)),filteredTree=treeGroup.filter(r=>filtered.includes(r)),filteredDeps=depRows.filter(r=>filtered.includes(r));
+  tree.className=detailed.className='map-row'+(owned.length?' connected':'');
+  tree.hidden=!treeGroup.length;detailed.hidden=!filteredTree.length;
+  el('map-root').textContent=el('explore-root').textContent=local?.label||rootLabel;
+  el('map-field').hidden=el('explore-map').hidden=!data.nodes.length;
+  function item(r,location){
+    const compact=location!=='list',title=r.label||r.path||r.id;
+    const relations=linksFor(r.id).map(l=>graphLink(l.edge,l.direction)),extras=relations.length>1?' +'+(relations.length-1):'';
+    const size=Number.isSafeInteger(r.file_count)&&r.file_count>0?choice('파일 '+formatCount(r.file_count)+'개',formatCount(r.file_count)+(r.file_count===1?' file':' files')):'';
+    const description=[graphKind(r.kind),size].filter(Boolean).join(' · '),button=explorerButton('',()=>enterNode(r),compact?'map-node':'explorer-item');
+    const rest=Number.isSafeInteger(r.omitted_children)&&r.omitted_children>0?choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children'):'';
+    button.title=[r.path||title,description,...relations,rest].filter(Boolean).join(' · ');
     button.setAttribute('aria-label',button.title);button.setAttribute('data-explorer-key',location+':'+r.id);
-    const text = node('span',''); text.append(node('strong',title),node('small',compact ? (size || (relations.length ? relations[0]+extras : description)) : description));
-    if (!compact) for (const relation of relations) text.append(node('small',relation));
-    button.append(text); if (!compact) button.append(node('span','›','muted'));
+    const text=node('span','');text.append(node('strong',title),node('small',compact?(size||(relations.length?relations[0]+extras:description)):description));
+    if(!compact) for(const relation of relations) text.append(node('small',relation));
+    button.append(text);if(!compact) button.append(node('span','›','muted'));
     const li=node('li','');li.append(button);return li;
   }
-  for(const r of group.slice(0,3)) tree.append(item(r,'mini'));
-  for(const r of group.filter(r=>filtered.includes(r)).slice(0,5)) detailed.append(item(r,'map'));
+  function depItem(r,location){
+    const title=r.label||r.path||r.id,depLinks=linksFor(r.id).filter(l=>!ownershipRelations.has(l.edge.relation)),first=depLinks[0];
+    const arrow=first?.direction==='out'?'→':first?.direction==='in'?'←':'↻',relations=depLinks.map(l=>graphLink(l.edge,l.direction));
+    const b=explorerButton('',()=>enterNode(r),'map-dep-chip');
+    b.setAttribute('data-relation-group','dependency');b.setAttribute('data-direction',first?.direction||'out');b.setAttribute('data-explorer-key',location+':'+r.id);
+    b.title=[r.path||title,...relations].filter(Boolean).join(' · ');b.setAttribute('aria-label',b.title);
+    const a=node('span',arrow,'dep-arrow');a.setAttribute('aria-hidden','true');
+    b.append(a,node('strong',title),node('small',relations[0]?relations[0].replace(/^[→←↻]\s*/,'')+(relations.length>1?' +'+(relations.length-1):''):''));
+    const li=node('li','');li.append(b);return li;
+  }
+  for(const r of parents.slice(0,3)) mapParents.append(item(r,'mini-parent'));
+  for(const r of filteredParents.slice(0,5)) exploreParents.append(item(r,'map-parent'));
+  for(const r of treeGroup.slice(0,3)) tree.append(item(r,'mini'));
+  for(const r of filteredTree.slice(0,5)) detailed.append(item(r,'map'));
+  for(const r of depRows.slice(0,4)) mapDeps.append(depItem(r,'mini-dep'));
+  for(const r of filteredDeps.slice(0,6)) exploreDeps.append(depItem(r,'map-dep'));
+  el('map-parents').hidden=!parents.length;el('explore-parents').hidden=!filteredParents.length;
+  el('map-deps').hidden=!depRows.length;el('explore-deps').hidden=!filteredDeps.length;
   for(const r of filtered) list.append(item(r,'list'));
   const provenance=data.provenance || {};
   const sources={'indexed-graph':['OMS 그래프 색인','OMS graph index'],'git-ls-files':['Git 추적 경로','Git-tracked paths'],'directory-scan':['폴더 구조','Directory scan']};
@@ -1288,8 +1585,6 @@ for (const list of tabLists) for (const [index, tab] of list.entries()) {
 // one shared detail by the item's own id; labels are display text only and never identify a task.
 const taskGroups = [['planned',['pending','queued','planned','todo','ready','open']],['active',['claimed','landing','working','starting','verifying','in_progress','running','blocked','waiting_for_input']],['review',['review','in_review']],['done',['done','completed','closed','verified']],['other',[]]];
 const taskGroup = item => taskGroups.find(([, states]) => states.includes(item.state))?.[0] || 'other';
-const workStateLabels={ready:['예정','Ready'],claimed:['담당 배정','Claimed'],running:['진행 중','Running'],review:['검토 중','In review'],landing:['게시 절차 진행','Landing'],blocked:['막힘','Blocked'],done:['완료','Done'],cancelled:['취소됨','Cancelled']};
-const taskStateText = item => Object.hasOwn(workStateLabels,item.state) ? choice(...workStateLabels[item.state]) : item.state ? stateLabel(item.state) : t('w.stateUnknown');
 const resultStates={accepted:['결과 수락','Result accepted'],completed:['결과 완료 기록','Completion recorded'],failed:['결과 실패','Result failed'],rejected:['결과 반려','Result rejected']};
 const verifyStates={passed:['검증 통과','Verification passed'],failed:['검증 실패','Verification failed'],not_run:['검증 미실행','Verification not run'],verified:['완료 근거 확인','Completion evidence verified'],unverified:['완료 근거 미확인','Completion evidence unverified']};
 const knownState=(states,v)=>typeof v==='string' && Object.hasOwn(states,v) ? v : null;
@@ -1325,7 +1620,7 @@ function loadWork(force) {
 function taskRow(item, pane, extra) {
   const row = node('button', '', 'task-row'), key = pane + ':' + item.id;
   row.type = 'button';
-  row.append(node('strong', item.title || item.id), node('span', taskStateText(item), 'task-state'),
+  row.append(node('strong', item.title || item.id), stateChip(item.state, {extraClass: 'task-state'}),
     node('small', [t('w.id', {v:item.id}), item.owner ? t('w.owner', {v:item.owner}) : t('w.ownerUnknown'), extra].filter(Boolean).join(' · ')));
   if (selectedTask?.id === item.id) row.setAttribute('aria-current', 'true');
   row.addEventListener('click', () => openTask(item.id, key));
@@ -1362,7 +1657,7 @@ function paintTasks(loading = false) {
   const fill = (id, rows, emptyKey) => el(id).replaceChildren(...(rows.length ? rows : [node('p', data && !workError && !unavailable ? (data.availability==='partial' && !items.length ? choice('조회 범위에서 기록을 찾지 못했습니다.','No records in this view.') : t(emptyKey)) : '', 'muted')]));
   fill('now-active', active.slice(0, 3).map(i => taskRow(i, 'now', null)), items.length ? 'w.noneActive' : 'w.empty');
   if (active.length > 3) el('now-active').append(action(t('w.viewAll'), () => showTab('work', true)));
-  fill('now-results', withResult.slice(0, 2).map(i => taskRow(i, 'now-result', choice(...resultStates[i.result]))), 'w.noneResults');
+  fill('now-results', withResult.slice(0, 3).map(i => taskRow(i, 'now-result', choice(...resultStates[i.result]))), 'w.noneResults');
   const groups = [];
   for (const [name] of taskGroups) {
     const rows = items.filter(i => taskGroup(i) === name);
@@ -1459,7 +1754,7 @@ function paintTaskDetail() {
   };
   if (taskSection === 'overview') {
     const post = workData.items.filter(o => o.depends?.includes(id));
-    put2(t('w.fState'), taskStateText(item));
+    put2(t('w.fState'), stateChip(item.state));
     put2(t('w.fOwner'), item.owner || missing('w.ownerUnknown'));
     put2(t('w.fIssue'), item.issue || missing('w.na'));
     put2(t('w.fPre'), ...(item.depends === null ? [missing('w.depsUnknown')] : item.depends.length ? item.depends.map(link) : [missing('w.depsNone')]));
@@ -1688,7 +1983,29 @@ function node(tag, text, className) {
 
 const formatCount = n => Number.isFinite(n) ? n.toLocaleString(locale()) : t('unknown');
 const providerName = p => names[p] || p || t('providerUnknown');
-const stateLabel = s => Object.hasOwn(MSG.ko,'state.' + s) ? t('state.' + s) : s;
+const STATE_ROLE={i:'info',w:'warning',a:'attention',c:'accent',m:'muted',s:'success',sm:'success-muted',e:'error'};
+const STATE_META=Object.fromEntries('running:▶:i;claimed:▷:i;landing:⟳:i;verifying:⟳:i;review:⚑:w;waiting:!:a;blocked:!:a;ready:▷:c;queued:·:m;done:✓:sm;completed:✓:sm;exited:✓:sm;accepted:✓:s;closed:·:m;cancelled:⊘:m;abandoned:⊘:m;interrupted:◷:w;failed:×:e;rejected:×:e;timed_out:◷:e;orphaned:?:w;guard_stop:!:w;partial:~:w;degraded:~:w;stale:~:w;unknown:?:m'.split(';').map(x=>{const [k,g,r]=x.split(':');return [k,[g,STATE_ROLE[r]]];}));
+const CHECK_META={failed:['×','error'],pending:['·','muted'],passed:['✓','success'],other:['·','muted']};
+const STATE_ALIAS=Object.fromEntries('running:working,starting,active,in_progress;review:in_review;waiting:waiting_approval,waiting_input,waiting_for_input;queued:pending,planned,todo,open;accepted:passed,verified,supported;cancelled:canceled;failed:error;timed_out:timeout'.split(';').flatMap(g=>{const [c,l]=g.split(':');return l.split(',').map(k=>[k,c]);}));
+function resolveState(raw,check=false){
+  const text=typeof raw==='string'?raw.trim():'',norm=text.toLowerCase().replace(/[\s-]+/g,'_');
+  if(check&&Object.hasOwn(CHECK_META,norm)){const [glyph,role]=CHECK_META[norm];return {canonical:norm,glyph,role,key:'git.check.'+norm,raw:text};}
+  const canonical=Object.hasOwn(STATE_META,norm)?norm:Object.hasOwn(STATE_ALIAS,norm)?STATE_ALIAS[norm]:null,[glyph,role]=STATE_META[canonical||'unknown'];
+  return {canonical:canonical||'unknown',glyph,role,key:canonical?'state.'+canonical:text?null:'state.unknown',raw:text};
+}
+const stateLabel=s=>{const i=resolveState(s);return i.key?t(i.key):'? '+i.raw;};
+function stateChip(raw,{check=false,extraClass='',labelKey}={}){
+  const info=resolveState(raw,check),chip=node('span','',['state-chip',extraClass].filter(Boolean).join(' '));
+  chip.setAttribute('data-state',info.canonical);chip.setAttribute('data-role',info.role);
+  const glyph=node('span',info.glyph,'state-glyph');glyph.setAttribute('aria-hidden','true');
+  const word=node('span','','state-word');put(word,()=>labelKey?t(labelKey):info.key?t(info.key):info.raw);
+  chip.append(glyph,' ',word);return chip;
+}
+function stateWithExit(raw,exit){
+  const wrap=node('span','','state-meta');wrap.append(stateChip(raw));
+  if(Number.isInteger(exit)) wrap.append(' · ',node('span',()=>t('act.exit',{n:exit}),'muted'));
+  return wrap;
+}
 function dateLabel(stamp) {
   const ms = typeof stamp === 'number' ? stamp * 1000 : Date.parse(stamp);
   return Number.isFinite(ms) ? new Date(ms).toLocaleString(locale()) : '';
@@ -2035,7 +2352,7 @@ function renderGit(data) {
       const checks = node('ul','');
       for (const check of c.items) {
         const li = node('li','','entry');
-        li.append(node('span',check.name),node('strong',() => t('git.check.' + (['failed','pending','passed','other'].includes(check.status) ? check.status : 'unknown'))));
+        li.append(node('span',check.name), stateChip(check.status, {check:true}));
         checks.append(li);
       }
       card.append(checks);
@@ -2126,52 +2443,36 @@ function render(d) {
   put('goal', () => d.goal || t('goalNone'));
   el('goal-expand').hidden=typeof d.goal!=='string' || d.goal.length<80;
   paintGoalFold();
-  for (const key of ['active','tasks','taskStatus']) put(key, () => (key === 'taskStatus' ? stateLabel(d[key]) : d[key]) ?? t('noInfo'));
-  const list = el('attention');
+  for(const key of ['active','tasks']) put(key,()=>d[key]??t('noInfo'));
+  if(d.taskStatus) el('taskStatus').replaceChildren(stateChip(d.taskStatus)); else put('taskStatus',()=>t('noInfo'));
+  const list=el('attention'),alerts=d.attention||[];
   list.replaceChildren();
-  for (const item of d.attention || []) {
-    const li = node('li', '', 'entry');
-    li.append(node('span', item.summary), node('strong', item.count ?? ''));
-    list.append(li);
-  }
-  el('alerts').hidden = !d.attention?.length;
-  const obs = d.observation?.schema === 1 && d.observation.kind === 'multi-source-observation' && d.observation.atomic === false ? d.observation : null;
-  const revision = typeof obs?.revision === 'string' && /^obs-v[0-9]+:[0-9a-f]{12,64}$/.test(obs.revision) ? obs.revision : null;
-  put('observation-revision', () => revision || t('unknown'));
-  put('observation-basis', () => obs ? t('obs.basis') : t('obs.basisUnknown'));
-  const completenessKeys = ['complete','partial','unknown'];
-  const completeness = () => obs && completenessKeys.includes(obs.completeness)
-    ? t('obs.' + obs.completeness)
-    : (d.degraded ? t('obs.partial') : t('obs.unknown'));
-  const ev = obs?.evidence && typeof obs.evidence === 'object' ? obs.evidence : null;
-  const omittedCount = Number.isSafeInteger(ev?.omitted) && ev.omitted > 0 ? ev.omitted : 0;
-  const trimmedCount = Number.isSafeInteger(ev?.trimmed) && ev.trimmed > 0 ? ev.trimmed : 0;
-  put('observation-completeness', () => [
-    completeness(),
-    omittedCount > 0 && t('obs.omitted',{n:formatCount(omittedCount)}),
-    trimmedCount > 0 && t('obs.trimmed',{n:formatCount(trimmedCount)})
-  ].filter(Boolean).join(' · '));
-  const sourceKeys = ['git','task','plan','attempts','artifacts','acceptance','conversation'];
-  const sourceStates = ['unavailable','partial','ambiguous','stale'];
-  put('observation-sources', () => {
-    const unavailableSources = sourceKeys.flatMap(key => {
-      const state = obs?.sources?.[key];
-      return sourceStates.includes(state) ? [t('src.' + key) + ' (' + t('srcState.' + state) + ')'] : [];
-    });
-    return [
-      unavailableSources.length > 0 && t('obs.needsAttention',{v:unavailableSources.join(', ')}),
-      typeof ev?.head === 'string' && /^[a-f0-9]{12}$/i.test(ev.head) && 'HEAD ' + ev.head,
-      typeof ev?.latestArtifact === 'string' && /^[a-z0-9_-]{1,128}$/i.test(ev.latestArtifact) && t('obs.latestArtifact',{v:ev.latestArtifact})
-    ].filter(Boolean).join(' · ');
+  for(const item of alerts){const li=node('li','','entry');li.append(node('span',item.summary),node('strong',item.count??''));list.append(li);}
+  el('alerts').hidden=el('alerts-badge').hidden=!alerts.length;
+  put('alerts-count',()=>alerts.length?t('alerts.count',{n:formatCount(alerts.length)}):'');
+  el('alerts-preview').textContent=alerts[0]?.summary||'';
+  const obs=d.observation?.schema===1&&d.observation.kind==='multi-source-observation'&&d.observation.atomic===false?d.observation:null;
+  const revision=typeof obs?.revision==='string'&&/^obs-v[0-9]+:[0-9a-f]{12,64}$/.test(obs.revision)?obs.revision:null;
+  put('observation-revision',()=>revision||t('unknown'));
+  put('observation-basis',()=>obs?t('obs.basis'):t('obs.basisUnknown'));
+  const completeness=()=>obs&&['complete','partial','unknown'].includes(obs.completeness)?t('obs.'+obs.completeness):(d.degraded?t('obs.partial'):t('obs.unknown'));
+  const ev=obs?.evidence&&typeof obs.evidence==='object'?obs.evidence:null;
+  const omittedCount=Number.isSafeInteger(ev?.omitted)&&ev.omitted>0?ev.omitted:0,trimmedCount=Number.isSafeInteger(ev?.trimmed)&&ev.trimmed>0?ev.trimmed:0;
+  put('observation-completeness',()=>[completeness(),omittedCount>0&&t('obs.omitted',{n:formatCount(omittedCount)}),trimmedCount>0&&t('obs.trimmed',{n:formatCount(trimmedCount)})].filter(Boolean).join(' · '));
+  const sourceKeys=['git','task','plan','attempts','artifacts','acceptance','conversation'],sourceStates=['unavailable','partial','ambiguous','stale'];
+  const degradedSources=()=>sourceKeys.flatMap(k=>{const s=obs?.sources?.[k];return sourceStates.includes(s)?[t('src.'+k)+' ('+t('srcState.'+s)+')']:[];});
+  put('observation-sources',()=>{const u=degradedSources();return [u.length>0&&t('obs.needsAttention',{v:u.join(', ')}),typeof ev?.head==='string'&&/^[a-f0-9]{12}$/i.test(ev.head)&&'HEAD '+ev.head,typeof ev?.latestArtifact==='string'&&/^[a-z0-9_-]{1,128}$/i.test(ev.latestArtifact)&&t('obs.latestArtifact',{v:ev.latestArtifact})].filter(Boolean).join(' · ');});
+  const observedStamp=(typeof obs?.observedAt==='string'&&obs.observedAt)||d.updated,date=new Date(observedStamp);
+  put('updated',()=>observedStamp&&Number.isFinite(date.getTime())?t('obs.lastChecked',{d:date.toLocaleString(locale())}):'');
+  const omitted=[['attemptsTrimmed','omit.attempts'],['operationsTrimmed','omit.operations'],['attentionTrimmed','omit.attention'],['activeAttemptsTrimmed','omit.active']].filter(([k])=>Number.isSafeInteger(d[k])&&d[k]>0);
+  const isDegraded=Boolean(d.degraded||obs?.completeness==='partial'||sourceKeys.some(k=>sourceStates.includes(obs?.sources?.[k]))||omitted.length>0);
+  el('status').className=isDegraded?'degraded':'';
+  put('status',()=>{
+    if(!isDegraded) return '';
+    const bad=degradedSources(),parts=[bad.length>0&&bad.join(', '),d.degraded&&t('degraded'),omitted.length>0&&t('omittedRecords',{v:omitted.map(([k,l])=>t('labelCount',{label:t(l),n:formatCount(d[k])})).join(', ')})].filter(Boolean);
+    return t('status.partial')+' · '+(parts.length?parts.join(' · '):t('obs.partial'));
   });
-  const observedStamp = (typeof obs?.observedAt === 'string' && obs.observedAt) || d.updated;
-  const date = new Date(observedStamp);
-  put('updated', () => observedStamp && Number.isFinite(date.getTime()) ? t('obs.lastChecked',{d:date.toLocaleString(locale())}) : '');
-  const omitted = [['attemptsTrimmed','omit.attempts'],['operationsTrimmed','omit.operations'],['attentionTrimmed','omit.attention'],['activeAttemptsTrimmed','omit.active']]
-    .filter(([key]) => Number.isSafeInteger(d[key]) && d[key] > 0);
-  put('status', () => [d.degraded && t('degraded'),
-    omitted.length > 0 && t('omittedRecords',{v:omitted.map(([key,label]) => t('labelCount',{label:t(label),n:formatCount(d[key])})).join(', ')})].filter(Boolean).join(' '));
-  el('view').hidden = false;
+  el('view').hidden=false;
 }
 
 function clearPeer(room) {
@@ -2182,29 +2483,26 @@ function clearPeer(room) {
   for (const id of ['peer-check','peer-chat','peer-next']) el(id).hidden = true;
 }
 function clearProject() {
-  workData = selectedTask = taskOrigin = undefined; workError = ''; taskOpen = false; taskSection = 'overview'; taskRows.clear(); el('pane-task').hidden = true; el('task-note').textContent = '';
-  for (const id of ['now-active','now-results','work-groups','results-list','owners-list','deps-list']) el(id).replaceChildren();
-  for (const id of ['now-status','work-status','results-status','relations-status']) el(id).textContent = '';
+  workData = selectedTask = taskOrigin = undefined; workError = ''; taskOpen = false; taskSection = 'overview'; taskRows.clear(); approvalState.clear();
+  for (const id of ['task-note','now-status','work-status','results-status','relations-status','connection-status','main-scope']) el(id).textContent = '';
   resetExplorer();
   el('goal-expand').setAttribute('aria-expanded','false');
   clearPeer(); clearReviewAttachment();
   checkedAt = ''; connectionReady = profileKnown = false; connectionState = 'conn.unknownProject'; hostFacts(); resetConnectionRows();
-  el('connection-status').textContent = ''; el('main-scope').textContent = '';
-  el('view').hidden = true;
   jobs.clear(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
   selectedMember = backTarget = olderCursor = tuiNext = undefined; chatRows = [];
-  clearEvidence(); availableAttempts = []; el('chat-evidence').hidden = true;
+  clearEvidence(); availableAttempts = [];
   members = []; tuiPages = []; el('tui-view').value = '';
-  for (const id of ['chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows']) el(id).replaceChildren();
-  for (const id of ['chat-back','chat-older','tui-next','tui-prev']) el(id).hidden = true;
   gitReady = overviewBacklog = false;
   gitData = gitItem = sendingBrief = sentBrief = providerData = undefined; gitDrafts.clear();
-  el('git-kind').value = 'checkout'; el('git-backlog').hidden = el('git-editor').hidden = true; el('provider-options').open = false; el('provider-load').disabled = false;
-  for (const id of ['git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status']) el(id).replaceChildren();
-  el('git-number').value = ''; el('git-goal').value = ''; el('git-provider').value = '';
+  el('git-kind').value = 'checkout'; el('provider-options').open = false; el('provider-load').disabled = false;
+  el('git-number').value = el('git-goal').value = el('git-provider').value = '';
   el('approval-card').className = 'card'; el('approval-card').hidden = false;
-  for (const id of ['thread-rows','approval-idle']) el(id).replaceChildren();
-  for (const id of ['work-threads','plan-strip','acceptance-bar','header-main']) el(id).hidden = true;
+  for (const id of ['view','pane-task','chat-evidence','chat-back','chat-older','tui-next','tui-prev','git-backlog','git-editor','work-threads','plan-strip','acceptance-bar','header-main','approval-badge','alerts-badge','latest-operations','work-dot']) el(id).hidden = true;
+  putAttr('work-dot','aria-label',() => '');
+  for (const id of ['now-active','now-results','work-groups','results-list','owners-list','deps-list','chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows','git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status','thread-rows','approval-idle','alerts-count','alerts-preview','latest-operations','work-dot','receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
+    el(id).replaceChildren();
+  }
   showTab('overview'); tabScroll.clear();
   updateContext(null);
   retryStart = undefined;
@@ -2213,9 +2511,6 @@ function clearProject() {
   briefInvalid = false; el('brief').setCustomValidity('');
   el('receipt').className = '';
   renderScratch();
-  for (const id of ['receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
-    el(id).replaceChildren();
-  }
 }
 
 function projectArgument(value) {
@@ -2234,6 +2529,7 @@ function switchProject(target) {
   project = '';
   clearProject();
   el('scope').hidden = true;
+  el('project').hidden = false;
   el('project-choice').replaceChildren();
   setBusy(false);
   refresh();
@@ -2248,7 +2544,9 @@ function selectProjectOption() {
 function chooseProject(aliases) {
   const select = el('project-choice');
   select.replaceChildren();
-  el('scope').hidden = !aliases.length;
+  const hasScope = aliases.length > 0;
+  el('scope').hidden = !hasScope;
+  el('project').hidden = hasScope;
   const target = requestedProject;
   if (target !== null && !aliases.includes(target)) {
     project = '';
@@ -2417,7 +2715,11 @@ function renderAttempts(page) {
   const select = el('evidence-attempt');
   const choose = new Option('',''); put(choose, () => t('evidence.choose'));
   select.replaceChildren(); select.add(choose);
-  for (const a of availableAttempts) select.add(new Option([a.tool,a.id,a.state].filter(Boolean).join(' · '),a.id));
+  for (const a of availableAttempts) {
+    const option = new Option('', a.id);
+    put(option, () => [a.tool, a.id, a.state && stateLabel(a.state)].filter(Boolean).join(' · '));
+    select.add(option);
+  }
   el('chat-evidence').hidden = !availableAttempts.length && !evidenceId;
   if (evidenceId) {
     if (!availableAttempts.some(a => a.id === evidenceId)) {
@@ -2610,11 +2912,11 @@ function renderTeam(d) {
     if (!member || shown.some(a => a.participant === member.participant && a.task === record.task)) continue;
     seen.add(member.participant);
     const row = action('',() => selectMember(member,row));
-    const dot = node('span','',(d.activeAttempts || []).includes(record) ? 'thread-dot thread-open' : 'thread-dot');
     const content = node('span','');
-    content.append(node('strong',record.task),node('small',() => [providerName(member.provider),member.participant,stateLabel(record.state)].filter(Boolean).join(' · ')));
+    content.append(node('strong',record.task),node('small',() => [providerName(member.provider),member.participant].filter(Boolean).join(' · ')));
+    const chip = stateChip(record.state);
     const arrow = node('span','›'); arrow.setAttribute('aria-hidden','true');
-    row.append(dot,content,arrow); putAttr(row,'aria-label',() => t('thread.aria',{task:record.task,p:member.participant}));
+    row.append(content,chip,arrow); putAttr(row,'aria-label',() => t('thread.aria',{task:record.task,p:member.participant}));
     threads.append(row);
   }
   el('work-threads').hidden = !seen.size;
@@ -2741,7 +3043,10 @@ function renderConversation(d) {
   const active = d.activeAttempts || [];
   const complete = Array.isArray(d.activeAttempts) && !(d.activeAttemptsTrimmed > 0) && d.active === active.length;
   const roomLeads = active.filter(attempt => (readOnly || attempt.room === main.room) && isLead(attempt));
-  el('work-dot').hidden = !roomLeads.length;
+  const dot = el('work-dot');
+  dot.hidden = !roomLeads.length;
+  put(dot, () => roomLeads.length ? formatCount(roomLeads.length) : '');
+  putAttr(dot, 'aria-label', () => roomLeads.length ? t(roomLeads.length === 1 ? 'lead.countOne' : 'lead.count', {n:formatCount(roomLeads.length)}) : '');
   if (!roomLeads.length) {
     cards.append(node('p', () => t(complete ? 'lead.none' : 'lead.unseen'), 'muted'));
     return;
@@ -2754,8 +3059,7 @@ function renderConversation(d) {
     const avatar = node('span',''); paintAvatar(avatar,lead);
     const text = node('span','','work-title');
     text.append(node('small',assignee),node('strong',() => [lead.task || lead.id || t('lead.taskUnknown'),isReadOnly && lead.room].filter(Boolean).join(' · ')));
-    const state = node('small',() => stateLabel(lead.state) || t('statusUnknown'),'lead-state');
-    if (['working','verifying','starting','in_review'].includes(lead.state)) state.className += ' observed';
+    const state = stateChip(lead.state, {extraClass: 'lead-state'});
     card.append(avatar,text,state);
     if (member) {
       putAttr(card,'aria-label',() => t('lead.aria',{assignee,task:lead.task || lead.id || '',p:member.participant}));
@@ -2765,6 +3069,10 @@ function renderConversation(d) {
   }
 }
 
+function recordedStateLabel(state) {
+  if (state === 'queued') return t('scratch.queued');
+  return Object.hasOwn(MSG.ko,'state.' + state) ? t('state.' + state) : state || t('unknown');
+}
 function renderScratch(history) {
   const section = el('scratch-history'), list = el('scratch-rows');
   list.replaceChildren();
@@ -2780,7 +3088,7 @@ function renderScratch(history) {
     if (!label || !row.id) { skipped = true; continue; }
     const item = node('li','','entry'), detail = node('div','');
     detail.append(node('strong',label), node('div',() => [row.provider && providerName(row.provider),row.tool].filter(Boolean).join(' · '),'muted'),
-      node('div',() => t('scratch.recorded',{s:stateLabel(row.state) || t('unknown')})),
+      node('div',() => t('scratch.recorded',{s:recordedStateLabel(row.state)})),
       node('div',() => t('scratch.at',{at:dateLabel(row.updatedAt) || t('unknown')}),'muted'));
     item.append(detail); list.append(item);
   }
@@ -2796,94 +3104,85 @@ function renderScratch(history) {
   });
 }
 
-function renderActivity(d) {
+function renderActivity(d){
   renderScratch(d.managedScratch);
-  const attempts = d.attempts || [];
-  const state = d.commandStatus;
-  put('core-state', () => [t('act.planned',{n:formatCount(d.tasks)}), d.taskStatus, d.degraded === true && t('act.partialRuntime')].filter(Boolean).join(' · '));
-  put('command-state', () => state?.available
-    ? [t('act.attempts',{n:formatCount(state.total)}), t('act.open',{n:formatCount(state.active)}), t('act.executing',{n:formatCount(state.executing)}),
-      ...Object.entries(state.byState || {}).map(([key,value]) => key + ' ' + formatCount(value))].join(' · ')
-    : t('act.unknown'));
-  const timeline = el('command-list'); timeline.replaceChildren();
-  const recorded = new Map([...attempts,...(d.activeAttempts || [])].filter(a => a.id).map(a => [a.id,a]));
-  const events = [
-    ...attempts.map(a => ({id:a.id, at:a.updated, what:a.tool || (() => t('act.attempt')), ref:a.task || a.id, who:a.provider, state:a.state})),
-    ...(d.operations || []).map(o => ({id:o.attempt, at:o.updated, what:o.kind || (() => t('act.artifact')), ref:o.artifactId, who:o.provider, state:o.status, exit:o.exit}))
-  ].sort((a,b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
-  for (const event of events) {
-    const li = node('li','','entry'), label = node('span','');
-    label.append(node('span',() => [typeof event.what === 'function' ? event.what() : event.what, event.who && providerName(event.who)].filter(Boolean).join(' · ')));
-    label.append(node('small',() => [dateLabel(event.at) || t('act.timeUnknown'),event.ref].filter(Boolean).join(' · ')));
-    const attempt = recorded.get(event.id);
-    const member = attempt && members.find(m => m.room === attempt.room && m.participant === attempt.participant);
-    if (member) {
-      const link = action(() => t('act.viewEvidence'),() => selectMember(member,link,attempt.id));
-      putAttr(link,'aria-label',() => t('act.viewEvidenceAria',{id:attempt.id})); label.append(link);
-    }
-    li.append(label,node('strong',() => [event.state, Number.isInteger(event.exit) && t('act.exit',{n:event.exit})].filter(Boolean).join(' · ') || t('statusUnknown'))); timeline.append(li);
+  const attempts=d.attempts||[],state=d.commandStatus;
+  put('core-state',()=>[t('act.planned',{n:formatCount(d.tasks)}),d.taskStatus&&stateLabel(d.taskStatus),d.degraded===true&&t('act.partialRuntime')].filter(Boolean).join(' · '));
+  put('command-state',()=>state?.available?[t('act.attempts',{n:formatCount(state.total)}),t('act.open',{n:formatCount(state.active)}),t('act.executing',{n:formatCount(state.executing)}),...Object.entries(state.byState||{}).map(([k,v])=>stateLabel(k)+' '+formatCount(v))].join(' · '):t('act.unknown'));
+  const timeline=el('command-list');timeline.replaceChildren();
+  const recorded=new Map([...attempts,...(d.activeAttempts||[])].filter(a=>a.id).map(a=>[a.id,a]));
+  const events=[...attempts.map(a=>({id:a.id,at:a.updated,what:a.tool||(()=>t('act.attempt')),ref:a.task||a.id,who:a.provider,state:a.state})),...(d.operations||[]).map(o=>({id:o.attempt,at:o.updated,what:o.kind||(()=>t('act.artifact')),ref:o.artifactId,who:o.provider,state:o.status,exit:o.exit}))].sort((a,b)=>(Date.parse(b.at)||0)-(Date.parse(a.at)||0));
+  for(const event of events){
+    const li=node('li','','entry'),label=node('span','');
+    label.append(node('span',()=>[typeof event.what==='function'?event.what():event.what,event.who&&providerName(event.who)].filter(Boolean).join(' · ')),node('small',()=>[dateLabel(event.at)||t('act.timeUnknown'),event.ref].filter(Boolean).join(' · ')));
+    const attempt=recorded.get(event.id),member=attempt&&members.find(m=>m.room===attempt.room&&m.participant===attempt.participant);
+    if(member){const link=action(()=>t('act.viewEvidence'),()=>selectMember(member,link,attempt.id));putAttr(link,'aria-label',()=>t('act.viewEvidenceAria',{id:attempt.id}));label.append(link);}
+    li.append(label,stateWithExit(event.state,event.exit));timeline.append(li);
   }
-  if (!events.length) timeline.append(node('li',() => t('act.noEvents'),'muted'));
-  const team = el('repo-team');
-  team.replaceChildren();
-  const repoMembers = (d.activeAttempts || []).filter(row => isMain(row) || isLead(row));
-  if (d.main && !repoMembers.some(row => row.id === d.main.id && row.tool === d.main.tool &&
-    row.room === d.main.room && row.provider === d.main.provider)) repoMembers.unshift(d.main);
-  for (const member of repoMembers) {
-    const item = node('li', '', 'entry');
-    const role = member === d.main || isMain(member) ? 'Main' : 'Lead';
-    const name = () => names[member.provider] || member.provider || t('providerUnknown');
-    item.append(node('span', () => [name() + ' ' + role, member.room || t('act.roomUnknown'), member.task].filter(Boolean).join(' · ')),
-      node('strong', () => member.state || t('statusUnknown')));
-    team.append(item);
+  if(!events.length) timeline.append(node('li',()=>t('act.noEvents'),'muted'));
+  const team=el('repo-team');team.replaceChildren();
+  const repoMembers=(d.activeAttempts||[]).filter(r=>isMain(r)||isLead(r));
+  if(d.main&&!repoMembers.some(r=>r.id===d.main.id&&r.tool===d.main.tool&&r.room===d.main.room&&r.provider===d.main.provider)) repoMembers.unshift(d.main);
+  for(const m of repoMembers){
+    const item=node('li','','entry'),role=m===d.main||isMain(m)?'Main':'Lead',name=()=>names[m.provider]||m.provider||t('providerUnknown');
+    item.append(node('span',()=>[name()+' '+role,m.room||t('act.roomUnknown'),m.task].filter(Boolean).join(' · ')),stateChip(m.state));team.append(item);
   }
-  if (!repoMembers.length) team.append(node('li', () => t('act.noTeam'), 'muted'));
-  const activity = el('activity');
-  activity.replaceChildren();
-  for (const attempt of attempts) {
-    const item = node('li', '', 'entry');
-    const label = [names[attempt.provider] || attempt.provider, attempt.tool, attempt.task, attempt.room].filter(Boolean);
-    item.append(node('span', label.join(' · ')), node('strong', () => attempt.state || t('statusUnknown')));
-    activity.append(item);
-  }
-  if (!attempts.length) activity.append(node('li', () => t(d.active == null || d.attemptsTrimmed > 0 ? 'act.recentUnknown' : 'act.recentNone'), 'muted'));
-
-  const acceptance = d.acceptance, reviews = d.reviews;
-  put('criteria', () => acceptance?.available === true
-    ? t('act.criteria',{v:acceptance.verified ?? '?',n:acceptance.total ?? '?'}) +
-      t(acceptance.complete === true ? 'act.complete' : acceptance.complete === false ? 'act.incomplete' : 'act.completeUnknown')
-    : t('act.criteriaUnknown'));
-  put('reviews', () => reviews?.available === true
-    ? t('act.reviews',{p:reviews.passed ?? '?',f:reviews.failed ?? '?',u:reviews.unknown ?? '?'})
-    : t('act.reviewsUnknown'));
-  const operations = el('operations');
-  operations.replaceChildren();
-  for (const operation of d.operations || []) {
-    const item = node('li', '', 'entry');
-    const label = node('span', '');
-    label.append(node('span', () => [operation.kind || t('act.artifact'), names[operation.provider] || operation.provider].filter(Boolean).join(' · ')));
-    if (operation.artifactId) label.append(node('small', operation.artifactId));
-    const stamp = Date.parse(operation.updated);
-    if (Number.isFinite(stamp)) label.append(node('small', () => new Date(stamp).toLocaleString(locale())));
-    item.append(label, node('strong', () => [operation.status || t('statusUnknown'), operation.exit != null && t('act.exit',{n:operation.exit})].filter(Boolean).join(' · ')));
-    operations.append(item);
-  }
-  if (!d.operations?.length) operations.append(node('li', () => t(reviews?.available === true && !(d.operationsTrimmed > 0) ? 'act.opsNone' : 'act.opsUnknown'), 'muted'));
+  if(!repoMembers.length) team.append(node('li',()=>t('act.noTeam'),'muted'));
+  const activity=el('activity');activity.replaceChildren();
+  for(const a of attempts){const item=node('li','','entry');item.append(node('span',[names[a.provider]||a.provider,a.tool,a.task,a.room].filter(Boolean).join(' · ')),stateChip(a.state));activity.append(item);}
+  if(!attempts.length) activity.append(node('li',()=>t(d.active==null||d.attemptsTrimmed>0?'act.recentUnknown':'act.recentNone'),'muted'));
+  const acceptance=d.acceptance,reviews=d.reviews;
+  put('criteria',()=>acceptance?.available===true?t('act.criteria',{v:acceptance.verified??'?',n:acceptance.total??'?'})+t(acceptance.complete===true?'act.complete':acceptance.complete===false?'act.incomplete':'act.completeUnknown'):t('act.criteriaUnknown'));
+  put('reviews',()=>reviews?.available===true?t('act.reviews',{p:reviews.passed??'?',f:reviews.failed??'?',u:reviews.unknown??'?'}):t('act.reviewsUnknown'));
+  const operationRow=o=>{
+    const item=node('li','','entry'),label=node('span',''),stamp=Date.parse(o.updated);
+    label.append(node('span',()=>[o.kind||t('act.artifact'),names[o.provider]||o.provider].filter(Boolean).join(' · ')));
+    if(o.artifactId) label.append(node('small',o.artifactId));
+    if(Number.isFinite(stamp)) label.append(node('small',()=>new Date(stamp).toLocaleString(locale())));
+    item.append(label,stateWithExit(o.status,o.exit));return item;
+  };
+  const operations=el('operations'),latestOps=el('latest-operations'),opRows=d.operations||[];
+  operations.replaceChildren();latestOps.replaceChildren();
+  for(const o of opRows) operations.append(operationRow(o));
+  for(const o of opRows.slice(0,3)) latestOps.append(operationRow(o));
+  latestOps.hidden=!opRows.length;
+  if(!opRows.length) operations.append(node('li',()=>t(reviews?.available===true&&!(d.operationsTrimmed>0)?'act.opsNone':'act.opsUnknown'),'muted'));
 }
 
 function renderApprovals(rows, incomplete) {
   const card = el('approval-card');
-  card.className = rows.length && !readOnly ? 'card awaiting-action' : 'card';
+  const awaiting = Boolean(rows.length && !readOnly);
+  card.className = awaiting ? 'card awaiting-action' : 'card';
   card.hidden = !rows.length && !incomplete;
+  el('approval-badge').hidden = !awaiting;
   put('approvals-heading', () => rows.length ? t('appr.count',{n:rows.length}) : t('appr.list'));
   const list = el('approvals');
   const expected = generation;
+  for (const child of list.children || []) {
+    if (child._approvalId && Boolean(child.open) !== child._initialOpen) {
+      approvalState.set(child._approvalId, child.open ? 'open' : 'closed');
+    }
+  }
   list.replaceChildren();
   if (incomplete) list.append(node('p', () => t('appr.partial'), 'muted'));
   put('approval-idle', () => !incomplete && !rows.length ? t('appr.idle') : '');
   for (const row of rows) {
     const details = document.createElement('details');
     details.className = 'approval';
+    const key = typeof row.id === 'string' && row.id ? row.id : null;
+    const prev = key ? approvalState.get(key) : undefined;
+    const open = prev === 'open' || (rows.length === 1 && (prev === undefined || prev === 'auto'));
+    details.open = open;
+    details._approvalId = key;
+    details._initialOpen = open;
+    if (key) {
+      if (prev === undefined) approvalState.set(key, open ? 'auto' : 'seen');
+      else if (prev === 'auto' && !open) approvalState.set(key, 'seen');
+      details.addEventListener('toggle', () => {
+        if (Boolean(details.open) === details._initialOpen && approvalState.get(key) === 'auto') return;
+        approvalState.set(key, details.open ? 'open' : 'closed');
+      });
+    }
     const summary = node('summary', row.summary || row.action);
     const body = node('div', '');
     body.append(node('p', () => row.action === 'Main scope decision' ? t('appr.scope') : t('appr.action',{v:row.action})));
@@ -3057,7 +3356,7 @@ async function recoverStart(expected) {
       retryStart = undefined;
       if (el('brief').value.trim() === goal) el('brief').value = '';
       el('receipt').className = '';
-      put('receipt', () => t('start.recorded',{p:names[main],state:result.state || t('statusUnknown'),attempt:result.attempt}));
+      put('receipt', () => t('start.recorded',{p:names[main],state:result.state ? stateLabel(result.state) : t('statusUnknown'),attempt:result.attempt}));
       updateContext({project:project || null, room:result.room, status:result.state});
       return 'recorded';
     }
@@ -3103,7 +3402,7 @@ async function loadStatus(expected, recover = true) {
     if (!tabLists[0].includes(currentTab)) loadTab(currentTab,true);
     if (readOnly) {
       retryStart = undefined;
-      el('approval-card').hidden = true; el('approvals').replaceChildren();
+      el('approval-card').hidden = true; el('approval-badge').hidden = true; el('approvals').replaceChildren();
       el('approval-progress').textContent = el('approval-idle').textContent = '';
       return;
     }
@@ -3115,7 +3414,7 @@ async function loadStatus(expected, recover = true) {
       renderApprovals(approvals, response.structuredContent.incomplete);
     } catch (error) {
       if (expected === generation) {
-        el('approval-card').className = 'card'; el('approval-card').hidden = false;
+        el('approval-card').className = 'card'; el('approval-card').hidden = false; el('approval-badge').hidden = true;
         put('approvals-heading', () => t('appr.list')); el('approval-idle').textContent = '';
         el('approvals').replaceChildren(node('p', () => error.message, 'error'));
       }
