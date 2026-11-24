@@ -825,6 +825,10 @@ fn status_separates_dormant_72h_and_stale_7d_ttl_without_modifying_packet() {
     assert_eq!(code, 0, "{err}");
     assert!(json_out.contains(r#""stale": false"#), "{json_out}");
     assert!(json_out.contains(r#""dormant": false"#), "{json_out}");
+    assert!(
+        json_out.contains(r#""current_goal_eligible": true"#),
+        "{json_out}"
+    );
     let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
     assert_eq!(code, 0, "{err}");
     assert!(text_out.contains("stale: no\n"), "{text_out}");
@@ -841,6 +845,10 @@ fn status_separates_dormant_72h_and_stale_7d_ttl_without_modifying_packet() {
     assert_eq!(code, 0, "{err}");
     assert!(json_out.contains(r#""stale": false"#), "{json_out}");
     assert!(json_out.contains(r#""dormant": true"#), "{json_out}");
+    assert!(
+        json_out.contains(r#""current_goal_eligible": false"#),
+        "{json_out}"
+    );
     let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
     assert_eq!(code, 0, "{err}");
     assert!(text_out.contains("stale: no\n"), "{text_out}");
@@ -864,6 +872,10 @@ fn status_separates_dormant_72h_and_stale_7d_ttl_without_modifying_packet() {
     assert_eq!(code, 0, "{err}");
     assert!(json_out.contains(r#""stale": true"#), "{json_out}");
     assert!(json_out.contains(r#""dormant": false"#), "{json_out}");
+    assert!(
+        json_out.contains(r#""current_goal_eligible": false"#),
+        "{json_out}"
+    );
     let (code, text_out, err) = call(&repo, &mut svc, &["status"]);
     assert_eq!(code, 0, "{err}");
     assert!(text_out.contains("stale: yes\n"), "{text_out}");

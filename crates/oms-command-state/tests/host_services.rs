@@ -1262,6 +1262,15 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     let host = PlanOnlyHost(GroupPlan);
     let snapshot = state(repo.path(), &host);
     assert!(!snapshot.get("task").get("stale").truth(), "{snapshot:?}");
+    assert_eq!(
+        snapshot.get("runtime").get("objective").text("source"),
+        "plan"
+    );
+    assert_eq!(
+        snapshot.get("runtime").get("objective").text("text"),
+        "Live plan goal"
+    );
+    assert_eq!(snapshot.get("task").text("goal"), "Old 6-day handoff goal");
     assert!(snapshot.get("task").get("dormant").truth(), "{snapshot:?}");
     assert_eq!(
         snapshot.get("task").text("next"),
@@ -1334,6 +1343,10 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     );
     fs::write(&packet_path, &stale_packet).unwrap();
     let stale_json = state(repo.path(), &host);
+    assert_eq!(
+        stale_json.get("runtime").get("objective").text("source"),
+        "plan"
+    );
     assert!(
         stale_json.get("task").get("stale").truth(),
         "{stale_json:?}"
@@ -1395,6 +1408,14 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     assert!(!fresh_json.get("task").get("stale").truth());
     assert!(!fresh_json.get("task").get("dormant").truth());
     assert_eq!(fresh_json.get("task").text("next"), "Fresh next step");
+    assert_eq!(
+        fresh_json.get("runtime").get("objective").text("source"),
+        "task"
+    );
+    assert_eq!(
+        fresh_json.get("runtime").get("objective").text("text"),
+        "Fresh handoff goal"
+    );
     let (code, out, err) = run_with_host(
         "state",
         &args(&["--repo", &repo.path().to_string_lossy()]),

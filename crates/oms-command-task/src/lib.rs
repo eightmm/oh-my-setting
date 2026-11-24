@@ -1029,6 +1029,12 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("closed_at", nullable(closed)),
             ("stale", Json::Bool(stale)),
             ("dormant", Json::Bool(dormant)),
+            (
+                "current_goal_eligible",
+                Json::Bool(
+                    state == b"active" && freshness.idle_seconds.is_some() && !stale && !dormant,
+                ),
+            ),
             ("verification", string(verification)),
             ("lifecycle", lifecycle),
         ]

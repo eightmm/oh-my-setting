@@ -276,6 +276,7 @@ fn native_state_views_use_fresh_canonical_runtime_evidence() {
         let output = f
             .public(&bin)
             .current_dir(&f.0)
+            .env("OMS_AGENT_TASK_TTL", "604800")
             .args(args)
             .output()
             .unwrap();
@@ -304,6 +305,50 @@ fn native_state_views_use_fresh_canonical_runtime_evidence() {
         2
     );
     assert_ne!(refreshed["runtime"]["criteria"], canonical["criteria"]);
+
+    std::fs::write(&project, "# Project\n\n## 목표\nProject objective\n").unwrap();
+    let plan = repo.join(".oms/plan/tasks.json");
+    let packet = repo.join(".oms/task/current.md");
+    std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(packet.parent().unwrap()).unwrap();
+    let active_plan = r#"{"schema":3,"goal":"Plan objective","tasks":{"one":{"id":"one","title":"Task one","state":"ready","depends":[]}}}"#;
+    std::fs::write(&plan, active_plan).unwrap();
+    let recent = oms_command_room::now();
+    for (activity, expected, source) in [
+        (recent.as_str(), "Packet objective", "task"),
+        ("2000-01-01T00:00:00Z", "Plan objective", "plan"),
+        ("", "Plan objective", "plan"),
+        ("bad-date", "Plan objective", "plan"),
+        ("2999-01-01T00:00:00Z", "Plan objective", "plan"),
+    ] {
+        let raw = format!(
+            "# Active Task\n- task_id: handoff\n- status: active\n- updated: {activity}\n\n## Goal\nPacket objective\n"
+        );
+        std::fs::write(&packet, &raw).unwrap();
+        let objective = serde_json::json!({"text":expected,"source":source});
+        let envelope = run(&["runtime", "envelope", "show", "--repo", path]);
+        assert_eq!(envelope["objective"], objective, "{envelope}");
+        assert_eq!(envelope["task"]["goal"], "Packet objective");
+        let state = run(&["state", "--repo", path, "--json"]);
+        assert_eq!(state["runtime"]["objective"], objective);
+        assert_eq!(state["task"]["goal"], "Packet objective");
+        assert_eq!(
+            run(&["dashboard", "--repo", path, "--json"])["goal"],
+            objective
+        );
+        let panel = run(&["dashboard", "--repo", path, "--json", "--panel-snapshot"]);
+        assert_eq!(panel["dashboard"]["goal"], expected);
+        assert_eq!(std::fs::read_to_string(&packet).unwrap(), raw);
+        assert_eq!(std::fs::read_to_string(&plan).unwrap(), active_plan);
+    }
+    let empty_plan = r#"{"schema":3,"goal":"Original plan objective","tasks":{}}"#;
+    std::fs::write(&plan, empty_plan).unwrap();
+    let envelope = run(&["runtime", "envelope", "show", "--repo", path]);
+    assert_eq!(
+        envelope["objective"],
+        serde_json::json!({"text":"Project objective","source":"project"})
+    );
+    assert_eq!(std::fs::read_to_string(&plan).unwrap(), empty_plan);
 }
 
 #[test]

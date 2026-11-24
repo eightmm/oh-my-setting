@@ -194,6 +194,15 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
         (stale, dormant, idle)
     };
     if task.get("present").truth() {
+        let eligible = matches!(task.get("current_goal_eligible"), Value::Bool(true))
+            && !is_stale
+            && !is_dormant
+            && idle_secs.is_some()
+            && oms_command_task::packet::metadata(&task_text, "task_id").unwrap_or(b"legacy")
+                == task.text("task_id").as_bytes()
+            && oms_command_task::packet::metadata(&task_text, "status").unwrap_or(b"active")
+                == b"active";
+        task.set("current_goal_eligible", Value::Bool(eligible))?;
         task.set("stale", Value::Bool(is_stale))?;
         task.set("dormant", Value::Bool(is_dormant))?;
         if let Some(secs) = idle_secs {
@@ -564,7 +573,7 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
         .cloned()
         .map(Ok)
         .or_else(|| host.runtime_envelope(&ctx.repo, ctx.interrupted));
-    let runtime = if let Some(canonical) = canonical {
+    let mut runtime = if let Some(canonical) = canonical {
         match canonical {
             Ok(mut injected) => {
                 require(
@@ -595,13 +604,6 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
         object([
             ("schema", number(2)),
             ("healthy", Value::Bool(healthy)),
-            (
-                "objective",
-                object([
-                    ("text", state.get("task").get("goal").clone()),
-                    ("source", string("task")),
-                ]),
-            ),
             ("scope", json::empty()),
             ("criteria", Value::Array(vec![])),
             (
@@ -613,6 +615,28 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
             ("warnings", Value::Array(vec![])),
         ])
     };
+    if runtime.opt("objective").is_none() {
+        let task = state.get("task");
+        let plan = state.get("plan");
+        let task_goal = if matches!(task.get("current_goal_eligible"), Value::Bool(true)) {
+            let (sections, _) =
+                oms_contract_markdown::sections(std::str::from_utf8(&task_text).unwrap_or(""));
+            oms_contract_markdown::task_goal(&sections)
+        } else {
+            String::new()
+        };
+        let plan_goal = oms_contract_markdown::bounded_line(plan.text("goal"), 1000);
+        let (goal, source) = oms_work_inspect::current_objective(
+            &task_goal,
+            &plan_goal,
+            matches!(plan.get("has_unfinished"), Value::Bool(true)),
+            state.get("project").text("goal"),
+        );
+        runtime.set(
+            "objective",
+            object([("text", string(goal)), ("source", string(source))]),
+        )?;
+    }
     state.set("runtime", runtime)?;
     let rules = ["AGENTS.md", "CLAUDE.md"]
         .iter()
@@ -1122,16 +1146,8 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
     let runtime = state.get("runtime");
     let task = state.get("task");
     let plan = state.get("plan");
-    let (goal, source) = if !runtime.get("objective").text("text").is_empty() {
-        (
-            runtime.get("objective").text("text"),
-            runtime.get("objective").text("source"),
-        )
-    } else if !task.text("goal").is_empty() {
-        (task.text("goal"), "task")
-    } else {
-        (plan.text("goal"), "plan")
-    };
+    let goal = runtime.get("objective").text("text");
+    let source = runtime.get("objective").text("source");
     let mut projected_plan = plan.clone();
     projected_plan.set(
         "stale_claims",
@@ -1673,15 +1689,7 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
         ("project", label(report.get("repo").get("name"), 255)),
         ("branch", label(report.get("repo").get("branch"), 255)),
         ("updated", label(report.get("generated_at"), 64)),
-        (
-            "goal",
-            if goal != Value::Null {
-                goal
-            } else {
-                main.map(|v| goal_text(v.get("refs").get("panel_label")))
-                    .unwrap_or(Value::Null)
-            },
-        ),
+        ("goal", goal),
         (
             "degraded",
             Value::Bool(!report.get("collection").get("ok").truth()),
@@ -2115,6 +2123,14 @@ fn state_text(state: &Value) -> Result<String> {
             .join(", ")
     }
     let mut out = format!("# state: {}\n", state.text("repo"));
+    let objective = state.get("runtime").get("objective");
+    if !objective.text("text").is_empty() {
+        out.push_str(&format!(
+            "objective ({}): {}\n",
+            objective.text("source"),
+            objective.text("text")
+        ));
+    }
     let mail = state.get("room_mail");
     if mail.get("bound").truth() {
         out.push_str("\n## Room mail\n");
@@ -2191,7 +2207,14 @@ fn state_text(state: &Value) -> Result<String> {
     }
     let task = state.get("task");
     if task.get("present").truth() {
-        out.push_str("\n## Active task\n");
+        if task.get("dormant").truth()
+            || task.get("stale").truth()
+            || task.text("status") == "closed"
+        {
+            out.push_str("\n## Historical task packet\n");
+        } else {
+            out.push_str("\n## Active task\n");
+        }
         if !task.get("healthy").truth() {
             out.push_str("  status unavailable or invalid (run: oms agent-task status --json)\n");
         }
@@ -2530,7 +2553,7 @@ mod panel_snapshot_tests {
     #[test]
     fn compact_snapshot_binds_room_and_omits_private_or_unbounded_source_columns() {
         let mut report = crate::json::parse(br#"{"kind":"oms-dashboard","schema":1,
-            "attempts":{"available":true,"active":1,"active_recent":[{"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-a"}}],
+            "attempts":{"available":true,"active":1,"active_recent":[{"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-a","panel_label":"Launch note"}}],
             "recent":[{"attempt_id":"historical","tool":"panel-native-assignment","state":"done","refs":{"panel_role":"lead","panel_room_id":"older"}}]},
             "attention":{"items":[{"code":"stale-plan-claims","summary":"Check results","command":"private command"}],"room_mail":{"bound":true,"healthy":true,"room_id":"room-b"}},
             "acceptance":{"available":true,"total":3,"counts":{"verified":1},"complete":false},
@@ -2586,7 +2609,9 @@ mod panel_snapshot_tests {
                 ]),
             )
             .unwrap();
+        report.set("goal", Value::Null).unwrap();
         let unbound = panel_snapshot(&report, &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("goal"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("tasksVerified"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("tasks"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("currentRoom"), &Value::Null);
