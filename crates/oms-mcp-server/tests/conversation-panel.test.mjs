@@ -73,7 +73,11 @@ async function panel(projects, dashboard = {}, options = {}) {
       host.initialize = params;
       result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{message:options.message ? {text:{}} : undefined}};
     }
-    if (method === 'ui/message') { host.messages.push(params); result = {isError:host.rejectMessage === true}; }
+    if (method === 'ui/message') {
+      host.messages.push(params);
+      if (host.messageError) { queueMicrotask(() => notify({id,error:host.messageError})); return; }
+      result = {isError:host.rejectMessage === true};
+    }
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
@@ -978,4 +982,13 @@ test('review copy fallback, host refusal and stale or unrelated result never imp
     assert.equal(p.get('review-share').hidden,true); await p.event('review-choose','click');await p.event('review-submit','click');
     assert.equal(p.host.messages.length,0);
   }
+});
+
+test('an ambiguous host send failure keeps the selected answer copyable without repeating the message',async()=>{
+  const p=await reviewedPanel({message:true});
+  p.host.messageError={code:-32603,message:'Host failed after delivery'};
+  await choose(p,'en');await p.event('review-choose','click');await p.event('review-submit','click');
+  assert.match(p.get('review-share-status').textContent,/Delivery is unconfirmed/);
+  await p.event('review-submit','click');await p.event('review-copy','click');
+  assert.equal(p.host.messages.length,1); assert.equal(p.get('review-text').selected,true);
 });

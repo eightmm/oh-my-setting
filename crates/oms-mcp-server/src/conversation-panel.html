@@ -1014,7 +1014,7 @@ window.addEventListener('message', event => {
   pending.delete(msg.id);
   if (msg.error) {
     const error = msg.error.message ? new Error(msg.error.message) : uiError('hostFail');
-    error.hostRejected = true;
+    error.hostRejected = [-32601,-32602].includes(msg.error.code);
     call.reject(error);
   }
   else call.resolve(msg.result);
