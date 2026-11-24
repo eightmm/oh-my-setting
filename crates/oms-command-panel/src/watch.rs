@@ -97,7 +97,9 @@ fn run_with_source_writer(
     }
     let mut requested = true;
     #[cfg(target_os = "linux")]
-    let mut agy_first_child_wake = crate::wakeup::AgyFirstChildWake::default();
+    let mut agy_first_child_wake = crate::wakeup::FirstChildWake::default();
+    #[cfg(target_os = "linux")]
+    let mut codex_roster_wake = crate::wakeup::FirstChildWake::default();
     let mut deadline = Instant::now();
     let mut scope_sample = None;
     let mut read = attention::load(repo, &room);
@@ -195,11 +197,15 @@ fn run_with_source_writer(
             #[cfg(target_os = "linux")]
             if changed || checkout_changed || rejected_native || !board.phase.retains_agy_detail() {
                 agy_first_child_wake.replace(None);
+                codex_roster_wake.replace(None);
             }
             let mut native_projection = None;
             if let Some(reading) = native {
                 #[cfg(target_os = "linux")]
-                agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
+                {
+                    agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
+                    codex_roster_wake.replace(reading.observations.codex_roster_watch());
+                }
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
                     checked_agy = reading.agy;
@@ -481,9 +487,9 @@ fn run_with_source_writer(
             }
             if let Some(terminal) = &mut terminal {
                 #[cfg(target_os = "linux")]
-                let native_fd = agy_first_child_wake.fd();
+                let native_fd = [agy_first_child_wake.fd(), codex_roster_wake.fd()];
                 #[cfg(not(target_os = "linux"))]
-                let native_fd = None;
+                let native_fd = [None; 2];
                 let (keys, woken, _native_ready) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
@@ -496,9 +502,10 @@ fn run_with_source_writer(
                     let idle = board.as_ref().is_some_and(|board| !board.worker.busy());
                     // Settle the current authoritative paint before scheduling
                     // another job from a burst of transcript writes.
-                    let native_woken =
-                        agy_first_child_wake.refresh(_native_ready, idle, Instant::now());
-                    woken || native_woken
+                    let now = Instant::now();
+                    let agy_woken = agy_first_child_wake.refresh(_native_ready[0], idle, now);
+                    let codex_woken = codex_roster_wake.refresh(_native_ready[1], idle, now);
+                    woken || agy_woken || codex_woken
                 };
                 let mut refresh = woken;
                 let mut collect_ready = false;
@@ -9226,6 +9233,48 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback() {
+        private_native_watch_fixture(
+            "watch::tests::agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback",
+            None,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_watch_paints_bound_child_only_rollout() {
+        private_native_watch_fixture(
+            "watch::tests::codex_watch_paints_bound_child_only_rollout",
+            Some(CodexWatchStimulus::Complete),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_watch_retries_after_partial_bound_child_header() {
+        private_native_watch_fixture(
+            "watch::tests::codex_watch_retries_after_partial_bound_child_header",
+            Some(CodexWatchStimulus::Partial),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_watch_paints_verified_recent_creation_in_default_overview() {
+        private_native_watch_fixture(
+            "watch::tests::codex_watch_paints_verified_recent_creation_in_default_overview",
+            Some(CodexWatchStimulus::Overview),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    enum CodexWatchStimulus {
+        Complete,
+        Partial,
+        Overview,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn private_native_watch_fixture(test_name: &str, stimulus: Option<CodexWatchStimulus>) {
         use super::Options;
         use crate::{commands, render};
         use oms_panel_core::{CommandOutput, NativeCommand, Services, SubcommandServices};
@@ -9241,8 +9290,23 @@ mod tests {
         const SEED_ENV: &str = "OMS_TEST_AGY_WATCH_SEED";
         const REPLY_ENV: &str = "OMS_TEST_WATCH_REPLY";
         const WORKER: &str = "wake-worker";
-        const TEST_NAME: &str =
-            "watch::tests::agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback";
+        const OVERVIEW_HISTORY: [&str; 3] =
+            ["Codex archived A", "Codex archived B", "Codex archived C"];
+        const OVERVIEW_CHILD: &str = "Codex new child fixture";
+        const OVERVIEW_PARTIAL_MODEL: &str = "fixture/partial-frame:v2";
+        let codex = stimulus.is_some();
+        let overview = matches!(stimulus, Some(CodexWatchStimulus::Overview));
+        let complete_overview_header = std::cell::Cell::new(false);
+        let timing = matches!(stimulus, Some(CodexWatchStimulus::Complete))
+            .then(|| std::env::var("OMS_TEST_CODEX_ROSTER_TIMING").ok())
+            .flatten();
+        let (trials, socket_fallback): (usize, bool) = match timing.as_deref() {
+            Some("paired") => (20, true),
+            Some("fast") => (1, false),
+            Some("socket") => (1, true),
+            None => (1, true),
+            _ => panic!("invalid Codex fixture timing mode"),
+        };
 
         let reply = std::env::var_os(REPLY_ENV).is_some();
         if reply || std::env::var_os(SEED_ENV).is_some() {
@@ -9402,6 +9466,14 @@ mod tests {
             let options = Options::parse(&commands::strings(&["--watch"])).unwrap();
             let services = SubcommandServices::sibling().unwrap();
             let interrupted = AtomicBool::new(false);
+            if codex {
+                crate::orchestrator::codex_chat_fixture::bind_codex_watch_lead(
+                    &repo,
+                    &std::env::var("OMS_FAKE_ROOM").unwrap(),
+                    &services,
+                    &interrupted,
+                );
+            }
             crate::agy_child_chat::reset_all_agy_counters();
             let result = super::run(&repo, &options, &services, &interrupted).unwrap();
             let foreground = agy_watch_counters();
@@ -9419,11 +9491,11 @@ mod tests {
 
         struct Temp(PathBuf);
         impl Temp {
-            fn new() -> Self {
+            fn new(label: &str) -> Self {
                 let p = std::env::temp_dir()
                     .canonicalize()
                     .unwrap()
-                    .join(format!("oms-agy-watch-pty-{}", std::process::id()));
+                    .join(format!("oms-watch-pty-{label}-{}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&p);
                 std::fs::create_dir(&p).unwrap();
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -9458,8 +9530,20 @@ mod tests {
             walk(root);
         };
 
-        let tmp = Temp::new();
-        let repo = tmp.0.join("repo");
+        let label = match stimulus {
+            None => "agy",
+            Some(CodexWatchStimulus::Complete) => "codex",
+            Some(CodexWatchStimulus::Partial) => "partial",
+            Some(CodexWatchStimulus::Overview) => "overview",
+        };
+        let tmp = Temp::new(label);
+        // A long checkout selects the real five-second no-socket fallback
+        // in the fast smoke. The full timing pairs use the normal socket.
+        let repo = tmp.0.join(if socket_fallback {
+            "repo".into()
+        } else {
+            "r".repeat(99)
+        });
         let wt = tmp.0.join("repo-wt");
         let home = tmp.0.join("home");
         let state = tmp.0.join("state");
@@ -9475,6 +9559,21 @@ mod tests {
             &repo, &home, &state, &bin, &gemini, &app_root, &presence, &brain,
         ] {
             mkdir_p(d);
+        }
+        let codex_home = home.join(".codex");
+        if codex {
+            mkdir_p(&codex_home);
+            let xdg = home.join(".config");
+            mkdir_p(&xdg);
+            let registry_dir = xdg.join("oh-my-setting");
+            mkdir_p(&registry_dir);
+            let registry = registry_dir.join("provider-accounts.json");
+            std::fs::write(
+                &registry,
+                json!({"schema":1,"providers":{"codex":{"accounts":[{"id":"fixture","home":codex_home}]}}}).to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(registry, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
         let run_git = |dir: &Path, args: &[&str]| {
@@ -9519,7 +9618,7 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let fixture_command = || {
             let mut cmd = Command::new(&exe);
-            cmd.args(["--exact", TEST_NAME, "--nocapture"])
+            cmd.args(["--exact", test_name, "--nocapture"])
                 .env_clear()
                 .env("PATH", "/usr/local/bin:/usr/bin:/bin")
                 .env("HOME", &home)
@@ -9555,7 +9654,15 @@ mod tests {
             .arg("-n")
             .arg("-F")
             .arg(&lock_path)
-            .args(["bash", "-c", "exec -a agy bash"])
+            .args([
+                "bash",
+                "-c",
+                if codex {
+                    "exec -a codex bash"
+                } else {
+                    "exec -a agy bash"
+                },
+            ])
             .env_clear()
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("HOME", &home)
@@ -9702,7 +9809,11 @@ elif is list-panes -s -t %2 -F "$SESSION"; then
   window=@4
   if [ -n "${OMS_FAKE_LEAD_WINDOW+x}" ]; then IFS= read -r window < "$OMS_FAKE_LEAD_WINDOW" || :; fi
   if [ "$window" != absent ]; then
-    printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+    if [ -n "${OMS_TEST_CODEX_LEAD:-}" ]; then
+      printf '$1\t%s\t%%3\t%s\t0\t0\t\t\t\t\t%s\tcodex\t%s\t0\t._1_\n' "$window" "$lead_pid" "$room" "$attempt"
+    else
+      printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+    fi
   fi
 elif is display-message -p -t '$1' "$SERVER" ';' show-options -v -t '$1' @oms_panel_repo; then
   repo=${OMS_TEST_REPO?}
@@ -9735,6 +9846,8 @@ elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p 
   printf '%s\n' '└ Models & Quota' 'GEMINI MODELS' 'Weekly Limit Remaining' '[███] 94%' 'Five Hour Limit Remaining' '[███] 86%' 'CLAUDE AND GPT MODELS' 'Weekly Limit Remaining' '[███] 100%'
 elif is capture-pane -p -t %1; then
   printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
+elif [ -n "${OMS_TEST_CODEX_LEAD:-}" ] && { is capture-pane -p -t %3 || is capture-pane -p -J -S -100 -t %3; }; then
+  /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
 elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
   if [ -n "$stall" ] && [ -e "$stall" ]; then
     ticket=$(stall_ticket)
@@ -9815,6 +9928,17 @@ fi
                         }
                     }
                 }
+                if overview {
+                    assert!(
+                        screen.iter().all(|line| {
+                            OVERVIEW_HISTORY.iter().all(|title| !line.contains(title))
+                                && (complete_overview_header.get()
+                                    || !line.contains(OVERVIEW_CHILD))
+                        }),
+                        "unverified child or history flashed in Overview:\n{}",
+                        screen.join("\n")
+                    );
+                }
             }
             updated
         };
@@ -9891,7 +10015,7 @@ fi
             let mut child_in = child_out.try_clone().unwrap();
             let mut pty_cmd = Command::new(&exe);
             pty_cmd
-                .args(["--exact", TEST_NAME, "--nocapture"])
+                .args(["--exact", test_name, "--nocapture"])
                 .env_clear()
                 .env("PATH", &bin)
                 .env("HOME", &home)
@@ -9916,6 +10040,9 @@ fi
                 .stdin(slave.try_clone().unwrap())
                 .stdout(slave)
                 .stderr(Stdio::inherit());
+            if codex {
+                pty_cmd.env("OMS_TEST_CODEX_LEAD", "1");
+            }
             let mut child = pty_cmd.spawn().unwrap();
             std::fs::write(&watch_pid, child.id().to_string()).unwrap();
             // The command holds the last parent copies of the slave.
@@ -9995,6 +10122,219 @@ fi
             let tmux_log = std::fs::read_to_string(&log).unwrap();
             (parsed, tmux_log)
         };
+
+        if codex {
+            std::fs::write(&lead_window, "@3").unwrap();
+            std::fs::write(&prompt_file, format!("› {prompt_line}\n")).unwrap();
+            let controls = timing.is_some();
+            let mut samples = [Vec::new(), Vec::new()];
+            let codex_captures = |command: &str| {
+                std::fs::read_to_string(&log)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| *line == command)
+                    .count()
+            };
+            let primary_captures = || codex_captures("capture-pane -p -t %3");
+            let recent_captures = || codex_captures("capture-pane -p -J -S -100 -t %3");
+            let codex_watch_armed = || {
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .any(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+            };
+            for trial in 0..trials {
+                let order = if trial.is_multiple_of(2) {
+                    [true, false]
+                } else {
+                    [false, true]
+                };
+                for armed in order.into_iter().take(if controls { 2 } else { 1 }) {
+                    let history = "Codex history fixture";
+                    let (next, (child, metadata)) = if overview {
+                        (
+                            OVERVIEW_CHILD,
+                            crate::native_children::seed_codex_overview_rollouts(
+                                &codex_home,
+                                &repo,
+                                turn,
+                                OVERVIEW_HISTORY,
+                                OVERVIEW_CHILD,
+                            ),
+                        )
+                    } else {
+                        let next = "Codex child-only fixture";
+                        (
+                            next,
+                            crate::native_children::seed_codex_watch_rollouts(
+                                &codex_home,
+                                &repo,
+                                turn,
+                                history,
+                                next,
+                            ),
+                        )
+                    };
+                    if child.exists() {
+                        std::fs::remove_file(&child).unwrap();
+                    }
+                    std::fs::set_permissions(
+                        child.parent().unwrap(),
+                        std::fs::Permissions::from_mode(if armed { 0o700 } else { 0o775 }),
+                    )
+                    .unwrap();
+                    let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
+                        wait_for(stream, screen, rx, "bound Codex overview", &mut |lines| {
+                            lines.iter().any(|line| line.contains("@fixture"))
+                                && lines.iter().any(|line| line.contains("[Overview]"))
+                                && (!overview || codex_watch_armed())
+                        });
+                        if !overview {
+                            input.write_all(b"\t").unwrap();
+                            input.flush().unwrap();
+                            wait_for(stream, screen, rx, "bound Codex history", &mut |lines| {
+                                lines.iter().any(|line| line.contains("[All tasks]"))
+                                    && lines.iter().any(|line| line.contains(history))
+                                    && lines.iter().all(|line| !line.contains(next))
+                            });
+                        }
+                        assert_eq!(crate::wakeup::socket_path(&repo).exists(), socket_fallback);
+                        assert_eq!(codex_watch_armed(), armed);
+                        let partial = (overview
+                            || matches!(stimulus, Some(CodexWatchStimulus::Partial)))
+                        .then(|| {
+                            let before = primary_captures();
+                            let recent_before = recent_captures();
+                            if overview {
+                                // The next provider-only refresh changes a
+                                // visible footer while keeping the managed Turn.
+                                let pane = format!(
+                                    "› {prompt_line}\n  {OVERVIEW_PARTIAL_MODEL} high · Context 95% left\n← for agents · ? for shortcuts\n"
+                                );
+                                assert_eq!(
+                                    crate::orchestrator::codex_model_from_chrome(&pane).as_deref(),
+                                    Some(OVERVIEW_PARTIAL_MODEL)
+                                );
+                                std::fs::write(&prompt_file, pane).unwrap();
+                            }
+                            let mut file = std::fs::File::create(&child).unwrap();
+                            let boundary = if overview {
+                                assert!(metadata.ends_with('\n'));
+                                metadata.len() - 1
+                            } else {
+                                metadata.len() / 2
+                            };
+                            let (prefix, rest) = metadata.split_at(boundary);
+                            file.write_all(prefix.as_bytes()).unwrap();
+                            // The second recent capture follows the actual rollout scan.
+                            wait_for(
+                                stream,
+                                screen,
+                                rx,
+                                "partial Codex header scanned",
+                                &mut |lines| {
+                                    assert!(lines.iter().all(|line| !line.contains(next)));
+                                    recent_captures() >= recent_before + 2
+                                        && (!overview
+                                            || lines.iter().any(|line| {
+                                                line.contains(OVERVIEW_PARTIAL_MODEL)
+                                                    && line.contains("@fixture")
+                                            }))
+                                },
+                            );
+                            assert_eq!(primary_captures(), before + 1);
+                            (file, rest)
+                        });
+                        let prior = primary_captures();
+                        let started = Instant::now();
+                        if let Some((mut file, remainder)) = partial {
+                            file.write_all(remainder.as_bytes()).unwrap();
+                            if overview {
+                                complete_overview_header.set(true);
+                            }
+                        } else {
+                            std::fs::write(&child, &metadata).unwrap();
+                        }
+                        let wrote = started.elapsed();
+                        let upper = match (armed, socket_fallback) {
+                            (true, true) => Duration::from_secs(8),
+                            (true, false) => Duration::from_secs(3),
+                            (false, false) => Duration::from_secs(9),
+                            (false, true) => Duration::from_secs(36),
+                        };
+                        let mut capture_at = None;
+                        loop {
+                            if capture_at.is_none() && primary_captures() > prior {
+                                capture_at = Some(started.elapsed());
+                            }
+                            apply_frames(stream, screen);
+                            if screen.iter().any(|line| line.contains(next)) {
+                                break;
+                            }
+                            assert!(
+                                started.elapsed() < upper,
+                                "Codex child paint exceeded {upper:?}"
+                            );
+                            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                                stream.push_str(&String::from_utf8_lossy(&chunk));
+                            }
+                        }
+                        let elapsed = started.elapsed();
+                        let lower = if socket_fallback { 20 } else { 3 };
+                        assert!(
+                            elapsed < upper && (armed || elapsed >= Duration::from_secs(lower))
+                        );
+                        assert_eq!(primary_captures(), prior + 1);
+                        if overview {
+                            assert!(screen.iter().any(|line| line.contains("[Overview]")));
+                            let row = screen.iter().find(|line| line.contains(next)).unwrap();
+                            assert!(
+                                row.contains("unknown") && !row.contains("seen "),
+                                "a fresh header does not prove activity: {row}",
+                            );
+                        }
+                        samples[usize::from(!armed)].push(elapsed);
+                        if controls {
+                            eprintln!(
+                                "CODEX_ROSTER_SAMPLE trial={} watch={} write_us={} paint_us={} capture_us={}",
+                                trial + 1,
+                                armed,
+                                wrote.as_micros(),
+                                elapsed.as_micros(),
+                                capture_at
+                                    .expect("changed frame without a capture")
+                                    .as_micros()
+                            );
+                        }
+                    });
+                    assert!(!calls.contains("UNEXPECTED:"), "{calls}");
+                }
+            }
+            if controls {
+                for (label, group) in ["candidate", "fallback"].into_iter().zip(&mut samples) {
+                    group.sort_unstable();
+                    let percentile =
+                        |pct: usize| group[(group.len() * pct).div_ceil(100) - 1].as_micros();
+                    eprintln!(
+                        "CODEX_ROSTER_SUMMARY mode={} case={label} count={} p50_us={} p95_us={}",
+                        timing.as_deref().unwrap(),
+                        group.len(),
+                        percentile(50),
+                        percentile(95)
+                    );
+                    if label == "candidate" {
+                        assert!(percentile(95) <= 2_000_000);
+                    }
+                }
+            }
+            let _ = holder.kill();
+            let _ = holder.wait();
+            return;
+        }
 
         let mutating_out = Command::new(&fake_tmux)
             .args(["send-keys", "-t", "%4", "Enter"])
