@@ -138,7 +138,14 @@ impl Request {
                 self.action == "template" && self.os("output").is_none_or(OsStr::is_empty)
                     || matches!(
                         self.action.as_str(),
-                        "validate" | "compare" | "show" | "summarize" | "evaluate" | "sweep"
+                        "validate"
+                            | "compare"
+                            | "show"
+                            | "summarize"
+                            | "evaluate"
+                            | "sweep"
+                            | "next"
+                            | "checkpoint"
                     )
             }
             Mode::Benchmark => matches!(self.action.as_str(), "show" | "compare"),
@@ -298,7 +305,16 @@ fn spec(r: &Request) -> Spec {
             true,
         ),
         (Mode::Experiment, "reconcile", _) => ("", "run-id", "", "run-id", 0, 0, false),
-        (Mode::Experiment, "summarize", _) => ("", "id", "", "id", 0, 0, false),
+        (Mode::Experiment, "checkpoint", _) => (
+            "path-only",
+            "id run-id manifest max-bytes timeout-seconds",
+            "",
+            "id run-id manifest",
+            0,
+            0,
+            false,
+        ),
+        (Mode::Experiment, "summarize" | "next", _) => ("", "id", "", "id", 0, 0, false),
         (Mode::Experiment, "sweep", "plan") => ("", "emit", "", "", 1, 1, false),
         (Mode::Experiment, "invariants", _) => (
             "",
@@ -613,7 +629,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 Mode::Capsule => "export verify import diff",
                 Mode::Backend => "target describe check run",
                 Mode::Experiment => {
-                    "template validate compare register show run reconcile launch sweep summarize evaluate invariants"
+                    "template validate compare register show run reconcile launch sweep summarize next checkpoint evaluate invariants"
                 }
                 Mode::Benchmark => "show snapshot record compare",
                 Mode::Resources => "host status activate hold reconcile retire-team discard-write",

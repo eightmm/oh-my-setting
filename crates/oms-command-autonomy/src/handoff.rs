@@ -373,6 +373,113 @@ pub fn render_checked(
             }
         }
     }
+    if ctx
+        .store
+        .optional(".oms/plan/autopilot-run.json", MAX_FILE)?
+        .is_some()
+    {
+        // The session-handoff caller supplies a fixed native read adapter, not
+        // an execution-capable autonomy host. Read the owning status producer
+        // through that adapter so external observations retain its validation.
+        let projection = (|| -> Result<Value> {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            require(!remaining.is_zero(), "handoff read deadline exhausted")?;
+            let output = invoke(
+                &ctx,
+                "autopilot",
+                vec![
+                    "status".into(),
+                    "--repo".into(),
+                    ctx.repo.as_os_str().to_owned(),
+                ],
+                remaining,
+            );
+            crate::checkpoint(interrupted)?;
+            let out = output?;
+            if out.code == 130 {
+                return Err(Error::new(130, "interrupted"));
+            }
+            require(
+                out.code == 0
+                    && Instant::now() < deadline
+                    && out.stdout.len() <= MAX_PROJECTION_BYTES,
+                "autopilot handoff projection unavailable",
+            )?;
+            check_source(&out.stdout)?;
+            let status = value::parse(&out.stdout)?;
+            let next = &status["next_action"];
+            require(
+                next["schema"] == 1
+                    && next["kind"] == "autopilot-next-action"
+                    && next["decision_sha256"]
+                        .as_str()
+                        .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())),
+                "autopilot handoff projection malformed",
+            )?;
+            Ok(next.clone())
+        })();
+        match projection {
+            Ok(next) => {
+                let state = json!({"owner_id":next["owner_id"],"stage":next["stage"],"receipt_sha256":next["receipt_sha256"],
+                    "decision_sha256":next["decision_sha256"],"proposal":next["proposal"],"budget":next["budget"],
+                    "wait":next["wait"],"progress":next["progress"]});
+                let state = value::canonical(&state)?;
+                if state.len() <= 4096 && check_source(&state).is_ok() {
+                    data.get_mut("State").unwrap().push(
+                        String::from_utf8(state)
+                            .map_err(|_| Error::new(2, "invalid handoff state"))?,
+                        "current autopilot receipt and producer projections",
+                    );
+                }
+                let commands = value::canonical(
+                    &json!({"action":next["action"],"reason":next["reason"],"commands":next["commands"]}),
+                )?;
+                if commands.len() <= 2048 && check_source(&commands).is_ok() {
+                    data.get_mut("Next step").unwrap().push(
+                        String::from_utf8(commands)
+                            .map_err(|_| Error::new(2, "invalid handoff next action"))?,
+                        "autopilot status; re-read before mutation",
+                    );
+                }
+            }
+            Err(e) if e.code == 130 => return Err(e),
+            Err(_) => {
+                let state = data.get_mut("State").unwrap();
+                state.unavailable = true;
+                state.note("autopilot projection unavailable; inspect the preserved receipt before continuing".into(), "autopilot status");
+            }
+        }
+    }
+    if Instant::now() < deadline {
+        let query = data["Goal"]
+            .rows
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Ok(experience) = services.experience_context(&ctx.repo, &query, interrupted) {
+            let raw = value::canonical(&experience)?;
+            if raw.len() <= 16 * 1024 && check_source(&raw).is_ok() {
+                let section = data.get_mut("Decisions").unwrap();
+                for item in experience["entries"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .take(3)
+                {
+                    let text = value::canonical(item)?;
+                    if text.len() <= 2048 {
+                        section.push(
+                            format!("Advisory prior outcome: {}", String::from_utf8_lossy(&text)),
+                            "source-checked journal experience",
+                        );
+                    }
+                }
+            }
+        }
+        crate::checkpoint(interrupted)?;
+    }
     let pointers = data.get_mut("Pointers").unwrap();
     pointers.has_records = true;
     pointers.push(

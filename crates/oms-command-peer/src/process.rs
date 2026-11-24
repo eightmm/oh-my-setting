@@ -43,6 +43,7 @@ pub enum HandoffProjection {
     NextStep,
     JournalDecisions,
     ReviewFindings,
+    AutopilotStatus,
 }
 impl HandoffProjection {
     pub fn command(self, repo: &Path, state: &Path, timeout: Duration) -> Invocation {
@@ -55,6 +56,7 @@ impl HandoffProjection {
                 "peer-review",
                 &["findings", "list", "--status", "open", "--json"],
             ),
+            Self::AutopilotStatus => ("autopilot", &["status"]),
         };
         let mut argv = vec!["oms".into(), tool.into()];
         argv.extend(args.iter().map(|arg| OsString::from(*arg)));
@@ -267,19 +269,93 @@ pub struct LaunchFence {
     deadline: Instant,
     expires_at: Option<i64>,
     campaign_deadline: Option<i64>,
+    plan_checkout: Option<PlanCheckout>,
 }
+
+#[derive(Clone, Debug)]
+struct PlanCheckout {
+    plan: crate::plan_delegate::PlanLaunch,
+    worktree: PathBuf,
+}
+
 impl LaunchFence {
     pub(crate) fn new(deadline: Instant, expires_at: Option<i64>) -> Self {
         Self {
             deadline,
             expires_at,
             campaign_deadline: None,
+            plan_checkout: None,
         }
     }
     pub(crate) fn with_campaign_deadline(mut self, deadline: Option<i64>) -> Self {
         self.campaign_deadline = deadline;
         self
     }
+    pub(crate) fn with_plan_checkout(
+        mut self,
+        plan: crate::plan_delegate::PlanLaunch,
+        cwd: &Path,
+    ) -> Result<Self> {
+        if plan.source.canonicalize()? != plan.source || cwd.canonicalize()? != cwd {
+            return crate::fail("Plan source or worker checkout no longer has its physical path");
+        }
+        self.plan_checkout = Some(PlanCheckout {
+            plan,
+            worktree: cwd.to_owned(),
+        });
+        Ok(self)
+    }
+
+    /// Recheck the actual child cwd and retain Plan custody through a single
+    /// native spawn. The caller handles supervision after this returns.
+    pub fn with_start_authority<T>(
+        &self,
+        request: Request,
+        plan_services: Option<&dyn oms_command_plan::Services>,
+        interrupted: &AtomicBool,
+        spawn: impl FnOnce(Request) -> T,
+    ) -> Result<T> {
+        self.check(interrupted)?;
+        let cwd = request
+            .cwd
+            .as_deref()
+            .ok_or_else(|| Error::new(2, "provider cwd is absent"))?;
+        let Some(checkout) = &self.plan_checkout else {
+            return Ok(spawn(request));
+        };
+        let plan = &checkout.plan;
+        let services = plan_services.ok_or_else(|| {
+            Error::new(
+                2,
+                "Plan provider start requires the owning native Plan adapter",
+            )
+        })?;
+        let cwd = cwd.to_owned();
+        let check_checkout = || {
+            if plan.source.canonicalize()? != plan.source
+                || cwd.canonicalize()? != checkout.worktree
+            {
+                return crate::fail("Plan source or worker checkout changed before provider start");
+            }
+            let git = oms_command_plan::repository::Git {
+                repo: &checkout.worktree,
+                interrupted,
+                group_resolver: None,
+                deadline: Some(self.deadline),
+                group_snapshot: None,
+            };
+            crate::delegate::Worktree::check_bound_base(
+                &checkout.worktree,
+                plan.base_sha(),
+                |args| git.run(args).map_err(|e| Error::new(e.code, e.message)),
+            )
+        };
+        plan.with_running_before(services, interrupted, self.deadline, check_checkout, || {
+            self.check(interrupted)?;
+            Ok(spawn(request))
+        })
+    }
+
     pub fn check(&self, interrupted: &AtomicBool) -> Result<()> {
         crate::check(interrupted)?;
         if Instant::now() >= self.deadline {
@@ -398,6 +474,21 @@ impl TeamLaunchBinding<'_> {
     }
 }
 pub trait Executor: Sync {
+    /// Native Plan mutation services supplied only by the owning host. The
+    /// read-only peer projections never implement this delegation authority.
+    fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
+        None
+    }
+    /// Advisory source-checked context from the existing journal/memory owners.
+    /// This read cannot dispatch work or grant acceptance/resume authority.
+    fn experience_context(
+        &self,
+        _repo: &Path,
+        _query: &str,
+        _interrupted: &AtomicBool,
+    ) -> Result<oms_command_autonomy::services::ExperienceContext> {
+        Err(Error::new(2, "native experience context unavailable"))
+    }
     /// A host with an existing staged native launcher may execute only this
     /// fixed read. Missing integration is an explicit gap, never a PATH fallback.
     fn handoff_projection(
@@ -470,6 +561,17 @@ pub trait Executor: Sync {
 pub struct Native;
 impl Executor for Native {
     fn execute(&self, input: Invocation, interrupted: &AtomicBool) -> Result<Completed> {
+        self.execute_with_plan_services(input, None, interrupted)
+    }
+}
+impl Native {
+    /// Start an invocation using the host's existing Plan adapter when bound.
+    pub fn execute_with_plan_services(
+        &self,
+        input: Invocation,
+        plan_services: Option<&dyn oms_command_plan::Services>,
+        interrupted: &AtomicBool,
+    ) -> Result<Completed> {
         crate::check(interrupted)?;
         if let Some(fence) = &input.launch_fence {
             fence.check(interrupted)?;
@@ -514,12 +616,14 @@ impl Executor for Native {
                 .ok_or_else(|| Error::new(2, "execution deadline overflow"))?,
         );
         request.capture.max_bytes = input.max_bytes;
-        if let Some(fence) = &input.launch_fence {
-            fence.check(interrupted)?;
-        }
-        let job = reactor
-            .start(request)
-            .map_err(|e| Error::new(125, format!("process could not start: {e}")))?;
+        let started = if let Some(fence) = &input.launch_fence {
+            fence.with_start_authority(request, plan_services, interrupted, |request| {
+                reactor.start(request)
+            })?
+        } else {
+            reactor.start(request)
+        };
+        let job = started.map_err(|e| Error::new(125, format!("process could not start: {e}")))?;
         let mut cancelled = false;
         loop {
             if interrupted.load(Ordering::Acquire) && !cancelled {

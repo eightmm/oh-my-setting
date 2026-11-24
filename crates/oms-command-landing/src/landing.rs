@@ -17,24 +17,8 @@ fn append(repo: &Path, row: &V, _interrupted: &std::sync::atomic::AtomicBool) ->
     storage::append_under_lock(repo, Path::new(LOG), row)
 }
 pub fn receipt_digest(row: &V) -> Result<String> {
-    let keys = [
-        "schema",
-        "landing_id",
-        "patch",
-        "patch_sha",
-        "base_sha",
-        "task",
-        "lease",
-        "plan_receipt_sha",
-        "plan_done_receipt_sha",
-        "approval",
-        "approval_version",
-    ];
-    let mut canonical = V::Obj(std::collections::BTreeMap::new());
-    for k in keys {
-        canonical.set(k, row.get(k).clone());
-    }
-    Ok(digest(&canonical.json(false)?))
+    let value = oms_command_plan::json::parse(&row.json(false)?)?;
+    Ok(oms_command_plan::patch_landing_receipt_digest(&value)?)
 }
 fn terminal(intent: &V, event: &str, reason: &str) -> V {
     let mut row = intent.clone();
@@ -48,6 +32,11 @@ fn terminal(intent: &V, event: &str, reason: &str) -> V {
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     parent()?;
     require(o.words.is_empty(), "unexpected patch-land argument")?;
+    let mut policy = Policy::options(o);
+    policy.expected_plan_review = o
+        .has("expected-plan-review")
+        .then(|| oms_command_plan::ReviewFence::parse(o.get("expected-plan-review").as_bytes()))
+        .transpose()?;
     let repo = c.repo(o)?;
     let state = c.state(&repo)?;
     storage::ensure_ignore(&state, c.interrupted)?;
@@ -63,7 +52,12 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     git.clean()?;
     let before = git.snapshot()?;
     let plan = if o.has("plan-task") {
-        Some(admission::task(c, &repo, o.get("plan-task"))?)
+        Some(admission::task_with_review(
+            c,
+            &repo,
+            &policy.task,
+            policy.expected_plan_review.as_ref(),
+        )?)
     } else {
         None
     };
@@ -98,7 +92,12 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "patch bytes differ from the plan task review",
         )?;
     }
-    let policy = Policy::options(o);
+    if let Some(expected) = &policy.expected_plan_review {
+        require(
+            before.head == expected.base_sha() && sha == expected.patch_sha256(),
+            "selected patch or base differs from the exact Plan review",
+        )?;
+    }
     let prelim = LandingRequest {
         state_repo: &state,
         execution_repo: &repo,
@@ -279,6 +278,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     if let Some(plan) = &plan {
         intent.set("plan_id", plan.get("plan_id").clone());
     }
+    if let Some(expected) = &policy.expected_plan_review {
+        intent.set("plan_review_binding", V::parse(&expected.encode()?)?);
+    }
     // Outside the receipt hash: recovery replays the finish with the consent.
     if policy.allow_verifier_change {
         intent.set("verifier_change_consent", true);
@@ -423,6 +425,13 @@ fn recover(c: &Context<'_>, repo: &Path, state: &Path, task: &str) -> Result<Out
             .text()
             .is_some_and(|p| Path::new(p) != repo)
         {
+            continue;
+        }
+        if intent.get("plan_review_binding").truth()
+            && receipt_digest(intent).ok().as_deref() != intent.get("receipt_sha").text()
+        {
+            failed = true;
+            out += "patch-land: exact recovery binding changed; intent kept\n";
             continue;
         }
         let path = state.join(string(intent, "patch"));

@@ -118,7 +118,7 @@ printf '}}\n'
 }
 
 fn transport_args(rt: &Runtime<'_>, row: &Value, action: &str) -> Vec<OsString> {
-    vec![
+    let mut args = vec![
         action.into(),
         "--repo".into(),
         rt.repo.as_os_str().to_owned(),
@@ -130,7 +130,11 @@ fn transport_args(rt: &Runtime<'_>, row: &Value, action: &str) -> Vec<OsString> 
         row.text("remote_dir").into(),
         "--op-id".into(),
         row.text("run_id").into(),
-    ]
+    ];
+    if action == "reconcile" {
+        args.extend(["--timeout-seconds".into(), "10".into()]);
+    }
+    args
 }
 
 fn finish(rt: &Runtime<'_>, initial: &Value, transport_exit: Option<i32>) -> Result<(Value, i32)> {

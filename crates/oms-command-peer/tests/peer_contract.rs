@@ -1643,6 +1643,716 @@ fn run(repo: &Repo, source: &Path, tool: &str, values: &[&str]) -> Output {
 }
 
 #[test]
+fn plan_delegate_uses_exact_issued_lease_and_native_verified_result() {
+    fn isolated_resume_states(name: &str, body: impl Fn()) {
+        for (layout, env) in [
+            (
+                "private-resume",
+                &[("OMS_RESUME_SESSION", "fixture-ambient-resume")][..],
+            ),
+            ("private-empty-resume", &[("OMS_RESUME_SESSION", "")]),
+            ("private", &[]),
+        ] {
+            provider_isolated_with_env(name, layout, env, &body);
+        }
+    }
+    isolated_resume_states(
+        "plan_delegate_uses_exact_issued_lease_and_native_verified_result",
+        || {
+            use oms_command_peer::process::{PhysicalAttempt, PhysicalContract, RegisterPhysical};
+            use oms_command_plan::{Action, Context as PlanContext, Plan, Request, json};
+            const SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+            fn git_at(repo: &Path, args: &[&str]) -> String {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args([
+                        "-c",
+                        "user.name=Fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            }
+            fn drift_worktree(mode: &str, repo: &Path) {
+                if mode.contains("-index-") {
+                    fs::write(repo.join("tracked.txt"), "staged fixture change\n").unwrap();
+                    git_at(repo, &["add", "--", "tracked.txt"]);
+                } else {
+                    git_at(repo, &["commit", "--allow-empty", "-qm", "concurrent head"]);
+                }
+            }
+            struct Host {
+                repo: PathBuf,
+                base: String,
+                mode: &'static str,
+                calls: AtomicU64,
+                alias_during_start: Mutex<Option<PathBuf>>,
+            }
+            impl oms_command_plan::Services for Host {
+                fn group_membership_resolver(
+                    &self,
+                ) -> Option<oms_command_plan::services::GroupResolver> {
+                    let mut pending = self.alias_during_start.lock().unwrap();
+                    if pending.is_some() {
+                        let active = self.repo.join(oms_command_plan::storage::ACTIVE);
+                        let lock = oms_lock::Lock::for_file(
+                            &active,
+                            oms_lock::Settings::from_env().unwrap(),
+                        )
+                        .unwrap();
+                        // Plan's source Git setup requests the resolver under
+                        // ACTIVE, after the checkout's initial generation was read.
+                        match lock.try_acquire() {
+                            Err(oms_lock::Error::Busy) => {
+                                let worker = pending.take().unwrap();
+                                if self.mode == "worktree-alias-under-start-lock" {
+                                    self.replace_worker_with_alias(&worker);
+                                } else {
+                                    self.arm_late_git_change(&worker);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => panic!("cannot sample canonical Start lock: {error}"),
+                        }
+                    }
+                    None
+                }
+            }
+            impl Host {
+                fn arm_late_git_change(&self, worker: &Path) {
+                    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+                    let bin = home.join("bin");
+                    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                        .filter(|path| path != &bin)
+                        .map(|path| path.join("git"))
+                        .find(|path| path.is_file())
+                        .unwrap();
+                    fs::write(
+                        home.join("fixture-start-drift"),
+                        format!("{}\n{}\n", worker.display(), self.mode),
+                    )
+                    .unwrap();
+                    fs::write(
+                        home.join("fixture-real-git"),
+                        real_git.as_os_str().as_encoded_bytes(),
+                    )
+                    .unwrap();
+                    let shim = bin.join("git");
+                    fs::write(&shim, r#"#!/bin/sh
+set -eu
+real_git=$(cat "$HOME/fixture-real-git")
+spec="$HOME/fixture-start-drift"
+if [ -f "$spec" ]; then
+    { IFS= read -r worker; IFS= read -r mode; } < "$spec"
+    previous=
+    checkout=
+    cached=0
+    for arg do
+        if [ "$previous" = -C ]; then checkout=$arg; fi
+        if [ "$arg" = --cached ]; then cached=1; fi
+        previous=$arg
+    done
+    if [ "$checkout" = "$worker" ] && [ "$cached" = 1 ]; then
+        "$real_git" "$@"
+        case "$mode" in
+            worktree-head-after-start-proof)
+                "$real_git" -C "$worker" -c user.name=Fixture -c user.email=fixture@example.invalid commit --allow-empty -qm 'late HEAD'
+                ;;
+            worktree-index-after-start-proof)
+                printf 'late index\n' > "$worker/tracked.txt"
+                "$real_git" -C "$worker" add -- tracked.txt
+                ;;
+            *) exit 81 ;;
+        esac
+        mv "$spec" "$spec.used"
+        exit 0
+    fi
+fi
+exec "$real_git" "$@"
+"#).unwrap();
+                    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+
+                fn replace_worker_with_alias(&self, path: &Path) {
+                    let other = path.with_file_name("other-worktree");
+                    fs::rename(path, path.with_file_name("retained-worktree")).unwrap();
+                    git_at(
+                        &self.repo,
+                        &[
+                            "-c",
+                            "core.hooksPath=/dev/null",
+                            "worktree",
+                            "add",
+                            "--detach",
+                            other.to_str().unwrap(),
+                            &self.base,
+                        ],
+                    );
+                    std::os::unix::fs::symlink(&other, path).unwrap();
+                }
+                fn plan(&self, request: Request) -> json::Value {
+                    let context =
+                        PlanContext::from_environment_at(&request, &self.repo, &self.repo, None)
+                            .unwrap();
+                    let plan = Plan::open(context, self, &STOP).unwrap();
+                    let output = plan.execute(&request).unwrap();
+                    if output.stdout.first() == Some(&b'{') {
+                        json::parse(&output.stdout).unwrap()
+                    } else {
+                        json::Value::Null
+                    }
+                }
+                fn replace(&self) -> json::Value {
+                    let old = self.plan(Request::new(Action::Show).with("id", "t1"));
+                    self.plan(
+                        Request::new(Action::Release)
+                            .with("id", "t1")
+                            .with("lease-id", old.text("lease_id")),
+                    );
+                    self.plan(
+                        Request::new(Action::Claim)
+                            .with("id", "t1")
+                            .with("provider", "claude")
+                            .flag("json"),
+                    )
+                }
+            }
+            impl Executor for Host {
+                fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
+                    Some(self)
+                }
+                fn with_physical_contract(
+                    &self,
+                    attempt: &PhysicalAttempt<'_>,
+                    _: std::time::Instant,
+                    _: &AtomicBool,
+                    register: RegisterPhysical<'_>,
+                ) -> oms_command_peer::Result<()> {
+                    if self.mode == "replace-before-send" {
+                        self.replace();
+                    }
+                    match self.mode {
+                        "head-before-send" => drift_worktree(self.mode, &self.repo),
+                        "worktree-head-before-send" | "worktree-index-before-send" => {
+                            drift_worktree(self.mode, attempt.execution_repo);
+                        }
+                        _ => {}
+                    }
+                    register(PhysicalContract::default()).map(|_| ())
+                }
+                fn execute_provider(
+                    &self,
+                    mut request: Invocation,
+                    _: &oms_command_telemetry::store::usage::Identity,
+                    _: bool,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if self.mode == "worktree-split-index" {
+                        assert!(
+                            !git_at(&request.cwd, &["rev-parse", "--shared-index-path"]).is_empty()
+                        );
+                    }
+                    if matches!(
+                        self.mode,
+                        "source-head-at-spawn"
+                            | "worktree-head-at-spawn"
+                            | "worktree-index-at-spawn"
+                            | "lease-at-spawn"
+                    ) {
+                        // The logical gate already succeeded. Exercise the same
+                        // fence at the native supervisor immediately before spawn.
+                        let replacement = match self.mode {
+                            "lease-at-spawn" => {
+                                let replacement = self.replace();
+                                for repo in [&self.repo, &request.cwd] {
+                                    assert_eq!(git_at(repo, &["rev-parse", "HEAD"]), self.base);
+                                    assert!(
+                                        git_at(repo, &["diff", "--cached", "--name-only"])
+                                            .is_empty()
+                                    );
+                                }
+                                Some(replacement)
+                            }
+                            "source-head-at-spawn" => {
+                                drift_worktree("worktree-head-at-spawn", &self.repo);
+                                None
+                            }
+                            mode => {
+                                drift_worktree(mode, &request.cwd);
+                                None
+                            }
+                        };
+                        let marker = request.cwd.join("provider-started");
+                        request.argv = args(&["/bin/sh", "-c", "touch provider-started"]);
+                        request.input = None;
+                        let result = Native.execute_with_plan_services(request, Some(self), stop);
+                        assert!(!marker.exists(), "{} launched a provider", self.mode);
+                        if let Some(replacement) = replacement {
+                            let err = result.as_ref().expect_err("stale lease started provider");
+                            assert!(
+                                err.message
+                                    .contains("Plan delegation task, lease, scope or base changed")
+                            );
+                            let current =
+                                self.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1"));
+                            assert_eq!(current.text("state"), "claimed");
+                            assert_eq!(current.text("lease_id"), replacement.text("lease_id"));
+                            assert_eq!(
+                                current.text("task_sha256"),
+                                replacement.text("task_sha256")
+                            );
+                        }
+                        return result;
+                    }
+                    self.execute(request, stop)
+                }
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if matches!(request.argv[0].to_str(), Some("git" | "bash")) {
+                        if matches!(
+                            self.mode,
+                            "worktree-head-before-start"
+                                | "worktree-index-before-start"
+                                | "worktree-alias-before-start"
+                                | "worktree-alias-under-start-lock"
+                                | "worktree-head-after-start-proof"
+                                | "worktree-index-after-start-proof"
+                        ) && request
+                            .argv
+                            .windows(2)
+                            .any(|pair| pair[0] == "worktree" && pair[1] == "add")
+                        {
+                            let path = PathBuf::from(&request.argv[request.argv.len() - 2]);
+                            let result = Native.execute(request, stop)?;
+                            assert_eq!(result.code, 0);
+                            match self.mode {
+                                "worktree-alias-before-start" => {
+                                    self.replace_worker_with_alias(&path)
+                                }
+                                "worktree-alias-under-start-lock"
+                                | "worktree-head-after-start-proof"
+                                | "worktree-index-after-start-proof" => {
+                                    *self.alias_during_start.lock().unwrap() = Some(path);
+                                }
+                                _ => drift_worktree(self.mode, &path),
+                            }
+                            return Ok(result);
+                        }
+                        return Native.execute(request, stop);
+                    }
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        request.environment.iter().all(|(key, _)| !key
+                            .to_string_lossy()
+                            .starts_with("OMS_DELEGATE_PLAN_"))
+                    );
+                    let prompt = request
+                        .input
+                        .as_ref()
+                        .map(|raw| String::from_utf8_lossy(raw).into_owned())
+                        .unwrap_or_else(|| {
+                            request
+                                .argv
+                                .iter()
+                                .map(|part| part.to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        });
+                    assert!(prompt.contains("Required verification:"));
+                    assert!(prompt.contains("Forbidden paths: denied.txt"));
+                    let script = match self.mode {
+                        "unknown-stderr-only" => {
+                            Some("printf '%s\\n' 'provider capacity unavailable' >&2; exit 1")
+                        }
+                        "unknown-claude-open" => Some(concat!(
+                            "printf 'changed\\n' > tracked.txt; printf '%s\\n' ",
+                            "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}' ",
+                            "'{\"type\":\"system\",\"subtype\":\"init\"}'",
+                        )),
+                        "ok-footer" => Some(concat!(
+                            "printf 'changed\\n' > tracked.txt; printf '%s\\n' ",
+                            "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}' ",
+                            "'{\"type\":\"system\",\"subtype\":\"hook_response\",\"hook_event\":\"Stop\",\"outcome\":\"success\"}' ",
+                            "'{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\"}}'",
+                        )),
+                        _ => None,
+                    };
+                    if let Some(script) = script {
+                        let mut fixture = request;
+                        fixture.argv = args(&["/bin/sh", "-c", script]);
+                        fixture.input = None;
+                        return Native.execute_with_plan_services(fixture, Some(self), stop);
+                    }
+                    fs::write(
+                        request.cwd.join("tracked.txt"),
+                        if self.mode == "repair" {
+                            "repaired\n"
+                        } else {
+                            "changed\n"
+                        },
+                    )
+                    .unwrap();
+                    if self.mode == "forbidden" {
+                        fs::write(request.cwd.join("denied.txt"), "forbidden edit\n").unwrap();
+                    }
+                    if self.mode == "replace-on-return" {
+                        self.replace();
+                    }
+                    Ok(Completed {
+                        code: if self.mode == "failure" { 7 } else if self.mode == "cancel" { 130 } else { 0 },
+                        stdout: b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"implemented the frozen task\"}\n".to_vec(),
+                        stderr: vec![], complete: self.mode != "cancel", cleanup_complete: Some(true),
+                        owned_cleanup: None, elapsed: Duration::ZERO,
+                    })
+                }
+            }
+            let regular = [
+                "ok",
+                "foreign-provider",
+                "foreign-model",
+                "read-role",
+                "forbidden",
+                "replace-before-send",
+                "head-before-send",
+                "worktree-head-before-start",
+                "worktree-index-before-start",
+                "worktree-alias-before-start",
+                "worktree-alias-under-start-lock",
+                "worktree-head-after-start-proof",
+                "worktree-index-after-start-proof",
+                "worktree-split-index",
+                "worktree-head-before-send",
+                "worktree-index-before-send",
+                "source-head-at-spawn",
+                "worktree-head-at-spawn",
+                "worktree-index-at-spawn",
+                "lease-at-spawn",
+                "unknown-stderr-only",
+                "unknown-claude-open",
+                "ok-footer",
+                "replace-on-return",
+                "failure",
+                "cancel",
+                "repair",
+            ];
+            let modes: &[&str] = match std::env::var("OMS_RESUME_SESSION").as_deref() {
+                Ok("fixture-ambient-resume") => &["ambient-resume"],
+                Ok("") => &["ok"],
+                Err(std::env::VarError::NotPresent) => &regular,
+                other => panic!("unexpected fixture resume state: {other:?}"),
+            };
+            for &mode in modes {
+                let repo = provider_repo();
+                repo.write("denied.txt", "unchanged\n");
+                repo.write(".gitignore", ".oms/\n");
+                repo.git(&["add", "denied.txt", ".gitignore"]);
+                repo.git(&[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "scope",
+                ]);
+                let host = Host {
+                    repo: repo.0.clone(),
+                    base: git_at(&repo.0, &["rev-parse", "HEAD"]),
+                    mode,
+                    calls: AtomicU64::new(0),
+                    alias_during_start: Mutex::new(None),
+                };
+                if mode == "worktree-split-index" {
+                    git_at(&repo.0, &["config", "core.splitIndex", "true"]);
+                }
+                host.plan(Request::new(Action::Init).with("goal", "native Plan delegate"));
+                let mut task_request = Request::new(Action::Add)
+                    .with("id", "t1")
+                    .with("title", "update tracked.txt")
+                    .with("allowed", "tracked.txt,denied.txt")
+                    .with("forbidden", "denied.txt")
+                    .with("verify", "test -s tracked.txt")
+                    .with(
+                        "assignment",
+                        if mode == "unknown-stderr-only" {
+                            "{\"provider\":\"claude\",\"model\":\"fixture\",\"fallback_model\":\"fixture-fallback\"}"
+                        } else {
+                            "{\"provider\":\"claude\",\"model\":\"fixture\"}"
+                        },
+                    );
+                if mode == "read-role" {
+                    task_request = task_request.with("role", "researcher");
+                }
+                host.plan(task_request);
+                let mut issued = host.plan(
+                    Request::new(Action::Claim)
+                        .with("id", "t1")
+                        .with("provider", "claude")
+                        .flag("json"),
+                );
+                let mut review_artifact = None;
+                if mode == "repair" {
+                    repo.write(".oms/artifacts/old.md", "prior real review\n");
+                    repo.write(".oms/artifacts/old.patch", "prior patch\n");
+                    host.plan(
+                        Request::new(Action::Review)
+                            .with("id", "t1")
+                            .with("lease-id", issued.text("lease_id"))
+                            .with("artifact", ".oms/artifacts/old.md")
+                            .with("patch", ".oms/artifacts/old.patch"),
+                    );
+                    host.plan(
+                        Request::new(Action::Repair)
+                            .with("id", "t1")
+                            .with("lease-id", issued.text("lease_id"))
+                            .with("artifact", ".oms/artifacts/old.md"),
+                    );
+                    issued = host.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1"));
+                    review_artifact = Some(".oms/artifacts/old.md");
+                }
+                let context = PlanContext::from_environment_at(
+                    &Request::new(Action::Status),
+                    &repo.0,
+                    &repo.0,
+                    None,
+                )
+                .unwrap();
+                let plan = Plan::open(context, &host, &STOP).unwrap();
+                let binding = json::object([
+                    ("schema", json::number(1)),
+                    ("plan_id", issued.get("plan_id").clone()),
+                    ("task_id", issued.get("id").clone()),
+                    ("task_sha256", issued.get("task_sha256").clone()),
+                    ("lease_id", issued.get("lease_id").clone()),
+                    ("lease_epoch", issued.get("lease_epoch").clone()),
+                    (
+                        "base_sha",
+                        json::string(plan.git().text(&["rev-parse", "HEAD"]).unwrap()),
+                    ),
+                ]);
+                let binding = String::from_utf8(json::canonical(&binding).unwrap()).unwrap();
+                let mut call = vec![
+                    "--to".to_string(),
+                    if mode == "foreign-provider" {
+                        "codex"
+                    } else {
+                        "claude"
+                    }
+                    .into(),
+                    "--model".into(),
+                    if mode == "foreign-model" {
+                        "other-model"
+                    } else {
+                        "fixture"
+                    }
+                    .into(),
+                    "--plan-task".into(),
+                    "t1".into(),
+                    "--plan-binding".into(),
+                    binding,
+                ];
+                if mode == "unknown-stderr-only" {
+                    call.extend(["--fallback-model".into(), "fixture-fallback".into()]);
+                }
+                if let Some(path) = review_artifact {
+                    call.extend([
+                        "--terminalize-resumed-repair".into(),
+                        "--review-artifact".into(),
+                        path.into(),
+                    ]);
+                }
+                let late_git_change = matches!(
+                    mode,
+                    "worktree-head-after-start-proof" | "worktree-index-after-start-proof"
+                );
+                let pre_start_refusal = late_git_change
+                    || matches!(
+                        mode,
+                        "ambient-resume"
+                            | "worktree-alias-before-start"
+                            | "worktree-alias-under-start-lock"
+                    );
+                let events = oms_command_operations::event_path(&repo.0);
+                let plan_file = repo.0.join(oms_command_plan::storage::ACTIVE);
+                let before = pre_start_refusal.then(|| {
+                    (
+                        host.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1")),
+                        fs::read(&events).ok(),
+                        fs::read(&plan_file).unwrap(),
+                    )
+                });
+                let output = oms_command_peer::run_with_executor(
+                    "peer-delegate",
+                    &call.iter().map(OsString::from).collect::<Vec<_>>(),
+                    &repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    &host,
+                );
+                if late_git_change {
+                    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+                    assert!(home.join("fixture-start-drift.used").is_file());
+                    fs::remove_file(home.join("fixture-start-drift.used")).unwrap();
+                    fs::remove_file(home.join("bin/git")).unwrap();
+                }
+                let task = host.plan(Request::new(Action::Show).with("id", "t1"));
+                let message = format!(
+                    "{mode}: {}{}",
+                    String::from_utf8_lossy(&output.1),
+                    String::from_utf8_lossy(&output.2)
+                );
+                if let Some((snapshot, prior_events, prior_plan)) = before {
+                    let reason = if mode == "ambient-resume" {
+                        "OMS_RESUME_SESSION cannot select a provider session for Plan delegation"
+                    } else if late_git_change {
+                        "Plan worker Git generation changed before Start"
+                    } else {
+                        "Plan worker checkout does not have its expected physical path"
+                    };
+                    assert_eq!(output.0, 2, "{message}");
+                    assert!(message.contains(reason), "{message}");
+                    assert_eq!(task.text("state"), "claimed", "{message}");
+                    assert_eq!(
+                        host.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1"))
+                            .get("task_sha256"),
+                        snapshot.get("task_sha256"),
+                        "{message}"
+                    );
+                    assert_eq!(fs::read(&events).ok(), prior_events);
+                    assert_eq!(fs::read(&plan_file).unwrap(), prior_plan);
+                    assert!(!repo.0.join(".oms/artifacts/index.jsonl").exists());
+                    assert!(
+                        !repo
+                            .0
+                            .join(oms_command_telemetry::store::usage::RECEIPTS)
+                            .exists()
+                    );
+                    assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+                    assert!(host.alias_during_start.lock().unwrap().is_none());
+                    continue;
+                }
+                if matches!(mode, "ok" | "repair" | "ok-footer" | "worktree-split-index") {
+                    assert_eq!(output.0, 0, "{message}");
+                    assert_eq!(task.text("state"), "review", "{message}");
+                    assert_eq!(task.text("review_lease_id"), issued.text("lease_id"));
+                    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(
+                        fs::read_to_string(repo.0.join("tracked.txt")).unwrap(),
+                        "baseline\n",
+                        "owner checkout must remain unchanged"
+                    );
+                    let rows = oms_command_peer::storage::rows(
+                        &fs::read(repo.0.join(".oms/artifacts/index.jsonl")).unwrap(),
+                    )
+                    .unwrap();
+                    let row = rows
+                        .iter()
+                        .find(|row| row.get("kind").text() == Some("delegate"))
+                        .unwrap();
+                    assert_eq!(
+                        row.get("plan_binding").get("lease_id").text(),
+                        Some(issued.text("lease_id"))
+                    );
+                    assert_eq!(row.get("task_id").text(), Some("t1"));
+                    for (path, digest) in
+                        [("artifact", "artifact_sha256"), ("patch", "patch_sha256")]
+                    {
+                        assert_eq!(
+                            row.get(digest).text().unwrap(),
+                            json::sha(
+                                fs::read(repo.0.join(row.get(path).text().unwrap())).unwrap()
+                            )
+                        );
+                    }
+                    if mode == "repair" {
+                        assert!(task.get("repair_count").is_int(1));
+                    }
+                } else {
+                    assert_ne!(output.0, 0, "{message}");
+                    assert_ne!(task.text("state"), "review", "{message}");
+                    assert_eq!(
+                        host.calls.load(Ordering::SeqCst),
+                        u64::from(!matches!(
+                            mode,
+                            "foreign-provider"
+                                | "foreign-model"
+                                | "read-role"
+                                | "replace-before-send"
+                                | "head-before-send"
+                                | "worktree-head-before-start"
+                                | "worktree-index-before-start"
+                                | "worktree-head-before-send"
+                                | "worktree-index-before-send"
+                                | "source-head-at-spawn"
+                                | "worktree-head-at-spawn"
+                                | "worktree-index-at-spawn"
+                                | "lease-at-spawn"
+                        )),
+                        "{message}"
+                    );
+                    if matches!(
+                        mode,
+                        "worktree-head-before-start" | "worktree-index-before-start"
+                    ) {
+                        assert_eq!(task.text("state"), "claimed", "{message}");
+                        assert_eq!(task.text("lease_id"), issued.text("lease_id"));
+                    }
+                    if matches!(mode, "unknown-stderr-only" | "unknown-claude-open") {
+                        let stderr = String::from_utf8_lossy(&output.2);
+                        let worktree = stderr
+                            .lines()
+                            .find_map(|line| line.strip_prefix("worktree retained: "))
+                            .unwrap_or_else(|| panic!("{message}"));
+                        let expected = if mode == "unknown-claude-open" {
+                            "changed\n"
+                        } else {
+                            "baseline\n"
+                        };
+                        assert_eq!(
+                            fs::read_to_string(Path::new(worktree).join("tracked.txt")).unwrap(),
+                            expected
+                        );
+                    }
+                    if mode == "replace-on-return" {
+                        assert_ne!(task.text("lease_id"), issued.text("lease_id"));
+                        assert!(
+                            fs::read_to_string(repo.0.join(".oms/plan/late-results.jsonl"))
+                                .unwrap()
+                                .contains("stale_delegate_binding")
+                        );
+                    }
+                }
+                let before_replay = host.calls.load(Ordering::SeqCst);
+                let replay = oms_command_peer::run_with_executor(
+                    "peer-delegate",
+                    &call.iter().map(OsString::from).collect::<Vec<_>>(),
+                    &repo.0,
+                    Path::new(SOURCE),
+                    &STOP,
+                    &host,
+                );
+                assert_ne!(
+                    replay.0, 0,
+                    "replaying the old issued binding cannot resend: {mode}"
+                );
+                assert_eq!(host.calls.load(Ordering::SeqCst), before_replay);
+            }
+        },
+    );
+}
+#[test]
 fn provider_adapter_discovery_requires_marker() {
     for layout in ["override", "xdg", "home"] {
         provider_isolated("provider_adapter_discovery_requires_marker", layout, || {
@@ -4972,6 +5682,22 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 }
             }
             impl Executor for Reads {
+                fn experience_context(
+                    &self,
+                    _repo: &Path,
+                    query: &str,
+                    _interrupted: &AtomicBool,
+                ) -> oms_command_peer::Result<serde_json::Value> {
+                    if self.mode != "autopilot" {
+                        return Err(oms_command_peer::Error::new(
+                            2,
+                            "fixture experience unavailable",
+                        ));
+                    }
+                    assert!(query.contains("Plan continuity"));
+                    Ok(serde_json::json!({"schema":1,"authority":"advisory",
+                        "entries":[{"outcome":"valid negative measurement","source_sha256":"d".repeat(64)}]}))
+                }
                 fn execute(
                     &self,
                     request: Invocation,
@@ -4998,6 +5724,14 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         interrupted.store(true, Ordering::Release);
                         return Err(oms_command_peer::Error::new(130, "fixture interrupted"));
                     }
+                    if self.mode == "autopilot_interrupted"
+                        && projection == HandoffProjection::AutopilotStatus
+                    {
+                        return Err(oms_command_peer::Error::new(
+                            130,
+                            "fixture late cancellation",
+                        ));
+                    }
                     let mut stdout = match projection {
                     HandoffProjection::TaskStatus => {
                         br#"{"schema":1,"status":"active","verification":"not_verified"}"#.to_vec()
@@ -5014,16 +5748,28 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     HandoffProjection::ReviewFindings => {
                         br#"[{"id":"finding_1","status":"open","summary":"review freshness"}]"#.to_vec()
                     }
+                    HandoffProjection::AutopilotStatus => {
+                        serde_json::to_vec(&serde_json::json!({"next_action":{"schema":1,"kind":"autopilot-next-action",
+                            "owner_id":"fixture-owner","stage":"parked","receipt_sha256":"a".repeat(64),
+                            "decision_sha256":"b".repeat(64),"action":"resume","reason":"exact terminal result remains unconsumed",
+                            "wait":{"status":"terminal","result_sha256":"c".repeat(64)},"budget":{"remaining_cycles":2},
+                            "commands":[["oms","autopilot","status"]]}})).unwrap()
+                    }
                 };
                     if matches!(self.mode, "empty" | "omitted_only" | "omitted_one")
-                        && projection != HandoffProjection::TaskStatus
+                        && !matches!(
+                            projection,
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus
+                        )
                     {
                         let key = match projection {
                             HandoffProjection::EvidenceMatrix => "criteria",
                             HandoffProjection::NextStep => "actions",
                             HandoffProjection::JournalDecisions => "decisions",
                             HandoffProjection::ReviewFindings => "",
-                            HandoffProjection::TaskStatus => unreachable!(),
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus => {
+                                unreachable!()
+                            }
                         };
                         stdout = if key.is_empty() {
                             b"[]".to_vec()
@@ -5042,7 +5788,12 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         };
                     }
                     let mut complete = true;
-                    if self.mode == "collections" && projection != HandoffProjection::TaskStatus {
+                    if self.mode == "collections"
+                        && !matches!(
+                            projection,
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus
+                        )
+                    {
                         let (key, name, count, omitted, bounded) = match projection {
                             HandoffProjection::EvidenceMatrix => {
                                 ("criteria", "criterion", 24, 2, true)
@@ -5052,7 +5803,9 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                                 ("decisions", "decision", 32, 7, false)
                             }
                             HandoffProjection::ReviewFindings => ("", "finding", 17, 0, false),
-                            HandoffProjection::TaskStatus => unreachable!(),
+                            HandoffProjection::TaskStatus | HandoffProjection::AutopilotStatus => {
+                                unreachable!()
+                            }
                         };
                         let rows = V::Arr(
                             (0..count)
@@ -5226,6 +5979,38 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 packet.as_bytes()
             );
             assert!(!repo.0.join(".oms/handoffs").exists());
+
+            // A receipt is only a discovery signal here. The checked next
+            // action must come from the fixed native status producer, while
+            // experience crosses the real peer -> autonomy adapter as advisory.
+            repo.write(".oms/plan/autopilot-run.json", b"{}");
+            let adaptive = Reads::new("autopilot");
+            let result = call(&adaptive, &["prompt", "--max-bytes", "8192"]);
+            assert_eq!(result.0, 0, "{}", message(&result));
+            let body = std::str::from_utf8(&result.1).unwrap();
+            for expected in [
+                "fixture-owner",
+                "exact terminal result remains unconsumed",
+                "remaining_cycles",
+                "Advisory prior outcome",
+                "valid negative measurement",
+                "source-checked journal experience",
+            ] {
+                assert!(body.contains(expected), "missing {expected}: {body}");
+            }
+            assert_eq!(
+                adaptive
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(projection, _)| *projection == HandoffProjection::AutopilotStatus)
+                    .count(),
+                1
+            );
+            let interrupted_read = call(&Reads::new("autopilot_interrupted"), &["prompt"]);
+            assert_eq!(interrupted_read.0, 130, "{}", message(&interrupted_read));
+            fs::remove_file(repo.0.join(".oms/plan/autopilot-run.json")).unwrap();
 
             let small = call(&Reads::new("complete"), &["prompt", "--max-bytes", "512"]);
             assert_eq!(small.0, 0, "{}", message(&small));

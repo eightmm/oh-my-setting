@@ -323,8 +323,15 @@ fn intent_from_receipt(row: &Value) -> Value {
     ])
 }
 pub(crate) fn cleanup(plan: &Plan<'_>) -> Result<()> {
+    if let Some((path, raw)) = completed_cleanup(plan)? {
+        plan.store.remove(path, &raw, None)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn completed_cleanup(plan: &Plan<'_>) -> Result<Option<(String, Vec<u8>)>> {
     if !plan.context.canonical() {
-        return Ok(());
+        return Ok(None);
     }
     let names = plan.store.names(".oms/plan", 65536, true)?;
     let mut matches = Vec::new();
@@ -339,7 +346,7 @@ pub(crate) fn cleanup(plan: &Plan<'_>) -> Result<()> {
         }
     }
     if matches.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     require(
         matches.len() == 1,
@@ -368,7 +375,7 @@ pub(crate) fn cleanup(plan: &Plan<'_>) -> Result<()> {
             "active plan lineage still requires exact retire replay",
         )?;
     }
-    plan.store.remove(path, &raw, None)
+    Ok(Some((path.clone(), raw)))
 }
 pub(crate) fn cleanup_for_accept(
     plan: &Plan<'_>,

@@ -22,6 +22,7 @@ mod manifest;
 mod ml_context;
 mod native;
 mod peer;
+mod plan_delegate;
 pub mod process;
 pub mod providers;
 mod receipts;

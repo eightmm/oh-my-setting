@@ -2,7 +2,7 @@
 use crate::cli::Args;
 use crate::planning::invoke;
 use crate::storage::{Context, MAX_FILE, PROGRESS};
-use crate::{Error, Output, Result, checkpoint, require, value, verify};
+use crate::{Error, Output, Result, adaptive, checkpoint, require, value, verify};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -81,7 +81,24 @@ fn terminal(
 ) -> Result<Output> {
     let receipt = value::random("")?;
     let receipt = value::hash(receipt);
-    let row = json!({"schema": 1, "kind": "terminal", "ts": value::now(), "run_id": run, "cycle": cycle, "status": status, "reason": reason, "base_sha": ctx.git(&["rev-parse", "HEAD"])?, "receipt": receipt});
+    let mut row = json!({"schema": 1, "kind": "terminal", "ts": value::now(), "run_id": run, "cycle": cycle, "status": status, "reason": reason, "base_sha": ctx.git(&["rev-parse", "HEAD"])?, "receipt": receipt});
+    row["tree"] = ctx.git(&["rev-parse", "HEAD^{tree}"])?.into();
+    row["worktree_clean"] = ctx.clean().is_ok().into();
+    row["owner_id"] = ctx.owner_id.clone().into();
+    if let Some(raw) = ctx.store.optional(crate::storage::RECEIPT, 64 * 1024)? {
+        let contract = value::parse(&raw)?;
+        if contract["owner_id"] == ctx.owner_id {
+            row["spec_sha256"] = contract["spec_sha256"].clone();
+        }
+    }
+    if let Some(cause) = ctx
+        .rows(PROGRESS)?
+        .iter()
+        .rev()
+        .find(|r| r["kind"] == "autopilot-failure" && r["run_id"] == run)
+    {
+        row["cause"] = cause["failure"].clone();
+    }
     {
         let _lock = ctx.lock(PROGRESS)?;
         ctx.append(PROGRESS, &row)?;
@@ -335,39 +352,120 @@ fn evidence(ctx: &Context<'_>, path: &str) -> Result<Vec<u8>> {
         path.starts_with(&ctx.state),
         "task evidence escaped canonical state repository",
     )?;
+    // Native landing publications retain a second link to their certified
+    // anchor. Only the existing capture owner may validate those bytes;
+    // ordinary evidence still requires the Store's single-link invariant.
+    if path.parent() == Some(ctx.state.join(".oms/landing-patches").as_path())
+        && let Some(bytes) = ctx
+            .services
+            .read_managed_patch(&ctx.state, &path, 16 * MAX_FILE)?
+    {
+        return Ok(bytes);
+    }
     Ok(ctx.store.read(path, 16 * MAX_FILE)?)
 }
-fn completed_landing(ctx: &Context<'_>, id: &str) -> Result<Value> {
+/// Candidate terminals are indexed separately from all authoritative records
+/// for the landing id so a contradictory row cannot hide under another task.
+#[derive(Default)]
+pub(crate) struct LandingLedger<'a> {
+    by_task: BTreeMap<&'a str, Vec<&'a oms_command_plan::json::Value>>,
+    by_id: BTreeMap<&'a str, Vec<&'a oms_command_plan::json::Value>>,
+}
+impl<'a> LandingLedger<'a> {
+    pub(crate) fn new(rows: &'a [oms_command_plan::json::Value]) -> Self {
+        let mut ledger = Self::default();
+        for row in rows {
+            let event = row.text("event");
+            if matches!(event, "intent" | "complete" | "abandoned") {
+                ledger
+                    .by_id
+                    .entry(row.text("landing_id"))
+                    .or_default()
+                    .push(row);
+            }
+            if event == "complete" {
+                ledger
+                    .by_task
+                    .entry(row.text("task"))
+                    .or_default()
+                    .push(row);
+            }
+        }
+        ledger
+    }
+}
+
+pub(crate) fn completed_landing(
+    ctx: &Context<'_>,
+    id: &str,
+    expected: Option<&oms_command_plan::ReviewFence>,
+) -> Result<Value> {
     let plan = ctx.plan()?;
     let snapshot = plan.load()?;
+    let rows = plan.patch_landing_rows()?;
+    let ledger = LandingLedger::new(&rows);
+    let row = completed_landing_from_snapshot(ctx, &plan, &snapshot, &ledger, id, expected)?;
+    value::from_plan(row)
+}
+
+/// Commit publication and milestone progress consume the same canonical
+/// result proof. Batch readers reuse the Plan snapshot and ledger indexes.
+pub(crate) fn completed_landing_from_snapshot<'a>(
+    ctx: &Context<'_>,
+    plan: &oms_command_plan::Plan<'_>,
+    snapshot: &oms_command_plan::Snapshot,
+    ledger: &LandingLedger<'a>,
+    id: &str,
+    expected: Option<&oms_command_plan::ReviewFence>,
+) -> Result<&'a oms_command_plan::json::Value> {
     let task = snapshot.task(id)?;
     require(
-        task.text("state") == "done",
+        snapshot.verified_done(task),
         "completed landing requires done task",
     )?;
     let receipt = oms_command_plan::json::receipt_digest(task)?;
     let patch_hash = value::hash(evidence(ctx, task.text("patch"))?);
-    let plan_id = value::from_plan(snapshot.plan.get("plan_id"))?;
-    let row = ctx
-        .rows(".oms/landings.jsonl")?
+    let worktree = ctx.repo.to_string_lossy();
+    let candidate = ledger
+        .by_task
+        .get(id)
         .into_iter()
+        .flatten()
         .rev()
         .find(|row| {
-            row["event"] == "complete"
-                && value::text(row, "task") == id
-                && (row["worktree"] == ctx.repo.to_string_lossy().as_ref()
-                    || row.get("worktree").is_none() && ctx.repo == ctx.state)
-                && row["plan_id"] == plan_id
-                && value::text(row, "lease") == task.text("review_lease_id")
-                && value::text(row, "plan_done_receipt_sha") == receipt
-                && value::text(row, "patch_sha") == patch_hash
+            (row.text("worktree") == worktree.as_ref()
+                || row.opt("worktree").is_none() && ctx.repo == ctx.state)
+                && row.get("plan_id") == snapshot.plan.get("plan_id")
+                && row.text("lease") == task.text("review_lease_id")
+                && row.text("plan_done_receipt_sha") == receipt
+                && row.text("patch") == task.text("patch")
+                && row.text("patch_sha") == patch_hash
+                && expected.is_none_or(|proof| row.text("base_sha") == proof.base_sha())
         })
         .ok_or_else(|| Error::new(3, "no exact completed landing receipt"))?;
+    let landing_id = candidate.text("landing_id");
+    let records = ledger.by_id.get(landing_id).into_iter().flatten().copied();
+    let (intent, terminal) = oms_command_plan::completed_patch_landing(records, landing_id)?;
     require(
-        value::commit(value::text(&row, "base_sha")),
+        value::commit(intent.text("base_sha")),
         "landing receipt has invalid base",
     )?;
-    Ok(row)
+    let recorded = intent.opt("plan_review_binding");
+    if let Some(expected) = expected {
+        let recorded = recorded
+            .ok_or_else(|| Error::new(2, "landing receipt is missing the selected Plan review"))?;
+        require(
+            oms_command_plan::json::canonical(recorded)? == expected.encode()?,
+            "landing receipt belongs to another selected Plan review",
+        )?;
+    }
+    let proof = recorded
+        .map(|value| {
+            oms_command_plan::ReviewFence::parse(&oms_command_plan::json::canonical(value)?)
+        })
+        .transpose()?;
+    plan.check_landing_done(snapshot, id, proof.as_ref(), &patch_hash)?;
+    Ok(terminal)
 }
 fn changed_paths(ctx: &Context<'_>, base: &str, tree: &str) -> Result<Vec<String>> {
     let raw = ctx.plan()?.git().run(&[
@@ -412,7 +510,7 @@ fn review_receipt(ctx: &Context<'_>, row: &Value, intent: &Value) -> Result<()> 
         "landed patch differs from frozen intent",
     )?;
     evidence(ctx, value::text(row, "artifact"))?;
-    let landed = completed_landing(ctx, value::text(row, "id"))?;
+    let landed = completed_landing(ctx, value::text(row, "id"), None)?;
     require(
         value::text(&landed, "base_sha") == value::text(intent, "base_sha"),
         "completed landing differs from frozen commit base",
@@ -724,7 +822,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             value::text(&current, "state") == "done",
             "--commit-task requires an already-landed task",
         )?;
-        let receipt = completed_landing(ctx, id)?;
+        let receipt = completed_landing(ctx, id, None)?;
         if ctx.clean().is_ok() {
             return Ok(Output::text(format!(
                 "goal-drive: landed task={id} already committed"
@@ -806,13 +904,27 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         acceptance_plan.context.cycle = Some(cycle);
         let acceptance = acceptance_plan.execute(&Request::new(Action::Accept))?;
         let accept_code = acceptance.code;
+        if accept_code != 0 {
+            adaptive::record_failure(
+                ctx,
+                "acceptance",
+                &String::from_utf8_lossy(&acceptance.stderr),
+                accept_code,
+            )?;
+        }
+        let adaptive_progress = if ctx.owner_id.is_empty() {
+            None
+        } else {
+            Some(adaptive::cycle(ctx, &plan)?)
+        };
         output.append(Output {
             code: accept_code,
             stdout: acceptance.stdout,
             stderr: acceptance.stderr,
         });
         guard(ctx, expected_ref)?;
-        if accept_code == 0 {
+        let tranche = adaptive::tranche(ctx)?;
+        if accept_code == 0 && tranche["pending"] != true {
             let pending = plan["tasks"].as_object().is_some_and(|t| {
                 t.values()
                     .any(|t| !["done", "cancelled"].contains(&value::text(t, "state")))
@@ -834,8 +946,11 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             output.code = 0;
             return terminal(ctx, &run, cycle, "done", "acceptance-pass", output);
         }
-        if accept_code != 3 {
+        if accept_code != 3 && accept_code != 0 {
             return terminal(ctx, &run, cycle, "park", "acceptance-command-error", output);
+        }
+        if tranche["next_milestone"] == true && tranche["pending"] == false {
+            return terminal(ctx, &run, cycle, "park", "milestone-verification", output);
         }
         let current = Progress {
             head: ctx.git(&["rev-parse", "HEAD"])?,
@@ -856,11 +971,20 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             receipts: 0,
             stalled: 0,
         };
-        if previous.as_ref().is_some_and(|before| {
-            before.tree == current.tree
-                && !current.accept.is_empty()
-                && before.accept == current.accept
-        }) {
+        if tranche["first_attempt"] != true
+            && !plan["tasks"]
+                .as_object()
+                .is_some_and(|tasks| tasks.values().any(|t| t["state"] == "review"))
+            && (adaptive_progress
+                .as_ref()
+                .is_some_and(|p| p["stalled_cycles"].as_u64().unwrap_or(0) > 0)
+                || adaptive_progress.is_none()
+                    && previous.as_ref().is_some_and(|before| {
+                        before.tree == current.tree
+                            && !current.accept.is_empty()
+                            && before.accept == current.accept
+                    }))
+        {
             return terminal(ctx, &run, cycle, "park", "stuck", output);
         }
         let facts = progress(&current, previous.as_ref());
@@ -895,13 +1019,41 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 return terminal(ctx, &run, cycle, "park", "cycles-exhausted", output);
             }
             let _ = ctx.action(&Request::new(Action::Reclaim));
-            let selected = match ctx.action(&Request::new(Action::Next).flag("json")) {
-                Ok(out) if out.code == 0 => value::parse(&out.stdout)?,
-                _ => return terminal(ctx, &run, cycle, "park", "tasks-exhausted", output),
+            let selected = if let Some(id) = tranche["retry_task_id"].as_str() {
+                let task = ctx.plan_value()?["tasks"][id].clone();
+                require(task["state"] == "ready", "retry task is no longer ready")?;
+                task
+            } else {
+                match ctx.action(&Request::new(Action::Next).flag("json")) {
+                    Ok(out) if out.code == 0 => value::parse(&out.stdout)?,
+                    Ok(out) => {
+                        let reason = adaptive::selection_reason(ctx)?;
+                        output.append(out);
+                        return terminal(ctx, &run, cycle, "park", reason, output);
+                    }
+                    Err(e) => {
+                        adaptive::record_failure(ctx, "selection", &e.message, e.code)?;
+                        output
+                            .stderr
+                            .extend_from_slice(format!("{}\n", e.message).as_bytes());
+                        return terminal(
+                            ctx,
+                            &run,
+                            cycle,
+                            "park",
+                            "plan-observation-error",
+                            output,
+                        );
+                    }
+                }
             };
             let selected_id = value::text(&selected, "id");
             require(value::id(selected_id, 160), "next task has invalid id")?;
             let mut reservation = json!({"schema": 1, "kind": if owner.is_empty() { "goal-cycle" } else { "autopilot-cycle" }, "ts": value::now(), "contract_id": owner, "run_id": run, "cycle": cycle, "task_id": selected_id, "lease_id": ""});
+            if !tranche.is_null() {
+                reservation["proposal_sha256"] = tranche["proposal_sha256"].clone();
+                reservation["retry_sha256"] = tranche["retry_sha256"].clone();
+            }
             reservation
                 .as_object_mut()
                 .unwrap()
@@ -919,6 +1071,18 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     run_args.set(key, args.values[key].clone());
                 }
             }
+            if !tranche["retry_route"].is_null() {
+                for (flag, field) in [
+                    ("model", "model"),
+                    ("fallback-model", "fallback_model"),
+                    ("reasoning-effort", "reasoning_effort"),
+                ] {
+                    let text = value::text(&tranche["retry_route"], field);
+                    if !text.is_empty() {
+                        run_args.set(flag, text);
+                    }
+                }
+            }
             if args.flag("retry-known") {
                 run_args.flags.insert("retry-known".into());
             }
@@ -928,10 +1092,21 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     output.append(out);
                 }
                 Ok(out) => {
+                    adaptive::record_failure(
+                        ctx,
+                        "worker",
+                        &format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        ),
+                        out.code,
+                    )?;
                     output.append(out);
                     return terminal(ctx, &run, cycle, "park", "task-failed", output);
                 }
                 Err(e) => {
+                    adaptive::record_failure(ctx, "worker", &e.message, e.code)?;
                     output
                         .stderr
                         .extend_from_slice(format!("{}\n", e.message).as_bytes());
@@ -989,10 +1164,21 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         match crate::runner::execute_bound(ctx, &land_args, Some(&intent)) {
             Ok(out) if out.code == 0 => output.append(out),
             Ok(out) => {
+                adaptive::record_failure(
+                    ctx,
+                    "landing",
+                    &format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    out.code,
+                )?;
                 output.append(out);
                 return terminal(ctx, &run, cycle, "park", "task-failed", output);
             }
             Err(e) => {
+                adaptive::record_failure(ctx, "landing", &e.message, e.code)?;
                 output
                     .stderr
                     .extend_from_slice(format!("{}\n", e.message).as_bytes());
@@ -1006,6 +1192,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 format!("goal-drive: committed task={id} commit={commit}\n").as_bytes(),
             ),
             Err(e) => {
+                adaptive::record_failure(ctx, "commit", &e.message, e.code)?;
                 output
                     .stderr
                     .extend_from_slice(format!("{}\n", e.message).as_bytes());

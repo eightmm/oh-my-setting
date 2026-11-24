@@ -67,6 +67,7 @@ reads, malformed JSON, output bounds, cancellation and withholding one source.
 | `usage` | Canonical pre-invocation liabilities and provider usage receipts before native output decoding |
 | `peer` | `peer-ask`, `agent-call`, `consult`, `advise`, prompt artifacts, threads, debate and synthesis |
 | `delegate` | Detached worktrees, role defaults, patch capture before verification, repair and lifecycle review state |
+| `plan_delegate` | Issued Plan snapshot, per-attempt lease fences and verified native result capture through the owning host |
 | `review` | Criterion coverage, singleton confirmation, incremental review outcomes, finding anchors/dispositions, pinned verification scopes and advisory security pass |
 | `review_red` | Advisory bare-base control and bounded individual test-patch checks in disposable worktrees |
 | `native` | Runtime criterion projections through native task status, verified plan snapshots, room projection and lifecycle projection; typed handoff read adapter |
@@ -300,6 +301,33 @@ not established by compilation:
   task by default and honor explicit memory/context exclusions. This is the
   prompt summary path, not an execution or experiment-validation receipt.
 
+### Native Plan delegation
+
+`plan-run` passes its original issued task/lease/epoch, canonical task digest and
+captured HEAD in `--plan-binding` beside `--plan-task`. Claim and Next return that
+snapshot under the owning Plan lock. The host's typed Plan-services hook is
+unavailable by default; the root host provides its existing ControlServices.
+The peer read projections retain their read-only service surface.
+
+The adapter derives the prompt, verifier, allowed/forbidden paths and role from
+the frozen task. Assignment model/effort/workload conflicts refuse. The issued
+base pins the source HEAD, worktree HEAD and index at the provider spawn fence.
+Start advances the binding digest, and launch rechecks the current lease and
+deadline. Capacity text cannot authorize automatic account overflow or model
+fallback for bound work. Codex, Claude and Antigravity JSON transports require
+their native terminal result. Incomplete delivery retains the worktree for
+reconciliation.
+A returned result must match the native index's operation, attempt, provider,
+base and exact file digests. The Plan owner then captures those artifact/patch bytes (at most 16 MiB
+each) and the index using its existing immutable store, rechecks the lease, and
+records Review. Landing verifies those retained digests again. A native worker
+success does not grant landing, task completion or goal acceptance.
+
+Canonical one-shot repair requires `repair_count=1`, the original reviewed
+lease and recorded repair artifact. The calling plan-run owner retains cleanup
+and known-failure terminalization; absent acknowledgement remains held. Replaying
+the pre-Start binding cannot dispatch a second worker.
+
 ## Remaining compatibility work and integration blockers
 
 The historical W5b dependency blockers no longer describe this workspace:
@@ -310,9 +338,9 @@ Interactive delegation and complete streamed command capture need that interface
 
 The remaining behavior is still refused or incomplete:
 
-- Plan claim/start/touch/review/release, observed panel bindings, resumed repair,
-  candidate-patch admission and automatic apply need authenticated marker,
-  shared-state, lease and landing producer wiring. `patch-admit`, `patch-land`,
+- Observed panel bindings, native provider-session relocation, candidate-patch
+  admission and automatic apply remain refused by peer-delegate. The bounded
+  Plan delegation path above does not implement those modes. `patch-admit`, `patch-land`,
   `candidate`, `change-guard` and `draft-pr` remain owned by the landing crate;
   the peer command ownership set is unchanged.
 - Automatic `--graph-context` selection remains incomplete. The opt-in

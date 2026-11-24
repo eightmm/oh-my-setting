@@ -51,6 +51,7 @@ pub(crate) const VALUES: &[&str] = &[
     "task-id",
     "resume-session",
     "plan-task",
+    "plan-binding",
     "observe-plan-binding",
     "context-pack",
     "max-turns",

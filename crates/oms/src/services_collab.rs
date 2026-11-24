@@ -274,6 +274,7 @@ struct Job<'a> {
     desktop_main: bool,
     channel: Option<&'a mut dyn OwnedDuplexConsumer>,
     launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
+    plan_services: Option<&'a dyn oms_command_plan::Services>,
     #[cfg(target_os = "linux")]
     dispatch_observer: Option<protected_dispatch::Observer<'a>>,
 }
@@ -295,6 +296,7 @@ impl<'a> Job<'a> {
             desktop_main: false,
             channel: None,
             launch_fence: None,
+            plan_services: None,
             #[cfg(target_os = "linux")]
             dispatch_observer: None,
         }
@@ -374,13 +376,19 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
-    if let Some(fence) = job.launch_fence {
-        fence.check(interrupted).map_err(|e| e.message)?;
-    }
-    if let Some(channel) = &channel {
-        channel.check().map_err(|e| e.message)?;
-    }
-    let id = reactor.start(request).map_err(|e| e.to_string())?;
+    let mut spawn = |request| {
+        if let Some(channel) = &channel {
+            channel.check().map_err(|e| e.message)?;
+        }
+        reactor.start(request).map_err(|e| e.to_string())
+    };
+    let id = if let Some(fence) = job.launch_fence {
+        fence
+            .with_start_authority(request, job.plan_services, interrupted, spawn)
+            .map_err(|e| e.message)?
+    } else {
+        spawn(request)
+    }?;
     #[cfg(target_os = "linux")]
     let mut dispatch_observer = job.dispatch_observer;
     #[cfg(target_os = "linux")]
@@ -798,6 +806,19 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
+        Some(&self.control)
+    }
+    fn experience_context(
+        &self,
+        repo: &Path,
+        query: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_peer::Result<Value> {
+        oms_command_autonomy::Services::experience_context(&self.control, repo, query, interrupted)
+            .map_err(|e| oms_command_peer::Error::new(e.code, e.message))
+    }
+
     fn handoff_projection(
         &self,
         projection: oms_command_peer::process::HandoffProjection,
@@ -909,6 +930,7 @@ impl CollabServices<'_> {
                 merged: input.merge,
                 physical_call: input.physical_call,
                 launch_fence: input.launch_fence.as_ref(),
+                plan_services: Some(&self.control),
                 #[cfg(target_os = "linux")]
                 dispatch_observer: observer
                     .as_mut()
@@ -1561,6 +1583,46 @@ impl CollabServices<'_> {
 }
 
 impl AutopilotHost for CollabServices<'_> {
+    fn external_wait(&self, state: &Path, refresh: bool) -> Result<Value, String> {
+        let checked = receipt::load_checked_receipt(state)
+            .map_err(|e| e.to_string())?
+            .ok_or("autopilot receipt missing")?;
+        let repo = Path::new(
+            checked.row["repo"]
+                .as_str()
+                .ok_or("autopilot repository missing")?,
+        );
+        let wait = &checked.row["adaptive"]["wait"];
+        if wait.is_null() {
+            return Err("autopilot has no external wait".into());
+        }
+        let observation = oms_command_autonomy::Services::external_observation(
+            &self.control,
+            repo,
+            state,
+            &wait["binding"],
+            refresh,
+            self.interrupted,
+        )
+        .map_err(|e| e.to_string())?;
+        let decision =
+            oms_command_autonomy::adaptive::observe(repo, state, &self.control, self.interrupted)
+                .map_err(|e| e.to_string())?;
+        let again = receipt::load_checked_receipt(state)
+            .map_err(|e| e.to_string())?
+            .ok_or("autopilot receipt disappeared")?;
+        if again.sha256 != checked.sha256
+            || decision["receipt_sha256"] != checked.sha256
+            || decision["wait"]["result_sha256"] != observation["result_sha256"]
+        {
+            return Err("autopilot wait changed during observation".into());
+        }
+        let mut result = observation;
+        result["owner_id"] = checked.row["owner_id"].clone();
+        result["action"] = decision["action"].clone();
+        result["decision_sha256"] = decision["decision_sha256"].clone();
+        Ok(result)
+    }
     fn load_contract(&self, repo: &Path) -> Result<ApprovedContract, ContractError> {
         let checked = receipt::load_checked_receipt(repo)
             .map_err(|e| ContractError::Invalid(e.to_string()))?
@@ -1617,6 +1679,16 @@ impl AutopilotHost for CollabServices<'_> {
     /// direct child of this process left behind. A kill between log creation
     /// and the spawn leaves only an empty private log.
     fn launch(&self, argv: &[String], log: &Path, cwd: &Path) -> Result<u32, String> {
+        self.launch_bound(argv, log, cwd, &Value::Null)
+    }
+
+    fn launch_bound(
+        &self,
+        argv: &[String],
+        log: &Path,
+        cwd: &Path,
+        identity: &Value,
+    ) -> Result<u32, String> {
         if argv.first().map(String::as_str) != Some("oms") {
             return Err("autopilot continuation must start with `oms`".into());
         }
@@ -1624,17 +1696,40 @@ impl AutopilotHost for CollabServices<'_> {
             return Err(NO_LAUNCHER.into());
         }
         self.check(self.interrupted)?;
+        let mut environment = vec![("OMS_AUTOPILOT_WAKE_RESUME", "1")];
+        if !identity.is_null() {
+            let checked = self
+                .load_contract(cwd)
+                .map_err(|e| format!("launch receipt unavailable: {e:?}"))?;
+            if identity["owner_id"] != checked.owner_id
+                || identity["input_receipt_sha256"] != checked.receipt_sha256
+                || argv != checked.argv
+                || !identity["launch_id"]
+                    .as_str()
+                    .is_some_and(|s| oms_command_autonomy::value::id(s, 128))
+            {
+                return Err("launch tuple does not match the exact approved continuation".into());
+            }
+            environment.extend([
+                (
+                    "OMS_AUTOPILOT_WAKE_LAUNCH_ID",
+                    identity["launch_id"].as_str().unwrap(),
+                ),
+                (
+                    "OMS_AUTOPILOT_WAKE_OWNER_ID",
+                    identity["owner_id"].as_str().unwrap(),
+                ),
+                (
+                    "OMS_AUTOPILOT_WAKE_RECEIPT_SHA256",
+                    identity["input_receipt_sha256"].as_str().unwrap(),
+                ),
+            ]);
+        }
         let existed = std::fs::symlink_metadata(log).is_ok();
         let file = open_tick_log(log, cwd)?;
         let mut full = self.native.clone();
         full.extend(argv.iter().skip(1).map(OsString::from));
-        match spawn_detached(
-            &self.detach_worker,
-            full,
-            cwd,
-            &[("OMS_AUTOPILOT_WAKE_RESUME", "1")],
-            file.into(),
-        ) {
+        match spawn_detached(&self.detach_worker, full, cwd, &environment, file.into()) {
             Ok(pid) => Ok(pid),
             Err(e) => {
                 if !existed {
@@ -3204,6 +3299,23 @@ mod tests {
             String::from_utf8_lossy(&done.stdout),
             format!(
                 "{}\npeer-review findings list --status open --json --repo {}",
+                state.display(),
+                dir.path().display()
+            )
+        );
+        let done = PeerProcessExecutor::handoff_projection(
+            &host,
+            oms_command_peer::process::HandoffProjection::AutopilotStatus,
+            dir.path(),
+            &state,
+            Duration::from_secs(10),
+            &stop,
+        )
+        .expect("staged checked autopilot status projection");
+        assert_eq!(
+            String::from_utf8_lossy(&done.stdout),
+            format!(
+                "{}\nautopilot status --repo {}",
                 state.display(),
                 dir.path().display()
             )

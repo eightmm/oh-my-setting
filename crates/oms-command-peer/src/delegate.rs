@@ -5,9 +5,11 @@ use crate::{
     providers::{self, Target},
     safety, storage,
 };
+use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::io::IsTerminal;
-use std::os::unix::fs::DirBuilderExt;
+use std::io::{IsTerminal, Read, Seek, SeekFrom};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 struct CargoSlot {
@@ -75,6 +77,130 @@ pub(crate) struct Worktree {
     pub base: String,
     pub owner: PathBuf,
 }
+
+#[derive(PartialEq, Eq)]
+struct GitFileGeneration {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    protection: (u32, u32, u32, u64),
+}
+impl GitFileGeneration {
+    fn read(meta: &std::fs::Metadata) -> Option<Self> {
+        (meta.is_file() && meta.nlink() == 1).then(|| Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+            size: meta.len(),
+            modified: (meta.mtime(), meta.mtime_nsec()),
+            changed: (meta.ctime(), meta.ctime_nsec()),
+            protection: (meta.mode(), meta.uid(), meta.gid(), meta.nlink()),
+        })
+    }
+
+    fn same_file(&self, other: &Self) -> bool {
+        (self.device, self.inode, self.size, self.protection)
+            == (other.device, other.inode, other.size, other.protection)
+    }
+}
+
+struct GitFileWitness {
+    path: PathBuf,
+    opened: Option<(std::fs::File, GitFileGeneration)>,
+}
+impl GitFileWitness {
+    fn open(path: PathBuf, optional: bool) -> Result<Self> {
+        use rustix::fs::OFlags;
+        let opened = match std::fs::File::options()
+            .read(true)
+            .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC).bits() as i32)
+            .open(&path)
+        {
+            Ok(file) => {
+                let generation =
+                    GitFileGeneration::read(&file.metadata()?).ok_or_else(worktree_git_changed)?;
+                Some((file, generation))
+            }
+            Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let witness = Self { path, opened };
+        witness.recheck()?;
+        Ok(witness)
+    }
+
+    fn recheck(&self) -> Result<()> {
+        match (&self.opened, self.path.symlink_metadata()) {
+            (Some((file, expected)), Ok(named))
+                if GitFileGeneration::read(&named).as_ref() == Some(expected)
+                    && GitFileGeneration::read(&file.metadata()?).as_ref() == Some(expected)
+                    && self.path.canonicalize()? == self.path =>
+            {
+                Ok(())
+            }
+            (None, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(worktree_git_changed()),
+        }
+    }
+
+    fn digest(&self, check: &impl Fn() -> Result<()>) -> Result<([u8; 32], GitFileGeneration)> {
+        const LIMIT: u64 = 64 * 1024 * 1024;
+        let (file, expected) = self.opened.as_ref().ok_or_else(worktree_git_changed)?;
+        let stamp = || GitFileGeneration::read(&file.metadata()?).ok_or_else(worktree_git_changed);
+        let before = stamp()?;
+        if !before.same_file(expected) || before.size > LIMIT {
+            return Err(worktree_git_changed());
+        }
+        let mut reader = file.try_clone()?;
+        reader.seek(SeekFrom::Start(0))?;
+        let mut reader = reader.take(LIMIT + 1);
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            check()?;
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            digest.update(&buffer[..n]);
+        }
+        if LIMIT + 1 - reader.limit() != before.size || stamp()? != before {
+            return Err(worktree_git_changed());
+        }
+        Ok((digest.finalize().into(), before))
+    }
+}
+
+fn worktree_git_changed() -> Error {
+    Error::new(
+        2,
+        "Plan worker Git generation changed before Start; preserved for inspection",
+    )
+}
+
+pub(crate) struct StartCheckout {
+    directory: (u64, u64),
+    admin: PathBuf,
+    admin_generation: (u64, u64),
+    files: Vec<GitFileWitness>,
+}
+
+fn physical_directory_generation(path: &Path) -> Result<(u64, u64)> {
+    let info = path.symlink_metadata()?;
+    if !info.is_dir() || path.canonicalize()? != path {
+        return fail("Plan worker checkout does not have its expected physical path");
+    }
+    Ok((info.dev(), info.ino()))
+}
+
+fn git_output_path(bytes: &[u8]) -> Result<&Path> {
+    let name = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    if name.is_empty() || name.contains(&b'\r') || name.contains(&b'\n') || name.contains(&0) {
+        return Err(worktree_git_changed());
+    }
+    Ok(Path::new(OsStr::from_bytes(name)))
+}
 impl Worktree {
     pub(crate) fn create(repo: &Path, base: &str, context: &Context<'_>) -> Result<Self> {
         if base.is_empty() || base.starts_with('-') {
@@ -126,18 +252,159 @@ impl Worktree {
         })
     }
     pub(crate) fn identity(&self, context: &Context<'_>) -> Result<()> {
-        let found = process::git(context, &self.path, &["rev-parse", "--show-toplevel"])?;
+        Self::check_identity(&self.path, &self.base, &|args| {
+            process::git(context, &self.path, args)
+        })
+    }
+    fn check_identity(
+        path: &Path,
+        base: &str,
+        git: &impl Fn(&[&str]) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        let found = git(&["rev-parse", "--show-toplevel"])?;
         if Path::new(String::from_utf8_lossy(&found).trim()).canonicalize()?
-            != self.path.canonicalize()?
+            != path.canonicalize()?
         {
             return fail("worker worktree identity changed; preserved for inspection");
         }
-        let head = process::git(context, &self.path, &["rev-parse", "HEAD"])?;
-        if String::from_utf8_lossy(&head).trim() != self.base {
+        let head = git(&["rev-parse", "HEAD"])?;
+        if String::from_utf8_lossy(&head).trim() != base {
             return fail("worker changed HEAD; worktree preserved for inspection");
         }
         Ok(())
     }
+    pub(crate) fn check_bound_base(
+        path: &Path,
+        base: &str,
+        git: impl Fn(&[&str]) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        Self::check_identity(path, base, &git)?;
+        let staged = git(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--ignore-submodules=none",
+            "--name-only",
+            "-z",
+            base,
+            "--",
+        ])?;
+        if !staged.is_empty() {
+            return fail(
+                "Plan worker index differs from its issued base; worktree preserved for inspection",
+            );
+        }
+        Ok(())
+    }
+    pub(crate) fn bound_start_generation(&self) -> Result<(u64, u64)> {
+        physical_directory_generation(&self.path)
+    }
+
+    pub(crate) fn prove_start_checkout(
+        &self,
+        generation: (u64, u64),
+        base: &str,
+        git: impl Fn(&[&str]) -> Result<Vec<u8>>,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<StartCheckout> {
+        check()?;
+        if self.bound_start_generation()? != generation {
+            return Err(worktree_git_changed());
+        }
+        let link = GitFileWitness::open(self.path.join(".git"), false)?;
+        let output = git(&["rev-parse", "--absolute-git-dir"])?;
+        let admin = git_output_path(&output)?.to_owned();
+        let admin_generation = physical_directory_generation(&admin)?;
+        let head = GitFileWitness::open(admin.join("HEAD"), false)?;
+        let mut head_bytes = Vec::new();
+        (&head.opened.as_ref().ok_or_else(worktree_git_changed)?.0)
+            .take(66)
+            .read_to_end(&mut head_bytes)?;
+        if head_bytes.strip_suffix(b"\n") != Some(base.as_bytes()) {
+            return Err(worktree_git_changed());
+        }
+        let index = GitFileWitness::open(admin.join("index"), true)?;
+        let shared = git(&["rev-parse", "--shared-index-path"])?;
+        let shared = if shared.is_empty() {
+            None
+        } else {
+            let named = git_output_path(&shared)?;
+            let name = named.file_name().ok_or_else(worktree_git_changed)?;
+            let path = admin.join(name);
+            if !name.as_bytes().starts_with(b"sharedindex.")
+                || self.path.join(named).canonicalize()? != path
+            {
+                return Err(worktree_git_changed());
+            }
+            let file = GitFileWitness::open(path, false)?;
+            let (digest, _) = file.digest(&check)?;
+            Some((file, digest))
+        };
+        Self::check_bound_base(&self.path, base, git)?;
+        let mut files = vec![link, head, index];
+        if let Some((mut file, expected)) = shared {
+            // Git freshens a split index's timestamp even on a read. Accept
+            // that change only for unchanged content through the same inode.
+            let (actual, generation) = file.digest(&check)?;
+            if actual != expected {
+                return Err(worktree_git_changed());
+            }
+            file.opened.as_mut().ok_or_else(worktree_git_changed)?.1 = generation;
+            file.recheck()?;
+            files.push(file);
+        }
+        Ok(StartCheckout {
+            directory: generation,
+            admin,
+            admin_generation,
+            files,
+        })
+    }
+
+    pub(crate) fn recheck_start_checkout(&self, witness: &StartCheckout) -> Result<()> {
+        if self.bound_start_generation()? != witness.directory
+            || physical_directory_generation(&witness.admin)? != witness.admin_generation
+        {
+            return Err(worktree_git_changed());
+        }
+        for file in &witness.files {
+            file.recheck()?;
+        }
+        Ok(())
+    }
+    fn staged_patch(&self, context: &Context<'_>) -> Result<Vec<u8>> {
+        process::git(
+            context,
+            &self.path,
+            &[
+                "-c",
+                "diff.external=",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--cached",
+                &self.base,
+                "--",
+            ],
+        )
+    }
+
+    fn prepare_bound_repair(&self, captured: &[u8], context: &Context<'_>) -> Result<()> {
+        self.identity(context)?;
+        if self.staged_patch(context)? != captured {
+            return fail(
+                "Plan worker index changed after patch capture; worktree preserved for inspection",
+            );
+        }
+        // Keep the captured edits while handing the next invocation a base index.
+        process::git(context, &self.path, &["read-tree", "--reset", &self.base])?;
+        Ok(())
+    }
+
     fn pristine(&self, context: &Context<'_>) -> Result<()> {
         self.identity(context)?;
         let state = process::git(
@@ -521,11 +788,7 @@ fn brief_label(question: &str) -> String {
 
 pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
-    let interactive = args.has("interactive");
-    if args.has("plan-task")
-        || args.has("observe-plan-binding")
-        || args.has("terminalize-resumed-repair")
-    {
+    if args.has("observe-plan-binding") {
         return fail("plan lease integration must be supplied by the owning native plan adapter");
     }
     if args.has("apply") {
@@ -536,6 +799,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if args.has("resume-session") {
         return fail("native session relocation must be bound before resuming a delegation");
     }
+    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
+    let mut resolved = args.clone();
+    let mut plan = crate::plan_delegate::BoundDelegate::prepare(&mut resolved, &repo, context)?;
+    let args = &resolved;
+    let interactive = args.has("interactive");
     let orientation = if args.has("context-pack") {
         Some(crate::context_pack::orientation(
             &args.path("context-pack", context.cwd),
@@ -546,7 +814,6 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut target = Target::parse(args.required("to")?)?;
     peer::apply_account(args, std::slice::from_mut(&mut target))?;
     let question = peer::question(args, context)?;
-    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
     let directory = peer::directory(args, &repo, "delegate")?;
     let mut read = args.has("read-only");
     if args.has("role")
@@ -590,6 +857,12 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         args.value("reasoning-effort", "auto"),
         role,
     )?;
+    if let Some(plan) = &plan {
+        if read {
+            return fail("Plan patch delegation cannot change into a read-only role");
+        }
+        plan.route(args, &route)?;
+    }
     route.explicit = !providers::panel_implicit_target() || route.account_pinned;
     route.public_research = read
         && matches!(args.get("role"), "researcher" | "scholar")
@@ -739,6 +1012,23 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         return fail("--interactive requires NDJSON turn input on stdin; no worktree created");
     }
     let worktree = Worktree::create(&repo, &base, context)?;
+    if let Some(bound) = &mut plan {
+        let generation = worktree.bound_start_generation()?;
+        if let Err(error) = bound.start(&worktree, generation, context) {
+            // Preserve a checkout whose original contents cannot be proved.
+            if worktree
+                .bound_start_generation()
+                .is_ok_and(|seen| seen == generation)
+                && worktree.pristine(context).is_ok()
+                && worktree
+                    .bound_start_generation()
+                    .is_ok_and(|seen| seen == generation)
+            {
+                let _ = worktree.remove(context);
+            }
+            return Err(error);
+        }
+    }
     let compiled = if args.has("context-manifest") {
         let prepare = || -> Result<_> {
             worktree.pristine(context)?;
@@ -834,6 +1124,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         })
         .unwrap_or_default();
     extra_env = crate::usage::operation_env(&extra_env)?;
+    if let Some(bound) = &plan {
+        extra_env.extend(bound.launch_environment()?);
+    }
     process::TeamLocator::append_args(args, &mut extra_env)?;
     extra_env.push(("OMS_ATTEMPT_ID".into(), attempt.clone().into()));
     if !task_id.is_empty() {
@@ -845,6 +1138,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         }
         crate::check(context.interrupted)?;
         verify_exit_code = None;
+        let mut bound_verifier_failed = false;
         worktree.identity(context)?;
         if interactive && round == 0 {
             let mut turn_history = String::new();
@@ -944,21 +1238,27 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 idx += 1;
             }
         } else {
-            let result = providers::execute_with_fallback_env(
-                &mut route,
-                args.get("fallback-model"),
-                &prompt,
-                &worktree.path,
-                !read,
-                peer::timeout(args, "peer-delegate")?,
-                &repo,
-                &extra_env,
-                context,
-            );
+            let result = plan
+                .as_ref()
+                .map_or(Ok(()), |bound| bound.check(context))
+                .and_then(|()| {
+                    providers::execute_with_fallback_env(
+                        &mut route,
+                        args.get("fallback-model"),
+                        &prompt,
+                        &worktree.path,
+                        !read,
+                        peer::timeout(args, "peer-delegate")?,
+                        &repo,
+                        &extra_env,
+                        context,
+                    )
+                });
             let result = match result {
                 Ok(r) => r,
                 Err(error) => {
                     code = error.code;
+                    needs_keep |= plan.is_some();
                     body.extend_from_slice(
                         format!("\n## Output\n\n{}\n", error.message).as_bytes(),
                     );
@@ -966,8 +1266,16 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 }
             };
             code = result.code;
-            if !result.complete && code == 0 {
-                code = 1;
+            if !result.complete {
+                if code == 0 {
+                    code = 1;
+                }
+                if plan.is_some() {
+                    needs_keep = true;
+                    body.extend_from_slice(
+                        b"\nPlan worker delivery is unknown; worktree retained for reconciliation.\n",
+                    );
+                }
             }
             body.extend_from_slice(
                 format!(
@@ -1003,6 +1311,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 || name == ".git"
                 || name.starts_with(".oms/")
                 || name == ".oms"
+                || plan
+                    .as_ref()
+                    .is_some_and(|bound| bound.forbidden(name).unwrap_or(true))
                 || !scope.is_empty()
                     && !scope
                         .iter()
@@ -1017,23 +1328,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             }
         }
         if code == 0 || !names.is_empty() {
-            captured = process::git(
-                context,
-                &worktree.path,
-                &[
-                    "-c",
-                    "diff.external=",
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--binary",
-                    "--src-prefix=a/",
-                    "--dst-prefix=b/",
-                    "--cached",
-                    &base,
-                    "--",
-                ],
-            )?;
+            captured = worktree.staged_patch(context)?;
         }
         if read && !captured.is_empty() {
             code = 1;
@@ -1084,6 +1379,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 body.extend_from_slice(b"\nVerifier changed the pinned tracked state; worktree retained and success withheld.\n");
             }
             verify_exit_code = Some(code);
+            bound_verifier_failed = checked.complete && !matches!(code, 0 | 124);
             verified = if code == 0 { "passed" } else { "failed" };
             let clean = safety::redact(&checked.stdout)?;
             body.extend_from_slice(
@@ -1105,8 +1401,15 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             }
         }
         storage::write(&repo, &artifact, body.clone(), true, context.interrupted)?;
-        if code == 0 || matches!(code, 3 | 126 | 127 | 130) || needs_keep {
+        if code == 0
+            || matches!(code, 3 | 126 | 127 | 130)
+            || needs_keep
+            || (plan.is_some() && !bound_verifier_failed)
+        {
             break;
+        }
+        if plan.is_some() && round < repair {
+            worktree.prepare_bound_repair(&captured, context)?;
         }
         prompt.push_str(
             "\nRepair the rejected changes and verification failure within the original scope.\n",
@@ -1146,7 +1449,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         ("kind", "delegate".into()),
         ("ts", now().into()),
         ("artifact_id", crate::id("art_")?.into()),
-        ("attempt_id", attempt.into()),
+        ("attempt_id", attempt.clone().into()),
         (
             "operation_id",
             extra_env
@@ -1180,13 +1483,34 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if let Some(compiled) = &compiled {
         compiled.index(&mut index);
     }
+    if let Some(plan) = &plan {
+        index.set("plan_binding", plan.issued()?);
+    }
     peer::index(&repo, &index, context)?;
+    let plan_review = if code == 0 {
+        plan.as_ref().map_or(Ok(()), |bound| {
+            bound.review(
+                &index,
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "OMS_OPERATION_ID")
+                    .and_then(|(_, value)| value.to_str())
+                    .unwrap_or(""),
+                &attempt,
+                context,
+            )
+        })
+    } else {
+        Ok(())
+    };
     let mut note = String::new();
     if needs_keep {
         note.push_str(&format!("worktree retained: {}\n", worktree.path.display()));
     } else if let Err(e) = worktree.remove(context) {
         note.push_str(&format!("worktree cleanup deferred: {}\n", e.message));
     }
+    plan_review?;
     Ok((
         code,
         format!(
