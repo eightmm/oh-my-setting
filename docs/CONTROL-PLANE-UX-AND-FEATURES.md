@@ -5,6 +5,10 @@
 UX-01–06과 NF-01–06의 세부 설계·48개 수락 조건을 추가한다.
 이 12개 명세는 12개 독립 엔진이나 자동 구현 승인이 아니다.
 
+2026-11-24 GUI 합의: [공통 작업 화면](CONTROL-SURFACE-UX.md)에 작업·결과 중심의 기본 화면,
+별도 관계도, 공통 작업 상세와 반응형 동선을 정리했다. 해당 정보 구조는 사용자가 선택한 방향이며
+아래 11월 9일 비교 가설과 구분한다. 문서·시안 단계로, GUI 구현 완료나 기존 TUI 기본 배치 변경을 뜻하지 않는다.
+
 2026-11-18 정리: [Feature scope](FEATURE-SCOPE.md)와 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를
 먼저 적용한다. 아래 과거 구현 단계는 제안 이력이다. NF-01/02/03/04는 기존 brief/next/context/work-inspect의 consumer를
 재사용한다. 존재하는 projection과 해당 TUI UX의 완료는 별도로 확인한다. UX/NF 전체를 구현해야
