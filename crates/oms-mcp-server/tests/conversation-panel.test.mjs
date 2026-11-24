@@ -91,7 +91,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     queueMicrotask(() => notify({id, result}));
   }};
   const document = {getElementById:get, createElement:() => new Element()};
-  runInNewContext(script, {window, document, Option:Element, setTimeout, clearTimeout, crypto:{randomUUID}});
+  runInNewContext(script, {window, document, Option:Element, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID}});
   await setImmediate();
   return {get, calls, host, notify,
     async event(id, type) {
@@ -704,7 +704,7 @@ test('Overview binds its map before the dashboard finishes; node navigation and 
   const p = await panel(['one','two'],{}, {context:true});
   p.host.tools = {
     oms_panel_project_graph:({project,node:focus}) => ({
-      schema:1,kind:'oms-panel-project-graph',provenance:{source:'git-ls-files'},scope:{focusNode:focus || 'dir:.'},status:'ready',selection:focus ? {status:'found',node:{id:focus,kind:'directory',privateDetail:'omit-this'}} : null,nodes:focus ? [{id:'src',label:'src',kind:'directory'},{id:'src/main.rs',label:'main.rs',kind:'file'}] :
+      schema:1,kind:'oms-panel-project-graph',provenance:{source:'git-ls-files',indexState:'unindexed'},scope:{focusNode:focus || 'dir:.'},status:'ready',selection:focus ? {status:'found',node:{id:focus,kind:'directory',privateDetail:'omit-this'}} : null,nodes:focus ? [{id:'src',label:'src',kind:'directory'},{id:'src/main.rs',label:'main.rs',kind:'file'}] :
         [{id:'dir:.',label:project,kind:'repository'},{id:'src',label:'src',kind:'directory'},{id:'docs',label:'docs',kind:'directory'}],
       edges:[{source:focus || 'dir:.',target:focus ? 'src/main.rs' : 'src',relation:'contains',confidence:'STRUCTURAL'}]
     }),
@@ -712,7 +712,7 @@ test('Overview binds its map before the dashboard finishes; node navigation and 
   };
   p.host.delay='one';p.get('project-choice').value='one';await p.event('project-choice','change');
   assert.equal(p.get('map-field').hidden,false);
-  assert.equal(p.get('map-root').textContent,'one');
+  assert.equal(p.get('map-root').textContent,'one');assert.match(p.get('map-status').textContent,/색인 없음/);
   assert.match(p.get('map-children').textContent,/src/);
   assert.doesNotMatch(p.get('map-children').textContent,/docs|가져오기/);
   p.host.release(); await setImmediate();

@@ -531,7 +531,7 @@ function graphKind(k) {
 }
 function graphLink(e,out) {
   const rel=e?.relation;
-  if(rel==='contains') return out ? choice('하위 항목','Child') : choice('상위 항목','Parent');
+  if(rel==='contains' && ['STRUCTURAL','EXTRACTED'].includes(e.confidence)) return out ? choice('하위 항목','Child') : choice('상위 항목','Parent');
   const direction=out ? '→ ' : '← ';
   const name=rel==='imports' || rel==='import' ? choice('가져오기','Imports') : rel;
   const confidence={EXTRACTED:['추출','Extracted'],INFERRED:['추론','Inferred'],AMBIGUOUS:['불확실','Ambiguous'],STRUCTURAL:['구조','Structural']};
@@ -624,7 +624,8 @@ function paintGraph(loading = false) {
   const sources={'indexed-graph':['OMS 그래프 색인','OMS graph index'],'git-ls-files':['Git 추적 경로','Git-tracked paths'],'directory-scan':['폴더 구조','Directory scan']};
   const source = Object.hasOwn(sources,provenance.source) ? choice(...sources[provenance.source]) : '';
   const basis = provenance.indexFreshness==='stale' ? choice('오래된 색인','Stale index') : provenance.indexState==='invalid' ? choice('색인 확인 실패','Index unreadable') :
-    ['absent','missing'].includes(provenance.indexState) ? choice('색인 없음 · 포함 관계','No index · containment') : '';
+    provenance.indexState==='empty' ? choice('빈 색인 · 포함 관계','Empty index · containment') :
+    provenance.indexState==='unindexed' ? choice('색인 없음 · 포함 관계','No index · containment') : '';
   const total=data.counts?.total_nodes, shown=data.nodes.length;
   const span=Number.isSafeInteger(total) && total>=shown ? choice('노드 '+shown+'/'+total,shown+'/'+total+' nodes') : '';
   const partial=data.completeness==='partial'||data.limits?.truncated===true;
@@ -657,7 +658,10 @@ window.addEventListener('keydown',event=>{
 el('graph-filter').addEventListener('input',()=>paintGraph());
 function submitGraphQuery() {
   const query=el('graph-filter').value.trim();
-  if (!query || Array.from(query).length>128) return;
+  if (!query) return;
+  if (new TextEncoder().encode(query).length>256) {
+    el('graph-info').textContent=choice('검색어를 UTF-8 256바이트 이내로 줄여 주세요.','Use a query of at most 256 UTF-8 bytes.');return;
+  }
   graphTrail=[];readGraph(undefined,query);
 }
 el('graph-search').addEventListener('click',submitGraphQuery);
