@@ -364,48 +364,108 @@ fn evidence(ctx: &Context<'_>, path: &str) -> Result<Vec<u8>> {
     }
     Ok(ctx.store.read(path, 16 * MAX_FILE)?)
 }
-fn completed_landing(ctx: &Context<'_>, id: &str) -> Result<Value> {
+/// Candidate terminals are indexed separately from all authoritative records
+/// for the landing id so a contradictory row cannot hide under another task.
+#[derive(Default)]
+pub(crate) struct LandingLedger<'a> {
+    by_task: BTreeMap<&'a str, Vec<&'a oms_command_plan::json::Value>>,
+    by_id: BTreeMap<&'a str, Vec<&'a oms_command_plan::json::Value>>,
+}
+impl<'a> LandingLedger<'a> {
+    pub(crate) fn new(rows: &'a [oms_command_plan::json::Value]) -> Self {
+        let mut ledger = Self::default();
+        for row in rows {
+            let event = row.text("event");
+            if matches!(event, "intent" | "complete" | "abandoned") {
+                ledger
+                    .by_id
+                    .entry(row.text("landing_id"))
+                    .or_default()
+                    .push(row);
+            }
+            if event == "complete" {
+                ledger
+                    .by_task
+                    .entry(row.text("task"))
+                    .or_default()
+                    .push(row);
+            }
+        }
+        ledger
+    }
+}
+
+pub(crate) fn completed_landing(
+    ctx: &Context<'_>,
+    id: &str,
+    expected: Option<&oms_command_plan::ReviewFence>,
+) -> Result<Value> {
     let plan = ctx.plan()?;
     let snapshot = plan.load()?;
-    let rows = ctx.rows(".oms/landings.jsonl")?;
-    completed_landing_from_snapshot(ctx, &snapshot, id, rows.iter().rev())
+    let rows = plan.patch_landing_rows()?;
+    let ledger = LandingLedger::new(&rows);
+    let row = completed_landing_from_snapshot(ctx, &plan, &snapshot, &ledger, id, expected)?;
+    value::from_plan(row)
 }
-/// The same proof serves commit publication and read-only goal progress. A
-/// caller inspecting several tasks keeps their canonical snapshot and indexes
-/// the bounded landing ledger once, without accepting projected task fields.
+
+/// Commit publication and milestone progress consume the same canonical
+/// result proof. Batch readers reuse the Plan snapshot and ledger indexes.
 pub(crate) fn completed_landing_from_snapshot<'a>(
     ctx: &Context<'_>,
+    plan: &oms_command_plan::Plan<'_>,
     snapshot: &oms_command_plan::Snapshot,
+    ledger: &LandingLedger<'a>,
     id: &str,
-    rows: impl IntoIterator<Item = &'a Value>,
-) -> Result<Value> {
+    expected: Option<&oms_command_plan::ReviewFence>,
+) -> Result<&'a oms_command_plan::json::Value> {
     let task = snapshot.task(id)?;
     require(
-        task.text("state") == "done",
+        snapshot.verified_done(task),
         "completed landing requires done task",
     )?;
     let receipt = oms_command_plan::json::receipt_digest(task)?;
     let patch_hash = value::hash(evidence(ctx, task.text("patch"))?);
-    let plan_id = value::from_plan(snapshot.plan.get("plan_id"))?;
-    let row = rows
+    let worktree = ctx.repo.to_string_lossy();
+    let candidate = ledger
+        .by_task
+        .get(id)
         .into_iter()
+        .flatten()
+        .rev()
         .find(|row| {
-            row["event"] == "complete"
-                && value::text(row, "task") == id
-                && (row["worktree"] == ctx.repo.to_string_lossy().as_ref()
-                    || row.get("worktree").is_none() && ctx.repo == ctx.state)
-                && row["plan_id"] == plan_id
-                && value::text(row, "lease") == task.text("review_lease_id")
-                && value::text(row, "plan_done_receipt_sha") == receipt
-                && value::text(row, "patch_sha") == patch_hash
+            (row.text("worktree") == worktree.as_ref()
+                || row.opt("worktree").is_none() && ctx.repo == ctx.state)
+                && row.get("plan_id") == snapshot.plan.get("plan_id")
+                && row.text("lease") == task.text("review_lease_id")
+                && row.text("plan_done_receipt_sha") == receipt
+                && row.text("patch") == task.text("patch")
+                && row.text("patch_sha") == patch_hash
+                && expected.is_none_or(|proof| row.text("base_sha") == proof.base_sha())
         })
-        .cloned()
         .ok_or_else(|| Error::new(3, "no exact completed landing receipt"))?;
+    let landing_id = candidate.text("landing_id");
+    let records = ledger.by_id.get(landing_id).into_iter().flatten().copied();
+    let (intent, terminal) = oms_command_plan::completed_patch_landing(records, landing_id)?;
     require(
-        value::commit(value::text(&row, "base_sha")),
+        value::commit(intent.text("base_sha")),
         "landing receipt has invalid base",
     )?;
-    Ok(row)
+    let recorded = intent.opt("plan_review_binding");
+    if let Some(expected) = expected {
+        let recorded = recorded
+            .ok_or_else(|| Error::new(2, "landing receipt is missing the selected Plan review"))?;
+        require(
+            oms_command_plan::json::canonical(recorded)? == expected.encode()?,
+            "landing receipt belongs to another selected Plan review",
+        )?;
+    }
+    let proof = recorded
+        .map(|value| {
+            oms_command_plan::ReviewFence::parse(&oms_command_plan::json::canonical(value)?)
+        })
+        .transpose()?;
+    plan.check_landing_done(snapshot, id, proof.as_ref(), &patch_hash)?;
+    Ok(terminal)
 }
 fn changed_paths(ctx: &Context<'_>, base: &str, tree: &str) -> Result<Vec<String>> {
     let raw = ctx.plan()?.git().run(&[
@@ -450,7 +510,7 @@ fn review_receipt(ctx: &Context<'_>, row: &Value, intent: &Value) -> Result<()> 
         "landed patch differs from frozen intent",
     )?;
     evidence(ctx, value::text(row, "artifact"))?;
-    let landed = completed_landing(ctx, value::text(row, "id"))?;
+    let landed = completed_landing(ctx, value::text(row, "id"), None)?;
     require(
         value::text(&landed, "base_sha") == value::text(intent, "base_sha"),
         "completed landing differs from frozen commit base",
@@ -762,7 +822,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             value::text(&current, "state") == "done",
             "--commit-task requires an already-landed task",
         )?;
-        let receipt = completed_landing(ctx, id)?;
+        let receipt = completed_landing(ctx, id, None)?;
         if ctx.clean().is_ok() {
             return Ok(Output::text(format!(
                 "goal-drive: landed task={id} already committed"

@@ -75,6 +75,7 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "patch",
                 "verify",
                 "plan-task",
+                "expected-plan-review",
                 "panel-accept",
                 "allow-floor-change",
                 "approval",
@@ -217,6 +218,15 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
             out.words.push(s.into());
         }
         i += 1;
+    }
+    if tool == "patch-land" && out.has("expected-plan-review") {
+        require(
+            out.all("expected-plan-review").len() == 1
+                && out.all("plan-task").len() == 1
+                && !out.has("recover")
+                && !out.has("panel-accept"),
+            "--expected-plan-review requires one --plan-task outside recovery or panel acceptance",
+        )?;
     }
     if tool == "patch-land" && out.has("panel-accept") {
         require(

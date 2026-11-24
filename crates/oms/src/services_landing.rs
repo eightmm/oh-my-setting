@@ -58,11 +58,7 @@ fn plan_run(
     interrupted: &AtomicBool,
 ) -> Result<Vec<u8>> {
     request.repo = Some(repo.to_owned());
-    let mut context = oms_command_plan::Context::from_environment(&request, repo)?;
-    context.state_repo = state.to_owned();
-    context.plan_file = state.join(".oms/plan/tasks.json");
-    let response =
-        oms_command_plan::Plan::open(context, services, interrupted)?.execute(&request)?;
+    let response = landing_plan(services, repo, state, &request, interrupted)?.execute(&request)?;
     if response.code != 0 {
         return Err(Error::new(
             response.code,
@@ -71,6 +67,45 @@ fn plan_run(
     }
     Ok(response.stdout)
 }
+fn landing_plan<'a>(
+    services: &'a dyn oms_command_plan::Services,
+    repo: &Path,
+    state: &Path,
+    request: &oms_command_plan::Request,
+    interrupted: &'a AtomicBool,
+) -> Result<oms_command_plan::Plan<'a>> {
+    let mut context = oms_command_plan::Context::from_environment(request, repo)?;
+    context.state_repo = state.to_owned();
+    context.plan_file = state.join(".oms/plan/tasks.json");
+    Ok(oms_command_plan::Plan::open(
+        context,
+        services,
+        interrupted,
+    )?)
+}
+
+fn reviewed_task_snapshot(
+    services: &dyn oms_command_plan::Services,
+    request: &LandingRequest<'_>,
+    interrupted: &AtomicBool,
+) -> Result<PlanValue> {
+    let Some(expected) = &request.policy.expected_plan_review else {
+        return task_snapshot(services, request, interrupted);
+    };
+    let mut query = oms_command_plan::Request::new(oms_command_plan::Action::EvidenceSnapshot)
+        .with("id", request.task);
+    query.repo = Some(request.execution_repo.to_owned());
+    let plan = landing_plan(
+        services,
+        request.execution_repo,
+        request.state_repo,
+        &query,
+        interrupted,
+    )?;
+    let task = plan.check_landing_review(expected)?;
+    stored_task(task)
+}
+
 /// Current task as stored: the snapshot's added `plan_id` and contract
 /// staleness are view fields that the stored record `finish` hashes lacks.
 fn task_snapshot(
@@ -86,7 +121,10 @@ fn task_snapshot(
             .with("id", request.task),
         interrupted,
     )?;
-    let mut task = oms_command_plan::json::parse(&raw)?;
+    stored_task(oms_command_plan::json::parse(&raw)?)
+}
+
+fn stored_task(mut task: PlanValue) -> Result<PlanValue> {
     // A view whose state was overridden is not the stored record finish hashes.
     if task.opt("stored_state").is_some() {
         return Err(fail("plan task completion is unverified; not landable"));
@@ -167,6 +205,14 @@ pub(crate) fn landing_review(
             "landing review requires this exact admitted patch on this base",
         ));
     }
+    if request.policy.expected_plan_review.is_some()
+        && (admission.get("verification").text() != Some("command")
+            || !matches!(admission.get("verify_exit"), V::Num(exit) if exit == "0"))
+    {
+        return Err(fail(
+            "bound Plan landing requires successful command verification",
+        ));
+    }
     if oms_command_plan::json::sha(request.patch) != request.patch_sha256 {
         return Err(fail("landing review requires the admitted patch bytes"));
     }
@@ -177,7 +223,10 @@ pub(crate) fn landing_review(
             ("plan_done_receipt_sha", "".into()),
         ]));
     }
-    let task = task_snapshot(services, request, interrupted)?;
+    let mut task = reviewed_task_snapshot(services, request, interrupted)?;
+    if let Some(expected) = &request.policy.expected_plan_review {
+        expected.stamp_landing_task(&mut task)?;
+    }
     if task.text("state") != "review"
         || task.text("lease_id").is_empty()
         || task.text("review_lease_id") != task.text("lease_id")
@@ -398,7 +447,10 @@ pub(crate) fn fence_landing(
         }
     };
     if !request.task.is_empty() {
-        let task = task_snapshot(services, request, interrupted)?;
+        let mut task = reviewed_task_snapshot(services, request, interrupted)?;
+        if let Some(expected) = &request.policy.expected_plan_review {
+            expected.stamp_landing_task(&mut task)?;
+        }
         let lease = text(intent, "lease");
         if task.text("lease_id") != lease
             || oms_command_plan::json::receipt_digest(&task)? != text(intent, "plan_receipt_sha")
@@ -407,19 +459,25 @@ pub(crate) fn fence_landing(
                 "plan task lease or review receipt changed; not applied",
             ));
         }
+        let mut land = oms_command_plan::Request::new(oms_command_plan::Action::Land)
+            .with("id", request.task)
+            .with("lease-id", lease.as_str())
+            .with("expected-review-patch", task.text("patch"))
+            .with("expected-review-patch-sha256", request.patch_sha256)
+            .with("expected-review-verify", task.text("verify"))
+            .with("expected-review-executor-id", "")
+            .with("expected-review-executor-soul-sha256", "")
+            .with("expected-review-lease-id", task.text("review_lease_id"));
+        if let Some(expected) = &request.policy.expected_plan_review {
+            let encoded = String::from_utf8(expected.encode()?)
+                .map_err(|_| fail("Plan review binding encoding unavailable"))?;
+            land = land.with("expected-review-binding", encoded);
+        }
         plan_run(
             services,
             request.execution_repo,
             request.state_repo,
-            oms_command_plan::Request::new(oms_command_plan::Action::Land)
-                .with("id", request.task)
-                .with("lease-id", lease.as_str())
-                .with("expected-review-patch", task.text("patch"))
-                .with("expected-review-patch-sha256", request.patch_sha256)
-                .with("expected-review-verify", task.text("verify"))
-                .with("expected-review-executor-id", "")
-                .with("expected-review-executor-soul-sha256", "")
-                .with("expected-review-lease-id", task.text("review_lease_id")),
+            land,
             interrupted,
         )?;
     }
@@ -465,10 +523,17 @@ fn release_fenced(
     {
         return Ok(());
     }
-    let mut release =
-        oms_command_plan::Request::new(oms_command_plan::Action::Release).with("id", request.task);
+    let mut release = oms_command_plan::Request::new(oms_command_plan::Action::Release)
+        .with("id", request.task)
+        .with(
+            "expected-landing-receipt-sha256",
+            text(intent, "plan_receipt_sha"),
+        );
     if !lease.is_empty() {
         release = release.with("lease-id", lease.as_str());
+    }
+    if let Some(encoded) = intent_review_binding(intent)? {
+        release = release.with("expected-review-binding", encoded);
     }
     plan_run(
         services,
@@ -478,6 +543,20 @@ fn release_fenced(
         interrupted,
     )
     .map(drop)
+}
+
+fn intent_review_binding(intent: &V) -> Result<Option<String>> {
+    if intent.get("plan_review_binding") == &V::Null {
+        return Ok(None);
+    }
+    let hash = oms_command_landing::landing::receipt_digest(intent)?;
+    if text(intent, "receipt_sha") != hash {
+        return Err(fail("landing receipt changed before Plan transition"));
+    }
+    let raw = intent.get("plan_review_binding").json(false)?;
+    Ok(Some(String::from_utf8(raw).map_err(|_| {
+        fail("Plan review binding encoding unavailable")
+    })?))
 }
 
 fn finish_task(
@@ -496,6 +575,12 @@ fn finish_task(
         );
     if !text(intent, "lease").is_empty() {
         finish = finish.with("lease-id", text(intent, "lease"));
+    }
+    if let Some(encoded) = intent_review_binding(intent)? {
+        finish = finish.with("expected-review-binding", encoded).with(
+            "expected-landing-done-receipt-sha256",
+            text(intent, "plan_done_receipt_sha"),
+        );
     }
     if refreeze {
         finish = finish.flag("refreeze-acceptance");
@@ -576,7 +661,29 @@ pub(crate) fn recover_landing(
             )?,
             (true, "done")
                 if oms_command_plan::json::receipt_digest(&task)?
-                    == text(intent, "plan_done_receipt_sha") => {}
+                    == text(intent, "plan_done_receipt_sha") =>
+            {
+                let expected = intent_review_binding(intent)?
+                    .map(|encoded| oms_command_plan::ReviewFence::parse(encoded.as_bytes()))
+                    .transpose()?;
+                let mut query =
+                    oms_command_plan::Request::new(oms_command_plan::Action::EvidenceSnapshot)
+                        .with("id", request.task);
+                query.repo = Some(request.execution_repo.to_owned());
+                let plan = landing_plan(
+                    services,
+                    request.execution_repo,
+                    request.state_repo,
+                    &query,
+                    interrupted,
+                )?;
+                plan.check_landing_done(
+                    &plan.load()?,
+                    request.task,
+                    expected.as_ref(),
+                    request.patch_sha256,
+                )?;
+            }
             (true, _) => {
                 return Err(fail(
                     "applied landing plan receipt did not converge; intent kept",
@@ -2092,6 +2199,31 @@ mod tests {
                     ..request(&f)
                 };
                 assert!(landing_review(&control, &req, &off).is_err());
+                let query = Request::new(Action::EvidenceSnapshot).with("id", "t1");
+                let plan = landing_plan(&control, &f.repo, &f.repo, &query, &off).unwrap();
+                let shown =
+                    oms_command_plan::json::parse(&plan.execute(&query).unwrap().stdout).unwrap();
+                let mut policy = f.policy.clone();
+                policy.expected_plan_review =
+                    Some(plan.landing_review_fence(&shown, &f.base).unwrap());
+                let mut admission = f.admission.clone();
+                let mut check = |kind: &str, exit: V| {
+                    admission.set("verification", kind);
+                    admission.set("verify_exit", exit);
+                    landing_review(
+                        &control,
+                        &LandingRequest {
+                            admission: &admission,
+                            policy: &policy,
+                            ..request(&f)
+                        },
+                        &off,
+                    )
+                };
+                assert!(check("skipped", V::Null).is_err());
+                assert!(check("command", 1usize.into()).is_err());
+                assert!(check("command", "0".into()).is_err());
+                check("command", 0usize.into()).unwrap();
                 let plain = oms_command_landing::admission::Policy::default();
                 let req = LandingRequest {
                     task: "",

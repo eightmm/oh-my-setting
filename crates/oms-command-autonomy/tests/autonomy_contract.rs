@@ -199,6 +199,12 @@ impl FeedbackMock {
         );
         self.plan(repo, &["claim", "--id", id, "--provider", "codex"]);
         let task = self.plan(repo, &["show", "--id", id]);
+        fs::write(
+            repo.join(".oms/worker-artifact"),
+            b"retained worker report\n",
+        )
+        .unwrap();
+        fs::write(repo.join(".oms/worker-patch"), b"retained worker patch\n").unwrap();
         self.plan(
             repo,
             &[
@@ -208,9 +214,9 @@ impl FeedbackMock {
                 "--lease-id",
                 task["lease_id"].as_str().unwrap(),
                 "--artifact",
-                "worker-artifact",
+                ".oms/worker-artifact",
                 "--patch",
-                "worker-patch",
+                ".oms/worker-patch",
             ],
         );
     }
@@ -352,6 +358,15 @@ impl Services for FeedbackMock {
     ) -> oms_command_autonomy::Result<CommandResult> {
         match call.tool.as_str() {
             "fail-ledger" => {
+                if self.mode == "review-replaced"
+                    && call.args.first().is_some_and(|arg| arg == "check")
+                {
+                    fs::write(
+                        call.cwd.join(".oms/worker-artifact"),
+                        b"replacement report\n",
+                    )
+                    .unwrap();
+                }
                 if self.mode == "head-before-delegate"
                     && call.args.first().is_some_and(|arg| arg == "check")
                 {
@@ -391,6 +406,29 @@ impl Services for FeedbackMock {
                 assert!(!args.iter().any(|arg| arg == "--repair"));
                 let binding =
                     serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
+                if self.mode.starts_with("unknown-after-start") {
+                    self.plan(
+                        &call.cwd,
+                        &[
+                            "start",
+                            "--id",
+                            arg("--plan-task").as_str(),
+                            "--lease-id",
+                            binding["lease_id"].as_str().unwrap(),
+                        ],
+                    );
+                    if self.mode == "unknown-after-start-error" {
+                        return Err(oms_command_autonomy::Error::new(
+                            2,
+                            "worker response unavailable",
+                        ));
+                    }
+                    return Ok((
+                        124,
+                        vec![],
+                        b"worker timed out without acknowledgement".to_vec(),
+                    ));
+                }
                 assert!(args.iter().any(|a| a == "--terminalize-resumed-repair"));
                 let packet: serde_json::Value =
                     serde_json::from_slice(&fs::read(arg("--review-artifact")).unwrap()).unwrap();
@@ -408,24 +446,77 @@ impl Services for FeedbackMock {
                 assert_eq!(binding["lease_id"], task["lease_id"]);
                 assert_eq!(binding["lease_epoch"], task["lease_epoch"]);
                 assert_eq!(binding["task_sha256"], task["task_sha256"]);
-                self.plan(
-                    &call.cwd,
-                    &[
-                        "review",
-                        "--id",
-                        &id,
-                        "--lease-id",
-                        task["lease_id"].as_str().unwrap(),
-                        "--artifact",
-                        "repaired-artifact",
-                        "--patch",
-                        "repaired-patch",
-                    ],
-                );
+                fs::write(
+                    call.cwd.join(".oms/repaired-artifact"),
+                    b"retained repair report\n",
+                )
+                .unwrap();
+                fs::write(
+                    call.cwd.join(".oms/repaired-patch"),
+                    b"retained repair patch\n",
+                )
+                .unwrap();
+                use oms_command_plan::{Action, Context, DelegateBinding, Plan, Request};
+                let request = Request::new(Action::Start)
+                    .with("id", id.as_str())
+                    .with("lease-id", task["lease_id"].as_str().unwrap());
+                let stop = AtomicBool::new(false);
+                let context = Context::from_environment(&request, &call.cwd).unwrap();
+                let plan = Plan::open(context, self, &stop).unwrap();
+                let issued =
+                    DelegateBinding::parse(&serde_json::to_vec(&binding).unwrap()).unwrap();
+                let running = plan.execute_bound_task(&request, &issued, None).unwrap();
+                let operation = call
+                    .environment
+                    .iter()
+                    .find(|(key, _)| key == "OMS_OPERATION_ID")
+                    .and_then(|(_, value)| value.to_str())
+                    .unwrap();
+                let index = json!({
+                    "schema": 1, "kind": "delegate", "event_id": "evt_fixture",
+                    "attempt_id": "att_fixture", "operation_id": if self.mode == "foreign-operation" {
+                        "op_different"
+                    } else { operation },
+                    "task_id": id, "provider": "codex", "base_sha": binding["base_sha"],
+                    "exit": 0, "verify_exit": 0, "verification": "passed", "state": "review",
+                    "no_change": false, "plan_binding": binding,
+                    "artifact": ".oms/repaired-artifact",
+                    "artifact_sha256": oms_command_plan::json::sha(b"retained repair report\n"),
+                    "patch": ".oms/repaired-patch",
+                    "patch_sha256": oms_command_plan::json::sha(b"retained repair patch\n"),
+                });
+                let mut index_raw = serde_json::to_vec(&index).unwrap();
+                index_raw.push(b'\n');
+                write_private(&call.cwd.join(".oms/artifacts/index.jsonl"), &index_raw);
+                let index = oms_command_plan::json::parse(&index_raw).unwrap();
+                plan.execute_bound_task(
+                    &Request::new(Action::Review)
+                        .with("id", id)
+                        .with("lease-id", task["lease_id"].as_str().unwrap())
+                        .with("artifact", ".oms/repaired-artifact")
+                        .with("patch", ".oms/repaired-patch"),
+                    &running,
+                    Some(&index),
+                )
+                .unwrap();
                 Ok((0, vec![], vec![]))
             }
             "patch-land" => {
                 self.lands.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.mode == "review-replaced" {
+                    let proof = call
+                        .args
+                        .windows(2)
+                        .find(|args| args[0] == "--expected-plan-review")
+                        .unwrap();
+                    let proof =
+                        serde_json::from_str::<serde_json::Value>(proof[1].to_str().unwrap())
+                            .unwrap();
+                    assert_eq!(
+                        proof["report_sha256"],
+                        oms_command_plan::json::sha(b"retained worker report\n")
+                    );
+                }
                 Ok((1, vec![], b"fixture admission hold".to_vec()))
             }
             other => panic!("unexpected command: {other}"),
@@ -519,6 +610,50 @@ fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
 }
 
 #[test]
+fn plan_run_retains_exact_running_lease_on_unknown_worker_outcome() {
+    if scrubbed_child("plan_run_retains_exact_running_lease_on_unknown_worker_outcome") {
+        return;
+    }
+    for mode in ["unknown-after-start-error", "unknown-after-start-timeout"] {
+        let mock = FeedbackMock::new(mode);
+        let repo = mock.fixture();
+        mock.plan(
+            &repo.0,
+            &[
+                "add",
+                "--id",
+                "fresh",
+                "--title",
+                "ordinary worker",
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+            ],
+        );
+        let run = |selector: &[&str]| {
+            let mut argv = ["--to", "codex"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            argv.extend(selector.iter().map(OsString::from));
+            run_with_services("plan-run", &argv, &repo.0, &AtomicBool::new(false), &mock)
+        };
+        let out = run(&["--id", "fresh"]);
+        assert_ne!(out.0, 0, "{out:?}");
+        let running = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+        assert_eq!(running["state"], "running");
+        assert!(!running["lease_id"].as_str().unwrap().is_empty());
+        assert_ne!(run(&["--next"]).0, 0);
+        assert_eq!(FeedbackMock::count(&mock.sends), 1);
+        assert_eq!(
+            mock.plan(&repo.0, &["show", "--id", "fresh"])["lease_id"],
+            running["lease_id"]
+        );
+    }
+}
+
+#[test]
 fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
     if scrubbed_child("plan_run_does_not_refresh_its_frozen_base_after_preflight") {
         return;
@@ -548,7 +683,7 @@ fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
     );
     assert_ne!(result.0, 0);
     assert!(
-        String::from_utf8_lossy(&result.2).contains("base moved before dispatch"),
+        String::from_utf8_lossy(&result.2).contains("base moved before claiming"),
         "{result:?}"
     );
     assert_eq!(FeedbackMock::count(&mock.sends), 0);
@@ -556,6 +691,33 @@ fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
     assert_eq!(
         task["state"], "ready",
         "only the newly issued original lease is released"
+    );
+}
+
+#[test]
+fn plan_run_never_rebinds_a_selected_review_or_worker_operation() {
+    if scrubbed_child("plan_run_never_rebinds_a_selected_review_or_worker_operation") {
+        return;
+    }
+    let mock = FeedbackMock::new("review-replaced");
+    let repo = mock.fixture();
+    assert_eq!(mock.run(&repo, "one", false).0, 1);
+    assert_eq!(FeedbackMock::count(&mock.lands), 1);
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
+
+    let mock = FeedbackMock::new("foreign-operation");
+    let repo = mock.fixture();
+    let result = mock.run(&repo, "one", true);
+    assert_ne!(result.0, 0);
+    assert!(
+        String::from_utf8_lossy(&result.2).contains("different delegation operation"),
+        "{result:?}"
+    );
+    assert_eq!(FeedbackMock::count(&mock.lands), 0);
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "one"])["state"],
+        "review"
     );
 }
 

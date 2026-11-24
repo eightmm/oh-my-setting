@@ -2,10 +2,13 @@
 
 use oms_command_autonomy::{CommandResult, Invocation, ModelRoute, Services, run_with_services};
 use oms_command_plan::services::{GroupMembership, GroupResolver};
-use serde_json::Value;
+use oms_command_plan::{Action, Context, DelegateBinding, Plan, Request, json as plan_json};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -117,6 +120,63 @@ impl Mock {
             started = self.wake.wait_timeout(started, left).unwrap().0;
         }
     }
+    fn review(
+        &self,
+        call: &Invocation,
+        plan: &Plan<'_>,
+        issued: &DelegateBinding,
+        running: &DelegateBinding,
+    ) {
+        let _one = self.plan.lock().unwrap();
+        let id = issued.task_id();
+        let operation = call
+            .environment
+            .iter()
+            .find_map(|(name, value)| (name == "OMS_OPERATION_ID").then_some(value))
+            .and_then(|value| value.to_str())
+            .expect("exact operation identity");
+        let dir = call.cwd.join(".oms/artifacts");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let artifact = format!(".oms/artifacts/artifact-{id}.md");
+        let patch = format!(".oms/artifacts/patch-{id}.patch");
+        let report = b"fixture native review report\n";
+        let changes = b"fixture native review patch\n";
+        for (file, bytes) in [(&artifact, report.as_slice()), (&patch, changes.as_slice())] {
+            let file = call.cwd.join(file);
+            fs::write(&file, bytes).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let binding: Value = serde_json::from_slice(&issued.encode().unwrap()).unwrap();
+        let index = json!({
+            "schema": 1, "kind": "delegate", "event_id": format!("evt-{id}"),
+            "attempt_id": format!("att-{id}"), "operation_id": operation,
+            "task_id": id, "provider": "codex", "base_sha": issued.base_sha(),
+            "exit": 0, "verify_exit": 0, "verification": "passed", "state": "review",
+            "no_change": false, "plan_binding": binding, "artifact": artifact,
+            "artifact_sha256": plan_json::sha(report), "patch": patch,
+            "patch_sha256": plan_json::sha(changes),
+        });
+        let raw = serde_json::to_vec(&index).unwrap();
+        let index_path = dir.join("index.jsonl");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&index_path)
+            .unwrap();
+        fs::set_permissions(&index_path, fs::Permissions::from_mode(0o600)).unwrap();
+        file.write_all(&[raw.as_slice(), b"\n"].concat()).unwrap();
+        plan.execute_bound_task(
+            &Request::new(Action::Review)
+                .with("id", id)
+                .with("lease-id", running.lease_id())
+                .with("artifact", artifact)
+                .with("patch", patch),
+            running,
+            Some(&plan_json::parse(&raw).unwrap()),
+        )
+        .unwrap();
+    }
     fn delegate(&self, call: &Invocation) {
         let args = call.args.iter().map(|a| a.to_string_lossy().into_owned());
         let args = args.collect::<Vec<_>>();
@@ -125,6 +185,20 @@ impl Mock {
             .find(|w| w[0] == "--plan-task")
             .map(|w| w[1].clone())
             .unwrap();
+        let issued = DelegateBinding::parse(
+            args.windows(2).find(|w| w[0] == "--plan-binding").unwrap()[1].as_bytes(),
+        )
+        .unwrap();
+        let start = Request::new(Action::Start)
+            .with("id", id.as_str())
+            .with("lease-id", issued.lease_id());
+        let stop = AtomicBool::new(false);
+        let context = Context::from_environment(&start, &call.cwd).unwrap();
+        let plan = Plan::open(context, self, &stop).unwrap();
+        let running = (!self.panics.contains(id.as_str())).then(|| {
+            let _one = self.plan.lock().unwrap();
+            plan.execute_bound_task(&start, &issued, None).unwrap()
+        });
         {
             let mut running = self.running.lock().unwrap();
             for other in running.iter() {
@@ -153,23 +227,7 @@ impl Mock {
             panic!("injected worker panic for {id}");
         }
         std::thread::sleep(Duration::from_millis(30));
-        let (_, shown) = self.plan(&call.cwd, &["show", "--id", &id]);
-        let task: Value = serde_json::from_str(&shown).unwrap();
-        let lease = task["lease_id"].as_str().unwrap().to_owned();
-        self.plan(
-            &call.cwd,
-            &[
-                "review",
-                "--id",
-                &id,
-                "--lease-id",
-                &lease,
-                "--artifact",
-                &format!("artifact-{id}"),
-                "--patch",
-                &format!("patch-{id}"),
-            ],
-        );
+        self.review(call, &plan, &issued, &running.unwrap());
         self.live.fetch_sub(1, Ordering::SeqCst);
         self.running.lock().unwrap().remove(&id);
     }
@@ -286,14 +344,14 @@ fn parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling() {
     let (code, out, err) = run(&repo, &mock, &["--parallel", "--max-writers", "2"]);
     assert_eq!(code, 1, "{out}{err}");
     assert!(
-        out.contains("task=t2-boom panicked; lease released"),
+        out.contains("task=t2-boom panicked; unstarted claim released"),
         "{out}"
     );
     assert!(out.contains("started=3 failed=1"), "{out}");
     for ok in ["t1-slow", "t3-late"] {
         let task = state(&repo, ok);
         assert_eq!(task["state"], "review", "{ok}: {task}");
-        assert_eq!(task["artifact"], format!("artifact-{ok}"));
+        assert_eq!(task["delegate_result"]["kind"], "native-delegate-review");
     }
     let boom = state(&repo, "t2-boom");
     assert_eq!(boom["state"], "ready", "{boom}");

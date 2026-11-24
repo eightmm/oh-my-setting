@@ -4,7 +4,7 @@ use crate::storage::{ACTIVE, Context, MAX_FILE, PROGRESS, RECEIPT};
 use crate::{Error, Result, Services, planning, require, value};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -880,7 +880,8 @@ pub(crate) fn goal_progress(ctx: &Context<'_>, row: &Value) -> Result<Value> {
         spec.criteria.len() <= 128,
         "goal criterion observation exceeds 128 criteria",
     )?;
-    let snapshot = ctx.plan()?.load()?;
+    let plan = ctx.plan()?;
+    let snapshot = plan.load()?;
     let canonical = snapshot.ordered()?;
     let mut completed = BTreeSet::new();
     let mut local = Vec::new();
@@ -903,21 +904,11 @@ pub(crate) fn goal_progress(ctx: &Context<'_>, row: &Value) -> Result<Value> {
     // Ordinary patch-land Finish retains its proof in the landing ledger,
     // rather than the research/landed-commit completion objects on a task.
     if !local.is_empty() {
-        let rows = ctx.rows(".oms/landings.jsonl")?;
-        let mut by_task = BTreeMap::<&str, Vec<&Value>>::new();
-        for row in &rows {
-            by_task
-                .entry(value::text(row, "task"))
-                .or_default()
-                .push(row);
-        }
+        let rows = plan.patch_landing_rows()?;
+        let ledger = crate::goal::LandingLedger::new(&rows);
         for id in local {
-            let rows = by_task.get(id).map(Vec::as_slice).unwrap_or_default();
             match crate::goal::completed_landing_from_snapshot(
-                ctx,
-                &snapshot,
-                id,
-                rows.iter().rev().copied(),
+                ctx, &plan, &snapshot, &ledger, id, None,
             ) {
                 Ok(_) => {
                     completed.insert(id.to_owned());

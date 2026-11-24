@@ -67,6 +67,80 @@ impl DelegateBinding {
         self.0.text("base_sha")
     }
 }
+const LANDING_REVIEW_SHA256: &str = "landing_review_sha256";
+
+/// Comparison target for landing the exact Plan review selected by a runner.
+#[derive(Clone, Debug)]
+pub struct ReviewFence {
+    lease: DelegateBinding,
+    report_sha256: String,
+    patch_sha256: String,
+}
+impl ReviewFence {
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        let row = json::parse_bounded(raw, 4096)?;
+        json::keys(&row, &["binding", "report_sha256", "patch_sha256"], &[])?;
+        let lease = DelegateBinding::parse(&json::canonical(row.get("binding"))?)?;
+        let report_sha256 = row.text("report_sha256").to_owned();
+        let patch_sha256 = row.text("patch_sha256").to_owned();
+        require(
+            json::hex(&report_sha256, 64) && json::hex(&patch_sha256, 64),
+            "invalid Plan review evidence digest",
+        )?;
+        Ok(Self {
+            lease,
+            report_sha256,
+            patch_sha256,
+        })
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        json::canonical(&object([
+            ("binding", self.lease.0.clone()),
+            ("report_sha256", string(&self.report_sha256)),
+            ("patch_sha256", string(&self.patch_sha256)),
+        ]))
+    }
+    pub fn task_id(&self) -> &str {
+        self.lease.task_id()
+    }
+    pub(crate) fn lease_id(&self) -> &str {
+        self.lease.lease_id()
+    }
+    pub(crate) fn plan_id(&self) -> &str {
+        self.lease.0.text("plan_id")
+    }
+    pub fn base_sha(&self) -> &str {
+        self.lease.base_sha()
+    }
+    pub fn patch_sha256(&self) -> &str {
+        &self.patch_sha256
+    }
+    fn digest(&self) -> Result<String> {
+        Ok(json::sha(self.encode()?))
+    }
+    /// Include the review binding in the native Plan receipt without changing
+    /// the outer landing ledger digest shared by legacy consumers.
+    pub fn stamp_landing_task(&self, task: &mut Value) -> Result<()> {
+        task.set(LANDING_REVIEW_SHA256, string(self.digest()?))
+    }
+    fn require_landing_stamp(&self, task: &Value) -> Result<()> {
+        require(
+            task.text(LANDING_REVIEW_SHA256) == self.digest()?,
+            "Plan landing lacks the exact review binding",
+        )
+    }
+    fn require_task(&self, plan: &Value, task: &Value, state: &str) -> Result<()> {
+        require(
+            plan.get("plan_id") == self.lease.0.get("plan_id")
+                && task.text("id") == self.task_id()
+                && task.text("state") == state
+                && task.text("review_lease_id") == self.lease.lease_id()
+                && task.get("lease_id") == self.lease.0.get("lease_id")
+                && task.get("lease_epoch") == self.lease.0.get("lease_epoch"),
+            "Plan landing task or reviewed lease changed",
+        )
+    }
+}
 #[derive(Clone)]
 pub struct Context {
     /// Caller directory that relative request operands resolve against.
@@ -465,9 +539,13 @@ impl<'a> Plan<'a> {
         }
     }
     pub fn load(&self) -> Result<Snapshot> {
-        let snap = self
-            .plan_storage()
-            .snapshot(&self.context.plan_file, MAX_JSON, true)?;
+        self.load_from_snapshot(self.plan_file_snapshot()?)
+    }
+    fn plan_file_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
+        self.plan_storage()
+            .snapshot(&self.context.plan_file, MAX_JSON, true)
+    }
+    fn load_from_snapshot(&self, snap: Option<storage::FileSnapshot>) -> Result<Snapshot> {
         let raw = snap.as_ref().map(|s| s.raw.clone());
         let strict =
             self.context.canonical() && self.store.directory_exists(".oms/plan/completions")?;
@@ -803,9 +881,14 @@ impl<'a> Plan<'a> {
         Ok((request, retained))
     }
 
-    fn delegate_review_evidence(&self, task: &Value, expected_patch: &str) -> Result<()> {
+    fn delegate_review_evidence(
+        &self,
+        task: &Value,
+        expected_patch: &str,
+        base: Option<&str>,
+    ) -> Result<Option<Value>> {
         let Some(result) = task.opt("delegate_result") else {
-            return Ok(());
+            return Ok(None);
         };
         json::keys(
             result,
@@ -830,6 +913,7 @@ impl<'a> Plan<'a> {
         require(
             index.text("task_id") == task.text("id")
                 && index.text("provider") == task.text("provider")
+                && base.is_none_or(|base| index.text("base_sha") == base)
                 && index.get("plan_binding").get("plan_id") == result.get("plan_id")
                 && index.get("plan_binding").get("lease_id") == result.get("lease_id"),
             "retained native delegate index changed identity",
@@ -848,7 +932,42 @@ impl<'a> Plan<'a> {
         require(
             result.get("patch").text("sha256") == expected_patch,
             "landing patch is not the exact native delegated result",
-        )
+        )?;
+        Ok(Some(index))
+    }
+
+    /// Select only the retained, verified Review from this exact provider call.
+    pub fn check_delegate_review(
+        &self,
+        issued: &DelegateBinding,
+        operation: &str,
+    ) -> Result<Value> {
+        self.context.parent()?;
+        let raw = self.locked(false, None, || self.plan_file_snapshot())?;
+        let mut snapshot = self.load_from_snapshot(raw)?;
+        snapshot.require_contract()?;
+        let task = snapshot.task(issued.task_id())?.clone();
+        require(
+            snapshot.plan.get("plan_id") == issued.0.get("plan_id")
+                && task.text("state") == "review"
+                && task.text("lease_id") == issued.lease_id()
+                && task.text("review_lease_id") == issued.lease_id()
+                && task.get("lease_epoch") == issued.0.get("lease_epoch")
+                && self.git().text(&["rev-parse", "HEAD"])? == issued.base_sha()
+                && crate::contracts::stale(&snapshot.registry, &task)?.is_empty(),
+            "issued delegation no longer owns the exact reviewed task",
+        )?;
+        let patch = task.get("delegate_result").get("patch").text("sha256");
+        let index = self
+            .delegate_review_evidence(&task, patch, Some(issued.base_sha()))?
+            .ok_or_else(|| error("issued delegation lacks retained native review evidence"))?;
+        require(
+            index.text("operation_id") == operation && index.get("plan_binding") == &issued.0,
+            "retained native review belongs to a different delegation operation",
+        )?;
+        let mut view = self.view(&mut snapshot, &task, true)?;
+        view.set("plan_id", snapshot.plan.get("plan_id").clone())?;
+        Ok(view)
     }
 
     fn execute_inner(
@@ -1282,7 +1401,19 @@ impl<'a> Plan<'a> {
         require(valid_id(id), "--id must match [A-Za-z0-9._-]+")?;
         let mut t = s.task(id)?.clone();
         let state = t.text("state").to_owned();
-        if matches!(req.action, Claim | Land | Finish) {
+        if matches!(req.action, Claim | Release | Repair | Block) && req.has("expected-task-sha256")
+        {
+            let expected = req.value("expected-task-sha256")?;
+            require(
+                json::hex(expected, 64)
+                    && json::hash(&t)? == expected
+                    && (req.action != Release || state == "claimed"),
+                "task changed before the conditional Plan transition",
+            )?;
+        }
+        if matches!(req.action, Claim | Land | Finish)
+            || req.action == Repair && req.has("expected-review-binding")
+        {
             let stale = crate::contracts::stale(&s.registry, &t)?;
             require(
                 stale.is_empty(),
@@ -1402,6 +1533,16 @@ impl<'a> Plan<'a> {
                 }
             }
             Repair => {
+                if req.has("expected-review-binding") {
+                    let proof =
+                        ReviewFence::parse(req.value("expected-review-binding")?.as_bytes())?;
+                    self.require_landing_review(&s.plan, &t, &proof)?;
+                    self.delegate_review_evidence(
+                        &t,
+                        proof.patch_sha256(),
+                        Some(proof.base_sha()),
+                    )?;
+                }
                 require(
                     state == "review",
                     format!("task {id} is {state}; only reviewed work can enter repair"),
@@ -1431,7 +1572,7 @@ impl<'a> Plan<'a> {
                     t.set("repair_artifact", string(req.text("artifact")?))?;
                 }
             }
-            Land => self.land(req, &mut t)?,
+            Land => self.land(req, &mut t, &s.plan)?,
             Finish => {
                 if self.finish(req, s, &mut t)? {
                     return Ok(Response::default());
@@ -1475,6 +1616,12 @@ impl<'a> Plan<'a> {
                     ),
                 )?;
                 self.lease(req, &t)?;
+                if req.has("expected-landing-receipt-sha256")
+                    || t.opt(LANDING_REVIEW_SHA256).is_some()
+                {
+                    self.context.parent()?;
+                    self.require_landing_transition(req, &s.plan, &t)?;
+                }
                 clear_claim(s, &mut t)?;
             }
             Reopen => {
@@ -2179,7 +2326,124 @@ impl<'a> Plan<'a> {
         lines.push(format!("plan: reclaimed {count} task(s)"));
         Ok(Response::text(lines.join("\n")))
     }
-    fn land(&self, req: &Request, t: &mut Value) -> Result<()> {
+    /// Freeze the selected review and its evidence before passing it to landing.
+    pub fn landing_review_fence(&self, snapshot: &Value, base: &str) -> Result<ReviewFence> {
+        let lease = DelegateBinding::parse(&json::canonical(&object([
+            ("schema", number(1)),
+            ("plan_id", snapshot.get("plan_id").clone()),
+            ("task_id", snapshot.get("id").clone()),
+            ("task_sha256", snapshot.get("task_sha256").clone()),
+            ("lease_id", snapshot.get("lease_id").clone()),
+            ("lease_epoch", snapshot.get("lease_epoch").clone()),
+            ("base_sha", string(base)),
+        ]))?)?;
+        self.context.parent()?;
+        self.locked(false, None, || {
+            let current = self.load()?;
+            let task = current.task(lease.task_id())?;
+            let report = self.evidence_read(task.text("artifact"), MAX_PATCH)?;
+            let patch = self.evidence_read(task.text("patch"), MAX_PATCH)?;
+            require(
+                !report.is_empty() && !patch.is_empty(),
+                "review evidence is empty",
+            )?;
+            let expected = ReviewFence {
+                lease,
+                report_sha256: json::sha(&report),
+                patch_sha256: json::sha(&patch),
+            };
+            self.require_landing_review(&current.plan, task, &expected)?;
+            self.delegate_review_evidence(task, expected.patch_sha256(), Some(base))?;
+            Ok(expected)
+        })
+    }
+
+    pub fn check_landing_review(&self, expected: &ReviewFence) -> Result<Value> {
+        self.context.parent()?;
+        self.locked(false, None, || {
+            let mut s = self.load()?;
+            let task = s.task(expected.task_id())?.clone();
+            require(
+                crate::contracts::stale(&s.registry, &task)?.is_empty(),
+                "Plan landing contracts became stale before admission",
+            )?;
+            self.require_landing_review(&s.plan, &task, expected)?;
+            self.delegate_review_evidence(
+                &task,
+                expected.patch_sha256(),
+                Some(expected.base_sha()),
+            )?;
+            let mut view = self.view(&mut s, &task, true)?;
+            view.set("plan_id", s.plan.get("plan_id").clone())?;
+            Ok(view)
+        })
+    }
+
+    fn require_landing_review(
+        &self,
+        plan: &Value,
+        task: &Value,
+        expected: &ReviewFence,
+    ) -> Result<()> {
+        expected.require_task(plan, task, "review")?;
+        self.verify_review_evidence(task)?;
+        require(
+            json::hash(task)? == expected.lease.0.text("task_sha256")
+                && self.git().text(&["rev-parse", "HEAD"])? == expected.base_sha()
+                && json::sha(&self.evidence_read(task.text("artifact"), MAX_PATCH)?)
+                    == expected.report_sha256
+                && json::sha(&self.evidence_read(task.text("patch"), MAX_PATCH)?)
+                    == expected.patch_sha256(),
+            "Plan landing review, report, patch or base changed",
+        )
+    }
+
+    pub fn check_landing_done(
+        &self,
+        snapshot: &Snapshot,
+        task_id: &str,
+        expected: Option<&ReviewFence>,
+        patch_sha256: &str,
+    ) -> Result<()> {
+        self.check_landing_result(
+            &snapshot.plan,
+            snapshot.task(task_id)?,
+            expected,
+            patch_sha256,
+        )
+    }
+
+    pub(crate) fn check_landing_result(
+        &self,
+        plan: &Value,
+        task: &Value,
+        expected: Option<&ReviewFence>,
+        patch_sha256: &str,
+    ) -> Result<()> {
+        let Some(expected) = expected else {
+            return require(
+                task.opt(LANDING_REVIEW_SHA256).is_none(),
+                "bound Plan completion requires its exact review proof",
+            );
+        };
+        expected.require_task(plan, task, "done")?;
+        expected.require_landing_stamp(task)?;
+        require(
+            patch_sha256 == expected.patch_sha256()
+                && json::sha(&self.evidence_read(task.text("artifact"), MAX_PATCH)?)
+                    == expected.report_sha256,
+            "Plan landing completed with different report or patch evidence",
+        )
+    }
+
+    fn land(&self, req: &Request, t: &mut Value, plan: &Value) -> Result<()> {
+        let review = req
+            .has("expected-review-binding")
+            .then(|| ReviewFence::parse(req.value("expected-review-binding")?.as_bytes()))
+            .transpose()?;
+        if let Some(expected) = &review {
+            self.require_landing_review(plan, t, expected)?;
+        }
         require(
             t.text("state") == "review",
             format!(
@@ -2222,7 +2486,13 @@ impl<'a> Plan<'a> {
             json::hex(expected, 64),
             "--expected-review-patch-sha256 must be lowercase SHA-256",
         )?;
-        self.delegate_review_evidence(t, expected)?;
+        require(
+            review
+                .as_ref()
+                .is_none_or(|review| review.patch_sha256() == expected),
+            "Plan landing patch differs from its exact reviewed binding",
+        )?;
+        self.delegate_review_evidence(t, expected, review.as_ref().map(ReviewFence::base_sha))?;
         require(
             json::sha(self.evidence_read(path, MAX_PATCH)?) == expected,
             "reviewed patch bytes changed during admission",
@@ -2244,6 +2514,9 @@ impl<'a> Plan<'a> {
             t.text("executor_id") == executor && t.text("executor_soul_sha256") == soul,
             "executor review receipt changed during admission",
         )?;
+        if let Some(review) = review {
+            review.stamp_landing_task(t)?;
+        }
         t.set("state", string("landing"))
     }
     fn finish(&self, req: &Request, s: &mut Snapshot, t: &mut Value) -> Result<bool> {
@@ -2362,26 +2635,60 @@ impl<'a> Plan<'a> {
                 t.text("state")
             ),
         )?;
-        let expected = req.value("expected-landing-receipt-sha256")?;
-        require(
-            json::hex(expected, 64),
-            "--expected-landing-receipt-sha256 must be lowercase SHA-256",
-        )?;
-        require(
-            json::receipt_digest(t)? == expected,
-            "landing receipt changed; stale finish rejected",
-        )?;
-        let mut finished = t.clone();
-        evidence(req, &mut finished)?;
-        finished.set("state", string("done"))?;
-        self.verify_review_evidence(&finished)?;
-        if req.has("refreeze-acceptance") {
-            self.refreeze(req, s, t, expected)?;
+        let review = self.require_landing_transition(req, &s.plan, t)?;
+        let mut done = t.clone();
+        evidence(req, &mut done)?;
+        done.set("state", string("done"))?;
+        if let Some(review) = review {
+            require(
+                json::sha(&self.evidence_read(t.text("artifact"), MAX_PATCH)?)
+                    == review.report_sha256
+                    && done.get("artifact") == t.get("artifact")
+                    && json::sha(&self.evidence_read(done.text("patch"), MAX_PATCH)?)
+                        == review.patch_sha256()
+                    && json::receipt_digest(&done)?
+                        == req.value("expected-landing-done-receipt-sha256")?,
+                "Plan Finish evidence or expected done receipt changed",
+            )?;
         }
-        *t = finished;
+        self.verify_review_evidence(&done)?;
+        if req.has("refreeze-acceptance") {
+            self.refreeze(req, s, t, req.value("expected-landing-receipt-sha256")?)?;
+        }
+        *t = done;
         Ok(false)
     }
-
+    fn require_landing_transition(
+        &self,
+        req: &Request,
+        plan: &Value,
+        task: &Value,
+    ) -> Result<Option<ReviewFence>> {
+        let receipt = req.value("expected-landing-receipt-sha256")?;
+        require(
+            task.text("state") == "landing"
+                && json::hex(receipt, 64)
+                && json::receipt_digest(task)? == receipt,
+            "landing receipt changed; stale transition rejected",
+        )?;
+        let proof = req
+            .has("expected-review-binding")
+            .then(|| ReviewFence::parse(req.value("expected-review-binding")?.as_bytes()))
+            .transpose()?;
+        require(
+            proof.is_some() == task.opt(LANDING_REVIEW_SHA256).is_some(),
+            "bound Plan transition requires its exact review binding",
+        )?;
+        if let Some(proof) = &proof {
+            proof.require_task(plan, task, "landing")?;
+            proof.require_landing_stamp(task)?;
+            require(
+                self.git().text(&["rev-parse", "HEAD"])? == proof.base_sha(),
+                "Plan landing base changed before terminal transition",
+            )?;
+        }
+        Ok(proof)
+    }
     fn capture_review_evidence(&self, req: &Request, task: &Value) -> Result<Option<Value>> {
         let flags = [
             "expected-review-artifact-sha256",
@@ -3003,6 +3310,7 @@ pub(crate) fn clear_claim(s: &mut Snapshot, t: &mut Value) -> Result<()> {
     }
     t.remove("claimed_by_participant");
     t.remove("review_evidence");
+    t.remove(LANDING_REVIEW_SHA256);
     Ok(())
 }
 pub(crate) fn parse_ts(s: &str) -> Option<i128> {
