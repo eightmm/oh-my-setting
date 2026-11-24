@@ -869,9 +869,9 @@ test('Korean and English catalogs match, and every static node and message key r
   assert.ok(literals.length > 40);
   for (const key of literals) assert.ok(Object.hasOwn(ko, key), key);
   for (const key of [...script.matchAll(/\bt\(\s*'([^']+)'/g)].map(m => m[1]).filter(key => !key.endsWith('.'))) assert.ok(Object.hasOwn(ko, key), key);
-  const families = {state:['working','starting','verifying','review','in_review','done','blocked','waiting_for_input'],
+  const families = {state:['running','starting','supported','passed','active','planned','open','verifying','review','done','blocked','waiting'],
     'git.class':['candidate','blocked','unverified','plan_linked','board_in_progress','closed_board','duplicate','archived','unknown','draft','foreign','epic','closed','pull_request'],
-    'git.check':['failed','pending','passed','other','unknown'], ev:['info','events','files','diff','transcript'],
+    'git.check':['failed','pending','passed','other'], ev:['info','events','files','diff','transcript'],
     src:['git','task','plan','attempts','artifacts','acceptance','conversation'], srcState:['unavailable','partial','ambiguous','stale'],
     sv:['connections','modelcatalog','routes','attribution'], obs:['complete','partial','unknown']};
   for (const [family, members] of Object.entries(families)) for (const member of members) assert.ok(Object.hasOwn(ko, family + '.' + member), family + '.' + member);
@@ -1405,11 +1405,12 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
       ]})
   }});
 
-  // Leads heading badge shows only a neutral count with an accessible name; individual rows carry their own chips.
+  // Leads heading holds the neutral count inside <h2> (visually hidden + decorative pill, no aria-label on span).
   const leadsBadge = p.get('work-dot');
   assert.equal(leadsBadge.hidden, false);
   assert.equal(leadsBadge.textContent, '3');
-  assert.equal(leadsBadge.getAttribute('aria-label'), 'Lead 3개');
+  assert.equal(leadsBadge.getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (3)');
   assert.doesNotMatch(leadsBadge.textContent, /실행|Running|▶|⟳|▷|!/);
   assert.doesNotMatch(leadsBadge.className || '', /\bstate-chip\b/);
 
@@ -1448,7 +1449,8 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
 
   await choose(p, 'en');
   assert.equal(leadsBadge.textContent, '3');
-  assert.equal(leadsBadge.getAttribute('aria-label'), '3 Leads');
+  assert.equal(leadsBadge.getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (3)');
   assert.deepEqual(leadChips.map(c => c.textContent), ['▷ Claimed', '⟳ Landing', '? paused_x']);
   assert.deepEqual(chips.map(c => c.textContent), [
     '⊘ Cancelled', '⊘ Cancelled', '⊘ Abandoned', '◷ Interrupted', '· Closed',
@@ -1464,7 +1466,8 @@ test('honest state mapping preserves distinct terminal/live states, unknown raw 
   assert.doesNotMatch(optionTexts().join('\n'), /완료|취소됨|착지 중|호출 선택/);
 
   await choose(p, 'ko');
-  assert.equal(leadsBadge.getAttribute('aria-label'), 'Lead 3개');
+  assert.equal(leadsBadge.getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (3)');
   assert.deepEqual(optionTexts(), [
     '호출 선택',
     'peer-review · att-1 · 완료',
@@ -1541,7 +1544,8 @@ test('round 3 advisories: unified git check states, distinct states, Korean read
     'warning', 'warning', 'warning', 'warning', 'error', 'accent'
   ]);
   assert.equal(p.run('MSG.ko["state.ready"]'), '준비됨');
-  assert.equal(p.get('work-dot').getAttribute('aria-label'), 'Lead 1개');
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (1)');
 
   // Git checks: one lookup, general-table fallback, ? raw for unknown.
   const checkChips = stateChips(p.get('git-content'));
@@ -1576,7 +1580,8 @@ test('round 3 advisories: unified git check states, distinct states, Korean read
   assert.deepEqual(checkChips.map(c => c.textContent), [
     '× Failed', '✓ Passed', '· Pending', '· Other', '⊘ Cancelled', '× Failed', '? custom_check', '? Unknown'
   ]);
-  assert.equal(p.get('work-dot').getAttribute('aria-label'), '1 Lead');
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (1)');
   assert.equal(p.get('map-parents-label').textContent, 'Parent');
   assert.equal(p.get('explore-parents-label').textContent, 'Parent');
   await choose(p, 'ko');
@@ -1688,4 +1693,96 @@ test('CSS design contracts: control-border token, no suppressed focus outline, f
   assert.doesNotMatch(styleCss, /::-webkit-progress-value\s*,\s*progress::-moz-progress-bar/);
   assert.match(styleCss, /progress::-webkit-progress-value\{[^}]*background:var\(--brand\)/);
   assert.match(styleCss, /progress::-moz-progress-bar\{[^}]*background:var\(--brand\)/);
+});
+
+test('follow-up honesty: distinct starting/supported/passed/active/planned/open chips and Lead count inside heading', async () => {
+  const leads = [
+    {room:'r', participant:'lead-1', provider:'claude', role:'lead', task:'Booting', state:'starting'},
+    {room:'r', participant:'lead-2', provider:'codex', role:'lead', task:'Live room', state:'active'}
+  ];
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner', participants:leads},
+    activeAttempts:leads,
+    attempts:[
+      {id:'a-starting', provider:'codex', tool:'run', task:'t1', room:'r', state:'starting'},
+      {id:'a-supported', provider:'codex', tool:'run', task:'t2', room:'r', state:'supported'},
+      {id:'a-passed', provider:'codex', tool:'run', task:'t3', room:'r', state:'passed'},
+      {id:'a-active', provider:'codex', tool:'run', task:'t4', room:'r', state:'active'},
+      {id:'a-planned', provider:'codex', tool:'run', task:'t5', room:'r', state:'planned'},
+      {id:'a-open', provider:'codex', tool:'run', task:'t6', room:'r', state:'open'}
+    ]
+  });
+
+  // Lead count lives inside <h2 id="leads-heading"> without aria-label on the badge span.
+  const headingMatch = html.match(/<h2[^>]*\bid="leads-heading"[^>]*>([\s\S]*?)<\/h2>/);
+  assert.ok(headingMatch, 'leads-heading h2 exists');
+  assert.match(headingMatch[1], /id="lead-count"/);
+  assert.match(headingMatch[1], /id="work-dot"/);
+  assert.doesNotMatch(headingMatch[1], /\baria-label=/);
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('work-dot').textContent, '2');
+  assert.equal(p.get('lead-count').textContent, ' (2)');
+
+  const leadChips = stateChips(p.get('leads'));
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ 시작 중', '▷ 활성']);
+  assert.deepEqual(leadChips.map(c => c.getAttribute('data-state')), ['starting', 'active']);
+  assert.deepEqual(leadChips.map(c => c.getAttribute('data-role')), ['info', 'info']);
+
+  const actChips = stateChips(p.get('activity'));
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '▷ 시작 중', '✓ 근거 있음', '✓ 통과', '▷ 활성', '· 예정', '· 열림'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-state')), [
+    'starting', 'supported', 'passed', 'active', 'planned', 'open'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-role')), [
+    'info', 'success-muted', 'success', 'info', 'muted', 'muted'
+  ]);
+
+  await choose(p, 'en');
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ Starting', '▷ Active']);
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '▷ Starting', '✓ Supported', '✓ Passed', '▷ Active', '· Planned', '· Open'
+  ]);
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (2)');
+});
+
+test('every ko/en catalog key is referenced by markup, script, or an explicit dynamic prefix', async () => {
+  const p = await panel(['one']);
+  const ko = p.run('MSG.ko'), en = p.run('MSG.en');
+  assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
+  const bodyHtml = html.slice(html.indexOf('<body>'), html.indexOf('<script>'));
+  const markupKeys = new Set();
+  for (const m of bodyHtml.matchAll(/\bdata-i18n="([^"]+)"/g)) markupKeys.add(m[1]);
+  for (const m of bodyHtml.matchAll(/\bdata-i18n-attr="([^"]+)"/g)) {
+    for (const pair of m[1].split(';').filter(Boolean)) markupKeys.add(pair.split(':')[1]);
+  }
+  const catalogBlock = script.match(/const MSG(?:_PAIRS)? = \{[\s\S]+?\n\};/);
+  assert.ok(catalogBlock, 'message catalog block exists');
+  const codeWithoutCatalog = script.replace(catalogBlock[0], '');
+  const codeLiterals = new Set();
+  for (const m of codeWithoutCatalog.matchAll(/(['"])((?:\\.|(?!\1)[^\\\n])*)\1/g)) codeLiterals.add(m[2]);
+
+  // Dynamic prefixes constructed by runtime code (each family also checked against its backing table).
+  const dynamicFamilies = {
+    'g.': new Set(p.run('taskGroups').map(([name]) => name)),
+    'sv.': new Set(p.run('settingViews')),
+    'state.': new Set(Object.keys(p.run('STATE_META'))),
+    'git.class.': new Set(['candidate','blocked','unverified','plan_linked','board_in_progress','closed_board','duplicate','archived','unknown','draft','foreign','epic','closed','pull_request']),
+    'git.check.': new Set(Object.keys(p.run('CHECK_META'))),
+    'obs.': new Set(['complete','partial','unknown']),
+    'src.': new Set(['git','task','plan','attempts','artifacts','acceptance','conversation']),
+    'srcState.': new Set(['unavailable','partial','ambiguous','stale']),
+    'ev.': new Set(p.run('evidenceKeys'))
+  };
+
+  const unreferenced = [];
+  for (const key of Object.keys(ko)) {
+    if (markupKeys.has(key) || codeLiterals.has(key)) continue;
+    const match = Object.entries(dynamicFamilies).find(([prefix, members]) => key.startsWith(prefix) && members.has(key.slice(prefix.length)));
+    if (!match) unreferenced.push(key);
+  }
+  assert.deepEqual(unreferenced, [], `unreferenced catalog keys: ${unreferenced.join(', ')}`);
 });
