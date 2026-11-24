@@ -1235,19 +1235,72 @@ fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
 
 pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
     let input = String::from_utf8_lossy(raw);
-    decode_provider_events(provider, &input).unwrap_or_else(|| (input.into_owned(), true))
+    decode_provider_events(provider, &input, false).unwrap_or_else(|| (input.into_owned(), true))
 }
 
-fn decode_provider_events(provider: &str, input: &str) -> Option<(String, bool)> {
+fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool {
+    match (provider, kind) {
+        ("codex" | "claude", "usage") => ["input_tokens", "output_tokens", "total_tokens"]
+            .iter()
+            .any(|key| matches!(row.get("usage").get(key), V::Num(n) if n.parse::<u64>().is_ok())),
+        ("claude", "rate_limit_event") => matches!(
+            text(row.get("rate_limit_info"), "status"),
+            "allowed" | "allowed_warning" | "rejected"
+        ),
+        ("claude", "system") => {
+            text(row, "subtype") == "hook_response"
+                && matches!(text(row, "hook_event"), "Stop" | "SessionEnd")
+                && text(row, "outcome") == "success"
+        }
+        _ => false,
+    }
+}
+
+fn decode_bound_output(provider: &str, raw: &[u8]) -> (String, bool) {
+    if provider == "antigravity" {
+        // AGY print mode emits a single JSON document, which may span lines.
+        if let Ok(row) = oms_json::parse_strict(raw)
+            && let Some(answer) = native_text(&row, "response")
+        {
+            let terminal = native_text(&row, "status").as_deref() == Some("SUCCESS")
+                && row
+                    .get("error")
+                    .is_none_or(|v| matches!(v, oms_json::Value::Null))
+                && !native_stopped_early(&row);
+            return (answer, terminal);
+        }
+    } else if let Ok(input) = std::str::from_utf8(raw)
+        && let Some(decoded) = decode_provider_events(provider, input, true)
+    {
+        return decoded;
+    }
+    (String::from_utf8_lossy(raw).into_owned(), false)
+}
+
+fn decode_provider_events(
+    provider: &str,
+    input: &str,
+    require_terminal_json: bool,
+) -> Option<(String, bool)> {
     let mut output = Vec::new();
     let mut recognized = false;
     let mut terminal = false;
     let mut stopped_early = false;
-    for line in input.lines() {
+    let mut malformed = false;
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(row) = V::parse(line.as_bytes()) else {
+            malformed = true;
             continue;
         };
+        if require_terminal_json
+            && (!matches!(row, V::Obj(_)) || oms_json::parse_strict(line.as_bytes()).is_err())
+        {
+            malformed = true;
+        }
         let kind = text(&row, "type");
+        if require_terminal_json && !native_result_footer(provider, kind, &row) {
+            terminal = false;
+        }
         for reason in [
             row.get("stop_reason"),
             row.get("finish_reason"),
@@ -1302,6 +1355,10 @@ fn decode_provider_events(provider: &str, input: &str) -> Option<(String, bool)>
                         text(&row, "subtype"),
                         "error_max_turns" | "error_during_execution"
                     );
+                if require_terminal_json {
+                    terminal &= row.get("is_error") == &V::Bool(false)
+                        && text(&row, "subtype") == "success";
+                }
                 let result = text(&row, "result");
                 if !result.is_empty() && output.last().is_none_or(|v| v != result) {
                     output.push(result.into());
@@ -1357,7 +1414,12 @@ fn decode_provider_events(provider: &str, input: &str) -> Option<(String, bool)>
             }
         }
     }
-    recognized.then(|| (output.join("\n\n"), terminal && !stopped_early))
+    recognized.then(|| {
+        (
+            output.join("\n\n"),
+            terminal && !stopped_early && (!require_terminal_json || !malformed),
+        )
+    })
 }
 struct ProviderScratch(PathBuf);
 impl ProviderScratch {
@@ -2162,6 +2224,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
             .unwrap_or(""),
     )?;
     let extra_env = crate::usage::operation_env(extra_env)?;
+    let plan_bound = crate::plan_delegate::has_launch_binding(&extra_env);
     let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
         .map(|(k, _)| k)
@@ -2177,8 +2240,8 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     let mut excluded = BTreeSet::new();
     let mut rebound = None;
     for overflow in 0..2 {
-        let write_snapshot =
-            (overflow == 0 && write && !route.account_pinned).then(|| repo_state(context, cwd));
+        let write_snapshot = (!plan_bound && overflow == 0 && write && !route.account_pinned)
+            .then(|| repo_state(context, cwd));
         let bound = match rebound.take() {
             Some(bound) => bound,
             None => account_environment(route, &excluded, account_repo)?,
@@ -2204,7 +2267,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 .filter(|(key, _)| !crate::plan_delegate::launch_key(key))
                 .cloned(),
         );
-        if let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
+        if !plan_bound && let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
             environment.push((
                 "OMS_BASE_SHA".into(),
                 String::from_utf8_lossy(&base).trim().into(),
@@ -2325,7 +2388,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         let started = std::time::Instant::now();
         let direct = matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
             && exec_argv == transport.argv;
-        let invocation = Invocation {
+        let mut invocation = Invocation {
             argv: exec_argv,
             cwd: cwd.to_owned(),
             input: transport.input.clone(),
@@ -2340,8 +2403,15 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?,
             ),
         };
-        let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, context)
-            .and_then(|()| {
+        let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, cwd, context)
+            .and_then(|plan| {
+                if let Some(plan) = plan {
+                    invocation
+                        .environment
+                        .push(("OMS_BASE_SHA".into(), plan.base_sha().into()));
+                    invocation.launch_fence =
+                        Some(pending_usage.launch_fence().with_plan_checkout(plan, cwd)?);
+                }
                 if let Some(protocol) = &team_protocol {
                     context.executor.execute_team_requests(
                         invocation,
@@ -2389,12 +2459,17 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     if let Some((diagnostic, _)) = decode_provider_events(
                         &route.provider,
                         &String::from_utf8_lossy(&result.stdout),
+                        false,
                     ) {
                         result.stderr.extend_from_slice(diagnostic.as_bytes());
                     }
                     (String::new(), false)
                 }
             }
+        } else if plan_bound
+            && matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
+        {
+            decode_bound_output(&route.provider, &result.stdout)
         } else {
             decode_output(&route.provider, &result.stdout)
         };
@@ -2439,7 +2514,8 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
             context.interrupted,
         );
         // One same-provider retry on another account when the worktree stays untouched.
-        if overflow == 0
+        if !plan_bound
+            && overflow == 0
             && cap_hit
             && !route.account_pinned
             && let Some(account) = account
@@ -2504,7 +2580,8 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
     context: &Context<'_>,
 ) -> Result<Completed> {
     let extra_env = crate::usage::operation_env(extra_env)?;
-    let write_snapshot = (write && !fallback.is_empty() && fallback != route.model)
+    let plan_bound = crate::plan_delegate::has_launch_binding(&extra_env);
+    let write_snapshot = (!plan_bound && write && !fallback.is_empty() && fallback != route.model)
         .then(|| repo_state(context, cwd));
     let result = execute_env_with_output(
         route,
@@ -2517,7 +2594,8 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
         output_mode,
         context,
     )?;
-    if !fallback.is_empty()
+    if !plan_bound
+        && !fallback.is_empty()
         && fallback != route.model
         && capacity(&result)
         && is_clean_retry(&write_snapshot, context, cwd)
@@ -2838,6 +2916,107 @@ mod bridge_route_tests {
         let mut route = route.clone();
         execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
     }
+    #[test]
+    fn plan_bound_native_output_requires_a_terminal_envelope() {
+        let cases: &[(&str, &[u8], bool)] = &[
+            ("codex", br#"{"type":"turn.completed"}"#, true),
+            ("codex", br#"{"type":"turn.failed"}"#, false),
+            ("codex", br#"{"type":"bad","type":"turn.completed"}"#, false),
+            (
+                "claude",
+                br#"{"type":"result","subtype":"success","is_error":false}"#,
+                true,
+            ),
+            (
+                "claude",
+                br#"{"type":"result","subtype":"error_during_execution","is_error":true}"#,
+                false,
+            ),
+            ("claude", br#"{"type":"result"}"#, false),
+            (
+                "antigravity",
+                b"{\n\"status\":\"SUCCESS\",\n\"response\":\"done\"\n}",
+                true,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"ERROR","response":"failed"}"#,
+                false,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"SUCCESS","response":"short","stop_reason":"length"}"#,
+                false,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"SUCCESS","response":"bad","error":{}}"#,
+                false,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"SUCCESS","response":"truncated""#,
+                false,
+            ),
+        ];
+        let codex_open = concat!(
+            "{\"type\":\"turn.completed\"}\n",
+            "{\"type\":\"thread.started\",\"thread_id\":\"next\"}\n",
+            "{\"type\":\"item.started\",\"item\":{\"id\":\"pending\"}}\n",
+        );
+        let claude_open = concat!(
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n",
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"pending\"}]}}\n",
+        );
+        for (provider, stream, terminal) in [
+            ("codex", codex_open, "{\"type\":\"turn.completed\"}\n"),
+            (
+                "claude",
+                claude_open,
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n",
+            ),
+        ] {
+            assert!(
+                !decode_bound_output(provider, stream.as_bytes()).1,
+                "{provider}"
+            );
+            assert!(decode_output(provider, stream.as_bytes()).1, "{provider}");
+            assert!(decode_bound_output(provider, format!("{stream}{terminal}").as_bytes()).1);
+        }
+        let codex_footer = concat!(
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2}}\n",
+            "{\"type\":\"usage\",\"usage\":{\"output_tokens\":1}}\n",
+        );
+        let claude_footer = concat!(
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n",
+            "{\"type\":\"system\",\"subtype\":\"hook_response\",\"hook_event\":\"Stop\",\"outcome\":\"success\"}\n",
+            "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\"}}\n",
+        );
+        assert!(decode_bound_output("codex", codex_footer.as_bytes()).1);
+        assert!(decode_bound_output("claude", claude_footer.as_bytes()).1);
+        assert!(
+            !decode_bound_output(
+                "codex",
+                b"{\"type\":\"turn.completed\"}\n{\"type\":\"usage\"}\n",
+            )
+            .1
+        );
+        for &(provider, bytes, terminal) in cases {
+            assert_eq!(
+                decode_bound_output(provider, bytes).1,
+                terminal,
+                "{provider}: {bytes:?}"
+            );
+        }
+        for provider in ["codex", "claude", "antigravity", "fixture", "cursor"] {
+            assert_eq!(
+                decode_output(provider, b"legacy explicit text"),
+                ("legacy explicit text".into(), true)
+            );
+        }
+    }
+
     #[test]
     fn physical_contracts_fence_each_retry_and_settle_owned_execution() {
         isolated_transport(

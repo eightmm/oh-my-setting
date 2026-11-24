@@ -834,6 +834,7 @@ impl CollabServices<'_> {
                 physical_call: input.physical_call,
                 channel: Some(&mut channel),
                 launch_fence: input.launch_fence.as_ref(),
+                plan_services: Some(&self.control),
                 ..Job::new(
                     argv,
                     &input.cwd,

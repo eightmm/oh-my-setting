@@ -310,11 +310,15 @@ unavailable by default; the root host provides its existing ControlServices.
 The peer read projections retain their read-only service surface.
 
 The adapter derives the prompt, verifier, allowed/forbidden paths and role from
-the frozen task. Assignment model/effort/workload conflicts refuse. Start advances
-the binding digest explicitly; preparation and every physical provider attempt,
-including fallback, recheck the same lease with current time. A returned result
-must match the native index's operation, attempt, provider, base and exact file
-digests. The Plan owner then captures those artifact/patch bytes (at most 16 MiB
+the frozen task. Assignment model/effort/workload conflicts refuse. The issued
+base pins the source HEAD, worktree HEAD and index at the provider spawn fence.
+Start advances the binding digest, and launch rechecks the current lease and
+deadline. Capacity text cannot authorize automatic account overflow or model
+fallback for bound work. Codex, Claude and Antigravity JSON transports require
+their native terminal result. Incomplete delivery retains the worktree for
+reconciliation.
+A returned result must match the native index's operation, attempt, provider,
+base and exact file digests. The Plan owner then captures those artifact/patch bytes (at most 16 MiB
 each) and the index using its existing immutable store, rechecks the lease, and
 records Review. Landing verifies those retained digests again. A native worker
 success does not grant landing, task completion or goal acceptance.

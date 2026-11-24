@@ -2671,6 +2671,7 @@ fn slurm_template_requires_native_checkpoint_provenance_before_training() {
 fn native_autopilot_review_repair_calls_the_worker_after_acceptance_passes() {
     use std::os::unix::fs::PermissionsExt;
     let f = Landing::new();
+    f.configure_commit_identity();
     f.provider_config();
     std::fs::create_dir(f.repo.join("tests")).unwrap();
     std::fs::write(
@@ -3022,6 +3023,7 @@ esac
 fn native_autopilot_advances_a_verified_milestone_before_global_acceptance() {
     use std::os::unix::fs::PermissionsExt;
     let f = Landing::new();
+    f.configure_commit_identity();
     f.provider_config();
     std::fs::create_dir(f.repo.join("tests")).unwrap();
     std::fs::write(f.repo.join("b.txt"), "b\n").unwrap();
@@ -3610,6 +3612,11 @@ impl Landing {
         landing.git(&["add", "a.txt"]);
         landing.git(&["commit", "-qm", "init"]);
         landing
+    }
+    fn configure_commit_identity(&self) {
+        // The native publication command deliberately clears global Git config.
+        self.git(&["config", "--local", "user.name", "t"]);
+        self.git(&["config", "--local", "user.email", "t@example.invalid"]);
     }
     fn provider_config(&self) {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -4444,12 +4451,72 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap(),
         before
     );
+    std::fs::write(l.repo.join(".oms/p/r.md"), &report).unwrap();
+    let selected: serde_json::Value =
+        serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap())
+            .unwrap();
+    let expected_review = serde_json::json!({
+        "binding":{"schema":1,"plan_id":stored["plan_id"],"task_id":"t2",
+            "task_sha256":selected["task_sha256"],"base_sha":l.git(&["rev-parse", "HEAD"]),
+            "lease_id":selected["lease_id"],"lease_epoch":selected["lease_epoch"]},
+        "report_sha256":oms_command_plan::json::sha(&report),
+        "patch_sha256":oms_command_plan::json::sha(&reviewed)
+    })
+    .to_string();
+    let old_lease = selected["lease_id"].as_str().unwrap();
+    l.ok(&[
+        "agent-plan",
+        "release",
+        "--id",
+        "t2",
+        "--lease-id",
+        old_lease,
+    ]);
+    let issued: serde_json::Value = serde_json::from_str(&l.ok(&[
+        "agent-plan",
+        "claim",
+        "--id",
+        "t2",
+        "--provider",
+        "codex",
+        "--json",
+    ]))
+    .unwrap();
+    let replacement = issued["lease_id"].as_str().unwrap();
+    assert_ne!(replacement, old_lease);
+    l.ok(&[
+        "agent-plan",
+        "review",
+        "--id",
+        "t2",
+        "--lease-id",
+        replacement,
+        "--artifact",
+        ".oms/p/r.md",
+        "--patch",
+        reviewed_patch,
+        "--expected-review-artifact-sha256",
+        &oms_command_plan::json::sha(&report),
+        "--expected-review-patch-sha256",
+        &oms_command_plan::json::sha(&reviewed),
+    ]);
+    let (code, out, err) = l.oms(&[
+        "patch-land",
+        "--plan-task",
+        "t2",
+        "--expected-plan-review",
+        &expected_review,
+    ]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("reviewed lease changed"), "{err}");
+    assert!(l.events().is_empty());
     assert_eq!(
         std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
         "a\n"
     );
     assert!(!l.repo.join("tests/review-binding.txt").exists());
-    std::fs::write(l.repo.join(".oms/p/r.md"), &report).unwrap();
     let (code, out, err) = l.oms(&[
         "patch-admit",
         "--patch",

@@ -3816,7 +3816,7 @@ mod tests {
             &Request::new(Action::Finish)
                 .with("id", "t1")
                 .with("lease-id", lease)
-                .with("expected-landing-receipt-sha256", landing_receipt)
+                .with("expected-landing-receipt-sha256", &landing_receipt)
                 .with("patch", frozen.as_os_str()),
         )
         .unwrap();
@@ -3825,15 +3825,17 @@ mod tests {
         assert_eq!(task.get("covers").strings().unwrap(), ["C1"]);
         assert!(task.get("completion_receipt").object().is_err());
         assert!(task.get("landing").object().is_err());
-        let complete = serde_json::json!({"schema":1,"event":"complete","landing_id":landing,
+        let intent = serde_json::json!({"schema":1,"event":"intent","landing_id":landing,
             "task":"t1","worktree":repo.path(),"plan_id":snapshot.plan.text("plan_id"),
-            "lease":lease,"plan_done_receipt_sha":json::receipt_digest(snapshot.task("t1").unwrap()).unwrap(),
-            "patch_sha":digest,"base_sha":base,"patch":frozen});
+            "lease":lease,"plan_receipt_sha":landing_receipt,"plan_done_receipt_sha":json::receipt_digest(task).unwrap(),
+            "patch_sha":digest,"base_sha":base,"patch":frozen,"approval":"","approval_version":""});
+        let mut landing_record = json::parse(&serde_json::to_vec(&intent).unwrap()).unwrap();
+        let hash = oms_command_plan::patch_landing_receipt_digest(&landing_record).unwrap();
+        landing_record
+            .set("receipt_sha", json::string(hash))
+            .unwrap();
         ordinary
-            .append(
-                ".oms/landings.jsonl",
-                &json::parse(&serde_json::to_vec(&complete).unwrap()).unwrap(),
-            )
+            .append(".oms/landings.jsonl", &landing_record)
             .unwrap();
         std::fs::write(repo.path().join("a.txt"), "after\n").unwrap();
         let run = || {
@@ -3845,6 +3847,17 @@ mod tests {
                 &control,
             )
         };
+        let (code, _, _) = run();
+        assert_ne!(code, 0, "outstanding intent cannot authorize a commit");
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), base);
+        let ledger = repo.path().join(".oms/landings.jsonl");
+        let before_terminal = std::fs::read(&ledger).unwrap();
+        landing_record
+            .set("event", json::string("complete"))
+            .unwrap();
+        ordinary
+            .append(".oms/landings.jsonl", &landing_record)
+            .unwrap();
         let (code, out, err) = run();
         assert_eq!(
             code,
@@ -4017,7 +4030,6 @@ mod tests {
         );
         assert_eq!(proof["claimed_tasks"], serde_json::json!(["t1"]));
         assert_eq!(proof["completed_tasks"], serde_json::json!(["t1"]));
-        let ledger = repo.path().join(".oms/landings.jsonl");
         let valid = std::fs::read(&ledger).unwrap();
         std::fs::write(&ledger, b"").unwrap();
         assert_eq!(
@@ -4035,9 +4047,10 @@ mod tests {
                 repo.path().join("foreign").to_string_lossy().into_owned(),
             ),
         ] {
-            let mut changed = complete.clone();
-            changed[field] = foreign.into();
-            std::fs::write(&ledger, format!("{changed}\n")).unwrap();
+            let mut changed = landing_record.clone();
+            changed.set(field, json::string(foreign)).unwrap();
+            std::fs::write(&ledger, &before_terminal).unwrap();
+            ordinary.append(".oms/landings.jsonl", &changed).unwrap();
             assert_eq!(
                 criterion()["completed_tasks"],
                 serde_json::json!([]),

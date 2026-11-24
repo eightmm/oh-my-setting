@@ -1,6 +1,6 @@
 //! Exact Plan lease integration for the existing native delegate producer.
 //! The host supplies the owning Plan services; read projections grant no writes.
-use crate::{Context, Error, Result, V, cli::Args, fail, providers, storage};
+use crate::{Context, Error, Result, V, cli::Args, delegate::Worktree, fail, providers, storage};
 use oms_command_plan::{Action, DelegateBinding, Plan, Request, json as plan_json};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -8,6 +8,69 @@ use std::time::{Duration, Instant};
 
 fn domain(error: oms_command_plan::Error) -> Error {
     Error::new(error.code, error.message)
+}
+
+fn open_plan_before<'a>(
+    repo: &Path,
+    state: &Path,
+    cwd: &Path,
+    services: &'a dyn oms_command_plan::Services,
+    interrupted: &'a std::sync::atomic::AtomicBool,
+    deadline: Instant,
+) -> Result<Plan<'a>> {
+    let req = Request::new(Action::Status);
+    let context = oms_command_plan::Context::from_selected_state_before(
+        &req,
+        repo,
+        cwd,
+        state,
+        interrupted,
+        deadline,
+    )
+    .map_err(domain)?;
+    if context.execution_repo != repo || context.state_repo != state {
+        return fail("Plan source or state repository changed before provider start");
+    }
+    Plan::open(context, services, interrupted).map_err(domain)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PlanLaunch {
+    pub(crate) source: PathBuf,
+    state: PathBuf,
+    binding: DelegateBinding,
+    provider: String,
+}
+impl PlanLaunch {
+    pub(crate) fn base_sha(&self) -> &str {
+        self.binding.base_sha()
+    }
+
+    pub(crate) fn with_running_before<T>(
+        &self,
+        services: &dyn oms_command_plan::Services,
+        interrupted: &std::sync::atomic::AtomicBool,
+        deadline: Instant,
+        check_checkout: impl FnMut() -> Result<()>,
+        spawn: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        open_plan_before(
+            &self.source,
+            &self.state,
+            &self.source,
+            services,
+            interrupted,
+            deadline,
+        )?
+        .with_running_delegate_before(
+            &self.binding,
+            &self.provider,
+            deadline,
+            check_checkout,
+            spawn,
+        )
+        .map_err(domain)?
+    }
 }
 
 pub(crate) struct BoundDelegate {
@@ -20,23 +83,24 @@ pub(crate) struct BoundDelegate {
 
 impl BoundDelegate {
     fn plan<'a>(&self, context: &'a Context<'_>) -> Result<Plan<'a>> {
+        self.plan_before(context, Instant::now() + Duration::from_secs(20))
+    }
+
+    fn plan_before<'a>(&self, context: &'a Context<'_>, deadline: Instant) -> Result<Plan<'a>> {
         let services = context.executor.plan_delegate_services().ok_or_else(|| {
             Error::new(
                 2,
                 "plan lease integration requires the owning native Plan adapter",
             )
         })?;
-        let req = Request::new(Action::Status);
-        let plan_context = oms_command_plan::Context::from_selected_state_before(
-            &req,
+        open_plan_before(
             &self.repo,
-            context.cwd,
             &self.state,
+            context.cwd,
+            services,
             context.interrupted,
-            Instant::now() + Duration::from_secs(20),
+            deadline,
         )
-        .map_err(domain)?;
-        Plan::open(plan_context, services, context.interrupted).map_err(domain)
     }
 
     pub(crate) fn prepare(
@@ -57,6 +121,9 @@ impl BoundDelegate {
             DelegateBinding::parse(args.required("plan-binding")?.as_bytes()).map_err(domain)?;
         if binding.task_id() != args.required("plan-task")? {
             return fail("Plan delegation task differs from its issued lease binding");
+        }
+        if std::env::var_os("OMS_RESUME_SESSION").is_some_and(|session| !session.is_empty()) {
+            return fail("OMS_RESUME_SESSION cannot select a provider session for Plan delegation");
         }
         for flag in [
             "prompt",
@@ -155,15 +222,45 @@ impl BoundDelegate {
         Ok(Some(bound))
     }
 
-    pub(crate) fn start(&mut self, context: &Context<'_>) -> Result<()> {
-        let request = Request::new(Action::Start)
-            .with("id", self.binding.task_id())
-            .with("lease-id", self.binding.lease_id());
+    pub(crate) fn start(
+        &mut self,
+        worker: &Worktree,
+        generation: (u64, u64),
+        context: &Context<'_>,
+    ) -> Result<()> {
+        let plan_error = |error: Error| oms_command_plan::Error {
+            code: error.code,
+            message: error.message,
+        };
+        let check_checkout = |deadline| {
+            let git = oms_command_plan::repository::Git {
+                repo: &worker.path,
+                interrupted: context.interrupted,
+                group_resolver: None,
+                deadline: Some(deadline),
+                group_snapshot: None,
+            };
+            worker
+                .prove_start_checkout(
+                    generation,
+                    self.base_sha(),
+                    |args| git.run(args).map_err(domain),
+                    || crate::process::LaunchFence::new(deadline, None).check(context.interrupted),
+                )
+                .map_err(plan_error)
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
         self.binding = self
-            .plan(context)?
-            .execute_bound_task(&request, &self.binding, None)
+            .plan_before(context, deadline)?
+            .execute_bound_start_before(&self.binding, deadline, check_checkout, |witness| {
+                worker.recheck_start_checkout(witness).map_err(plan_error)
+            })
             .map_err(domain)?;
         Ok(())
+    }
+
+    pub(crate) fn base_sha(&self) -> &str {
+        self.binding.base_sha()
     }
 
     pub(crate) fn route(&self, args: &Args, route: &providers::Route) -> Result<()> {
@@ -306,13 +403,18 @@ pub(crate) fn launch_key(key: &OsStr) -> bool {
     .any(|name| key == *name)
 }
 
+pub(crate) fn has_launch_binding(extra: &[(OsString, OsString)]) -> bool {
+    extra.iter().any(|(key, _)| launch_key(key))
+}
+
 pub(crate) fn check_launch(
     extra: &[(OsString, OsString)],
     provider: &str,
+    execution_repo: &Path,
     context: &Context<'_>,
-) -> Result<()> {
-    if !extra.iter().any(|(key, _)| launch_key(key)) {
-        return Ok(());
+) -> Result<Option<PlanLaunch>> {
+    if !has_launch_binding(extra) {
+        return Ok(None);
     }
     let one = |name: &str| -> Result<&OsStr> {
         let values = extra
@@ -333,12 +435,17 @@ pub(crate) fn check_launch(
         binding,
         task: plan_json::Value::Null,
     };
-    let task = bound
+    bound
         .plan(context)?
-        .check_delegate_binding(&bound.binding)
+        .check_running_delegate(&bound.binding, provider)
         .map_err(domain)?;
-    if task.text("state") != "running" || task.text("provider") != provider {
-        return fail("Plan provider launch no longer owns its exact running lease");
-    }
-    Ok(())
+    crate::delegate::Worktree::check_bound_base(execution_repo, bound.base_sha(), |args| {
+        crate::process::git(context, execution_repo, args)
+    })?;
+    Ok(Some(PlanLaunch {
+        source: bound.repo,
+        state: bound.state,
+        binding: bound.binding,
+        provider: provider.to_owned(),
+    }))
 }

@@ -273,6 +273,7 @@ struct Job<'a> {
     physical_call: Option<oms_supervisor::process::PhysicalCall>,
     channel: Option<&'a mut dyn OwnedDuplexConsumer>,
     launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
+    plan_services: Option<&'a dyn oms_command_plan::Services>,
     #[cfg(target_os = "linux")]
     dispatch_observer: Option<protected_dispatch::Observer<'a>>,
 }
@@ -293,6 +294,7 @@ impl<'a> Job<'a> {
             physical_call: None,
             channel: None,
             launch_fence: None,
+            plan_services: None,
             #[cfg(target_os = "linux")]
             dispatch_observer: None,
         }
@@ -371,13 +373,19 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
-    if let Some(fence) = job.launch_fence {
-        fence.check(interrupted).map_err(|e| e.message)?;
-    }
-    if let Some(channel) = &channel {
-        channel.check().map_err(|e| e.message)?;
-    }
-    let id = reactor.start(request).map_err(|e| e.to_string())?;
+    let mut spawn = |request| {
+        if let Some(channel) = &channel {
+            channel.check().map_err(|e| e.message)?;
+        }
+        reactor.start(request).map_err(|e| e.to_string())
+    };
+    let id = if let Some(fence) = job.launch_fence {
+        fence
+            .with_start_authority(request, job.plan_services, interrupted, spawn)
+            .map_err(|e| e.message)?
+    } else {
+        spawn(request)
+    }?;
     #[cfg(target_os = "linux")]
     let mut dispatch_observer = job.dispatch_observer;
     #[cfg(target_os = "linux")]
@@ -919,6 +927,7 @@ impl CollabServices<'_> {
                 merged: input.merge,
                 physical_call: input.physical_call,
                 launch_fence: input.launch_fence.as_ref(),
+                plan_services: Some(&self.control),
                 #[cfg(target_os = "linux")]
                 dispatch_observer: observer
                     .as_mut()

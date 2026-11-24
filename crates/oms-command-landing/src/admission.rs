@@ -23,6 +23,7 @@ use std::{
 pub struct Policy {
     pub verify: String,
     pub task: String,
+    pub expected_plan_review: Option<oms_command_plan::ReviewFence>,
     pub ml: bool,
     pub allow_verifier_change: bool,
     pub allow_test_reduction: bool,
@@ -47,6 +48,7 @@ impl Policy {
         Self {
             verify: o.get("verify").into(),
             task: o.get("plan-task").into(),
+            expected_plan_review: None,
             ml: o.has("ml"),
             allow_verifier_change: o.has("allow-verifier-change"),
             allow_test_reduction: o.has("allow-test-reduction"),
@@ -85,7 +87,12 @@ pub(crate) fn capture_bytes(index: &CaptureIndex, path: &Path) -> Result<Vec<u8>
         None => Ok(index.read_patch(path, storage::MAX)?),
     }
 }
-pub(crate) fn task(c: &Context<'_>, repo: &Path, id: &str) -> Result<V> {
+pub(crate) fn task_with_review(
+    c: &Context<'_>,
+    repo: &Path,
+    id: &str,
+    expected: Option<&oms_command_plan::ReviewFence>,
+) -> Result<V> {
     require(
         !id.is_empty()
             && id
@@ -104,7 +111,17 @@ pub(crate) fn task(c: &Context<'_>, repo: &Path, id: &str) -> Result<V> {
     context.state_repo = c.state(repo)?;
     context.plan_file = context.state_repo.join(".oms/plan/tasks.json");
     let plan = oms_command_plan::Plan::open(context, services, c.interrupted)?;
-    let row = V::parse(&plan.execute(&request)?.stdout)?;
+    let row = if let Some(expected) = expected {
+        require(
+            expected.task_id() == id,
+            "Plan review binding names another task",
+        )?;
+        V::parse(&oms_command_plan::json::canonical(
+            &plan.check_landing_review(expected)?,
+        )?)?
+    } else {
+        V::parse(&plan.execute(&request)?.stdout)?
+    };
     require(
         !row.get("executor_id").truth() && !row.get("executor_soul_sha256").truth(),
         "Soul executor receipt is retired; create a fresh plan task",
@@ -324,7 +341,13 @@ pub(crate) fn admit(
     let mut forbidden = vec![];
     let mut reviewed_task = None;
     if !policy.task.is_empty() {
-        let row = task(c, repo, &policy.task)?;
+        let row = task_with_review(c, repo, &policy.task, policy.expected_plan_review.as_ref())?;
+        if let Some(expected) = &policy.expected_plan_review {
+            require(
+                snapshot.head == expected.base_sha() && digest(&bytes) == expected.patch_sha256(),
+                "admission input differs from the exact Plan review",
+            )?;
+        }
         if row.has("review_evidence") {
             require(
                 row.get("state").text() == Some("review"),
@@ -335,6 +358,8 @@ pub(crate) fn admit(
                     == Some(digest(&bytes).as_str()),
                 "patch differs from exact reviewed evidence",
             )?;
+        }
+        if policy.expected_plan_review.is_some() || row.has("review_evidence") {
             reviewed_task = Some((row.get("plan_id").clone(), row.get("task_sha256").clone()));
         }
         let stored = string(&row, "verify");
@@ -750,7 +775,8 @@ pub(crate) fn admit(
         "source changed after admission checks; no outcome witness published",
     )?;
     if let Some((plan_id, task_sha)) = reviewed_task {
-        let current = task(c, repo, &policy.task)?;
+        let current =
+            task_with_review(c, repo, &policy.task, policy.expected_plan_review.as_ref())?;
         require(
             current.get("plan_id") == &plan_id && current.get("task_sha256") == &task_sha,
             "exact reviewed evidence or task changed during admission; no outcome witness published",

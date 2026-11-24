@@ -1,9 +1,8 @@
 //! Opt-in `plan-run --parallel`: one controller keeps up to `--max-writers`
 //! non-overlapping ready tasks running and refills a slot the moment its task
-//! ends (no wave barrier). Every worker owns exactly one lease; a failed or
-//! panicking worker releases only that lease and never touches a sibling.
+//! ends (no wave barrier). Failures release only exact unstarted claims.
 use crate::cli::Args;
-use crate::runner::{preflight, run_task};
+use crate::runner::{preflight, release_unstarted, run_task};
 use crate::storage::{Context, Gates};
 use crate::{Error, Output, Result, checkpoint, require, value};
 use oms_command_plan::{Action, Request};
@@ -17,13 +16,14 @@ struct Flight {
     paths: Vec<String>,
     resources: Vec<String>,
     lease: String,
+    issued_sha: String,
 }
 struct Done {
     id: String,
     result: Option<Result<Output>>,
 }
 enum Pick {
-    Task(Value),
+    Task(Value, String),
     Backpressure,
     Idle,
 }
@@ -91,9 +91,7 @@ fn review_count(ctx: &Context<'_>) -> Result<usize> {
         .filter(|t| value::text(t, "state") == "review")
         .count())
 }
-/// Claims the first ready task that fits beside the running ones. Selection
-/// and claim are separate plan calls, which is safe because the controller
-/// lock makes this process the only claimant.
+/// Claims the exact ready snapshot that fits beside the running ones.
 fn pick(
     ctx: &Context<'_>,
     provider: &str,
@@ -101,6 +99,7 @@ fn pick(
     attempted: &BTreeSet<String>,
     backlog: Option<usize>,
 ) -> Result<Pick> {
+    let base = ctx.git(&["rev-parse", "HEAD"])?;
     let out = ctx.action(&Request::new(Action::Ready).flag("json"))?;
     require(out.code == 0, "cannot list ready tasks")?;
     let ready = value::parse(&out.stdout)?;
@@ -132,38 +131,29 @@ fn pick(
         return Ok(Pick::Backpressure);
     }
     for candidate in candidates {
+        require(
+            ctx.git(&["rev-parse", "HEAD"])? == base,
+            "Plan ready selection base moved before claiming",
+        )?;
         let id = value::text(&candidate, "id");
         let claimed = ctx.action(
             &Request::new(Action::Claim)
                 .with("id", id)
                 .with("provider", provider)
+                .with(
+                    "expected-task-sha256",
+                    value::text(&candidate, "task_sha256"),
+                )
                 .flag("json"),
         );
         if let Ok(issued) = claimed
             && issued.code == 0
         {
-            return Ok(Pick::Task(value::parse(&issued.stdout)?));
+            return Ok(Pick::Task(value::parse(&issued.stdout)?, base));
         }
     }
     Ok(Pick::Idle)
 }
-/// Controller-side cleanup for a worker that panicked before its own cleanup
-/// ran: release only the lease it was handed, and only if still unreviewed.
-fn release_panicked(ctx: &Context<'_>, id: &str, lease: &str) {
-    if let Ok(shown) = ctx.action(&Request::new(Action::Show).with("id", id))
-        && let Ok(task) = value::parse(&shown.stdout)
-        && ["claimed", "running"].contains(&value::text(&task, "state"))
-        && value::text(&task, "lease_id") == lease
-        && task["repair_count"].as_u64().unwrap_or(0) == 0
-    {
-        let _ = ctx.action(
-            &Request::new(Action::Release)
-                .with("id", id)
-                .with("lease-id", lease),
-        );
-    }
-}
-
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     ctx.parent()?;
     let provider = ctx.services.normalize_provider(args.required("to")?)?;
@@ -229,7 +219,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             }
             while !interrupted && !backpressure && !halted && flights.len() < writers {
                 match pick(controller, &provider, &flights, &attempted, backlog) {
-                    Ok(Pick::Task(task)) => {
+                    Ok(Pick::Task(task, base)) => {
                         let id = value::text(&task, "id").to_owned();
                         attempted.insert(id.clone());
                         flights.insert(
@@ -238,6 +228,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                                 paths: strings(&task["allowed_paths"]),
                                 resources: strings(&task["resources"]),
                                 lease: value::text(&task, "lease_id").to_owned(),
+                                issued_sha: value::text(&task, "task_sha256").to_owned(),
                             },
                         );
                         started += 1;
@@ -255,7 +246,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                                 worker.run_id = run;
                                 worker.cycle = cycle;
                                 worker.peer_wall = Some(wall);
-                                run_task(&worker, &worker_args, None, task, true, wall)
+                                run_task(&worker, &worker_args, None, task, true, &base, wall)
                             }));
                             let _ = tx.send(Done {
                                 id,
@@ -301,12 +292,22 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                         }
                         None => {
                             failed += 1;
-                            if let Some(flight) = &flight {
-                                release_panicked(controller, &done.id, &flight.lease);
-                            }
+                            let released = flight.as_ref().is_some_and(|flight| {
+                                release_unstarted(
+                                    controller,
+                                    &done.id,
+                                    &flight.lease,
+                                    &flight.issued_sha,
+                                )
+                            });
                             format!(
-                                "plan-run: parallel task={} panicked; lease released\n",
-                                done.id
+                                "plan-run: parallel task={} panicked; {}\n",
+                                done.id,
+                                if released {
+                                    "unstarted claim released"
+                                } else {
+                                    "inspect the retained lease"
+                                },
                             )
                         }
                     };

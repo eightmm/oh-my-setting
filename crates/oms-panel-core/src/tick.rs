@@ -2278,8 +2278,9 @@ impl Env<'_> {
     ) -> std::result::Result<String, Fail> {
         let (receipt, wakes) = self.ledger_checked(tx)?;
         let (pane, member, main_attempt) = self.wake_target().map_err(Fail::Other)?;
+        // A Main swap or result import invalidates the pending reminder.
         if self.wake_reason(false).map_err(Fail::Other)?.0 != reason {
-            return Ok("skipped: wake evidence changed before submission".into());
+            return Ok("skipped: shared work changed before wake; reread on the next tick".into());
         }
         let external_key = reason
             .starts_with("external result ")

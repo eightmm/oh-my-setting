@@ -401,6 +401,7 @@ impl Plan<'_> {
                     ("verify", t.get("verify").clone()),
                     ("depends", t.get("depends").clone()),
                     ("why_ready", string(why)),
+                    ("task_sha256", string(json::hash(&t)?)),
                     ("role", string(t.text("role"))),
                     (
                         "resources",
