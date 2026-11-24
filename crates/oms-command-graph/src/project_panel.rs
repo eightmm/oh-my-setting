@@ -9,7 +9,9 @@
 
 use super::{build, index::Graph};
 use crate::{CommandResult, Error, Result, cli::Args, util::*};
+use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -29,7 +31,11 @@ const MAX_TREE_ENTRIES: usize = 30_000;
 
 const MAX_GIT_STDOUT_BYTES: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
+// Raw ceiling for the encoded index. The streaming reader below keeps only a
+// tracked, field-bounded projection, so this is not the retained size.
+const MAX_INDEX_BYTES: usize = 24 * 1024 * 1024;
+const MAX_INDEX_NODES: usize = 30_000;
+const MAX_INDEX_EDGES: usize = 75_000;
 const MAX_RESPONSE_BYTES: usize = 52_000;
 
 const EXCLUDED_DIRS: &[&str] = &[
@@ -312,6 +318,182 @@ enum IndexAttempt {
     Invalid(&'static str),
 }
 
+/// Streams `graph.json` and retains only tracked, field-bounded nodes and
+/// slim valid edges; untracked or invalid records are dropped as they decode.
+struct TopSeed<'a> {
+    tracked: &'a [String],
+    cancel: &'a AtomicBool,
+    over_budget: &'a Cell<bool>,
+}
+
+struct RowsSeed<'a> {
+    top: &'a TopSeed<'a>,
+    nodes: bool,
+}
+
+fn slim_node(row: &Value, tracked: &[String]) -> Option<Value> {
+    let (path, id) = (s(row, "path"), s(row, "id"));
+    let (kind, suffix) = id.split_once(':')?;
+    if !(matches!(kind, "file" | "test" | "symbol")
+        && (suffix == path
+            || (kind == "symbol" && suffix.split_once("::").is_some_and(|(p, _)| p == path)))
+        && valid_node_id(id)
+        && tracked
+            .binary_search_by(|key| key.as_str().cmp(path))
+            .is_ok())
+    {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    for key in [
+        "id",
+        "kind",
+        "name",
+        "path",
+        "language",
+        "source_digest",
+        "summary",
+    ] {
+        if row[key].is_string() {
+            out.insert(key.into(), row[key].clone());
+        }
+    }
+    let mut metadata = serde_json::Map::new();
+    for key in [
+        "qualname",
+        "signature",
+        "line",
+        "end_line",
+        "span_complete",
+        "scope_truncated",
+        "signature_truncated",
+    ] {
+        let value = &row["metadata"][key];
+        let keep = match key {
+            "qualname" => value.is_string(),
+            "signature" => value.as_str().is_some_and(|v| v.len() <= 320),
+            "line" | "end_line" => value.is_u64(),
+            _ => value.is_boolean(),
+        };
+        if keep {
+            metadata.insert(key.into(), value.clone());
+        }
+    }
+    out.insert("metadata".into(), Value::Object(metadata));
+    Some(Value::Object(out))
+}
+
+fn slim_edge(row: &Value) -> Option<Value> {
+    (!s(row, "source").is_empty()
+        && !s(row, "target").is_empty()
+        && matches!(
+            s(row, "relation"),
+            "calls" | "contains" | "imports" | "references" | "tests"
+        )
+        && matches!(s(row, "confidence"), "EXTRACTED" | "INFERRED" | "AMBIGUOUS"))
+    .then(|| {
+        json!({"source":row["source"],"target":row["target"],"relation":row["relation"],"confidence":row["confidence"]})
+    })
+}
+
+impl<'de> DeserializeSeed<'de> for RowsSeed<'_> {
+    type Value = Vec<Value>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        de: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        de.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for RowsSeed<'_> {
+    type Value = Vec<Value>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an array of graph records")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let (cap, mut seen, mut rows) = if self.nodes {
+            (MAX_INDEX_NODES, 0, Vec::new())
+        } else {
+            (MAX_INDEX_EDGES, 0, Vec::new())
+        };
+        while let Some(row) = seq.next_element::<Value>()? {
+            seen += 1;
+            if seen > cap {
+                self.top.over_budget.set(true);
+                return Err(A::Error::custom("graph exceeds the panel read budget"));
+            }
+            if seen % 256 == 0 && self.top.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(A::Error::custom("interrupted"));
+            }
+            let slim = if self.nodes {
+                slim_node(&row, self.top.tracked)
+            } else {
+                slim_edge(&row)
+            };
+            rows.extend(slim);
+        }
+        Ok(rows)
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for TopSeed<'_> {
+    type Value = Option<Value>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        de: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        de.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for TopSeed<'_> {
+    type Value = Option<Value>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a project graph object")
+    }
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let (mut schema, mut revision, mut nodes, mut edges) = (None, None, None, None);
+        while let Some(key) = map.next_key::<String>()? {
+            let dup = match key.as_str() {
+                "schema" => schema.replace(map.next_value::<Value>()?).is_some(),
+                "revision" => revision.replace(map.next_value::<Value>()?).is_some(),
+                "nodes" => nodes
+                    .replace(map.next_value_seed(RowsSeed {
+                        top: &self,
+                        nodes: true,
+                    })?)
+                    .is_some(),
+                "edges" => edges
+                    .replace(map.next_value_seed(RowsSeed {
+                        top: &self,
+                        nodes: false,
+                    })?)
+                    .is_some(),
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                    false
+                }
+            };
+            if dup {
+                return Err(A::Error::custom("duplicate graph field"));
+            }
+        }
+        Ok(match (schema, revision, nodes, edges) {
+            (Some(schema), Some(revision), Some(nodes), Some(edges)) => {
+                Some(json!({"schema":schema,"revision":revision,"nodes":nodes,"edges":edges}))
+            }
+            _ => None,
+        })
+    }
+}
+
 fn try_read_indexed(repo: &Path, tracked: &[String], cancel: &AtomicBool) -> Result<IndexAttempt> {
     let state = repo.join(".oms/project-graph");
     if no_symlinks(&state).is_err() {
@@ -339,69 +521,63 @@ fn try_read_indexed(repo: &Path, tracked: &[String], cancel: &AtomicBool) -> Res
             "project graph index exceeds the read-only panel size budget",
         ));
     }
-    let mut raw_graph = match read_json(&graph_path, MAX_INDEX_BYTES) {
-        Ok(Some(v)) if v.is_object() => v,
-        _ => {
+    let parent = graph_path.parent().expect("graph path has a parent");
+    let bytes = match open_store(parent)
+        .ok()
+        .and_then(|store| {
+            store
+                .optional(Path::new("graph.json"), MAX_INDEX_BYTES)
+                .ok()
+        })
+        .flatten()
+    {
+        Some(bytes) => bytes,
+        None => {
             return Ok(IndexAttempt::Invalid(
                 "project graph index is unreadable or malformed",
             ));
         }
     };
+    check(cancel)?;
+    let over_budget = Cell::new(false);
+    let parsed = {
+        let mut de = serde_json::Deserializer::from_slice(&bytes);
+        let top = TopSeed {
+            tracked,
+            cancel,
+            over_budget: &over_budget,
+        };
+        serde::de::DeserializeSeed::deserialize(top, &mut de).and_then(|v| de.end().map(|()| v))
+    };
+    drop(bytes);
+    check(cancel)?;
+    if over_budget.get() {
+        return Ok(IndexAttempt::Invalid(
+            "Cached graph exceeds the panel read budget.",
+        ));
+    }
+    let Ok(Some(mut raw_graph)) = parsed else {
+        return Ok(IndexAttempt::Invalid(
+            "project graph index is unreadable or malformed",
+        ));
+    };
     let revision = s(&raw_graph, "revision").to_owned();
     if raw_graph["schema"] != build::SCHEMA
         || revision.len() != 64
         || !revision.bytes().all(|b| b.is_ascii_hexdigit())
-        || !raw_graph["nodes"].is_array()
-        || !raw_graph["edges"].is_array()
     {
         return Ok(IndexAttempt::Invalid(
             "project graph index schema is incompatible",
         ));
     }
-    if array(&raw_graph, "nodes").len() > 30_000 || array(&raw_graph, "edges").len() > 75_000 {
-        return Ok(IndexAttempt::Invalid(
-            "Cached graph exceeds the panel read budget.",
-        ));
-    }
-    // General-purpose indexes may include untracked work. Rebuild the panel's
-    // in-memory adjacency exclusively from identities in this checkout's Git index.
-    let rows = raw_graph["nodes"].as_array_mut().unwrap();
-    rows.retain(|row| {
-        let path = s(row, "path");
-        let id = s(row, "id");
-        let Some((kind, suffix)) = id.split_once(':') else {
-            return false;
-        };
-        matches!(kind, "file" | "test" | "symbol")
-            && (suffix == path
-                || (kind == "symbol" && suffix.split_once("::").is_some_and(|(p, _)| p == path)))
-            && valid_node_id(id)
-            && tracked
-                .binary_search_by(|key| key.as_str().cmp(path))
-                .is_ok()
-    });
-    let ids: BTreeSet<_> = rows.iter().map(|row| s(row, "id").to_owned()).collect();
+    let ids: BTreeSet<_> = array(&raw_graph, "nodes")
+        .iter()
+        .map(|row| s(row, "id").to_owned())
+        .collect();
     raw_graph["edges"]
         .as_array_mut()
         .unwrap()
-        .retain_mut(|row| {
-            let valid = ids.contains(s(row, "source"))
-                && ids.contains(s(row, "target"))
-                && matches!(
-                    s(row, "relation"),
-                    "calls" | "contains" | "imports" | "references" | "tests"
-                )
-                && matches!(s(row, "confidence"), "EXTRACTED" | "INFERRED" | "AMBIGUOUS");
-            if let Some(object) = row.as_object_mut() {
-                object.retain(|field, _| {
-                    matches!(
-                        field.as_str(),
-                        "source" | "target" | "relation" | "confidence"
-                    )
-                });
-            }
-            valid
-        });
+        .retain(|row| ids.contains(s(row, "source")) && ids.contains(s(row, "target")));
     check(cancel)?;
     let manifest = read_json(&state.join("manifest.json"), 4 * 1024 * 1024)
         .ok()

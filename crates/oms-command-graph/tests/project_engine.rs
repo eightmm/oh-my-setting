@@ -1371,3 +1371,98 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
     assert_eq!(large_dto["completeness"], "partial");
     assert_eq!(tree_fingerprint(&large.0), before_large);
 }
+
+#[test]
+fn panel_streams_indexes_between_sixteen_and_twenty_four_mib() {
+    let repo = Fixture::empty();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo.0)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    fs::create_dir_all(repo.0.join("src")).unwrap();
+    fs::set_permissions(repo.0.join("src"), fs::Permissions::from_mode(0o700)).unwrap();
+    for (path, text) in [
+        ("src/lib.sh", "#!/usr/bin/env bash\nhelper() { echo ok; }\n"),
+        (
+            "src/main.sh",
+            "#!/usr/bin/env bash\nsource src/lib.sh\nrun_app() { helper; }\n",
+        ),
+    ] {
+        fs::write(repo.0.join(path), text).unwrap();
+        fs::set_permissions(repo.0.join(path), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    git(&["add", "."]);
+    fs::write(
+        repo.0.join("src/untracked_sentinel.sh"),
+        "untracked_sentinel() { echo ok; }\n",
+    )
+    .unwrap();
+    project::build(
+        &repo.0,
+        &repo.state(),
+        &Default::default(),
+        &AtomicBool::new(false),
+        None,
+    )
+    .unwrap();
+    let panel = |extra: &[&str]| -> Value {
+        let mut args: Vec<OsString> = ["project", "panel", "--repo"].map(Into::into).to_vec();
+        args.push(repo.0.as_os_str().to_owned());
+        args.push("--json".into());
+        args.extend(extra.iter().map(OsString::from));
+        let (code, out, err) =
+            oms_command_graph::run_with_helper(&args, &repo.0, &AtomicBool::new(false), None);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        serde_json::from_slice(&out).unwrap()
+    };
+    let probes: [&[&str]; 3] = [
+        &[],
+        &["--query=helper"],
+        &["--node=symbol:src/lib.sh::helper"],
+    ];
+    let small: Vec<Value> = probes.iter().map(|p| panel(p)).collect();
+    assert_eq!(small[0]["provenance"]["mode"], "indexed");
+    assert_eq!(small[2]["selection"]["status"], "found");
+    assert!(small[2]["selection"]["definition"].is_object());
+
+    let graph_path = repo.state().join("graph.json");
+    let original = fs::read(&graph_path).unwrap();
+    let mut padded: Value = serde_json::from_slice(&original).unwrap();
+    let pad_to = |graph: &mut Value, total: usize| {
+        let pad = "x".repeat(1 << 20);
+        let nodes = graph["nodes"].as_array_mut().unwrap();
+        for i in 0..total {
+            let k = i % nodes.len();
+            nodes[k][format!("pad{i}")] = json!(pad);
+        }
+    };
+    pad_to(&mut padded, 18);
+    let raw = padded.to_string();
+    assert!(raw.len() > 16 << 20 && raw.len() < 24 << 20);
+    fs::write(&graph_path, &raw).unwrap();
+    for (probe, expected) in probes.iter().zip(&small) {
+        assert_eq!(&panel(probe), expected, "{probe:?}");
+    }
+
+    pad_to(&mut padded, 25);
+    fs::write(&graph_path, padded.to_string()).unwrap();
+    let over = panel(&[]);
+    assert_eq!(over["provenance"]["mode"], "fallback");
+    assert_eq!(over["provenance"]["indexState"], "invalid");
+
+    let mut truncated = raw.into_bytes();
+    truncated.truncate(truncated.len() - 3);
+    fs::write(&graph_path, truncated).unwrap();
+    assert_eq!(panel(&[])["provenance"]["indexState"], "invalid");
+    assert!(
+        !panel(&["--query=untracked_sentinel"])
+            .to_string()
+            .contains("untracked_sentinel.sh\"")
+    );
+}
