@@ -753,6 +753,20 @@ fn desktop_assignment() {
     );
     assert!(!source.join("last-call.json").exists());
     assert_eq!(runs(), 0);
+    fixture_settings(
+        &source,
+        json!({"exit": 2, "stderr": "room: room_inventory_incomplete"}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "room_inventory_incomplete:",
+    );
+    assert_eq!(runs(), 0, "incomplete ownership never launches a reviewer");
     // A fresh intent launches once and records the returned operation.
     // The fixture cannot know the generated operation id, so its receipt names another one.
     fixture_settings(
@@ -949,7 +963,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v13.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v14.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -978,6 +992,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v10.html"),
         json!("ui://oms/conversation-panel/v11.html"),
         json!("ui://oms/conversation-panel/v12.html"),
+        json!("ui://oms/conversation-panel/v13.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

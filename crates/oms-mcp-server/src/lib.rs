@@ -454,7 +454,7 @@ impl<'a> Server<'a> {
                         format!("unknown resource: {}", storage::repr(&params["uri"])),
                     ));
                 }
-                self.complete(json!({"contents":[{"uri":GRAPH_URI,"mimeType":MIME,"text":include_str!("project-graph.html"),"_meta":{"ui":{"prefersBorder":true,"csp":{"resourceDomains":["https://cdn.jsdelivr.net"]}}}}]}),params,true)
+                self.complete(json!({"contents":[{"uri":GRAPH_URI,"mimeType":MIME,"text":include_str!("project-graph.html"),"_meta":{"ui":{"prefersBorder":true}}}]}),params,true)
             }
             "tasks/get" | "tasks/update" | "tasks/cancel" => {
                 if !self.config.tasks_extension || self.protocol(params) != MODERN {
