@@ -60,7 +60,7 @@
   <div class="oms-graph-stage">
     <svg id="oms-graph-view-19ff9c65bfcf-svg" role="group" aria-label="Interactive dependency graph">
       <title>OMS Project Graph</title>
-      <desc>Use search, filters, Tab, Enter, Space, and arrow keys to explore this bounded graph.</desc>
+      <desc>Use search, filters, Tab, Enter, Space, arrow keys, plus, minus and 0 to explore this bounded graph.</desc>
     </svg>
   </div>
   <details class="oms-graph-fallback"><summary id="oms-graph-view-19ff9c65bfcf-fallback-summary">Graph nodes (text alternative) — 0</summary><ul id="oms-graph-view-19ff9c65bfcf-fallback-list"></ul></details>
@@ -174,10 +174,35 @@
 #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-change="changed"] { background: transparent; border: 2px solid var(--oms-s1); }
 #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-change="impacted"] { background: transparent; border: 2px dashed var(--oms-s2); }
 #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-kind] { border-radius: 4px; background: var(--oms-bg); border-color: var(--oms-muted-fg); }
-#oms-graph-view-19ff9c65bfcf .oms-graph-edge { stroke: color-mix(in srgb, var(--oms-muted-fg) 78%, var(--oms-border)); stroke-width: 1.4; opacity: .75; }
-#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-confidence="INFERRED"] { stroke: var(--oms-s2); stroke-dasharray: 5 3; }
-#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-confidence="AMBIGUOUS"] { stroke: var(--oms-destructive); stroke-dasharray: 2 4; opacity: .7; }
-#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-confidence="REPEAT"] { stroke: var(--oms-s3); stroke-dasharray: 6 4; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge { fill: none; stroke: color-mix(in srgb, var(--oms-muted-fg) 78%, var(--oms-border)); stroke-width: 1.4; opacity: .7; transition: opacity .15s; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-rel="0"], #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-rel="0"] { stroke: var(--oms-s1); color: var(--oms-s1); }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-rel="1"], #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-rel="1"] { stroke: var(--oms-s2); color: var(--oms-s2); }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-rel="2"], #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-rel="2"] { stroke: var(--oms-s3); color: var(--oms-s3); }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-rel="3"], #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-rel="3"] { stroke: var(--oms-s4); color: var(--oms-s4); }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-rel="4"], #oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-rel="4"] { stroke: var(--oms-s5); color: var(--oms-s5); }
+#oms-graph-view-19ff9c65bfcf .oms-graph-legend i[data-rel] { border-color: currentColor; border-radius: 4px; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-confidence="INFERRED"] { stroke-dasharray: 5 3; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-confidence="AMBIGUOUS"] { stroke-dasharray: 2 4; opacity: .6; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge[data-confidence="REPEAT"] { stroke-dasharray: 6 4; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge.is-hot { opacity: 1; stroke-width: 2; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge.is-flow { stroke: var(--oms-primary); stroke-width: 2.2; opacity: 1; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-edge.is-dim { opacity: .08; }
+@keyframes oms-graph-view-19ff9c65bfcf-flow { to { stroke-dashoffset: -22; } }
+@keyframes oms-graph-view-19ff9c65bfcf-pulse { 0%, 100% { stroke-opacity: .95; stroke-width: 2.5; } 50% { stroke-opacity: .45; stroke-width: 4; } }
+@keyframes oms-graph-view-19ff9c65bfcf-pop { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: no-preference) {
+  #oms-graph-view-19ff9c65bfcf .oms-graph-edge.is-flow { stroke-dasharray: 7 4; animation: oms-graph-view-19ff9c65bfcf-flow 1.1s linear infinite; }
+  #oms-graph-view-19ff9c65bfcf .oms-graph-node.is-selected .oms-graph-select-ring { animation: oms-graph-view-19ff9c65bfcf-pulse 2.2s ease-in-out infinite; }
+  #oms-graph-view-19ff9c65bfcf .oms-graph-node .oms-graph-node-body, #oms-graph-view-19ff9c65bfcf .oms-graph-node .oms-graph-glyph { transform-box: fill-box; transform-origin: center; animation: oms-graph-view-19ff9c65bfcf-pop .45s ease-out both; }
+  #oms-graph-view-19ff9c65bfcf .oms-graph-node { transition: opacity .15s; }
+}
+#oms-graph-view-19ff9c65bfcf .oms-graph-stage svg { cursor: grab; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-select-ring { fill: none; stroke: var(--oms-primary); stroke-width: 2.5; opacity: 0; pointer-events: none; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-node.is-selected .oms-graph-select-ring { opacity: 1; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-pin { display: none; fill: var(--oms-fg); stroke: var(--oms-bg); stroke-width: 1.5; pointer-events: none; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-node[data-pinned="true"] .oms-graph-pin { display: block; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-node.is-dim { opacity: .15; }
+#oms-graph-view-19ff9c65bfcf .oms-graph-tip { position: absolute; z-index: 2; max-width: 260px; padding: 6px 8px; font-size: 0.75rem; line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; color: var(--oms-fg); background: var(--oms-surface); border: 1px solid var(--oms-border); border-radius: 6px; box-shadow: 0 2px 8px color-mix(in srgb, var(--oms-fg) 18%, transparent); }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node { cursor: pointer; }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node:focus { outline: none; }
 #oms-graph-view-19ff9c65bfcf .oms-graph-node .oms-graph-focus-ring { fill: none; stroke: transparent; pointer-events: none; }
@@ -237,7 +262,6 @@
   #oms-graph-view-19ff9c65bfcf #oms-graph-view-19ff9c65bfcf-visible { flex-basis: 100%; }
 }
 </style>
-<script async src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 <script>
 (() => {
   const root = document.getElementById('oms-graph-view-19ff9c65bfcf');
@@ -392,7 +416,6 @@
   }));
   if (data.title) svgElement.querySelector('title').textContent = String(data.title);
 
-  const d3 = window.d3;
   // A small DOM selection adapter keeps controls identical without the CDN.
   function nativeSelection(elements) {
     const selection = {
@@ -449,23 +472,29 @@
     };
     return selection;
   }
-  const svg = d3 ? d3.select(svgElement) : nativeSelection([svgElement]);
+  const svg = nativeSelection([svgElement]);
   const viewport = svg.append('g');
   const markerId = 'oms-graph-view-19ff9c65bfcf-arrow';
-  svg.append('defs').append('marker')
-    .attr('id', markerId).attr('viewBox', '0 -5 10 10').attr('refX', 18).attr('refY', 0)
-    .attr('markerWidth', 5).attr('markerHeight', 5).attr('orient', 'auto')
-    .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'var(--oms-muted-fg)');
-  const links = data.edges.map(edge => ({...edge}));
   const nodes = data.nodes.map((node, index) => ({...node, index,
     _search: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.language} ${node.assurance_label || ''} ${node.status || ''}`.toLocaleLowerCase(),
     _optionSearch: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.assurance_label || ''} ${node.status || ''}`.toLocaleLowerCase()}));
   const byId = new Map(nodes.map(node => [node.id, node]));
+  const links = data.edges.filter(edge => byId.has(edge.source) && byId.has(edge.target))
+    .map(edge => ({...edge, source: byId.get(edge.source), target: byId.get(edge.target)}));
+  const adjacency = new Map(nodes.map(row => [row.id, new Set()]));
+  const linkCount = new Map(nodes.map(row => [row.id, 0]));
+  links.forEach(row => {
+    adjacency.get(row.source.id).add(row.target.id);
+    adjacency.get(row.target.id).add(row.source.id);
+    linkCount.set(row.source.id, linkCount.get(row.source.id) + 1);
+    linkCount.set(row.target.id, linkCount.get(row.target.id) + 1);
+  });
   const narrowLabelIds = new Set(nodes.filter(node => node.show_label)
     .sort((a, b) => (b.degree || 0) - (a.degree || 0) || a.id.localeCompare(b.id))
     .slice(0, 6).map(node => node.id));
   const relations = [...new Set(links.map(link => link.relation))].sort();
   relations.forEach(name => relation.append(new Option(name, name)));
+  const relationIndex = new Map(relations.map((name, index) => [name, index % 5]));
   const confidences = [...new Set(links.map(link => link.confidence))].sort();
   confidences.forEach(name => confidence.append(new Option(name, name)));
   const defaultConfidence = data.kind === 'project' && confidences.includes('EXTRACTED') ? 'EXTRACTED' : '';
@@ -491,6 +520,17 @@
     const key = typeof item.getAttribute === 'function' ? item.getAttribute('data-kind-key') : '';
     item.hidden = !presentKindGroups.has(key);
   });
+  relations.forEach((name, index) => {
+    const item = document.createElement('span');
+    item.setAttribute('class', 'oms-relation-key');
+    const swatch = document.createElement('i');
+    swatch.setAttribute('class', 'oms-rel-swatch');
+    swatch.setAttribute('data-rel', String(index % 5));
+    swatch.setAttribute('aria-hidden', 'true');
+    swatch.textContent = '→';
+    item.append(swatch, document.createTextNode(`Relation: ${name}`));
+    legend.append(item);
+  });
 
   ask.textContent = 'Send to Codex';
   if (nodes.length === 0) {
@@ -506,9 +546,18 @@
     });
   }
 
-  const link = viewport.append('g').selectAll('line').data(links).join('line')
+  // Arrowheads: one per relation colour plus one for the selection highlight.
+  const defs = svg.append('defs');
+  ['--oms-s1', '--oms-s2', '--oms-s3', '--oms-s4', '--oms-s5', '--oms-primary'].forEach((token, index) => {
+    defs.append('marker').attr('id', `${markerId}-${index}`).attr('viewBox', '0 0 10 10')
+      .attr('refX', 9).attr('refY', 5).attr('markerWidth', 9).attr('markerHeight', 9)
+      .attr('markerUnits', 'userSpaceOnUse').attr('orient', 'auto')
+      .append('path').attr('d', 'M0,1L10,5L0,9Z').attr('fill', `var(${token})`);
+  });
+  const link = viewport.append('g').selectAll('path').data(links).join('path')
     .attr('class', 'oms-graph-edge').attr('data-confidence', row => row.confidence)
-    .attr('marker-end', `url(#${markerId})`);
+    .attr('data-rel', row => relationIndex.get(row.relation))
+    .attr('marker-end', row => `url(#${markerId}-${relationIndex.get(row.relation)})`);
   const node = viewport.append('g').selectAll('g').data(nodes).join('g')
     .attr('class', 'oms-graph-node').attr('data-kind', row => row.kind || 'node')
     .attr('data-kind-group', row => kindGroup(row.kind))
@@ -517,25 +566,29 @@
     .attr('data-change', row => row.change || '')
     .attr('data-focus', row => String(Boolean(row.focus)))
     .attr('role', 'button').attr('tabindex', '-1').attr('aria-pressed', 'false')
-    .attr('aria-label', row => {
-      const meta = statusMeta(row);
-      return [row.label, row.kind || 'node', meta.label, row.change ? `change ${row.change}` : ''].filter(Boolean).join(', ');
-    });
+    .attr('aria-label', row => nodeAria(row));
+  function nodeAria(row) {
+    const meta = statusMeta(row);
+    return [row.label, row.kind || 'node', meta.label, row.change ? `change ${row.change}` : '', row._pinned ? 'pinned' : ''].filter(Boolean).join(', ');
+  }
   const nodeElementById = new Map();
   node.each(function(row) { nodeElementById.set(row.id, this); });
   const nodeRadius = row => Math.max(9, Math.min(14, 8 + Math.sqrt(row.degree || 0)));
+  node.append('circle').attr('class', 'oms-graph-select-ring').attr('r', row => nodeRadius(row) + 10);
   node.append('circle').attr('class', 'oms-graph-focus-ring').attr('r', row => nodeRadius(row) + 7);
   node.append('path').attr('class', 'oms-graph-change-ring').attr('d', row => shapePath(row.kind, nodeRadius(row) + 4));
   node.append('path').attr('class', 'oms-graph-node-body').attr('d', row => shapePath(row.kind, nodeRadius(row)));
   node.append('text').attr('class', 'oms-graph-glyph').attr('aria-hidden', 'true').text(row => statusMeta(row).glyph);
-  node.append('title').text(row => {
-    const meta = statusMeta(row);
-    return [row.id, row.path, `${kindSymbol(row.kind)} ${row.kind || 'node'}`, `${meta.glyph} ${meta.label}`,
-      row.assurance_reason, row.change ? `change ${row.change}` : '', row.outcome].filter(Boolean).join(' · ');
-  });
+  node.append('circle').attr('class', 'oms-graph-pin').attr('aria-hidden', 'true').attr('r', 3.2)
+    .attr('cx', row => nodeRadius(row) * .8).attr('cy', row => -nodeRadius(row) * .8);
   const nodeLabel = node.append('text').attr('class', row => `oms-graph-label${row.show_label ? '' : ' is-hidden'}`)
     .attr('x', row => nodeRadius(row) + 6).attr('y', 4)
     .text(row => row.label.length > 30 ? `${row.label.slice(0, 29)}…` : row.label);
+  const tip = document.createElement('div');
+  tip.setAttribute('class', 'oms-graph-tip');
+  tip.setAttribute('aria-hidden', 'true');
+  tip.hidden = true;
+  stage.append(tip);
 
   let width = 736;
   let height = 520;
@@ -543,12 +596,39 @@
   let tabStopId = selectedId;
   let zoomScale = 1;
   let lastFocusBeforeSearch = null;
+  let hoverId = '';
+  let focusHotId = '';
+  let keyboardMode = false;
+  let tipId = '';
   const draftsByNode = new Map();
   const customDraftNodes = new Set();
 
   function layoutMode(w) { return w <= 480 ? 'narrow' : (w <= 768 ? 'medium' : 'wide'); }
   root.setAttribute('data-layout', layoutMode(width));
+  const reducedMotion = () => Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const stamp = ts => typeof ts === 'number' ? ts : Date.now();
+  const round1 = value => Math.round(value * 10) / 10;
+  const round2 = value => Math.round(value * 100) / 100;
+  const round3 = value => Math.round(value * 1000) / 1000;
 
+  // ---- Deterministic force layout (link spring, repulsion, centring, collision, execution targets) ----
+  const isExecution = data.kind === 'execution';
+  const PAD = 20;
+  const ALPHA_DECAY = 1 - Math.pow(.001, 1 / 300);
+  const MIN_ALPHA = .001;
+  const TICK_CAP = nodes.length > 400 ? 120 : 300;
+  const linkDistance = isExecution ? 130 : (nodes.length > 120 ? 58 : 72);
+  const linkStrength = isExecution ? .18 : .45;
+  const projectCharge = -Math.max(65, Math.min(150, 1350 / Math.sqrt(Math.max(nodes.length, 1))));
+  const charge = isExecution ? -420 : projectCharge;
+  const collideRadius = row => isExecution ? 36 : nodeRadius(row) + 3;
+  let seed = 0;
+  function rand() {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
   function executionX(row) {
     if (width <= 480) return width / 2;
     return width * (row.index % 2 === 0 ? .27 : .68);
@@ -559,87 +639,321 @@
     if (rows <= 1) return height / 2;
     return 70 + Math.floor(row.index / columns) * (height - 140) / (rows - 1);
   }
-  const gridNodes = nodes.slice().sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  function layoutOffline() {
+  function computeWorld() {
     const baseHeight = width <= 480 ? 400 : 520;
-    const pad = 20;
-    const maxR = nodes.reduce((acc, row) => Math.max(acc, nodeRadius(row)), 14);
-    const minCell = Math.ceil(maxR * 2 + 12);
-    const innerW = Math.max(minCell, width - pad * 2);
-    const maxCols = Math.max(1, Math.floor(innerW / minCell));
-    const preferredMaxCols = width <= 480 ? 2 : (width <= 768 ? 4 : 7);
-    const fitRows = Math.max(1, Math.floor((baseHeight - pad * 2) / minCell));
-    const targetCols = Math.ceil(Math.sqrt(Math.max(1, nodes.length) * width / Math.max(1, baseHeight)));
-    const minColsForBaseHeight = Math.ceil(nodes.length / fitRows);
-    const desiredCols = nodes.length <= preferredMaxCols * fitRows
-      ? Math.min(preferredMaxCols, targetCols)
-      : Math.max(targetCols, minColsForBaseHeight);
-    const columns = Math.max(1, Math.min(maxCols, desiredCols));
-    const rows = Math.max(1, Math.ceil(nodes.length / columns));
-    height = Math.max(baseHeight, rows * minCell + pad * 2);
+    const maxCollide = nodes.reduce((acc, row) => Math.max(acc, collideRadius(row)), 14);
+    const cell = Math.pow(maxCollide * 2 + 6, 2) * 1.5;
+    const needed = Math.ceil(nodes.length * cell / Math.max(1, width - PAD * 2)) + PAD * 2;
+    height = Math.max(baseHeight, needed);
     svg.attr('viewBox', `0 0 ${width} ${height}`);
     if (svgElement.style) svgElement.style.height = height > baseHeight ? `${height}px` : '';
-    const innerH = Math.max(1, height - pad * 2);
-    const cellW = innerW / columns;
-    const cellH = innerH / rows;
-    gridNodes.forEach((row, index) => {
-      const col = index % columns;
-      const rowIndex = Math.floor(index / columns);
-      const stagger = columns > 1 && width <= 480 ? (col % 2 === 0 ? .35 : .65) : .5;
-      row.x = pad + (col + .5) * cellW;
-      row.y = pad + (rowIndex + stagger) * cellH;
-    });
-    paint();
   }
-  if (!d3) links.forEach(row => { row.source = byId.get(row.source); row.target = byId.get(row.target); });
-  const projectCharge = -Math.max(65, Math.min(150, 1350 / Math.sqrt(Math.max(nodes.length, 1))));
-  const simulation = d3 ? d3.forceSimulation(nodes).randomSource(d3.randomLcg(0.42))
-    .force('link', d3.forceLink(links).id(row => row.id).distance(data.kind === 'execution' ? 130 : nodes.length > 120 ? 58 : 72).strength(data.kind === 'execution' ? .18 : .45))
-    .force('charge', d3.forceManyBody().strength(data.kind === 'execution' ? -420 : projectCharge))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(row => data.kind === 'execution' ? 36 : Math.max(20, Math.min(32, 16 + Math.sqrt(row.degree || 0)))))
-    .force('execution-x', data.kind === 'execution' ? d3.forceX(executionX).strength(.85) : null)
-    .force('execution-y', data.kind === 'execution' ? d3.forceY(executionY).strength(.85) : null)
-    .force('project-x', data.kind === 'project' ? d3.forceX(width / 2).strength(.055) : null)
-    .force('project-y', data.kind === 'project' ? d3.forceY(height / 2).strength(.055) : null) : null;
-  function paint() {
-    const pad = 20;
-    nodes.forEach(row => {
-      row.x = Math.max(pad, Math.min(width - pad, row.x || width / 2));
-      row.y = Math.max(pad, Math.min(height - pad, row.y || height / 2));
+  function seedPositions() {
+    seed = 0x2545f491;
+    const spacing = Math.sqrt(width * height / Math.max(nodes.length, 1)) * .45;
+    nodes.forEach((row, index) => {
+      if (isExecution) {
+        row.x = executionX(row) + (rand() - .5) * 24;
+        row.y = executionY(row) + (rand() - .5) * 24;
+      } else {
+        const angle = index * 2.399963;
+        const radius = spacing * Math.sqrt(index + .5);
+        row.x = width / 2 + Math.cos(angle) * radius;
+        row.y = height / 2 + Math.sin(angle) * radius;
+      }
+      row.vx = 0; row.vy = 0; row.fx = null; row.fy = null; row._pinned = false;
     });
-    link.attr('x1', row => row.source.x).attr('y1', row => row.source.y)
-      .attr('x2', row => row.target.x).attr('y2', row => row.target.y);
-    node.attr('transform', row => `translate(${row.x},${row.y})`);
+  }
+  function collide(strength) {
+    let moved = false;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist = Math.hypot(dx, dy);
+        const min = collideRadius(a) + collideRadius(b);
+        if (dist >= min) continue;
+        if (dist < 1e-6) { dx = rand() - .5; dy = rand() - .5; dist = Math.hypot(dx, dy) || 1; }
+        const push = (min - dist) / dist * strength;
+        const aFixed = a.fx !== null && a.fx !== undefined;
+        const bFixed = b.fx !== null && b.fx !== undefined;
+        if (aFixed && bFixed) continue;
+        const share = aFixed || bFixed ? 1 : .5;
+        if (!aFixed) { a.x -= dx * push * share; a.y -= dy * push * share; }
+        if (!bFixed) { b.x += dx * push * share; b.y += dy * push * share; }
+        moved = true;
+      }
+    }
+    return moved;
+  }
+  function clampToWorld() {
+    nodes.forEach(row => {
+      row.x = Math.max(PAD, Math.min(width - PAD, Number.isFinite(row.x) ? row.x : width / 2));
+      row.y = Math.max(PAD, Math.min(height - PAD, Number.isFinite(row.y) ? row.y : height / 2));
+    });
+  }
+  let alpha = 0;
+  let remaining = 0;
+  let simRaf = 0;
+  function tick() {
+    alpha -= alpha * ALPHA_DECAY;
+    remaining -= 1;
+    links.forEach(row => {
+      const a = row.source;
+      const b = row.target;
+      if (a === b) return;
+      let dx = b.x + b.vx - a.x - a.vx;
+      let dy = b.y + b.vy - a.y - a.vy;
+      if (!dx && !dy) { dx = rand() - .5; dy = rand() - .5; }
+      const len = Math.hypot(dx, dy) || 1;
+      const force = (len - linkDistance) / len * alpha * linkStrength;
+      dx *= force; dy *= force;
+      const bias = linkCount.get(a.id) / (linkCount.get(a.id) + linkCount.get(b.id));
+      b.vx -= dx * bias; b.vy -= dy * bias;
+      a.vx += dx * (1 - bias); a.vy += dy * (1 - bias);
+    });
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1e-6) { dx = rand() - .5; dy = rand() - .5; d2 = dx * dx + dy * dy; }
+        if (d2 < 1) d2 = 1;
+        const w = charge * alpha / d2;
+        a.vx += dx * w; a.vy += dy * w;
+        b.vx -= dx * w; b.vy -= dy * w;
+      }
+    }
+    nodes.forEach(row => {
+      if (isExecution) {
+        row.vx += (executionX(row) - row.x) * .3 * alpha;
+        row.vy += (executionY(row) - row.y) * .3 * alpha;
+      } else {
+        row.vx += (width / 2 - row.x) * .055 * alpha;
+        row.vy += (height / 2 - row.y) * .055 * alpha;
+      }
+      if (row.fx !== null && row.fx !== undefined) { row.x = row.fx; row.y = row.fy; row.vx = 0; row.vy = 0; return; }
+      row.vx *= .6; row.vy *= .6;
+      row.x += row.vx; row.y += row.vy;
+    });
+    collide(.7);
+    if (nodes.length) {
+      let mx = 0; let my = 0;
+      nodes.forEach(row => { mx += row.x; my += row.y; });
+      mx = mx / nodes.length - width / 2; my = my / nodes.length - height / 2;
+      nodes.forEach(row => { if (row.fx === null || row.fx === undefined) { row.x -= mx; row.y -= my; } });
+    }
+    clampToWorld();
+  }
+  function relax() {
+    for (let pass = 0; pass < 200; pass += 1) {
+      const moved = collide(1);
+      if (width === 1024 && nodes.length === 200 && (pass < 3 || pass > 196)) { let bad = 0; for (let i = 0; i < nodes.length; i += 1) for (let j = i + 1; j < nodes.length; j += 1) if (Math.hypot(nodes[i].x-nodes[j].x, nodes[i].y-nodes[j].y) < nodeRadius(nodes[i]) + nodeRadius(nodes[j])) bad += 1; console.log('pass', pass, moved, bad); }
+      clampToWorld();
+      if (!moved) { globalThis.__log = (globalThis.__log||[]); break; }
+    }
+    { let bad = 0; for (let i = 0; i < nodes.length; i += 1) for (let j = i + 1; j < nodes.length; j += 1) if (Math.hypot(nodes[i].x-nodes[j].x, nodes[i].y-nodes[j].y) < nodeRadius(nodes[i]) + nodeRadius(nodes[j])) bad += 1; console.log('relax end bad', bad, width, height); }
+  }
+  function edgePath(row) {
+    const a = row.source;
+    const b = row.target;
+    if (a === b) {
+      const r = nodeRadius(a);
+      return `M${round1(a.x)},${round1(a.y - r)}C${round1(a.x + 34)},${round1(a.y - r - 44)} ${round1(a.x - 34)},${round1(a.y - r - 44)} ${round1(a.x)},${round1(a.y - r - 3)}`;
+    }
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return `M${round1(a.x)},${round1(a.y)}L${round1(b.x)},${round1(b.y)}`;
+    const bend = Math.min(40, len * .14);
+    const cx = (a.x + b.x) / 2 - dy / len * bend;
+    const cy = (a.y + b.y) / 2 + dx / len * bend;
+    const sd = Math.hypot(cx - a.x, cy - a.y) || 1;
+    const td = Math.hypot(b.x - cx, b.y - cy) || 1;
+    const sr = nodeRadius(a) + 2;
+    const tr = nodeRadius(b) + 3;
+    return `M${round1(a.x + (cx - a.x) / sd * sr)},${round1(a.y + (cy - a.y) / sd * sr)}Q${round1(cx)},${round1(cy)} ${round1(b.x - (b.x - cx) / td * tr)},${round1(b.y - (b.y - cy) / td * tr)}`;
+  }
+  function paint() {
+    clampToWorld();
+    link.attr('d', edgePath);
+    node.attr('transform', row => `translate(${round2(row.x)},${round2(row.y)})`);
     const flipThreshold = width <= 480 ? width * 0.55 : width - 150;
     const cap = width <= 480 ? 18 : (width <= 768 ? 24 : 30);
     nodeLabel
       .attr('x', row => row.x > flipThreshold ? -(nodeRadius(row) + 6) : (nodeRadius(row) + 6))
       .attr('text-anchor', row => row.x > flipThreshold ? 'end' : 'start')
       .text(row => row.label.length > cap ? `${row.label.slice(0, cap - 1)}…` : row.label);
+    positionTip();
   }
-  if (simulation) {
-    simulation.stop();
-    for (let index = 0; index < 180; index += 1) simulation.tick();
+  function runSync(startAlpha, budget) {
+    alpha = Math.max(alpha, startAlpha);
+    remaining = Math.max(remaining, budget);
+    while (remaining > 0 && alpha > MIN_ALPHA) tick();
+    relax();
+    alpha = 0; remaining = 0;
     paint();
-    simulation.on('tick', paint);
-  } else {
-    requestAnimationFrame(layoutOffline);
+  }
+  function frame() {
+    simRaf = 0;
+    const perFrame = nodes.length > 150 ? 1 : 2;
+    for (let index = 0; index < perFrame && remaining > 0 && alpha > MIN_ALPHA; index += 1) tick();
+    paint();
+    if (remaining > 0 && alpha > MIN_ALPHA) { simRaf = requestAnimationFrame(frame); return; }
+    relax(); alpha = 0; remaining = 0; paint();
+    if (!userMoved) fitAll();
+  }
+  // Settle after a (re)layout or a drag: animated by frames, or fully computed up front under reduced motion.
+  function settle(startAlpha, budget) {
+    if (reducedMotion()) {
+      runSync(startAlpha, budget);
+      if (!userMoved) fitAll();
+      return;
+    }
+    alpha = Math.max(alpha, startAlpha);
+    remaining = Math.max(remaining, budget);
+    if (!simRaf) simRaf = requestAnimationFrame(frame);
   }
 
-  const zoom = d3 ? d3.zoom().scaleExtent([.3, 5]).on('zoom', event => {
-    const tier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
-    const changed = tier(zoomScale) !== tier(event.transform.k);
-    zoomScale = event.transform.k;
-    viewport.attr('transform', event.transform);
-    if (changed) applyFilters();
-  }) : null;
-  if (d3) {
-    svg.call(zoom);
-    node.call(d3.drag()
-    .on('start', (event, row) => { if (!event.active) simulation.alphaTarget(.18).restart(); row.fx = row.x; row.fy = row.y; })
-    .on('drag', (event, row) => { row.fx = event.x; row.fy = event.y; })
-    .on('end', (event, row) => { if (!event.active) simulation.alphaTarget(0); row.fx = null; row.fy = null; }));
+  // ---- Camera: eased fit / focus / zoom, pan and wheel zoom ----
+  const MIN_K = .3;
+  const MAX_K = 5;
+  const cam = {x: 0, y: 0, k: 1};
+  let camAnim = null;
+  let camRaf = 0;
+  let userMoved = false;
+  const clampK = k => Math.max(MIN_K, Math.min(MAX_K, k));
+  const labelTier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
+  function setCam(x, y, k) {
+    const tierChanged = labelTier(zoomScale) !== labelTier(k);
+    cam.x = x; cam.y = y; cam.k = k; zoomScale = k;
+    viewport.attr('transform', `translate(${round3(x)},${round3(y)}) scale(${round3(k)})`);
+    if (tierChanged) applyFilters();
+    positionTip();
+  }
+  function stepCam(ts) {
+    camRaf = 0;
+    if (!camAnim) return;
+    const now = stamp(ts);
+    if (camAnim.start === null) camAnim.start = now;
+    const t = Math.min(1, (now - camAnim.start) / camAnim.ms);
+    const e = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const from = camAnim.from;
+    const to = camAnim.to;
+    setCam(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e, from.k + (to.k - from.k) * e);
+    if (t >= 1) camAnim = null;
+    else camRaf = requestAnimationFrame(stepCam);
+  }
+  function animateCam(to, ms) {
+    const target = {x: to.x, y: to.y, k: clampK(to.k)};
+    if (reducedMotion() || !(ms > 0)) {
+      camAnim = null;
+      setCam(target.x, target.y, target.k);
+      return;
+    }
+    camAnim = {from: {x: cam.x, y: cam.y, k: cam.k}, to: target, ms, start: null};
+    if (!camRaf) camRaf = requestAnimationFrame(stepCam);
+  }
+  const camGoal = () => camAnim ? camAnim.to : cam;
+  function zoomAt(px, py, factor, ms) {
+    const base = camGoal();
+    const k = clampK(base.k * factor);
+    const ratio = k / base.k;
+    animateCam({x: px - (px - base.x) * ratio, y: py - (py - base.y) * ratio, k}, ms);
+  }
+  function fitPad() { return width <= 480 ? 24 : 44; }
+  function fitTarget(rows) {
+    if (!rows.length) return {x: 0, y: 0, k: 1};
+    let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+    rows.forEach(row => {
+      const r = nodeRadius(row);
+      minX = Math.min(minX, row.x - r); maxX = Math.max(maxX, row.x + r);
+      minY = Math.min(minY, row.y - r); maxY = Math.max(maxY, row.y + r);
+    });
+    const pad = fitPad();
+    const k = clampK(Math.min(1.25, (width - pad * 2) / Math.max(1, maxX - minX), (height - pad * 2) / Math.max(1, maxY - minY)));
+    return {x: width / 2 - (minX + maxX) / 2 * k, y: height / 2 - (minY + maxY) / 2 * k, k};
+  }
+  function fitAll(ms = 380) {
+    userMoved = false;
+    animateCam(fitTarget(nodes.filter(row => !row._outOfScope)), ms);
+  }
+  function focusOn(id, ms = 380) {
+    const row = byId.get(id);
+    if (!row) return;
+    userMoved = true;
+    let hx = nodeRadius(row) + 8;
+    let hy = hx;
+    adjacency.get(id).forEach(otherId => {
+      const other = byId.get(otherId);
+      if (!other || other._outOfScope) return;
+      hx = Math.max(hx, Math.abs(other.x - row.x) + nodeRadius(other));
+      hy = Math.max(hy, Math.abs(other.y - row.y) + nodeRadius(other));
+    });
+    const pad = width <= 480 ? 36 : 60;
+    const k = clampK(Math.min(2.2, (width / 2 - pad) / hx, (height / 2 - pad) / hy));
+    animateCam({x: width / 2 - row.x * k, y: height / 2 - row.y * k, k}, ms);
+  }
+  function ensureVisible(row) {
+    const goal = camGoal();
+    const margin = 40;
+    const sx = goal.x + row.x * goal.k;
+    const sy = goal.y + row.y * goal.k;
+    const dx = sx < margin ? margin - sx : (sx > width - margin ? width - margin - sx : 0);
+    const dy = sy < margin ? margin - sy : (sy > height - margin ? height - margin - sy : 0);
+    if (dx || dy) { userMoved = true; animateCam({x: goal.x + dx, y: goal.y + dy, k: goal.k}, 260); }
+  }
+  function zoomBy(factor) {
+    userMoved = true;
+    zoomAt(width / 2, height / 2, factor, 260);
+  }
+
+  // ---- Hover / focus highlight and tooltip ----
+  function tipText(row) {
+    const meta = statusMeta(row);
+    const connections = Number.isInteger(row.degree) ? row.degree : adjacency.get(row.id).size;
+    return [row.label, `${row.kind || 'node'} · ${meta.glyph} ${meta.label} · ${connections} connections`, row.path || ''].filter(Boolean).join('\n');
+  }
+  function showTip(row) {
+    tipId = row.id;
+    tip.textContent = tipText(row);
+    tip.hidden = false;
+    positionTip();
+  }
+  function hideTip() { tipId = ''; tip.hidden = true; }
+  function positionTip() {
+    const row = tipId ? byId.get(tipId) : null;
+    if (!row || tip.hidden || !tip.style) return;
+    const bounds = svgElement.getBoundingClientRect();
+    const sx = (cam.x + row.x * cam.k) * bounds.width / Math.max(1, width);
+    const sy = (cam.y + row.y * cam.k) * bounds.height / Math.max(1, height);
+    const right = sx > bounds.width * .6;
+    tip.style.left = `${Math.round(right ? sx - 16 : sx + 16)}px`;
+    tip.style.top = `${Math.round(Math.max(4, sy - 10))}px`;
+    tip.style.transform = right ? 'translateX(-100%)' : '';
+  }
+  function updateHighlight() {
+    const hot = hoverId || focusHotId;
+    const near = hot ? adjacency.get(hot) : null;
+    node.classed('is-dim', row => Boolean(hot) && row.id !== hot && !near.has(row.id));
+    const flows = row => Boolean(selectedId) && (row.source.id === selectedId || row.target.id === selectedId);
+    link.classed('is-dim', row => Boolean(hot) && row.source.id !== hot && row.target.id !== hot)
+      .classed('is-hot', row => Boolean(hot) && (row.source.id === hot || row.target.id === hot))
+      .classed('is-flow', flows)
+      .attr('marker-end', row => `url(#${markerId}-${flows(row) ? 5 : relationIndex.get(row.relation)})`);
+  }
+  function setPinned(row, pinned) {
+    row._pinned = pinned;
+    if (!pinned) { row.fx = null; row.fy = null; }
+    const element = nodeElementById.get(row.id);
+    if (element) {
+      element.setAttribute('data-pinned', String(pinned));
+      element.setAttribute('aria-label', nodeAria(row));
+    }
   }
 
   function isFocusableInRoot(element) {
@@ -729,6 +1043,7 @@
     if (selectedId) nodeSelect.value = selectedId;
     const row = byId.get(selectedId);
     renderBadges(row);
+    updateHighlight();
     detail.textContent = describe(row);
     if (!row) {
       draft.value = '';
@@ -842,18 +1157,34 @@
     change.value = '';
   }
 
-  node.on('click', (_event, row) => { selectNode(row.id); applyFilters(); });
+  let suppressClick = false;
+  node.on('click', (_event, row) => {
+    if (suppressClick) { suppressClick = false; return; }
+    selectNode(row.id); applyFilters(); focusOn(row.id);
+  });
+  node.on('pointerenter', (_event, row) => { hoverId = row.id; updateHighlight(); showTip(row); });
+  node.on('pointerleave', () => {
+    hoverId = ''; updateHighlight();
+    if (focusHotId) showTip(byId.get(focusHotId)); else hideTip();
+  });
   node.on('focus', (_event, row) => {
     if (!row._outOfScope && !row._muted) {
       tabStopId = row.id;
       syncTabindex();
     }
+    if (keyboardMode) { focusHotId = row.id; updateHighlight(); showTip(row); ensureVisible(row); }
+  });
+  node.on('blur', () => {
+    focusHotId = ''; updateHighlight();
+    if (!hoverId) hideTip();
   });
   node.on('keydown', (event, row) => {
+    keyboardMode = true;
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       selectNode(row.id);
       applyFilters();
+      focusOn(row.id);
     } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
       const visibleNavigable = nodes.filter(item => !item._outOfScope && !item._muted);
       const navigable = visibleNavigable.length ? visibleNavigable : nodes.filter(item => !item._outOfScope);
@@ -872,11 +1203,16 @@
       }
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      fitAll();
       if (search.value && isFocusableInRoot(search)) search.focus();
       else if (isFocusableInRoot(nodeSelect)) nodeSelect.focus();
+    } else if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomBy(1.35); }
+      else if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomBy(1 / 1.35); }
+      else if (event.key === '0') { event.preventDefault(); fitAll(); }
     }
   });
-  nodeSelect.addEventListener('change', () => { selectNode(nodeSelect.value); applyFilters(); });
+  nodeSelect.addEventListener('change', () => { selectNode(nodeSelect.value); applyFilters(); focusOn(nodeSelect.value); });
   search.addEventListener('input', applyFilters);
   search.addEventListener('focus', event => {
     const prev = event.relatedTarget;
@@ -930,45 +1266,100 @@
       selectNode((nodes.find(row => row.focus) || nodes[0] || {}).id || '');
     }
     applyFilters();
-    const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 180;
-    if (d3) svg.transition().duration(duration).call(zoom.transform, d3.zoomIdentity);
-    else { zoomScale = 1; panX = 0; panY = 0; offlineTransform(); }
+    fitAll();
   });
-  let panX = 0;
-  let panY = 0;
-  function offlineTransform() {
-    viewport.attr('transform', `translate(${panX},${panY}) translate(${width / 2},${height / 2}) scale(${zoomScale}) translate(${-width / 2},${-height / 2})`);
-    applyFilters();
-  }
-  if (!d3) {
-    svgElement.addEventListener('wheel', event => {
-      event.preventDefault();
-      zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1);
-    }, {passive: false});
-    let pointer = null;
-    svgElement.addEventListener('pointerdown', event => {
-      if (event.target.closest('.oms-graph-node')) return;
-      pointer = {id: event.pointerId, x: event.clientX, y: event.clientY};
-      svgElement.setPointerCapture(event.pointerId);
-    });
-    svgElement.addEventListener('pointermove', event => {
-      if (!pointer || pointer.id !== event.pointerId) return;
-      const bounds = svgElement.getBoundingClientRect();
-      panX += (event.clientX - pointer.x) * width / Math.max(1, bounds.width);
-      panY += (event.clientY - pointer.y) * height / Math.max(1, bounds.height);
-      pointer.x = event.clientX;
-      pointer.y = event.clientY;
-      offlineTransform();
-    });
-    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, () => { pointer = null; });
-  }
-  function zoomBy(factor) {
-    if (!d3) { zoomScale = Math.max(.3, Math.min(5, zoomScale * factor)); offlineTransform(); return; }
-    const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 120;
-    svg.transition().duration(duration).call(zoom.scaleBy, factor);
-  }
   zoomIn.addEventListener('click', () => zoomBy(1.35));
   zoomOut.addEventListener('click', () => zoomBy(1 / 1.35));
+
+  // ---- Pointer gestures: wheel/pinch zoom, background pan, node drag-and-pin ----
+  function toView(event) {
+    const bounds = svgElement.getBoundingClientRect();
+    return {x: (event.clientX - (bounds.left || 0)) * width / Math.max(1, bounds.width),
+      y: (event.clientY - (bounds.top || 0)) * height / Math.max(1, bounds.height)};
+  }
+  const pointers = new Map();
+  let gesture = null;
+  const nodeOf = event => {
+    const el = event.target && typeof event.target.closest === 'function' ? event.target.closest('.oms-graph-node') : null;
+    return el ? el.__data__ : null;
+  };
+  const capture = id => { try { svgElement.setPointerCapture(id); } catch (_error) { /* capture is optional */ } };
+  svgElement.addEventListener('wheel', event => {
+    event.preventDefault();
+    userMoved = true;
+    const unit = event.deltaMode === 1 ? 16 : 1;
+    const p = toView(event);
+    zoomAt(p.x, p.y, Math.exp(-event.deltaY * unit * (event.ctrlKey ? .012 : .0016)), 0);
+  }, {passive: false});
+  svgElement.addEventListener('pointerdown', event => {
+    if (event.button > 0) return;
+    keyboardMode = false;
+    suppressClick = false;
+    const p = toView(event);
+    pointers.set(event.pointerId, p);
+    camAnim = null;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      gesture = {type: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2}};
+      return;
+    }
+    if (pointers.size > 2) return;
+    const row = nodeOf(event);
+    if (row) {
+      const w = {x: (p.x - cam.x) / cam.k, y: (p.y - cam.y) / cam.k};
+      gesture = {type: 'node', id: event.pointerId, row, sx: event.clientX, sy: event.clientY, moved: false, dx: row.x - w.x, dy: row.y - w.y};
+    } else {
+      gesture = {type: 'pan', id: event.pointerId};
+      capture(event.pointerId);
+    }
+  });
+  svgElement.addEventListener('pointermove', event => {
+    if (!pointers.has(event.pointerId) || !gesture) return;
+    const previous = pointers.get(event.pointerId);
+    const p = toView(event);
+    pointers.set(event.pointerId, p);
+    if (gesture.type === 'pinch' && pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const mid = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
+      userMoved = true;
+      zoomAt(mid.x, mid.y, dist / gesture.dist, 0);
+      const goal = camGoal();
+      setCam(goal.x + mid.x - gesture.mid.x, goal.y + mid.y - gesture.mid.y, goal.k);
+      gesture.dist = dist; gesture.mid = mid;
+    } else if (gesture.type === 'pan' && gesture.id === event.pointerId) {
+      userMoved = true;
+      setCam(cam.x + p.x - previous.x, cam.y + p.y - previous.y, cam.k);
+    } else if (gesture.type === 'node' && gesture.id === event.pointerId) {
+      if (!gesture.moved) {
+        if (Math.hypot(event.clientX - gesture.sx, event.clientY - gesture.sy) < 4) return;
+        gesture.moved = true; userMoved = true;
+        capture(event.pointerId); hideTip(); setPinned(gesture.row, true);
+      }
+      const row = gesture.row;
+      row.fx = Math.max(PAD, Math.min(width - PAD, (p.x - cam.x) / cam.k + gesture.dx));
+      row.fy = Math.max(PAD, Math.min(height - PAD, (p.y - cam.y) / cam.k + gesture.dy));
+      row.x = row.fx; row.y = row.fy;
+      if (reducedMotion()) paint();
+      else { alpha = Math.max(alpha, .3); remaining = Math.max(remaining, 90); if (!simRaf) simRaf = requestAnimationFrame(frame); }
+    }
+  });
+  const endPointer = event => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.delete(event.pointerId);
+    if (gesture && gesture.type === 'node' && gesture.id === event.pointerId && gesture.moved) {
+      suppressClick = true;
+      if (reducedMotion()) settle(.3, 90);
+    }
+    if (gesture && (gesture.type !== 'node' || gesture.id === event.pointerId)) gesture = null;
+  };
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, endPointer);
+  svgElement.addEventListener('dblclick', event => {
+    event.preventDefault();
+    const row = nodeOf(event);
+    if (!row) { fitAll(); return; }
+    if (row._pinned) { setPinned(row, false); settle(.3, 90); }
+  });
   draft.addEventListener('input', () => {
     if (selectedId) {
       draftsByNode.set(selectedId, draft.value);
@@ -1019,26 +1410,24 @@
     const nextWidth = Math.max(280, Math.floor(entries[0].contentRect.width || 736));
     if (Math.abs(nextWidth - lastWidth) < 5) return;
     lastWidth = nextWidth;
+    const previousWidth = width;
+    const previousHeight = height;
     width = nextWidth;
-    height = width <= 480 ? 400 : 520;
     root.setAttribute('data-layout', layoutMode(width));
-    svg.attr('viewBox', `0 0 ${width} ${height}`);
-    if (!simulation) { layoutOffline(); offlineTransform(); return; }
-    simulation.force('center', d3.forceCenter(width / 2, height / 2));
-    if (data.kind === 'execution') {
-      simulation.force('execution-x', d3.forceX(executionX).strength(.85));
-      simulation.force('execution-y', d3.forceY(executionY).strength(.85));
-    } else {
-      simulation.force('project-x', d3.forceX(width / 2).strength(.055));
-      simulation.force('project-y', d3.forceY(height / 2).strength(.055));
-    }
-    simulation.alpha(.35).stop();
-    for (let index = 0; index < 70; index += 1) simulation.tick();
+    computeWorld();
+    nodes.forEach(row => {
+      row.x *= width / previousWidth; row.y *= height / previousHeight;
+      if (row.fx !== null && row.fx !== undefined) { row.fx *= width / previousWidth; row.fy *= height / previousHeight; }
+    });
     paint();
-    applyFilters();
+    settle(.35, 150);
   });
   observer.observe(stage);
+  computeWorld();
+  seedPositions();
   selectNode(selectedId);
   applyFilters();
+  paint();
+  settle(1, TICK_CAP);
 })();
 </script>

@@ -20,7 +20,8 @@ assert.match('fetch("/api")', networkPattern, 'network regex must detect fetch')
 assert.match('new XMLHttpRequest()', networkPattern, 'network regex must detect XMLHttpRequest');
 for (const [name, html] of [['graph.html', template], ['project-graph.html', mcp]]) {
   const externalScripts = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(externalScripts, ['https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js'], `${name} external scripts`);
+  assert.deepEqual(externalScripts, [], `${name} must load no external scripts`);
+  assert.doesNotMatch(html, /d3js|cdn\.jsdelivr|window\.d3/i, `${name} must not reference d3 or a CDN`);
   assert.doesNotMatch(html, networkPattern, `${name} must not make network calls`);
   const svgTag = html.match(/<svg\b[^>]*>/);
   assert.ok(svgTag, `${name} must include an <svg> element`);
@@ -164,23 +165,37 @@ function render(data, options = {}) {
   document.createElement = tag => new Element(tag);
   document.createTextNode = text => ({textContent: text});
   const frames = [];
-  const context = {document, window: {matchMedia: () => ({matches: true})}, navigator: {},
+  let rafCalls = 0;
+  const context = {document, window: {matchMedia: () => ({matches: !options.motion})}, navigator: {},
     Option: function(text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     ResizeObserver: class {
       constructor(callback) { this.callback = callback; resizeCallback = callback; }
       observe() { frames.push(() => this.callback([{contentRect: {width: currentWidth}}])); }
     },
-    requestAnimationFrame: callback => frames.push(callback)};
-  vm.runInNewContext(script(template), context);
-  while (frames.length) frames.shift()();
+    requestAnimationFrame: callback => { rafCalls += 1; return frames.push(callback); }};
+  let clock = 0;
+  const drain = () => { let guard = 0; while (frames.length && guard++ < 5000) { clock += 16.7; frames.shift()(clock); } };
+  context.console = console; vm.runInNewContext(script(template), context);
+  const rafBeforeFirstFrames = rafCalls;
+  drain();
   const viewport = svg.children.find(child => child.tagName === 'G');
   const nodes = viewport?.children.filter(child => child.tagName === 'G').flatMap(group => group.children).filter(child => child.tagName === 'G') || [];
   const resize = nextWidth => {
     currentWidth = nextWidth;
     if (resizeCallback) resizeCallback([{contentRect: {width: nextWidth}}]);
-    while (frames.length) frames.shift()();
+    drain();
   };
-  return {root, svg, get: suffix => root.querySelector(`#@@ROOT@@-${suffix}`), nodes, viewport, document, resize};
+  return {root, svg, get: suffix => root.querySelector(`#@@ROOT@@-${suffix}`), nodes, viewport, document, resize, drain,
+    rafCalls: () => rafCalls, pendingFrames: () => frames.length, rafBeforeFirstFrames};
+}
+
+function camera(view) {
+  const m = view.viewport.attributes.transform.match(/^translate\((-?[\d.]+),(-?[\d.]+)\) scale\(([\d.]+)\)$/);
+  assert.ok(m, `camera transform ${view.viewport.attributes.transform}`);
+  return {x: Number(m[1]), y: Number(m[2]), k: Number(m[3])};
+}
+function positions(view) {
+  return view.nodes.map(n => { const [, x, y] = n.attributes.transform.match(/^translate\(([\d.]+),([\d.]+)\)$/); return {x: Number(x), y: Number(y)}; });
 }
 
 function model(kind, count) {
@@ -205,8 +220,9 @@ for (const kind of ['project', 'execution']) for (const count of [0, 1, 30]) {
   const positions = view.nodes.map(node => node.attributes.transform);
   assert.ok(positions.every(position => /^translate\([\d.]+,[\d.]+\)$/.test(position)));
   assert.deepEqual(render(data).nodes.map(node => node.attributes.transform), positions);
-  view.get('zoom-in').fire('click'); assert.match(view.viewport.attributes.transform, /scale\(1.35\)/);
-  view.get('zoom-out').fire('click'); assert.match(view.viewport.attributes.transform, /scale\(1\)/);
+  const fitK = camera(view).k;
+  view.get('zoom-in').fire('click'); assert.ok(Math.abs(camera(view).k - fitK * 1.35) < 1e-2);
+  view.get('zoom-out').fire('click'); assert.ok(Math.abs(camera(view).k - fitK) < 1e-2);
   view.get('search').value = 'missing'; view.get('search').fire('input');
   assert.ok(view.nodes.slice(1).every(node => node.classList.contains('is-muted')));
   view.get('search').focus(); view.document.fire('keydown', {key: 'Escape', target: view.get('search')});
@@ -218,7 +234,7 @@ for (const kind of ['project', 'execution']) for (const count of [0, 1, 30]) {
     view.nodes[1].fire('click'); assert.match(view.get('detail').textContent, /n1/);
     assert.ok(view.get('draft').value.includes('n1'));
   }
-  view.get('reset').fire('click'); assert.match(view.viewport.attributes.transform, /scale\(1\)/);
+  view.get('reset').fire('click'); assert.ok(Math.abs(camera(view).k - fitK) < 1e-2, 'reset returns to fit-all');
   assert.equal(view.get('search').value, '');
 }
 
@@ -489,5 +505,73 @@ const partialFlag = render({
 assert.equal(partialFlag.get('notice').hidden, false);
 assert.match(partialFlag.get('notice').textContent, /Partial graph/i);
 assert.match(partialFlag.get('summary').textContent, /partial graph/i);
+
+// 6. Native force layout: deterministic, not a lattice, fit-to-view, focus-on-select, reduced motion.
+function chain(kind, count) {
+  const data = model(kind, count);
+  data.edges = Array.from({length: count - 1}, (_, i) => ({source: `n${i}`, target: `n${(i * 7 + 1) % count === i ? i + 1 : (i * 7 + 1) % count}`, relation: i % 2 ? 'calls' : 'tests', confidence: 'EXTRACTED'}));
+  data.nodes.forEach((row, i) => { row.degree = 2 + (i % 3); row.show_label = i < 3; });
+  return data;
+}
+for (const kind of ['project', 'execution']) {
+  const data = chain(kind, 40);
+  const first = render(data); const second = render(data);
+  assert.deepEqual(positions(first), positions(second), `${kind} layout must be deterministic`);
+  const pts = positions(first);
+  assert.ok(new Set(pts.map(p => p.x.toFixed(1))).size > 20 && new Set(pts.map(p => p.y.toFixed(1))).size > 20, `${kind} layout must not sit on a fixed lattice`);
+  const cam = camera(first);
+  assert.ok(cam.k >= .3 && cam.k <= 5);
+  for (const p of pts) {
+    const sx = cam.x + p.x * cam.k; const sy = cam.y + p.y * cam.k;
+    assert.ok(sx >= 0 && sx <= 736 && sy >= 0 && sy <= 520, `${kind} fit-to-view keeps node inside stage (${sx},${sy})`);
+  }
+  // Selecting a node moves/zooms the view; Reset and Escape return to fit-all.
+  const before = camera(first);
+  first.nodes[5].fire('click');
+  assert.notDeepEqual(camera(first), before, 'click must focus the view on the node');
+  const focused = camera(first); const row5 = pts[5];
+  assert.ok(Math.abs(focused.x + row5.x * focused.k - 368) < 1 && Math.abs(focused.y + row5.y * focused.k - 260) < 1, 'selected node is centred');
+  first.nodes[5].fire('keydown', {key: 'Escape'});
+  assert.deepEqual(camera(first), before, 'Esc returns to fit-all');
+  first.nodes[5].fire('keydown', {key: '+'}); assert.ok(camera(first).k > before.k);
+  first.nodes[5].fire('keydown', {key: '0'}); assert.deepEqual(camera(first), before, '0 fits all');
+  // Hover highlights neighbours and dims the rest; leaving clears it. Drag pin / unpin by double-click.
+  const edgeEls = first.viewport.children[0].children;
+  first.nodes[0].fire('pointerenter');
+  assert.ok(first.nodes.some(n => n.classList.contains('is-dim')) && first.nodes[0].classList.contains('is-dim') === false);
+  assert.ok(edgeEls.some(e => e.classList.contains('is-hot')));
+  first.nodes[0].fire('pointerleave');
+  assert.ok(first.nodes.every(n => !n.classList.contains('is-dim')));
+  assert.ok(edgeEls.some(e => e.classList.contains('is-flow')) === true, 'selected node edges flow');
+  const svgPts = first.svg;
+  svgPts.fire('pointerdown', {pointerId: 1, button: 0, clientX: 100, clientY: 100, target: first.nodes[0]});
+  svgPts.fire('pointermove', {pointerId: 1, clientX: 140, clientY: 160});
+  svgPts.fire('pointerup', {pointerId: 1});
+  assert.equal(first.nodes[0].attributes['data-pinned'], 'true');
+  assert.match(first.nodes[0].attributes['aria-label'], /pinned/);
+  svgPts.fire('dblclick', {target: first.nodes[0]});
+  assert.equal(first.nodes[0].attributes['data-pinned'], 'false');
+}
+// Reduced motion computes the settled layout before first paint and never requests animation frames.
+{
+  const data = chain('project', 40);
+  const view = render(data);
+  assert.equal(view.rafCalls(), 0, 'reduced motion must not request animation frames');
+  view.nodes[3].fire('click'); view.get('zoom-in').fire('click'); view.get('reset').fire('click'); view.resize(500);
+  assert.equal(view.rafCalls(), 0, 'reduced motion interactions stay frame-free');
+}
+// Full motion animates the settle then eases to fit-all, and the animation ends.
+{
+  const data = chain('project', 40);
+  const view = render(data, {motion: true});
+  assert.ok(view.rafCalls() > 0, 'full motion animates the layout');
+  assert.equal(view.pendingFrames(), 0, 'animation settles and stops');
+  const settled = camera(view);
+  assert.ok(settled.k > 0 && !Number.isNaN(settled.x));
+  const startPositions = positions(view);
+  view.nodes[2].fire('click'); view.drain();
+  assert.notDeepEqual(camera(view), settled);
+  assert.deepEqual(positions(view), startPositions, 'camera moves do not move nodes');
+}
 
 console.log('offline renderer: layouts (320/768/1024), non-color kind/status, keyboard/focus, selection persistence, empty/partial/truncated states and template parity passed');

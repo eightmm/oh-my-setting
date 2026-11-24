@@ -126,7 +126,7 @@ framework:
   and pre-ticks only its small projection. Following
   [W3C SVG accessibility guidance](https://www.w3.org/TR/SVG/access.html), the
   fragment also exposes keyboard controls and an always-present text listing;
-  a missing CDN renderer degrades to that listing rather than losing the graph.
+  the renderer is self-contained (no CDN or external script), and the listing stays available regardless.
 
 ## Ownership boundaries
 
