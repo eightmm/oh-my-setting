@@ -789,6 +789,21 @@ test('all current public verbs have a Korean search label and new host verbs can
   assert.ok(Object.values(glossary).every(label=>/[가-힣]/.test(label)));
 });
 
+test('selected function shows distinct direction, relation and confidence once per returned neighbor',async()=>{
+  const p=await panel(['one'],{}, {locale:'en',tools:{oms_panel_project_graph:()=>({
+    schema:1,kind:'oms-panel-project-graph',status:'ready',scope:{focusNode:'symbol:a::f'},nodes:[{id:'symbol:a::f',kind:'function',label:'f'},{id:'symbol:a::g',label:'g',kind:'function'}],provenance:{source:'indexed-graph'},
+    edges:[{source:'symbol:a::f',target:'symbol:a::g',relation:'calls',confidence:'EXTRACTED'},{source:'symbol:a::g',target:'symbol:a::f',relation:'calls',confidence:'EXTRACTED'}],
+    selection:{omittedNeighbors:7,neighbors:[{id:'symbol:a::g',direction:'out',relation:'calls',confidence:'EXTRACTED'},{id:'symbol:a::g',direction:'in',relation:'references',confidence:'INFERRED'},{id:'symbol:a::g',direction:'out',relation:'tests',confidence:'EXTRACTED'}]}
+  })}});
+  await p.event('tab-project','click');p.get('graph-confidence').value='all';await p.event('graph-confidence','change');
+  const row=p.get('graph-list').children[0],info=row.textContent;
+  for(const label of ['→ Calls · Extracted','← Calls · Extracted','← References · Inferred','→ Test link · Extracted']) assert.equal(info.split(label).length,2);
+  assert.match(p.get('graph-info').textContent,/7 links omitted/);
+  assert.doesNotMatch(p.get('map-children').textContent,/References/);
+  p.get('language-choice').value='ko';await p.event('language-choice','change');
+  assert.match(p.get('graph-list').textContent,/← 참조 · 추론/);
+});
+
 test('standard hosts retain selectable command help; provenance and inferred associations are explicit', async () => {
   const p=await panel(['one','two'],{}, {message:true,readOnly:true});
   p.host.tools={

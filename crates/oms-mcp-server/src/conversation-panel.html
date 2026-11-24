@@ -986,15 +986,16 @@ function graphKind(k) {
   const kinds = {directory:['폴더','Folder'],folder:['폴더','Folder'],file:['파일','File'],module:['모듈','Module'],repository:['저장소','Repository'],project:['프로젝트','Project'],symbol:['심볼','Symbol']};
   return Object.hasOwn(kinds,k) ? choice(...kinds[k]) : k || choice('노드','Node');
 }
-function graphLink(e,out) {
-  const rel=e?.relation;
-  if(rel==='contains' && ['STRUCTURAL','EXTRACTED'].includes(e.confidence)) return out ? choice('하위 항목','Child') : choice('상위 항목','Parent');
-  const direction=out ? '→ ' : '← ';
-  const name=rel==='imports' || rel==='import' ? choice('가져오기','Imports') : rel;
+function graphLink(e, direction) {
+  const rel=e.relation;
+  const labels={calls:['호출','Calls'],imports:['가져오기','Imports'],import:['가져오기','Imports'],references:['참조','References'],tests:['테스트 연결','Test link']};
   const confidence={EXTRACTED:['추출','Extracted'],INFERRED:['추론','Inferred'],AMBIGUOUS:['불확실','Ambiguous'],STRUCTURAL:['구조','Structural']};
-  const proof=Object.hasOwn(confidence,e?.confidence) ? choice(...confidence[e.confidence]) : choice('미확인','Unconfirmed');
-  return [name && direction+name,proof].filter(Boolean).join(' · ');
+  const name=rel==='contains' ? (direction==='out' ? choice('하위 항목','Child') : choice('상위 항목','Parent')) :
+    Object.hasOwn(labels,rel) ? choice(...labels[rel]) : rel;
+  const prefix=direction==='out' ? '→ ' : direction==='in' ? '← ' : '↻ ';
+  return prefix+name+' · '+(Object.hasOwn(confidence,e.confidence) ? choice(...confidence[e.confidence]) : choice('미확인','Unconfirmed'));
 }
+
 function readGraph(focus, query = '', limit = 40) {
   if (!explorerBound) return;
   if (!focus && !query) focus='dir:.';
@@ -1045,16 +1046,22 @@ function paintGraph(loading = false) {
   const byNeighbor = new Map();
   const allRelations=el('graph-confidence').value === 'all';
   function showRelation(e) {return allRelations || ['STRUCTURAL','EXTRACTED'].includes(e.confidence);}
+  function remember(id,edge,direction) {
+    if (!id || !showRelation(edge) || typeof edge.relation!=='string') return;
+    if (!byNeighbor.has(id)) byNeighbor.set(id,new Map());
+    const key=JSON.stringify([direction,edge.relation,edge.confidence]);
+    byNeighbor.get(id).set(key,{edge,direction});
+  }
   for (const e of data.edges) {
-    if (!showRelation(e)) continue;
-    if (e.source === focus) byNeighbor.set(e.target,{edge:e,out:true});
-    else if (e.target === focus) byNeighbor.set(e.source,{edge:e,out:false});
+    if (e.source===focus) remember(e.target,e,e.target===focus?'self':'out');
+    else if (e.target===focus) remember(e.source,e,'in');
   }
   for (const n of data.selection?.neighbors || []) {
-    if (!n || !showRelation(n) || typeof n.id!=='string') continue;
-    if (!byNeighbor.has(n.id)) byNeighbor.set(n.id,{edge:n,out:n.direction!=='in'});
+    if (!n || !showRelation(n) || typeof n.id!=='string' || !['in','out'].includes(n.direction)) continue;
+    remember(n.id,n,n.id===focus?'self':n.direction);
     if (!candidates.some(x=>x.id===n.id) && n.id!==focus) candidates.push(n);
   }
+  if(local && byNeighbor.has(focus)) candidates.push(local);
   const connected = candidates.filter(r => byNeighbor.has(r.id));
   const rows = [...connected,...candidates.filter(r => !byNeighbor.has(r.id))];
   const input = el('graph-filter').value.trim();
@@ -1068,15 +1075,16 @@ function paintGraph(loading = false) {
   function item(r,location) {
     const compact=location!=='list';
     const title = r.label || r.path || r.id;
-    const link = byNeighbor.get(r.id);
-    const relation = link && graphLink(link.edge,link.out);
+    const relations=Array.from(byNeighbor.get(r.id)?.values() || [], link=>graphLink(link.edge,link.direction));
+    const extras=relations.length>1 ? ' +'+(relations.length-1) : '';
     const size = Number.isSafeInteger(r.file_count) && r.file_count>0 ? choice('파일 '+formatCount(r.file_count)+'개',formatCount(r.file_count)+' files') : '';
-    const description = [graphKind(r.kind),size,compact && size ? '' : relation].filter(Boolean).join(' · ');
+    const description=[graphKind(r.kind),size].filter(Boolean).join(' · ');
     const button = explorerButton('',()=>enterNode(r),compact?'map-node':'explorer-item');
     const rest = Number.isSafeInteger(r.omitted_children) && r.omitted_children > 0 ? choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children') : '';
-    button.title = [r.path || title,description,rest].filter(Boolean).join(' · ');
+    button.title = [r.path || title,description,...relations,rest].filter(Boolean).join(' · ');
     button.setAttribute('aria-label',button.title);button.setAttribute('data-explorer-key',location+':'+r.id);
-    const text = node('span',''); text.append(node('strong',title),node('small',compact && size ? size : description));
+    const text = node('span',''); text.append(node('strong',title),node('small',compact ? (size || (relations.length ? relations[0]+extras : description)) : description));
+    if (!compact) for (const relation of relations) text.append(node('small',relation));
     button.append(text); if (!compact) button.append(node('span','›','muted'));
     const li=node('li','');li.append(button);return li;
   }
@@ -1095,7 +1103,9 @@ function paintGraph(loading = false) {
   const missing = data.status==='not_found' ? choice('일치하는 노드 없음','No matching node') : data.status==='unknown' ? choice('구조를 확인할 수 없음','Structure unavailable') :
     !shown ? choice('조회된 노드 없음','No nodes returned') : !rows.length ? choice('연결된 노드 없음','No connected nodes') : '';
   el('map-status').textContent=[source,basis,span,missing,partial && choice('일부 표시','Partial view')].filter(Boolean).join(' · ');
-  el('graph-info').textContent=[el('map-status').textContent,query && choice('필터 결과 ','Filtered: ')+filtered.length].filter(Boolean).join(' · ');
+  const omitted=data.selection?.omittedNeighbors;
+  const omittedLabel=Number.isSafeInteger(omitted) && omitted>0 ? choice('선택 항목 연결 '+omitted+'개 생략',omitted+' links omitted for this selection') : '';
+  el('graph-info').textContent=[el('map-status').textContent,omittedLabel,query && choice('필터 결과 ','Filtered: ')+filtered.length].filter(Boolean).join(' · ');
   el('graph-more').hidden=!partial || graphLimit>=60;
 }
 
