@@ -924,6 +924,60 @@ fn named_skill(name: &str, body_tail: &str) -> String {
 }
 
 #[test]
+fn desktop_marketplaces_package_the_same_project_workflow() {
+    let root = oms_source();
+    let load = |path: PathBuf| -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).expect("read plugin JSON")).expect("plugin JSON")
+    };
+    let mut workflows = Vec::new();
+    for (catalog, command) in [(root.clone(), "oms"), (root.join("plugins/oms-ssh"), "ssh")] {
+        let market = load(catalog.join(".agents/plugins/marketplace.json"));
+        let entry = market["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "oms")
+            .unwrap();
+        let package = catalog
+            .join(entry["source"]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap();
+        assert!(package.starts_with(&catalog));
+        let manifest = load(package.join("plugin.json"));
+        assert_eq!(manifest["name"], "oms");
+        let setup = &manifest["extensions"]["com.openai"]["onboardingSkill"];
+        assert!(package.join(setup.as_str().unwrap()).is_file());
+        let servers = load(package.join("mcp.json"));
+        assert_eq!(servers["mcpServers"].as_object().unwrap().len(), 1);
+        assert_eq!(servers["mcpServers"]["oms-panel"]["command"], command);
+        workflows.push(fs::read(package.join("skills/oms-project/SKILL.md")).unwrap());
+    }
+    // Each transport is a self-contained import, including on Windows.
+    assert_eq!(workflows[0], workflows[1]);
+    let app = root.join("plugins/oms-app");
+    let manifest = load(app.join("plugin.json"));
+    assert_eq!(
+        manifest["version"],
+        load(root.join("plugins/oms/plugin.json"))["version"]
+    );
+    let servers = load(app.join("mcp_config.json"));
+    let server = &servers["mcpServers"]["oms-panel"];
+    assert_eq!(servers["mcpServers"].as_object().unwrap().len(), 1);
+    assert_eq!(server["command"], "ssh");
+    let args = server["args"].as_array().unwrap();
+    assert_eq!(
+        args[..args.len() - 1],
+        load(root.join("plugins/oms-ssh/oms/mcp.json"))["mcpServers"]["oms-panel"]["args"]
+            .as_array()
+            .unwrap()[..args.len() - 1]
+    );
+    assert_eq!(
+        args.last().unwrap(),
+        "exec env OMS_MCP_TOOL_PROFILE=mcp-app ~/.local/bin/oms mcp-server"
+    );
+}
+
+#[test]
 fn bundled_skill_validation_covers_enabled_source_catalog() {
     let source = oms_source();
     let manifest: serde_json::Value =

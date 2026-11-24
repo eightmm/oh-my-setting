@@ -1459,16 +1459,10 @@ fn dispatch_owned(
             source: source.to_path_buf(),
         });
         let mut reader = std::io::BufReader::new(std::io::stdin().lock());
-        let mut writer = std::io::stdout().lock();
-        match oms_mcp_server::serve_with_services(
-            source,
-            &cwd,
-            interrupted,
-            &mut reader,
-            &mut writer,
-            config,
-            executor,
-        ) {
+        let mut writer = std::io::stdout();
+        match oms_mcp_server::Server::with_executor(source, &cwd, interrupted, config, executor)
+            .and_then(|server| server.serve_connection(&mut reader, &mut writer))
+        {
             Ok(()) => std::process::exit(0),
             Err(err) => {
                 eprintln!("error: {err}");

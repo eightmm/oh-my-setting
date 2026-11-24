@@ -15,6 +15,8 @@ pub mod context;
 pub mod history;
 #[path = "project_index.rs"]
 pub mod index;
+#[path = "project_panel.rs"]
+pub(crate) mod panel;
 #[path = "project_sqlite.rs"]
 mod sqlite;
 #[path = "project_unicode.rs"]
@@ -159,6 +161,9 @@ pub(crate) fn dispatch(
     bounds(args)?;
     if args.action == "benchmark" {
         return benchmark::dispatch(args, repo, _cwd, cancel, helper);
+    }
+    if args.action == "panel" {
+        return panel::dispatch(args, repo, cancel);
     }
     let state = state_dir(repo)?;
     let action = args.action.as_str();

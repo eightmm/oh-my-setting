@@ -1150,6 +1150,7 @@ dependencies = [
  "oms-context",
  "oms-output",
  "oms-output-capture",
+ "oms-reference",
  "oms-safe-fs",
  "oms-scrub",
  "regex",

@@ -3251,6 +3251,24 @@ impl GhRepo {
 printf '%s\n' "$*" >> '{log}'
 dir='{dir}' method=GET endpoint= body=
 args=("$@")
+case "$1 $2" in
+  "pr list") panel=panel-prs ;;
+  "issue list") panel=panel-issues ;;
+  "issue view"|"pr view") panel=panel-lookup ;;
+  "api graphql")
+    case "$*" in
+      *'projectV2(number'*) panel=panel-board ;;
+      *'work:issues('*|*'work:pullRequests('*) panel=panel-inventory ;;
+      *) panel=panel-projects ;;
+    esac ;;
+  *) panel= ;;
+esac
+if [ -n "$panel" ]; then
+  [ -f "$dir/$panel" ] || exit 1
+  printf '%s\n' "$(<"$dir/$panel")"
+  if [ -f "$dir/$panel-failed" ]; then exit 1; fi
+  exit 0
+fi
 for ((i = 0; i < ${{#args[@]}}; i++)); do
   case "${{args[i]}}" in
     --method) method=${{args[i+1]}} ;;
@@ -4255,4 +4273,479 @@ fn land_pr_merge_preserves_head_branch_when_dependent_pr_is_open_or_unverified()
             "{status}"
         );
     }
+}
+
+#[test]
+fn github_panel_reads_one_explicit_project_board_without_guessing() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "desktop-board", false);
+    let url = "https://github.com/orgs/example-org/projects/3";
+    let field = |id: &str, name: &str, opts: &str| {
+        format!(
+            r#"{{"__typename":"ProjectV2SingleSelectField","id":"{id}","name":"{name}","options":[{opts}]}}"#
+        )
+    };
+    let fields = [
+        field("F_status", "Status", r#"{"id":"o1","name":"Ready"}"#),
+        field("F_prio", "Priority", r#"{"id":"o2","name":"P1"}"#),
+        field("F_prio2", "Priority", r#"{"id":"o3","name":"P2"}"#),
+    ]
+    .join(",");
+    let value = |field: &str, option: &str, name: &str| {
+        format!(
+            r#"{{"__typename":"ProjectV2ItemFieldSingleSelectValue","optionId":"{option}","name":"{name}","field":{{"id":"{field}"}}}}"#
+        )
+    };
+    let issue = |n: u32, state: &str, repo: &str, labels: &str, extra: &str| {
+        format!(
+            r#"{{"type":"ISSUE","isArchived":false,"content":{{"__typename":"Issue","number":{n},"title":"Work {n}","state":"{state}","url":"https://github.com/{repo}/issues/{n}","repository":{{"nameWithOwner":"{repo}"}},"issueType":null,"blockedBy":{{"pageInfo":{{"hasNextPage":false}},"nodes":[]}},"labels":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{labels}]}}}},"fieldValues":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{extra}]}}}}"#
+        )
+    };
+    let mine = "example-org/example-repo";
+    let plan = r.repo.join(".oms/plan");
+    fs::create_dir_all(&plan).unwrap();
+    fs::write(
+        plan.join("tasks.json"),
+        r##"{"tasks":{"existing":{"issue":"#7","state":"in_progress"}}}"##,
+    )
+    .unwrap();
+    let items = [
+        issue(1, "OPEN", mine, "", &value("F_status", "o1", "Ready")),
+        issue(1, "OPEN", mine, "", ""),
+        issue(2, "OPEN", mine, r#"{"name":"Epic"}"#, ""),
+        issue(3, "CLOSED", mine, "", ""),
+        issue(4, "OPEN", "elsewhere/project", "", ""),
+        r#"{"type":"DRAFT_ISSUE","isArchived":false,"content":null,"fieldValues":{"pageInfo":{"hasNextPage":false},"nodes":[]}}"#.to_string(),
+        issue(5, "OPEN", mine, "", "").replace(r#""isArchived":false"#, r#""isArchived":true"#),
+        issue(6, "OPEN", mine, "", &value("F_status", "zz", "Odd <b>name</b>")),
+        issue(7, "OPEN", mine, "", ""),
+        issue(8, "OPEN", mine, "", "").replace(r#""blockedBy":{"pageInfo":{"hasNextPage":false},"nodes":[]}"#,r#""blockedBy":{"pageInfo":{"hasNextPage":false},"nodes":[{"state":"OPEN"}]}"#),
+        issue(9, "OPEN", mine, "", "").replace(r#""blockedBy":{"pageInfo":{"hasNextPage":false},"nodes":[]}"#,r#""blockedBy":null"#),
+        issue(10, "OPEN", mine, "", "").replace(r#""issueType":null"#,r#""issueType":{"name":"Epic"}"#),
+        issue(11, "OPEN", mine, "", "").replace(r#""labels":{"pageInfo":{"hasNextPage":false}"#,r#""labels":{"pageInfo":{"hasNextPage":true}"#),
+    ]
+    .join(",");
+    let reply = |more: bool, id: &str| {
+        format!(
+            r#"{{"data":{{"organization":{{"login":"example-org","projectV2":{{"id":"{id}","number":3,"title":"Board","url":"{url}","closed":false,"fields":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{fields}]}},"items":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"cGFnZTE="}},"nodes":[{items}]}}}}}}}}}}"#
+        )
+    };
+    fs::write(r.dir.join("panel-board"), reply(true, "PVT_abc")).unwrap();
+    fs::write(r.dir.join("panel-projects"),r#"{"data":{"repository":{"nameWithOwner":"example-org/example-repo","projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PVT_abc","url":"https://github.com/orgs/example-org/projects/3","number":3,"title":"Board","closed":false,"owner":{"__typename":"Organization","login":"example-org"},"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}]}}}}"#).unwrap();
+    let run = |args: &[&str]| {
+        let mut a = vec!["panel-status", "--json"];
+        a.extend(args);
+        let (code, out, err) = r.run(&iso, &a);
+        (code, V::parse(out.as_bytes()).ok(), err)
+    };
+    let (code, out, err) = run(&["--project-id", "PVT_abc"]);
+    assert_eq!(code, 0, "{err}");
+    let b = out.unwrap();
+    let b = b.get("github").get("board");
+    assert_eq!(b.get("status").text(), Some("available"));
+    assert_eq!(b.get("incomplete"), &V::Bool(true));
+    assert!(b.get("nextCursor").text().is_some());
+    assert_eq!(b.get("board").get("id").text(), Some("PVT_abc"));
+    let missing: Vec<_> = b
+        .get("board")
+        .get("fields")
+        .get("missing")
+        .array()
+        .iter()
+        .filter_map(|v| v.text())
+        .collect();
+    assert_eq!(
+        missing,
+        ["Priority", "Area", "Phase"],
+        "duplicate Priority is ambiguous, not guessed"
+    );
+    let class: Vec<_> = b
+        .get("items")
+        .array()
+        .iter()
+        .map(|i| i.get("class").text().unwrap())
+        .collect();
+    assert_eq!(
+        class,
+        [
+            "candidate",
+            "duplicate",
+            "epic",
+            "closed",
+            "foreign",
+            "draft",
+            "archived",
+            "unverified",
+            "plan_linked",
+            "blocked",
+            "unverified",
+            "epic",
+            "unknown"
+        ]
+    );
+    let rows = b.get("items").array();
+    assert_eq!(
+        rows[0].get("url").text(),
+        Some("https://github.com/example-org/example-repo/issues/1")
+    );
+    assert_eq!(
+        rows[0].get("fields").get("Status").get("optionId").text(),
+        Some("o1")
+    );
+    assert_eq!(rows[7].get("fields").get("Status"), &V::Null);
+    assert!(
+        rows[4].get("url").text().is_none(),
+        "foreign item exposes no detail"
+    );
+    // A wrong node id, wrong cursor, or a different board never silently substitutes.
+    let (_, out, _) = run(&["--project-id", "PVT_other"]);
+    assert_eq!(
+        out.unwrap().get("github").get("board").get("reason").text(),
+        Some("board_not_in_catalog")
+    );
+    assert_ne!(
+        run(&["--project-id", "PVT_abc", "--cursor", "bogus.cGFnZTE="]).0,
+        0
+    );
+    assert_ne!(
+        r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project",
+                "https://github.com/orgs/example-org/repo"
+            ]
+        )
+        .0,
+        0
+    );
+    fs::write(r.dir.join("panel-board"), reply(false, "PVT_replaced")).unwrap();
+    assert_eq!(
+        run(&["--project-id", "PVT_abc"])
+            .1
+            .unwrap()
+            .get("github")
+            .get("board")
+            .get("reason")
+            .text(),
+        Some("identity_mismatch")
+    );
+    // Cursor continuation completes the board.
+    let cursor = b.get("nextCursor").text().unwrap().to_string();
+    fs::write(r.dir.join("panel-board"), reply(false, "PVT_abc")).unwrap();
+    let (code, out, err) = run(&["--project-id", "PVT_abc", "--cursor", &cursor]);
+    assert_eq!(code, 0, "{err}");
+    let done = out.unwrap();
+    assert!(matches!(
+        done.get("github").get("board").get("nextCursor"),
+        V::Null
+    ));
+    assert!(r.calls().contains("-f after=cGFnZTE="));
+    // Missing scope reports the reason; nothing was mutated.
+    fs::write(r.dir.join("panel-board"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
+    fs::write(r.dir.join("panel-board-failed"), "").unwrap();
+    let (_, out, _) = run(&["--project-id", "PVT_abc"]);
+    let denied = out.unwrap();
+    assert_eq!(
+        denied.get("github").get("board").get("reason").text(),
+        Some("insufficient_scope")
+    );
+    assert_eq!(r.posts(), 0);
+}
+
+#[test]
+fn github_panel_matches_current_and_verified_linked_worktrees() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "desktop-git", false);
+    let linked = iso.home.path().join("worktree");
+    iso.git(
+        &r.repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let head = iso.git_out(&r.repo, &["rev-parse", "HEAD"]);
+    let old = "a".repeat(40);
+    let row = |n: i32, branch: &str, oid: &str, fork: bool| {
+        format!(
+            r#"{{"number":{n},"title":"Team PR","state":"OPEN","isDraft":false,"headRefName":"{branch}","baseRefName":"main","headRefOid":"{oid}","isCrossRepository":{fork},"statusCheckRollup":[{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}},{{"__typename":"StatusContext","state":"PENDING"}},{{"__typename":"StatusContext","context":"lint","state":"FAILURE"}},{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"}}],"url":"https://github.com/example-org/example-repo/pull/{n}"}}"#
+        )
+    };
+    let prs = [
+        row(1, "main", &old, false),
+        row(2, "feature", &head, false),
+        row(3, "feature", &head, true),
+        row(4, "feature", &old, false),
+        row(5, "unrelated", &head, false),
+    ];
+    fs::write(r.dir.join("panel-prs"), format!("[{}]", prs.join(","))).unwrap();
+    fs::write(r.dir.join("panel-issues"), r#"[{"number":3,"title":"Open issue","state":"OPEN","url":"https://github.com/example-org/example-repo/issues/3","body":"private text"},{"number":4,"title":"Foreign issue","state":"OPEN","url":"https://github.com/elsewhere/project/issues/4"}]"#).unwrap();
+    let board_reply = r#"{"data":{"repository":{"nameWithOwner":"EXAMPLE-org/example-repo","projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[{"number":4,"title":"Board","url":"https://github.com/orgs/example-org/projects/4","closed":false,"owner":{"__typename":"Organization","login":"example-org"},"items":{"pageInfo":{"hasNextPage":true},"nodes":[{"type":"PULL_REQUEST","content":{"__typename":"PullRequest","number":2,"state":"OPEN","title":"Linked work","url":"https://github.com/example-org/example-repo/pull/2","repository":{"nameWithOwner":"example-org/example-repo"}}},{"type":"ISSUE","content":{"__typename":"Issue","number":1,"state":"OPEN","title":"Foreign issue","url":"https://github.com/elsewhere/project/issues/1","repository":{"nameWithOwner":"elsewhere/project"}}},{"type":"REDACTED","content":null}]}}]}}}}"#;
+    fs::write(r.dir.join("panel-projects"), board_reply).unwrap();
+    let get = |path: &Path| {
+        let (code, out, err) = r.run_in(&iso, path, &["panel-status", "--json"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            !["Foreign issue", "private text", "secret-filename"]
+                .iter()
+                .any(|text| out.contains(text))
+        );
+        V::parse(out.as_bytes()).unwrap()
+    };
+    fs::write(r.repo.join("secret-filename"), "private").unwrap();
+    let data = get(&r.repo);
+    assert!(matches!(data.get("git").get("dirty"), V::Bool(true)));
+    assert_eq!(data.get("git").get("head").text(), Some(head.as_str()));
+    assert!(matches!(data.get("git").get("ahead"), V::Null));
+    let github = data.get("github");
+    assert_eq!(github.get("status").text(), Some("available"));
+    let work = github.get("work");
+    let issues = work.get("issues");
+    assert_eq!(issues.get("status").text(), Some("available"));
+    assert_eq!(issues.get("items").array().len(), 1);
+    assert_eq!(issues.get("incomplete"), &V::Bool(true));
+    let picker = work.get("pullRequests");
+    assert_eq!(picker.get("status").text(), Some("available"));
+    assert_eq!(
+        picker.get("items").array().len(),
+        5,
+        "includes fork and other-branch PRs"
+    );
+    assert_eq!(picker.get("incomplete"), &V::Bool(false));
+    let projects = work.get("projects");
+    assert_eq!(projects.get("status").text(), Some("available"));
+    let boards = projects.get("items").array();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(
+        boards[0].get("url").text(),
+        Some("https://github.com/orgs/example-org/projects/4")
+    );
+    assert_eq!(boards[0].get("incomplete"), &V::Bool(true));
+    let contents = boards[0].get("items").array();
+    assert_eq!(contents.len(), 1);
+    assert_eq!(
+        contents[0].get("url").text(),
+        Some("https://github.com/example-org/example-repo/pull/2")
+    );
+    let rows = github.get("pullRequests").array();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("scope").text(), Some("checkout"));
+    assert!(matches!(rows[0].get("matchesLocalHead"), V::Bool(false)));
+    assert_eq!(
+        rows[1].get("url").text(),
+        Some("https://github.com/example-org/example-repo/pull/2")
+    );
+    assert_eq!(rows[1].get("scope").text(), Some("linkedWorktree"));
+    assert_eq!(rows[1].get("title").text(), Some("Team PR"));
+    assert_eq!(
+        rows[1].get("checks").get("items").array()[0]
+            .get("name")
+            .text(),
+        Some("lint")
+    );
+    for key in ["passed", "failed", "pending", "other"] {
+        assert!(matches!(rows[1].get("checks").get(key),V::Num(n) if n=="1"));
+    }
+    let issue_page = r#"{"data":{"repository":{"nameWithOwner":"example-org/example-repo","work":{"pageInfo":{"hasNextPage":true,"endCursor":"cGFnZTE="},"nodes":[{"number":3,"title":"Scoped issue","url":"https://github.com/example-org/example-repo/issues/3","state":"OPEN"}]}}}}"#;
+    fs::write(r.dir.join("panel-inventory"), issue_page).unwrap();
+    let inventory = |collection: &str, after: Option<&str>| {
+        let mut args = vec!["panel-status", "--inventory", collection];
+        if let Some(s) = after {
+            args.extend(["--cursor", s]);
+        }
+        r.run(&iso, &args)
+    };
+    let (code, page, err) = inventory("issues", None);
+    assert_eq!(code, 0, "{err}");
+    let first = V::parse(page.as_bytes())
+        .unwrap()
+        .get("github")
+        .get("inventory")
+        .clone();
+    assert_eq!(first.get("items").array().len(), 1);
+    let cursor = first.get("nextCursor").text().unwrap();
+    assert_ne!(inventory("pullRequests", Some(cursor)).0, 0);
+    assert_ne!(inventory("issues", Some("--help")).0, 0);
+    let repeated = V::parse(inventory("issues", Some(cursor)).1.as_bytes()).unwrap();
+    let repeated = repeated.get("github").get("inventory");
+    assert_eq!(repeated.get("nextCursor"), &V::Null);
+    assert_eq!(repeated.get("incomplete"), &V::Bool(true));
+    let last = issue_page
+        .replace("true", "false")
+        .replace("/issues/3", "/issues/8")
+        .replace(r#""number":3"#, r#""number":8"#);
+    fs::write(r.dir.join("panel-inventory"), &last).unwrap();
+    let (code, page, err) = inventory("issues", Some(cursor));
+    assert_eq!(code, 0, "{err}");
+    let page = V::parse(page.as_bytes()).unwrap();
+    let page = page.get("github").get("inventory");
+    assert_eq!(
+        page.get("items").array()[0].get("number"),
+        &V::Num("8".into())
+    );
+    assert_eq!(page.get("incomplete"), &V::Bool(false));
+    assert_eq!(page.get("nextCursor"), &V::Null);
+    fs::write(
+        r.dir.join("panel-inventory"),
+        last.replace("/issues/8", "/pull/8"),
+    )
+    .unwrap();
+    let page = V::parse(inventory("pullRequests", None).1.as_bytes()).unwrap();
+    assert_eq!(
+        page.get("github").get("inventory").get("items").array()[0]
+            .get("kind")
+            .text(),
+        Some("pull")
+    );
+    let lookup = |kind: &str, no: &str| {
+        let (code, out, err) = r.run(&iso, &["panel-status", "--json", kind, no]);
+        assert_eq!(code, 0, "{err}");
+        assert!(!out.contains("extra body"));
+        V::parse(out.as_bytes())
+            .unwrap()
+            .get("github")
+            .get("lookup")
+            .clone()
+    };
+    let issue = r#"{"number":447,"title":"Older task","url":"https://github.com/example-org/example-repo/issues/447","state":"OPEN","body":"extra body"}"#;
+    fs::write(r.dir.join("panel-lookup"), issue).unwrap();
+    assert_eq!(
+        lookup("--issue", "447").get("item").get("title").text(),
+        Some("Older task")
+    );
+    assert_eq!(
+        lookup("--issue", "446").get("status").text(),
+        Some("unavailable")
+    );
+    assert_eq!(
+        lookup("--pull", "447").get("status").text(),
+        Some("unavailable")
+    );
+    for (payload, status) in [
+        (issue.replace("OPEN", "CLOSED"), "closed"),
+        (issue.replace("example-org", "foreign"), "unavailable"),
+    ] {
+        fs::write(r.dir.join("panel-lookup"), payload).unwrap();
+        let data = lookup("--issue", "447");
+        assert_eq!(data.get("status").text(), Some(status));
+        assert_eq!(data.get("item"), &V::Null);
+    }
+    let pr = issue.replace("/issues/", "/pull/");
+    fs::write(r.dir.join("panel-lookup"), pr).unwrap();
+    assert_eq!(
+        lookup("--pull", "447").get("status").text(),
+        Some("available")
+    );
+    for args in [
+        vec!["panel-status", "--issue", "0"],
+        vec!["panel-status", "--issue", "2", "--pull", "3"],
+    ] {
+        assert_ne!(r.run(&iso, &args).0, 0);
+    }
+    let data = get(&linked);
+    assert_eq!(data.get("git").get("branch").text(), Some("feature"));
+    assert!(matches!(data.get("git").get("dirty"), V::Bool(false)));
+    assert_eq!(
+        data.get("github").get("pullRequests").array()[0]
+            .get("scope")
+            .text(),
+        Some("checkout")
+    );
+    fs::write(
+        r.dir.join("panel-projects"),
+        board_reply.replace("EXAMPLE-org/example-repo", "other/project"),
+    )
+    .unwrap();
+    assert_eq!(
+        get(&r.repo)
+            .get("github")
+            .get("work")
+            .get("projects")
+            .get("status")
+            .text(),
+        Some("unavailable")
+    );
+    fs::write(r.dir.join("panel-projects"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
+    fs::write(r.dir.join("panel-projects-failed"), "").unwrap();
+    let denied = get(&r.repo);
+    let denied = denied.get("github").get("work").get("projects");
+    assert_eq!(denied.get("status").text(), Some("unavailable"));
+    assert_eq!(denied.get("reason").text(), Some("insufficient_scope"));
+    fs::remove_file(r.dir.join("panel-projects")).unwrap();
+    let data = get(&r.repo);
+    let work = data.get("github").get("work");
+    assert_eq!(
+        work.get("projects").get("status").text(),
+        Some("unavailable")
+    );
+    assert_eq!(work.get("issues").get("status").text(), Some("available"));
+    assert_eq!(
+        work.get("pullRequests").get("status").text(),
+        Some("available")
+    );
+    // Several large Unicode titles and check names share one MCP response budget.
+    let long_label = "🧪".repeat(160);
+    let check =
+        format!(r#"{{"__typename":"StatusContext","state":"PENDING","context":"{long_label}"}}"#);
+    let wide = (1..=9).map(|id| format!(r#"{{"number":{id},"title":"{long_label}","state":"OPEN","isDraft":false,"headRefName":"main","baseRefName":"main","headRefOid":"{head}","isCrossRepository":false,"statusCheckRollup":[{}],"url":"https://github.com/example-org/example-repo/pull/{id}"}}"#, [check.as_str();6].join(","))).collect::<Vec<_>>();
+    fs::write(r.dir.join("panel-prs"), format!("[{}]", wide.join(","))).unwrap();
+    let bounded = get(&r.repo);
+    let github = bounded.get("github");
+    assert!(bounded.json(false).unwrap().len() < 52_000);
+    assert_eq!(github.get("incomplete"), &V::Bool(true));
+    assert!(
+        !github.get("pullRequests").array().is_empty()
+            && github.get("pullRequests").array().len() < 8
+    );
+    fs::write(r.dir.join("panel-prs"), "[]").unwrap();
+    assert!(
+        get(&r.repo)
+            .get("github")
+            .get("pullRequests")
+            .array()
+            .is_empty()
+    );
+    fs::remove_file(r.dir.join("panel-prs")).unwrap();
+    assert_eq!(
+        get(&r.repo).get("github").get("status").text(),
+        Some("unavailable")
+    );
+    let calls = r.calls();
+    for call in calls.lines() {
+        assert!(
+            call.starts_with(
+                "pr list --repo github.com/example-org/example-repo --state open --limit 51 --json "
+            ) || ["issue view 447", "issue view 446", "pr view 447"].iter().any(|s|
+                call == format!("{s} --repo github.com/example-org/example-repo --json number,title,url,state"))
+              || call
+                == "issue list --repo github.com/example-org/example-repo --state open --limit 13 --json number,title,url,state"
+                || (call.starts_with("api graphql --hostname github.com -f query=query(")
+                    && ((call.contains("projectsV2(first:6)") && call.contains("items(first:8)")
+                         && call.ends_with("-f owner=example-org -f name=example-repo"))
+                       || ((call.contains("work:issues(first:12") || call.contains("work:pullRequests(first:12"))
+                         && call.contains("orderBy:{field:CREATED_AT,direction:ASC}")
+                         && (call.ends_with("-f owner=example-org -f name=example-repo") || call.ends_with("-f name=example-repo -f after=cGFnZTE="))))),
+            "{call}"
+        );
+    }
+    let nested = r.repo.join("nested-project");
+    fs::create_dir_all(nested.join(".oms")).unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &["panel-status", "--repo", nested.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let nested = V::parse(out.as_bytes()).unwrap();
+    assert!(matches!(nested.get("git").get("available"), V::Bool(false)));
+    assert!(matches!(nested.get("github").get("repository"), V::Null));
+    iso.git(&r.repo, &["remote", "remove", "origin"]);
+    assert_eq!(
+        get(&r.repo).get("github").get("status").text(),
+        Some("unsupported")
+    );
+    assert_eq!(r.calls(), calls);
 }

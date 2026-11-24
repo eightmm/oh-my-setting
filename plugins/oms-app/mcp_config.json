@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "oms-panel": {
+      "command": "ssh",
+      "args": [
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ForwardAgent=no",
+        "--",
+        "oms-runtime",
+        "exec env OMS_MCP_TOOL_PROFILE=mcp-app ~/.local/bin/oms mcp-server"
+      ]
+    }
+  }
+}

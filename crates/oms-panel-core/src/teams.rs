@@ -185,6 +185,14 @@ fn resource_view(snapshot: Option<&resources::Summary>) -> Value {
         "limits":{"teams":s.policy.max_teams,"invocations":s.policy.max_invocations,"open_process_claims":s.policy.max_open_processes,"write_wip":s.policy.max_write_wip,"reviewer_headroom":s.policy.reviewer_headroom},
         "native_process_count":null,"native_usage_coverage":null,"native_global_hard_cap":"unsupported"}))
 }
+/// Retained resource policy and occupancy without loading Teams or native provider data.
+pub fn desktop_capacity(repo: &Path, stop: &AtomicBool) -> Result<Value> {
+    checkpoint(stop)?;
+    let observed =
+        resources::summary(repo, stop).map_err(|_| Error::new("resource occupancy unavailable"))?;
+    Ok(resource_view(observed.as_ref()))
+}
+
 /// Uses existing read producers only. Sources are independently observed, not an
 /// atomic global snapshot; source failures preserve nulls rather than zeroes.
 pub fn read(repo: &Path, service: &dyn Services, stop: &AtomicBool) -> Result<Value> {

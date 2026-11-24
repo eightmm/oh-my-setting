@@ -245,6 +245,54 @@ impl ReceiptAttempt {
     }
 }
 
+/// The desktop usage drawer reads the same verified ledger generation for
+/// lifetime physical-call accounting and its bounded list of attempt details.
+pub fn desktop_receipts<'a>(
+    repo: &Path,
+    attempts: impl IntoIterator<Item = &'a str>,
+    stop: &AtomicBool,
+) -> Option<(serde_json::Map<String, Value>, Value)> {
+    let mut cache = ReceiptTokensCache::default();
+    let mut lifetime = Value::Null;
+    let by_attempt = cache.refresh(repo, stop, |root| {
+        let projection = usage::load(root)?;
+        lifetime = provider_receipts(&projection);
+        Ok(projection)
+    })?;
+    let attempts = attempts
+        .into_iter()
+        .filter_map(|id| Some((id.to_owned(), by_attempt.get(id)?.snapshot())))
+        .collect();
+    Some((attempts, lifetime))
+}
+
+fn provider_receipts(projection: &Projection) -> Value {
+    #[derive(Default)]
+    struct Provider {
+        calls: usize,
+        tokens: ReceiptSum,
+        cost: ReceiptSum,
+        estimate: ReceiptSum,
+    }
+    let subtotal = |sum: &ReceiptSum| (sum.reported > 0).then_some(sum.sum).flatten();
+    let mut groups = BTreeMap::<&str, Provider>::new();
+    for call in &projection.calls {
+        let group = groups.entry(&call.receipt.identity.provider).or_default();
+        group.calls += 1;
+        group.tokens.observe(call.tokens);
+        match call.receipt.cost {
+            usage::Cost::Reported(_) => group.cost.observe(call.cost_microusd),
+            usage::Cost::ProviderEstimate(_) => group.estimate.observe(call.cost_microusd),
+            _ => {}
+        }
+    }
+    Value::Array(groups.into_iter().map(|(provider,g)|json!({
+        "provider":provider,"calls":g.calls,"tokens":subtotal(&g.tokens),"tokenReports":g.tokens.reported,
+        "reportedCostMicrousd":subtotal(&g.cost),"reportedCostCalls":g.cost.reported,
+        "estimatedCostMicrousd":subtotal(&g.estimate),"estimatedCostCalls":g.estimate.reported
+    })).collect())
+}
+
 impl ReceiptTokensCache {
     /// Select only requested attempt IDs for a private Board snapshot. The
     /// repository must be the collector's canonical state root.
@@ -1386,6 +1434,38 @@ mod receipt_token_tests {
             receipt.phase = Phase::Unknown;
         }
         usage::record(repo, &receipt, &stop).unwrap();
+    }
+
+    #[test]
+    fn desktop_provider_totals_preserve_cost_basis_and_partial_coverage() {
+        use usage::{AccountedCall, Cost, Receipt};
+        let call = |cost: Cost, tokens: Option<u64>, accounted: Option<u64>| AccountedCall {
+            receipt: Receipt {
+                identity: Identity {
+                    provider: "codex".into(),
+                    ..Default::default()
+                },
+                cost,
+                ..Default::default()
+            },
+            tokens,
+            cost_microusd: accounted,
+            conflict: false,
+            reasoning_tokens: None,
+        };
+        let p = Projection {
+            calls: vec![
+                call(Cost::Reported(0), Some(0), Some(0)),
+                call(Cost::ProviderEstimate(80), Some(5), Some(20)),
+                call(Cost::Unknown, None, None),
+            ],
+        };
+        let totals = provider_receipts(&p);
+        assert_eq!(
+            totals[0],
+            json!({"provider":"codex","calls":3,"tokens":5,"tokenReports":2,
+            "reportedCostMicrousd":0,"reportedCostCalls":1,"estimatedCostMicrousd":20,"estimatedCostCalls":1})
+        );
     }
 
     #[test]

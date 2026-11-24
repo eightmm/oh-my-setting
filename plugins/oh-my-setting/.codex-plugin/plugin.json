@@ -18,9 +18,12 @@
   "interface": {
     "displayName": "oh-my-setting",
     "shortDescription": "Routing, handoff, guards, and private local telemetry for Codex.",
-    "longDescription": "oh-my-setting adds local Codex hooks that route prompts to installed skills, preserve pre-compaction handoffs, guard high-risk coding turns, and retain content-free lifecycle counters without prompts, commands, or output.",
+    "longDescription": "oh-my-setting adds local Codex hooks that route prompts to installed skills, preserve pre-compaction handoffs, guard high-risk coding turns, and retain content-free lifecycle counters without prompts, commands, or output. With the OMS MCP server installed on the project host, ask for the current project’s panel status in chat.",
     "developerName": "oh-my-setting",
     "category": "Developer Tools",
+    "defaultPrompt": [
+      "Show the current project’s OMS panel status, active leads and recorded results."
+    ],
     "capabilities": [
       "Read",
       "Write"

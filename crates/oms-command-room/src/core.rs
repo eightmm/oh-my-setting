@@ -97,6 +97,7 @@ pub struct LineageEntry {
 #[derive(Clone, Copy)]
 pub(crate) enum Carry<'a> {
     No,
+    DesktopOwner(&'a str),
     Replay(Option<&'a str>),
 }
 impl Carry<'_> {
@@ -1604,6 +1605,12 @@ impl<'a> Room<'a> {
         }
         Ok(found)
     }
+    pub(crate) fn published_room(&self, state: &Value) -> Result<bool> {
+        Ok(state["predecessor"].is_null()
+            || state.flag("carried")
+            || self.tail_successor(state.text("predecessor"))?.as_deref() == Some(state.text("id")))
+    }
+
     pub fn discover(&self) -> Result<(Vec<Value>, bool)> {
         let Some(store) = &self.store else {
             return Ok((vec![], false));
@@ -1693,10 +1700,7 @@ impl<'a> Room<'a> {
                 let snap = self.snapshot(id)?;
                 bytes += snap.bytes.len().saturating_sub(used);
                 let state = project(&snap.rows)?;
-                if !state["predecessor"].is_null()
-                    && !state.flag("carried")
-                    && self.tail_successor(state.text("predecessor"))?.as_deref() != Some(id)
-                {
+                if !self.published_room(&state)? {
                     return Ok(None);
                 }
                 active += 1;

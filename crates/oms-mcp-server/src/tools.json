@@ -1018,5 +1018,21 @@
       "idempotentHint": true,
       "openWorldHint": false
     }
+  },
+  {
+    "name": "oms_panel_snapshot",
+    "description": "Compact read-only OMS dashboard for this repository. Reports the bound Room when known, Main, active and recent attempts, review outcomes and acceptance evidence.",
+    "properties": {
+      "repo": {
+        "type": "string",
+        "description": "Repository whose harness state to read (default: the server's working directory)."
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   }
 ]

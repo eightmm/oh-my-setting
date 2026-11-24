@@ -146,6 +146,30 @@ fn main_capability(harness: &str) -> Option<&'static MainCapability> {
         .find(|entry| entry.harness == harness)
 }
 
+/// Registry policy and executable presence only. Neither establishes login or a session.
+pub(super) fn desktop_connections() -> Vec<Value> {
+    MAIN_CAPABILITIES
+        .iter()
+        .map(|cap| {
+            let transport = match cap.transport {
+                MainTransport::Native(_) => "native",
+                MainTransport::CodexGateway => "CodexGateway",
+            };
+            let resume = if cap.resume_refusal.is_some() {
+                "unsupported"
+            } else {
+                "requires verified session"
+            };
+            json!({
+                "harness": cap.harness, "owner": cap.owner, "transport": transport,
+                "installed": which_exists(cap.harness),
+                "dependencies": cap.requires.join(", "), "dependenciesPresent": cap.installed(),
+                "resumePolicy": resume, "accountSelection": cap.supports_account(),
+            })
+        })
+        .collect()
+}
+
 fn required_main_capability(raw: &str) -> Result<&'static MainCapability> {
     main_capability(raw).ok_or_else(|| Error::new("unsupported launch provider"))
 }
@@ -621,6 +645,44 @@ fn launch(
     let prefix = entry_prefix(source)?;
     let policy = load_policy(source)?;
     let main = MainAdmission::admit(capability, &policy, options)?;
+    if options.get("host") == Some("desktop") {
+        require(
+            which_exists("tmux"),
+            "desktop Main requires tmux on the OMS execution host",
+        )?;
+        let relay = MainRelay::admit(repo, &prefix, &main)?;
+        split_panel(
+            repo,
+            &prefix,
+            &policy,
+            SplitRequest::StartNew(main, relay),
+            options,
+            services,
+            stop,
+        )?;
+        let room = options.required("room")?;
+        let (session, _) = resolve_checked_session(repo, &repo.to_string_lossy(), services, stop)?;
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Ok(StartupMainProbe::Verified(main)) =
+                verified_startup_main(repo, &session, Some(&room), services, stop)
+                && main.harness == capability.harness
+            {
+                return Ok((
+                    0,
+                    json(
+                        &json!({"status":"started","provider":main.harness,"room":room,"attempt":main.attempt}),
+                    )?,
+                    vec![],
+                ));
+            }
+            require(
+                !stop.load(Ordering::Acquire) && Instant::now() < deadline,
+                "desktop Main startup is unconfirmed; inspect the request Room before retrying",
+            )?;
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
     require(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "interactive panel needs a terminal; use --json or --dry-run",
@@ -670,6 +732,7 @@ fn split_panel<'a>(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<bool> {
+    let desktop = options.get("host") == Some("desktop");
     let auto_providers = matches!(&request, SplitRequest::ReuseOrPick);
     let store = Store::open(repo)?;
     let repo_str = repo.to_string_lossy().into_owned();
@@ -681,6 +744,46 @@ fn split_panel<'a>(
         SplitRequest::StartNew(main, relay) => {
             let start_lock = take_start_lock()?;
             (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
+            if desktop {
+                ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
+                let room = options.required("room")?;
+                // An existing or partially launched request is never submitted again,
+                // even after the first Main has exited or the MCP server restarts.
+                crate::commands::query(
+                    services,
+                    NativeCommand::Room,
+                    repo,
+                    &[
+                        "new",
+                        "--id",
+                        &room,
+                        "--topic",
+                        "OMS desktop goal",
+                        "--json",
+                    ],
+                    stop,
+                )?;
+                crate::commands::query(
+                    services,
+                    NativeCommand::Room,
+                    repo,
+                    &[
+                        "join",
+                        "--id",
+                        &room,
+                        "--participant",
+                        "oms-desktop",
+                        "--provider",
+                        "codex",
+                        "--role",
+                        "advisor",
+                        "--label",
+                        "OMS desktop user",
+                        "--json",
+                    ],
+                    stop,
+                )?;
+            }
             (main, relay, start_lock)
         }
         SplitRequest::ReuseOrPick => {
@@ -887,6 +990,9 @@ fn split_panel<'a>(
             services,
             stop,
         )?;
+        if desktop {
+            return Ok(true);
+        }
         terminals::tmux(
             services,
             repo,
@@ -1021,6 +1127,9 @@ fn split_panel<'a>(
     }
 
     drop(start_lock);
+    if desktop {
+        return Ok(true);
+    }
     attach_session(&session).map(|()| true)
 }
 
@@ -4495,8 +4604,13 @@ fn native_command(
         ),
         _ => String::new(),
     };
+    let desktop_inst = if room_id.is_some_and(|room| room.starts_with("oms-app-")) {
+        "\nDelegate scoped work to the available provider leads as the goal requires. For a user decision, send the exact proposed next step as an OMS Room question addressed to oms-desktop. Read its linked answer before proceeding. A scope decision does not replace any privileged operation grant."
+    } else {
+        ""
+    };
     let base_inst = format!(
-        "OMS terminal panel sole main. Repository: {}. Use --owner {} for owner commands.{room_inst}\n{MAIN_STARTUP_PROMPT}",
+        "OMS terminal panel sole main. Repository: {}. Use --owner {} for owner commands.{room_inst}{desktop_inst}\n{MAIN_STARTUP_PROMPT}",
         repo.display(),
         resolution.owner
     );

@@ -10,7 +10,7 @@ use std::path::Path;
 #[path = "state_projection.rs"]
 mod projection;
 
-pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refresh-ci]\n       oms state gpu-status [--json]\n       oms state gpu-wait --min-free-mib N [--gpu IDX] [--timeout-secs S] [--poll-ms M] [--json]\n       oms state compact [--repo PATH] [--keep-recent N] [--dry-run] [--json]\n       oms state archive <list|show|search|stats> [--repo PATH] [--json]\n       oms state-verify [--repo PATH] [--json]\n       oms inbox [--repo PATH] [--json] [--fix-safe]\n       oms dashboard [--repo PATH] [--json] [--watch [--interval N] [--count N]]\nState views never grant authority. Unsupported sources are reported as degraded.\n";
+pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refresh-ci]\n       oms state gpu-status [--json]\n       oms state gpu-wait --min-free-mib N [--gpu IDX] [--timeout-secs S] [--poll-ms M] [--json]\n       oms state compact [--repo PATH] [--keep-recent N] [--dry-run] [--json]\n       oms state archive <list|show|search|stats> [--repo PATH] [--json]\n       oms state-verify [--repo PATH] [--json]\n       oms inbox [--repo PATH] [--json] [--fix-safe]\n       oms dashboard [--repo PATH] [--json [--panel-snapshot [--conversation-digest HEX32]]] [--watch [--interval N] [--count N]]\nState views never grant authority. Unsupported sources are reported as degraded.\n";
 
 fn decoded(output: Output) -> Result<Value> {
     require(output.0 == 0, String::from_utf8_lossy(&output.2))?;
@@ -53,6 +53,14 @@ fn plan(
 }
 
 pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Value> {
+    collect_snapshot(ctx, host, None)
+}
+
+fn collect_snapshot(
+    ctx: &Context<'_>,
+    host: &dyn HostServices,
+    consumer: Option<&str>,
+) -> Result<Value> {
     let mut state = object([
         ("schema", number(1)),
         ("project", helpers::project(&ctx.repo)),
@@ -89,6 +97,41 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
         .ok()
         .and_then(|v| v.array().ok())
         .unwrap_or(&[]);
+    if let Some(consumer) = consumer
+        && events.as_ref().is_ok_and(|v| v.array().is_ok())
+    {
+        // The panel and this exact-chat lookup share the full lifecycle collection.
+        // 'recent' and 'active_latest' below can omit a terminal Main.
+        let panel_mains = event_rows
+            .iter()
+            .filter(|row| row.text("tool") == "panel-main")
+            .map(|row| {
+                let refs = row.get("refs");
+                oms_command_room::ConversationPanelAttempt {
+                    room: refs.text("panel_room_id"),
+                    participant: refs
+                        .get("panel_room_participant")
+                        .str()
+                        .unwrap_or_else(|_| row.text("attempt_id")),
+                    terminal: row.get("terminal").truth(),
+                }
+            });
+        // Use only the chosen project. A process-scoped Room or previous chat
+        // cannot supply the conversation identity for a per-request probe.
+        if let Ok(room) = oms_command_room::Room::open(
+            &ctx.repo,
+            Default::default(),
+            &oms_command_room::LocalServices,
+            ctx.interrupted,
+            false,
+            false,
+        ) && let Ok(binding) = room.conversation_main(consumer, panel_mains)
+            && let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
+            && let Ok(binding) = json::parse(&encoded)
+        {
+            state.set("conversation", binding)?;
+        }
+    }
     let mut counts = json::empty();
     let mut active = 0;
     let mut executing = 0;
@@ -397,7 +440,10 @@ pub(crate) fn run(
     let (values, flags): (&[&str], &[&str]) = match tool {
         "state" => (&["repo"], &["json", "refresh-ci"]),
         "inbox" => (&["repo"], &["json", "fix-safe"]),
-        "dashboard" => (&["repo", "interval", "count"], &["json", "watch"]),
+        "dashboard" => (
+            &["repo", "interval", "count", "conversation-digest"],
+            &["json", "watch", "panel-snapshot"],
+        ),
         _ => (&["repo"], &["json"]),
     };
     let opts = Options::parse(args, values, flags)?;
@@ -454,6 +500,21 @@ pub(crate) fn run(
         opts.flag("watch") || opts.get("count").is_empty() && opts.get("interval").is_empty(),
         "--count and --interval require --watch",
     )?;
+    require(
+        !opts.flag("panel-snapshot") || opts.flag("json"),
+        "--panel-snapshot requires --json",
+    )?;
+    let digest = opts.get("conversation-digest");
+    require(
+        digest.is_empty()
+            || (opts.flag("panel-snapshot")
+                && digest.len() == 32
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())),
+        "--conversation-digest requires a panel snapshot and 32 lowercase hex digits",
+    )?;
+    let consumer = (!digest.is_empty()).then_some(digest);
     let count = opts.number("count", if opts.flag("watch") { usize::MAX } else { 1 })?;
     let interval = opts.number("interval", 5)?;
     require(
@@ -485,7 +546,7 @@ pub(crate) fn run(
         crate::checkpoint(ctx.interrupted)?;
         let state = match cached.take() {
             Some(state) => state,
-            None => snapshot(&ctx, host)?,
+            None => collect_snapshot(&ctx, host, consumer)?,
         };
         let report = match tool {
             "state" => state,
@@ -530,9 +591,19 @@ pub(crate) fn run(
                 ])
             }
             "dashboard" => {
-                let report = projection::dashboard(&ctx, &state)?;
+                let mut report = projection::dashboard(&ctx, &state)?;
                 code = i32::from(!report.get("collection").get("ok").truth());
-                report
+                let panel =
+                    projection::panel_snapshot(&ctx.repo, &report, state.get("conversation"));
+                if opts.flag("panel-snapshot") {
+                    panel
+                } else {
+                    report.set(
+                        "observation",
+                        panel.get("dashboard").get("observation").clone(),
+                    )?;
+                    report
+                }
             }
             _ => return Err(error(2, "unknown state view")),
         };

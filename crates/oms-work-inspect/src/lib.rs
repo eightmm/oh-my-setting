@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 //! Read-only canonical status validation and schema-2 work envelope projections.
+pub mod git;
+
 use oms_context::{Json, parse_experiment_json, parse_json};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

@@ -60,8 +60,8 @@
   "children": {
     "project": {
       "prog": "oms graph project",
-      "help": "usage: oms graph project [-h] [--repo REPO] [--pretty]\n                         {build,ensure,check,map,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n                         ...\n\nStructural code graph over --repo. State lives in <repo>/.oms/project-graph/\nunless OMS_PROJECT_GRAPH_STATE names an absolute directory to use instead.\nReaders build or refresh it themselves unless --no-refresh or\nOMS_GRAPH_AUTOBUILD=0 says otherwise.\n\npositional arguments:\n  {build,ensure,check,map,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n    api                 signatures and summaries for one indexed file, without\n                        bodies\n    search              exhaustive case-insensitive literal search grouped by\n                        graph symbol\n    symbol              one symbol's definitions, graph references and\n                        unlinked text matches, in separate zones\n    coupling            paths that change together in Git history;\n                        structural=no marks coupling the parsers cannot see\n    unreferenced        symbols with no incoming graph edge; review\n                        candidates, not proof of dead code\n    affected            fail-open affected-test plan for an exact Git range\n    impact              one orientation brief for a Git range: affected tests,\n                        dependents, co-change partners left out, CODEOWNERS\n\n    benchmark           opt-in history recall snapshots and comparison\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n",
-      "usage": "usage: oms graph project [-h] [--repo REPO] [--pretty]\n                         {build,ensure,check,map,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n                         ...\n",
+      "help": "usage: oms graph project [-h] [--repo REPO] [--pretty]\n                         {build,ensure,check,map,panel,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n                         ...\n\nStructural code graph over --repo. State lives in <repo>/.oms/project-graph/\nunless OMS_PROJECT_GRAPH_STATE names an absolute directory to use instead.\nReaders build or refresh it themselves unless --no-refresh or\nOMS_GRAPH_AUTOBUILD=0 says otherwise.\n\npositional arguments:\n  {build,ensure,check,map,panel,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n    panel               strictly read-only bounded side-panel graph projection\n                        (uses cached index or git ls-files fallback, never writes)\n    api                 signatures and summaries for one indexed file, without\n                        bodies\n    search              exhaustive case-insensitive literal search grouped by\n                        graph symbol\n    symbol              one symbol's definitions, graph references and\n                        unlinked text matches, in separate zones\n    coupling            paths that change together in Git history;\n                        structural=no marks coupling the parsers cannot see\n    unreferenced        symbols with no incoming graph edge; review\n                        candidates, not proof of dead code\n    affected            fail-open affected-test plan for an exact Git range\n    impact              one orientation brief for a Git range: affected tests,\n                        dependents, co-change partners left out, CODEOWNERS\n\n    benchmark           opt-in history recall snapshots and comparison\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n",
+      "usage": "usage: oms graph project [-h] [--repo REPO] [--pretty]\n                         {build,ensure,check,map,panel,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n                         ...\n",
       "options": [
         {
           "names": [
@@ -2143,6 +2143,132 @@
               "default": false,
               "required": false,
               "nargs": null,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "panel": {
+          "prog": "oms graph project panel",
+          "usage": "usage: oms graph project panel [-h] [--repo REPO] [--pretty] [--json]\n                               [--node NODE] [--query QUERY] [--limit LIMIT]\n                               [--depth DEPTH] [--include-tests]\n",
+          "help": "usage: oms graph project panel [-h] [--repo REPO] [--pretty] [--json]\n                               [--node NODE] [--query QUERY] [--limit LIMIT]\n                               [--depth DEPTH] [--include-tests]\n\nStrictly read-only bounded graph projection for the OMS side panel.\nUses an existing project graph index when present, or bounded git ls-files\ndirectory aggregation without writing or building an index.\n\noptions:\n  -h, --help       show this help message and exit\n  --repo REPO      project repository checkout root\n  --pretty         pretty-print JSON\n  --json           emit schema-1 panel project graph JSON\n  --node NODE      optional stable node ID to select, inspect neighbors, or drill into\n  --query QUERY    optional literal substring filter over node names and paths\n  --limit LIMIT    maximum nodes to return (1-60, default 40)\n  --depth DEPTH    maximum traversal or directory depth (0-3, default 2)\n  --include-tests  include test nodes when available\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--node"
+              ],
+              "dest": "node",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--query"
+              ],
+              "dest": "query",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 40,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--depth"
+              ],
+              "dest": "depth",
+              "default": 2,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--include-tests"
+              ],
+              "dest": "include_tests",
+              "default": false,
+              "required": false,
+              "nargs": 0,
               "type": "str",
               "action": "flag",
               "choices": [],

@@ -24,7 +24,13 @@ fn codex(paths: &Paths, args: &[&str], flag: &AtomicBool) -> Result<crate::Outpu
         Duration::from_secs(120),
     )
 }
-fn inventory(paths: &Paths, flag: &AtomicBool) -> Result<(bool, Option<PathBuf>)> {
+struct Inventory {
+    installed: bool,
+    root: Option<PathBuf>,
+    shared: bool,
+}
+
+fn inventory(paths: &Paths, flag: &AtomicBool) -> Result<Inventory> {
     let out = codex(paths, &["plugin", "list", "--json"], flag)?;
     if out.0 != 0 {
         return r::fail("Codex plugin inventory unavailable; no configuration changed");
@@ -47,7 +53,18 @@ fn inventory(paths: &Paths, flag: &AtomicBool) -> Result<(bool, Option<PathBuf>)
         let end = line.find(char::is_whitespace)?;
         (line.get(..end) == Some(MARKETPLACE)).then(|| PathBuf::from(line[end..].trim()))
     });
-    Ok((installed, root))
+    let shared = rows.iter().any(|row| {
+        row["installed"] == true
+            && row["pluginId"]
+                .as_str()
+                .and_then(|id| id.rsplit_once('@'))
+                .is_some_and(|(name, market)| name != "oh-my-setting" && market == MARKETPLACE)
+    });
+    Ok(Inventory {
+        installed,
+        root,
+        shared,
+    })
 }
 pub(crate) fn cache(paths: &Paths) -> Result<PathBuf> {
     let source = paths.source.join("plugins/oh-my-setting");
@@ -167,7 +184,9 @@ fn unrelated(mut value: serde_json::Value) -> serde_json::Value {
 /// Read-only inventory and generated-cache comparison, using the installer's
 /// existing bounded CLI and ownership checks without refreshing the plugin.
 pub(crate) fn codex_healthy(paths: &Paths, flag: &AtomicBool) -> Result<bool> {
-    let (installed, root) = inventory(paths, flag)?;
+    let Inventory {
+        installed, root, ..
+    } = inventory(paths, flag)?;
     if !installed || root.as_ref().and_then(|p| r::physical(p).ok()).as_ref() != Some(&paths.source)
     {
         return Ok(false);
@@ -216,7 +235,9 @@ pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> 
         }
         return r::fail("Codex CLI is required to inspect and change its plugin registration");
     }
-    let (installed, root) = inventory(paths, flag)?;
+    let Inventory {
+        installed, root, ..
+    } = inventory(paths, flag)?;
     if before["plugins"].get(PLUGIN_ID).is_some() && !installed
         || before["marketplaces"].get(MARKETPLACE).is_some() && root.is_none()
     {
@@ -260,7 +281,11 @@ fn apply_codex(
     if r::find("codex", &paths.cwd).is_none() {
         return Ok(());
     }
-    let (installed, root) = inventory(paths, flag)?;
+    let Inventory {
+        installed,
+        root,
+        shared,
+    } = inventory(paths, flag)?;
     let before = config(paths)?;
     let targets = [
         paths.codex_home()?.join("config.toml"),
@@ -278,7 +303,7 @@ fn apply_codex(
             if installed {
                 commands.push(vec!["plugin".into(), "remove".into(), PLUGIN_ID.into()]);
             }
-            if root.is_some() {
+            if root.is_some() && !shared {
                 commands.push(vec![
                     "plugin".into(),
                     "marketplace".into(),
@@ -355,14 +380,16 @@ fn apply_codex(
     if unrelated(before) != unrelated(config(paths)?) {
         return r::fail("Codex CLI changed unrelated settings; transaction refused");
     }
-    let (present, market) = inventory(paths, flag)?;
+    let after = inventory(paths, flag)?;
     if remove {
-        if present || market.is_some() {
-            return r::fail("Codex CLI did not remove its plugin and marketplace");
+        if after.installed || after.root != root.filter(|_| shared) || after.shared != shared {
+            return r::fail(
+                "Codex CLI did not remove its hook plugin or preserve the expected marketplace state",
+            );
         }
         return Ok(());
     }
-    if !present || market.is_none() {
+    if !after.installed || after.root.is_none() {
         return r::fail("Codex CLI did not register its plugin and marketplace");
     }
     let cache = cache(paths)?;

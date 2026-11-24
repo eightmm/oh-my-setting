@@ -6,6 +6,7 @@ rust-version = "1.99.1"
 
 [dependencies]
 oms-context = { path = "../oms-context" }
+oms-reference = { path = "../oms-reference" }
 oms-output-capture = { path = "../oms-output-capture" }
 oms-scrub = { path = "../oms-scrub" }
 ryu = "=1.0.23"

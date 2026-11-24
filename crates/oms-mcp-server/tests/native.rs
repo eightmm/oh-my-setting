@@ -103,12 +103,19 @@ struct Client {
 }
 impl Client {
     fn new(source: &Path, repo: &Path, full: bool, tasks: bool, child: bool) -> Self {
-        Self::with_depth(source, repo, full, tasks, child, std::ffi::OsStr::new("0"))
+        Self::with_depth(
+            source,
+            repo,
+            if full { "full" } else { "core" },
+            tasks,
+            child,
+            std::ffi::OsStr::new("0"),
+        )
     }
     fn with_depth(
         source: &Path,
         repo: &Path,
-        full: bool,
+        profile: &str,
         tasks: bool,
         child: bool,
         depth: &std::ffi::OsStr,
@@ -119,7 +126,12 @@ impl Client {
             .arg("--stdio")
             .arg(source)
             .arg(repo)
-            .arg(if full { "full" } else { "core" })
+            .arg(profile)
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
             .arg(if tasks { "1" } else { "0" })
             .env("OMS_HARNESS_CHILD", if child { "1" } else { "0" })
             .env("OMS_HARNESS_DELEGATE_DEPTH", depth)
@@ -222,6 +234,8 @@ fn environment_profile() {
         (None, true),
         (Some(std::ffi::OsString::from("core")), true),
         (Some("full".into()), true),
+        (Some("chatgpt-panel".into()), true),
+        (Some("mcp-app".into()), true),
         (Some("".into()), false),
         (Some("invalid".into()), false),
         (Some(std::ffi::OsString::from_vec(vec![255])), false),
@@ -236,6 +250,1338 @@ fn environment_profile() {
         assert_eq!(result.status.success(), ok, "{:?}", result);
     }
 }
+fn cross_host_project_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    for (host, extensions) in [
+        ("generic-tools", json!({})),
+        (
+            "claude",
+            json!({"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}),
+        ),
+        (
+            "antigravity",
+            json!({"io.modelcontextprotocol/ui":{},"com.google.antigravity/ui":{"entrypoints":["aux_pane","global"]}}),
+        ),
+    ] {
+        let init=c.call("initialize",json!({"protocolVersion":"2025-11-25","capabilities":{"extensions":extensions},"clientInfo":{"name":host,"version":"1"}}));
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+        assert!(
+            init["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("oms_panel_snapshot")
+        );
+        let listed = c.call("tools/list", json!({}));
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8);
+        let graph_tool = tools
+            .iter()
+            .find(|t| t["name"] == "oms_panel_project_graph")
+            .unwrap();
+        assert_eq!(graph_tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(graph_tool["annotations"]["destructiveHint"], false);
+        assert_eq!(graph_tool["inputSchema"]["additionalProperties"], false);
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("repo")
+                .is_none()
+        );
+        assert!(
+            graph_tool["inputSchema"]["properties"]
+                .get("project")
+                .is_some()
+        );
+        assert!(tools.iter().any(|t| t["name"] == "oms_panel_capabilities"
+            && t["annotations"]["readOnlyHint"] == true
+            && t["annotations"]["destructiveHint"] == false
+            && t["annotations"]["idempotentHint"] == true
+            && t["annotations"]["openWorldHint"] == false
+            && t["inputSchema"]["additionalProperties"] == false));
+        let opener = tools
+            .iter()
+            .find(|t| t["name"] == "oms_open_panel")
+            .unwrap();
+        assert_eq!(
+            opener["_meta"]["openai/ui"]["entrypoints"][0]["type"],
+            "global"
+        );
+        assert_eq!(
+            opener["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+            json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
+        );
+        let uri = &opener["_meta"]["ui"]["resourceUri"];
+        let view = c.call("resources/read", json!({"uri":uri}));
+        assert!(
+            view["result"]["contents"][0]["text"].as_str()
+                == Some(include_str!("../src/conversation-panel.html"))
+        );
+        assert_eq!(
+            view["result"]["contents"][0]["mimeType"],
+            "text/html;profile=mcp-app"
+        );
+        assert_eq!(
+            view["result"]["contents"][0]["_meta"]["ui"]["preferredDisplayMode"],
+            "fullscreen"
+        );
+        assert_eq!(
+            payload(&c.tool("oms_open_panel", json!({})))["readOnly"],
+            true
+        );
+    }
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({})))["binding"],
+        "unbound"
+    );
+    bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
+    for name in [
+        "oms_panel_chat",
+        "oms_start_main",
+        "oms_decide_approval",
+        "oms_list_approvals",
+        "oms_assign_provider",
+        "oms_assign_result",
+    ] {
+        assert_eq!(c.tool(name, json!({}))["error"]["code"], -32602);
+    }
+    let dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let map = dir.join("desktop-projects.json");
+    std::fs::write(&map, json!({"fixture":repo}).to_string()).unwrap();
+    std::fs::set_permissions(map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({}))),
+        json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
+    );
+    let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","updated":"2026-11-24T10:00:00Z","conversationMain":null,"observation":obs}});
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
+    let reply=c.call("tools/call",json!({"name":"oms_panel_snapshot","arguments":{"project":"fixture"},"_meta":{"threadId":"00000000-0000-4000-8000-000000000001"}}));
+    assert_eq!(payload(&reply)["dashboard"]["project"], "fixture");
+    assert_eq!(payload(&reply)["dashboard"]["observation"], obs);
+    assert_eq!(
+        reply["result"]["structuredContent"]["dashboard"]["observation"],
+        obs
+    );
+    assert!(
+        !record(&source)["argv"]
+            .to_string()
+            .contains("conversation-digest")
+    );
+    assert!(!record(&source)["argv"].to_string().contains("00000000-"));
+    // Fail-closed: exit-1 partial response contradicting a complete observation cannot claim complete revision.
+    fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    let degraded = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
+    assert_eq!(payload(&degraded)["dashboard"]["degraded"], true);
+    assert_eq!(
+        payload(&degraded)["dashboard"]["observation"]["completeness"],
+        "partial"
+    );
+    assert!(payload(&degraded)["dashboard"]["observation"]["revision"].is_null());
+    // Genuine partial response from the producer keeps its partial revision intact.
+    let mut partial_obs = obs.clone();
+    partial_obs["completeness"] = json!("partial");
+    partial_obs["sources"]["artifacts"] = json!("unavailable");
+    let partial_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","degraded":true,"conversationMain":null,"observation":partial_obs}});
+    fixture_settings(
+        &source,
+        json!({"exit":1,"stdout":partial_snapshot.to_string()}),
+    );
+    let partial_reply = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
+    assert_eq!(
+        payload(&partial_reply)["dashboard"]["observation"],
+        partial_obs
+    );
+    // Generic read-only host can read the bounded repository project graph by alias.
+    let sample_graph = json!({
+        "schema": 1,
+        "kind": "oms-panel-project-graph",
+        "status": "ready",
+        "completeness": "complete",
+        "provenance": {"source":"git-ls-files","mode":"fallback","indexState":"unindexed","verifiedRelationships":false,"readOnly":true,"wroteIndex":false},
+        "scope": {"repository":"repo","focusNode":null,"query":null,"includeTests":false,"depth":2,"limit":40},
+        "limits": {"maxNodes":40,"maxEdges":180,"truncated":false},
+        "counts": {"shown_nodes":1,"total_nodes":1,"shown_edges":0,"total_edges":0,"confidence":{}},
+        "nodes": [{"id":"dir:.","label":"repo","kind":"directory","path":""}],
+        "edges": [],
+        "selection": null
+    });
+    fixture_settings(&source, json!({"stdout":sample_graph.to_string()}));
+    let graph_reply = c.tool("oms_panel_project_graph", json!({"project":"fixture"}));
+    good(&graph_reply);
+    assert_eq!(payload(&graph_reply), sample_graph);
+    assert_eq!(graph_reply["result"]["structuredContent"], sample_graph);
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "graph", "project", "panel", "--repo", repo, "--json", "--limit", "40", "--depth", "2"
+        ])
+    );
+    // The JSON-RPC response itself must fit the host limit, including text fallback.
+    let mut big = sample_graph.clone();
+    big["nodes"] = json!(
+        (0..60)
+            .map(|i| json!({"id":format!("file:{i}"),"label":"x".repeat(600)}))
+            .collect::<Vec<_>>()
+    );
+    fixture_settings(&source, json!({"exit":0,"stdout":big.to_string()}));
+    let page = c.tool(
+        "oms_panel_project_graph",
+        json!({"project":"fixture","limit":60}),
+    );
+    good(&page);
+    assert_eq!(page["result"]["structuredContent"], big);
+    assert!(
+        page["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("60 nodes")
+    );
+    assert!(page.to_string().len() < 60_000);
+}
+fn mcp_app_binding_boundaries() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let other = source.join("other-checkout");
+    std::fs::create_dir_all(other.join(".oms")).unwrap();
+    let dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let map = dir.join("desktop-projects.json");
+    let bind = |value: Value| {
+        std::fs::write(&map, value.to_string()).unwrap();
+        std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture"}});
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
+    let ask = |c: &mut Client, args: Value, meta: Value| {
+        c.call(
+            "tools/call",
+            json!({"name":"oms_panel_snapshot","arguments":args,"_meta":meta}),
+        )
+    };
+    let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bind(json!({"fixture":repo}));
+    let foreign =
+        json!({"threadId":"00000000-0000-4000-8000-000000000001","room":"r","participant":"p"});
+    good(&ask(&mut c, json!({"project":"fixture"}), foreign.clone()));
+    let argv = record(&source)["argv"].to_string();
+    assert!(argv.contains(repo.to_str().unwrap()) && !argv.contains("00000000-"));
+    // Client-supplied paths, Room and participant names are never authority.
+    for args in [
+        json!({"project":"fixture","repo":other}),
+        json!({"project":"fixture","participant":"p"}),
+        json!({"project":"fixture","room":"r"}),
+    ] {
+        assert_eq!(ask(&mut c, args, json!({}))["error"]["code"], -32602);
+    }
+    assert_eq!(
+        c.tool(
+            "oms_panel_project_graph",
+            json!({"project":"fixture","repo":other})
+        )["error"]["code"],
+        -32602
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({"project":other})),
+        "OMS_PANEL_REPO",
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "OMS_PANEL_REPO",
+    );
+    // An alias absent from the catalog (and a raw path) is refused.
+    bad(
+        &ask(&mut c, json!({"project":other}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(&ask(&mut c, json!({}), json!({})), "OMS_PANEL_REPO");
+    // Mutating or Room tools are refused by name and leave no new command record.
+    let before = std::fs::read(source.join("last-call.json")).unwrap();
+    for name in [
+        "oms_start_main",
+        "oms_decide_approval",
+        "oms_panel_chat",
+        "oms_peer_start",
+        "oms_list_approvals",
+    ] {
+        let r = c.call(
+            "tools/call",
+            json!({"name":name,"arguments":{"project":"fixture"},"_meta":foreign}),
+        );
+        assert_eq!(r["error"]["code"], -32602, "{name}");
+    }
+    assert_eq!(
+        std::fs::read(source.join("last-call.json")).unwrap(),
+        before
+    );
+    // Replacing the alias target with a symlink is refused on the next call.
+    let link = source.join("link-checkout");
+    std::os::unix::fs::symlink(&repo, &link).unwrap();
+    bind(json!({"fixture":link}));
+    bad(
+        &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({"project":"fixture"})),
+        "OMS_PANEL_REPO",
+    );
+    // Repointing the alias grants exactly the newly bound checkout.
+    bind(json!({"fixture":other}));
+    good(&ask(&mut c, json!({"project":"fixture"}), json!({})));
+    assert!(
+        record(&source)["argv"]
+            .to_string()
+            .contains(other.to_str().unwrap())
+    );
+    // Group/world-writable, empty or sparse catalogs fail closed.
+    bind(json!({"fixture":repo}));
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o666)).unwrap();
+    bad(
+        &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "Invalid OMS project map",
+    );
+    for value in [
+        json!({}),
+        json!({"fixture":"relative/path"}),
+        json!({"bad alias":repo}),
+    ] {
+        bind(value);
+        bad(
+            &ask(&mut c, json!({"project":"fixture"}), json!({})),
+            "Invalid OMS project map",
+        );
+    }
+    // Revocation between calls, then reopening, does not restore access.
+    bind(json!({"fixture":repo}));
+    good(&ask(&mut c, json!({"project":"fixture"}), json!({})));
+    bind(json!({"other":other}));
+    bad(
+        &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    std::fs::remove_file(&map).unwrap();
+    let mut reopened = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bad(
+        &ask(&mut reopened, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(&ask(&mut reopened, json!({}), json!({})), "OMS_PANEL_REPO");
+}
+// Provider assignment: the Room store is proven in room_contract; here the
+// MCP side must launch exactly once per requestId and trust only the host binding.
+fn desktop_assignment() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let thread = "01900000-0000-7000-8000-0000000000bb";
+    let req = "4d6acd01-bd18-4567-bf69-ea05fb048b27";
+    let record_for = |status: &str, fresh: Option<bool>, operation: Value| {
+        let mut r = json!({"request":req,"room":"r","participant":format!("ask-{req}"),"provider":"claude","role":"researcher",
+            "title":"Find callers","task":"inspect the callers","readOnly":true,"thread":operation,
+            "status":status,"operation":operation});
+        if let Some(f) = fresh {
+            r["fresh"] = json!(f);
+        }
+        r.to_string()
+    };
+    let call = |c: &mut Client, name: &str, args: Value, meta: Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":args,"_meta":meta}),
+        )
+    };
+    let args = json!({"room":"r","requestId":req,"provider":"claude","title":"Find callers","task":"inspect the callers"});
+    let runs = || std::fs::read_dir(repo.join(".oms/artifacts/mcp")).map_or(0, |d| d.count());
+    // No host conversation binding, widget-chosen authority, or extra arguments: nothing runs.
+    bad(
+        &call(&mut c, "oms_assign_provider", args.clone(), json!({})),
+        "bound conversation",
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":"bad"}),
+        ),
+        "bound conversation",
+    );
+    let mut extra = args.clone();
+    extra["thread"] = json!("other");
+    assert_eq!(
+        call(
+            &mut c,
+            "oms_assign_provider",
+            extra,
+            json!({"threadId":thread})
+        )["error"]["code"],
+        -32602
+    );
+    let mut bad_provider = args.clone();
+    bad_provider["provider"] = json!("codex,claude");
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            bad_provider,
+            json!({"threadId":thread}),
+        ),
+        "provider",
+    );
+    assert!(!source.join("last-call.json").exists());
+    assert_eq!(runs(), 0);
+    // A fresh intent launches once and records the returned operation.
+    // The fixture cannot know the generated operation id, so its receipt names another one.
+    fixture_settings(
+        &source,
+        json!({"room":{
+        "desktop-assign":record_for("assigned",Some(true),Value::Null),
+        "desktop-assign-receipt":record_for("started",None,json!("placeholder"))}}),
+    );
+    let first = call(
+        &mut c,
+        "oms_assign_provider",
+        args.clone(),
+        json!({"threadId":thread}),
+    );
+    good(&first);
+    // A mismatching receipt is never trusted: the launch stays unconfirmed.
+    assert_eq!(payload(&first)["status"], "unconfirmed");
+    assert_eq!(runs(), 1, "the provider was launched exactly once");
+    let operation = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    assert_eq!(payload(&first)["operation"], operation);
+    // Let the detached fixture peer finish so it cannot overwrite the command record.
+    until(|| {
+        repo.join(".oms/artifacts/mcp")
+            .join(&operation)
+            .join("status")
+            .is_file()
+    });
+    // A retry observes the recorded intent and never starts another provider.
+    for (status, expected) in [("assigned", "unconfirmed"), ("started", "recorded")] {
+        let op = if status == "started" {
+            json!(operation)
+        } else {
+            Value::Null
+        };
+        fixture_settings(
+            &source,
+            json!({"room":{"desktop-assign":record_for(status,Some(false),op)}}),
+        );
+        let again = call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        );
+        good(&again);
+        assert_eq!(payload(&again)["status"], expected);
+        assert_eq!(payload(&again)["role"], "researcher");
+        assert_eq!(payload(&again)["readOnly"], true);
+        assert_eq!(runs(), 1, "retry never redispatches");
+        assert_eq!(record(&source)["argv"][1], "desktop-assign");
+        let digest = record(&source)["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|v| v == "--conversation-digest")
+            .unwrap();
+        assert_ne!(
+            record(&source)["argv"][digest + 1],
+            thread,
+            "only a digest leaves the process"
+        );
+    }
+    // A Room record for another request, role or thread is never trusted.
+    let mut forged: Value =
+        serde_json::from_str(&record_for("started", Some(false), json!(operation))).unwrap();
+    forged["role"] = json!("main");
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign":forged.to_string()}}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "unrecognized",
+    );
+    assert_eq!(runs(), 1);
+    // The result reader takes the thread only from the Room receipt and exposes its turns.
+    let updates = json!({"schema":1,"thread":operation,"turns":[{"role":"topic","text":"internal topic"},{"role":"answer","provider":"claude","quality":"ok","text":"callers found"},{"role":"answer","provider":"agy","quality":"ok","text":"foreign seat"}],"cursor":"c1","has_more":false});
+    fixture_settings(
+        &source,
+        json!({"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let read = call(
+        &mut c,
+        "oms_assign_result",
+        json!({"room":"r","requestId":req}),
+        json!({"threadId":thread}),
+    );
+    good(&read);
+    assert_eq!(
+        read["result"]["_meta"]["assignment"]["transcript"]["turns"][0]["text"],
+        "callers found"
+    );
+    assert_eq!(read["result"]["_meta"]["assignment"]["role"], "researcher");
+    assert_eq!(payload(&read)["status"], "started");
+    assert!(payload(&read)["transcript"].is_null());
+    assert!(
+        !read["result"]["content"]
+            .to_string()
+            .contains("fixture answer")
+    );
+    assert!(!read.to_string().contains("foreign seat"));
+    // The existing participant reader shows the same turns in its recorded-result slot.
+    let chat = json!({"room":"r","participant":format!("ask-{req}"),"provider":"claude","source":"room","self":false,"messages":[],"nextBefore":null});
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let page = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    good(&page);
+    assert!(page["result"]["content"][0]["text"].as_str().is_some());
+    assert!(
+        page["result"]["_meta"]["chat"]["result"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("fixture answer")
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_result",
+            json!({"room":"r","requestId":req}),
+            json!({}),
+        ),
+        "bound conversation",
+    );
+    let foreign_req = "5d6acd01-bd18-4567-bf69-ea05fb048b27";
+    let mut foreign: Value =
+        serde_json::from_str(&record_for("started", None, json!(operation))).unwrap();
+    foreign["request"] = json!(foreign_req);
+    foreign["participant"] = json!(format!("ask-{foreign_req}"));
+    fixture_settings(
+        &source,
+        json!({"updates":updates.to_string(),"room":{"desktop-assign-status":foreign.to_string()}}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_result",
+            json!({"room":"r","requestId":foreign_req}),
+            json!({"threadId":thread}),
+        ),
+        "does not match",
+    );
+    // Delegated workers and the read-only app profile have no assignment authority.
+    let before = runs();
+    let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
+    bad(
+        &call(
+            &mut worker,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "parent app",
+    );
+    let mut app = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    assert_eq!(
+        call(
+            &mut app,
+            "oms_assign_provider",
+            args,
+            json!({"threadId":thread})
+        )["error"]["code"],
+        -32602
+    );
+    assert_eq!(runs(), before);
+}
+fn conversation_panel() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
+    let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
+    assert_eq!(tools.as_array().unwrap().len(), 15);
+    assert_eq!(
+        tools[0]["_meta"]["openai/ui"]["entrypoints"],
+        json!([{"type":"thread"}])
+    );
+    let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
+    assert_eq!(uri, "ui://oms/conversation-panel/v10.html");
+    assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
+    assert_eq!(
+        c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
+        json!([])
+    );
+    let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
+    assert_eq!(resources.as_array().unwrap().len(), 1);
+    assert_eq!(resources[0]["uri"], *uri);
+    let read = |c: &mut Client, uri: &Value| {
+        c.call("resources/read", json!({"uri":uri}))["result"]["contents"][0].clone()
+    };
+    let current = read(&mut c, uri);
+    assert_eq!(current["uri"], *uri);
+    assert!(current["text"].as_str() == Some(include_str!("../src/conversation-panel.html")));
+    assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
+    for historical_uri in [
+        json!("ui://oms/conversation-panel/v1.html"),
+        json!("ui://oms/conversation-panel/v2.html"),
+        json!("ui://oms/conversation-panel/v3.html"),
+        json!("ui://oms/conversation-panel/v4.html"),
+        json!("ui://oms/conversation-panel/v5.html"),
+        json!("ui://oms/conversation-panel/v6.html"),
+        json!("ui://oms/conversation-panel/v7.html"),
+        json!("ui://oms/conversation-panel/v8.html"),
+        json!("ui://oms/conversation-panel/v9.html"),
+    ] {
+        let historical = read(&mut c, &historical_uri);
+        assert_eq!(historical["uri"], historical_uri);
+        assert_eq!(historical["text"], current["text"]);
+        assert_eq!(historical["mimeType"], current["mimeType"]);
+    }
+    assert_eq!(
+        c.call(
+            "resources/read",
+            json!({"uri":"ui://oms/conversation-panel/unrecognized.html"})
+        )["error"]["code"],
+        -32602
+    );
+    assert!(c.tool("oms_open_panel", json!({}))["result"].is_object());
+    assert!(c.tool("oms_peer_start", json!({}))["error"].is_object());
+    assert!(c.tool("oms_panel_snapshot", json!({"repo":source}))["error"].is_object());
+    assert!(
+        c.call("tasks/cancel", json!({"_meta":modern(),"taskId":"absent"}))["error"].is_object()
+    );
+    bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
+    assert!(!source.join("last-call.json").exists());
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","currentRoom":null,"project":"demo","goal":"Finish inspection","active":null,"activeAttempts":[],"attention":[{"summary":"Review pending","count":2}]}});
+    fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    let result = c.tool("oms_panel_snapshot", json!({}));
+    let data = &result["result"]["structuredContent"]["dashboard"];
+    assert_eq!(payload(&result)["dashboard"], *data);
+    assert_eq!(data["degraded"], true);
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
+    );
+    // Keep one runtime command blocked while the host opens and reads its tab.
+    // A queued project call must stay behind the snapshot and emit its own ID.
+    fixture_settings(
+        &source,
+        json!({"snapshotGate":true,"stdout":snapshot.to_string()}),
+    );
+    let send = |client: &mut Client, id: i64, name: &str| {
+        client.raw(format!("{}\n", json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":{}}})).as_bytes());
+    };
+    send(&mut c, 9001, "oms_panel_snapshot");
+    until(|| source.join("snapshot-ready").exists());
+    for id in 9002..=9009 {
+        send(&mut c, id, "oms_list_approvals");
+    }
+    send(&mut c, 9010, "oms_list_approvals");
+    let refused = c.read();
+    assert_eq!(refused["id"], 9010);
+    assert_eq!(refused["error"]["code"], -32000);
+    assert_eq!(
+        c.tool("oms_open_panel", json!({}))["result"]["structuredContent"]["panel"],
+        "OMS"
+    );
+    assert_eq!(read(&mut c, uri)["text"], current["text"]);
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    let ready = c.read();
+    assert_eq!(ready["id"], 9001);
+    assert_eq!(payload(&ready)["dashboard"]["project"], "demo");
+    for id in 9002..=9009 {
+        let approvals = c.read();
+        assert_eq!(approvals["id"], id);
+        assert_eq!(payload(&approvals)["approvals"], json!([]));
+    }
+    fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "oms_panel_snapshot"
+                    && t["annotations"]["readOnlyHint"] == true
+                    && t.get("_meta").is_none())
+        );
+        assert_eq!(
+            regular.tool("oms_panel_snapshot", json!({"repo":repo}))["result"],
+            result["result"]
+        );
+        assert_eq!(
+            regular.tool("oms_panel_snapshot", json!({}))["result"],
+            result["result"]
+        );
+        assert!(
+            regular.tool("oms_panel_snapshot", json!({"project":"other"}))["error"].is_object()
+        );
+        assert!(regular.tool("oms_start_main", json!({}))["error"].is_object());
+    }
+    let thread = "01900000-0000-7000-8000-000000000001";
+    let detail = json!({"room":"fixture","participant":"owner","provider":"codex","self":true,"source":"room","messages":[{"text":"dedicated widget reader body"}]});
+    fixture_settings(&source, json!({"stdout":detail.to_string()}));
+    assert!(
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "oms_panel_chat"
+                && v["_meta"]["ui"]["visibility"] == json!(["app"]))
+    );
+    bad(
+        &c.tool(
+            "oms_panel_chat",
+            json!({"room":"fixture","participant":"owner"}),
+        ),
+        "bound conversation",
+    );
+    let result=c.call("tools/call",json!({"name":"oms_panel_chat","arguments":{"room":"fixture","participant":"owner","before":42},"_meta":{"threadId":thread}}));
+    assert_eq!(
+        result["result"]["_meta"]["chat"]["messages"],
+        detail["messages"]
+    );
+    assert_eq!(
+        result["result"]["_meta"]["chat"]["nativeUri"],
+        format!("codex://threads/{thread}")
+    );
+    for k in ["content", "structuredContent"] {
+        let public = result["result"][k].to_string();
+        assert!(!public.contains("dedicated widget reader body") && !public.contains(thread));
+    }
+    let argv = record(&source)["argv"].clone();
+    assert!(!argv.to_string().contains(thread));
+    assert_eq!(argv[3], "--desktop-chat");
+    assert_eq!(argv[10].as_str().unwrap().len(), 32);
+    let evidence = |client: &mut Client, args: Value| {
+        client.call(
+            "tools/call",
+            json!({"name":"oms_panel_chat","arguments":args,"_meta":{"threadId":thread}}),
+        )
+    };
+    good(&evidence(
+        &mut c,
+        json!({"room":"fixture","participant":"owner","section":"files","attempt":"bound-attempt","page":2}),
+    ));
+    let recorded = record(&source);
+    assert_eq!(
+        &recorded["argv"].as_array().unwrap()[11..],
+        [
+            "--evidence-section",
+            "files",
+            "--evidence-attempt",
+            "bound-attempt",
+            "--page",
+            "2"
+        ]
+        .map(Value::from)
+    );
+    bad(
+        &evidence(
+            &mut c,
+            json!({"room":"fixture","participant":"owner","section":"raw","attempt":"bound-attempt"}),
+        ),
+        "Unsupported",
+    );
+    bad(
+        &evidence(
+            &mut c,
+            json!({"room":"fixture","participant":"owner","section":"files","attempt":"../other"}),
+        ),
+        "Invalid",
+    );
+    bad(
+        &evidence(
+            &mut c,
+            json!({"room":"fixture","participant":"owner","section":"files","attempt":"bound-attempt","before":5}),
+        ),
+        "cursor",
+    );
+
+    assert!(
+        c.tool(
+            "oms_panel_chat",
+            json!({"room":"fixture","participant":"owner","threadId":thread})
+        )["error"]
+            .is_object()
+    );
+    let view = json!({"view":"plan","page":2,"columns":[],"rows":[],"status":"ready"});
+    fixture_settings(&source, json!({"stdout":view.to_string()}));
+    assert_eq!(
+        payload(&c.tool("oms_panel_tui_view", json!({"view":"plan","page":2}))),
+        view
+    );
+    for name in ["connections", "modelcatalog", "attribution", "routes"] {
+        let page = json!({"view":name,"page":1,"columns":[],"rows":[],"status":"ready"});
+        fixture_settings(&source, json!({"stdout":page.to_string()}));
+        assert_eq!(
+            payload(&c.tool("oms_panel_tui_view", json!({"view":name}))),
+            page
+        );
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "panel",
+                "--repo",
+                repo,
+                "--desktop-view",
+                name,
+                "--page",
+                "1",
+                "--json"
+            ])
+        );
+    }
+    bad(
+        &c.tool("oms_panel_tui_view", json!({"view":"--launch"})),
+        "Unsupported",
+    );
+    bad(
+        &c.tool("oms_panel_tui_view", json!({"view":"plan","page":-1})),
+        "Invalid",
+    );
+    for (name, body, argv) in [
+        (
+            "oms_panel_usage",
+            json!({"providers":[],"attempts":[]}),
+            json!(["panel", "--repo", repo, "--desktop-usage", "--json"]),
+        ),
+        (
+            "oms_panel_git_status",
+            json!({"git":{},"github":{}}),
+            json!(["github", "panel-status", "--repo", repo, "--json"]),
+        ),
+    ] {
+        fixture_settings(&source, json!({"stdout":body.to_string()}));
+        assert_eq!(payload(&c.tool(name, json!({}))), body);
+        assert_eq!(record(&source)["argv"], argv);
+    }
+    let lookup = json!({"git":{},"github":{"lookup":{"status":"closed","item":null}}});
+    fixture_settings(&source, json!({"stdout":lookup.to_string()}));
+    for (kind, flag) in [("issue", "--issue"), ("pull", "--pull")] {
+        assert_eq!(
+            payload(&c.tool("oms_panel_git_status", json!({"kind":kind,"number":447}))),
+            lookup
+        );
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "github",
+                "panel-status",
+                "--repo",
+                repo,
+                "--json",
+                flag,
+                "447"
+            ])
+        );
+    }
+    fixture_settings(
+        &source,
+        json!({"stdout":json!({"git":{},"github":{"inventory":{"kind":"issues","items":[],"nextCursor":null}}}).to_string()}),
+    );
+    let page = c.tool(
+        "oms_panel_git_status",
+        json!({"inventory":"issues","cursor":"abc.foo="}),
+    );
+    assert_eq!(payload(&page)["github"]["inventory"]["kind"], "issues");
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "github",
+            "panel-status",
+            "--repo",
+            repo,
+            "--json",
+            "--inventory",
+            "issues",
+            "--cursor",
+            "abc.foo="
+        ])
+    );
+    good(&c.tool(
+        "oms_panel_git_status",
+        json!({"boardId":"PVT_fixture","cursor":"abc.foo="}),
+    ));
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "github",
+            "panel-status",
+            "--repo",
+            repo,
+            "--json",
+            "--project-id",
+            "PVT_fixture",
+            "--cursor",
+            "abc.foo="
+        ])
+    );
+    for args in [
+        json!({"kind":"issue"}),
+        json!({"number":2}),
+        json!({"kind":"pr","number":2}),
+        json!({"kind":"issue","number":"--repo"}),
+        json!({"kind":"issue","number":10000000000i64}),
+        json!({"inventory":"other"}),
+        json!({"boardId":"https://example.invalid/x"}),
+        json!({"boardId":"PVT_1","inventory":"issues"}),
+        json!({"boardId":"PVT_1","kind":"issue","number":1}),
+        json!({"cursor":"abc"}),
+        json!({"inventory":"issues","cursor":"x y"}),
+        json!({"inventory":"issues","kind":"issue","number":1}),
+    ] {
+        assert_eq!(
+            c.tool("oms_panel_git_status", args)["result"]["isError"],
+            true
+        );
+    }
+    let panel_graph = json!({
+        "schema": 1,
+        "kind": "oms-panel-project-graph",
+        "status": "ready",
+        "completeness": "complete",
+        "provenance": {"source":"indexed-graph","mode":"indexed","indexState":"present","verifiedRelationships":true,"readOnly":true,"wroteIndex":false},
+        "scope": {"repository":"demo","focusNode":"dir:src","query":null,"includeTests":true,"depth":1,"limit":20},
+        "limits": {"maxNodes":20,"maxEdges":180,"truncated":false},
+        "counts": {"shown_nodes":2,"total_nodes":2,"shown_edges":1,"total_edges":1,"confidence":{"EXTRACTED":1}},
+        "nodes": [
+            {"id":"file:src/a.rs","label":"a.rs","kind":"file","path":"src/a.rs"},
+            {"id":"file:src/b.rs","label":"b.rs","kind":"file","path":"src/b.rs"}
+        ],
+        "edges": [{"source":"file:src/a.rs","target":"file:src/b.rs","relation":"imports","confidence":"EXTRACTED"}],
+        "selection": {"status":"found","requestedId":"dir:src","node":{"id":"dir:src","kind":"directory"},"breadcrumbs":[],"neighbors":[],"omittedNeighbors":0}
+    });
+    fixture_settings(&source, json!({"stdout":panel_graph.to_string()}));
+    assert_eq!(
+        payload(&c.tool(
+            "oms_panel_project_graph",
+            json!({"node":"dir:src","limit":20,"depth":1,"includeTests":true})
+        )),
+        panel_graph
+    );
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "graph",
+            "project",
+            "panel",
+            "--repo",
+            repo,
+            "--json",
+            "--limit",
+            "20",
+            "--depth",
+            "1",
+            "--include-tests",
+            "--node=dir:src"
+        ])
+    );
+    good(&c.tool("oms_panel_project_graph", json!({"query":"panel"})));
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "graph",
+            "project",
+            "panel",
+            "--repo",
+            repo,
+            "--json",
+            "--limit",
+            "40",
+            "--depth",
+            "2",
+            "--query=panel"
+        ])
+    );
+    assert_eq!(
+        c.tool("oms_panel_project_graph", json!({"repo":source}))["error"]["code"],
+        -32602
+    );
+    let before_bad_graph = record(&source);
+    for args in [
+        json!({"node":"dir:src","query":"src"}),
+        json!({"node":"file:../etc/passwd"}),
+        json!({"node":"file:/etc/passwd"}),
+        json!({"node":"--help"}),
+        json!({"query":"   "}),
+        json!({"query":"bad\nquery"}),
+        json!({"limit":0}),
+        json!({"limit":61}),
+        json!({"depth":-1}),
+        json!({"depth":4}),
+        json!({"includeTests":"yes"}),
+    ] {
+        assert_eq!(
+            c.tool("oms_panel_project_graph", args.clone())["result"]["isError"],
+            true,
+            "expected error for {args}"
+        );
+    }
+    assert_eq!(record(&source), before_bad_graph);
+    // Oversized node count from backend is rejected by panel receipt validation.
+    let mut oversize_graph = panel_graph.clone();
+    oversize_graph["nodes"] = json!(vec![json!({"id":"file:a.rs"}); 61]);
+    fixture_settings(&source, json!({"stdout":oversize_graph.to_string()}));
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "unrecognized receipt",
+    );
+    // Outbound secret-shaped text is withheld before leaving the MCP server.
+    let mut secret_graph = panel_graph.clone();
+    secret_graph["nodes"][0]["label"] =
+        json!(concat!("ghp_", "0123456789abcdef0123456789abcdef0123"));
+    fixture_settings(&source, json!({"stdout":secret_graph.to_string()}));
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "outbound scan",
+    );
+    // Invalid project repository stderr maps to a safe user-facing message.
+    fixture_settings(
+        &source,
+        json!({"exit":2,"stdout":"","stderr":"graph: invalid project repository: expected .git\n"}),
+    );
+    bad(
+        &c.tool("oms_panel_project_graph", json!({})),
+        "not a valid OMS or Git repository",
+    );
+    let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
+    fixture_settings(
+        &source,
+        json!({"stdout":snapshot.to_string(),"binding":{"conversationBinding":"matched","conversationMain":expected_main}}),
+    );
+    for mut client in [
+        Client::new(&source, &repo, false, false, false),
+        Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref()),
+    ] {
+        let snapshot = |client: &mut Client, metadata: Value| {
+            client.call(
+                "tools/call",
+                json!({"name":"oms_panel_snapshot","arguments":{},"_meta":metadata}),
+            )
+        };
+        let observed = snapshot(&mut client, json!({"threadId":thread}));
+        assert_eq!(
+            payload(&observed)["dashboard"]["conversationMain"],
+            expected_main
+        );
+        assert!(!observed.to_string().contains(thread));
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(thread.as_bytes()));
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "dashboard",
+                "--repo",
+                repo,
+                "--json",
+                "--panel-snapshot",
+                "--conversation-digest",
+                &digest[..32]
+            ])
+        );
+        for invalid in [
+            json!({"sessionId":thread}),
+            json!({"threadId":"bad"}),
+            json!({}),
+        ] {
+            let unbound = snapshot(&mut client, invalid);
+            assert!(payload(&unbound)["dashboard"]["conversationMain"].is_null());
+            assert_eq!(
+                record(&source)["argv"],
+                json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
+            );
+        }
+    }
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
+    let partial = c.call(
+        "tools/call",
+        json!({"name":"oms_panel_snapshot","_meta":{"threadId":thread}}),
+    );
+    assert_eq!(payload(&partial)["dashboard"]["project"], "demo");
+    assert_eq!(
+        payload(&partial)["dashboard"]["conversationBinding"],
+        "unconfirmed"
+    );
+    let mut worker = Client::with_depth(&source, &repo, "core", false, false, "1".as_ref());
+    bad(
+        &worker.tool("oms_panel_snapshot", json!({"repo":source})),
+        "own repository",
+    );
+    let start = json!({"main":"codex","goal":"--help; inspect scope","requestId":"4d6acd01-bd18-4567-bf69-ea05fb048b27"});
+    let room = "oms-app-4d6acd01-bd18-4567-bf69-ea05fb048b27";
+    fixture_settings(
+        &source,
+        json!({"stdout":json!({"status":"started","provider":"codex","room":room,"attempt":"native-main"}).to_string()}),
+    );
+    let receipt = payload(&c.tool("oms_start_main", start.clone()));
+    assert_eq!(receipt["attempt"], "native-main");
+    assert_eq!(receipt["requestId"], start["requestId"]);
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "panel",
+            "--repo",
+            repo,
+            "--host",
+            "desktop",
+            "--launch",
+            "codex",
+            "--room",
+            room,
+            "--task=--help; inspect scope",
+            "--json"
+        ])
+    );
+    let argv: Vec<std::ffi::OsString> = record(&source)["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().into())
+        .collect();
+    let interrupted = AtomicBool::new(false);
+    let recognized = |args: &[std::ffi::OsString]| {
+        CommandRequest {
+            args,
+            cwd: &repo,
+            timeout: Duration::from_secs(1),
+            interrupted: &interrupted,
+        }
+        .is_desktop_main_start()
+    };
+    assert!(recognized(&argv));
+    for (i, replacement) in [
+        (0, "other"),
+        (2, "/"),
+        (4, "inline"),
+        (6, "unknown"),
+        (8, "room-other"),
+        (9, "--help"),
+    ] {
+        let mut changed = argv.clone();
+        changed[i] = replacement.into();
+        assert!(!recognized(&changed));
+    }
+    let before = record(&source);
+    let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
+    bad(&worker.tool("oms_start_main", start.clone()), "parent app");
+    bad(
+        &worker.tool("oms_panel_project_graph", json!({})),
+        "parent app",
+    );
+    bad(&worker.tool("oms_list_projects", json!({})), "delegated");
+    bad(
+        &c.tool(
+            "oms_start_main",
+            json!({"main":"codex","goal":"x\ry","requestId":start["requestId"]}),
+        ),
+        "one-line goal",
+    );
+    assert_eq!(record(&source), before);
+    let map = source.join("test-config/oh-my-setting/desktop-projects.json");
+    std::fs::create_dir_all(map.parent().unwrap()).unwrap();
+    std::fs::write(&map, json!({"demo":repo}).to_string()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({})))["projects"],
+        json!(["demo"])
+    );
+    bad(&c.tool("oms_panel_snapshot", json!({})), "project");
+    bad(
+        &c.tool("oms_panel_snapshot", json!({"project":"../demo"})),
+        "project",
+    );
+    let mut routed = start;
+    routed["project"] = json!("demo");
+    good(&c.tool("oms_start_main", routed.clone()));
+    let recovered = json!({"requestId":routed["requestId"],"room":room,"status":"recorded","attempt":"native-main","state":"done","provider":"codex","terminal":true});
+    fixture_settings(&source, json!({"stdout":recovered.to_string()}));
+    assert_eq!(
+        payload(&c.tool(
+            "oms_start_status",
+            json!({"project":"demo","requestId":routed["requestId"]})
+        )),
+        recovered
+    );
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "room",
+            "desktop-start-status",
+            "--repo",
+            repo,
+            "--id",
+            room,
+            "--json"
+        ])
+    );
+    std::fs::write(&map, "{}").unwrap();
+    bad(
+        &c.tool("oms_list_projects", json!({})),
+        "Invalid OMS project map",
+    );
+}
+
+fn panel_command_catalog() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let name = "oms_panel_capabilities";
+    let mut desktop =
+        Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let listing =
+        "advise                     First description.\npeer-ask                   Ask a peer.\n";
+    fixture_settings(&source, json!({"stdout":listing}));
+    let first = desktop.tool(name, json!({}));
+    let expected = json!({"schema":1,"total":2,"omitted":0,"commands":[{"name":"advise","description":"First description."},{"name":"peer-ask","description":"Ask a peer."}]});
+    assert_eq!(payload(&first), expected);
+    assert_eq!(first["result"]["structuredContent"], expected);
+    assert_eq!(record(&source)["argv"], json!(["list", "--all"]));
+    assert_eq!(record(&source)["cwd"], json!(repo));
+    assert_eq!(
+        payload(&desktop.tool(name, json!({"offset":2}))),
+        json!({"schema":1,"total":2,"omitted":2,"commands":[]})
+    );
+    let before = std::fs::read(source.join("last-call.json")).unwrap();
+    for field in [
+        json!({"command":"update"}),
+        json!({"path":repo}),
+        json!({"repo":repo}),
+    ] {
+        assert_eq!(desktop.tool(name, field)["error"]["code"], -32602);
+    }
+    for offset in [
+        json!(-1),
+        json!(10001),
+        json!("2"),
+        json!(null),
+        json!(true),
+        json!(0.5),
+    ] {
+        bad(
+            &desktop.tool(name, json!({"offset":offset})),
+            "Invalid command catalog offset",
+        );
+    }
+    let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
+    bad(&worker.tool(name, json!({})), "parent app");
+    let mut generic = Client::with_depth(&source, &repo, "mcp-app", false, false, "0".as_ref());
+    bad(&generic.tool(name, json!({})), "OMS_PANEL_REPO");
+    let map = source.join("test-config/oh-my-setting/desktop-projects.json");
+    std::fs::create_dir_all(map.parent().unwrap()).unwrap();
+    std::fs::write(&map, json!({"approved":repo}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for alias in [json!("unknown"), json!(repo), json!(null)] {
+        bad(
+            &generic.tool(name, json!({"project":alias})),
+            "OMS_PANEL_REPO",
+        );
+    }
+    assert_eq!(
+        before,
+        std::fs::read(source.join("last-call.json")).unwrap()
+    );
+    assert_eq!(
+        payload(&generic.tool(name, json!({"project":"approved"}))),
+        expected
+    );
+    for full in [false, true] {
+        assert_eq!(
+            Client::new(&source, &repo, full, false, false).tool(name, json!({}))["error"]["code"],
+            -32602
+        );
+    }
+    std::fs::remove_file(map).unwrap();
+
+    let descriptions = (0..240)
+        .map(|i| format!("Description {i} — {}", r#""some text" "#.repeat(30)))
+        .collect::<Vec<_>>();
+    let rows = descriptions
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("command-{i} {d}\n"))
+        .collect::<String>();
+    fixture_settings(&source, json!({"stdout":rows}));
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = desktop.tool(name, json!({"offset":offset}));
+        good(&page);
+        assert!(page.to_string().len() <= 60_000);
+        let data = &page["result"]["structuredContent"];
+        let rows = data["commands"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert_eq!(data["omitted"], descriptions.len() - rows.len());
+        for row in rows {
+            assert_eq!(row["name"], format!("command-{offset}"));
+            assert_eq!(row["description"], descriptions[offset]);
+            offset += 1;
+        }
+        pages += 1;
+        if data.get("nextOffset").is_none() {
+            break;
+        }
+        assert_eq!(data["nextOffset"], offset);
+    }
+    assert_eq!(offset, descriptions.len());
+    assert!(pages > 1);
+    for (stdout, error) in [
+        ("".into(), "Unreadable"),
+        ("a desc\na again\n".into(), "Unreadable"),
+        ("/bin/sh command\n".into(), "Unreadable"),
+        ("status bad\u{7}record".into(), "Unreadable"),
+        (format!("giant {}", "a".repeat(61000)), "response limit"),
+        (
+            format!("help {}{}", "gh", ["p_", &"a".repeat(36)].concat()),
+            "outbound scan",
+        ),
+    ] {
+        fixture_settings(&source, json!({"stdout":stdout}));
+        bad(&desktop.tool(name, json!({})), error);
+    }
+    fixture_settings(&source, json!({"exit":2,"stderr":"private diagnostic"}));
+    let result = desktop.tool(name, json!({}));
+    bad(&result, "OMS refused");
+    assert!(!result.to_string().contains("private diagnostic"));
+}
+
 fn environment_authority() {
     use std::os::unix::ffi::OsStringExt;
     let t = Temp::new();
@@ -246,7 +1592,7 @@ fn environment_authority() {
         std::ffi::OsString::from("invalid"),
         std::ffi::OsString::from_vec(vec![255]),
     ] {
-        let mut c = Client::with_depth(&source, &repo, false, false, false, &depth);
+        let mut c = Client::with_depth(&source, &repo, "core", false, false, &depth);
         bad(
             &c.tool("oms_peer_start", json!({"kind":"consult","prompt":"q"})),
             "delegated worker",
@@ -491,7 +1837,7 @@ fn discovery_protocols() {
     let listed = c.call("tools/list", json!({"_meta":modern()}));
     let golden: Value = serde_json::from_str(include_str!("definitions.json")).unwrap();
     assert_eq!(listed["result"]["tools"], golden);
-    assert_eq!(golden.as_array().unwrap().len(), 32);
+    assert_eq!(golden.as_array().unwrap().len(), 33);
     assert_eq!(listed["result"]["ttlMs"], 300000);
     let d = c.call("server/discover", json!({}));
     assert_eq!(
@@ -565,7 +1911,7 @@ fn discovery_protocols() {
             .as_array()
             .unwrap()
             .len(),
-        13
+        14
     );
     good(&core.tool("oms_task_state", json!({})));
     assert_eq!(
@@ -2209,6 +3555,32 @@ fn owner_validation() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner"));
     assert!(!Command::new(&binary).output().unwrap().status.success());
     for (i,launch)in[json!({}),json!({"kind":"write"}),json!({"kind":"consult","targets":["--help"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}),json!({"kind":"consult","targets":[],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{"include_task":1}})].into_iter().enumerate(){let op=format!("consult-20200101T000000Z-{i:08x}");let dir=run_dir(&repo,&op,json!({}),None);std::fs::write(dir.join("launch.json"),launch.to_string()).unwrap();let output=Command::new(&binary).args([source.as_os_str(),repo.as_os_str(),std::ffi::OsStr::new(&op),source.join("bin/oms").as_os_str()]).env("PATH","").env("OMS_HARNESS_CHILD","0").env("OMS_HARNESS_DELEGATE_DEPTH","0").output().unwrap();assert!(!output.status.success());assert_eq!(std::fs::read_to_string(dir.join("status")).unwrap(),"1\n");assert!(!source.join("last-call.json").exists());}
+    let revision = "1".repeat(40);
+    let stages = source.join("target/oms-native");
+    let staged = exec_file(&stages.join(&revision), 0o755);
+    let op = "ask-20200101T000000Z-eeeeeeee";
+    let dir = run_dir(&repo, op, json!({}), None);
+    std::fs::write(dir.join("launch.json"),json!({"kind":"ask","targets":["claude"],"thread":op,"new_thread":false,"debate_rounds":0,"context_options":{}}).to_string()).unwrap();
+    let output = Command::new(&binary)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            op.as_ref(),
+            staged.as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let args = record(&stages)["argv"].as_array().unwrap().clone();
+    assert_eq!(
+        args[..5],
+        json!(["--oms-dispatch", source, revision, "--", "peer-ask"])
+            .as_array()
+            .unwrap()[..]
+    );
     fixture_settings(&source, json!({"gate":true}));
     let mut c = Client::new(&source, &repo, false, true, false);
     let started = c.tool("oms_peer_start", json!({"kind":"consult","prompt":"hold"}));
@@ -2535,6 +3907,27 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if cfg["snapshotGate"] == true {
+        if args.first().is_some_and(|v| v == "dashboard") {
+            std::fs::write(source.join("snapshot-ready"), "").unwrap();
+            until(|| source.join("snapshot-release").exists());
+        } else if args.get(1).is_some_and(|v| v == "desktop-requests") {
+            println!("{}", json!({"approvals":[],"incomplete":false}));
+            return;
+        }
+    }
+    if args.first().is_some_and(|v| v == "dashboard")
+        && args.iter().any(|v| v == "--conversation-digest")
+    {
+        let mut report: Value = serde_json::from_str(cfg["stdout"].as_str().unwrap()).unwrap();
+        report["dashboard"]["conversationBinding"] = cfg["binding"]["conversationBinding"]
+            .as_str()
+            .unwrap_or("unconfirmed")
+            .into();
+        report["dashboard"]["conversationMain"] = cfg["binding"]["conversationMain"].clone();
+        println!("{report}");
+        return;
+    }
     if args.first().is_some_and(|s| {
         s.to_str()
             .is_some_and(|s| ["consult", "advise", "peer-ask"].contains(&s))
@@ -2559,6 +3952,19 @@ fn fake_oms() {
         std::fs::write(&artifact, "## Output\nfixture answer\n## Exit\n0\n").unwrap();
         println!("artifact: {}", artifact.display());
         println!("thread: fixture-thread");
+        return;
+    }
+    if args.first().is_some_and(|v| v == "room")
+        && let Some(out) = args
+            .get(1)
+            .and_then(|v| v.to_str())
+            .and_then(|a| cfg["room"][a].as_str())
+    {
+        print!("{out}");
+        return;
+    }
+    if args.iter().any(|v| v == "updates") && cfg["updates"].is_string() {
+        print!("{}", cfg["updates"].as_str().unwrap());
         return;
     }
     if cfg["hold"] == true {
@@ -3005,26 +4411,36 @@ fn main() {
         let full = args[4] == "full";
         let tasks = args[5] == "1";
         let mut fixture_config = pinned(Path::new(&args[2]), config(full, tasks));
+        if args[4] == "mcp-app" {
+            fixture_config.profile = ToolProfile::McpApp;
+        } else if args[4] == "chatgpt-panel" {
+            fixture_config.profile = ToolProfile::ChatGptPanel;
+        }
         if Path::new(&args[2]).join("fixture-owner").is_file() {
             fixture_config.peer_owner = std::env::current_exe().unwrap();
         }
-        oms_mcp_server::serve(
+        Server::new(
             Path::new(&args[2]),
             Path::new(&args[3]),
             &flag,
-            &mut std::io::stdin().lock(),
-            &mut std::io::stdout().lock(),
             fixture_config,
         )
+        .unwrap()
+        .serve_connection(&mut std::io::stdin().lock(), &mut std::io::stdout())
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 30] = [
+    let cases: [(&str, fn()); 35] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
         ("owner_validation", owner_validation),
         ("environment_profile", environment_profile),
+        ("cross_host_project_reads", cross_host_project_reads),
+        ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
+        ("conversation_panel", conversation_panel),
+        ("desktop_assignment", desktop_assignment),
+        ("panel_command_catalog", panel_command_catalog),
         ("environment_authority", environment_authority),
         ("boundary_limits", boundary_limits),
         ("canonical_protocol_cases", canonical_protocol_cases),

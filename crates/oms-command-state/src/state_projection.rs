@@ -21,29 +21,6 @@ fn query(ctx: &Context<'_>, argv: &[&str]) -> String {
         .map(|b| String::from_utf8_lossy(&b).trim().to_owned())
         .unwrap_or_default()
 }
-fn git_status(status: &str) -> (String, String, String, Option<u64>) {
-    let mut head = String::new();
-    let mut branch = String::new();
-    let mut upstream = String::new();
-    let mut ahead = None;
-    for line in status.lines() {
-        if let Some(value) = line.strip_prefix("# branch.oid ") {
-            if value != "(initial)" {
-                head = value.into();
-            }
-        } else if let Some(value) = line.strip_prefix("# branch.head ") {
-            if value != "(detached)" {
-                branch = value.into();
-            }
-        } else if let Some(value) = line.strip_prefix("# branch.upstream ") {
-            upstream = value.into();
-        } else if let Some(value) = line.strip_prefix("# branch.ab +") {
-            ahead = value.split_whitespace().next().and_then(|n| n.parse().ok());
-        }
-    }
-    (head, branch, upstream, ahead)
-}
-
 pub(super) fn alive(row: &Value) -> Option<bool> {
     let raw = row.get("pid");
     let pid = raw
@@ -241,13 +218,27 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
             ),
         ]),
     )?;
-    let status = query(ctx, &["git", "status", "--porcelain=v2", "--branch"]);
-    let (head, branch, upstream, ahead) = git_status(&status);
+    let mut command = vec![
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ];
+    command.extend_from_slice(oms_work_inspect::git::STATUS_ARGS);
+    let status = helpers::query(ctx, &command).unwrap_or_default();
+    let git = oms_work_inspect::git::snapshot(&status);
+    let head = git["head"].as_str().unwrap_or_default();
+    let branch = git["branch"].as_str().unwrap_or_default();
+    let upstream = git["upstream"].as_str().unwrap_or_default();
+    let ahead = git["ahead"].as_u64();
+    state.set("git", json::parse(git.to_string().as_bytes())?)?;
     let (ci_rows, _) = rows(ctx, ".oms/ci.jsonl");
     let mut ci = ci_rows.last().cloned().unwrap_or_else(json::empty);
     let fresh = !head.is_empty()
         && !ci.text("sha").is_empty()
-        && (head.starts_with(ci.text("sha")) || ci.text("sha").starts_with(&head));
+        && (head.starts_with(ci.text("sha")) || ci.text("sha").starts_with(head));
     let ci_state = if fresh {
         "current"
     } else if ahead.is_some_and(|a| a > 0)
@@ -1172,6 +1163,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
     Ok(object([
         ("schema", number(1)),
         ("kind", string("oms-dashboard")),
+        ("git", state.get("git").clone()),
         ("generated_at", string(timestamp(epoch())?)),
         (
             "repo",
@@ -1277,6 +1269,461 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         ("fleet", fleet::dashboard(state)),
     ]))
 }
+
+fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
+    let source = |ok: bool, has_rows: bool| {
+        if ok {
+            "ok"
+        } else if has_rows {
+            "partial"
+        } else {
+            "unavailable"
+        }
+    };
+    let attempts_ok = report.get("attempts").get("available").truth();
+    let has_rows = |key: &str| {
+        dashboard
+            .get(key)
+            .array()
+            .is_ok_and(|rows| !rows.is_empty())
+    };
+    let plan = report.get("plan");
+    let plan_stale = ["stale_claims", "stale_reviews"]
+        .iter()
+        .any(|key| plan.get(key).int().unwrap_or(0) > 0);
+    let binding = match dashboard.text("conversationBinding") {
+        "matched" if dashboard.get("conversationMain").object().is_ok() => "matched",
+        "ambiguous" => "ambiguous",
+        _ => "unconfirmed",
+    };
+    let states = [
+        (
+            "git",
+            source(dashboard.get("git").get("available").truth(), false),
+        ),
+        (
+            "task",
+            source(report.get("task").get("healthy").truth(), false),
+        ),
+        (
+            "plan",
+            if plan_stale {
+                "stale"
+            } else {
+                source(plan.get("healthy").truth(), false)
+            },
+        ),
+        (
+            "attempts",
+            source(
+                attempts_ok,
+                has_rows("attempts") || has_rows("activeAttempts"),
+            ),
+        ),
+        (
+            "artifacts",
+            source(
+                report.get("operations").get("available").truth(),
+                has_rows("operations"),
+            ),
+        ),
+        (
+            "acceptance",
+            source(report.get("acceptance").get("available").truth(), false),
+        ),
+        ("conversation", binding),
+    ];
+    let observed = states
+        .iter()
+        .any(|(_, value)| !matches!(*value, "unavailable" | "unconfirmed" | "ambiguous"));
+    let gaps = states
+        .iter()
+        .any(|(_, value)| !matches!(*value, "ok" | "unconfirmed" | "matched"))
+        || dashboard.get("degraded").truth();
+    let mut sources = object(states.map(|(name, value)| (name, string(value))));
+    let nonneg = |v: &Value| {
+        v.int()
+            .ok()
+            .and_then(|n| u64::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    let attempts_shown = dashboard
+        .get("attempts")
+        .array()
+        .map_or(0, |rows| rows.len() as u64);
+    let active_shown = dashboard
+        .get("activeAttempts")
+        .array()
+        .map_or(0, |rows| rows.len() as u64);
+    let attempts_trimmed = nonneg(dashboard.get("attemptsTrimmed"));
+    let active_trimmed = nonneg(dashboard.get("activeAttemptsTrimmed"));
+    let attempts_omitted = if attempts_ok {
+        nonneg(dashboard.get("commandStatus").get("total"))
+            .saturating_sub(attempts_shown.saturating_add(attempts_trimmed))
+    } else {
+        0
+    };
+    let active_omitted = if attempts_ok {
+        nonneg(dashboard.get("active")).saturating_sub(active_shown.saturating_add(active_trimmed))
+    } else {
+        0
+    };
+    let omitted = nonneg(report.get("operations").get("omitted"))
+        .saturating_add(nonneg(report.get("attention").get("omitted")))
+        .saturating_add(nonneg(report.get("acceptance").get("omitted")))
+        .saturating_add(nonneg(
+            dashboard.get("conversationMain").get("participantsOmitted"),
+        ))
+        .saturating_add(attempts_omitted)
+        .saturating_add(active_omitted);
+    let trimmed = attempts_trimmed
+        .saturating_add(nonneg(dashboard.get("operationsTrimmed")))
+        .saturating_add(nonneg(dashboard.get("attentionTrimmed")))
+        .saturating_add(active_trimmed);
+    let conversation_incomplete = dashboard.get("conversationMain").get("incomplete").truth();
+    // Bounds apply to each source window. A recent and an active row can refer to the same attempt.
+    for (name, bounded) in [
+        (
+            "attempts",
+            attempts_omitted > 0
+                || active_omitted > 0
+                || attempts_trimmed > 0
+                || active_trimmed > 0,
+        ),
+        (
+            "artifacts",
+            nonneg(report.get("operations").get("omitted")) > 0
+                || nonneg(dashboard.get("operationsTrimmed")) > 0,
+        ),
+        (
+            "acceptance",
+            nonneg(report.get("acceptance").get("omitted")) > 0,
+        ),
+    ] {
+        if bounded && sources.text(name) == "ok" {
+            let _ = sources.set(name, string("partial"));
+        }
+    }
+    let mut completeness = if !observed {
+        "unknown"
+    } else if gaps || conversation_incomplete || omitted > 0 || trimmed > 0 {
+        "partial"
+    } else {
+        "complete"
+    };
+    let head = dashboard
+        .get("git")
+        .get("head")
+        .str()
+        .ok()
+        .filter(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|s| string(&s[..12]))
+        .unwrap_or(Value::Null);
+    let latest_artifact = dashboard
+        .get("operations")
+        .array()
+        .ok()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.get("artifactId").str().ok())
+        .filter(|id| {
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        })
+        .map(string)
+        .unwrap_or(Value::Null);
+    let evidence = object([
+        ("scope", string("repository")),
+        ("head", head),
+        ("latestArtifact", latest_artifact),
+        ("omitted", number(omitted)),
+        ("trimmed", number(trimmed)),
+    ]);
+    let revision = if completeness == "unknown" {
+        Value::Null
+    } else {
+        let mut stable_dashboard = dashboard.clone();
+        // Exclude wall-clock-only read time so repeated equivalent reads share a revision.
+        stable_dashboard.remove("updated");
+        stable_dashboard.remove("observation");
+        let basis = object([
+            ("schema", number(1)),
+            ("kind", string("multi-source-observation")),
+            (
+                "checkout",
+                string(json::sha(repo.as_os_str().as_encoded_bytes())),
+            ),
+            ("completeness", string(completeness)),
+            ("sources", sources.clone()),
+            ("evidence", evidence.clone()),
+            ("dashboard", stable_dashboard),
+        ]);
+        match crate::json::hash(&basis) {
+            Ok(digest) => string(format!("obs-v1:{}", &digest[..24])),
+            Err(_) => {
+                completeness = "unknown";
+                Value::Null
+            }
+        }
+    };
+    object([
+        ("schema", number(1)),
+        ("kind", string("multi-source-observation")),
+        ("atomic", Value::Bool(false)),
+        ("revision", revision),
+        ("observedAt", dashboard.get("updated").clone()),
+        ("completeness", string(completeness)),
+        ("sources", sources),
+        ("evidence", evidence),
+    ])
+}
+
+/// Compact public columns before command capture. Omit oversized strings whole
+/// so that the MCP outbound scanner never receives a credential prefix.
+fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) -> Value {
+    fn label(v: &Value, bytes: usize) -> Value {
+        match v.str() {
+            Ok(s) if !s.is_empty() && s.len() <= bytes && !s.chars().any(char::is_control) => {
+                string(s)
+            }
+            _ => Value::Null,
+        }
+    }
+    fn rows(v: &Value, limit: usize, f: impl Fn(&Value) -> Value) -> Value {
+        Value::Array(v.array().unwrap_or(&[]).iter().take(limit).map(f).collect())
+    }
+    fn count(v: &Value) -> Value {
+        v.int()
+            .ok()
+            .filter(|n| *n >= 0)
+            .map(number)
+            .unwrap_or(Value::Null)
+    }
+    fn attempt(row: &Value) -> Value {
+        let refs = row.get("refs");
+        let provider = if row.text("tool") == "panel-main" && !refs.text("panel_harness").is_empty()
+        {
+            refs.get("panel_harness")
+        } else {
+            row.get("provider")
+        };
+        object([
+            ("id", label(row.get("attempt_id"), 128)),
+            ("provider", label(provider, 64)),
+            ("tool", label(row.get("tool"), 96)),
+            ("role", label(refs.get("panel_role"), 64)),
+            (
+                "participant",
+                label(refs.get("panel_room_participant"), 160),
+            ),
+            ("created", label(row.get("created_at"), 64)),
+            ("reason", label(row.get("reason_code"), 96)),
+            ("room", label(refs.get("panel_room_id"), 128)),
+            ("task", label(row.get("task_id"), 192)),
+            ("state", label(row.get("state"), 64)),
+            ("updated", label(row.get("updated_at"), 64)),
+        ])
+    }
+    let attempts = report.get("attempts");
+    let active = attempts.get("active_recent");
+    let mail = report.get("attention").get("room_mail");
+    let current_room = if mail.get("bound").truth() && mail.get("healthy").truth() {
+        label(mail.get("room_id"), 128)
+    } else {
+        Value::Null
+    };
+    let window = active.array().unwrap_or(&[]);
+    let mut candidates = window.iter().filter(|r| {
+        r.text("tool") == "panel-main"
+            && (current_room == Value::Null || r.get("refs").get("panel_room_id") == &current_room)
+    });
+    let first = candidates.next();
+    // A partial repository-wide window cannot establish uniqueness.
+    let main = first.filter(|_| {
+        candidates.next().is_none()
+            && (current_room != Value::Null
+                || attempts.get("active").int().ok() == Some(window.len() as i128))
+    });
+    let goal_text = |v: &Value| {
+        v.str()
+            .ok()
+            .filter(|s| !s.is_empty() && s.chars().count() <= 2000)
+            .map(string)
+            .unwrap_or(Value::Null)
+    };
+    let goal = goal_text(report.get("goal").get("text"));
+    let plan = report.get("plan");
+    let acceptance = report.get("acceptance");
+    let operations = report.get("operations");
+    let reviews = report.get("reviews");
+    let operation_count = |key: &str| {
+        if attempts.get("available").truth() {
+            count(attempts.get(key))
+        } else {
+            Value::Null
+        }
+    };
+    let plan_count = |key: &str| {
+        if plan.get("healthy").truth() {
+            count(plan.get(key))
+        } else {
+            Value::Null
+        }
+    };
+    let mut dashboard = object([
+        ("scope", string("repository")),
+        ("git", report.get("git").clone()),
+        (
+            "conversationMain",
+            conversation.get("conversationMain").clone(),
+        ),
+        (
+            "conversationBinding",
+            conversation
+                .opt("conversationBinding")
+                .cloned()
+                .unwrap_or_else(|| string("unconfirmed")),
+        ),
+        ("currentRoom", current_room),
+        ("project", label(report.get("repo").get("name"), 255)),
+        ("branch", label(report.get("repo").get("branch"), 255)),
+        ("updated", label(report.get("generated_at"), 64)),
+        (
+            "goal",
+            if goal != Value::Null {
+                goal
+            } else {
+                main.map(|v| goal_text(v.get("refs").get("panel_label")))
+                    .unwrap_or(Value::Null)
+            },
+        ),
+        (
+            "degraded",
+            Value::Bool(!report.get("collection").get("ok").truth()),
+        ),
+        ("main", main.map(attempt).unwrap_or(Value::Null)),
+        (
+            "active",
+            if attempts.get("available").truth() {
+                count(attempts.get("active"))
+            } else {
+                Value::Null
+            },
+        ),
+        ("tasks", plan_count("task_count")),
+        ("tasksVerified", plan_count("verified_count")),
+        ("taskStatus", label(report.get("task").get("status"), 96)),
+        ("attempts", rows(attempts.get("recent"), 16, attempt)),
+        ("activeAttempts", rows(active, 8, attempt)),
+        (
+            "commandStatus",
+            object([
+                ("total", operation_count("total")),
+                ("active", operation_count("active")),
+                ("executing", operation_count("executing")),
+                (
+                    "byState",
+                    if attempts.get("available").truth() {
+                        attempts.get("by_state").clone()
+                    } else {
+                        Value::Null
+                    },
+                ),
+                ("available", attempts.get("available").clone()),
+            ]),
+        ),
+        (
+            "attention",
+            rows(report.get("attention").get("items"), 8, |v| {
+                object([
+                    ("code", label(v.get("code"), 96)),
+                    ("summary", label(v.get("summary"), 512)),
+                    ("count", count(v.get("count"))),
+                ])
+            }),
+        ),
+        (
+            "operations",
+            rows(operations.get("recent"), 8, |v| {
+                object([
+                    ("kind", label(v.get("kind"), 96)),
+                    ("provider", label(v.get("provider"), 64)),
+                    ("status", label(v.get("status"), 96)),
+                    ("updated", label(v.get("ts"), 64)),
+                    (
+                        "exit",
+                        v.get("exit").int().ok().map(number).unwrap_or(Value::Null),
+                    ),
+                    ("artifactId", label(v.get("artifact_id"), 128)),
+                    ("attempt", label(v.get("attempt_id"), 160)),
+                    ("task", label(v.get("task_id"), 160)),
+                    (
+                        "verifyExit",
+                        v.get("verify_exit")
+                            .int()
+                            .ok()
+                            .map(number)
+                            .unwrap_or(Value::Null),
+                    ),
+                    ("verifyStatus", label(v.get("verify_status"), 64)),
+                ])
+            }),
+        ),
+        (
+            "reviews",
+            object([
+                ("available", operations.get("available").clone()),
+                ("passed", count(reviews.get("passed"))),
+                ("failed", count(reviews.get("failed"))),
+                ("unknown", count(reviews.get("unknown"))),
+            ]),
+        ),
+        (
+            "acceptance",
+            object([
+                ("available", acceptance.get("available").clone()),
+                ("total", count(acceptance.get("total"))),
+                ("verified", count(acceptance.get("counts").get("verified"))),
+                ("complete", acceptance.get("complete").clone()),
+            ]),
+        ),
+    ]);
+    // Allocate headroom for MCP framing and escaped multibyte labels. Trim
+    // complete rows only, keeping the goal and exact conversation identity.
+    let mut bytes = crate::json::encoded(&dashboard).map_or(usize::MAX, |v| v.len());
+    if bytes > 52_000 {
+        for key in ["attempts", "operations", "attention", "activeAttempts"] {
+            if bytes <= 52_000 {
+                break;
+            }
+            if let Value::Array(mut saved) = dashboard.get(key).clone() {
+                let count = saved.len();
+                while bytes > 52_000
+                    && let Some(row) = saved.pop()
+                {
+                    bytes = bytes.saturating_sub(
+                        crate::json::encoded(&row).map_or(0, |v| v.len().saturating_sub(1)),
+                    );
+                }
+                let _ = dashboard.set(&format!("{key}Trimmed"), number(count - saved.len()));
+                let _ = dashboard.set(key, Value::Array(saved));
+            }
+        }
+    }
+    let observation = build_observation(repo, &dashboard, report);
+    let _ = dashboard.set("observation", observation);
+    dashboard
+}
+
+pub(super) fn panel_snapshot(repo: &Path, report: &Value, conversation: &Value) -> Value {
+    object([
+        ("schema", number(1)),
+        ("kind", string("oms-panel-snapshot")),
+        (
+            "dashboard",
+            project_panel_dashboard(repo, report, conversation),
+        ),
+    ])
+}
 fn dashboard_text(report: &Value) -> Result<String> {
     fn shown(v: &Value) -> String {
         if matches!(v, Value::Null) || v.str() == Ok("") {
@@ -1294,6 +1741,43 @@ fn dashboard_text(report: &Value) -> Result<String> {
             .join(" ")
     }
     let repo = report.get("repo");
+    let obs = report.get("observation");
+    let obs_rev = obs
+        .get("revision")
+        .str()
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown");
+    let obs_completeness = obs
+        .get("completeness")
+        .str()
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown");
+    let obs_time = obs
+        .get("observedAt")
+        .str()
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown");
+    let obs_atomic = if obs.get("atomic").truth() {
+        "atomic"
+    } else {
+        "non-atomic"
+    };
+    let obs_gaps: Vec<String> = obs
+        .get("sources")
+        .object()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|(_, v)| {
+            matches!(
+                v.str(),
+                Ok("unavailable" | "ambiguous" | "stale" | "partial")
+            )
+        })
+        .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+        .collect();
     let mut lines = vec![
         format!(
             "OMS dashboard  repo={}  {}@{}  snapshot={}",
@@ -1311,7 +1795,13 @@ fn dashboard_text(report: &Value) -> Result<String> {
             report.text("generated_at")
         ),
         format!("coverage: {}", report.text("coverage")),
+        format!(
+            "observation: {obs_rev} (multi-source, {obs_atomic}, {obs_completeness})  observed={obs_time}"
+        ),
     ];
+    if !obs_gaps.is_empty() {
+        lines.push(format!("  observation source gaps: {}", obs_gaps.join(",")));
+    }
     for (source, status) in report.get("collection").get("sources").object()? {
         if status.str() != Ok("ok") {
             lines.push(format!(
@@ -1911,4 +2401,273 @@ fn state_text(state: &Value) -> Result<String> {
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod panel_snapshot_tests {
+    use super::*;
+
+    fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
+        super::panel_snapshot(Path::new("test-fixture"), report, conversation)
+    }
+
+    #[test]
+    fn compact_snapshot_binds_room_and_omits_private_or_unbounded_source_columns() {
+        let mut report = crate::json::parse(br#"{"kind":"oms-dashboard","schema":1,
+            "attempts":{"available":true,"active":1,"active_recent":[{"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-a"}}],
+            "recent":[{"attempt_id":"historical","tool":"panel-native-assignment","state":"done","refs":{"panel_role":"lead","panel_room_id":"older"}}]},
+            "attention":{"items":[{"code":"stale-plan-claims","summary":"Check results","command":"private command"}],"room_mail":{"bound":true,"healthy":true,"room_id":"room-b"}},
+            "acceptance":{"available":true,"total":3,"counts":{"verified":1},"complete":false},
+            "reviews":{"passed":2,"failed":1,"unknown":0},
+            "operations":{"available":true,"recent":[{"kind":"review","artifact_id":"review-1","exit":1,"status":"failed"}]}}"#).unwrap();
+        let raw = "x".repeat(350_000);
+        report
+            .set(
+                "plan",
+                object([
+                    ("private", string(&raw)),
+                    ("healthy", Value::Bool(true)),
+                    ("task_count", number(3)),
+                    ("verified_count", number(1)),
+                    ("cancelled_count", number(2)),
+                ]),
+            )
+            .unwrap();
+        report.set("goal", object([("text", string(raw))])).unwrap();
+        let projected = panel_snapshot(&report, &Value::Null);
+        let d = projected.get("dashboard");
+        assert_eq!(d.text("scope"), "repository");
+        assert_eq!(d.text("currentRoom"), "room-b");
+        assert_eq!(d.get("main"), &Value::Null);
+        assert_eq!(d.get("goal"), &Value::Null);
+        assert_eq!(d.get("attempts").array().unwrap()[0].text("role"), "lead");
+        let active = d.get("activeAttempts").array().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].text("room"), "room-a");
+        assert_eq!(active[0].text("provider"), "pi");
+        assert_eq!(d.get("reviews").get("failed").int().unwrap(), 1);
+        assert_eq!(d.get("acceptance").get("verified").int().unwrap(), 1);
+        assert_eq!(d.get("tasks").int().unwrap(), 3);
+        assert_eq!(d.get("tasksVerified").int().unwrap(), 1);
+        assert_eq!(
+            d.get("attention").array().unwrap()[0].text("code"),
+            "stale-plan-claims"
+        );
+        assert_eq!(
+            d.get("operations").array().unwrap()[0].text("artifactId"),
+            "review-1"
+        );
+        let wire = String::from_utf8(crate::json::encoded(&projected).unwrap()).unwrap();
+        assert!(wire.len() < 4096 && !wire.contains("private"));
+        report.set("attention", object([])).unwrap();
+        report
+            .set(
+                "plan",
+                object([
+                    ("healthy", Value::Bool(false)),
+                    ("task_count", number(3)),
+                    ("verified_count", number(1)),
+                ]),
+            )
+            .unwrap();
+        let unbound = panel_snapshot(&report, &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("tasksVerified"), &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("tasks"), &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("currentRoom"), &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("main").text("id"), "main-1");
+        let mut attempts = report.get("attempts").clone();
+        let first = attempts.get("active_recent").array().unwrap()[0].clone();
+        let mut second = first.clone();
+        second.set("attempt_id", string("other-main")).unwrap();
+        attempts.set("active", number(2)).unwrap();
+        attempts
+            .set("active_recent", Value::Array(vec![first, second]))
+            .unwrap();
+        report.set("attempts", attempts).unwrap();
+        let goal = "한".repeat(2000);
+        report
+            .set("goal", object([("text", string(&goal))]))
+            .unwrap();
+        let ambiguous = panel_snapshot(&report, &Value::Null);
+        assert_eq!(ambiguous.get("dashboard").get("main"), &Value::Null);
+        assert_eq!(ambiguous.get("dashboard").text("goal"), goal);
+    }
+
+    #[test]
+    fn observation_revision_is_stable_across_wall_clock_and_tracks_scope_state_and_partiality() {
+        let base = || {
+            crate::json::parse(br#"{
+                "kind":"oms-dashboard","schema":1,
+                "generated_at":"2026-11-24T10:00:00Z",
+                "repo":{"name":"demo","branch":"main","head":"1234567890ab"},
+                "git":{"available":true,"head":"1234567890abcdef1234567890abcdef12345678","branch":"main","upstream":"origin/main","ahead":0,"behind":0,"dirty":false},
+                "coverage":"OMS-managed only",
+                "collection":{"ok":true,"sources":{"state":"ok","artifacts":"ok","attempts":"ok"}},
+                "goal":{"text":"Ship bounded observation","source":"task"},
+                "task":{"healthy":true,"present":true,"status":"active"},
+                "plan":{"healthy":true,"present":true,"task_count":2,"verified_count":1},
+                "attempts":{"available":true,"total":1,"active":1,"executing":1,"by_state":{"working":1},
+                    "active_recent":[{"attempt_id":"att-1","tool":"panel-main","provider":"codex","state":"working","updated_at":"2026-11-24T09:55:00Z","refs":{"panel_role":"main","panel_room_id":"room-a"}}],
+                    "recent":[{"attempt_id":"att-1","tool":"panel-main","provider":"codex","state":"working","updated_at":"2026-11-24T09:55:00Z","refs":{"panel_role":"main","panel_room_id":"room-a"}}]},
+                "operations":{"available":true,"recent":[{"kind":"verify","artifact_id":"art-1","exit":0,"status":"success","ts":"2026-11-24T09:50:00Z"}],"omitted":0},
+                "reviews":{"passed":1,"failed":0,"unknown":0},
+                "acceptance":{"available":true,"total":2,"counts":{"verified":1},"complete":false,"criteria":[],"omitted":0,"note":"worker completion is not acceptance"},
+                "attention":{"items":[],"omitted":0}
+            }"#).unwrap()
+        };
+        let first_report = base();
+        let first = panel_snapshot(&first_report, &Value::Null);
+        let first_obs = first.get("dashboard").get("observation");
+        assert_eq!(first_obs.get("schema").int().unwrap(), 1);
+        assert_eq!(first_obs.text("kind"), "multi-source-observation");
+        assert_eq!(first_obs.get("atomic"), &Value::Bool(false));
+        assert_eq!(first_obs.text("completeness"), "complete");
+        assert_eq!(first_obs.text("observedAt"), "2026-11-24T10:00:00Z");
+        assert_eq!(first_obs.get("evidence").text("scope"), "repository");
+        assert_eq!(first_obs.get("evidence").text("head"), "1234567890ab");
+        assert_eq!(first_obs.get("evidence").text("latestArtifact"), "art-1");
+        assert_eq!(first_obs.get("evidence").get("omitted").int().unwrap(), 0);
+        let rev = first_obs.text("revision");
+        assert!(rev.starts_with("obs-v1:") && rev.len() == 31, "{rev}");
+
+        // Wall-clock-only change advances observedAt without changing revision.
+        let mut later_report = base();
+        later_report
+            .set("generated_at", string("2026-11-24T10:09:45Z"))
+            .unwrap();
+        let later = panel_snapshot(&later_report, &Value::Null);
+        assert_eq!(
+            later.get("dashboard").get("observation").text("revision"),
+            rev
+        );
+        assert_eq!(
+            later.get("dashboard").get("observation").text("observedAt"),
+            "2026-11-24T10:09:45Z"
+        );
+
+        // Unprojected private data does not alter the observation revision.
+        let mut noisy = base();
+        let mut plan = noisy.get("plan").clone();
+        plan.set("private_note", string("secret-unprojected"))
+            .unwrap();
+        noisy.set("plan", plan).unwrap();
+        assert_eq!(
+            panel_snapshot(&noisy, &Value::Null)
+                .get("dashboard")
+                .get("observation")
+                .text("revision"),
+            rev
+        );
+
+        // Changed state in the selected scope changes revision.
+        let mut changed = base();
+        let mut plan = changed.get("plan").clone();
+        plan.set("verified_count", number(2)).unwrap();
+        changed.set("plan", plan).unwrap();
+        assert_ne!(
+            panel_snapshot(&changed, &Value::Null)
+                .get("dashboard")
+                .get("observation")
+                .text("revision"),
+            rev
+        );
+
+        // Conversation-bound scope differs from repository-only and foreign room scopes.
+        let conv_a = crate::json::parse(br#"{"conversationBinding":"matched","conversationMain":{"provider":"codex","room":"room-a","participant":"owner","source":"room-session","state":"joined","incomplete":false,"participantsOmitted":0,"participants":[]}}"#).unwrap();
+        let conv_b = crate::json::parse(br#"{"conversationBinding":"matched","conversationMain":{"provider":"codex","room":"room-b","participant":"owner","source":"room-session","state":"joined","incomplete":false,"participantsOmitted":0,"participants":[]}}"#).unwrap();
+        let bound_a = panel_snapshot(&first_report, &conv_a);
+        let bound_b = panel_snapshot(&first_report, &conv_b);
+        let obs_a = bound_a.get("dashboard").get("observation");
+        let obs_b = bound_b.get("dashboard").get("observation");
+        assert_eq!(obs_a.get("evidence").text("scope"), "repository");
+        assert!(obs_a.get("evidence").opt("room").is_none());
+        assert_ne!(obs_a.text("revision"), rev);
+        assert_ne!(obs_a.text("revision"), obs_b.text("revision"));
+        // Same bound scope across wall-clock read times keeps the same revision.
+        assert_eq!(
+            panel_snapshot(&later_report, &conv_a)
+                .get("dashboard")
+                .get("observation")
+                .text("revision"),
+            obs_a.text("revision")
+        );
+
+        // Partial/degraded source retains a distinct partial revision and names the gap.
+        let mut partial_report = base();
+        partial_report
+            .set(
+                "collection",
+                object([
+                    ("ok", Value::Bool(false)),
+                    ("sources", object([("artifacts", string("invalid"))])),
+                ]),
+            )
+            .unwrap();
+        partial_report
+            .set(
+                "operations",
+                object([
+                    ("available", Value::Bool(false)),
+                    ("recent", Value::Array(vec![])),
+                    ("omitted", number(0)),
+                ]),
+            )
+            .unwrap();
+        let partial = panel_snapshot(&partial_report, &Value::Null);
+        let partial_obs = partial.get("dashboard").get("observation");
+        assert_eq!(partial_obs.text("completeness"), "partial");
+        assert_eq!(partial_obs.get("sources").text("artifacts"), "unavailable");
+        assert!(partial_obs.text("revision").starts_with("obs-v1:"));
+        assert_ne!(partial_obs.text("revision"), rev);
+
+        // CLI text rendering surfaces the same revision and non-atomic/unavailable markers.
+        partial_report
+            .set("observation", partial_obs.clone())
+            .unwrap();
+        let rendered = dashboard_text(&partial_report).unwrap();
+        assert!(
+            rendered.contains(&format!(
+                "observation: {} (multi-source, non-atomic, partial)  observed=2026-11-24T10:00:00Z",
+                partial_obs.text("revision")
+            )),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("observation source gaps: artifacts"),
+            "{rendered}"
+        );
+
+        // A mixed source retains its recorded evidence, and stale claims require native plan evidence.
+        let mut mixed = first_report.clone();
+        let mut operations = mixed.get("operations").clone();
+        operations.set("available", Value::Bool(false)).unwrap();
+        mixed.set("operations", operations).unwrap();
+        let mut plan = mixed.get("plan").clone();
+        plan.set("stale_claims", number(1)).unwrap();
+        mixed.set("plan", plan).unwrap();
+        let snapshot = panel_snapshot(&mixed, &Value::Null);
+        let obs = snapshot.get("dashboard").get("observation");
+        assert_eq!(obs.text("completeness"), "partial");
+        assert_eq!(obs.get("sources").text("artifacts"), "partial");
+        assert_eq!(obs.get("sources").text("plan"), "stale");
+        assert_eq!(obs.get("evidence").text("latestArtifact"), "art-1");
+        let same_contents_elsewhere = super::panel_snapshot(
+            Path::new("different/test-fixture"),
+            &first_report,
+            &Value::Null,
+        );
+        assert_ne!(
+            same_contents_elsewhere
+                .get("dashboard")
+                .get("observation")
+                .text("revision"),
+            rev
+        );
+        // Completely unknown/unreadable sources emit unknown completeness and null revision.
+        let unknown = panel_snapshot(&crate::json::empty(), &Value::Null);
+        let unknown_obs = unknown.get("dashboard").get("observation");
+        assert_eq!(unknown_obs.text("completeness"), "unknown");
+        assert_eq!(unknown_obs.get("revision"), &Value::Null);
+        assert_eq!(unknown_obs.get("atomic"), &Value::Bool(false));
+    }
 }

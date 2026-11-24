@@ -2031,25 +2031,18 @@ fn public_slurm_lint_preserves_static_modes_source_roots_and_raw_arguments() {
 
 #[test]
 fn private_dispatch_accepts_verified_companions() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
-    let dir = fixture.binary().parent().unwrap().to_path_buf();
-    let manifest_path = dir.join("manifest.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    for name in [
-        "oms-supervisor",
-        "oms-state-queue-worker",
-        "oms-mcp-peer-owner",
-        "oms-run-bounded-helper",
-        "oms-graph-python-helper",
-    ] {
-        let path = dir.join(name);
-        std::fs::write(&path, name).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        manifest["artifacts"][name] = format!("{:x}", Sha256::digest(name.as_bytes())).into();
-    }
-    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    add_companions(
+        &fixture,
+        &[
+            "oms-supervisor",
+            "oms-state-queue-worker",
+            "oms-mcp-peer-owner",
+            "oms-run-bounded-helper",
+            "oms-graph-python-helper",
+        ],
+    );
+    let dir = fixture.binary().parent().unwrap().to_owned();
     let run = || {
         Command::new(fixture.binary())
             .arg("--oms-select")
@@ -4372,4 +4365,287 @@ fn github_project_mode_activates_from_the_checked_in_declaration() {
     assert!(std::fs::read(&log).unwrap_or_default().is_empty());
     assert!(!f.0.join("preflight").exists());
     assert_eq!(files(&ambient), ambient_before);
+}
+
+#[test]
+fn panel_project_graph_mcp_end_to_end_unindexed_and_indexed() {
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    let f = Fixture::new();
+    let bin = f.binary();
+    let dir = bin.parent().unwrap().to_path_buf();
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let owner_path = dir.join("oms-mcp-peer-owner");
+    std::fs::write(&owner_path, b"#!/usr/bin/env bash\nexit 0\n").unwrap();
+    std::fs::set_permissions(&owner_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    manifest["artifacts"]["oms-mcp-peer-owner"] =
+        format!("{:x}", Sha256::digest(std::fs::read(&owner_path).unwrap())).into();
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let demo = f.0.join("demo-repo");
+    std::fs::create_dir_all(demo.join("src")).unwrap();
+    std::fs::create_dir_all(demo.join("tests")).unwrap();
+    for dir in [&demo, &demo.join("src"), &demo.join("tests")] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(
+        demo.join("src/lib.sh"),
+        "#!/usr/bin/env bash\nhelper() { echo ok; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        demo.join("src/main.sh"),
+        "#!/usr/bin/env bash\nsource src/lib.sh\nrun_app() { helper; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        demo.join("tests/test-app.sh"),
+        "#!/usr/bin/env bash\nsource src/main.sh\nrun_app\n",
+    )
+    .unwrap();
+    std::fs::write(demo.join(".env"), "LOCAL_SECRET_DEMO=do_not_expose\n").unwrap();
+    for rel in ["src/lib.sh", "src/main.sh", "tests/test-app.sh", ".env"] {
+        std::fs::set_permissions(demo.join(rel), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for args in [
+        &["init", "-q"][..],
+        &["add", "src/lib.sh", "src/main.sh", "tests/test-app.sh"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&demo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let config_dir = f.0.join("xdg/oh-my-setting");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let catalog = config_dir.join("desktop-projects.json");
+    std::fs::write(&catalog, json!({"demo": demo}).to_string()).unwrap();
+    std::fs::set_permissions(&catalog, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--oms-dispatch",
+            f.0.to_str().unwrap(),
+            "1111111111111111111111111111111111111111",
+            "--",
+            "mcp-server",
+        ])
+        .current_dir(&f.0)
+        .env("OMS_MCP_TOOL_PROFILE", "mcp-app")
+        .env("XDG_CONFIG_HOME", f.0.join("xdg"))
+        .env("OMS_PROJECT_GRAPH_STATE", f.0.join("unrelated-index"))
+        .env_remove("OMS_PANEL_REPO")
+        .env_remove("OMS_PANEL_PROJECTS")
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env_remove("OMS_HARNESS_CHILD")
+        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env_remove("OMS_STATE_REPO")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut rpc = |id: u64, method: &str, params: Value| -> Value {
+        let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        writeln!(stdin, "{req}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        assert!(stdout.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    };
+
+    // 1. Registered in generic read-only mcp-app profile.
+    let listed = rpc(1, "tools/list", json!({}));
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "oms_panel_project_graph"
+                && t["annotations"]["readOnlyHint"] == true)
+    );
+
+    // 2. Unindexed repo first-load & drilldown via real `oms graph project panel`, zero writes.
+    let unindexed = rpc(
+        2,
+        "tools/call",
+        json!({"name":"oms_panel_project_graph","arguments":{"project":"demo"}}),
+    );
+    assert_eq!(unindexed["result"]["isError"], false, "{unindexed}");
+    let sc = &unindexed["result"]["structuredContent"];
+    assert_eq!(sc["schema"], 1);
+    assert_eq!(sc["kind"], "oms-panel-project-graph");
+    assert_eq!(sc["status"], "ready");
+    assert_eq!(sc["provenance"]["source"], "git-ls-files");
+    assert_eq!(sc["provenance"]["mode"], "fallback");
+    assert_eq!(sc["provenance"]["verifiedRelationships"], false);
+    assert_eq!(sc["provenance"]["wroteIndex"], false);
+    assert!(!sc.to_string().contains(".env"));
+    assert!(!sc.to_string().contains("do_not_expose"));
+    assert!(!demo.join(".oms").exists());
+
+    let drill = rpc(
+        3,
+        "tools/call",
+        json!({"name":"oms_panel_project_graph","arguments":{"project":"demo","node":"dir:src"}}),
+    );
+    assert_eq!(drill["result"]["isError"], false, "{drill}");
+    assert_eq!(
+        drill["result"]["structuredContent"]["selection"]["status"],
+        "found"
+    );
+
+    // 3. Rejects arbitrary repo parameter and unapproved alias.
+    let bad_param = rpc(
+        4,
+        "tools/call",
+        json!({"name":"oms_panel_project_graph","arguments":{"project":"demo","repo":"/tmp"}}),
+    );
+    assert_eq!(bad_param["error"]["code"], -32602);
+    let bad_alias = rpc(
+        5,
+        "tools/call",
+        json!({"name":"oms_panel_project_graph","arguments":{"project":"unapproved"}}),
+    );
+    assert_eq!(bad_alias["result"]["isError"], true);
+
+    // 4. Build real index explicitly, then verify indexed read distinguishes EXTRACTED edges and writes nothing.
+    let build = Command::new(&bin)
+        .args([
+            "--oms-dispatch",
+            f.0.to_str().unwrap(),
+            "1111111111111111111111111111111111111111",
+            "--",
+            "graph",
+            "project",
+            "build",
+            "--repo",
+            demo.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(&demo)
+        .env_remove("OMS_HARNESS_CHILD")
+        .env_remove("OMS_STATE_REPO")
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let graph_mtime_before = std::fs::metadata(demo.join(".oms/project-graph/graph.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let indexed = rpc(
+        6,
+        "tools/call",
+        json!({"name":"oms_panel_project_graph","arguments":{"project":"demo"}}),
+    );
+    assert_eq!(indexed["result"]["isError"], false, "{indexed}");
+    let isc = &indexed["result"]["structuredContent"];
+    assert_eq!(isc["provenance"]["source"], "indexed-graph");
+    assert_eq!(isc["provenance"]["mode"], "indexed");
+    assert_eq!(isc["provenance"]["verifiedRelationships"], true);
+    assert_eq!(isc["provenance"]["wroteIndex"], false);
+    assert!(
+        isc["counts"]["confidence"]["EXTRACTED"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "expected EXTRACTED edges: {isc}"
+    );
+    let graph_mtime_after = std::fs::metadata(demo.join(".oms/project-graph/graph.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(graph_mtime_before, graph_mtime_after);
+
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn add_companions(fixture: &Fixture, names: &[&str]) {
+    use std::os::unix::fs::PermissionsExt;
+    let binary = fixture.binary();
+    let dir = binary.parent().unwrap();
+    let manifest = dir.join("manifest.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    for &name in names {
+        let path = dir.join(name);
+        std::fs::write(&path, name).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        value["artifacts"][name] = format!("{:x}", Sha256::digest(name.as_bytes())).into();
+    }
+    std::fs::write(manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+#[test]
+fn panel_capabilities_matches_native_oms_list_all_without_side_effects() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let fixture = Fixture::new();
+    add_companions(&fixture, &["oms-mcp-peer-owner"]);
+    let bin = fixture.binary();
+    let revision = bin.parent().unwrap().file_name().unwrap();
+    let invoke = || {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("--oms-dispatch")
+            .arg(&fixture.0)
+            .arg(revision)
+            .arg("--")
+            .current_dir(&fixture.0);
+        cmd
+    };
+    let listed = invoke().args(["list", "--all"]).output().unwrap();
+    assert!(listed.status.success());
+    let expected = std::str::from_utf8(&listed.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| {
+            let (name, description) = l.split_once(' ').unwrap();
+            serde_json::json!({"name":name,"description":description.trim_start()})
+        })
+        .collect::<Vec<_>>();
+    assert!(!expected.is_empty());
+    let mut child = invoke()
+        .arg("mcp-server")
+        .env("OMS_MCP_TOOL_PROFILE", "mcp-app")
+        .env(
+            "OMS_PANEL_PROJECTS",
+            serde_json::json!({"fixture":fixture.0}).to_string(),
+        )
+        .env_remove("OMS_PANEL_REPO")
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env_remove("OMS_HARNESS_CHILD")
+        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oms_panel_capabilities","arguments":{"project":"fixture"}}});
+    writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let data = &reply["result"]["structuredContent"];
+    assert_eq!(data["commands"], serde_json::json!(expected), "{reply}");
+    assert_eq!(data["total"], expected.len());
+    assert_eq!(data["omitted"], 0);
+    assert!(!fixture.0.join(".oms").exists());
 }

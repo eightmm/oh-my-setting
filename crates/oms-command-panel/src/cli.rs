@@ -7,6 +7,8 @@ const FLAGS: &[&str] = &[
     "reopen",
     "providers",
     "health",
+    "desktop-usage",
+    "desktop-chat",
     "sessions",
     "next-attention",
     "switch",
@@ -40,6 +42,7 @@ const FLAGS: &[&str] = &[
     "unbound",
 ];
 const VALUES: &[&str] = &[
+    "desktop-view",
     "repo",
     "layout",
     "host",
@@ -85,6 +88,10 @@ const VALUES: &[&str] = &[
     "participant",
     "open-chat",
     "chat-surface",
+    "conversation-digest",
+    "evidence-section",
+    "evidence-attempt",
+    "before",
     "accept",
     "allow-floor-change",
     "message",
@@ -370,7 +377,7 @@ impl Options {
         )?;
         for (key, choices) in [
             ("layout", &["auto", "inline", "split"][..]),
-            ("host", &["auto", "inline", "tmux", "herdr"][..]),
+            ("host", &["auto", "inline", "tmux", "herdr", "desktop"][..]),
             (
                 "view",
                 &["auto", "summary", "compact", "detail", "graph", "tree"][..],
@@ -386,6 +393,21 @@ impl Options {
             ("size", &["small", "medium", "large"][..]),
         ] {
             self.choice(key, choices)?;
+        }
+        self.choice("desktop-view", crate::desktop_board::VIEWS)?;
+        if self.has("desktop-view") {
+            require(
+                self.has("json")
+                    && self.flags.iter().all(|s| s == "json")
+                    && self.values.keys().all(|s| {
+                        matches!(
+                            s.as_str(),
+                            "desktop-view" | "page" | "repo" | "conversation-digest"
+                        )
+                    }),
+                "--desktop-view accepts only --json, --page, --repo and a host conversation binding",
+            )?;
+            self.integer("page", 1, 1, crate::desktop_board::MAX_PAGE)?;
         }
         self.choice("dispatch", oms_panel_core::routing::ROLES)?;
         self.choice("workload", oms_panel_core::routing::TIERS)?;
@@ -414,6 +436,27 @@ impl Options {
                 &["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
             )?;
         }
+        require(
+            self.get("host") != Some("desktop")
+                || (self.has("launch")
+                    && self.has("task")
+                    && self.has("json")
+                    && self
+                        .get("room")
+                        .is_some_and(|id| id.starts_with("oms-app-"))
+                    && !["account", "resume"].iter().any(|key| self.has(key))),
+            "--host desktop requires --launch, --task and --json for a fresh managed Main",
+        )?;
+        require(
+            (!self.has("before") || self.has("desktop-chat"))
+                && (!self.has("conversation-digest")
+                    || self.has("desktop-chat")
+                    || self.has("desktop-view")),
+            "desktop reader selectors require a compatible desktop view",
+        )?;
+        if self.has("desktop-chat") || self.has("desktop-usage") {
+            require(self.has("json"), "desktop reads require --json")?;
+        }
         let modes = [
             "watch",
             "launch",
@@ -438,6 +481,8 @@ impl Options {
             "health",
             "mail",
             "metrics",
+            "desktop-usage",
+            "desktop-chat",
             "sessions",
             "usage",
             "compare",
@@ -605,7 +650,22 @@ impl Options {
             ],
             &["accept"],
         )?;
-        self.needs(&["export", "page", "participant"], &["results"])?;
+        self.needs(&["export"], &["results"])?;
+        self.needs(&["page"], &["results", "desktop-view", "desktop-chat"])?;
+        self.needs(&["evidence-section", "evidence-attempt"], &["desktop-chat"])?;
+        if self.has("desktop-chat") {
+            require(
+                self.has("evidence-section") == self.has("evidence-attempt")
+                    && (!self.has("page") || self.has("evidence-section"))
+                    && !(self.has("before") && self.has("evidence-section")),
+                "select an exact evidence attempt and section or a Room message page",
+            )?;
+            self.choice(
+                "evidence-section",
+                &["info", "events", "files", "diff", "transcript"],
+            )?;
+        }
+        self.needs(&["participant"], &["results", "desktop-chat"])?;
         self.needs(&["resume"], &["launch"])?;
         self.needs(&["task"], &["launch", "spawn-main", "orchestrator"])?;
         self.needs(
@@ -738,7 +798,16 @@ impl Options {
             "--count without a number requires --sessions",
         )?;
         if self.has("page") {
-            self.integer("page", 1, 1, 1000)?;
+            self.integer(
+                "page",
+                1,
+                1,
+                if self.has("desktop-chat") {
+                    10000
+                } else {
+                    1000
+                },
+            )?;
             require(!self.has("task-id"), "--page takes no --task-id")?;
         }
         if self.has("verify-timeout") {
@@ -763,6 +832,7 @@ impl Options {
         )?;
         require(
             !self.has("json")
+                || self.get("host") == Some("desktop")
                 || !["launch", "orchestrator", "focus-orchestrator"]
                     .iter()
                     .any(|key| self.has(key)),
@@ -923,6 +993,40 @@ pub fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::{Options, usage};
+
+    #[test]
+    fn desktop_detail_uses_the_production_option_grammar() {
+        let args = |s: &[&str]| s.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(
+            Options::parse(&args(&[
+                "--repo",
+                ".",
+                "--desktop-chat",
+                "--json",
+                "--room",
+                "room-a",
+                "--participant",
+                "main",
+                "--conversation-digest",
+                "00000000000000000000000000000000",
+                "--before",
+                "42"
+            ]))
+            .is_ok()
+        );
+        assert!(Options::parse(&args(&["--repo", ".", "--desktop-usage", "--json"])).is_ok());
+        assert!(
+            Options::parse(&args(&[
+                "--repo",
+                ".",
+                "--usage",
+                "--conversation-digest",
+                "wrong",
+                "--json"
+            ]))
+            .is_err()
+        );
+    }
 
     #[test]
     fn only_startup_options_enter_the_overall_main_picker() {
@@ -1211,6 +1315,30 @@ mod tests {
             assert!(parse(&["--orchestrator", provider, "--resume", uuid]).is_err());
             assert!(parse(&["--focus-orchestrator", provider, "--resume", uuid]).is_err());
         }
+        assert!(
+            parse(&[
+                "--host",
+                "desktop",
+                "--launch",
+                "codex",
+                "--room",
+                "oms-app-example",
+                "--task=--report",
+                "--json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "--host",
+                "desktop",
+                "--launch",
+                "codex",
+                "--task=goal",
+                "--json"
+            ])
+            .is_err()
+        );
         assert!(parse(&["--launch", "codex", "--resume", "legacy-session"]).is_ok());
     }
 

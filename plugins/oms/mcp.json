@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "oms-panel": {
+      "type": "stdio",
+      "command": "oms",
+      "args": ["mcp-server"],
+      "env": { "OMS_MCP_TOOL_PROFILE": "chatgpt-panel" }
+    }
+  }
+}

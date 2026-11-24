@@ -15,6 +15,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) fn strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
+pub(crate) fn artifact_rows(value: &Value) -> Result<&[Value]> {
+    value
+        .as_array()
+        .or_else(|| value["rows"].as_array())
+        .map(Vec::as_slice)
+        .ok_or_else(|| Error::new("artifact index did not return a row list"))
+}
 pub(crate) fn query(
     service: &dyn Services,
     command: NativeCommand,
@@ -762,6 +769,14 @@ pub(crate) fn run_mode(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    if options.has("desktop-view") {
+        // The desktop connection selects the checkout independently of process-wide Room variables.
+        let (state, execution) = resolve_repositories(options, cwd, None, false)?;
+        let (repo, execution) = state
+            .zip(execution)
+            .ok_or_else(|| Error::new("desktop view needs a selected repository"))?;
+        return crate::desktop_board::run(&repo, &execution, source, options, services, stop);
+    }
     let env_room = std::env::var_os("OMS_ROOM_REPO").map(PathBuf::from);
     let (repo_opt, exec_opt) =
         resolve_repositories(options, cwd, env_room.as_deref(), default_main)?;
@@ -1090,11 +1105,25 @@ pub(crate) fn run_mode(
     if options.has("mail") {
         return mail(&repo, options, services, stop);
     }
+    if options.has("desktop-chat") {
+        return output(crate::desktop_detail::chat(&repo, options, services, stop)?);
+    }
     if options.has("chats") || options.has("open-chat") {
         return chats(&repo, options, services, stop);
     }
     if options.has("watch") || options.has("log") {
         return crate::watch::run_with_source(&repo, source, options, services, stop);
+    }
+    if options.has("desktop-usage") {
+        // Desktop project selection never inherits a process-wide Room selection.
+        let (state, _, _) =
+            snapshot_for(&Session::new(), &repo, None, None, services, stop, false)?;
+        return output(crate::desktop_detail::usage(
+            &repo,
+            &state.report,
+            unix_now(),
+            stop,
+        ));
     }
     let state = snapshot(&repo, options, services, stop)?;
     if options.has("health") {
@@ -1122,7 +1151,7 @@ pub(crate) fn run_mode(
             .unwrap_or_else(|| rows(&state.report["plan"]["tasks"]).to_vec());
         let metrics = oms_panel_core::metrics::aggregate(&oms_panel_core::metrics::MetricInputs {
             attempts: &attempts,
-            artifacts: rows(&artifacts),
+            artifacts: artifact_rows(&artifacts)?,
             tasks: &tasks,
             since: options.get("since"),
             now: oms_panel_core::timestamp() as f64,
@@ -1190,26 +1219,21 @@ pub(crate) fn results_report(
         stop,
     )
 }
-fn routes_output(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn routes_report(
     repo: Option<&Path>,
     has_git_repo: bool,
     cwd: &Path,
     source: &Path,
     options: &Options,
+    selected_room: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<Output> {
+) -> Result<Value> {
     let policy = policy(source)?;
     let owner = owner(options);
-    let selected_room = room(options);
-    let (inputs, events_observed) = routing_inputs(
-        repo,
-        Some(cwd),
-        selected_room.as_deref(),
-        Some(&owner),
-        services,
-        stop,
-    )?;
+    let (inputs, events_observed) =
+        routing_inputs(repo, Some(cwd), selected_room, Some(&owner), services, stop)?;
     // The resolver may use a non-Git directory for the existing preview. That
     // fallback does not establish repository-wide count evidence.
     let events_observed = has_git_repo && events_observed;
@@ -1308,6 +1332,28 @@ fn routes_output(
         obj.insert("owner".into(), json!(owner));
         obj.insert("chosen".into(), Value::Object(chosen));
     }
+    Ok(base)
+}
+fn routes_output(
+    repo: Option<&Path>,
+    has_git_repo: bool,
+    cwd: &Path,
+    source: &Path,
+    options: &Options,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Output> {
+    let selected_room = room(options);
+    let base = routes_report(
+        repo,
+        has_git_repo,
+        cwd,
+        source,
+        options,
+        selected_room.as_deref(),
+        services,
+        stop,
+    )?;
     if !options.has("json")
         && std::env::var_os("OMS_PANEL_READER_BOARD").is_some()
         && let Some(mut tty) = crate::input::TerminalInput::open()?

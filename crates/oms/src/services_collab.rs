@@ -271,6 +271,7 @@ struct Job<'a> {
     heartbeat: Option<&'a ActivityHeartbeat>,
     cancel: StopReason,
     physical_call: Option<oms_supervisor::process::PhysicalCall>,
+    desktop_main: bool,
     channel: Option<&'a mut dyn OwnedDuplexConsumer>,
     launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
     #[cfg(target_os = "linux")]
@@ -291,6 +292,7 @@ impl<'a> Job<'a> {
             heartbeat: None,
             cancel: StopReason::Cancelled,
             physical_call: None,
+            desktop_main: false,
             channel: None,
             launch_fence: None,
             #[cfg(target_os = "linux")]
@@ -316,8 +318,9 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     let detached_tmux = program.is_some_and(|name| name == "tmux")
         && job.argv.get(1).is_some_and(|arg| arg == "new-session")
         && job.argv.get(2).is_some_and(|arg| arg == "-d");
-    let allow_whole_tree =
-        !detached_tmux && !matches!(program.and_then(|name| name.to_str()), Some("git" | "ssh"));
+    let allow_whole_tree = !job.desktop_main
+        && !detached_tmux
+        && !matches!(program.and_then(|name| name.to_str()), Some("git" | "ssh"));
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;
@@ -2718,11 +2721,12 @@ impl CommandExecutor for CollabServices<'_> {
         let mut argv: Vec<OsString> = vec!["oms".into()];
         argv.extend(request.args.iter().cloned());
         let argv = self.resolve_argv(argv).map_err(|e| format!("error: {e}"))?;
-        let (done, _) = supervise(
-            Job::new(argv, request.cwd, request.timeout, MCP_OUTPUT_LIMIT),
-            request.interrupted,
-        )
-        .map_err(|e| format!("error: {e}"))?;
+        let mut job = Job::new(argv, request.cwd, request.timeout, MCP_OUTPUT_LIMIT);
+        // The nested native panel can be the first tmux client. Once it has
+        // enrolled the Main, the tmux daemon must survive this RPC's teardown.
+        // All other MCP calls retain ordinary whole-tree supervision.
+        job.desktop_main = request.is_desktop_main_start();
+        let (done, _) = supervise(job, request.interrupted).map_err(|e| format!("error: {e}"))?;
         if let Some(stop) = done.stop {
             return Err(format!(
                 "error: {}",

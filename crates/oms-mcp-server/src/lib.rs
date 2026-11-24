@@ -9,6 +9,7 @@ pub mod value;
 mod command;
 mod extra;
 mod output;
+mod panel;
 pub use command::{Captured, CommandExecutor, CommandRequest, SubprocessExecutor};
 mod peer;
 mod storage;
@@ -26,15 +27,17 @@ pub(crate) const PAGE_BYTES: usize = 16 * 1024;
 pub(crate) const RUN_ROOT: &str = ".oms/artifacts/mcp";
 const MODERN: &str = "2026-07-28";
 const FALLBACK: &str = "2025-06-18";
-const PROTOCOLS: [&str; 3] = [MODERN, FALLBACK, "2025-03-26"];
+const PROTOCOLS: &[&str] = &[MODERN, FALLBACK, "2025-03-26"];
+const PANEL_PROTOCOLS: &[&str] = &[MODERN, "2025-11-25", FALLBACK, "2025-03-26"];
 const META_PROTOCOL: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXTENSION: &str = "io.modelcontextprotocol/tasks";
 const GRAPH_URI: &str = "ui://oms/project-graph/v1.html";
 const MIME: &str = "text/html;profile=mcp-app";
-const CORE: [&str; 13] = [
+const CORE: [&str; 14] = [
     "oms_inbox",
     "oms_repo_state",
+    "oms_panel_snapshot",
     "oms_handoffs",
     "oms_handoff_show",
     "oms_journal",
@@ -52,6 +55,13 @@ const CORE: [&str; 13] = [
 pub enum ToolProfile {
     Core,
     Full,
+    ChatGptPanel,
+    McpApp,
+}
+impl ToolProfile {
+    fn is_panel(self) -> bool {
+        matches!(self, Self::ChatGptPanel | Self::McpApp)
+    }
 }
 
 /// Immutable process configuration; it confers no request or worker authority.
@@ -71,7 +81,9 @@ impl Config {
         let profile = match std::env::var("OMS_MCP_TOOL_PROFILE").as_deref() {
             Err(std::env::VarError::NotPresent) | Ok("core") => ToolProfile::Core,
             Ok("full") => ToolProfile::Full,
-            _ => return Err("error: OMS_MCP_TOOL_PROFILE must be core or full"),
+            Ok("chatgpt-panel") => ToolProfile::ChatGptPanel,
+            Ok("mcp-app") => ToolProfile::McpApp,
+            _ => return Err("error: unknown OMS_MCP_TOOL_PROFILE"),
         };
         Ok(Self {
             profile,
@@ -95,6 +107,9 @@ pub(crate) fn tools() -> &'static [Value] {
         .as_slice()
 }
 fn definitions(profile: ToolProfile) -> Value {
+    if profile.is_panel() {
+        return panel::definitions(profile);
+    }
     Value::Array(tools().iter().filter(|t| profile == ToolProfile::Full || CORE.contains(&t["name"].as_str().unwrap())).map(|t| {
         let mut d = json!({"name":t["name"], "description":t["description"], "inputSchema":{"type":"object","properties":t["properties"],"required":t.get("required").cloned().unwrap_or_else(|| json!([]))}});
         for key in ["annotations", "title", "outputSchema"] {
@@ -230,6 +245,7 @@ pub(crate) fn prefix_chars(s: &str, limit: usize) -> String {
 
 /// One persistent session. Tool definitions and trusted version are captured
 /// once; mutable authority, receipts and run state are acquired per action.
+#[derive(Clone)]
 pub struct Server<'a> {
     pub(crate) source_root: PathBuf,
     pub(crate) caller_cwd: PathBuf,
@@ -303,15 +319,23 @@ impl<'a> Server<'a> {
             .canonicalize()
             .map_err(|e| format!("error: invalid repository path: {e}"))?)
     }
+    fn supported_protocols(&self) -> &'static [&'static str] {
+        if self.config.profile.is_panel() {
+            PANEL_PROTOCOLS
+        } else {
+            PROTOCOLS
+        }
+    }
     fn protocol(&self, params: &Value) -> &'static str {
-        PROTOCOLS
-            .into_iter()
+        self.supported_protocols()
+            .iter()
+            .copied()
             .find(|p| Some(*p) == meta(params)[META_PROTOCOL].as_str())
             .unwrap_or(self.protocol)
     }
     fn capabilities(&self, protocol: &str) -> Value {
         let mut c = json!({"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}});
-        if self.config.tasks_extension && protocol == MODERN {
+        if !self.config.profile.is_panel() && self.config.tasks_extension && protocol == MODERN {
             c["extensions"] = json!({EXTENSION:{}});
         }
         c
@@ -373,10 +397,13 @@ impl<'a> Server<'a> {
         }
         let params = &message["params"];
         if let Some(p) = meta(params)[META_PROTOCOL].as_text()
-            && !p.as_str().is_some_and(|p| PROTOCOLS.contains(&p))
+            && !p
+                .as_str()
+                .is_some_and(|p| self.supported_protocols().contains(&p))
         {
             let mut v = error(id, -32022, "Unsupported protocol version");
-            v["error"]["data"] = json!({"supported":PROTOCOLS,"requested":p.prefix(64)});
+            v["error"]["data"] =
+                json!({"supported":self.supported_protocols(),"requested":p.prefix(64)});
             return Some(v);
         }
         let invalid_params = || error(id, -32602, "invalid params: expected object");
@@ -385,20 +412,31 @@ impl<'a> Server<'a> {
                 if !params.is_null() && !params.is_object() {
                     return Some(invalid_params());
                 }
-                json!({"resultType":"complete","supportedVersions":PROTOCOLS,"capabilities":self.capabilities(MODERN),"_meta":{"io.modelcontextprotocol/serverInfo":self.info},"ttlMs":300_000,"cacheScope":"private"})
+                json!({"resultType":"complete","supportedVersions":self.supported_protocols(),"capabilities":self.capabilities(MODERN),"_meta":{"io.modelcontextprotocol/serverInfo":self.info},"ttlMs":300_000,"cacheScope":"private"})
             }
             "initialize" => {
                 if !params.is_null() && !params.is_object() {
                     return Some(invalid_params());
                 }
-                self.protocol = PROTOCOLS
-                    .into_iter()
+                self.protocol = self
+                    .supported_protocols()
+                    .iter()
+                    .copied()
                     .find(|p| Some(*p) == params["protocolVersion"].as_str())
                     .unwrap_or(FALLBACK);
-                self.complete(json!({"protocolVersion":self.protocol,"capabilities":self.capabilities(self.protocol),"serverInfo":self.info}),params,false)
+                let mut result = json!({"protocolVersion":self.protocol,"capabilities":self.capabilities(self.protocol),"serverInfo":self.info});
+                if self.config.profile == ToolProfile::McpApp {
+                    result["instructions"] = json!(
+                        "Open OMS with oms_open_panel. In a text client, use oms_list_projects, then oms_panel_snapshot with the selected alias for project progress. These tools read host-configured OMS projects."
+                    );
+                }
+                self.complete(result, params, false)
             }
             "ping" => self.complete(json!({}), params, false),
             "tools/list" => self.complete(json!({"tools":self.definitions}), params, true),
+            _ if self.config.profile.is_panel() => {
+                return Some(self.panel_request(id, method, params));
+            }
             "resources/list" => {
                 if !params.is_null() && !params.is_object() {
                     return Some(invalid_params());
@@ -460,6 +498,33 @@ impl<'a> Server<'a> {
                         format!("unknown tool: {}", storage::repr(&json!(name))),
                     ));
                 };
+                if name == "oms_panel_snapshot" {
+                    if !args
+                        .as_object()
+                        .is_some_and(|fields| fields.keys().all(|key| key.as_str() == Some("repo")))
+                    {
+                        return Some(error(id, -32602, "expected only an optional repo"));
+                    }
+                    let result = self.repo(args).and_then(|repo| {
+                        if delegated() && repo != self.caller_cwd {
+                            return Err(
+                                "Delegated workers may read only their own repository.".into()
+                            );
+                        }
+                        self.panel_snapshot(&repo, meta(params))
+                            .map_err(ToolError::from)
+                    });
+                    let value = match result {
+                        Ok(dashboard) => panel::response(Ok(json!({"dashboard":dashboard}))),
+                        Err(ToolError::Text(message)) => {
+                            json!({"isError":true,"content":[{"type":"text","text":message}]})
+                        }
+                        Err(ToolError::InvalidField) => {
+                            return Some(error(id, -32602, FIELD_ERROR));
+                        }
+                    };
+                    return Some(reply(id, self.complete(value, params, false)));
+                }
                 let (text, bad, graph) = if name == "oms_project_graph_render" {
                     match self.graph(args) {
                         Ok((text, graph)) => (text, false, Some(graph)),
@@ -551,6 +616,29 @@ fn serve_server<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
 ) -> io::Result<()> {
+    read_records(interrupted, reader, |record| {
+        let response = match record {
+            Ok(message) => server.handle_value(&message),
+            Err(error) => Some(error),
+        };
+        write_response(writer, response)
+    })
+}
+
+fn write_response(writer: &mut impl Write, response: Option<Value>) -> io::Result<()> {
+    if let Some(value) = response {
+        writer.write_all(value::encode(&value, true, false, false, false).as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn read_records(
+    interrupted: &AtomicBool,
+    reader: &mut impl BufRead,
+    mut handle: impl FnMut(Result<Value, Value>) -> io::Result<()>,
+) -> io::Result<()> {
     loop {
         if interrupted.load(Ordering::Relaxed) {
             break;
@@ -585,8 +673,8 @@ fn serve_server<R: BufRead, W: Write>(
         if !seen {
             break;
         }
-        let response = if oversize {
-            Some(error(
+        let parsed = if oversize {
+            Err(error(
                 &Value::Null,
                 -32600,
                 format!("request exceeds {MAX_REQUEST_BYTES}-byte limit"),
@@ -596,20 +684,78 @@ fn serve_server<R: BufRead, W: Write>(
             if line.is_empty() {
                 continue;
             }
-            match value::parse(line.as_bytes(), MAX_REQUEST_BYTES) {
-                Ok(v) => server.handle_value(&v),
-                Err(_) => Some(error(&Value::Null, -32700, "parse error")),
-            }
+            value::parse(line.as_bytes(), MAX_REQUEST_BYTES)
+                .map_err(|_| error(&Value::Null, -32700, "parse error"))
         } else {
-            Some(error(&Value::Null, -32700, "parse error"))
+            Err(error(&Value::Null, -32700, "parse error"))
         };
-        if let Some(v) = response {
-            writer.write_all(value::encode(&v, true, false, false, false).as_bytes())?;
-            writer.write_all(b"\n")?;
-            writer.flush()?;
-        }
+        handle(parsed)?;
     }
     Ok(())
+}
+
+impl Server<'_> {
+    /// Serve native stdio. Desktop content tabs may fetch their document while
+    /// a project query is running. Serialize all runtime calls on one bounded
+    /// worker, and write complete, ID-correlated responses from either thread.
+    pub fn serve_connection(
+        mut self,
+        reader: &mut impl BufRead,
+        writer: &mut (impl Write + Send),
+    ) -> io::Result<()> {
+        if !self.config.profile.is_panel() {
+            let stop = self.interrupted;
+            return serve_server(&mut self, stop, reader, writer);
+        }
+        let mut runtime = self.clone();
+        let writer = std::sync::Mutex::new(writer);
+        let write = |response| {
+            write_response(
+                *writer
+                    .lock()
+                    .map_err(|_| io::Error::other("MCP writer unavailable"))?,
+                response,
+            )
+        };
+        std::thread::scope(|scope| {
+            let (queue, pending) = std::sync::mpsc::sync_channel::<(&'static str, Value)>(8);
+            let worker = scope.spawn(move || -> io::Result<()> {
+                for (version, request) in pending {
+                    if runtime.interrupted.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    runtime.protocol = version;
+                    write(runtime.handle_value(&request))?;
+                }
+                Ok(())
+            });
+            let input = read_records(self.interrupted, reader, |record| {
+                let request = match record {
+                    Ok(message) => message,
+                    Err(error) => return write(Some(error)),
+                };
+                if !panel::runtime_request(&request) {
+                    return write(self.handle_value(&request));
+                }
+                match queue.try_send((self.protocol, request)) {
+                    Ok(()) => Ok(()),
+                    Err(std::sync::mpsc::TrySendError::Full((_, message))) => write(Some(error(
+                        &message["id"],
+                        -32000,
+                        "OMS panel is busy. The request was not executed.",
+                    ))),
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        Err(io::Error::other("OMS panel worker stopped"))
+                    }
+                }
+            });
+            drop(queue);
+            worker
+                .join()
+                .map_err(|_| io::Error::other("OMS panel worker stopped"))??;
+            input
+        })
+    }
 }
 
 /// Private native owner entry, for a bundled executable only. Arguments are

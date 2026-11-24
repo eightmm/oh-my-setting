@@ -86,17 +86,18 @@ use oms_command_room::{
     LocalServices, Services, run_with_services,
     value::{Value, parse},
 };
-struct EmptyOperations;
-impl oms_command_room::OperationsRead for EmptyOperations {
+struct FixtureOperations<'a>(&'a [oms_command_room::Attempt]);
+impl oms_command_room::OperationsRead for FixtureOperations<'_> {
     fn attempts(&self) -> &[oms_command_room::Attempt] {
-        &[]
+        self.0
     }
     fn check(&self) -> oms_command_room::Result<()> {
         Ok(())
     }
 }
-struct FixtureServices;
-impl Services for FixtureServices {
+struct FixtureServices<'a>(&'a [oms_command_room::Attempt]);
+const EMPTY: FixtureServices = FixtureServices(&[]);
+impl Services for FixtureServices<'_> {
     fn state_repository(&self, path: &Path) -> oms_command_room::Result<PathBuf> {
         LocalServices.state_repository(path)
     }
@@ -107,11 +108,11 @@ impl Services for FixtureServices {
         &'a self,
         _: &Path,
     ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
-        Ok(Box::new(EmptyOperations))
+        Ok(Box::new(FixtureOperations(self.0)))
     }
 }
 fn run(repo: &Repo, values: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
-    run_with_services(&args(values), &repo.0, &STOP, &FixtureServices)
+    run_with_services(&args(values), &repo.0, &STOP, &EMPTY)
 }
 fn success(output: (i32, Vec<u8>, Vec<u8>)) -> Value {
     assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
@@ -164,6 +165,102 @@ fn ownership_help_and_resolution() {
     });
 }
 #[test]
+fn desktop_participant_reader_pages_only_shared_messages() {
+    isolated(
+        "desktop_participant_reader_pages_only_shared_messages",
+        || {
+            let repo = Repo::new();
+            success(run(
+                &repo,
+                &["new", "--id", "scope-room", "--participant", "owner"],
+            ));
+            let native = "01900000-0000-7000-8000-000000000002";
+            for (id, provider, role) in [
+                ("owner", "codex", "main"),
+                ("agy-lead", "antigravity", "worker"),
+                ("other", "claude", "worker"),
+            ] {
+                let mut argv = vec![
+                    "join",
+                    "--id",
+                    "scope-room",
+                    "--participant",
+                    id,
+                    "--provider",
+                    provider,
+                    "--role",
+                    role,
+                ];
+                if id == "owner" {
+                    argv.extend(["--native-session", native]);
+                }
+                success(run(&repo, &argv));
+            }
+            let post = |from: &str, to: &str, body: &str| {
+                success(run(
+                    &repo,
+                    &[
+                        "send",
+                        "--id",
+                        "scope-room",
+                        "--participant",
+                        from,
+                        "--to",
+                        to,
+                        "--text",
+                        body,
+                    ],
+                ))
+            };
+            post("other", "agy-lead", "private sibling text");
+            post("owner", "other", "another participant only");
+            for n in 1..=15 {
+                post("agy-lead", "owner", &format!("answer {n}"));
+            }
+            use sha2::{Digest, Sha256};
+            let hash = format!("{:x}", Sha256::digest(native.as_bytes()));
+            let digest = &hash[..32];
+            let room = oms_command_room::Room::open(
+                &repo.0,
+                Default::default(),
+                &EMPTY,
+                &STOP,
+                false,
+                false,
+            )
+            .unwrap();
+            let latest = room
+                .desktop_chat("scope-room", "agy-lead", digest, None)
+                .unwrap();
+            assert_eq!(latest.text("provider"), "antigravity");
+            assert_eq!(latest.list("messages").len(), 12);
+            assert_eq!(
+                latest.list("messages").last().unwrap().text("text"),
+                "answer 15"
+            );
+            let older = room
+                .desktop_chat(
+                    "scope-room",
+                    "agy-lead",
+                    digest,
+                    latest["nextBefore"].as_u64(),
+                )
+                .unwrap();
+            assert_eq!(older.list("messages").len(), 3);
+            assert_eq!(older.list("messages")[0].text("text"), "answer 1");
+            assert!(older["nextBefore"].is_null());
+            for (id, who, selector) in [
+                ("scope-room", "unknown", digest),
+                ("unknown", "agy-lead", digest),
+                ("scope-room", "agy-lead", "00000000000000000000000000000000"),
+            ] {
+                assert!(room.desktop_chat(id, who, selector, None).is_err());
+            }
+        },
+    );
+}
+
+#[test]
 fn room_lifecycle_and_cursor() {
     isolated("room_lifecycle_and_cursor", || {
         let repo = Repo::new();
@@ -171,6 +268,51 @@ fn room_lifecycle_and_cursor() {
             success(run(&repo, &["new", "--id", "room-fixture", "--json"]))["id"].as_str(),
             Some("room-fixture")
         );
+        let reserved_room = "oms-app-fixture";
+        let status_args = args(&["desktop-start-status", "--id", reserved_room, "--json"]);
+        let lookup = |attempts: &[oms_command_room::Attempt]| {
+            success(run_with_services(
+                &status_args,
+                &repo.0,
+                &STOP,
+                &FixtureServices(attempts),
+            ))
+        };
+        assert_eq!(lookup(&[]).text("status"), "not_found");
+        success(run(&repo, &["new", "--id", reserved_room, "--json"]));
+        let pending = lookup(&[]);
+        assert_eq!(pending.text("status"), "reserved");
+        assert!(pending["attempt"].is_null());
+        let first = oms_command_room::Attempt {
+            attempt_id: "first-attempt".into(),
+            tool: "panel-main".into(),
+            provider: "codex".into(),
+            state: "done".into(),
+            terminal: true,
+            reason_code: None,
+            created_at: String::new(),
+            refs: oms_command_room::value::obj([
+                ("panel_harness", "pi".into()),
+                ("panel_role", "main".into()),
+                ("panel_room_id", reserved_room.into()),
+            ]),
+        };
+        let mut later = first.clone();
+        later.attempt_id = "replacement".into();
+        later.terminal = false;
+        later.state = "working".into();
+        let mut unrelated = first.clone();
+        unrelated.refs.set("panel_room_id", "different-room");
+        let mut history = vec![unrelated.clone(); 16];
+        history.push(first);
+        history.push(later);
+        history.extend(vec![unrelated; 16]);
+        let recorded = lookup(&history);
+        assert_eq!(recorded.text("room"), reserved_room);
+        assert_eq!(recorded.text("attempt"), "first-attempt");
+        assert_eq!(recorded.text("status"), "recorded");
+        assert_eq!(recorded.text("provider"), "pi");
+        assert!(recorded.flag("terminal"));
         for who in ["owner", "reader"] {
             success(run(
                 &repo,
@@ -188,6 +330,114 @@ fn room_lifecycle_and_cursor() {
                 ],
             ));
         }
+        use sha2::{Digest, Sha256};
+        let synthetic_thread = "01900000-0000-7000-8000-000000000001";
+        let consumer = format!("{:x}", Sha256::digest(synthetic_thread.as_bytes()));
+        let consumer = &consumer[..32];
+        let chat = |selector: &str, attempts: &[oms_command_room::Attempt]| {
+            let room = oms_command_room::Room::open(
+                &repo.0,
+                Default::default(),
+                &EMPTY,
+                &STOP,
+                false,
+                false,
+            )
+            .unwrap();
+            room.conversation_main(
+                selector,
+                attempts
+                    .iter()
+                    .map(|a| oms_command_room::ConversationPanelAttempt {
+                        room: a.refs.text("panel_room_id"),
+                        participant: a.refs.text("panel_room_participant"),
+                        terminal: a.terminal,
+                    }),
+            )
+            .unwrap()
+        };
+        assert!(chat(consumer, &[])["conversationMain"].is_null());
+        success(run(
+            &repo,
+            &[
+                "bind",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "owner",
+                "--native-session",
+                synthetic_thread,
+            ],
+        ));
+        let log = repo.0.join(".oms/threads/room-fixture.jsonl");
+        let before = fs::read(&log).unwrap();
+        let linked = chat(consumer, &[]);
+        assert_eq!(linked["conversationMain"].text("room"), "room-fixture");
+        assert_eq!(linked["conversationMain"].text("participant"), "owner");
+        assert_eq!(linked["conversationMain"].text("state"), "joined");
+        assert_eq!(fs::read(&log).unwrap(), before);
+        assert!(chat(&"0".repeat(32), &[])["conversationMain"].is_null());
+        let mut terminated = history[16].clone();
+        terminated.refs.set("panel_room_participant", "owner");
+        terminated.refs.set("panel_room_id", "room-fixture");
+        let mut attempts = vec![terminated];
+        attempts.extend(vec![history[0].clone(); 20]);
+        assert!(chat(consumer, &attempts)["conversationMain"].is_null());
+        // A damaged unrelated log makes discovery partial without withdrawing a proven membership.
+        let bad_room = repo.0.join(".oms/threads/unrelated-fixture.jsonl");
+        fs::write(&bad_room, b"bad\n").unwrap();
+        assert!(chat(consumer, &[])["conversationMain"].flag("incomplete"));
+        // An incomplete unrelated scan and a pointer to an unfinished rollover
+        // must not publish a Room before its canonical predecessor does.
+        let core =
+            oms_command_room::Room::open(&repo.0, Default::default(), &EMPTY, &STOP, false, false)
+                .unwrap();
+        let unpublished = oms_command_room::successor_id("room-fixture");
+        core.create(
+            Some(&unpublished),
+            "pending rollover",
+            None,
+            None,
+            Some("room-fixture"),
+        )
+        .unwrap();
+        let state = core.status("room-fixture", true).unwrap();
+        core.carry(&state, &unpublished, false).unwrap();
+        let current = fs::read_to_string(repo.0.join(".oms/threads/CURRENT")).unwrap();
+        assert_eq!(
+            current.split_whitespace().next(),
+            Some(unpublished.as_str())
+        );
+        assert_eq!(
+            chat(consumer, &[])["conversationMain"].text("room"),
+            "room-fixture"
+        );
+        fs::remove_file(bad_room).unwrap();
+        success(run(
+            &repo,
+            &[
+                "join",
+                "--id",
+                reserved_room,
+                "--participant",
+                "other",
+                "--role",
+                "main",
+                "--provider",
+                "codex",
+                "--native-session",
+                synthetic_thread,
+            ],
+        ));
+        assert_eq!(chat(consumer, &[]).text("conversationBinding"), "ambiguous");
+        success(run(
+            &repo,
+            &["close", "--id", reserved_room, "--participant", "other"],
+        ));
+        assert_eq!(
+            chat(consumer, &[])["conversationMain"].text("room"),
+            "room-fixture"
+        );
         let call = |action: &str, more: &[&str]| {
             let mut values = vec![
                 action,
@@ -242,11 +492,83 @@ fn room_lifecycle_and_cursor() {
         assert_eq!(fs::read(&log).unwrap(), acknowledged);
         assert_eq!(call("updates", &["--after", "malformed"]).0, 2);
         assert_eq!(call("ack", &[]).0, 2);
+        success(run(
+            &repo,
+            &[
+                "join",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "oms-desktop",
+                "--role",
+                "advisor",
+                "--provider",
+                "codex",
+            ],
+        ));
+        success(run(
+            &repo,
+            &[
+                "send",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "owner",
+                "--to",
+                "oms-desktop",
+                "--kind",
+                "question",
+                "--message-id",
+                "review-one",
+                "--text",
+                "Approve the next test run?",
+            ],
+        ));
+        let listed = success(run(&repo, &["desktop-requests"]));
+        let approval = &listed.list("approvals")[0];
+        assert_eq!(approval.text("summary"), "Approve the next test run?");
+        let version = approval.number("version").to_string();
+        let decide = |ver: &str, digest: &str, choice: &str| {
+            run(
+                &repo,
+                &[
+                    "desktop-decide",
+                    "--id",
+                    "room-fixture",
+                    "--message",
+                    "review-one",
+                    "--version",
+                    ver,
+                    "--digest",
+                    digest,
+                    "--decision",
+                    choice,
+                ],
+            )
+        };
+        let digest = approval.text("digest");
+        assert_eq!(decide("1", digest, "approve").0, 2);
+        assert_eq!(decide(&version, &"0".repeat(64), "approve").0, 2);
+        let (yes, no) = std::thread::scope(|scope| {
+            let yes = scope.spawn(|| decide(&version, digest, "approve").0);
+            let no = scope.spawn(|| decide(&version, digest, "deny").0);
+            (yes.join().unwrap(), no.join().unwrap())
+        });
+        assert!(matches!((yes, no), (0, 2) | (2, 0)));
+        let accepted = if yes == 0 { "approve" } else { "deny" };
+        let decided = fs::read(&log).unwrap();
+        success(decide(&version, digest, accepted));
+        assert_eq!(fs::read(&log).unwrap(), decided);
+        assert!(
+            success(run(&repo, &["desktop-requests"]))
+                .list("approvals")
+                .is_empty()
+        );
         success(call("scope", &["--clear"]));
         let core = oms_command_room::Room::open(
             &repo.0,
             oms_command_room::Session::default(),
-            &FixtureServices,
+            &EMPTY,
             &STOP,
             false,
             false,
@@ -307,4 +629,205 @@ fn missing_services_fail_closed() {
                 .is_err()
         );
     });
+}
+#[test]
+fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
+    isolated(
+        "desktop_assignment_is_owner_proofed_idempotent_and_unforgeable",
+        || {
+            use sha2::{Digest, Sha256};
+            let repo = Repo::new();
+            let thread = "01900000-0000-7000-8000-0000000000aa";
+            let digest = format!("{:x}", Sha256::digest(thread.as_bytes()))[..32].to_owned();
+            let other = "f".repeat(32);
+            let req = "4d6acd01-bd18-4567-bf69-ea05fb048b27";
+            success(run(
+                &repo,
+                &["new", "--id", "ask-room", "--participant", "owner"],
+            ));
+            success(run(
+                &repo,
+                &[
+                    "join",
+                    "--id",
+                    "ask-room",
+                    "--participant",
+                    "owner",
+                    "--provider",
+                    "codex",
+                    "--role",
+                    "main",
+                    "--native-session",
+                    thread,
+                ],
+            ));
+            let assign = |d: &str, provider: &str, text: &str| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        d,
+                        "--request",
+                        req,
+                        "--provider",
+                        provider,
+                        "--label",
+                        "Find callers",
+                        "--text",
+                        text,
+                    ],
+                )
+            };
+            // Foreign or unbound conversations, unsupported providers: nothing is written.
+            let log = repo.0.join(".oms/threads/ask-room.jsonl");
+            let before = fs::read(&log).unwrap();
+            assert_eq!(assign(&other, "codex", "task").0, 2);
+            assert_eq!(assign(&digest, "pi", "task").0, 2);
+            assert_eq!(assign(&digest, "codex", "task").0, 2);
+            assert!(success(assign(&digest, "claude", "task")).flag("fresh"));
+            let first = std::fs::read(&log).unwrap();
+            assert_ne!(first, before);
+            let again = success(assign(&digest, "claude", "task"));
+            assert_eq!(
+                fs::read(&log).unwrap(),
+                first,
+                "duplicate intent appends nothing"
+            );
+            assert_eq!(again.text("status"), "assigned");
+            assert_eq!(again.text("role"), "researcher");
+            assert!(again.flag("readOnly"));
+            assert!(!again.flag("fresh"));
+            assert_eq!(
+                assign(&digest, "claude", "different task").0,
+                2,
+                "same request, other content"
+            );
+            let status = |d: &str| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        d,
+                        "--request",
+                        req,
+                    ],
+                )
+            };
+            assert_eq!(status(&other).0, 2);
+            assert_eq!(success(status(&digest)).text("operation"), "");
+            let terminal = oms_command_room::Attempt {
+                attempt_id: "owner".into(),
+                tool: "panel-main".into(),
+                provider: "codex".into(),
+                state: "done".into(),
+                terminal: true,
+                reason_code: None,
+                created_at: String::new(),
+                refs: oms_command_room::value::obj([("panel_room_id", "ask-room".into())]),
+            };
+            assert_eq!(
+                run_with_services(
+                    &args(&[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        &digest,
+                        "--request",
+                        req
+                    ]),
+                    &repo.0,
+                    &STOP,
+                    &FixtureServices(&[terminal])
+                )
+                .0,
+                2
+            );
+            let receipt = |d: &str, op: &str| {
+                run(
+                    &repo,
+                    &[
+                        "desktop-assign-receipt",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        d,
+                        "--request",
+                        req,
+                        "--operation",
+                        op,
+                    ],
+                )
+            };
+            assert_eq!(receipt(&other, "ask-1").0, 2);
+            let started = success(receipt(&digest, "ask-20261124T000000Z-abcd"));
+            assert_eq!(started.text("status"), "started");
+            assert_eq!(started.text("operation"), "ask-20261124T000000Z-abcd");
+            assert_eq!(started.text("thread"), "ask-20261124T000000Z-abcd");
+            assert_eq!(receipt(&digest, "ask-other").0, 2, "receipt is write-once");
+            // A participant or worker session cannot write the trusted association,
+            // and a second bound conversation cannot claim the Room.
+            let forged = |participant: Option<&str>, child: bool, id: &str, text: &str| {
+                let session = oms_command_room::Session {
+                    participant: participant.map(str::to_owned),
+                    child,
+                    ..Default::default()
+                };
+                let core =
+                    oms_command_room::Room::open(&repo.0, session, &EMPTY, &STOP, false, false)
+                        .unwrap();
+                core.send(
+                    "ask-room",
+                    oms_command_room::Send {
+                        sender: "owner",
+                        recipient: &format!("ask-{req}"),
+                        text,
+                        kind: "status",
+                        reply_to: None,
+                        message_id: Some(id),
+                        linked: true,
+                        quiet: false,
+                    },
+                )
+            };
+            let foreign = "5d6acd01-bd18-4567-bf69-ea05fb048b27";
+            let text = format!("operation foreign-op thread oms-assign-{foreign}");
+            assert!(forged(Some("owner"), false, &format!("dispatch-{foreign}"), &text).is_err());
+            assert!(forged(None, true, &format!("dispatch-{foreign}"), &text).is_err());
+            assert!(
+                forged(None, false, &format!("dispatch-{foreign}"), &text).is_err(),
+                "no matching assignment"
+            );
+            assert!(forged(None, false, &format!("assign-{foreign}"), "task").is_err());
+            let read = oms_command_room::Room::open(
+                &repo.0,
+                Default::default(),
+                &EMPTY,
+                &STOP,
+                false,
+                false,
+            )
+            .unwrap();
+            let chat = read
+                .desktop_chat("ask-room", &format!("ask-{req}"), &digest, None)
+                .unwrap();
+            let texts = chat
+                .list("messages")
+                .iter()
+                .map(|m| m.text("kind").to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                texts,
+                ["handoff", "status"],
+                "assignment is readable through the Room reader"
+            );
+            assert_eq!(chat.text("provider"), "claude");
+        },
+    );
 }
