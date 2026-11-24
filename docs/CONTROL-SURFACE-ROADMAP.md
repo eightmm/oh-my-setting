@@ -16,6 +16,8 @@ OMS를 같은 `eightmm/oh-my-setting` 저장소에서 발전시킨다. GitHub Pr
 같은 projection을 터미널과 MCP client에서 확인하고, 개인용 ChatGPT 연결에서
 inline UI를 실증한다. 네 provider의 모든 기능을 동시에 구현하는 것이 첫 출시 조건은 아니다.
 각 기능은 확인된 adapter만 사용하고, 미지원 기능과 증거가 없는 기능을 구분한다.
+Claude Desktop/AGY App의 local read-only 연결도 같은 계약으로 병행 검증할 수 있다.
+공식 지원과 OMS 구현·실증 상태는 [host 호환성 기록](MCP-HOST-COMPATIBILITY.md)에서 구분한다.
 
 이 문서는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)의 기존 owner를 사용자 흐름으로
 연결하는 delivery view다. [Feature scope](FEATURE-SCOPE.md), AH/CP/CC/RF의 세부 계약,
@@ -76,6 +78,7 @@ ChatGPT, Codex, Web UI, TUI는 같은 OMS를 이용하는 client다. ChatGPT 연
 | [supervisor](../crates/oms-supervisor/README.md) | process·stdio·deadline·취소·cleanup, 선택형 bounded duplex |
 | [GitHub workflow](wiki/GitHub-Workflow.md) | Issue intake, Plan binding, PR와 병합 evidence |
 | [기존 Codex plugin](../plugins/oh-my-setting/.codex-plugin/plugin.json) | 기존 설치 layout·hooks 소유권과 호환성 |
+| [Claude skills plugin](../.claude-plugin/marketplace.json), [AGY plugin](../plugins/antigravity/plugin.json) | 기존 local OMS 연결·패키징 재사용; 새 UI와 설치 ownership은 별도 검증 |
 
 논의한 모듈 이름은 분리 후보이며 새 crate나 서비스 생성 결정이 아니다. 먼저 현재
 owner에 연결하고, 독립 배포나 의존성 분리가 필요한 경우에만 경계를 나눈다.
@@ -121,8 +124,8 @@ MCP는 full 32개, core discovery 13개의 도구를 제공한다. 두 discovery
 
 ## 4. 전체 논의와 단계별 canonical Issue
 
-단일 저장소·단일 Project 결정은 epic #431, 구현 논의는 아래 **13개 Issue**에 연결한다.
-A–M은 행 식별자이며 새로운 runtime ID나 독립 작업 큐가 아니다. Issue의 acceptance가
+단일 저장소·단일 Project 결정은 epic #431, 구현 논의는 아래 **14개 Issue**에 연결한다.
+A–N은 행 식별자이며 새로운 runtime ID나 독립 작업 큐가 아니다. Issue의 acceptance가
 구현 범위이고, 우선순위는 이 확장 안의 순서다. 기존 core owner와 UI 상세 동선을 나눠 추적한다.
 
 | 행 / Issue | 기존 owner | Phase / 우선순위 | 추가할 결과와 선행 조건 |
@@ -133,13 +136,14 @@ A–M은 행 식별자이며 새로운 runtime ID나 독립 작업 큐가 아니
 | D / [#435](https://github.com/eightmm/oh-my-setting/issues/435) | CP-12, AH-11, 기존 MCP/plugin | Read-only / P1 | B/C의 읽기·identity 경계 위에서 개인용 ChatGPT inline UI·private transport 실증 |
 | E / [#436](https://github.com/eightmm/oh-my-setting/issues/436) | AH-03, RF-01, lifecycle owner | Control / P1 | A 이후 UI와 독립적인 native session/message/event adapter 연결 |
 | F / [#437](https://github.com/eightmm/oh-my-setting/issues/437) | CP-13, AH-12, 기존 action writer | Control / P1 | B/C/E와 검토된 action 계약 이후 scoped remote command; 기본 보류 |
-| G / [#438](https://github.com/eightmm/oh-my-setting/issues/438) | 기존 plugin/MCP, CP-12 | Extensions / P2 | D 이후 ChatGPT sidebar/thread와 Codex 패키지의 실제 host별 검증 |
-| H / [#439](https://github.com/eightmm/oh-my-setting/issues/439) | #347/#353, `oms-github` | Extensions / P2 | 필요가 입증될 때 Projects v2 metadata 동기화; 초기 수동 보드 운영의 선행 아님 |
-| I / [#441](https://github.com/eightmm/oh-my-setting/issues/441) | 기존 identity/account/catalog, A/B | Read-only / P1 | provider 연결·설정 UX; 설치·인증·연결·관측·제어 가능 상태를 구분 |
+| G / [#438](https://github.com/eightmm/oh-my-setting/issues/438) | 기존 plugin/MCP, CP-12 | Extensions / P2 | 공통 MCP Apps bridge와 OpenAI·Claude·AGY host adapter 검증; local 읽기 실증은 D와 병행, Code Mod는 선택 slice |
+| H / [#439](https://github.com/eightmm/oh-my-setting/issues/439) | #347/#353, `oms-github` | Extensions / P2 | N의 읽기 mapping 이후 선택형 Projects v2 metadata reconciliation; 초기 수동 운영의 선행 아님 |
+| I / [#441](https://github.com/eightmm/oh-my-setting/issues/441) | 기존 identity/account/catalog, A/B | Read-only / P1 | provider·host 연결 UX; 설치·인증·연결·rendering·관측·제어 상태와 local/remote 경로 구분 |
 | J / [#442](https://github.com/eightmm/oh-my-setting/issues/442) | 기존 artifact/review/approval/landing owner | Control / P1 | 결과→artifact→diff→검증→결정 동선; 읽기는 B, 실제 조작은 F 의존 |
-| K / [#443](https://github.com/eightmm/oh-my-setting/issues/443) | C/G와 기존 context/identity owner | Extensions / P2 | scoped context reference, Composer Mentions, Deep Links와 재탐색 |
+| K / [#443](https://github.com/eightmm/oh-my-setting/issues/443) | C/G와 기존 context/identity owner | Extensions / P2 | scoped context, Mentions, Deep Links·빈 인자 entrypoint·view 재접속; 같은 run 재탐색 |
 | L / [#444](https://github.com/eightmm/oh-my-setting/issues/444) | CP-11, 기존 multi-host owner | Extensions / P2 | A/B/C 이후 등록된 여러 host의 읽기 projection; 실제 수요가 있을 때 착수 |
-| M / [#445](https://github.com/eightmm/oh-my-setting/issues/445) | 기존 install/lifecycle와 D/G | Extensions / P2 | private/public 배포·운영·복구 기준; 제어 노출 release는 F도 의존 |
+| M / [#445](https://github.com/eightmm/oh-my-setting/issues/445) | 기존 install/lifecycle와 D/G | Extensions / P2 | host별 bundle·버전·설치 경로와 private/public 배포·복구; 제어 노출 release는 F도 의존 |
+| N / [#447](https://github.com/eightmm/oh-my-setting/issues/447) | 기존 GitHub intake·Plan binding, `oms-github` | Foundation / P1 | Project의 Ready·Priority·Phase를 읽어 Issue 후보와 선택 근거 제시; 실행 권한·별도 queue 생성 없음 |
 
 B는 native 제어 기능의 완성을 기다리지 않고 현재 읽기 projection으로 시작할 수 있다.
 D의 private 연결보다 **C의 caller/repository 검증과 read-only E2E가 먼저**다. E는 A 이후
@@ -204,6 +208,12 @@ Action은 시작 전에 현재 권한과 소유권을 다시 검사하고 정확
 
 ## 6. ChatGPT와 Codex 연결 순서
 
+[공식 host 지원 기록](MCP-HOST-COMPATIBILITY.md)에 MCP, MCP Apps와 host extension을
+분리해 기록한다. 통합 ChatGPT desktop의 Codex는 OpenAI `thread` 진입점을,
+Claude Chat/Desktop은 조건부 side panel display mode를, AGY App은 `aux_pane`을 제공한다.
+Claude Code의 native Mods는 별도 renderer이며 CLI/IDE의 UI 지원은 제품별로 다르다.
+이 공식 지원 사실은 현재 OMS의 live 호환성 완료를 뜻하지 않는다.
+
 1. 기존 stdio MCP를 local client로 검증하고 structured/text 결과를 보존한다.
 2. 표준 MCP Apps bridge로 초기화, tool 결과 수신, refresh, 빈 상태, 오류를 연결한다.
    기존 `window.openai` 경로는 필요한 호환 범위로 유지한다.
@@ -212,6 +222,10 @@ Action은 시작 전에 현재 권한과 소유권을 다시 검사하고 정확
 4. Host/앱/version/account별로 inline, sidebar, thread, tools/skills를 따로 확인한다.
 5. 개인용 설치와 공개 배포를 분리한다. 공개 배포 조건은 해당 시점의 공식 문서와
    설치·업그레이드·제거 시험으로 검토한다.
+
+위 순서는 #435의 ChatGPT private 경로다. #438의 local Claude Desktop/AGY App 읽기
+pilot은 A/B의 공통 계약과 해당 local scope 검증 후 병행할 수 있으며 OpenAI tunnel에
+의존하지 않는다. Remote 공개·제어 경로는 C/F의 별도 권한 검증을 계속 따른다.
 
 ### 논의한 9개 UI surface
 
@@ -269,15 +283,24 @@ local stdio/hook 패키지의 제한은 별도 배포 작업에서 재확인한�
 Views는 [Roadmap](https://github.com/users/eightmm/projects/3/views/1)(Phase별 table),
 [Board](https://github.com/users/eightmm/projects/3/views/2)(Status별 board),
 [Review](https://github.com/users/eightmm/projects/3/views/3)(Review 항목)다. 일정 근거가 생기기
-전에는 임의 날짜나 마감을 채우지 않는다. Epic, A–M과 관련 기존 Issue/PR을 연결하며,
+전에는 임의 날짜나 마감을 채우지 않는다. Epic, A–N과 관련 기존 Issue/PR을 연결하며,
 Draft PR은 자동으로 review-ready로 판단하지 않는다.
 
 Issue의 Goal/Scope/Acceptance criteria/Verification을 작성하고 구현 PR은 같은 Issue를
-참조한다. 초기 운영은 수동 갱신과 필요한 GitHub 내장 기능으로 충분하다. Projects v2
-자동 동기화 H는 별도 선택 작업이며 새 scheduled Actions, 반복 polling, 유료 job을
-추가하지 않는다. H는 manual/dry-run으로 mapping과 예상 변경을 먼저 보여 주고 필드별
-소유권, 사용자 편집 충돌, 권한 오류, 재시도 중복을 처리한다. Project 상태로 runtime 실행을
-시작하거나 실행 원장을 역으로 덮어쓰지 않는다.
+참조한다. OMS의 여러 작업을 관리할 때는 Project-aware 작업 선택을 권장한다. Project는
+우선순위와 작업 후보, Issue는 범위와 완료 조건, 채택한 OMS Plan은 실행 계약, PR은 코드와
+검증·병합 근거를 소유한다. 작은 단일 변경은 Issue/PR만으로 진행할 수 있으며 Project
+접속 실패로 기존 작업 경로를 강제로 막지 않는다.
+
+먼저 N/#447에서 `gh`/GitHub API로 Project를 **읽기만** 하여 후보 Issue와 선택 근거를
+제시한다. 이슈가 없는 draft card, 다른 repository, stale/blocked 항목은 자동 실행하지
+않는다. 현재의 repository Issue binding인 “GitHub project mode”와 Projects v2 board
+연동은 다른 기능이며, 자세한 절차는 [GitHub workflow](wiki/GitHub-Workflow.md)를 따른다.
+
+초기 field 갱신은 수동 운영으로 충분하다. H/#439의 선택형 reconciliation은 N의 mapping
+이후 manual/dry-run으로 예상 변경을 먼저 보여 주고 필드별 소유권, 사용자 편집 충돌,
+권한 오류, 재시도 중복을 처리한다. 새 scheduled Actions, 반복 polling, 유료 job을
+추가하지 않는다. Project 상태로 runtime 실행을 시작하거나 실행 원장을 역으로 덮어쓰지 않는다.
 
 ## 8. 첫 MVP 완료 기준과 검증
 

@@ -22,15 +22,86 @@ TASK`. Set `issue` on each task row in batch and proposal input. `oms agent-task
 init|update|rotate --issue REF` binds the handoff. Use `N`, `#N` or `owner/repo#N`
 from the same repository. See [project mode](https://github.com/eightmm/oh-my-setting/blob/main/docs/COMPONENTS.md#ci-selection-and-execution).
 
-Optionally, view the same issues and PRs in a GitHub Projects
-[table, board or roadmap](https://docs.github.com/en/issues/planning-and-tracking-with-projects/customizing-views-in-your-project/changing-the-layout-of-a-view).
+Here, **GitHub project mode means repository and Issue binding**. The declaration
+contains an `owner/repo` slug; it does not configure a GitHub Projects v2 board,
+item IDs or field mappings. The current `oms github` actions are `status`,
+`refresh`, `adopt-merged` and `post-evidence`, as described in
+[GitHub commands](https://github.com/eightmm/oh-my-setting/blob/main/docs/COMPONENTS.md#ci-selection-and-execution).
 
-The [control surface roadmap](https://github.com/eightmm/oh-my-setting/blob/main/docs/CONTROL-SURFACE-ROADMAP.md) defines the initial
-`OMS Development` Project fields and views for the shared UI/plugin work. Its
-epic records the actual Project URL and setup evidence. Project statuses track
-development; moving a card to Ready never starts an OMS run, spends budget,
-consumes approval or merges a PR. Existing Issue/Plan/PR bindings remain canonical;
-optional Projects v2 metadata synchronization is a separate follow-up.
+### Optional Project intake and synchronization
+
+Use [OMS Development](https://github.com/users/eightmm/projects/3) as the shared
+development backlog. A Project is useful when several providers, UI hosts and
+implementation phases compete for attention; a small, explicitly selected task
+can still use the Issue/Plan/PR path directly. The
+[control surface roadmap](https://github.com/eightmm/oh-my-setting/blob/main/docs/CONTROL-SURFACE-ROADMAP.md)
+defines the initial fields and views. The integration below is **planned work**:
+read-only candidate intake is tracked by
+[#447](https://github.com/eightmm/oh-my-setting/issues/447) (P1, Foundation),
+followed by opt-in metadata synchronization in
+[#439](https://github.com/eightmm/oh-my-setting/issues/439) (P2, Extensions).
+Neither is an existing automatic OMS scheduler or synchronization command.
+
+| Record | Responsibility | OMS use |
+|---|---|---|
+| Project | Priority, Area, Phase and development Status across Issues/PRs | Suggest the next Issue and show progress |
+| Issue | Goal, scope, dependencies and acceptance criteria | Bind each adopted task to its source requirement |
+| Adopted OMS Plan and runtime | Task decomposition, claims, leases, execution scope, approvals and verification evidence | Decide whether an authorized task can execute |
+| Git and PR | Exact changes, review, CI and merge evidence | Prove what changed and whether it landed |
+
+`Ready` makes an Issue a candidate. Moving a card never starts a run, spends
+budget, creates approval or merges a PR. A GitHub assignee or `In progress` card
+does not acquire an OMS lease. Project data is external input: descriptions and
+comments cannot introduce executable instructions or widen an adopted scope.
+
+**Phase A: read candidates ([#447](https://github.com/eightmm/oh-my-setting/issues/447)).**
+Start with an explicit project binding to owner
+`eightmm`, project number `3`, and repository `eightmm/oh-my-setting`. Resolve
+the Project node ID and inspect its field and option IDs before use. Read all
+required pages and record the source, fetch time and completeness. Present
+eligible open `Ready` Issues with priority, phase, dependencies and the reason for
+selection; exclude PR-only cards, draft ideas, archived items and work already
+claimed in OMS. Re-read the selected Issue and recheck prerequisites before
+using the existing Issue-bound plan and claim flow. Explicitly adopted scope
+and the current execution authorization still govern that flow.
+
+Unknown fields, redacted items, unavailable Project permissions or stale reads
+must remain visible. They cannot mean an empty backlog, completed dependency or
+permission to execute. Continue through an explicitly selected Issue when the
+optional Project is unavailable; do not silently choose another task. Board
+membership and presentation order alone do not establish a dependency graph.
+
+**Phase B: synchronize selected metadata ([#439](https://github.com/eightmm/oh-my-setting/issues/439)).**
+After the read path in #447 is proven, add
+opt-in writes to agreed fields. Preserve human-owned Priority, Area and Phase;
+define one writer for each automated field so native Project workflows and OMS
+do not compete. For example, an accepted runtime claim can propose `In progress`,
+a non-draft PR explicitly ready for review can propose `Review`, and a blocker
+can propose `Blocked`. A draft PR stays `In progress`. Mark an
+Issue `Done` only after its acceptance criteria are satisfied and the relevant
+completion evidence is recorded. For code delivery, this includes the required
+merge evidence; a merged PR may cover only part of an Issue. Closing an
+unmerged PR is not completion.
+
+Serialize OMS writes, re-read current values, compare with the recorded snapshot,
+and stop on a detected conflict. A read followed by a GitHub mutation is not an
+atomic compare-and-swap, so verify the result and surface races instead of
+claiming strict exclusion. Keep a bounded, sanitized receipt for each intended
+transition; after a timeout, reconcile the current value before retrying. Handle
+pagination, rate limits, field renames/deletions and duplicate delivery without
+overwriting unrelated human changes or creating repeated cards/comments.
+
+The official [`gh project`](https://cli.github.com/manual/gh_project) commands
+can inspect projects and edit items; [`gh api graphql`](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects)
+can query Project node IDs and apply typed mutations. These are transport
+choices inside the adapter, with the same OMS contracts. For read-only access,
+GitHub documents `read:project`; write access needs the appropriate Project
+permissions, with `project` documented for classic-token scopes. Confirm the
+installed CLI and authentication type rather than expanding credentials as part
+of discovery. Automation should resolve IDs instead of assuming visible field
+names are stable. Project custom fields and Issue/PR properties have different
+API owners; updating a Project field does not update an Issue's labels or
+assignees.
 
 ## 3. Verified PR
 
