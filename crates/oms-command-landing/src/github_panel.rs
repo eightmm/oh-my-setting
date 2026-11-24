@@ -321,17 +321,13 @@ fn project_error(code: i32, errors: &[V]) -> Option<&'static str> {
     {
         return Some("rate_limited");
     }
-    if errors
-        .iter()
-        .any(|e| e.get("type").text() == Some("INSUFFICIENT_SCOPES"))
-    {
+    if errors.iter().any(|e| {
+        e.get("type").text() == Some("INSUFFICIENT_SCOPES")
+            && e.get("message")
+                .text()
+                .is_some_and(|m| m.contains("read:project"))
+    }) {
         return Some("insufficient_scope");
-    }
-    if errors
-        .iter()
-        .any(|e| e.get("type").text() == Some("FORBIDDEN"))
-    {
-        return Some("forbidden");
     }
     if errors
         .iter()

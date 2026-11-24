@@ -297,6 +297,7 @@ fn fetch_board_raw(
     target: &ResolvedBoard,
     expected_id: &str,
     after: Option<&str>,
+    classify: fn(i32, &[V]) -> Option<&'static str>,
 ) -> crate::Result<BoardPageRaw> {
     let query = BOARD_QUERY.replace("OWNER", target.group);
     let (owner, number_arg) = (
@@ -326,7 +327,7 @@ fn fetch_board_raw(
     let v = strict(&reply.stdout).unwrap_or(V::Null);
     let errors = v.get("errors").array();
     let board = v.get("data").get(target.group).get("projectV2");
-    let err_reason = project_error(reply.code, errors);
+    let err_reason = classify(reply.code, errors);
     if (reply.code != 0 && !(reply.code == 1 && !errors.is_empty())) || board.get("id") == &V::Null
     {
         return Ok(BoardPageRaw::Failed(err_reason));
@@ -389,12 +390,13 @@ pub(super) fn page(
             return Ok(board_empty(status, reason.as_deref()));
         }
     };
-    let (board, has_errors) = match fetch_board_raw(c, root, &target, expected_id, after)? {
-        BoardPageRaw::Ok {
-            board, has_errors, ..
-        } => (board, has_errors),
-        BoardPageRaw::Failed(reason) => return Ok(board_empty("unavailable", reason)),
-    };
+    let (board, has_errors) =
+        match fetch_board_raw(c, root, &target, expected_id, after, project_error)? {
+            BoardPageRaw::Ok {
+                board, has_errors, ..
+            } => (board, has_errors),
+            BoardPageRaw::Failed(reason) => return Ok(board_empty("unavailable", reason)),
+        };
     let (fields, chosen, mut incomplete) = board_fields(board.get("fields"));
     incomplete |= has_errors;
     let (V::Arr(nodes), V::Bool(more), V::Bool(closed)) = (
@@ -494,6 +496,31 @@ pub(super) fn page(
         },
     );
     Ok(out)
+}
+
+fn drift_error(code: i32, errors: &[V]) -> Option<&'static str> {
+    if code == 124 {
+        return Some("timeout");
+    }
+    if errors
+        .iter()
+        .any(|e| e.get("type").text() == Some("RATE_LIMITED"))
+    {
+        return Some("rate_limited");
+    }
+    if errors
+        .iter()
+        .any(|e| e.get("type").text() == Some("INSUFFICIENT_SCOPES"))
+    {
+        return Some("insufficient_scope");
+    }
+    if errors
+        .iter()
+        .any(|e| e.get("type").text() == Some("FORBIDDEN"))
+    {
+        return Some("forbidden");
+    }
+    project_error(code, errors)
 }
 
 fn reason_rank(reason: &str) -> u8 {
@@ -600,7 +627,7 @@ fn walk_open_work(
         }
         let v = strict(&reply.stdout).unwrap_or(V::Null);
         let errors = v.get("errors").array();
-        let err_reason = project_error(reply.code, errors);
+        let err_reason = drift_error(reply.code, errors);
         if reply.code != 0 && !(reply.code == 1 && !errors.is_empty()) {
             record_reason(&mut reason, err_reason.unwrap_or("unavailable"));
             break;
@@ -680,6 +707,28 @@ fn source_completeness(complete: bool, pages: usize, items_read: usize, reason: 
     ])
 }
 
+fn missing_bucket(
+    total: usize,
+    issues_total: usize,
+    pulls_total: usize,
+    items: Vec<V>,
+    omitted: usize,
+    unverified: Option<bool>,
+) -> V {
+    let mut bucket = obj([
+        ("total", total.into()),
+        ("issuesTotal", issues_total.into()),
+        ("pullRequestsTotal", pulls_total.into()),
+        ("items", V::Arr(items)),
+        ("omitted", omitted.into()),
+        ("limit", MISSING_LIMIT.into()),
+    ]);
+    if let Some(flag) = unverified {
+        bucket.set("unverified", flag);
+    }
+    bucket
+}
+
 fn drift_empty(status: &str, reason: Option<&str>, observed_at: &str) -> V {
     let resolved_reason = reason.unwrap_or(status);
     obj([
@@ -718,14 +767,11 @@ fn drift_empty(status: &str, reason: Option<&str>, observed_at: &str) -> V {
         ),
         (
             "missingFromBoard",
-            obj([
-                ("total", 0usize.into()),
-                ("issuesTotal", 0usize.into()),
-                ("pullRequestsTotal", 0usize.into()),
-                ("items", V::Arr(vec![])),
-                ("omitted", 0usize.into()),
-                ("limit", MISSING_LIMIT.into()),
-            ]),
+            missing_bucket(0, 0, 0, vec![], 0, Some(true)),
+        ),
+        (
+            "unverifiedMissing",
+            missing_bucket(0, 0, 0, vec![], 0, None),
         ),
         (
             "excluded",
@@ -784,27 +830,6 @@ fn verified_status<'a>(
     Some(Some(label.as_str()))
 }
 
-/// Silently recognize an archived item's repo identity so archived items of this
-/// repository stay listed as excluded and are never reported as missing-from-board drift.
-fn archived_local_ref(node: &V, slug: &Slug) -> Option<(Kind, Number)> {
-    let item = node.get("content");
-    let kind = match (node.get("type").text(), item.get("__typename").text()) {
-        (Some("ISSUE"), Some("Issue")) => Kind::Issue,
-        (Some("PULL_REQUEST"), Some("PullRequest")) => Kind::Pull,
-        _ => return None,
-    };
-    let repo = item
-        .get("repository")
-        .get("nameWithOwner")
-        .text()
-        .and_then(|s| Slug::parse(s).ok())?;
-    if !repo.matches(slug) {
-        return None;
-    }
-    let number = digits(item.get("number")).and_then(|n| Number::parse(n).ok())?;
-    Some((kind, number))
-}
-
 /// Read-only drift report for one explicitly identified Projects v2 board.
 /// Walks board pagination plus open repository issues and pull requests without
 /// mutating the board, issues or pull requests.
@@ -856,7 +881,7 @@ pub(super) fn drift(
     while board_pages < MAX_BOARD_PAGES {
         board_pages += 1;
         let (board, has_errors, err_reason) =
-            match fetch_board_raw(c, root, &target, expected_id, after.as_deref())? {
+            match fetch_board_raw(c, root, &target, expected_id, after.as_deref(), drift_error)? {
                 BoardPageRaw::Ok {
                     board,
                     has_errors,
@@ -926,34 +951,33 @@ pub(super) fn drift(
         }
         for node in nodes.iter().take(20) {
             board_items_read += 1;
-            match node.get("isArchived") {
-                V::Bool(true) => {
-                    excluded_archived += 1;
-                    if let Some(key) = archived_local_ref(node, slug) {
-                        board_present.insert(key);
-                    }
-                    continue;
-                }
-                V::Bool(false) => {}
-                _ => {
-                    excluded_unknown += 1;
-                    record_reason(&mut board_reason, "partial_response");
-                    continue;
-                }
-            }
+            let &V::Bool(archived) = node.get("isArchived") else {
+                excluded_unknown += 1;
+                record_reason(&mut board_reason, "partial_response");
+                continue;
+            };
             let item = node.get("content");
             let kind = match (node.get("type").text(), item.get("__typename").text()) {
                 (Some("DRAFT_ISSUE"), _) => {
-                    excluded_draft += 1;
+                    if archived {
+                        excluded_archived += 1;
+                    } else {
+                        excluded_draft += 1;
+                    }
                     continue;
                 }
-                (Some("ISSUE"), Some("Issue")) => Kind::Issue,
-                (Some("PULL_REQUEST"), Some("PullRequest")) => Kind::Pull,
-                _ => {
+                (Some("ISSUE"), Some("Issue")) => Some(Kind::Issue),
+                (Some("PULL_REQUEST"), Some("PullRequest")) => Some(Kind::Pull),
+                _ => None,
+            };
+            let Some(kind) = kind else {
+                if archived {
+                    excluded_archived += 1;
+                } else {
                     excluded_unknown += 1;
                     record_reason(&mut board_reason, "partial_response");
-                    continue;
                 }
+                continue;
             };
             let Some(repository) = item
                 .get("repository")
@@ -961,12 +985,24 @@ pub(super) fn drift(
                 .text()
                 .and_then(|s| Slug::parse(s).ok())
             else {
-                excluded_unknown += 1;
-                record_reason(&mut board_reason, "partial_response");
+                if archived {
+                    excluded_archived += 1;
+                } else {
+                    excluded_unknown += 1;
+                    record_reason(&mut board_reason, "partial_response");
+                }
                 continue;
             };
             if !repository.matches(slug) {
                 excluded_foreign += 1;
+                continue;
+            }
+            if archived {
+                excluded_archived += 1;
+                if let Some(number) = digits(item.get("number")).and_then(|n| Number::parse(n).ok())
+                {
+                    board_present.insert((kind, number));
+                }
                 continue;
             }
             let Some(mut row) = work_item(item, slug, kind, false) else {
@@ -1057,29 +1093,54 @@ pub(super) fn drift(
             (issues_walk, pulls_walk)
         };
 
-    let mut missing_rows: Vec<(Reverse<Number>, Kind, V)> = Vec::new();
-    let mut missing_issues_total = 0usize;
-    let mut missing_pulls_total = 0usize;
+    let mut unseen_rows: Vec<(Reverse<Number>, Kind, V)> = Vec::new();
+    let mut unseen_issues_total = 0usize;
+    let mut unseen_pulls_total = 0usize;
     for (number, row) in &issues_walk.items {
         if !board_present.contains(&(Kind::Issue, *number)) {
-            missing_issues_total += 1;
-            missing_rows.push((Reverse(*number), Kind::Issue, row.clone()));
+            unseen_issues_total += 1;
+            unseen_rows.push((Reverse(*number), Kind::Issue, row.clone()));
         }
     }
     for (number, row) in &pulls_walk.items {
         if !board_present.contains(&(Kind::Pull, *number)) {
-            missing_pulls_total += 1;
-            missing_rows.push((Reverse(*number), Kind::Pull, row.clone()));
+            unseen_pulls_total += 1;
+            unseen_rows.push((Reverse(*number), Kind::Pull, row.clone()));
         }
     }
-    missing_rows.sort_by_key(|(rev, kind, _)| (*rev, *kind));
-    let missing_total = missing_rows.len();
-    let missing_displayed: Vec<V> = missing_rows
+    unseen_rows.sort_by_key(|(rev, kind, _)| (*rev, *kind));
+    let unseen_total = unseen_rows.len();
+    let unseen_displayed: Vec<V> = unseen_rows
         .into_iter()
         .take(MISSING_LIMIT)
         .map(|(_, _, row)| row)
         .collect();
-    let missing_omitted = missing_total.saturating_sub(missing_displayed.len());
+    let unseen_omitted = unseen_total.saturating_sub(unseen_displayed.len());
+    let (missing_from_board, unverified_missing) = if board_complete {
+        (
+            missing_bucket(
+                unseen_total,
+                unseen_issues_total,
+                unseen_pulls_total,
+                unseen_displayed,
+                unseen_omitted,
+                Some(false),
+            ),
+            missing_bucket(0, 0, 0, vec![], 0, None),
+        )
+    } else {
+        (
+            missing_bucket(0, 0, 0, vec![], 0, Some(true)),
+            missing_bucket(
+                unseen_total,
+                unseen_issues_total,
+                unseen_pulls_total,
+                unseen_displayed,
+                unseen_omitted,
+                None,
+            ),
+        )
+    };
 
     status_drift_rows.sort_by_key(|(rev, kind, _)| (*rev, *kind));
     let status_drift_total = status_drift_rows.len();
@@ -1146,17 +1207,8 @@ pub(super) fn drift(
                 ("limit", STATUS_DRIFT_LIMIT.into()),
             ]),
         ),
-        (
-            "missingFromBoard",
-            obj([
-                ("total", missing_total.into()),
-                ("issuesTotal", missing_issues_total.into()),
-                ("pullRequestsTotal", missing_pulls_total.into()),
-                ("items", V::Arr(missing_displayed)),
-                ("omitted", missing_omitted.into()),
-                ("limit", MISSING_LIMIT.into()),
-            ]),
-        ),
+        ("missingFromBoard", missing_from_board),
+        ("unverifiedMissing", unverified_missing),
         (
             "excluded",
             obj([
@@ -1213,6 +1265,49 @@ fn num(v: &V) -> usize {
     digits(v).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
+fn write_source_completeness(out: &mut String, label: &str, src: &V) {
+    let state = if src.get("complete") == &V::Bool(true) {
+        "complete"
+    } else {
+        "partial"
+    };
+    let items = num(src.get("itemsRead"));
+    let pages = num(src.get("pages"));
+    if let Some(reason) = src.get("reason").text() {
+        let _ = writeln!(
+            out,
+            "  {label}: {state} ({reason}; {items} items / {pages} pages)"
+        );
+    } else {
+        let _ = writeln!(out, "  {label}: {state} ({items} items / {pages} pages)");
+    }
+}
+
+fn write_missing_bucket(out: &mut String, heading: &str, bucket: &V) {
+    let total = num(bucket.get("total"));
+    let issues = num(bucket.get("issuesTotal"));
+    let pulls = num(bucket.get("pullRequestsTotal"));
+    let omitted = num(bucket.get("omitted"));
+    let shown = bucket.get("items").array().len();
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "{heading}: {total} ({issues} issues, {pulls} PRs; showing {shown}, {omitted} more omitted)"
+        );
+    } else {
+        let _ = writeln!(out, "{heading}: {total} ({issues} issues, {pulls} PRs)");
+    }
+    for item in bucket.get("items").array() {
+        let kind = item.get("kind").text().unwrap_or("item");
+        let number = digits(item.get("number")).unwrap_or("?");
+        let title = item.get("title").text().unwrap_or("");
+        let _ = writeln!(out, "  - {kind} #{number} [OPEN] - {title}");
+    }
+    if omitted > 0 {
+        let _ = writeln!(out, "  ... and {omitted} more not shown");
+    }
+}
+
 pub(super) fn render_drift(report: &V, slug: Option<&Slug>, project_id: &str) -> String {
     let mut out = String::new();
     let status = report.get("status").text().unwrap_or("unavailable");
@@ -1248,47 +1343,15 @@ pub(super) fn render_drift(report: &V, slug: Option<&Slug>, project_id: &str) ->
     let c_issues = completeness.get("openIssues");
     let c_pulls = completeness.get("openPullRequests");
     if !partial {
-        let _ = writeln!(
-            out,
-            "Completeness: complete (board: {} items / {} pages; open issues: {} / {} pages; open PRs: {} / {} pages)",
-            num(c_board.get("itemsRead")),
-            num(c_board.get("pages")),
-            num(c_issues.get("itemsRead")),
-            num(c_issues.get("pages")),
-            num(c_pulls.get("itemsRead")),
-            num(c_pulls.get("pages")),
-        );
+        let _ = writeln!(out, "Completeness: complete");
     } else {
         let why = reason.map(reason_label).unwrap_or("incomplete read");
-        if status == "available" {
-            let _ = writeln!(
-                out,
-                "Completeness: partial - {why} (board: {}, {} items / {} pages; open issues: {}, {} / {} pages; open PRs: {}, {} / {} pages)",
-                if c_board.get("complete") == &V::Bool(true) {
-                    "complete"
-                } else {
-                    "partial"
-                },
-                num(c_board.get("itemsRead")),
-                num(c_board.get("pages")),
-                if c_issues.get("complete") == &V::Bool(true) {
-                    "complete"
-                } else {
-                    "partial"
-                },
-                num(c_issues.get("itemsRead")),
-                num(c_issues.get("pages")),
-                if c_pulls.get("complete") == &V::Bool(true) {
-                    "complete"
-                } else {
-                    "partial"
-                },
-                num(c_pulls.get("itemsRead")),
-                num(c_pulls.get("pages")),
-            );
-        } else {
-            let _ = writeln!(out, "Completeness: partial - {why}");
-        }
+        let _ = writeln!(out, "Completeness: partial - {why}");
+    }
+    if status == "available" {
+        write_source_completeness(&mut out, "board", c_board);
+        write_source_completeness(&mut out, "open issues", c_issues);
+        write_source_completeness(&mut out, "open PRs", c_pulls);
     }
 
     if status != "available" {
@@ -1320,25 +1383,24 @@ pub(super) fn render_drift(report: &V, slug: Option<&Slug>, project_id: &str) ->
             .filter_map(|v| v.text())
             .collect();
         if matched.is_empty() {
-            let _ = writeln!(
-                out,
-                "Done-like options: none on board (matched only by exact configured names: {configured}; no fuzzy guess)"
-            );
+            let _ = writeln!(out, "Done-like options: none on board");
         } else {
-            let _ = writeln!(
-                out,
-                "Done-like options: {} (matched only by exact configured names: {configured}; no fuzzy guess)",
-                matched.join(", ")
-            );
+            let _ = writeln!(out, "Done-like options: {}", matched.join(", "));
         }
-    } else {
         let _ = writeln!(
             out,
-            "Status options: unavailable (Status single-select field missing, duplicated, or truncated)"
+            "  rule: exact configured names only ({configured}; no fuzzy guess)"
         );
+    } else {
+        let _ = writeln!(out, "Status options: unavailable");
         let _ = writeln!(
             out,
-            "Done-like options: none verified (matched only by exact configured names: {configured}; no fuzzy guess)"
+            "  reason: Status single-select field missing, duplicated, or truncated"
+        );
+        let _ = writeln!(out, "Done-like options: none verified");
+        let _ = writeln!(
+            out,
+            "  rule: exact configured names only ({configured}; no fuzzy guess)"
         );
     }
 
@@ -1380,30 +1442,26 @@ pub(super) fn render_drift(report: &V, slug: Option<&Slug>, project_id: &str) ->
     }
 
     let missing = report.get("missingFromBoard");
-    let m_total = num(missing.get("total"));
-    let m_issues = num(missing.get("issuesTotal"));
-    let m_pulls = num(missing.get("pullRequestsTotal"));
-    let m_omitted = num(missing.get("omitted"));
-    let m_shown = missing.get("items").array().len();
-    if m_omitted > 0 {
-        let _ = writeln!(
-            out,
-            "Missing from board (open in repo): {m_total} ({m_issues} issues, {m_pulls} PRs; showing {m_shown}, {m_omitted} more omitted)"
-        );
+    let board_complete =
+        c_board.get("complete") == &V::Bool(true) && missing.get("unverified") != &V::Bool(true);
+    if board_complete {
+        write_missing_bucket(&mut out, "Missing from board (open in repo)", missing);
     } else {
         let _ = writeln!(
             out,
-            "Missing from board (open in repo): {m_total} ({m_issues} issues, {m_pulls} PRs)"
+            "Missing from board (open in repo): unverified (board read partial)"
         );
-    }
-    for item in missing.get("items").array() {
-        let kind = item.get("kind").text().unwrap_or("item");
-        let number = digits(item.get("number")).unwrap_or("?");
-        let title = item.get("title").text().unwrap_or("");
-        let _ = writeln!(out, "  - {kind} #{number} [OPEN] - {title}");
-    }
-    if m_omitted > 0 {
-        let _ = writeln!(out, "  ... and {m_omitted} more not shown");
+        let unverified_missing = report.get("unverifiedMissing");
+        let open_work_read = num(unverified_missing.get("total")) > 0
+            || num(c_issues.get("pages")) > 0
+            || num(c_pulls.get("pages")) > 0;
+        if open_work_read {
+            write_missing_bucket(
+                &mut out,
+                "Not seen on read pages (board read partial)",
+                unverified_missing,
+            );
+        }
     }
 
     let ex = report.get("excluded");

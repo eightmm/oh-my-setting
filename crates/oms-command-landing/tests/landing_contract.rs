@@ -4466,7 +4466,8 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         V::Null
     ));
     assert!(r.calls().contains("-f after=cGFnZTE="));
-    // Missing scope reports the reason; nothing was mutated.
+    // Missing scope reports the reason only for read:project; other scopes and FORBIDDEN
+    // never leak drift-only or misleading panel reasons to the shared board panel.
     fs::write(r.dir.join("panel-board"), r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#).unwrap();
     fs::write(r.dir.join("panel-board-failed"), "").unwrap();
     let (_, out, _) = run(&["--project-id", "PVT_abc"]);
@@ -4474,6 +4475,26 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     assert_eq!(
         denied.get("github").get("board").get("reason").text(),
         Some("insufficient_scope")
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires repo"}]}"#,
+    )
+    .unwrap();
+    let (_, out, _) = run(&["--project-id", "PVT_abc"]);
+    assert_eq!(
+        out.unwrap().get("github").get("board").get("reason"),
+        &V::Null
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"forbidden"}]}"#,
+    )
+    .unwrap();
+    let (_, out, _) = run(&["--project-id", "PVT_abc"]);
+    assert_eq!(
+        out.unwrap().get("github").get("board").get("reason"),
+        &V::Null
     );
     assert_eq!(r.posts(), 0);
 }
@@ -4864,7 +4885,9 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
         issue_card(299, "CLOSED", mine, false, &value("o_done", "Done")),
         // Foreign repository item -> excluded (not drift, no details leaked)
         issue_card(900, "CLOSED", "other-org/secret-repo", false, &value("o_back", "Backlog")),
-        // Archived item -> excluded (not drift, even though open)
+        // Archived foreign repository item -> excluded as foreignRepository, not archived
+        issue_card(901, "OPEN", "other-org/secret-repo", true, &value("o_back", "Backlog")),
+        // Archived local item -> excluded (not drift, even though open)
         issue_card(350, "OPEN", mine, true, &value("o_back", "Backlog")),
         // Draft item -> excluded
         r#"{"type":"DRAFT_ISSUE","isArchived":false,"content":null,"fieldValues":{"pageInfo":{"hasNextPage":false},"nodes":[]}}"#.to_string(),
@@ -4926,7 +4949,9 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
     );
     assert_eq!(code, 0, "{err}");
     assert!(
-        !out.contains("other-org/secret-repo") && !out.contains("Issue 900"),
+        !out.contains("other-org/secret-repo")
+            && !out.contains("Issue 900")
+            && !out.contains("Issue 901"),
         "foreign repo details must not leak: {out}"
     );
     let doc = V::parse(out.as_bytes()).expect("drift json");
@@ -5011,6 +5036,7 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
 
     // Missing from board: 21 open issues + 1 open PR = 22 total, bounded to 20 shown + 2 omitted.
     let missing = d.get("missingFromBoard");
+    assert_eq!(missing.get("unverified"), &V::Bool(false));
     assert_eq!(missing.get("total"), &V::Num("22".into()));
     assert_eq!(missing.get("issuesTotal"), &V::Num("21".into()));
     assert_eq!(missing.get("pullRequestsTotal"), &V::Num("1".into()));
@@ -5024,13 +5050,16 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
             .any(|i| i.get("number").py() == "350"),
         "archived item is excluded, not missing-from-board drift"
     );
+    let unverified_missing = d.get("unverifiedMissing");
+    assert_eq!(unverified_missing.get("total"), &V::Num("0".into()));
+    assert!(unverified_missing.get("items").array().is_empty());
 
-    // Excluded (not drift): 1 foreign, 1 archived, 1 draft.
+    // Excluded (not drift): 2 foreign (including 1 archived foreign), 1 archived local, 1 draft.
     let ex = d.get("excluded");
-    assert_eq!(ex.get("foreignRepository"), &V::Num("1".into()));
+    assert_eq!(ex.get("foreignRepository"), &V::Num("2".into()));
     assert_eq!(ex.get("archived"), &V::Num("1".into()));
     assert_eq!(ex.get("draft"), &V::Num("1".into()));
-    assert_eq!(ex.get("total"), &V::Num("3".into()));
+    assert_eq!(ex.get("total"), &V::Num("4".into()));
 
     // 2. Short human text readout.
     let (code, text, err) = r.run(
@@ -5043,13 +5072,18 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
         "{text}"
     );
     assert!(text.contains("Observed at: "), "{text}");
-    assert!(text.contains("Completeness: complete"), "{text}");
+    assert!(
+        text.contains(
+            "Completeness: complete\n  board: complete (11 items / 2 pages)\n  open issues: complete (24 items / 1 pages)\n  open PRs: complete (2 items / 1 pages)\n"
+        ),
+        "{text}"
+    );
     assert!(
         text.contains("Status options: Backlog, In Progress, Done"),
         "{text}"
     );
     assert!(
-        text.contains("Done-like options: Done (matched only by exact configured names:"),
+        text.contains("Done-like options: Done\n  rule: exact configured names only ("),
         "{text}"
     );
     assert!(
@@ -5064,11 +5098,24 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
         text.contains("issue #401 [OPEN] status=\"Done\" (open_in_done)"),
         "{text}"
     );
-    assert!(text.contains("2 more not shown"), "{text}");
     assert!(
-        text.contains("Excluded (not drift): 3 (foreign repository: 1, archived: 1, draft: 1)"),
+        text.contains(
+            "Missing from board (open in repo): 22 (21 issues, 1 PRs; showing 20, 2 more omitted)"
+        ),
         "{text}"
     );
+    assert!(text.contains("2 more not shown"), "{text}");
+    assert!(
+        text.contains("Excluded (not drift): 4 (foreign repository: 2, archived: 1, draft: 1)"),
+        "{text}"
+    );
+    for line in text.lines() {
+        assert!(
+            line.chars().count() <= 120,
+            "drift line exceeds 120 columns ({} chars): {line}",
+            line.chars().count()
+        );
+    }
 
     // 3. Board with NO configured done-like option (exact names only, no fuzzy guess for "Shipped" / "done").
     let no_done_fields = status_field(
@@ -5094,7 +5141,7 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
         "{text}"
     );
     assert!(
-        text.contains("Done-like options: none on board (matched only by exact configured names:"),
+        text.contains("Done-like options: none on board\n  rule: exact configured names only ("),
         "{text}"
     );
     assert!(
@@ -5131,6 +5178,13 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
         pd.get("completeness").get("board").get("complete"),
         &V::Bool(false)
     );
+    assert_eq!(pd.get("missingFromBoard").get("unverified"), &V::Bool(true));
+    assert_eq!(pd.get("missingFromBoard").get("total"), &V::Num("0".into()));
+    assert!(pd.get("missingFromBoard").get("items").array().is_empty());
+    assert_eq!(
+        pd.get("unverifiedMissing").get("total"),
+        &V::Num("23".into())
+    );
 
     // 5. Rate limit on page 2 -> reported as partial with rate_limited reason.
     fs::write(
@@ -5159,17 +5213,35 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
     let rld = rl_doc.get("github").get("drift");
     assert_eq!(rld.get("partial"), &V::Bool(true));
     assert_eq!(rld.get("reason").text(), Some("rate_limited"));
+    assert_eq!(
+        rld.get("missingFromBoard").get("unverified"),
+        &V::Bool(true)
+    );
     let (_, rl_text, _) = r.run(
         &iso,
         &["panel-status", "--project-id", "PVT_abc", "--drift"],
     );
     assert!(
-        rl_text.contains("Completeness: partial - rate limit (rate_limited)"),
+        rl_text.contains(
+            "Completeness: partial - rate limit (rate_limited)\n  board: partial (rate_limited;"
+        ),
         "{rl_text}"
     );
+    assert!(
+        rl_text.contains("Missing from board (open in repo): unverified (board read partial)"),
+        "{rl_text}"
+    );
+    for line in rl_text.lines() {
+        assert!(
+            line.chars().count() <= 120,
+            "partial drift line exceeds 120 columns ({} chars): {line}",
+            line.chars().count()
+        );
+    }
     fs::remove_file(r.dir.join("panel-board-after-page1cur-failed")).unwrap();
 
-    // 6. Timeout on page 2 -> reported as partial with timeout reason.
+    // 6. Timeout on page 2 -> reported as partial with timeout reason; PR #420 from page 2
+    // must NOT be reported missing, and unseen items go under unverifiedMissing.
     fs::write(r.dir.join("panel-board-after-page1cur-timeout"), "").unwrap();
     let (code, out, err) = r.run(
         &iso,
@@ -5183,17 +5255,53 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
     );
     assert_eq!(code, 0, "{err}");
     let to_doc = V::parse(out.as_bytes()).unwrap();
-    assert_eq!(
-        to_doc.get("github").get("drift").get("partial"),
-        &V::Bool(true)
+    let tod = to_doc.get("github").get("drift");
+    assert_eq!(tod.get("partial"), &V::Bool(true));
+    assert_eq!(tod.get("reason").text(), Some("timeout"));
+    let to_missing = tod.get("missingFromBoard");
+    assert_eq!(to_missing.get("unverified"), &V::Bool(true));
+    assert_eq!(to_missing.get("total"), &V::Num("0".into()));
+    assert_eq!(to_missing.get("issuesTotal"), &V::Num("0".into()));
+    assert_eq!(to_missing.get("pullRequestsTotal"), &V::Num("0".into()));
+    assert!(
+        to_missing.get("items").array().is_empty(),
+        "PR #420 must not be reported missing when board walk timed out: {out}"
     );
-    assert_eq!(
-        to_doc.get("github").get("drift").get("reason").text(),
-        Some("timeout")
+    let to_unverified = tod.get("unverifiedMissing");
+    assert_eq!(to_unverified.get("total"), &V::Num("23".into()));
+    assert_eq!(to_unverified.get("issuesTotal"), &V::Num("21".into()));
+    assert_eq!(to_unverified.get("pullRequestsTotal"), &V::Num("2".into()));
+    assert_eq!(to_unverified.get("items").array().len(), 20);
+    assert_eq!(to_unverified.get("omitted"), &V::Num("3".into()));
+    let (code, to_text, err) = r.run(
+        &iso,
+        &["panel-status", "--project-id", "PVT_abc", "--drift"],
     );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        to_text.contains("Missing from board (open in repo): unverified (board read partial)"),
+        "{to_text}"
+    );
+    assert!(
+        to_text.contains(
+            "Not seen on read pages (board read partial): 23 (21 issues, 2 PRs; showing 20, 3 more omitted)"
+        ),
+        "{to_text}"
+    );
+    assert!(
+        !to_text.contains("Missing from board (open in repo): 23"),
+        "{to_text}"
+    );
+    for line in to_text.lines() {
+        assert!(
+            line.chars().count() <= 120,
+            "timeout drift line exceeds 120 columns ({} chars): {line}",
+            line.chars().count()
+        );
+    }
     fs::remove_file(r.dir.join("panel-board-after-page1cur-timeout")).unwrap();
 
-    // 7. Missing permission (INSUFFICIENT_SCOPES) reported with reason in JSON and text.
+    // 7. Missing permission (INSUFFICIENT_SCOPES and drift-only FORBIDDEN) reported with reason in JSON and text.
     fs::write(
         r.dir.join("panel-board"),
         r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#,
@@ -5216,6 +5324,7 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
     assert_eq!(dd.get("status").text(), Some("unavailable"));
     assert_eq!(dd.get("partial"), &V::Bool(true));
     assert_eq!(dd.get("reason").text(), Some("insufficient_scope"));
+    assert_eq!(dd.get("missingFromBoard").get("unverified"), &V::Bool(true));
     let (_, denied_text, _) = r.run(
         &iso,
         &["panel-status", "--project-id", "PVT_abc", "--drift"],
@@ -5223,6 +5332,27 @@ fn github_board_drift_reports_status_mismatches_missing_exclusions_and_completen
     assert!(
         denied_text.contains("Completeness: partial - permission missing (insufficient_scope)"),
         "{denied_text}"
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"FORBIDDEN","message":"resource forbidden"}]}"#,
+    )
+    .unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &[
+            "panel-status",
+            "--project-id",
+            "PVT_abc",
+            "--drift",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let forbidden = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(
+        forbidden.get("github").get("drift").get("reason").text(),
+        Some("forbidden")
     );
     fs::remove_file(r.dir.join("panel-board-failed")).unwrap();
 
