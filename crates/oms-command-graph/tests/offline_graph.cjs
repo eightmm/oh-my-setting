@@ -391,7 +391,7 @@ assert.notEqual(execGlyphs[6], execGlyphs[2], 'ready must have a distinct glyph 
 }
 assert.notEqual(execPatterns[6], execPatterns[2], 'ready must have a distinct pattern from pending');
 { // Finished nodes show their outcome, never a blanket Exited.
-  const outcomes = {completed: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown', surprise: 'unknown'};
+  const outcomes = {completed: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown', changes_requested: 'review', partial: 'stale', approved: 'exited', skipped: 'exited', surprise: 'unknown'};
   const view = render({kind: 'execution', title: 'x', counts: {}, nodes: Object.keys(outcomes).map((o, i) => ({id: `o${i}`, label: o, kind: 'node', degree: 0, status: 'finished', outcome: o})), edges: []}, {width: 768});
   assert.deepEqual(view.nodes.map(n => n.attributes['data-state']), Object.values(outcomes));
   assert.equal(view.nodes[1].querySelector('.oms-graph-glyph').textContent, '×');
@@ -921,6 +921,13 @@ const labelOf = el => el.querySelector('.oms-graph-label');
   // Large children (degree 60 -> 16 px radius) must also clear each other at every width.
   const heavy = {...two, nodes: [...files, ...leaves.map(l => ({...l, degree: 60}))]};
   for (const w of [320, 640, 960]) clean(render(heavy, {width: w}), heavy.nodes, `heavy fans at ${w}`);
+  { // Nested fans: file -> 30 classes, one class -> 30 methods; no body pair overlaps at any width.
+    const cls = Array.from({length: 30}, (_, i) => ({id: `c${i}`, label: `c${i}`, kind: 'file', degree: i ? 1 : 31, show_label: false, assurance: 'supported'}));
+    const meth = Array.from({length: 30}, (_, i) => ({id: `m${i}`, label: `m${i}`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}));
+    const nested = {kind: 'project', title: 'Nest', counts: {}, nodes: [{id: 'f', label: 'f.rs', kind: 'file', degree: 30, show_label: true, assurance: 'supported'}, ...cls, ...meth],
+      edges: [...cls.map(c => ({source: 'f', target: c.id, relation: 'contains', confidence: 'EXTRACTED'})), ...meth.map(m => ({source: 'c0', target: m.id, relation: 'contains', confidence: 'EXTRACTED'}))]};
+    for (const w of [320, 640, 960]) clean(render(nested, {width: w}), nested.nodes, `nested fans at ${w}`);
+  }
   const big = {kind: 'project', title: 'Fan', counts: {}, nodes: [{id: 'hub', label: 'hub.rs', kind: 'file', degree: 90, show_label: true, assurance: 'supported'},
     ...Array.from({length: 90}, (_, i) => ({id: `leaf${i}`, label: `leaf${i}.rs`, kind: 'file', degree: 1, show_label: false, assurance: 'supported'}))],
     edges: Array.from({length: 90}, (_, i) => ({source: 'hub', target: `leaf${i}`, relation: 'contains', confidence: 'EXTRACTED'}))};

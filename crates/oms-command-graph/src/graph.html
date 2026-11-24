@@ -540,7 +540,7 @@
     finished: 'exited', done: 'exited', passed: 'accepted', completed: 'accepted',
     error: 'failed', guard_stop: 'failed', orphaned: 'failed', partial: 'stale', degraded: 'stale', unclassified: 'unknown'
   };
-  const OUTCOME_STATE = {completed: 'exited', approved: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown'};
+  const OUTCOME_STATE = {completed: 'exited', approved: 'exited', failed: 'failed', blocked: 'blocked', unverified: 'unknown', changes_requested: 'review', partial: 'stale', skipped: 'exited'};
   function statusMeta(row) {
     if (data.kind === 'project') {
       const key = Object.prototype.hasOwnProperty.call(ASSURANCE_META, row.assurance) ? row.assurance : 'unclassified';
@@ -678,8 +678,8 @@
   const viewport = svg.append('g');
   const markerId = '@@ROOT@@-arrow';
   const nodes = data.nodes.map((node, index) => ({...node, index,
-    _search: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.language} ${node.assurance_label || ''} ${node.status || ''}`.toLocaleLowerCase(),
-    _optionSearch: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.assurance_label || ''} ${node.status || ''}`.toLocaleLowerCase()}));
+    _search: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.language} ${node.assurance_label || ''} ${node.status || ''} ${statusMeta(node).label} ${node.outcome || ''}`.toLocaleLowerCase(),
+    _optionSearch: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.assurance_label || ''} ${node.status || ''} ${statusMeta(node).label} ${node.outcome || ''}`.toLocaleLowerCase()}));
   const byId = new Map(nodes.map(node => [node.id, node]));
   const links = data.edges.filter(edge => byId.has(edge.source) && byId.has(edge.target))
     .map(edge => ({...edge, source: byId.get(edge.source), target: byId.get(edge.target), _group: relationGroup(edge.relation)}));
@@ -944,13 +944,25 @@
       if (!kids.has(row.source.id)) kids.set(row.source.id, []);
       kids.get(row.source.id).push(row.target);
     });
-    [...kids.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1)).forEach(([id, list]) => {
+    // Bottom-up: a parent whose children fan themselves is built after them, so it reserves their whole rings.
+    const heights = new Map();
+    const heightOf = (id, seen = new Set()) => {
+      if (heights.has(id)) return heights.get(id);
+      if (seen.has(id)) return 0;
+      seen.add(id);
+      let h = 0;
+      (kids.get(id) || []).forEach(c => { if ((kids.get(c.id) || []).length > FAN_MIN) h = Math.max(h, heightOf(c.id, seen) + 1); });
+      heights.set(id, h);
+      return h;
+    };
+    [...kids.entries()].sort((a, b) => heightOf(a[0]) - heightOf(b[0]) || b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1)).forEach(([id, list]) => {
       const children = [...new Map(list.filter(c => !claimed.has(c.id) && c.id !== id).map(c => [c.id, c])).values()]
         .sort((a, b) => (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
       if (children.length <= FAN_MIN) return;
       const parent = byId.get(id);
       const slots = [];
-      const cr = children.reduce((acc, c) => Math.max(acc, collideRadius(c)), 0);
+      const footprint = c => c._fan || collideRadius(c);
+      const cr = children.reduce((acc, c) => Math.max(acc, footprint(c)), 0);
       const step = 2 * cr + 2;
       let placed = 0;
       for (let ring = 0; placed < children.length; ring += 1) {
@@ -968,7 +980,7 @@
     });
   })();
   function applyFans() {
-    fans.forEach(({parent, slots}) => slots.forEach(({child, dx, dy}) => {
+    fans.slice().reverse().forEach(({parent, slots}) => slots.forEach(({child, dx, dy}) => {
       if (child.fx !== null && child.fx !== undefined) return;
       child.x = parent.x + dx; child.y = parent.y + dy; child.vx = 0; child.vy = 0;
     }));
