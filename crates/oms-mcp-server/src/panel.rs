@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v13.html";
+const URI: &str = "ui://oms/conversation-panel/v14.html";
+const V13: &str = "ui://oms/conversation-panel/v13.html";
 const V12: &str = "ui://oms/conversation-panel/v12.html";
 const V11: &str = "ui://oms/conversation-panel/v11.html";
 const V10: &str = "ui://oms/conversation-panel/v10.html";
@@ -606,7 +607,7 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12)
+                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12 | V13)
                 ) =>
             {
                 json!({"contents":[{
@@ -847,6 +848,10 @@ impl Server<'_> {
                 (
                     "stale or mismatched",
                     "The approval question changed. Refresh the approval list.",
+                ),
+                (
+                    "room_inventory_incomplete",
+                    "room_inventory_incomplete: OMS could not verify unique assignment ownership within the Room inventory limits.",
                 ),
                 (
                     "conversation is not the owner",
