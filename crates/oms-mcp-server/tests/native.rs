@@ -343,6 +343,119 @@ fn cross_host_project_reads() {
     );
     assert!(!record(&source)["argv"].to_string().contains("00000000-"));
 }
+fn mcp_app_binding_boundaries() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let other = source.join("other-checkout");
+    std::fs::create_dir_all(other.join(".oms")).unwrap();
+    let dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let map = dir.join("desktop-projects.json");
+    let bind = |value: Value| {
+        std::fs::write(&map, value.to_string()).unwrap();
+        std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture"}});
+    fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
+    let ask = |c: &mut Client, args: Value, meta: Value| {
+        c.call(
+            "tools/call",
+            json!({"name":"oms_panel_snapshot","arguments":args,"_meta":meta}),
+        )
+    };
+    let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bind(json!({"fixture":repo}));
+    let foreign =
+        json!({"threadId":"00000000-0000-4000-8000-000000000001","room":"r","participant":"p"});
+    good(&ask(&mut c, json!({"project":"fixture"}), foreign.clone()));
+    let argv = record(&source)["argv"].to_string();
+    assert!(argv.contains(repo.to_str().unwrap()) && !argv.contains("00000000-"));
+    // Client-supplied paths, Room and participant names are never authority.
+    for args in [
+        json!({"project":"fixture","repo":other}),
+        json!({"project":"fixture","participant":"p"}),
+        json!({"project":"fixture","room":"r"}),
+    ] {
+        assert_eq!(ask(&mut c, args, json!({}))["error"]["code"], -32602);
+    }
+    // An alias absent from the catalog (and a raw path) is refused.
+    bad(
+        &ask(&mut c, json!({"project":other}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(&ask(&mut c, json!({}), json!({})), "OMS_PANEL_REPO");
+    // Mutating or Room tools are refused by name and leave no new command record.
+    let before = std::fs::read(source.join("last-call.json")).unwrap();
+    for name in [
+        "oms_start_main",
+        "oms_decide_approval",
+        "oms_panel_chat",
+        "oms_peer_start",
+        "oms_list_approvals",
+    ] {
+        let r = c.call(
+            "tools/call",
+            json!({"name":name,"arguments":{"project":"fixture"},"_meta":foreign}),
+        );
+        assert_eq!(r["error"]["code"], -32602, "{name}");
+    }
+    assert_eq!(
+        std::fs::read(source.join("last-call.json")).unwrap(),
+        before
+    );
+    // Replacing the alias target with a symlink is refused on the next call.
+    let link = source.join("link-checkout");
+    std::os::unix::fs::symlink(&repo, &link).unwrap();
+    bind(json!({"fixture":link}));
+    bad(
+        &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    // Repointing the alias grants exactly the newly bound checkout.
+    bind(json!({"fixture":other}));
+    good(&ask(&mut c, json!({"project":"fixture"}), json!({})));
+    assert!(
+        record(&source)["argv"]
+            .to_string()
+            .contains(other.to_str().unwrap())
+    );
+    // Group/world-writable, empty or sparse catalogs fail closed.
+    bind(json!({"fixture":repo}));
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o666)).unwrap();
+    bad(
+        &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "Invalid OMS project map",
+    );
+    for value in [
+        json!({}),
+        json!({"fixture":"relative/path"}),
+        json!({"bad alias":repo}),
+    ] {
+        bind(value);
+        bad(
+            &ask(&mut c, json!({"project":"fixture"}), json!({})),
+            "Invalid OMS project map",
+        );
+    }
+    // Revocation between calls, then reopening, does not restore access.
+    bind(json!({"fixture":repo}));
+    good(&ask(&mut c, json!({"project":"fixture"}), json!({})));
+    bind(json!({"other":other}));
+    bad(
+        &ask(&mut c, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    std::fs::remove_file(&map).unwrap();
+    let mut reopened = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bad(
+        &ask(&mut reopened, json!({"project":"fixture"}), json!({})),
+        "OMS_PANEL_REPO",
+    );
+    bad(&ask(&mut reopened, json!({}), json!({})), "OMS_PANEL_REPO");
+}
 fn conversation_panel() {
     let t = Temp::new();
     let source = t.source();
@@ -3670,13 +3783,14 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 32] = [
+    let cases: [(&str, fn()); 33] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
         ("owner_validation", owner_validation),
         ("environment_profile", environment_profile),
         ("cross_host_project_reads", cross_host_project_reads),
+        ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
         ("environment_authority", environment_authority),
         ("boundary_limits", boundary_limits),

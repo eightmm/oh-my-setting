@@ -243,6 +243,15 @@ already runs OMS, the local stdio entry can instead run the absolute installed
 `oms` executable with `args: ["mcp-server"]` and
 `env: {"OMS_MCP_TOOL_PROFILE":"mcp-app"}`. The generic profile reads the
 configured alias catalog or an operator-pinned `OMS_PANEL_REPO`.
+The SSH principal that starts the stdio process and its project catalog define
+the scope. Each call re-reads the catalog and verifies the canonical checkout.
+When a trusted operator maps an alias to a different valid canonical checkout,
+the next call uses that checkout. Removing the alias, substituting a symlink,
+or loosening the catalog permissions causes the next call to fail, including
+after the client reconnects.
+Client `_meta`, Room and participant names, and raw paths are ignored or
+rejected; mutating tools are refused by name. This does not add public-transport
+authentication, and `mcp-app` exposes no Room view.
 
 In **Git → GitHub Projects**, open a repository-linked board and select
 **보드 상세 보기**. Each request rechecks the board node against the repository's
