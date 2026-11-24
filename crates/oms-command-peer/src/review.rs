@@ -269,19 +269,25 @@ fn verdict_lines(answer: &str) -> (Option<&'static str>, Option<f64>) {
     (gate, confidence)
 }
 /// Redaction drops everything after a key marker with no END line, which can swallow a review's
-/// verdict. Verdict lines carry no free text, so a verdict lost that way is restored canonically.
+/// final verdict or leave an earlier quoted one in charge. Verdict lines carry no free text, so the
+/// raw answer's final verdict is appended canonically whenever the redacted text would read another.
 pub(crate) fn restore_verdict(raw: &str, mut redacted: String) -> String {
     let (gate, confidence) = verdict_lines(raw);
-    if let (Some(gate), None) = (gate, verdict_lines(&redacted).0) {
-        if !redacted.is_empty() && !redacted.ends_with('\n') {
-            redacted.push('\n');
-        }
-        if let Some(confidence) = confidence {
-            redacted.push_str(&format!("CONFIDENCE: {confidence}\n"));
-        }
-        redacted.push_str("GATE: ");
-        redacted.push_str(gate);
+    let Some(gate) = gate else {
+        return redacted;
+    };
+    if verdict_lines(&redacted) == (Some(gate), confidence) {
+        return redacted;
     }
+    if !redacted.is_empty() && !redacted.ends_with('\n') {
+        redacted.push('\n');
+    }
+    match confidence {
+        Some(confidence) => redacted.push_str(&format!("CONFIDENCE: {confidence}\n")),
+        None => redacted.push_str("CONFIDENCE: unknown\n"),
+    }
+    redacted.push_str("GATE: ");
+    redacted.push_str(gate);
     redacted
 }
 fn overall(states: &[&str]) -> i32 {

@@ -1052,15 +1052,17 @@ fn call_routed(
             );
         }
     }
-    let answer = crate::review::restore_verdict(
-        &String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned(),
-    );
+    let raw = String::from_utf8_lossy(&result.stdout);
+    let mut answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
+    // Classify the raw answer: redaction can erase a trailing stop-reason or timeout line.
     let quality = if result.complete {
-        providers::answer_quality(&answer).to_owned()
+        providers::answer_quality(&raw).to_owned()
     } else {
         "truncated".into()
     };
+    if tool == "peer-review" && args.has("gate") && quality == "ok" {
+        answer = crate::review::restore_verdict(&raw, answer);
+    }
     let timed_out = !result.complete && result.code == 124;
     let interrupted_seat = !result.complete && result.code == 130;
     let mut diagnostics = Vec::new();

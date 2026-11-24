@@ -3420,6 +3420,31 @@ fn review_classification_and_validation() {
         assert!(saved.contains("[oms-redacted:private-key]"), "{saved}");
         assert!(!saved.contains("from a fixture"), "{saved}");
         assert!(saved.contains("CONFIDENCE: 0.7\nGATE: pass"), "{saved}");
+
+        // A quoted earlier pass must not outrank the redacted final fail, and a refusal line hidden
+        // behind the marker must not turn into a pass.
+        let marker = format!("{}{} PRIVATE KEY{}", "-----", "BEGIN", "-----");
+        for (answer, directory, expected) in [
+            (
+                format!(
+                    "Quoted: GATE: pass\nGATE: pass\nSee {marker} here.\nCONFIDENCE: 0.6\nGATE: fail\n"
+                ),
+                ".oms/review-gate-redacted-fail",
+                1,
+            ),
+            (
+                format!(
+                    "See {marker} here.\nCONFIDENCE: 0.9\nGATE: pass\nstop-reason: provider=codex reason=refusal subtype=none is_error=0\n"
+                ),
+                ".oms/review-gate-redacted-refusal",
+                2,
+            ),
+        ] {
+            *provider_answer.borrow_mut() = answer.into_bytes();
+            let (output, calls, _) = run_gate(&["--no-verify"], directory, false);
+            assert_eq!(output.0, expected, "{directory}: {output:?}");
+            assert_eq!(calls, 1);
+        }
     });
 }
 #[test]
