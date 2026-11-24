@@ -1300,7 +1300,7 @@ fn conversation_panel() {
         &c.tool("oms_panel_project_graph", json!({})),
         "not a valid OMS or Git repository",
     );
-    let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
+    let expected_main = json!({"source":"room-session","provider":"codex","harness":"pi","participant":"owner","room":"r","state":"joined","incomplete":false});
     fixture_settings(
         &source,
         json!({"stdout":snapshot.to_string(),"binding":{"conversationBinding":"matched","conversationMain":expected_main}}),
@@ -1347,6 +1347,28 @@ fn conversation_panel() {
                 json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
             );
         }
+    }
+    for (field, value) in [
+        ("harness", "foreign"),
+        ("provider", "claude"),
+        ("source", "other"),
+        ("state", "left"),
+        ("participant", ""),
+        ("room", "../other"),
+    ] {
+        let mut forged = expected_main.clone();
+        forged[field] = json!(value);
+        fixture_settings(
+            &source,
+            json!({"stdout":snapshot.to_string(),"binding":{"conversationBinding":"matched","conversationMain":forged}}),
+        );
+        let result = c.call(
+            "tools/call",
+            json!({"name":"oms_panel_snapshot","arguments":{},"_meta":{"threadId":thread}}),
+        );
+        let report = payload(&result);
+        assert!(report["dashboard"]["conversationMain"]["harness"].is_null());
+        assert_eq!(report["dashboard"]["degraded"], true);
     }
     fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     let partial = c.call(

@@ -123,6 +123,9 @@ impl Room<'_> {
             "conversationMain",
             obj([
                 ("provider", "codex".into()),
+                // Room membership identifies the owner. Only the lifecycle
+                // collector can supply the independently recorded harness.
+                ("harness", Value::Null),
                 ("room", room["id"].clone()),
                 ("participant", room["owner"].clone()),
                 ("source", "room-session".into()),
