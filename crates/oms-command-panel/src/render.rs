@@ -839,7 +839,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
                 if let Some(fields) = child.as_object_mut() {
                     fields.remove("event_tokens");
                     fields.remove("receipt_tokens");
-                    fields.remove("board_seen");
+                    fields.remove("board_recent");
                 }
                 child
             }),
@@ -885,16 +885,19 @@ pub fn calls(report: &Value) -> Vec<Value> {
             call["lifecycle_stale"] = true.into();
         }
     }
-    // At most three recently seen Codex children, newest first, stay unfolded.
-    if let Some(observed) = oms_panel_core::metrics::stamp(&report["generated_at"]) {
-        let mut seen: Vec<_> = output
+    // A current interaction outranks a verified rollout creation. Keep the
+    // same three-row cap and newest-first ordering as native discovery.
+    let observed = oms_panel_core::metrics::stamp(&report["generated_at"]);
+    let recency = |call: &Value| codex_board_recency(report, call, observed?);
+    {
+        let mut recent: Vec<_> = output
             .iter_mut()
-            .filter(|call| call["provider"] == "codex" && call["native_child"] == true)
-            .filter(|call| native_seen_label(report, call, observed).is_some())
+            .filter_map(|call| Some((recency(call)?, call)))
             .collect();
-        seen.sort_by_key(|call| std::cmp::Reverse(call["seen_at"].as_u64()));
-        for call in seen.into_iter().take(3) {
-            call["board_seen"] = true.into();
+        recent.sort_by_key(|(recency, _)| std::cmp::Reverse(*recency));
+        for (rank, (_, call)) in recent.into_iter().take(3).enumerate() {
+            // Carry the stable discovery tie-break through the global sort.
+            call["board_recent"] = json!(rank);
         }
     }
     output.sort_by_cached_key(|v| {
@@ -909,14 +912,15 @@ pub fn calls(report: &Value) -> Vec<Value> {
     let recent_slots: Vec<_> = output
         .iter()
         .enumerate()
-        .filter_map(|(index, call)| (call["board_seen"] == true).then_some(index))
+        .filter_map(|(index, call)| call["board_recent"].is_u64().then_some(index))
         .collect();
     let mut recent: Vec<_> = recent_slots
         .iter()
         .map(|&index| std::mem::take(&mut output[index]))
         .collect();
-    recent.sort_by_key(|call| std::cmp::Reverse(call["seen_at"].as_u64()));
-    for (index, call) in recent_slots.into_iter().zip(recent) {
+    recent.sort_by_key(|call| call["board_recent"].as_u64());
+    for (index, mut call) in recent_slots.into_iter().zip(recent) {
+        call["board_recent"] = true.into();
         output[index] = call;
     }
     output
@@ -1873,7 +1877,7 @@ fn fold_inactive(nav: &navigation::Navigation, call: &Value) -> bool {
     let stub = call["native_child"] == true
         && call["provider"] == "codex"
         && call["state"] == "unknown"
-        && call["board_seen"] != true;
+        && call["board_recent"] != true;
     stub || call["room_only_stale"] == true
         || (awaiting_review(call)
             && oms_panel_core::metrics::stamp(&call["updated_at"])
@@ -4080,24 +4084,50 @@ fn elapsed_label(elapsed: f64) -> Option<String> {
     })
 }
 
-/// A Codex child whose parent recently recorded an interaction with it. Its
-/// `state` stays "unknown"; only the elapsed cell says "seen".
-fn native_seen_label(report: &Value, call: &Value, observed: f64) -> Option<String> {
-    if report["collection"]["ok"] != true
-        || report["collection"]["pending"] == true
-        || report["capacity_stale"] == true
-        || text(call, "state") != "unknown"
-    {
-        return None;
-    }
+fn native_recency_current(report: &Value, call: &Value) -> bool {
+    report["collection"]["ok"] == true
+        && report["collection"]["pending"] != true
+        && report["capacity_stale"] != true
+        && call["state"] == "unknown"
+}
+
+fn native_seen_age(call: &Value, observed: f64) -> Option<u64> {
     let observed_ms = call["seen_observed_ms"]
         .as_u64()?
         .max((observed * 1000.0).round() as u64);
-    let seen = call["seen_at"].as_u64()?;
-    let age = observed_ms.saturating_sub(seen);
-    if seen > observed_ms.saturating_add(5000) || age > 120_000 {
+    crate::native_children::codex_recent_age(call["seen_at"].as_u64()?, observed_ms)
+}
+
+fn codex_board_recency(
+    report: &Value,
+    call: &Value,
+    observed: f64,
+) -> Option<crate::native_children::CodexChildRecency> {
+    use crate::native_children::{CodexChildRecency, codex_recent_age};
+
+    if call["provider"] != "codex"
+        || call["native_child"] != true
+        || !native_recency_current(report, call)
+    {
         return None;
     }
+    if native_seen_age(call, observed).is_some() {
+        return call["seen_at"].as_u64().map(CodexChildRecency::Interacted);
+    }
+    let proof = &call["codex_recent_creation"];
+    let at = proof["at_ms"].as_u64()?;
+    let sampled = proof["observed_ms"].as_u64()?;
+    codex_recent_age(at, sampled)?;
+    codex_recent_age(at, sampled.max((observed * 1000.0).round() as u64))?;
+    Some(CodexChildRecency::Created(at))
+}
+
+/// A Codex child whose parent recently recorded an interaction with it. Its
+/// `state` stays "unknown"; only the elapsed cell says "seen".
+fn native_seen_label(report: &Value, call: &Value, observed: f64) -> Option<String> {
+    let age = native_recency_current(report, call)
+        .then(|| native_seen_age(call, observed))
+        .flatten()?;
     Some(format!("seen {}s", age / 1000))
 }
 
@@ -6943,7 +6973,7 @@ mod tests {
                 "seen_at":seen.as_u64().map(|seconds| seconds * 1000),"seen_observed_ms":10_000_000})
         };
         let mut forged = child("h", json!(9_000));
-        forged["board_seen"] = json!(true);
+        forged["board_recent"] = json!(true);
         let report = json!({"generated_at": 10_000, "collection":{"ok":true}, "native_children":[
             child("a", json!(9_990)), child("b", json!(9_980)), child("c", json!(9_970)),
             child("d", json!(9_960)), child("e", json!(9_879)), child("f", json!(10_006)),
@@ -7041,6 +7071,125 @@ mod tests {
         let mut undated = report.clone();
         undated.as_object_mut().unwrap().remove("generated_at");
         assert!(visible(&undated, &overview_nav).is_empty());
+    }
+
+    #[test]
+    fn default_overview_preserves_codex_discovery_order_at_equal_recency() {
+        const NOW: u64 = 1_800_000_000;
+        let child = |name: &str, envelope: &str| {
+            json!({"participant":format!("native-codex-{name}"), "title":format!("Child {name}"),
+                "native_child":true, "provider":"codex", "state":"unknown", "created_at":envelope})
+        };
+        for interacted in [true, false] {
+            let recent = |name, envelope| {
+                let mut row = child(name, envelope);
+                let at = (NOW - 1) * 1000;
+                if interacted {
+                    row["seen_at"] = json!(at);
+                    row["seen_observed_ms"] = json!(NOW * 1000);
+                } else {
+                    row["codex_recent_creation"] = json!({"at_ms":at,"observed_ms":NOW * 1000});
+                }
+                row
+            };
+            // Both the global envelope and participant sort prefer Alpha.
+            let report = json!({"generated_at":NOW,"collection":{"ok":true},"native_children":[
+                recent("Zulu", "2027-01-15T08:00:02Z"),
+                child("History", "2027-01-15T08:00:01Z"),
+                recent("Alpha", "2027-01-15T08:00:00Z"),
+            ]});
+            let ids = |rows: Vec<Value>| {
+                rows.into_iter()
+                    .map(|row| text(&row, "participant").to_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                ids(visible(&report, &navigation::Navigation::default())),
+                ["native-codex-Zulu", "native-codex-Alpha"],
+            );
+            assert_eq!(
+                ids(calls(&report)),
+                [
+                    "native-codex-Zulu",
+                    "native-codex-History",
+                    "native-codex-Alpha"
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn default_overview_unfolds_verified_recent_creations_without_claiming_activity() {
+        const NOW: u64 = 1_800_000_000;
+        let child = |name: &str| {
+            json!({"participant":format!("native-codex-{name}"), "title":format!("Child {name}"),
+                "native_child":true, "provider":"codex", "state":"unknown"})
+        };
+        let created = |name, at: u64| {
+            let mut row = child(name);
+            row["codex_recent_creation"] = json!({"at_ms":at,"observed_ms":NOW * 1000});
+            row
+        };
+        let mut interacted = child("Seen");
+        interacted["seen_at"] = json!((NOW - 30) * 1000);
+        interacted["seen_observed_ms"] = json!(NOW * 1000);
+        let mut historical = child("Historical");
+        historical["started_at"] = json!(NOW - 2);
+        historical["updated_at"] = json!(NOW - 1);
+        historical["board_recent"] = json!(true);
+        let newest = created("Newest", (NOW - 2) * 1000);
+        let report = json!({"generated_at":NOW,"collection":{"ok":true},"native_children":[
+            historical, created("Other", (NOW - 8) * 1000), interacted, newest,
+            created("Older", (NOW - 10) * 1000), created("Future", NOW * 1000 + 5_001),
+        ]});
+        let overview = navigation::Navigation::default();
+        let tab = navigation::Navigation {
+            view: overview.view.next(),
+            ..Default::default()
+        };
+        let names = |report: &Value, nav: &navigation::Navigation| {
+            visible(report, nav)
+                .iter()
+                .map(|row| {
+                    assert_eq!(row["state"], "unknown");
+                    text(row, "participant").to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = [
+            "native-codex-Seen",
+            "native-codex-Newest",
+            "native-codex-Other",
+        ];
+        assert_eq!(names(&report, &overview), expected);
+        assert_eq!(names(&report, &tab).len(), 6);
+        let read = BTreeMap::new();
+        let board = frame(&report, &overview, 120, 30, &read);
+        let new_line = board
+            .iter()
+            .find(|line| line.contains("Child Newest"))
+            .unwrap();
+        assert!(
+            new_line.contains("unknown") && !new_line.contains("seen "),
+            "{new_line}"
+        );
+        assert!(board.iter().all(|line| !line.contains("1 running")));
+        for columns in [40, 120] {
+            let rendered = board_frame(&report, &overview, columns, 35, &read, false, false);
+            let hits: BTreeSet<_> = rendered
+                .worker_rows
+                .into_values()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(hits, expected.map(str::to_owned).into(), "{columns}");
+        }
+        let mut expired = report.clone();
+        expired["generated_at"] = json!(NOW + 121);
+        assert!(names(&expired, &overview).is_empty());
+        assert_eq!(names(&expired, &tab).len(), 6);
+        let mut pending = report;
+        pending["collection"]["pending"] = json!(true);
+        assert!(names(&pending, &overview).is_empty());
     }
 
     #[test]

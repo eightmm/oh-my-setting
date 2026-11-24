@@ -11,6 +11,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
+mod codex_wake;
+#[cfg(target_os = "linux")]
+pub(crate) use codex_wake::DayWatch as CodexDayWatch;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct CodexWake {
+    turn: String,
+    pub(crate) source: Arc<CodexDayWatch>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct CodexWakeRequest<'a> {
+    pub(crate) previous: Option<&'a CodexWake>,
+}
+
 const TRANSCRIPT: &str = ".system_generated/logs/transcript.jsonl";
 const MAX_TRANSCRIPT: usize = 4 * 1024 * 1024;
 const MAX_LINE: usize = 256 * 1024;
@@ -42,6 +59,8 @@ pub(crate) const TASK_PREFIX: &str =
 pub(crate) struct ObservedChildren {
     pub(crate) rows: Vec<Value>,
     pub(crate) codex: BTreeMap<String, CodexLocator>,
+    #[cfg(target_os = "linux")]
+    pub(crate) codex_wake: Option<CodexWake>,
 }
 
 #[derive(Clone)]
@@ -474,6 +493,7 @@ pub(crate) fn observe_codex(
     home: &Path,
     root: &OwnedFd,
     stop: &AtomicBool,
+    #[cfg(target_os = "linux")] wake: Option<CodexWakeRequest<'_>>,
 ) -> Option<ObservedChildren> {
     let turn = codex_current_turn(terminal)?;
     let mut remaining = CODEX_READ_BUDGET;
@@ -482,8 +502,15 @@ pub(crate) fn observe_codex(
         root.try_clone().ok()?,
         codex_today()?,
         stop,
+        #[cfg(target_os = "linux")]
+        wake.map(|request| codex_wake::Request {
+            previous: request
+                .previous
+                .filter(|before| before.turn == turn)
+                .map(|before| &before.source),
+        }),
     )?;
-    codex_rows_checked(
+    let (observed, _) = codex_rows_checked(
         &rollouts,
         repo,
         turn,
@@ -491,8 +518,17 @@ pub(crate) fn observe_codex(
         stop,
         codex_now_ms(),
         true,
-    )
-    .map(|(observed, _)| observed)
+    )?;
+    #[cfg(target_os = "linux")]
+    let observed = {
+        let mut observed = observed;
+        observed.codex_wake = rollouts.day_watch.map(|source| CodexWake {
+            turn: turn.to_owned(),
+            source,
+        });
+        observed
+    };
+    Some(observed)
 }
 
 pub(crate) fn same_codex_turn(before: &str, after: &str) -> bool {
@@ -533,6 +569,8 @@ struct CodexRollouts {
     root: OwnedFd,
     today: chrono::NaiveDate,
     candidates: Vec<CodexRollout>,
+    #[cfg(target_os = "linux")]
+    day_watch: Option<Arc<CodexDayWatch>>,
 }
 
 fn codex_directory(root: &OwnedFd, path: &Path) -> Option<OwnedFd> {
@@ -558,7 +596,14 @@ pub(crate) fn open_ambient_codex_root(home: &Path) -> Option<(PathBuf, OwnedFd)>
 #[cfg(test)]
 fn codex_candidates(home: &Path, today: chrono::NaiveDate) -> Option<CodexRollouts> {
     let (home, root) = open_ambient_codex_root(home)?;
-    codex_candidates_at(home, root, today, &AtomicBool::new(false))
+    codex_candidates_at(
+        home,
+        root,
+        today,
+        &AtomicBool::new(false),
+        #[cfg(target_os = "linux")]
+        None,
+    )
 }
 
 pub(crate) fn codex_root_identity(home: &Path, root: &OwnedFd) -> Option<(fs::Dev, u64)> {
@@ -573,13 +618,14 @@ fn codex_candidates_at(
     root: OwnedFd,
     today: chrono::NaiveDate,
     stop: &AtomicBool,
+    #[cfg(target_os = "linux")] wake: Option<codex_wake::Request<'_>>,
 ) -> Option<CodexRollouts> {
     let owner = rustix::process::geteuid().as_raw();
     if stop.load(Ordering::Acquire) || fs::fstat(&root).ok()?.st_uid != owner {
         return None;
     }
     codex_root_identity(&home, &root)?;
-    let mut candidates = Vec::new();
+    let mut days = Vec::new();
     // These directories use local dates. The adjacent UTC dates cover timezone offsets.
     for date in [today.pred_opt(), Some(today), today.succ_opt()]
         .into_iter()
@@ -589,9 +635,19 @@ fn codex_candidates_at(
             return None;
         }
         let path = Path::new("sessions").join(date.format("%Y/%m/%d").to_string());
-        let Some(dir) = codex_directory(&root, &path) else {
-            continue;
-        };
+        if let Some(dir) = codex_directory(&root, &path) {
+            days.push((path, dir));
+        }
+    }
+    // Arm on the same directory descriptors before enumeration. A later creation
+    // can be missed by the scan only if its events are already eligible to wake.
+    #[cfg(target_os = "linux")]
+    let day_watch = wake.and_then(|request| CodexDayWatch::prepare(&home, &root, &days, request));
+    let mut candidates = Vec::new();
+    for (path, dir) in days {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
         let Ok(entries) = Dir::read_from(&dir) else {
             continue;
         };
@@ -632,6 +688,8 @@ fn codex_candidates_at(
         root,
         today,
         candidates,
+        #[cfg(target_os = "linux")]
+        day_watch,
     })
 }
 
@@ -778,14 +836,17 @@ fn codex_child_title(spawn: &Value) -> &str {
     }
 }
 
-fn codex_assignment(event: &Value, session: &str, turn: &str) -> bool {
+fn codex_user_message(event: &Value, session: &str) -> bool {
     let payload = &event["payload"];
-    let item = &payload["item"];
     event["type"] == "event_msg"
         && payload["type"] == "item_completed"
         && payload["thread_id"] == session
-        && item["type"] == "UserMessage"
-        && crate::rows(&item["content"])
+        && payload["item"]["type"] == "UserMessage"
+}
+
+fn codex_assignment(event: &Value, session: &str, turn: &str) -> bool {
+    codex_user_message(event, session)
+        && crate::rows(&event["payload"]["item"]["content"])
             .iter()
             .any(|block| block["type"] == "text" && codex_turn(text(block, "text")) == Some(turn))
 }
@@ -818,34 +879,75 @@ const CODEX_SEEN_SKEW_MS: u64 = 5_000;
 /// 2020-01-01T00:00:00Z: older stamps are not a Codex clock.
 const CODEX_SEEN_FLOOR_MS: u64 = 1_577_836_800_000;
 
+pub(crate) fn codex_recent_age(at: u64, observed: u64) -> Option<u64> {
+    let age = observed.saturating_sub(at);
+    (at <= observed.saturating_add(CODEX_SEEN_SKEW_MS) && age <= CODEX_SEEN_WINDOW_MS)
+        .then_some(age)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CodexChildRecency {
+    Created(u64),
+    Interacted(u64),
+}
+
+#[derive(Default)]
+struct CodexTurnActivity {
+    completed_at: Option<u64>,
+    interactions: BTreeMap<String, u64>,
+}
+
 /// Latest valid `interacted` completion (epoch ms) per child thread, from the
 /// already sampled parent bytes: only records after the current-turn
 /// UserMessage that share its parent `thread_id` and `turn_id` count. That
 /// UserMessage must occur exactly once with a usable id; a repeat (even with
-/// the same id) leaves no signal at all.
-fn codex_interactions(
+/// the same id) leaves no signal at all. Its typed completion clock, when
+/// present, is the lower bound for showing newly created children until a
+/// later typed user message from this parent supersedes it.
+fn codex_turn_activity(
     body: &[u8],
     recent_only: bool,
     parent: &str,
     turn: &str,
     now_ms: u64,
-) -> BTreeMap<String, u64> {
+) -> CodexTurnActivity {
     let mut turn_id: Option<String> = None;
-    let mut seen = BTreeMap::new();
+    let mut activity = CodexTurnActivity::default();
     let records = codex_complete_records(body, recent_only)
         .filter(|line| line.len() <= MAX_LINE)
-        .filter_map(|line| std::str::from_utf8(line).ok())
-        .filter(|line| line.contains(turn) || line.contains("SubAgentActivity"))
-        .filter_map(|line| oms_panel_core::decode(line.as_bytes(), MAX_LINE).ok());
-    for event in records {
+        .filter_map(|line| std::str::from_utf8(line).ok());
+    for line in records {
+        let activity_record = line.contains(turn) || line.contains("SubAgentActivity");
+        let maybe_later_input = activity.completed_at.is_some()
+            && (line.contains("UserMessage") || line.contains(r"\u"));
+        if !activity_record && !maybe_later_input {
+            continue;
+        }
+        let Ok(event) = oms_panel_core::decode(line.as_bytes(), MAX_LINE) else {
+            continue;
+        };
         let payload = &event["payload"];
-        if codex_assignment(&event, parent, turn) {
+        if activity_record && codex_assignment(&event, parent, turn) {
             match payload["turn_id"].as_str() {
                 Some(id) if turn_id.is_none() && codex_rollout_identifier(id) => {
                     turn_id = Some(id.to_owned());
+                    activity.completed_at = payload["completed_at_ms"].as_u64().filter(|&at| {
+                        at >= CODEX_SEEN_FLOOR_MS && at <= now_ms.saturating_add(CODEX_SEEN_SKEW_MS)
+                    });
                 }
-                _ => return BTreeMap::new(),
+                _ => return CodexTurnActivity::default(),
             }
+            continue;
+        }
+        if activity.completed_at.is_some()
+            && codex_user_message(&event, parent)
+            && payload["turn_id"]
+                .as_str()
+                .is_some_and(codex_rollout_identifier)
+        {
+            activity.completed_at = None;
+        }
+        if !activity_record {
             continue;
         }
         let item = &payload["item"];
@@ -873,11 +975,20 @@ fn codex_interactions(
             && started <= completed
             && completed <= now_ms.saturating_add(CODEX_SEEN_SKEW_MS)
         {
-            let latest = seen.entry(child.to_owned()).or_insert(0);
+            let latest = activity.interactions.entry(child.to_owned()).or_insert(0);
             *latest = (*latest).max(completed);
         }
     }
-    seen
+    activity
+}
+
+struct CodexChildHeader<'a> {
+    id: &'a str,
+    rollout: &'a CodexRollout,
+    parent: String,
+    started: String,
+    created_at: Option<u64>,
+    title: String,
 }
 
 struct CodexParentSample {
@@ -1136,6 +1247,13 @@ fn codex_rows_checked(
         let size = u64::try_from(sampled.st_size).ok()?;
         // A fork can repeat an inherited session header after its own first line.
         let header_bytes = codex_read_header(&mut file, size, remaining)?;
+        #[cfg(target_os = "linux")]
+        if let Some(source) = &rollouts.day_watch {
+            source.record_header(
+                &rollout.path,
+                !header_bytes.ends_with(b"\n") && size < MAX_LINE as u64,
+            );
+        }
         let Some(header) = codex_header(&header_bytes, id, repo) else {
             rollouts
                 .confirm_snapshot(
@@ -1164,13 +1282,19 @@ fn codex_rows_checked(
             let started = chrono::DateTime::parse_from_rfc3339(text(&header, "timestamp"))
                 .map(|stamp| stamp.to_rfc3339())
                 .unwrap_or_default();
-            children.push((
+            // The envelope clock records materialization. SessionMeta's own
+            // clock was captured when the provider created this rollout.
+            let created_at = chrono::DateTime::parse_from_rfc3339(text(meta, "timestamp"))
+                .ok()
+                .and_then(|stamp| u64::try_from(stamp.timestamp_millis()).ok());
+            children.push(CodexChildHeader {
                 id,
                 rollout,
-                spawned_by.to_owned(),
+                parent: spawned_by.to_owned(),
                 started,
-                codex_child_title(spawn).to_owned(),
-            ));
+                created_at,
+                title: codex_child_title(spawn).to_owned(),
+            });
         } else if codex_parent_source(meta) {
             if let Some(sample) = codex_verify_parent(
                 rollouts,
@@ -1201,7 +1325,7 @@ fn codex_rows_checked(
     }
     let missing_parents: BTreeSet<&str> = children
         .iter()
-        .map(|(_, _, by, _, _)| by.as_str())
+        .map(|child| child.parent.as_str())
         .filter(|&by| !recent_ids.contains(by))
         .collect();
     for rollout in codex_older_parent_candidates(rollouts, &missing_parents, stop)? {
@@ -1259,29 +1383,47 @@ fn codex_rows_checked(
     let parent_id = parent_id_owned.as_str();
     let parent = CodexAnchor::new(parent_id, &parent_sample.rollout);
     let mut counts = BTreeMap::new();
-    for (id, _, _, _, _) in &children {
-        *counts.entry(*id).or_insert(0) += 1;
+    for child in &children {
+        *counts.entry(child.id).or_insert(0) += 1;
     }
     let recent_only = u64::try_from(parent_sample.sampled.st_size).ok()? > MAX_TRANSCRIPT as u64;
-    let interactions =
-        codex_interactions(&parent_sample.body, recent_only, parent_id, turn, now_ms);
-    let recent = |id: &str| {
-        interactions.get(id).copied().filter(|&completed| {
-            counts[id] == 1 && now_ms.saturating_sub(completed) <= CODEX_SEEN_WINDOW_MS
-        })
+    let activity = codex_turn_activity(&parent_sample.body, recent_only, parent_id, turn, now_ms);
+    let recent_interaction = |child: &CodexChildHeader<'_>| {
+        activity
+            .interactions
+            .get(child.id)
+            .copied()
+            .filter(|&completed| {
+                counts[child.id] == 1 && codex_recent_age(completed, now_ms).is_some()
+            })
+    };
+    let recent_creation = |child: &CodexChildHeader<'_>| {
+        let created = child.created_at?;
+        let completed = activity.completed_at?;
+        (counts[child.id] == 1
+            && completed <= created
+            && codex_recent_age(created, now_ms).is_some())
+        .then_some(created)
     };
     let mut seen = BTreeSet::new();
     let children: Vec<_> = children
         .into_iter()
-        .filter(|(id, _, by, _, _)| by == parent_id && seen.insert(*id))
+        .filter(|child| child.parent == parent_id && seen.insert(child.id))
         .collect();
-    // Recently seen children (newest first, ties in header order) claim the
-    // three slots before header order fills the rest.
-    let mut picked: Vec<_> = (0..children.len())
-        .filter(|&index| recent(children[index].0).is_some())
+    // Interaction outranks creation. Both use newest first, then header order.
+    // Chat re-resolution uses this same selection at its saved observation clock.
+    let mut ranked: Vec<_> = children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| {
+            let recency = recent_interaction(child)
+                .map(CodexChildRecency::Interacted)
+                .or_else(|| recent_creation(child).map(CodexChildRecency::Created))?;
+            Some((index, recency))
+        })
         .collect();
-    picked.sort_by_key(|&index| std::cmp::Reverse(recent(children[index].0)));
-    picked.truncate(3);
+    ranked.sort_by_key(|&(_, recency)| std::cmp::Reverse(recency));
+    let mut picked: Vec<_> = ranked.into_iter().take(3).map(|(index, _)| index).collect();
     let history: Vec<_> = (0..children.len())
         .filter(|index| !picked.contains(index))
         .collect();
@@ -1298,17 +1440,17 @@ fn codex_rows_checked(
         .saturating_sub(proof_reserve)
         .min(CODEX_USAGE_BUDGET);
     let usage_initial = usage_budget;
-    for (id, rollout, _, started, title) in picked.into_iter().map(|index| &children[index]) {
-        let id = *id;
-        let mut child_row = row("codex", id, title, "", started, "", "unknown");
-        if !started.is_empty() {
-            child_row["started_at"] = json!(started);
+    for child in picked.into_iter().map(|index| &children[index]) {
+        let id = child.id;
+        let mut child_row = row("codex", id, &child.title, "", &child.started, "", "unknown");
+        if !child.started.is_empty() {
+            child_row["started_at"] = json!(child.started);
         }
         if project_usage
             && counts[id] == 1
             && let Some(usage) = codex_child_usage(
                 rollouts,
-                rollout,
+                child.rollout,
                 repo,
                 id,
                 parent_id,
@@ -1338,13 +1480,18 @@ fn codex_rows_checked(
                     fields.remove("observed_model");
                     fields.remove("seen_at");
                     fields.remove("seen_observed_ms");
+                    fields.remove("codex_recent_creation");
                 }
             }
         } else if counts[id] == 1 {
             // "Seen" is a recency signal only; `state` stays "unknown".
-            if let Some(completed) = recent(id) {
+            if let Some(completed) = recent_interaction(child) {
                 child_row["seen_at"] = json!(completed);
                 child_row["seen_observed_ms"] = json!(now_ms);
+            }
+            if let Some(created) = recent_creation(child) {
+                child_row["codex_recent_creation"] =
+                    json!({"at_ms": created, "observed_ms": now_ms});
             }
             observed.codex.insert(
                 participant.to_owned(),
@@ -1353,7 +1500,7 @@ fn codex_rows_checked(
                     root,
                     turn: turn.to_owned(),
                     parent: parent.clone(),
-                    child: CodexAnchor::new(id, rollout),
+                    child: CodexAnchor::new(id, child.rollout),
                     observed_ms: now_ms,
                 },
             );
@@ -1365,13 +1512,10 @@ fn codex_rows_checked(
         .rows
         .iter()
         .any(|row| row.get("native_response_usage").is_some());
-    if rollouts.root_unchanged()? != root
-        || rollouts
-            .status(&parent_sample.rollout, &parent_sample.file)
-            .is_none()
-    {
+    if rollouts.root_unchanged()? != root {
         return None;
     }
+    let mut parent_now = rollouts.status(&parent_sample.rollout, &parent_sample.file)?;
     if has_usage {
         let confirmed = rollouts
             .confirm_snapshot(
@@ -1385,19 +1529,23 @@ fn codex_rows_checked(
                 remaining,
             )
             .unwrap_or(false);
-        if rollouts.root_unchanged()? != root
-            || rollouts
-                .status(&parent_sample.rollout, &parent_sample.file)
-                .is_none()
-        {
+        if rollouts.root_unchanged()? != root {
             return None;
         }
+        parent_now = rollouts.status(&parent_sample.rollout, &parent_sample.file)?;
         if !confirmed {
             for row in &mut observed.rows {
                 let fields = row.as_object_mut().unwrap();
                 fields.remove("native_response_usage");
                 fields.remove("observed_model");
             }
+        }
+    }
+    // An append can add another matching Turn record outside the sampled range.
+    // Keep the ordinary row and renew creation evidence on the next observation.
+    if !codex_same_version(&parent_sample.sampled, &parent_now) {
+        for row in &mut observed.rows {
+            row.as_object_mut().unwrap().remove("codex_recent_creation");
         }
     }
     (!stop.load(Ordering::Acquire)).then_some((observed, parent_sample))
@@ -1500,6 +1648,8 @@ pub(crate) fn codex_chat(
         root.try_clone().ok()?,
         codex_today()?,
         stop,
+        #[cfg(target_os = "linux")]
+        None,
     )?;
     codex_chat_checked(&rollouts, repo, &expected.turn, expected, stop)
 }
@@ -3600,6 +3750,8 @@ fn agy_title(tool: &Value) -> String {
 
 #[cfg(test)]
 pub(crate) use tests::seed_codex_chat_rollouts;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use tests::{seed_codex_overview_rollouts, seed_codex_watch_rollouts};
 
 #[cfg(test)]
 mod tests {
@@ -3750,6 +3902,183 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "linux")]
+    fn private_codex_day_fixture(label: &str) -> RolloutFixture {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut fixture = RolloutFixture::new(label);
+        fixture.date = codex_today().unwrap();
+        let path = fixture.path(fixture.date, PARENT);
+        let day = path.parent().unwrap();
+        std::fs::create_dir_all(day.parent().unwrap()).unwrap();
+        std::fs::DirBuilder::new().mode(0o700).create(day).unwrap();
+        fixture
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sample_codex_day_wake(
+        fixture: &RolloutFixture,
+        prior: Option<&CodexWake>,
+        stop: &AtomicBool,
+    ) -> Option<(ObservedChildren, CodexWake)> {
+        let (home, root) = open_ambient_codex_root(fixture.store.repo())?;
+        let terminal = format!("› {}", codex_prompt(TURN));
+        let mut observed = observe_codex(
+            fixture.store.repo(),
+            &terminal,
+            &home,
+            &root,
+            stop,
+            Some(CodexWakeRequest { previous: prior }),
+        )?;
+        let wake = observed.codex_wake.take()?;
+        Some((observed, wake))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_day_wake_tracks_child_only_writes_across_partial_frames() {
+        use crate::wakeup::ChildWakeSource;
+        use std::io::Write;
+
+        let fixture = private_codex_day_fixture("day-child-only");
+        let repo = fixture.store.repo();
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[
+                codex_meta(PARENT, repo, json!("cli")),
+                codex_user_event(PARENT, STALE_TURN),
+                codex_user_event(PARENT, TURN),
+            ],
+        );
+        fixture.write(
+            fixture.date,
+            SECOND_CHILD,
+            &[codex_child_meta(SECOND_CHILD, repo)],
+        );
+        let parent = fixture.path(fixture.date, PARENT);
+        let parent_bytes = std::fs::read(&parent).unwrap();
+        let stop = AtomicBool::new(false);
+        let (history, wake) = sample_codex_day_wake(&fixture, None, &stop).unwrap();
+        assert_eq!(history.rows.len(), 1);
+        assert_eq!(
+            history.rows[0]["participant"],
+            participant_id("codex", SECOND_CHILD)
+        );
+
+        // The process creates the child after scanning, before the Board can
+        // accept the frame. The parent stays quiet through both child writes.
+        let mut child = File::create(fixture.path(fixture.date, CHILD)).unwrap();
+        let header = codex_child_meta(CHILD, repo).to_string();
+        let (partial, rest) = header.split_at(8);
+        child.write_all(partial.as_bytes()).unwrap();
+        assert_eq!(wake.source.changed(), Some(true));
+        let (still_history, same_wake) =
+            sample_codex_day_wake(&fixture, Some(&wake), &stop).unwrap();
+        assert_eq!(still_history.rows, history.rows);
+        assert!(Arc::ptr_eq(&wake.source, &same_wake.source));
+
+        writeln!(child, "{rest}").unwrap();
+        assert_eq!(same_wake.source.changed(), Some(true));
+        let (ready, retained) = sample_codex_day_wake(&fixture, Some(&same_wake), &stop).unwrap();
+        assert_eq!(ready.rows.len(), 2);
+        assert!(
+            ready
+                .rows
+                .iter()
+                .any(|row| row["participant"] == participant_id("codex", CHILD))
+        );
+        assert_eq!(std::fs::read(&parent).unwrap(), parent_bytes);
+
+        writeln!(child).unwrap();
+        drop(child);
+        assert_eq!(retained.source.changed(), Some(false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_day_wake_recovers_prearm_partial_and_coalesces_only_live_day() {
+        use crate::wakeup::{ChildWakeSource, FirstChildWake};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let fixture = private_codex_day_fixture("day-scope");
+        let foreign = RolloutFixture::new("day-foreign");
+        let repo = fixture.store.repo();
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[
+                codex_meta(PARENT, repo, json!("cli")),
+                codex_user_event(PARENT, TURN),
+            ],
+        );
+        let path = fixture.path(fixture.date, CHILD);
+        let day = path.parent().unwrap();
+        let mut child = File::create(&path).unwrap();
+        let header = codex_child_meta(CHILD, repo).to_string();
+        let (partial, rest) = header.split_at(8);
+        child.write_all(partial.as_bytes()).unwrap();
+
+        let stop = AtomicBool::new(false);
+        let (empty, observed) = sample_codex_day_wake(&fixture, None, &stop).unwrap();
+        let source = &observed.source;
+        assert!(empty.rows.is_empty());
+        foreign.write(foreign.date, CHILD, &[codex_child_meta(CHILD, repo)]);
+        assert_eq!(source.changed(), Some(false));
+        fixture.write(
+            fixture.date,
+            SECOND_CHILD,
+            &[codex_child_meta(SECOND_CHILD, foreign.store.repo())],
+        );
+        assert_eq!(source.changed(), Some(true));
+        let (foreign_frame, _) = sample_codex_day_wake(&fixture, Some(&observed), &stop).unwrap();
+        assert!(foreign_frame.rows.is_empty());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.path(fixture.date, PARENT))
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        assert_eq!(source.changed(), Some(false));
+
+        let now = Instant::now();
+        let mut wake = FirstChildWake::default();
+        wake.replace(Some(source.clone()));
+        for byte in rest.as_bytes().chunks(10) {
+            child.write_all(byte).unwrap();
+        }
+        writeln!(child).unwrap();
+        assert!(!wake.refresh(true, false, now));
+        assert!(wake.fd().is_none());
+        assert!(wake.refresh(false, true, now));
+        assert!(!wake.refresh(false, true, now + Duration::from_millis(100)));
+        let (ready, _) = sample_codex_day_wake(&fixture, Some(&observed), &stop).unwrap();
+        assert_eq!(ready.rows.len(), 1);
+
+        std::fs::set_permissions(day, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(!source.current());
+        assert_eq!(source.changed(), None);
+        assert!(sample_codex_day_wake(&fixture, None, &stop).is_none());
+        std::fs::set_permissions(day, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let (_, reopened) = sample_codex_day_wake(&fixture, None, &stop).unwrap();
+        let retired = day.with_extension("old");
+        std::fs::rename(day, &retired).unwrap();
+        std::fs::create_dir(day).unwrap();
+        assert!(!reopened.source.current());
+        assert_eq!(reopened.source.changed(), None);
+        assert!(sample_codex_day_wake(&fixture, Some(&reopened), &stop).is_none());
+
+        stop.store(true, Ordering::Release);
+        assert!(sample_codex_day_wake(&fixture, None, &stop).is_none());
+        wake.replace(None);
+        assert!(wake.fd().is_none());
+        assert!(!wake.refresh(true, true, now + Duration::from_secs(2)));
+    }
+
     pub(crate) fn seed_codex_chat_rollouts(
         home: &Path,
         repo: &Path,
@@ -3796,6 +4125,123 @@ mod tests {
             ],
         );
         participant_id("codex", CHILD)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn codex_watch_rollout_dir(home: &Path) -> (chrono::NaiveDate, PathBuf) {
+        let date = codex_today().unwrap();
+        let dir = home
+            .join("sessions")
+            .join(date.format("%Y/%m/%d").to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        (date, dir)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn codex_watch_rollout_path(date: chrono::NaiveDate, dir: &Path, id: &str) -> PathBuf {
+        dir.join(format!(
+            "rollout-{}T15-01-01-{id}.jsonl",
+            date.format("%Y-%m-%d")
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn codex_watch_child(repo: &Path, id: &str, title: &str) -> Value {
+        let mut child = codex_child_meta(id, repo);
+        child["payload"]["source"]["subagent"]["thread_spawn"]["agent_nickname"] = json!(title);
+        child
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn seed_codex_watch_rollouts(
+        home: &Path,
+        repo: &Path,
+        turn: &str,
+        history: &str,
+        next: &str,
+    ) -> (PathBuf, String) {
+        let (date, dir) = codex_watch_rollout_dir(home);
+        let path = |id| codex_watch_rollout_path(date, &dir, id);
+        let child = |id, title| format!("{}\n", codex_watch_child(repo, id, title));
+        std::fs::write(
+            path(PARENT),
+            format!(
+                "{}\n{}\n{}\n",
+                codex_meta(PARENT, repo, json!("cli")),
+                codex_user_event(PARENT, STALE_TURN),
+                codex_user_event(PARENT, turn),
+            ),
+        )
+        .unwrap();
+        std::fs::write(path(SECOND_CHILD), child(SECOND_CHILD, history)).unwrap();
+        (path(CHILD), child(CHILD, next))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn seed_codex_overview_rollouts(
+        home: &Path,
+        repo: &Path,
+        turn: &str,
+        history: [&str; 3],
+        next: &str,
+    ) -> (PathBuf, String) {
+        use std::io::Write as _;
+
+        let (date, dir) = codex_watch_rollout_dir(home);
+        let path = |id| codex_watch_rollout_path(date, &dir, id);
+        let now = codex_now_ms();
+        let typed = |turn, id, at| {
+            let mut row = codex_user_event(PARENT, turn);
+            row["payload"]["turn_id"] = json!(id);
+            row["payload"]["completed_at_ms"] = json!(at);
+            row
+        };
+        std::fs::write(
+            path(PARENT),
+            format!(
+                "{}\n{}\n{}\n",
+                codex_meta(PARENT, repo, json!("cli")),
+                typed(STALE_TURN, "fixture-old-turn", now - 300_000),
+                typed(turn, TURN_ID, now - 2_000),
+            ),
+        )
+        .unwrap();
+        let child = |id, title, at| {
+            let mut row = codex_watch_child(repo, id, title);
+            row["timestamp"] = json!(codex_fixture_time(now));
+            row["payload"]["timestamp"] = json!(codex_fixture_time(at));
+            format!("{row}\n")
+        };
+        // Put all three old children first by mtime. Their replayed envelope
+        // times also look fresh, while their creation clocks remain historical.
+        let historical = [SECOND_CHILD, SIBLINGS[0], SIBLINGS[1]];
+        let future_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        for (id, title) in historical.into_iter().zip(history) {
+            let mut file = File::create(path(id)).unwrap();
+            file.write_all(child(id, title, now - 240_000).as_bytes())
+                .unwrap();
+            file.set_modified(future_mtime).unwrap();
+        }
+        // Check all old headers with the real collector before the timed PTY.
+        let rollouts = codex_candidates(home, date).unwrap();
+        let mut remaining = CODEX_READ_BUDGET;
+        let (accepted, _) = codex_rows_at(&rollouts, repo, turn, &mut remaining, now).unwrap();
+        let expected: BTreeSet<_> = historical
+            .into_iter()
+            .map(|id| participant_id("codex", id))
+            .collect();
+        assert_eq!(
+            accepted.codex.keys().cloned().collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(accepted.rows.len(), history.len());
+        assert!(
+            accepted
+                .rows
+                .iter()
+                .all(|row| row.get("codex_recent_creation").is_none())
+        );
+        (path(CHILD), child(CHILD, next, now))
     }
 
     fn codex_context(turn: &str, cwd: &Path) -> Value {
@@ -4842,7 +5288,7 @@ mod tests {
     fn codex_seen_signal_uses_only_complete_sampled_records() {
         let line = |event: &Value| format!("{event}\n");
         let seen = |body: &str, recent_only| {
-            codex_interactions(body.as_bytes(), recent_only, PARENT, TURN, NOW_MS)
+            codex_turn_activity(body.as_bytes(), recent_only, PARENT, TURN, NOW_MS).interactions
         };
         let whole = [
             line(&codex_turn_event(TURN_ID)),
@@ -4861,14 +5307,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_seen_signal_adds_no_reads() {
+    fn codex_child_recency_adds_no_reads() {
         let measure = |label: &str, events: &[Value]| {
             let fixture = RolloutFixture::new(label);
             let repo = fixture.store.repo();
             let mut rows = vec![codex_meta(PARENT, repo, json!("vscode"))];
             rows.extend_from_slice(events);
             fixture.write(fixture.date, PARENT, &rows);
-            fixture.write(fixture.date, CHILD, &[codex_child_meta(CHILD, repo)]);
+            let mut child = codex_child_meta(CHILD, repo);
+            child["payload"]["timestamp"] = json!(codex_fixture_time(NOW_MS - 5_000));
+            fixture.write(fixture.date, CHILD, &[child]);
             let size = std::fs::metadata(fixture.path(fixture.date, PARENT))
                 .unwrap()
                 .len();
@@ -4895,6 +5343,26 @@ mod tests {
         assert_eq!(rows[0]["seen_at"], NOW_MS - 5000);
         assert_eq!((used, size), (base, base_size));
         assert_eq!((stale, stale_size), (base, base_size));
+
+        let old = codex_completed_turn(NOW_MS - 1_000);
+        let recent = codex_completed_turn(NOW_MS - 10_000);
+        let (hidden, hidden_size, rows) = measure("created-reads-a", &[old]);
+        assert!(rows[0].get("codex_recent_creation").is_none());
+        let (shown, shown_size, rows) = measure("created-reads-b", &[recent]);
+        assert!(rows[0]["codex_recent_creation"].is_object());
+        assert_eq!((hidden, hidden_size), (shown, shown_size));
+    }
+
+    fn codex_fixture_time(ms: u64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms.try_into().unwrap())
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn codex_completed_turn(at: u64) -> Value {
+        let mut turn = codex_turn_event(TURN_ID);
+        turn["payload"]["completed_at_ms"] = json!(at);
+        turn
     }
 
     const SIBLINGS: [&str; 5] = [
@@ -4968,6 +5436,117 @@ mod tests {
     fn sibling(index: usize, seen: Option<u64>) -> (String, Option<u64>) {
         let seen = seen.map(|seconds| NOW_MS - seconds * 1000);
         (participant_id("codex", SIBLINGS[index]), seen)
+    }
+
+    #[test]
+    fn codex_recent_creation_promotes_an_exact_child_without_an_interaction() {
+        let turn = codex_completed_turn(NOW_MS - 60_000);
+        let interaction = interacted_ago(SIBLINGS[2], 30);
+        let fixture = sibling_fixture(
+            "recent-creation",
+            &[turn.clone(), interaction.clone()],
+            &SIBLINGS[..4],
+        );
+        let repo = fixture.store.repo();
+        let new = SIBLINGS[3];
+        let participant = participant_id("codex", new);
+        let newest = NOW_MS - 5_000;
+        let path = fixture.path(fixture.date, new);
+        let prior_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let write_child = |date, created, parent| {
+            let mut header = codex_child_meta(new, repo);
+            // A fresh envelope is common when earlier metadata is replayed.
+            header["timestamp"] = json!(codex_fixture_time(newest));
+            header["payload"]["timestamp"] = created;
+            header["payload"]["source"]["subagent"]["thread_spawn"]["parent_thread_id"] =
+                json!(parent);
+            fixture.write(
+                date,
+                new,
+                &[
+                    header,
+                    codex_context("reply", repo),
+                    codex_agent_event(new, "reply", &format!("reply {new}")),
+                ],
+            );
+            File::options()
+                .write(true)
+                .open(fixture.path(date, new))
+                .unwrap()
+                .set_modified(prior_mtime)
+                .unwrap();
+        };
+        let observe = || fixture.projection_at(TURN, NOW_MS).unwrap();
+        let folded = [sibling(2, Some(30)), sibling(0, None), sibling(1, None)];
+        for created in [
+            json!(codex_fixture_time(NOW_MS - 80_000)),
+            json!(codex_fixture_time(NOW_MS + 5_001)),
+            json!("bad clock"),
+            Value::Null,
+        ] {
+            write_child(fixture.date, created, PARENT);
+            assert_eq!(selected(&observe()), folded);
+        }
+        let created = json!(codex_fixture_time(newest));
+        write_child(fixture.date, created.clone(), CHILD);
+        assert_eq!(selected(&observe()), folded);
+        write_child(fixture.date, created.clone(), PARENT);
+        let admitted = observe();
+        assert_eq!(
+            selected(&admitted),
+            [sibling(2, Some(30)), sibling(3, None), sibling(0, None)]
+        );
+        assert_eq!(
+            admitted.rows[1]["codex_recent_creation"],
+            json!({"at_ms": newest, "observed_ms": NOW_MS})
+        );
+        assert_eq!(
+            fixture.chat(
+                &format!("› {}", codex_prompt(TURN)),
+                &admitted.codex[&participant],
+            ),
+            Some(format!("reply {new}"))
+        );
+        let expired = fixture.projection_at(TURN, newest + 120_001).unwrap();
+        assert_eq!(
+            selected(&expired),
+            [sibling(0, None), sibling(1, None), sibling(2, None)]
+        );
+
+        let yesterday = fixture.date.pred_opt().unwrap();
+        write_child(yesterday, created, PARENT);
+        assert_eq!(selected(&observe()), folded);
+        std::fs::remove_file(fixture.path(yesterday, new)).unwrap();
+        let ordinary_text = "Please review the other module";
+        let mut ordinary = codex_user_event(PARENT, TURN);
+        ordinary["payload"]["turn_id"] = json!("next-turn");
+        ordinary["payload"]["completed_at_ms"] = json!(NOW_MS - 2_000);
+        ordinary["payload"]["item"]["content"][0]["text"] = json!(ordinary_text);
+        let mut foreign = ordinary.clone();
+        foreign["payload"]["thread_id"] = json!(CHILD);
+        let viewport = format!("› {}\n› {ordinary_text}", codex_prompt(TURN));
+        assert_eq!(codex_current_turn(&viewport), Some(TURN));
+        for (events, expected) in [
+            (
+                vec![ordinary.clone(), turn.clone(), interaction.clone(), foreign],
+                selected(&admitted),
+            ),
+            (vec![turn.clone(), ordinary, interaction], folded.to_vec()),
+        ] {
+            let mut parent = vec![codex_meta(PARENT, repo, json!("vscode"))];
+            parent.extend(events);
+            fixture.write(fixture.date, PARENT, &parent);
+            assert_eq!(selected(&observe()), expected);
+        }
+        for turns in [vec![codex_turn_event(TURN_ID)], vec![turn.clone(), turn]] {
+            let mut events = vec![codex_meta(PARENT, repo, json!("vscode"))];
+            events.extend(turns);
+            fixture.write(fixture.date, PARENT, &events);
+            assert_eq!(
+                selected(&observe()),
+                [sibling(0, None), sibling(1, None), sibling(2, None)]
+            );
+        }
     }
 
     #[test]
@@ -5212,8 +5791,9 @@ mod tests {
                 interacted_ago(child, 5)
             )
         };
-        let seen =
-            |child: &str| codex_interactions(body(child).as_bytes(), false, PARENT, TURN, NOW_MS);
+        let seen = |child: &str| {
+            codex_turn_activity(body(child).as_bytes(), false, PARENT, TURN, NOW_MS).interactions
+        };
         assert_eq!(seen(CHILD).len(), 1);
         for bad in [
             "not-a-thread-id",

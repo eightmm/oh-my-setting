@@ -382,6 +382,8 @@ pub struct Observations {
     panes: BTreeMap<String, Observation>,
     chats: BTreeMap<String, ChatBinding>,
     codex_bound_generation: Option<ChatPane>,
+    #[cfg(target_os = "linux")]
+    codex_child_watch: Option<(ChatPane, crate::native_children::CodexWake)>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -647,6 +649,15 @@ impl Observations {
             .flatten()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn codex_roster_watch(
+        &self,
+    ) -> Option<std::sync::Arc<crate::native_children::CodexDayWatch>> {
+        self.codex_child_watch
+            .as_ref()
+            .map(|(_, wake)| wake.source.clone())
+    }
+
     pub(crate) fn clear_chats(&mut self) {
         self.chats.clear();
     }
@@ -654,6 +665,10 @@ impl Observations {
     pub(crate) fn invalidate_readings(&mut self) {
         self.panes.clear();
         self.clear_chats();
+        #[cfg(target_os = "linux")]
+        {
+            self.codex_child_watch = None;
+        }
     }
 
     fn accept_codex_source(&mut self, pane: &ChatPane, mark: CodexChatMark) -> bool {
@@ -1176,6 +1191,8 @@ impl<'a> Panel<'a> {
         let mut selected_agy_usage_result = None;
         let census = std::cell::OnceCell::new();
         let mut bound_codex = None;
+        #[cfg(target_os = "linux")]
+        let previous_codex_watch = readings.codex_child_watch.take();
         readings.clear_chats();
         let mut codex_chat_pane = self
             .chat_pane_with_host("codex", host)
@@ -1300,10 +1317,31 @@ impl<'a> Panel<'a> {
                 }
                 sample.quota_visible = current.is_some();
                 if provider == "codex" {
-                    if let Some((chat_pane, observed)) = codex_chat_pane
-                        .take()
-                        .and_then(|pane| self.observe_codex_children(pane, report, host))
-                    {
+                    if let Some((chat_pane, observed)) = codex_chat_pane.take().and_then(|pane| {
+                        #[cfg(target_os = "linux")]
+                        let wake = expected
+                            .filter(|generation| {
+                                pane.codex_source == Some(CodexChatSource::Bound)
+                                    && generation.fences(&pane, "codex")
+                            })
+                            .map(|_| crate::native_children::CodexWakeRequest {
+                                previous: previous_codex_watch
+                                    .as_ref()
+                                    .filter(|(previous, _)| *previous == pane)
+                                    .map(|(_, wake)| wake),
+                            });
+                        self.observe_codex_children(
+                            pane,
+                            report,
+                            host,
+                            #[cfg(target_os = "linux")]
+                            wake,
+                        )
+                    }) {
+                        #[cfg(target_os = "linux")]
+                        if let Some(wake) = observed.codex_wake {
+                            readings.codex_child_watch = Some((chat_pane.clone(), wake));
+                        }
                         if chat_current {
                             readings.chats.extend(observed.codex.into_iter().map(
                                 |(participant, locator)| {
@@ -2106,6 +2144,7 @@ impl<'a> Panel<'a> {
         pane: ChatPane,
         report: &Value,
         host: &dyn AccountHost,
+        #[cfg(target_os = "linux")] wake: Option<crate::native_children::CodexWakeRequest<'_>>,
     ) -> Option<(ChatPane, crate::native_children::ObservedChildren)> {
         if pane.codex_source != Some(CodexChatSource::Ambient)
             && !self.has_live_report_scope(report)
@@ -2115,9 +2154,19 @@ impl<'a> Panel<'a> {
         let root = self.codex_root(&pane, host)?;
         let terminal = self.capture_recent(&pane.lead.id).ok()?;
         let (home, fd) = root.parts();
-        let mut observed =
-            crate::native_children::observe_codex(&pane.repo, &terminal, home, fd, self.stop)?;
-        if observed.rows.is_empty() || self.stop.load(Ordering::Acquire) {
+        let mut observed = crate::native_children::observe_codex(
+            &pane.repo,
+            &terminal,
+            home,
+            fd,
+            self.stop,
+            #[cfg(target_os = "linux")]
+            wake,
+        )?;
+        let empty = observed.rows.is_empty();
+        #[cfg(target_os = "linux")]
+        let empty = empty && observed.codex_wake.is_none();
+        if empty || self.stop.load(Ordering::Acquire) {
             return None;
         }
         let fresh = self.reload().ok()?;
@@ -2129,6 +2178,14 @@ impl<'a> Panel<'a> {
             || self.stop.load(Ordering::Acquire)
         {
             return None;
+        }
+        #[cfg(target_os = "linux")]
+        if observed
+            .codex_wake
+            .as_ref()
+            .is_some_and(|wake| !wake.source.current())
+        {
+            observed.codex_wake = None;
         }
         strip_native_answers(&mut observed.rows);
         Some((pane, observed))
@@ -6312,6 +6369,34 @@ pub(crate) mod codex_chat_fixture {
     const MAIN: &str = "att_11111111111111111111111111111111";
     pub(crate) const TURN: &str = "0123456789abcdef0123";
     pub(crate) const NEW_TURN: &str = "abcdef0123456789abcd";
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_codex_watch_lead(
+        repo: &Path,
+        room: &str,
+        services: &dyn Services,
+        stop: &AtomicBool,
+    ) {
+        let host = SystemAccountHost;
+        let panel = Panel::load(repo, room, services, stop).unwrap();
+        let lead = panel.leads.get("codex").expect("fixture Codex lead");
+        let owner = host.process_owner(lead.pid).unwrap();
+        let anchor = panel.binding_anchor("codex", lead, &owner.birth);
+        let receipt = account_binding::resolve_selection(
+            &host,
+            SelectionTarget {
+                role: "orchestrator",
+                provider: "codex",
+                model: "provider-default",
+            },
+            Some("fixture"),
+            &[],
+            oms_panel_core::timestamp(),
+        )
+        .unwrap();
+        account_binding::save_binding(&host, "orchestrator", &anchor, &receipt).unwrap();
+        assert!(account_binding::resolve_codex_chat_home(&host, &anchor).is_some());
+    }
 
     pub(crate) struct BoardSpy {
         repo: PathBuf,
