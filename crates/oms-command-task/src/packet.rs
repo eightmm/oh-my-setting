@@ -343,26 +343,117 @@ fn prune_current(raw: &[u8], cap: usize) -> Vec<u8> {
     }
     out
 }
+/// Default handoff packet mutation and stale TTL: 7 days (604800 seconds).
+pub const DEFAULT_TTL_SECONDS: u64 = 604800;
+
+/// Display-only dormancy threshold: 72 hours (in seconds).
+pub const DORMANT_THRESHOLD_SECONDS: u64 = 72 * 3600;
+
+/// Effective `OMS_AGENT_TASK_TTL` value from the environment (default 7 days).
+pub fn configured_ttl() -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    std::env::var_os("OMS_AGENT_TASK_TTL")
+        .filter(|v| !v.is_empty())
+        .map_or_else(
+            || DEFAULT_TTL_SECONDS.to_string().into_bytes(),
+            |v| v.as_bytes().to_vec(),
+        )
+}
+
+/// Non-negative idle age in seconds from `last_activity` (or `updated` fallback),
+/// or `None` when absent, unparseable, or in the future relative to `now`.
+pub fn idle_seconds(raw: &[u8], now: DateTime<Utc>) -> Option<u64> {
+    let value = metadata(raw, "last_activity")
+        .filter(|v| !v.is_empty())
+        .or_else(|| metadata(raw, "updated").filter(|v| !v.is_empty()))?;
+    let value = std::str::from_utf8(value).ok()?.trim();
+    let then = chrono::DateTime::parse_from_rfc3339(value)
+        .map(|t| t.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ")
+                .ok()
+                .map(|t| t.and_utc())
+        })?;
+    if now < then {
+        return None;
+    }
+    u64::try_from(now.signed_duration_since(then).num_seconds()).ok()
+}
+
+/// Display freshness of a handoff packet relative to `OMS_AGENT_TASK_TTL` (stale)
+/// and the 72-hour display-only dormancy threshold (dormant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketFreshness {
+    pub idle_seconds: Option<u64>,
+    pub stale: bool,
+    pub dormant: bool,
+}
+
+impl PacketFreshness {
+    pub fn idle_days(self) -> Option<u64> {
+        self.idle_seconds.map(|s| s / 86400)
+    }
+
+    /// Display status label: `stale` when TTL says stale, else `dormant` when idle >= 72h.
+    pub fn label(self) -> Option<String> {
+        let word = if self.stale {
+            "stale"
+        } else if self.dormant {
+            "dormant"
+        } else {
+            return None;
+        };
+        Some(match self.idle_days() {
+            Some(days) => format!("{word} (idle {days}d)"),
+            None => word.to_owned(),
+        })
+    }
+
+    /// Hint body for stale/dormant packets; with `"  hint: "` prefix fits 80 columns.
+    pub fn hint(self) -> Option<&'static str> {
+        if self.stale {
+            Some("stale handoff packet; run `oms agent-task close --reason '...'`")
+        } else if self.dormant {
+            Some("dormant handoff packet; run `oms agent-task close --reason '...'`")
+        } else {
+            None
+        }
+    }
+}
+
+/// Evaluate packet staleness (against `ttl`, defaulting to 7d) and display-only
+/// dormancy (idle >= 72h when not stale).
+pub fn freshness(raw: &[u8], ttl: &[u8], now: DateTime<Utc>) -> PacketFreshness {
+    let idle_seconds = idle_seconds(raw, now);
+    let closed = metadata(raw, "status") == Some(b"closed");
+    let is_stale = !closed && stale(raw, ttl, now);
+    let is_dormant =
+        !closed && !is_stale && idle_seconds.is_some_and(|age| age >= DORMANT_THRESHOLD_SECONDS);
+    PacketFreshness {
+        idle_seconds,
+        stale: is_stale,
+        dormant: is_dormant,
+    }
+}
+
+/// Evaluate packet freshness using `OMS_AGENT_TASK_TTL` from the environment.
+pub fn freshness_from_env(raw: &[u8], now: DateTime<Utc>) -> PacketFreshness {
+    freshness(raw, &configured_ttl(), now)
+}
+
 pub fn stale(raw: &[u8], ttl: &[u8], now: DateTime<Utc>) -> bool {
+    let default_ttl;
     let ttl = if !ttl.is_empty() && ttl.iter().all(u8::is_ascii_digit) {
         std::str::from_utf8(ttl).unwrap()
     } else {
-        "604800"
+        default_ttl = DEFAULT_TTL_SECONDS.to_string();
+        &default_ttl
     };
-    let Some(value) = metadata(raw, "last_activity").or_else(|| metadata(raw, "updated")) else {
+    let Some(age) = idle_seconds(raw, now) else {
         return false;
     };
-    let Ok(value) = std::str::from_utf8(value) else {
-        return false;
-    };
-    let Ok(then) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ") else {
-        return false;
-    };
-    if now < then.and_utc() {
-        return false;
-    }
-    let age = now.signed_duration_since(then.and_utc()).num_seconds();
-    age >= 0 && decimal_cmp(age.to_string().as_bytes(), ttl.as_bytes()) != std::cmp::Ordering::Less
+    decimal_cmp(age.to_string().as_bytes(), ttl.as_bytes()) != std::cmp::Ordering::Less
 }
 pub fn decimal_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     fn zero(v: &[u8]) -> &[u8] {

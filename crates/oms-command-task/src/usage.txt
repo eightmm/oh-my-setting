@@ -1,4 +1,4 @@
-Usage: agent-task.sh [options] [path|init|show|context|status|update|append|verify|rotate|close]
+Usage: oms agent-task [options] [path|init|show|context|status|update|append|verify|rotate|close]
 
 Maintain the active handoff packet shared by Codex, Claude Code, and
 Antigravity. Project task defaults to REPO/.oms/task/current.md.

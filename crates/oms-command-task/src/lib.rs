@@ -448,7 +448,7 @@ impl Task<'_> {
         }
         let id = packet::metadata(raw, "task_id").unwrap_or(b"legacy");
         if packet::metadata(raw, "status").unwrap_or(b"active") == b"active"
-            && !packet::stale(raw, &env("OMS_AGENT_TASK_TTL", b"604800"), utc())
+            && !packet::stale(raw, &packet::configured_ttl(), utc())
             && !o.has("replace-goal")
         {
             let mut message = [
@@ -964,10 +964,13 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
     let source = packet::metadata(&raw, "source_session").unwrap_or_default();
     let issue = packet::metadata(&raw, "github_issue").unwrap_or_default();
     let activity = packet::metadata(&raw, "last_activity")
-        .or_else(|| packet::metadata(&raw, "updated"))
+        .filter(|v| !v.is_empty())
+        .or_else(|| packet::metadata(&raw, "updated").filter(|v| !v.is_empty()))
         .unwrap_or_default();
     let closed = packet::metadata(&raw, "closed_at").unwrap_or_default();
-    let stale = packet::stale(&raw, &env("OMS_AGENT_TASK_TTL", b"604800"), utc());
+    let freshness = packet::freshness_from_env(&raw, utc());
+    let stale = freshness.stale;
+    let dormant = freshness.dormant;
     let verification = task.verification(&raw)?;
     if !task.options.json {
         let mut bytes = Vec::new();
@@ -979,6 +982,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("last_activity", activity),
             ("closed_at", closed),
             ("stale", if stale { b"yes" } else { b"no" }),
+            ("dormant", if dormant { b"yes" } else { b"no" }),
             ("github_issue", issue),
         ] {
             // Unbound packets keep the established text rows.
@@ -1024,6 +1028,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("last_activity", nullable(activity)),
             ("closed_at", nullable(closed)),
             ("stale", Json::Bool(stale)),
+            ("dormant", Json::Bool(dormant)),
             ("verification", string(verification)),
             ("lifecycle", lifecycle),
         ]
@@ -1302,9 +1307,9 @@ fn close(
             return Err(Error::new(
                 2,
                 if verification == "stale" {
-                    "verification is stale (the repo changed since it passed)\nrun 'agent-task.sh verify', or close anyway with --reason TEXT"
+                    "verification is stale (the repo changed since it passed)\nrun 'oms agent-task verify', or close anyway with --reason TEXT"
                 } else {
-                    "task is not verified\nrun 'agent-task.sh verify', or close anyway with --reason TEXT"
+                    "task is not verified\nrun 'oms agent-task verify', or close anyway with --reason TEXT"
                 },
             ));
         }
