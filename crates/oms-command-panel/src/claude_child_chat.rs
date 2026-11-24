@@ -37,6 +37,40 @@ pub(crate) struct ClaudeChild {
     pub(crate) state: &'static str,
     /// `None` is withheld: not read for this sample, or the read proved nothing.
     pub(crate) usage: Option<ClaudeChildUsage>,
+    pub(crate) version: Option<ClaudeChildVersion>,
+}
+
+/// Content version of a private child file. Its persistent identity is in the locator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct ClaudeChildVersion {
+    size: i128,
+    modified: (i128, i128),
+    changed: (i128, i128),
+}
+
+#[cfg(test)]
+impl ClaudeChildVersion {
+    pub(crate) fn fixture(revision: i128) -> Self {
+        Self {
+            changed: (0, revision),
+            ..Self::default()
+        }
+    }
+}
+
+pub(crate) struct ClaudeBoardChildren {
+    pub(crate) turn: String,
+    pub(crate) children: Vec<ClaudeChild>,
+    pub(crate) selected: Option<(ClaudeChildVersion, ClaudeResponse)>,
+    pub(crate) checked: Option<(ClaudeChildLocator, ClaudeChildVersion)>,
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum ClaudeSelection<'a> {
+    Read(&'a ClaudeChildLocator),
+    Recheck(&'a ClaudeChildLocator),
 }
 
 /// What the Board may show of one child: its newest response and the lead's
@@ -91,7 +125,9 @@ pub(crate) fn claude_child_chat(
 pub(crate) fn claude_board_children(
     _pid: u32,
     _repo: &std::path::Path,
-) -> Option<(String, Vec<ClaudeChild>)> {
+    _selected: Option<ClaudeSelection<'_>>,
+    _after_read: impl FnOnce(),
+) -> Option<ClaudeBoardChildren> {
     None
 }
 
@@ -100,7 +136,10 @@ pub(crate) use linux::{claude_board_children, claude_child_chat, claude_current_
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{ClaudeChild, ClaudeChildLocator, ClaudeChildUsage, ClaudeResponse, USAGE_KEYS};
+    use super::{
+        ClaudeBoardChildren, ClaudeChild, ClaudeChildLocator, ClaudeChildUsage, ClaudeChildVersion,
+        ClaudeResponse, ClaudeSelection, USAGE_KEYS,
+    };
     use crate::claude_lead_usage::linux::{
         DIR, FILE, config_root, environ, open_dir, start_time, unchanged,
     };
@@ -127,8 +166,21 @@ mod linux {
     pub(super) const USAGE_TAILS: usize = 2;
 
     #[cfg(test)]
-    // Counts child metadata reads, so tests can prove the roster bound.
-    thread_local!(pub(super) static META_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+    thread_local! {
+        // Record metadata and suffix attempts independently of which are accepted.
+        pub(super) static META_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    impl ClaudeChildVersion {
+        fn from_stat(st: &Stat) -> Self {
+            Self {
+                size: st.st_size.into(),
+                modified: (st.st_mtime.into(), st.st_mtime_nsec.into()),
+                changed: (st.st_ctime.into(), st.st_ctime_nsec.into()),
+            }
+        }
+    }
 
     /// `Err` names the first gate that refused, for diagnosis only.
     pub(super) type Stage<T> = Result<T, &'static str>;
@@ -146,31 +198,53 @@ mod linux {
     ) -> Option<(String, Vec<ClaudeChild>)> {
         proven(pid, |birth| {
             let config = lead_config(pid)?;
-            current(&Lead::new(pid, birth, &config), repo, 0, || {})
+            let board = board_children(&Lead::new(pid, birth, &config), repo, 0, None, || {})?;
+            Ok((board.turn, board.children))
         })
         .ok()
     }
 
-    /// The same children, with usage read for at most `USAGE_TAILS` of them.
+    /// The ordinary roster and up to two usage tails, plus one exact selected
+    /// child outside that sample. The selected response stays out of the roster.
     pub(crate) fn claude_board_children(
         pid: u32,
         repo: &Path,
-    ) -> Option<(String, Vec<ClaudeChild>)> {
+        selected: Option<ClaudeSelection<'_>>,
+        after_read: impl FnOnce(),
+    ) -> Option<ClaudeBoardChildren> {
         proven(pid, |birth| {
             let config = lead_config(pid)?;
-            current(&Lead::new(pid, birth, &config), repo, USAGE_TAILS, || {})
+            board_children(
+                &Lead::new(pid, birth, &config),
+                repo,
+                USAGE_TAILS,
+                selected,
+                after_read,
+            )
         })
         .ok()
     }
 
     /// A failed usage read withholds that child's usage, never its row.
     /// `between` runs after the usage reads and before their recheck (a test seam).
+    #[cfg(test)]
     pub(super) fn current(
         lead: &Lead,
         repo: &Path,
         tails: usize,
         between: impl FnOnce(),
     ) -> Stage<(String, Vec<ClaudeChild>)> {
+        let board = board_children(lead, repo, tails, None, between)?;
+        Ok((board.turn, board.children))
+    }
+
+    pub(super) fn board_children(
+        lead: &Lead,
+        repo: &Path,
+        tails: usize,
+        selected: Option<ClaudeSelection<'_>>,
+        between: impl FnOnce(),
+    ) -> Stage<ClaudeBoardChildren> {
         let mut scan = scan(lead, repo, None)?;
         scan.confirm()?;
         let skip = scan.children.len().saturating_sub(tails);
@@ -180,14 +254,70 @@ mod linux {
             .enumerate()
             .map(|(at, child)| (at >= skip).then(|| usage(&scan, &child.locator).ok())?)
             .collect();
-        between();
+        let selected_index = selected.and_then(|selection| {
+            let (locator, end) = match selection {
+                ClaudeSelection::Read(locator) => (locator, skip),
+                ClaudeSelection::Recheck(locator) => (locator, scan.children.len()),
+            };
+            scan.children[..end]
+                .iter()
+                .position(|child| child.locator == *locator)
+        });
+        let checked = selected_index.and_then(|index| {
+            let child = &scan.children[index];
+            let (file, stat, response) = match selected? {
+                ClaudeSelection::Read(_) => {
+                    let read = read_child(&scan, &child.locator, || {}).ok()?;
+                    (read.file, read.stat, Some(read.response?))
+                }
+                ClaudeSelection::Recheck(_) => {
+                    let (file, stat) = child_file(&scan, &child.locator).ok()?;
+                    (file, stat, None)
+                }
+            };
+            let version = ClaudeChildVersion::from_stat(&stat);
+            (child.version == Some(version)).then_some((index, file, stat, version, response))
+        });
+        if !scan.children.is_empty() {
+            between();
+        }
         // The usage reads widened the window, so the scan must still hold after them.
-        if read.iter().any(Option::is_some) && scan.confirm().is_ok() {
-            for (child, usage) in scan.children.iter_mut().zip(read) {
+        let confirmed = (read.iter().all(Option::is_none) && selected_index.is_none())
+            || scan.confirm().is_ok();
+        for (child, usage) in scan.children.iter_mut().zip(read) {
+            if confirmed {
                 child.usage = usage;
+            } else {
+                // Rows were proven before reading. They cannot renew retained usage.
+                child.version = None;
             }
         }
-        Ok((scan.turn, scan.children))
+        // Check the exact name/ancestors via confirm and the held version
+        // after the caller's pane recheck. A retained selection needs no body.
+        let checked = checked.and_then(|(index, file, stat, version, response)| {
+            (confirmed && fs::fstat(&file).is_ok_and(|now| unchanged(&stat, &now))).then_some((
+                scan.children[index].locator.clone(),
+                version,
+                response,
+            ))
+        });
+        if let Some(index) = selected_index
+            && checked.is_none()
+        {
+            scan.children[index].version = None;
+        }
+        let (selected, checked) = checked.map_or((None, None), |(locator, version, response)| {
+            (
+                response.map(|response| (version, response)),
+                Some((locator, version)),
+            )
+        });
+        Ok(ClaudeBoardChildren {
+            turn: scan.turn,
+            children: scan.children,
+            selected,
+            checked,
+        })
     }
 
     pub(crate) fn claude_child_chat(
@@ -733,6 +863,7 @@ mod linux {
                     title: title.chars().take(80).collect(),
                     state: if done.is_empty() { "unknown" } else { "done" },
                     usage: None,
+                    version: Some(ClaudeChildVersion::from_stat(&stat)),
                 });
             }
         }
@@ -767,15 +898,15 @@ mod linux {
             scan.children.iter().any(|child| child.locator == *expected),
             "locator",
         )?;
-        let (history, _) = read_child(&scan, expected, between)?;
+        let read = read_child(&scan, expected, between)?;
         scan.confirm()?;
-        chat_tail(&history).ok_or("no-reply")
+        chat_tail(&read.history).ok_or("no-reply")
     }
 
     /// One child's usage from its own tail and the scan's lead clocks; the
     /// caller confirms the scan after it.
     fn usage(scan: &Scan, expected: &ClaudeChildLocator) -> Stage<ClaudeChildUsage> {
-        let (_, response) = read_child(scan, expected, || {})?;
+        let response = read_child(scan, expected, || {})?.response;
         let (spawned_at, delivered_at) =
             scan.clocks.get(&expected.agent).cloned().ok_or("locator")?;
         Ok(ClaudeChildUsage {
@@ -785,12 +916,38 @@ mod linux {
         })
     }
 
+    struct ChildRead {
+        history: String,
+        response: Option<ClaudeResponse>,
+        file: File,
+        stat: Stat,
+    }
+
     /// The child transcript the scan proved, read once within `CHILD_WINDOW`.
     fn read_child(
         scan: &Scan,
         expected: &ClaudeChildLocator,
         between: impl FnOnce(),
-    ) -> Stage<(String, Option<ClaudeResponse>)> {
+    ) -> Stage<ChildRead> {
+        #[cfg(test)]
+        CHILD_READS.with(|n| n.set(n.get() + 1));
+        let (file, stat) = child_file(scan, expected)?;
+        let (body, recent) = read_tail(&file, &stat, CHILD_WINDOW, "child-read")?;
+        let (history, response) = replies(&body, recent, expected)?;
+        between();
+        gate(
+            fs::fstat(&file).is_ok_and(|now| unchanged(&stat, &now)),
+            "child-changed",
+        )?;
+        Ok(ChildRead {
+            history,
+            response,
+            file,
+            stat,
+        })
+    }
+
+    fn child_file(scan: &Scan, expected: &ClaudeChildLocator) -> Stage<(File, Stat)> {
         let dir = scan.subagents.as_ref().ok_or("locator")?;
         let (file, stat) = dir.file(
             &format!("agent-{}.jsonl", expected.agent),
@@ -801,14 +958,7 @@ mod linux {
             (stat.st_dev, stat.st_ino) == expected.child,
             "child-replaced",
         )?;
-        let (body, recent) = read_tail(&file, &stat, CHILD_WINDOW, "child-read")?;
-        let found = replies(&body, recent, expected)?;
-        between();
-        gate(
-            fs::fstat(&file).is_ok_and(|now| unchanged(&stat, &now)),
-            "child-changed",
-        )?;
-        Ok(found)
+        Ok((file, stat))
     }
 
     /// Counters and timestamp of one row; `None` marks a row without four
@@ -971,11 +1121,11 @@ mod linux {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::linux::{
-        CHILD_WINDOW, LEAD_WINDOW, LINE_LIMIT, Lead, META_READS, Stage, USAGE_TAILS, chat, current,
-        managed_turn, proven, scan,
+        CHILD_READS, CHILD_WINDOW, LEAD_WINDOW, LINE_LIMIT, Lead, META_READS, Stage, USAGE_TAILS,
+        board_children, chat, current, managed_turn, proven, scan,
     };
     use super::{
-        ClaudeChild, ClaudeChildLocator, claude_board_children, claude_child_chat,
+        ClaudeChild, ClaudeChildLocator, ClaudeSelection, claude_board_children, claude_child_chat,
         claude_current_children,
     };
     use crate::claude_lead_usage::linux::start_time;
@@ -2106,7 +2256,12 @@ mod tests {
         fixture.save();
         for i in 0..SPAWNED {
             let (meta, body) = (fixture.meta_path(&id(i)), fixture.child_path(&id(i)));
-            let reply = child_reply(&id(i), json!([{"type": "text", "text": "own reply"}]));
+            let reply = billed(
+                child_reply(&id(i), json!([{"type": "text", "text": "own reply"}])),
+                &format!("msg_{i}"),
+                "2026-11-21T08:00:00Z",
+                [i as i64 + 7, 2, 0, 0],
+            );
             let spawn = child_user(&id(i), json!(format!("prompt {i}")));
             fs::write(
                 &meta,
@@ -2140,6 +2295,74 @@ mod tests {
             (2, vec![false, true, true])
         );
         assert_eq!(read(0), [false; 3]);
+
+        let oldest = fixture.locator(&id(0));
+        let selected = |locator| {
+            board_children(&fixture.lead(), &fixture.repo, USAGE_TAILS, locator, || {}).unwrap()
+        };
+        CHILD_READS.with(|n| n.set(0));
+        let baseline = selected(None);
+        assert_eq!(CHILD_READS.with(|n| n.get()), 2);
+        assert!(baseline.selected.is_none());
+        let read = selected(Some(ClaudeSelection::Read(&oldest)));
+        assert_eq!(CHILD_READS.with(|n| n.get()), 5);
+        let (version, response) = read.selected.unwrap();
+        assert_eq!(response.id, "msg_0");
+        assert_eq!(response.usage, [7, 2, 0, 0]);
+        assert!(read.checked == Some((oldest.clone(), version)));
+        assert_eq!(read.children[0].version, Some(version));
+        assert!(read.children[0].usage.is_none());
+        CHILD_READS.with(|n| n.set(0));
+        for _ in 0..3 {
+            let stable = selected(Some(ClaudeSelection::Recheck(&oldest)));
+            assert_eq!(stable.children[0].version, Some(version));
+            assert!(stable.selected.is_none());
+            assert!(stable.checked == Some((oldest.clone(), version)));
+        }
+        assert_eq!(CHILD_READS.with(|n| n.get()), 6);
+
+        let mut foreign = oldest.clone();
+        foreign.tool_use = "toolu_other".into();
+        let already_sampled = fixture.locator(&id(1));
+        for locator in [&foreign, &already_sampled] {
+            CHILD_READS.with(|n| n.set(0));
+            let inactive = selected(Some(ClaudeSelection::Read(locator)));
+            assert!(inactive.selected.is_none());
+            assert!(inactive.checked.is_none());
+            assert_eq!(CHILD_READS.with(|n| n.get()), 2);
+        }
+
+        // A child can append while its parent and known locator stay identical.
+        let child_file = fixture.child_path(&id(0));
+        let incomplete = child_reply(&id(0), json!([{"type":"text","text":"new reply"}]));
+        let original_body = fs::read_to_string(&child_file).unwrap();
+        for (selection, expected_reads) in [
+            (ClaudeSelection::Recheck(&oldest), 2),
+            (ClaudeSelection::Read(&oldest), 3),
+        ] {
+            CHILD_READS.with(|n| n.set(0));
+            let lost = board_children(
+                &fixture.lead(),
+                &fixture.repo,
+                USAGE_TAILS,
+                Some(selection),
+                || append(&child_file, &incomplete),
+            )
+            .unwrap();
+            assert_eq!(CHILD_READS.with(|n| n.get()), expected_reads);
+            assert!(lost.selected.is_none());
+            assert!(lost.checked.is_none());
+            assert!(lost.children[0].version.is_none());
+            assert!(lost.children[1..].iter().all(|child| child.usage.is_some()));
+            fs::write(&child_file, &original_body).unwrap();
+        }
+        append(&child_file, &incomplete);
+        let after = selected(Some(ClaudeSelection::Read(&oldest)));
+        assert!(after.selected.is_none());
+        assert!(after.children[0].locator == oldest);
+        assert!(after.children[0].version.is_none());
+        assert_ne!(selected(None).children[0].version, Some(version));
+        fs::write(&child_file, original_body).unwrap();
 
         // A failed proof is not refilled from an older child.
         fs::remove_file(fixture.meta_path(&id(1))).unwrap();
@@ -2751,7 +2974,7 @@ mod tests {
         };
         assert!(claude_current_children(u32::MAX, &fixture.repo).is_none());
         assert!(claude_child_chat(&fixture.repo, TURN, &locator).is_none());
-        assert!(claude_board_children(u32::MAX, &fixture.repo).is_none());
+        assert!(claude_board_children(u32::MAX, &fixture.repo, None, || {}).is_none());
     }
 
     #[test]
