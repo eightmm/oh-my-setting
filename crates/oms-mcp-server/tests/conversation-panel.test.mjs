@@ -83,7 +83,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : {structuredContent:value};
+        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : params.name === 'oms_panel_project_graph' && value?.structuredContent ? value : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -832,6 +832,27 @@ test('selected function shows distinct direction, relation and confidence once p
   assert.doesNotMatch(p.get('map-children').textContent,/References/);
   p.get('language-choice').value='ko';await p.event('language-choice','change');
   assert.match(p.get('graph-list').textContent,/← 참조 · 추론/);
+});
+
+test('only the selected, current symbol exposes its widget-only declaration',async()=>{
+  const id='symbol:src/lib.rs::function:inspect',sym={id,path:'src/lib.rs',kind:'function',label:'inspect'};
+  let freshness='cached', detail={id,line:11,endLine:14,signature:'pub fn inspect()'};
+  const p=await panel(['one'],{}, {locale:'en',context:true,tools:{oms_panel_project_graph:args=>({
+    structuredContent:{schema:1,kind:'oms-panel-project-graph',nodes:[sym],edges:[],scope:{focusNode:args.node},provenance:{source:'indexed-graph',indexFreshness:freshness},
+      selection:args.node===id?{status:'found',node:sym}:null},_meta:{graphDefinition:detail}})}});
+  await p.event('tab-project','click');
+  assert.doesNotMatch(p.get('graph-info').textContent,/pub fn|lines 11/);
+  p.get('graph-list').children[0].children.find(e=>e?.dispatchEvent).dispatchEvent(new Event('click'));await setImmediate();
+  assert.match(p.get('graph-info').textContent,/src\/lib.rs · lines 11–14/);
+  assert.match(p.get('graph-info').textContent,/pub fn inspect/);
+  await p.event('graph-attach','click');
+  assert.ok(!JSON.stringify(p.host.contexts).includes('pub fn inspect'));
+  p.get('language-choice').value='ko';await p.event('language-choice','change');assert.match(p.get('graph-info').textContent,/11–14행/);
+  for(const state of ['stale','wrong-id','missing']) {
+    if(state==='stale')freshness='stale';else {freshness='cached';detail=state==='wrong-id'?{...detail,id:'symbol:other::x'}:undefined;}
+    await p.event('graph-reload','click');
+    assert.doesNotMatch(p.get('graph-info').textContent,/pub fn/);assert.match(p.get('graph-info').textContent,/소스 선언 미확인/);
+  }
 });
 
 test('standard hosts retain selectable command help; provenance and inferred associations are explicit', async () => {

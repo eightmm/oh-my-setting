@@ -495,7 +495,17 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         Ok(data)
     }) {
-        Ok(data) => {
+        Ok(mut data) => {
+            // Selected declarations are for the widget. Sharing a node with the
+            // conversation carries only its existing scoped reference.
+            let definition =
+                if data["kind"] == "oms-panel-project-graph" && data["selection"].is_object() {
+                    data["selection"]
+                        .as_object_mut()
+                        .and_then(|s| s.remove("definition"))
+                } else {
+                    None
+                };
             let mut text = data.to_string();
             if data["kind"] == "oms-panel-project-graph"
                 && text.len() + json!(&text).to_string().len() + 1024 > 60_000
@@ -520,7 +530,11 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     ids
                 );
             }
-            json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false})
+            let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false});
+            if let Some(detail) = definition {
+                result["_meta"]["graphDefinition"] = detail;
+            }
+            result
         }
         Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),
     }
