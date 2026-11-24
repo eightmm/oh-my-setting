@@ -1073,6 +1073,7 @@ struct StartupMain {
     room: String,
     attempt: String,
     member: String,
+    claude_assisted_exit: bool,
 }
 
 fn startup_native_candidate(
@@ -1178,7 +1179,7 @@ fn verified_startup_main(
                 && event["terminal"] != true
                 && event["refs"]["panel_room_id"] == *room_id)
     });
-    let matched = live.next().is_some_and(|event| {
+    let matched = live.next().filter(|event| {
         event["attempt_id"] == *attempt
             && event["provider"] == *owner
             && event["tool"] == "panel-main"
@@ -1190,9 +1191,11 @@ fn verified_startup_main(
             && event["state"]
                 .as_str()
                 .is_some_and(|phase| state::LIVE_STATES.contains(&phase))
-    }) && live.next().is_none();
-    if !matched
-        || !current_auto_orchestrator_room(repo, room_id, member, owner, services, stop)
+    });
+    let Some(event) = matched.filter(|_| live.next().is_none()) else {
+        return Ok(StartupMainProbe::Unverified);
+    };
+    if !current_auto_orchestrator_room(repo, room_id, member, owner, services, stop)
         || terminals::process(process.pid).ok().as_ref() != Some(&process)
     {
         return Ok(StartupMainProbe::Unverified);
@@ -1206,6 +1209,8 @@ fn verified_startup_main(
         room: (*room_id).into(),
         attempt: (*attempt).into(),
         member: (*member).into(),
+        claude_assisted_exit: event["refs"][CLAUDE_OPERATOR_EXIT_REF]
+            == CLAUDE_OPERATOR_EXIT_VERSION,
     })))
 }
 
@@ -1307,6 +1312,21 @@ fn available_main_switch_targets(policy: &routing::Policy, current: &str) -> Vec
         .collect()
 }
 
+fn existing_main_board_choice(
+    harness: &str,
+    claude_assisted_exit: bool,
+    claude_available: bool,
+    alternatives: &str,
+) -> String {
+    if alternatives.is_empty()
+        || (harness == "claude" && (!claude_available || !claude_assisted_exit))
+    {
+        "Open the Board".into()
+    } else {
+        format!("Open the Board to switch Main ({alternatives})")
+    }
+}
+
 fn pick_existing_main(
     main: &StartupMain,
     policy: &routing::Policy,
@@ -1319,13 +1339,12 @@ fn pick_existing_main(
         .collect::<Vec<_>>()
         .join(", ");
     let keep = format!("Continue current Main ({})", main.harness);
-    let board = if alternatives.is_empty()
-        || (main.harness == "claude" && !claude_assisted_exit_available())
-    {
-        "Open the Board".into()
-    } else {
-        format!("Open the Board to switch Main ({alternatives})")
-    };
+    let board = existing_main_board_choice(
+        &main.harness,
+        main.claude_assisted_exit,
+        claude_assisted_exit_available(),
+        &alternatives,
+    );
     pick_number(
         &[&keep, &board],
         stdin.as_fd(),
@@ -2171,6 +2190,20 @@ fn write_swap_record(store: &Store, record: &SwapRecord, first: bool) -> Result<
     write_swap_record_locked(&tx, record, first)
 }
 
+fn begin_assisted_swap_record(
+    store: &Store,
+    prior: Option<&SwapRecord>,
+    record: &SwapRecord,
+) -> Result<()> {
+    let tx = store.transaction(SWAP_RECORD_LOCK, Duration::from_secs(2))?;
+    let current = swap_record(store, &record.old_attempt)?;
+    require(
+        current.as_ref() == prior,
+        "Main swap has unresolved recovery evidence; inspect the panel before retrying",
+    )?;
+    write_swap_record_locked(&tx, record, prior.is_none())
+}
+
 fn write_swap_record_locked(
     tx: &oms_panel_core::Transaction<'_>,
     record: &SwapRecord,
@@ -2827,13 +2860,17 @@ fn perform_main_swap(
     let execution = state::native_repository(repo, Some(old_execution))?;
     let controller = terminals::process(std::process::id())?;
     if let Some(prior) = &prior {
+        let retryable_stage = if assisted_exit {
+            prior.stage == SwapStage::OperatorExitHeld
+        } else {
+            matches!(
+                prior.stage,
+                SwapStage::BeforeDraft | SwapStage::DraftConfirmed
+            )
+        };
         require(
-            !assisted_exit
+            retryable_stage
                 && prior.schema == 1
-                && matches!(
-                    prior.stage,
-                    SwapStage::BeforeDraft | SwapStage::DraftConfirmed
-                )
                 && prior.old_attempt == request.attempt_id
                 && prior.room == pane.room
                 && prior.member == pane.member
@@ -2886,7 +2923,7 @@ fn perform_main_swap(
             store.transaction("panel-provider-sessions", Duration::from_secs(3))?;
         check_native_assignments(repo, &pane.room, &pane.attempt, services, stop)?;
         check_swap_caller(repo, &pane, invocation, services, stop)?;
-        write_swap_record(&store, &record, true)?;
+        begin_assisted_swap_record(&store, prior.as_ref(), &record)?;
         let armed = (|| {
             require(
                 guarded_swap_tmux(
@@ -2923,8 +2960,8 @@ fn perform_main_swap(
         match armed {
             Ok(deadline) => deadline,
             Err(error) => {
-                let _ = hold_operator_exit(repo, &pane, &store, &record, services);
-                return Err(error);
+                let hold = hold_operator_exit(repo, &pane, &store, &record, services);
+                return Err(combine_operator_exit_hold_error(error, hold));
             }
         }
     } else {
@@ -3155,7 +3192,8 @@ fn perform_main_swap(
     })();
     if let Err(error) = exited {
         if assisted_exit {
-            hold_operator_exit(repo, &pane, &store, &record, services)?;
+            let hold = hold_operator_exit(repo, &pane, &store, &record, services);
+            return Err(combine_operator_exit_hold_error(error, hold));
         }
         return Err(error);
     }
@@ -3278,6 +3316,14 @@ fn disarm_operator_exit(store: &Store, record: &SwapRecord) -> Result<OperatorEx
         }
         _ => Err(Error::new("Claude Main exit receipt phase changed")),
     }
+}
+
+fn combine_operator_exit_hold_error(mut error: Error, hold: Result<bool>) -> Error {
+    if let Err(hold_error) = hold {
+        error.message = format!("{}; disarm failed: {}", error.message, hold_error.message);
+        error.publication_uncertain |= hold_error.publication_uncertain;
+    }
+    error
 }
 
 fn hold_operator_exit(
@@ -6187,14 +6233,21 @@ pub(crate) mod native_lifecycle_contract {
                             self.board_pid()
                         )))
                     }
-                    ["tmux", "list-panes", "-a", "-F", SWAP_PANE]
-                    | ["tmux", "display-message", "-p", "-t", "%1", SWAP_PANE] => {
+                    ["tmux", "list-panes", "-a", "-F", SWAP_PANE] => Ok(out(self.row(repo))),
+                    ["tmux", "display-message", "-p", "-t", "%1", SWAP_PANE] => {
                         if self.owner == "claude" && !self.dead.get() {
                             let store = Store::open(repo)?;
                             if let Some(mut receipt) = swap_record(&store, OLD)?
                                 && receipt.stage == SwapStage::OperatorExitArmed
                             {
-                                assert_eq!(self.preflights.get(), 2);
+                                assert_eq!(
+                                    self.preflights.get(),
+                                    if self.mode == "operator-preflight" {
+                                        4
+                                    } else {
+                                        2
+                                    }
+                                );
                                 assert_eq!(self.remain.get(), "on");
                                 let released = store.transaction(
                                     "panel-provider-sessions",
@@ -6229,6 +6282,11 @@ pub(crate) mod native_lifecycle_contract {
                                 );
                                 self.saw_instruction_ready.set(true);
                                 if self.mode == "operator-pane" {
+                                    return Ok(out(self.row(repo).replacen("\t@1\t", "\t@2\t", 1)));
+                                }
+                                if self.mode == "operator-pane-disarm-fail" {
+                                    receipt.controller_birth = "foreign-controller".into();
+                                    super::write_swap_record(&store, &receipt, false)?;
                                     return Ok(out(self.row(repo).replacen("\t@1\t", "\t@2\t", 1)));
                                 }
                                 let finish_normally = |child: &RefCell<Child>| {
@@ -6540,6 +6598,7 @@ pub(crate) mod native_lifecycle_contract {
             "operator-no-ack",
             "operator-native",
             "operator-pane",
+            "operator-pane-disarm-fail",
             "operator-room",
             "operator-preflight",
             "operator-team",
@@ -6785,6 +6844,17 @@ pub(crate) mod native_lifecycle_contract {
                     assert!(receipt.stage == SwapStage::RoomCommitted);
                     assert!(mock.committed.get());
                     assert_eq!(mock.launched.get(), 0);
+                } else if mode == "operator-pane-disarm-fail" {
+                    let message = result.unwrap_err().message;
+                    assert!(
+                        message.contains("pane changed")
+                            && message.contains("disarm failed")
+                            && message.contains("receipt changed"),
+                        "both original and disarm errors must be reported: {message}"
+                    );
+                    assert!(receipt.stage == SwapStage::OperatorExitArmed);
+                    assert!(!mock.committed.get());
+                    assert_eq!(mock.launched.get(), 0);
                 } else {
                     let expected = match mode {
                         "operator-native" | "operator-no-claim" => "armed child",
@@ -6817,7 +6887,136 @@ pub(crate) mod native_lifecycle_contract {
                     assert_eq!(mock.launched.get(), 0);
                     let live = !mock.dead.get();
                     assert_eq!(mock.remain.get(), if live { "" } else { "on" });
-                    if live || mode == "operator-no-ack" {
+                    if mode == "operator-timeout" {
+                        let held = swap_record(&store, OLD).unwrap().unwrap();
+                        assert!(held.stage == SwapStage::OperatorExitHeld);
+                        // Non-held stages and mismatched held records still refuse fail-closed.
+                        for bad in [
+                            {
+                                let mut r = held.clone();
+                                r.stage = SwapStage::OperatorExitClaimed;
+                                r
+                            },
+                            {
+                                let mut r = held.clone();
+                                r.stage = SwapStage::OperatorExitArmed;
+                                r
+                            },
+                            {
+                                let mut r = held.clone();
+                                r.stage = SwapStage::RoomCommitted;
+                                r
+                            },
+                            {
+                                let mut r = held.clone();
+                                r.room = "room-other".into();
+                                r
+                            },
+                            {
+                                let mut r = held.clone();
+                                r.old_pid = held.old_pid.saturating_add(1);
+                                r
+                            },
+                            {
+                                let mut r = held.clone();
+                                r.old_birth = "foreign-wrapper".into();
+                                r
+                            },
+                        ] {
+                            super::write_swap_record(&store, &bad, false).unwrap();
+                            let error = perform_main_swap(
+                                &repo.0,
+                                &target,
+                                &mock.old,
+                                &mock,
+                                &STOP,
+                                &invocation,
+                                |_| panic!("unsettled or mismatched assisted exit must refuse before admission"),
+                            )
+                            .unwrap_err();
+                            assert!(
+                                error.message.contains("unresolved recovery evidence"),
+                                "unexpected error: {}",
+                                error.message
+                            );
+                            assert!(swap_record(&store, OLD).unwrap().unwrap() == bad);
+                            assert_eq!(mock.launched.get(), 0);
+                        }
+                        // Under SWAP_RECORD_LOCK, a record changed since prior read also refuses.
+                        let mut claimed = held.clone();
+                        claimed.stage = SwapStage::OperatorExitClaimed;
+                        super::write_swap_record(&store, &claimed, false).unwrap();
+                        let mut replacement_start = held.clone();
+                        replacement_start.stage = SwapStage::BeforeDraft;
+                        assert!(
+                            super::begin_assisted_swap_record(
+                                &store,
+                                Some(&held),
+                                &replacement_start,
+                            )
+                            .unwrap_err()
+                            .message
+                            .contains("unresolved recovery evidence")
+                        );
+                        assert!(swap_record(&store, OLD).unwrap().unwrap() == claimed);
+                        super::write_swap_record(&store, &held, false).unwrap();
+                        mock.preflights.set(0);
+                        let retry_invocation = SwapInvocation {
+                            operator_exit_wait: Duration::from_secs(2),
+                            ..invocation
+                        };
+                        let retried = perform_main_swap(
+                            &repo.0,
+                            &target,
+                            &mock.old,
+                            &mock,
+                            &STOP,
+                            &retry_invocation,
+                            |record| {
+                                assert_eq!(record.permissions, "native");
+                                assert!(
+                                    record.handoff.len() <= 3000 && record.handoff.contains(ROOM)
+                                );
+                                Ok("exec /approved/test-command".into())
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(retried["attempt"], NEW);
+                        assert!(mock.saw_instruction_ready.get());
+                        assert!(
+                            swap_record(&store, OLD).unwrap().unwrap().stage
+                                == SwapStage::RoomCommitted
+                        );
+                        assert!(mock.committed.get());
+                        assert_eq!(mock.launched.get(), 1);
+                        assert_eq!(mock.remain.get(), "");
+                    } else if mode == "operator-preflight" {
+                        let retried = perform_main_swap(
+                            &repo.0,
+                            &target,
+                            &mock.old,
+                            &mock,
+                            &STOP,
+                            &invocation,
+                            |record| {
+                                assert_eq!(record.permissions, "native");
+                                assert!(
+                                    record.handoff.len() <= 3000 && record.handoff.contains(ROOM)
+                                );
+                                Ok("exec /approved/test-command".into())
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(retried["attempt"], NEW);
+                        assert!(mock.saw_instruction_ready.get());
+                        assert!(
+                            swap_record(&store, OLD).unwrap().unwrap().stage
+                                == SwapStage::RoomCommitted
+                        );
+                        assert!(mock.committed.get());
+                        assert_eq!(mock.launched.get(), 1);
+                        assert_eq!(mock.remain.get(), "");
+                    } else if mode == "operator-no-ack" {
                         let error = perform_main_swap(
                             &repo.0,
                             &target,
@@ -6828,12 +7027,7 @@ pub(crate) mod native_lifecycle_contract {
                             |_| panic!("unsettled assisted exit must never be replayed"),
                         )
                         .unwrap_err();
-                        let refusal = if live {
-                            "unresolved recovery evidence"
-                        } else {
-                            "source pane unavailable"
-                        };
-                        assert!(error.message.contains(refusal));
+                        assert!(error.message.contains("source pane unavailable"));
                         assert!(swap_record(&store, OLD).unwrap().unwrap().stage == phase);
                         assert_eq!(mock.launched.get(), 0);
                     }
@@ -10014,6 +10208,30 @@ mod main_selection_tests {
         assert!(super::main_picker_foreground(reader.as_fd()).is_err());
         stop.store(true, Ordering::Release);
         assert_cancelled(pick(b"2\n", &stop).0);
+    }
+
+    #[test]
+    fn existing_main_board_choice_requires_assisted_switch_for_claude() {
+        assert_eq!(
+            super::existing_main_board_choice("claude", false, true, "codex"),
+            "Open the Board"
+        );
+        assert_eq!(
+            super::existing_main_board_choice("claude", true, false, "codex"),
+            "Open the Board"
+        );
+        assert_eq!(
+            super::existing_main_board_choice("claude", true, true, "codex"),
+            "Open the Board to switch Main (codex)"
+        );
+        assert_eq!(
+            super::existing_main_board_choice("claude", true, true, ""),
+            "Open the Board"
+        );
+        assert_eq!(
+            super::existing_main_board_choice("codex", false, false, "claude"),
+            "Open the Board to switch Main (claude)"
+        );
     }
 
     #[test]
