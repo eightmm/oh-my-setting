@@ -261,7 +261,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v5.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v6.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -281,6 +281,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v2.html"),
         json!("ui://oms/conversation-panel/v3.html"),
         json!("ui://oms/conversation-panel/v4.html"),
+        json!("ui://oms/conversation-panel/v5.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

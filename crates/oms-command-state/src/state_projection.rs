@@ -1354,6 +1354,13 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
             Value::Null
         }
     };
+    let plan_count = |key: &str| {
+        if plan.get("healthy").truth() {
+            count(plan.get(key))
+        } else {
+            Value::Null
+        }
+    };
     let mut dashboard = object([
         ("scope", string("repository")),
         ("git", report.get("git").clone()),
@@ -1394,14 +1401,8 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
                 Value::Null
             },
         ),
-        (
-            "tasks",
-            if plan.get("healthy").truth() {
-                count(plan.get("task_count"))
-            } else {
-                Value::Null
-            },
-        ),
+        ("tasks", plan_count("task_count")),
+        ("tasksVerified", plan_count("verified_count")),
         ("taskStatus", label(report.get("task").get("status"), 96)),
         ("attempts", rows(attempts.get("recent"), 16, attempt)),
         ("activeAttempts", rows(active, 8, attempt)),
@@ -1426,6 +1427,7 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
             "attention",
             rows(report.get("attention").get("items"), 8, |v| {
                 object([
+                    ("code", label(v.get("code"), 96)),
                     ("summary", label(v.get("summary"), 512)),
                     ("count", count(v.get("count"))),
                 ])
@@ -2150,13 +2152,22 @@ mod panel_snapshot_tests {
         let mut report = crate::json::parse(br#"{"kind":"oms-dashboard","schema":1,
             "attempts":{"available":true,"active":1,"active_recent":[{"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-a"}}],
             "recent":[{"attempt_id":"historical","tool":"panel-native-assignment","state":"done","refs":{"panel_role":"lead","panel_room_id":"older"}}]},
-            "attention":{"items":[{"summary":"Check results","command":"private command"}],"room_mail":{"bound":true,"healthy":true,"room_id":"room-b"}},
+            "attention":{"items":[{"code":"stale-plan-claims","summary":"Check results","command":"private command"}],"room_mail":{"bound":true,"healthy":true,"room_id":"room-b"}},
             "acceptance":{"available":true,"total":3,"counts":{"verified":1},"complete":false},
             "reviews":{"passed":2,"failed":1,"unknown":0},
             "operations":{"available":true,"recent":[{"kind":"review","artifact_id":"review-1","exit":1,"status":"failed"}]}}"#).unwrap();
         let raw = "x".repeat(350_000);
         report
-            .set("plan", object([("private", string(&raw))]))
+            .set(
+                "plan",
+                object([
+                    ("private", string(&raw)),
+                    ("healthy", Value::Bool(true)),
+                    ("task_count", number(3)),
+                    ("verified_count", number(1)),
+                    ("cancelled_count", number(2)),
+                ]),
+            )
             .unwrap();
         report.set("goal", object([("text", string(raw))])).unwrap();
         let projected = panel_snapshot(&report, &Value::Null);
@@ -2172,6 +2183,12 @@ mod panel_snapshot_tests {
         assert_eq!(active[0].text("provider"), "pi");
         assert_eq!(d.get("reviews").get("failed").int().unwrap(), 1);
         assert_eq!(d.get("acceptance").get("verified").int().unwrap(), 1);
+        assert_eq!(d.get("tasks").int().unwrap(), 3);
+        assert_eq!(d.get("tasksVerified").int().unwrap(), 1);
+        assert_eq!(
+            d.get("attention").array().unwrap()[0].text("code"),
+            "stale-plan-claims"
+        );
         assert_eq!(
             d.get("operations").array().unwrap()[0].text("artifactId"),
             "review-1"
@@ -2179,7 +2196,19 @@ mod panel_snapshot_tests {
         let wire = String::from_utf8(crate::json::encoded(&projected).unwrap()).unwrap();
         assert!(wire.len() < 4096 && !wire.contains("private"));
         report.set("attention", object([])).unwrap();
+        report
+            .set(
+                "plan",
+                object([
+                    ("healthy", Value::Bool(false)),
+                    ("task_count", number(3)),
+                    ("verified_count", number(1)),
+                ]),
+            )
+            .unwrap();
         let unbound = panel_snapshot(&report, &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("tasksVerified"), &Value::Null);
+        assert_eq!(unbound.get("dashboard").get("tasks"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("currentRoom"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("main").text("id"), "main-1");
         let mut attempts = report.get("attempts").clone();

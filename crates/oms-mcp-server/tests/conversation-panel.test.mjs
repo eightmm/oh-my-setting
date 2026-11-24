@@ -238,7 +238,7 @@ test('active Lead cards, past executions and repository verification use their o
     operations:[{kind:'verify', artifactId:'check-17', status:'failed', exit:1}]
   });
   const cards = p.get('leads').textContent;
-  assert.match(cards, /Claude Leadworking · live-task/);
+  assert.match(cards, /Claude Lead작업 중 · live-task/);
   assert.doesNotMatch(cards, /Codex Lead|old-task|unrelated/);
   assert.match(p.get('activity').textContent, /old-task · room-one/);
   assert.equal(p.get('room').textContent, 'room-one');
@@ -426,4 +426,25 @@ test('a compact snapshot reports only positive omissions and keeps empty samples
   assert.match(p.get('activity').textContent,/실행 기록 미확인/);
   const full = await panel(['one'], {attemptsTrimmed:0});
   assert.doesNotMatch(full.get('status').textContent,/생략/);
+});
+
+test('overview opens only bound work conversations, labels confirmed Main, and routes measured progress to the plan', async () => {
+  const member={room:'r',participant:'native-lead',provider:'claude',role:'worker'};
+  const p=await panel(['one'],{conversationBinding:'matched',
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner',participants:[member]},
+    activeAttempts:[{...member,task:'Test changes',state:'verifying'},{...member,room:'another',task:'Wrong room'}],
+    attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}});
+  p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]}),oms_panel_tui_view:args=>({...args,status:'ready',columns:[],rows:[]})};
+  assert.equal(p.get('header-main').textContent,'Codex Main'); assert.equal(p.get('header-main').hidden,false);
+  assert.equal(p.get('plan-ratio').textContent,'0 / 3'); assert.equal(p.get('acceptance-bar').value,1);
+  const threads=p.get('thread-rows'); assert.equal(threads.children.length,1); assert.match(threads.textContent,/Test changes.*검증 중/);
+  threads.children[0].dispatchEvent(new Event('click')); await setImmediate();
+  assert.equal(p.calls.at(-1).args.participant,'native-lead'); assert.equal(p.calls.at(-1).args.room,'r');
+  await p.event('chat-back','click'); await p.event('header-main','click'); assert.equal(p.calls.at(-1).args.participant,'owner');
+  await p.event('chat-back','click'); await p.event('plan-open','click');
+  assert.equal(p.get('pane-activity').hidden,false); assert.equal(p.calls.at(-1).args.view,'plan');
+  assert.equal(p.get('approval-card').hidden,true);
+  const unknown = await panel(['one'],{tasks:4,tasksVerified:null,acceptance:{available:true,total:0,verified:0}});
+  assert.equal(unknown.get('header-main').hidden,true); assert.equal(unknown.get('plan-strip').hidden,true);
+  assert.equal(unknown.get('acceptance-bar').hidden,true); assert.equal(unknown.get('work-threads').hidden,true);
 });

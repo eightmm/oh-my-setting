@@ -7,53 +7,41 @@
 <style>
 :root {
   color-scheme: light dark;
-  --bg: #f8f9f6; --surface: #fff; --ink: #1b2922; --muted: #59675e;
-  --line: #d9ded7; --tint: #f0f4ed; --brand: #216341; --on-brand: #fff;
-  --main-line: #86ad90; --warm: #865519; --warm-bg: #faf4e8; --error: #a13029;
+  --bg: #f8f9fa; --surface: #fff; --ink: #1d2023; --muted: #61656b;
+  --line: #dcdfe3; --tint: #eff1f3; --brand: #275b51; --on-brand: #fff;
+  --main-line: #b9c5c1; --warm: #865519; --warm-bg: #faf4e8; --error: #a13029;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #151b18; --surface: #1d2520; --ink: #eff4ed; --muted: #b0bdb1;
-    --line: #3c4940; --tint: #243529; --brand: #a1d7a8; --on-brand: #14291b;
-    --main-line: #648a6c; --warm: #e6c286; --warm-bg: #352e22; --error: #ffa39b;
+    --bg: #09090b; --surface: #151518; --ink: #f2f2f3; --muted: #a3a5ad;
+    --line: #303035; --tint: #202226; --brand: #a3d8bf; --on-brand: #11281e;
+    --main-line: #424b47; --warm: #efd19b; --warm-bg: #2a241a; --error: #ffa39b;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; color: var(--ink); background: var(--bg); font: 15px/1.52 Inter, system-ui, sans-serif; overflow-wrap: anywhere; }
-main { max-width: 68rem; margin: auto; padding: clamp(.85rem, 4vw, 2rem); }
+body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.48 Inter, system-ui, "Noto Sans CJK KR", "Malgun Gothic", sans-serif; overflow-wrap: anywhere; }
+main { max-width: 68rem; margin: auto; padding: clamp(.8rem, 3.2vw, 1.45rem); }
 h1, h2, h3, p, ul, dl, dd, fieldset, legend { margin: 0; padding: 0; }
-h1 { font-size: 1.45rem; letter-spacing: -.045em; }
+h1 { font-size: 1.08rem; letter-spacing: -.045em; }
 h2, legend { font-size: 1rem; font-weight: 700; }
 h3 { font-size: .9rem; }
 button, input, select { font: inherit; }
-#scope { margin-top: .85rem; }
-select { max-width: 100%; padding: .4rem .65rem; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: .6rem; }
-button { border: 1px solid var(--line); border-radius: .65rem; background: var(--surface); color: var(--ink); min-height: 2.6rem; padding: .4rem .8rem; cursor: pointer; }
+button { border: 1px solid var(--line); border-radius: .65rem; background: var(--surface); color: var(--ink); min-height: 2rem; padding: .28rem .65rem; cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--brand); }
 button:disabled { opacity: .55; cursor: default; }
 :focus-visible { outline: 3px solid var(--brand); outline-offset: 3px; }
 header, .cluster, .between, .entry { display: flex; align-items: center; gap: .6rem; }
 header, .between { justify-content: space-between; }
 .cluster, .between, .entry { flex-wrap: wrap; }
-header { padding-bottom: .95rem; border-bottom: 1px solid var(--line); }
-.brand { width: 2rem; height: 2rem; display: grid; place-items: center; background: var(--ink); color: var(--surface); border-radius: .65rem; font-weight: 800; font-family: monospace; }
 #status, #receipt { font-size: .88rem; }
 #status:not(:empty), #receipt:not(:empty) { margin-top: .85rem; }
 .error { color: var(--error); }
 #receipt { white-space: pre-wrap; }
 #project { font-size: 1.07rem; letter-spacing: -.025em; }
-.project-line { margin-top: .9rem; }
-.project-line time { margin-left: auto; }
 #branch, time, .muted, dt { color: var(--muted); font-size: .83rem; }
-.card, .lead { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: .85rem; padding: 1rem; }
-.card { margin-top: 1rem; }
-.main-card { border-color: var(--main-line); background: var(--tint); }
-#current-main { font-size: clamp(1.4rem, 3vw, 1.8rem); line-height: 1.3; margin: .22rem 0 .4rem; }
-.identity { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .18rem .8rem; margin-top: .75rem; }
+.card, .lead { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: .65rem; padding: .8rem .9rem; }
+.card { margin-top: .7rem; }
 .identity dt { align-self: baseline; }
-.identity dd { font-size: .88rem; }
-.columns { display: grid; grid-template-columns: minmax(0,1fr); }
-@media (min-width: 50rem) { .columns { grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); gap: 1rem; align-items: start; } }
 details > summary { cursor: pointer; font-weight: 650; }
 #launch { margin-top: .8rem; }
 fieldset { border: 0; min-width: 0; }
@@ -66,11 +54,6 @@ fieldset { border: 0; min-width: 0; }
 .choice input:disabled + span { opacity: .6; }
 #brief { display: block; width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: .55rem; min-height: 2.9rem; padding: .6rem .7rem; margin: .35rem 0 .65rem; }
 .primary { background: var(--brand); color: var(--on-brand); border-color: var(--brand); font-weight: 650; }
-.leads-region { margin-top: .95rem; padding-top: .75rem; border-top: 1px solid var(--main-line); }
-.leads { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%, 9rem),1fr)); gap: .45rem; }
-.lead { padding: .65rem .75rem; }
-.leads-region > h3 { margin-bottom: .45rem; }
-.lead h4 { margin: 0 0 .16rem; }
 .lead p + p { margin-top: .3rem; }
 .evidence, .history { margin-top: .8rem; }
 .history summary { cursor: pointer; font-weight: 650; }
@@ -86,15 +69,10 @@ ul { list-style: none; }
   .lead { padding: .5rem .65rem; }
   .entry { grid-template-columns: minmax(0,1fr); gap: .15rem; }
 }
-.approval { padding: .8rem 0; }
 .approval + .approval { border-top: 1px solid var(--line); }
 .approval summary { cursor: pointer; white-space: pre-wrap; }
 .approval p { white-space: pre-wrap; margin: .3rem 0; }
-.approval code { font-size: .8rem; }
 .review { color: var(--warm); background: var(--warm-bg); }
-.tabs { display: flex; gap: .2rem; border-bottom: 1px solid var(--line); margin: .85rem 0 .3rem; }
-.tabs button { flex: 1; max-width: 9rem; min-width: 0; min-height: 2.7rem; padding: .3rem; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; font-weight: 600; }
-.tabs button[aria-selected="true"] { color: var(--brand); border-bottom-color: var(--brand); }
 .tabs button[aria-selected="false"]:hover { background: var(--tint); border-color: transparent; }
 .meta-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .6rem; align-items: start; }
 .link-action { background: transparent; color: var(--brand); border-color: var(--main-line); font-size: .85rem; font-weight: 650; }
@@ -109,7 +87,6 @@ meter { width: 100%; accent-color: var(--brand); }
 .rows article p + p, .message p { margin-top: .22rem; }
 .detail-title { display: flex; flex-wrap: wrap; gap: .4rem .75rem; justify-content: space-between; align-items: baseline; margin-bottom: .55rem; }
 .selection { display: grid; gap: .35rem; align-content: start; }
-.selection button { text-align: left; min-width: 0; }
 .selection button[aria-pressed="true"] { border-color: var(--brand); background: var(--tint); }
 .selection small { display: block; color: var(--muted); }
 .chat-grid { display: grid; gap: 1rem; }
@@ -125,15 +102,104 @@ th { color: var(--muted); font-weight: 600; }
 .table-wrap td { min-width: 5rem; max-width: 24rem; }
 #chat-older { margin-bottom: .5rem; }
 a { color: var(--brand); text-underline-offset: .18em; }
-@media (min-width: 43rem) { .chat-grid { grid-template-columns: minmax(10rem,1fr) minmax(0,2.4fr); } }
-@media (max-width: 28rem) { .tabs button { font-size: .83rem; } .meta-row { grid-template-columns: 1fr; } }
+@media (min-width: 43rem) {
+  .chat-grid { grid-template-columns: minmax(10rem,1fr) minmax(0,2.4fr); }
+}
+@media (max-width: 28rem) {
+  .tabs button { font-size: .83rem; } .meta-row { grid-template-columns: 1fr; }
+}
+.wordmark { flex-wrap: nowrap; min-width: 0; gap: .48rem; }
+.brand { place-items: center; display: grid; grid-template-columns: repeat(2, .36rem); grid-template-rows: repeat(2, .36rem); gap: 2px; width: 1.85rem; height: 1.85rem; border-radius: .5rem; background: var(--tint); border: 1px solid var(--line); align-content: center; justify-content: center; }
+.brand i { width: 100%; height: 100%; background: var(--ink); border-radius: 1.5px; }
+.brand i:last-child { background: var(--brand); }
+.wordmark h1 { flex-shrink: 0; }
+.project-line time, #branch { font-size: .75rem; }
+#scope label { color: var(--muted); font-size: .8rem; }
+select { max-width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--line); min-height: 1.9rem; border-radius: .4rem; padding: .16rem .45rem; }
+#refresh { font-size: .8rem; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+#approval-card.awaiting-action h2 { color: var(--warm); }
+#approval-card h2,.section-label { font-size: .82rem; }
+.approval { padding: .35rem 0 0; }
+.approval[open] > div { padding: .35rem .1rem; }
+.approval code { font-size: .8rem; display: block; color: var(--muted); margin: .35rem 0; }
+.approval .cluster { margin-top: .5rem; }
+#approval-card:not(.awaiting-action) { padding: .5rem .85rem; }
+#approval-card:not(.awaiting-action) #approvals { color: var(--muted); font-size: .8rem; }
+#goal-card > h2,.section-label { font-weight: 650; color: var(--muted); }
+.measure { display: grid; gap: .3rem; }
+.measure p { font-size: .77rem; color: var(--muted); }
+progress { width: 100%; height: .32rem; border: 0; border-radius: .4rem; overflow: hidden; appearance: none; background: var(--line); accent-color: var(--brand); }
+progress::-webkit-progress-bar { background: var(--line); }
+progress::-webkit-progress-value { background: var(--brand); }
+progress::-moz-progress-bar { background: var(--brand); }
+.identity { display: flex; flex-wrap: wrap; gap: .15rem .42rem; margin-top: .2rem; }
+.identity dt,.identity dd,#main-state { font-size: .76rem; }
+.identity dd { font-size: .88rem; font-weight: 500; }
+.identity dt:not(:first-child) { margin-left: .4rem; }
+#main-state { color: var(--muted); }
+#current-main { font-size: 1.2rem; line-height: 1.3; margin: .12rem 0; }
+.main-card .meta-row { align-items: center; }
+.avatar { display: inline-grid; place-items: center; width: 1.3rem; height: 1.3rem; flex: 0 0 auto; border-radius: .3rem; background: #c6c8cd; color: #202329; font: 700 .68rem/1 ui-monospace,monospace; }
+.avatar-codex { background: #b5d8c4; color: #1c392b; }
+.avatar-claude { background: #e8b7a1; color: #48281d; }
+.avatar-agy,.avatar-antigravity { background: #c2c2e7; color: #30304c; }
+.avatar-pi { background: #b3d1e9; color: #223b4f; }
+.selection button { text-align: left; min-width: 0; display: flex; gap: .5rem; align-items: center; }
+#launcher { padding: .5rem .85rem; }
+#launcher summary,.history summary { font-size: .84rem; }
+.history { margin-top: .58rem; }
+#scope { gap: .4rem; float: right; margin: .46rem 0 .18rem .5rem; }
+#scope + #status:not(:empty) { clear: both; }
+.project-line { margin-top: .4rem; font-size: .75rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .5rem; padding-top: .35rem; }
+.project-meta { display: inline-flex; flex-wrap: wrap; gap: .05rem .55rem; }
+.project-line time { margin: 0; }
+.tabs { display: flex; border-bottom: 1px solid var(--line); margin: .65rem 0 .3rem; gap: .18rem; clear: both; }
+.tabs button { max-width: 9rem; min-width: 0; padding: .3rem; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font-weight: 600; min-height: 2.3rem; color: var(--muted); font-size: .86rem; flex: 0 1 auto; padding-inline: .6rem; }
+header { border-bottom: 1px solid var(--line); padding-bottom: .65rem; margin: -.2rem 0 .2rem; }
+#goal { line-height: 1.42; font-weight: 670; letter-spacing: -.035em; font-size: 1.04rem; margin: .13rem 0 .25rem; }
+.section-label { letter-spacing: .025em; }
+#approval-card.awaiting-action { background: var(--warm-bg); border-color: color-mix(in srgb,var(--warm) 36%,var(--line));  }
+.work-dot,#approval-card.awaiting-action h2::before { content: ''; display: inline-block; width: .47rem; height: .47rem; border-radius: 50%; margin-right: .45rem; }
+#approval-card.awaiting-action h2::before { background: var(--warm); }
+.work-dot { background: #4c86e0; box-shadow: 0 0 0 3px #618dec24; }
+.leads-region { margin-top: .65rem; padding: .7rem .85rem; }
+.leads-region h2 { font-size: .83rem; }
+.leads { display: grid; grid-template-columns: 1fr; gap: 0; }
+.leads > p { padding-top: .4rem; }
+.lead { border: 0; margin-top: .45rem; padding: .4rem 0 0; border-top: 1px solid var(--line); background: transparent; border-radius: 0; }
+.lead h4 { margin: 0 0 .16rem; font-size: .84rem; }
+.lead h4 .link-action { min-height: 1.55rem; margin: 0; color: var(--ink); }
+.lead p { color: var(--muted); font-size: .79rem; }
+.plan-strip { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; padding-block: .42rem; }
+.plan-strip strong { font-variant-numeric: tabular-nums; }
+#plan-marker { width: .85rem; height: .85rem; border-radius: 100%; background: conic-gradient(var(--brand) var(--verified),var(--line) 0); mask-image: radial-gradient(circle,transparent 44%,black 48%); }
+#plan-open { margin-left: auto; border: 0; padding: 0 .2rem; color: var(--muted); background: transparent; font-size: .79rem; }
+.work-threads, .team-title { margin-top: 1rem; }
+.work-threads h2,.team-title { font-size: .88rem; }
+.work-threads button { width: 100%; display: grid; grid-template-columns: .5rem minmax(0,1fr) auto; align-items: baseline; text-align: left; gap: .44rem; border-radius: .55rem; margin-top: .48rem; padding: .58rem .7rem; color: var(--ink); }
+.thread-dot { width: .45rem; height: .45rem; border-radius: 50%; background: var(--muted); }
+.thread-open { background: #568be0; }
+.work-threads button strong,.work-threads button small { display: block; }
+.work-threads button small { margin-top: .16rem; color: var(--muted); font-size: .77rem; font-weight: 500; }
+.work-threads button > span:last-child { color: var(--muted); }
+.team-main { display: flex; gap: .62rem; align-items: center; }
+.team-main .avatar { width: 2.5rem; height: 2.5rem; font-size: .9rem; }
+.main-card { background: var(--surface); margin-top: .4rem; }
+.team-chips { display: flex; flex-wrap: wrap; margin: .44rem 0 .1rem; gap: .42rem; }
+.team-chips button { display: inline-flex; gap: .34rem; align-items: center; font-size: .78rem; font-weight: 550; min-height: 1.9rem; border-radius: .42rem; padding: .19rem .44rem .19rem .23rem; max-width: 100%; }
+@media (max-width: 26rem) {
+  #scope { float: none; margin-left: 0; }.project-meta { width: 100%; }.team-main .avatar { width: 2rem; height: 2rem; }.meta-row { grid-template-columns: minmax(0,1fr) auto; }.meta-row .link-action { max-width: 6.5rem; }
+}
+#header-main { color: var(--brand); font-size: .7rem; min-height: 1.48rem; padding: 0 .38rem; border-radius: .35rem; border-color: var(--main-line); }
+#header-main::before { content: ''; display: inline-block; width: .33rem; height: .33rem; background: currentColor; border-radius: 50%; margin: 0 .28rem .1rem 0; }
 [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <div class="cluster"><span class="brand" aria-hidden="true">M</span><h1>OMS</h1></div>
+    <div class="cluster wordmark"><span class="brand" aria-hidden="true"><i></i><i></i><i></i><i></i></span><h1>OMS</h1></div>
     <button id="refresh" type="button" disabled>새로고침</button>
   </header>
   <div id="scope" class="cluster" hidden>
@@ -142,7 +208,7 @@ a { color: var(--brand); text-underline-offset: .18em; }
   <p id="status" role="status">OMS 연결 중…</p>
   <p id="receipt" role="status"></p>
   <div id="view" hidden>
-    <div class="cluster project-line"><h2 id="project"></h2><p id="branch"></p><time id="updated"></time></div>
+    <div class="project-line"><strong id="project"></strong><button id="header-main" type="button" hidden></button><span class="project-meta"><span id="branch"></span><time id="updated"></time></span></div>
     <nav class="tabs" role="tablist" aria-label="프로젝트 보기">
       <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview">개요</button>
       <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1">대화</button>
@@ -151,16 +217,30 @@ a { color: var(--brand); text-underline-offset: .18em; }
       <button id="tab-git" role="tab" aria-selected="false" aria-controls="pane-git" tabindex="-1">Git · PR</button>
     </nav>
     <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <section id="approval-card" class="card" aria-labelledby="approvals-heading">
+      <h2 id="approvals-heading">승인 요청</h2><p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
+    </section>
+    <section class="card" id="goal-card" aria-labelledby="goal-heading">
+      <h2 id="goal-heading" class="section-label">프로젝트 목표</h2><p id="goal"></p>
+      <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
+    </section>
+    <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
+      <h2 id="leads-heading"><span id="work-dot" class="work-dot" aria-hidden="true" hidden></span>작업방 Lead 활동</h2><div id="leads" class="leads"></div>
+    </section>
+    <section id="plan-strip" class="card plan-strip" aria-label="프로젝트 작업 검증" hidden>
+      <span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted">계획 작업 검증</span>
+      <button id="plan-open" type="button">계획 보기 ›</button>
+    </section>
+    <section class="work-threads" id="work-threads" hidden><h2>작업 대화</h2><div id="thread-rows"></div></section>
+    <h2 class="team-title">작업방 팀</h2>
     <section class="card main-card" aria-labelledby="current-main">
-      <div class="meta-row"><div><p class="muted">현재 대화의 Overall Main</p><h2 id="current-main"></h2></div>
+      <div class="meta-row"><div class="team-main"><span id="main-avatar" class="avatar" aria-hidden="true" hidden></span><div><p class="muted">이 대화의 Main</p><h2 id="current-main"></h2></div></div>
         <button class="link-action" id="main-chat" type="button" hidden>Main 대화 보기</button></div><p id="main-state"></p>
       <dl class="identity" id="identity">
         <dt>작업방</dt><dd id="room"></dd><dt>참여자</dt><dd id="participant"></dd>
       </dl>
-      <section class="leads-region" id="room-leads" aria-labelledby="leads-heading">
-        <h3 id="leads-heading">이 작업방의 Lead</h3><div id="leads" class="leads"></div>
-      </section>
     </section>
+    <div id="team-region" hidden><div id="team-chips" class="team-chips" aria-label="참여자 대화"></div></div>
     <details id="launcher" class="card"><summary>별도 Main에 새 목표 전달</summary>
     <form id="launch">
       <fieldset id="controls"><legend>새 Main 선택</legend>
@@ -175,27 +255,21 @@ a { color: var(--brand); text-underline-offset: .18em; }
         <button class="primary" id="start" type="submit">목표 전달</button>
       </fieldset>
     </form></details>
-    <div class="columns">
-    <section class="card" aria-labelledby="approvals-heading">
-      <h2 id="approvals-heading">프로젝트 승인 대기</h2><p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
-    </section>
     <section class="card" aria-labelledby="progress">
-      <h2 id="progress">프로젝트 전체 기록</h2>
+      <div class="between"><h2 id="progress">프로젝트 전체 기록</h2><span id="approval-idle" class="muted" role="status"></span></div>
       <dl class="metrics">
         <div><dt>종료 기록 없는 시도</dt><dd id="active"></dd></div>
         <div><dt>계획된 작업</dt><dd id="tasks"></dd></div>
         <div><dt>현재 상태</dt><dd id="taskStatus"></dd></div>
       </dl>
-      <h3>기록된 목표</h3><p id="goal"></p>
       <div class="evidence">
-        <h3>검증 현황</h3><p id="criteria"></p><p id="reviews" class="muted"></p>
+        <p id="reviews" class="muted"></p>
       </div>
       <details class="history"><summary>프로젝트 Main·Lead 기록</summary><ul id="repo-team"></ul></details>
       <details class="history"><summary>최근 보관된 결과물</summary><ul id="operations"></ul></details>
       <details class="history"><summary>최근 실행 기록</summary><ul id="activity"></ul></details>
       <details class="history" id="alerts"><summary>확인이 필요한 항목</summary><ul id="attention"></ul></details>
     </section>
-    </div>
     </div>
     <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
       <div class="detail-title"><h2>작업방 대화</h2><button id="chat-back" type="button" hidden>이전 보기로</button></div>
@@ -462,6 +536,8 @@ function node(tag, text, className) {
 
 const formatCount = n => Number.isFinite(n) ? n.toLocaleString('ko-KR') : '미확인';
 const providerName = p => names[p] || p || '공급자 미확인';
+const stateLabels = {working:'작업 중',starting:'시작 중',verifying:'검증 중',review:'검토 중',in_review:'검토 중',done:'완료',blocked:'차단됨',waiting_for_input:'입력 대기'};
+const stateLabel = s => Object.hasOwn(stateLabels,s) ? stateLabels[s] : s;
 function dateLabel(stamp) {
   const ms = typeof stamp === 'number' ? stamp * 1000 : Date.parse(stamp);
   return Number.isFinite(ms) ? new Date(ms).toLocaleString() : '';
@@ -597,9 +673,18 @@ function render(d) {
   dashboardData = d;
   el('git-local').textContent = localGit(d.git);
   el('project').textContent = d.project || 'OMS 프로젝트';
+  const measured = (n,total) => Number.isSafeInteger(n) && Number.isSafeInteger(total) && total > 0 && n >= 0 && n <= total;
+  const bar = el('acceptance-bar'), criteria = d.acceptance;
+  bar.hidden = !criteria?.available || !measured(criteria.verified,criteria.total);
+  if (!bar.hidden) { bar.max = criteria.total; bar.value = criteria.verified; }
+  el('plan-strip').hidden = !measured(d.tasksVerified,d.tasks);
+  if (!el('plan-strip').hidden) {
+    el('plan-ratio').textContent = d.tasksVerified + ' / ' + d.tasks;
+    el('plan-marker').setAttribute('style','--verified:' + (100 * d.tasksVerified / d.tasks) + '%');
+  }
   el('branch').textContent = d.branch || '';
   el('goal').textContent = d.goal || '기록된 목표 없음';
-  for (const key of ['active','tasks','taskStatus']) el(key).textContent = d[key] ?? '정보 없음';
+  for (const key of ['active','tasks','taskStatus']) el(key).textContent = (key === 'taskStatus' ? stateLabel(d[key]) : d[key]) ?? '정보 없음';
   const list = el('attention');
   list.replaceChildren();
   for (const item of d.attention || []) {
@@ -625,6 +710,9 @@ function clearProject() {
   members = []; tuiPages = []; el('tui-view').value = '';
   for (const id of ['chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows']) el(id).replaceChildren();
   for (const id of ['main-chat','chat-back','chat-older','tui-next','tui-prev']) el(id).hidden = true;
+  el('approval-card').className = 'card'; el('approval-card').hidden = false;
+  for (const id of ['thread-rows','team-chips','approval-idle']) el(id).replaceChildren();
+  for (const id of ['work-threads','team-region','plan-strip','acceptance-bar','header-main']) el(id).hidden = true;
   showTab('overview'); tabScroll.clear();
   updateContext(null);
   retryStart = undefined;
@@ -876,17 +964,55 @@ function loadTui(page = tuiPages.at(-1) || 1) {
     el('tui-prev').disabled = el('tui-next').disabled = false; loaded.add('tui');
   },error => { status.textContent = error.message; el('tui-prev').disabled = el('tui-next').disabled = false; });
 }
-el('tui-view').addEventListener('change', () => {
+function resetTui() {
   jobs.delete('tui'); loaded.delete('tui'); tuiPages = []; tuiNext = null;
   el('tui-rows').replaceChildren(); el('tui-status').textContent = '';
-  el('tui-prev').hidden = el('tui-next').hidden = true; loadTui();
+  el('tui-prev').hidden = el('tui-next').hidden = true;
+}
+el('tui-view').addEventListener('change', () => { resetTui(); loadTui(); });
+el('plan-open').addEventListener('click', () => {
+  if (el('tui-view').value !== 'plan') { el('tui-view').value = 'plan'; resetTui(); }
+  showTab('activity',true);
 });
 el('tui-next').addEventListener('click', () => { if (tuiNext != null) loadTui(tuiNext); });
 el('tui-prev').addEventListener('click', () => { if (tuiPages.length > 1) loadTui(tuiPages.at(-2)); });
 
+function paintAvatar(element, person) {
+  const provider = String(person.provider || '').toLowerCase();
+  element.className = 'avatar' + (Object.hasOwn(names,provider) ? ' avatar-' + provider : '');
+  element.textContent = ({codex:'Cx',claude:'Cl',agy:'Ag',antigravity:'Ag',pi:'Pi'})[provider] || '·';
+  element.setAttribute('aria-hidden','true');
+}
+function renderTeam(d) {
+  const chips = el('team-chips'), threads = el('thread-rows');
+  chips.replaceChildren(); threads.replaceChildren();
+  el('team-region').hidden = !members.length;
+  const seen = new Set();
+  const history = [...(d.activeAttempts || []),...(d.attempts || [])];
+  for (const person of members) {
+    const chip = action('',() => selectMember(person,chip));
+    const avatar = node('span',''); paintAvatar(avatar,person);
+    chip.append(avatar,node('span',person.participant));
+    chip.setAttribute('aria-label',memberLabel(person) + ' 대화 열기'); chips.append(chip);
+  }
+  for (const record of history) {
+    if (!record.task || !record.participant || seen.has(record.participant)) continue;
+    const member = members.find(m => m.room === record.room && m.participant === record.participant);
+    if (!member) continue;
+    seen.add(member.participant);
+    const row = action('',() => selectMember(member,row));
+    const dot = node('span','',(d.activeAttempts || []).includes(record) ? 'thread-dot thread-open' : 'thread-dot');
+    const content = node('span','');
+    content.append(node('strong',record.task),node('small',[providerName(member.provider),member.participant,stateLabel(record.state)].filter(Boolean).join(' · ')));
+    const arrow = node('span','›'); arrow.setAttribute('aria-hidden','true');
+    row.append(dot,content,arrow); row.setAttribute('aria-label',record.task + ' · ' + member.participant + ' 대화 열기');
+    threads.append(row);
+  }
+  el('work-threads').hidden = !seen.size;
+}
 function renderConversation(d) {
   const main = d.conversationMain;
-  const joined = main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
+  const joined = (!d.conversationBinding || d.conversationBinding === 'matched') && main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
   const current = el('current-main');
   current.textContent = joined ? '' : 'Main 미확인';
   if (joined) { const label = node('label',names[main.provider] + ' Main'); label.htmlFor = 'main-chat'; current.append(label); }
@@ -903,7 +1029,16 @@ function renderConversation(d) {
     selectedMember = members.find(m => memberKey(m) === memberKey(selectedMember));
     if (!selectedMember) clearChat();
   }
-  renderMemberList();
+  renderMemberList(); renderTeam(d);
+  el('main-avatar').hidden = !joined;
+  if (joined) paintAvatar(el('main-avatar'),main);
+  const headerMain = el('header-main');
+  headerMain.hidden = !joined;
+  if (joined) {
+    headerMain.textContent = providerName(main.provider) + ' Main';
+    headerMain.setAttribute('aria-label','이 대화의 ' + headerMain.textContent + ' 작업방 대화 보기');
+  }
+  headerMain.onclick = joined ? () => selectMember(members.find(m => m.participant === main.participant),headerMain) : null;
   const mainChat = el('main-chat');
   mainChat.hidden = !joined;
   mainChat.setAttribute('aria-label',joined ? names[main.provider] + ' Main 작업방 대화 보기' : 'Main 대화 보기');
@@ -914,14 +1049,15 @@ function renderConversation(d) {
   const active = d.activeAttempts || [];
   const complete = Array.isArray(d.activeAttempts) && !(d.activeAttemptsTrimmed > 0) && d.active === active.length;
   const roomLeads = active.filter(attempt => attempt.room === main.room && isLead(attempt));
+  el('work-dot').hidden = !roomLeads.length;
   if (!roomLeads.length) {
-    cards.append(node('p', complete ? '미종료 Lead 기록 없음' : '조회한 기록에서 이 작업방의 Lead를 확인하지 못했습니다.', 'muted'));
+    cards.append(node('p', complete ? '미종료 Lead 기록 없음' : '조회한 기록에서 작업방의 미종료 Lead를 확인하지 못했습니다.', 'muted'));
     return;
   }
-  const providerName = attempt => names[attempt.provider] || attempt.provider || '공급자 미확인';
-  for (const provider of new Set(roomLeads.map(providerName))) {
+  const leadProvider = attempt => providerName(attempt.provider);
+  for (const provider of new Set(roomLeads.map(leadProvider))) {
     const card = node('article', '', 'lead');
-    const group = roomLeads.filter(attempt => providerName(attempt) === provider);
+    const group = roomLeads.filter(attempt => leadProvider(attempt) === provider);
     const person = group.every(a => a.participant === group[0].participant) ? members.find(m => m.participant === group[0].participant) : null;
     const heading = node('h4',person ? '' : provider + ' Lead');
     if (person) {
@@ -930,7 +1066,7 @@ function renderConversation(d) {
     }
     card.append(heading);
     for (const lead of group) {
-      card.append(node('p', [lead.state || '상태 미확인', lead.task || lead.id].filter(Boolean).join(' · '), 'muted'));
+      card.append(node('p', [stateLabel(lead.state) || '상태 미확인', lead.task || lead.id].filter(Boolean).join(' · '), 'muted'));
       const member = members.find(m => m.participant === lead.participant);
       if (member && !person) { const button = action(member.participant + ' 대화', () => selectMember(member,button)); card.append(button); }
     }
@@ -1013,11 +1149,15 @@ function renderActivity(d) {
 }
 
 function renderApprovals(rows, incomplete) {
+  const card = el('approval-card');
+  card.className = rows.length ? 'card awaiting-action' : 'card';
+  card.hidden = !rows.length && !incomplete;
+  el('approvals-heading').textContent = rows.length ? '승인 요청 ' + rows.length + '건' : '승인 목록';
   const list = el('approvals');
   const expected = generation;
   list.replaceChildren();
   if (incomplete) list.append(node('p', '승인 목록을 일부만 조회했습니다.', 'muted'));
-  else if (!rows.length) list.append(node('p', '대기 중인 승인 없음', 'muted'));
+  el('approval-idle').textContent = !incomplete && !rows.length ? '대기 중인 승인 없음' : '';
   for (const row of rows) {
     const details = document.createElement('details');
     details.className = 'approval';
@@ -1128,7 +1268,11 @@ async function loadStatus(expected, recover = true) {
       if (!Array.isArray(approvals)) throw new Error('승인 목록 응답을 읽을 수 없습니다.');
       renderApprovals(approvals, response.structuredContent.incomplete);
     } catch (error) {
-      if (expected === generation) el('approvals').replaceChildren(node('p', error.message, 'error'));
+      if (expected === generation) {
+        el('approval-card').className = 'card'; el('approval-card').hidden = false;
+        el('approvals-heading').textContent = '승인 목록'; el('approval-idle').textContent = '';
+        el('approvals').replaceChildren(node('p', error.message, 'error'));
+      }
     } finally {
       if (expected === generation) el('approval-progress').textContent = '';
     }

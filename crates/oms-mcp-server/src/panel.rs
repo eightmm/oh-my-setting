@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v5.html";
+const URI: &str = "ui://oms/conversation-panel/v6.html";
+const V5: &str = "ui://oms/conversation-panel/v5.html";
 const V4: &str = "ui://oms/conversation-panel/v4.html";
 const V3: &str = "ui://oms/conversation-panel/v3.html";
 const V1: &str = "ui://oms/conversation-panel/v1.html";
@@ -395,7 +396,9 @@ impl Server<'_> {
             "resources/list" => {
                 json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
             }
-            "resources/read" if matches!(params["uri"].as_str(), Some(URI | V1 | V2 | V3 | V4)) => {
+            "resources/read"
+                if matches!(params["uri"].as_str(), Some(URI | V1 | V2 | V3 | V4 | V5)) =>
+            {
                 json!({"contents":[{
                     "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
                     "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}
