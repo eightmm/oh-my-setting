@@ -213,13 +213,20 @@ chat returned `unknown MCP server 'oms-panel'` for both the resource and
 `oms_open_panel`. Reloading the executor’s MCP configuration left that chat
 in the same state.
 
-Open a **new chat in the same project** after enabling the plugin, then select
-the tab there. A fresh isolated Codex app-server conversation successfully
-read the preview HTML and called its opener in this setup. To diagnose a
-specific thread, compare its named `mcpServerStatus/list` and
+To recover the **same conversation**, the executor operator re-registered
+the already-enabled, identical local package using `plugin/install` on the
+running app-server with its registered `marketplacePath` and `pluginName`.
+The existing thread could immediately read the HTML, call `oms_open_panel`
+and retrieve its project snapshot. The source, cached package, marketplace and
+user configuration kept their original contents. Reopen the tab to retry the
+view. A new chat in the same project after registration also worked in an
+isolated app-server test.
+
+To diagnose a specific thread, compare its named `mcpServerStatus/list` and
 `mcpServer/resource/read` results with the host-wide results. Use the server
-name advertised by that plugin. Once the OMS heading appears, a status error
-inside the panel is a separate project-binding or runtime query to diagnose.
+name and environment advertised by that plugin. A rendered panel showing
+degraded data has reached OMS. Its status describes collection on the project
+host.
 
 ### Register a marketplace once
 

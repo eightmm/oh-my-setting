@@ -261,13 +261,27 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
+    assert_eq!(uri, "ui://oms/conversation-panel/v2.html");
+    let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
+    assert_eq!(resources.as_array().unwrap().len(), 1);
+    assert_eq!(resources[0]["uri"], *uri);
+    let read = |c: &mut Client, uri: &Value| {
+        c.call("resources/read", json!({"uri":uri}))["result"]["contents"][0].clone()
+    };
+    let current = read(&mut c, uri);
+    assert_eq!(current["uri"], *uri);
+    assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
+    let historical_uri = json!("ui://oms/conversation-panel/v1.html");
+    let historical = read(&mut c, &historical_uri);
+    assert_eq!(historical["uri"], historical_uri);
+    assert_eq!(historical["text"], current["text"]);
+    assert_eq!(historical["mimeType"], current["mimeType"]);
     assert_eq!(
-        c.call("resources/list", json!({}))["result"]["resources"][0]["uri"],
-        *uri
-    );
-    assert_eq!(
-        c.call("resources/read", json!({"uri":uri}))["result"]["contents"][0]["mimeType"],
-        "text/html;profile=mcp-app"
+        c.call(
+            "resources/read",
+            json!({"uri":"ui://oms/conversation-panel/unrecognized.html"})
+        )["error"]["code"],
+        -32602
     );
     assert!(c.tool("oms_open_panel", json!({}))["result"].is_object());
     assert!(c.tool("oms_peer_start", json!({}))["error"].is_object());

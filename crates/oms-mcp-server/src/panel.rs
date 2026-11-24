@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v1.html";
+const URI: &str = "ui://oms/conversation-panel/v2.html";
+const LEGACY_URI: &str = "ui://oms/conversation-panel/v1.html";
 const OPEN: &str = "oms_open_panel";
 const PROJECTS: &str = "oms_list_projects";
 const SNAPSHOT: &str = "oms_panel_snapshot";
@@ -326,10 +327,12 @@ impl Server<'_> {
             "resources/list" => {
                 json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
             }
-            "resources/read" if params["uri"] == URI => json!({"contents":[{
-                "uri":URI,"mimeType":MIME,"text":include_str!("conversation-panel.html"),
-                "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}
-            }]}),
+            "resources/read" if matches!(params["uri"].as_str(), Some(URI | LEGACY_URI)) => {
+                json!({"contents":[{
+                    "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
+                    "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}
+                }]})
+            }
             "resources/read" => return error(id, -32602, "unknown panel resource"),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
