@@ -1360,6 +1360,52 @@ anything. Tune with `OMS_STALL_WINDOW`, `OMS_STALL_ERROR_REPEAT`,
 default 86400); `0` disables a rule or the age cutoff. The ledger records
 failures and the pass that resolves one, not every command, so "same action,
 same successful result" repeats cannot be seen there.
+
+Native `agent-task verify` observations carry a `verification` object
+in the existing schema-2 ledger. Its scope is
+`agent-task-reference-v1`: the active packet task ID, exact command digest,
+actual snapshot and outcome reference-operation attempt IDs, and hashes of the
+packet bytes each operation published. An accepted outcome additionally retains
+the verified repository state. These reference operations are not worker or Lead
+attempts. A failure has `result: failed`; a successful observation is emitted only
+after the final receipt and reference finish are accepted.
+
+Before execution, the native observer selects up to 128 canonical failure-row
+hashes for the same active task and exact command. The final append rechecks those
+identities; another task's failure or a failure appended during the rerun is not
+added to `prior_failures`. An empty list means no matching native failures were
+observed; `null` means the source was unavailable, invalid, over the bound, or
+changed so the selected identities could not be confirmed. Native passes append
+the additive `verified` event while any open row lacks exact accepted evidence;
+this is an accepted observation, not a new failure or a command-wide resolution.
+Exact observations can accumulate across tasks. Only when every currently open
+row is covered does a native pass append `resolved`. Retry guards, state views
+and memory therefore keep an unrelated or later failure open. Counts remain
+conservative at fingerprint scope until that aggregate closes. Legacy failures
+without identity remain advisory and require explicit manual resolution.
+
+Manual CLI `resolve` keeps its established command-wide scope. JSON views expose
+the latest failure's `verification`/`failure_sha256` separately from the last
+`resolution_verification` and its explicit prior hashes. The ledger retains
+schema 2; readers must understand the additional `verified` event for complete
+views. Partial receipts use `observed_fingerprint` for the exact ledger subject.
+Legacy memory clients interpret a top-level `fingerprint` as an update to the
+failure's open/closed status. Keeping that key on fail and resolved records
+preserves manual resolutions even when an older memory client reads a later
+partial receipt. Current readers also accept previously written `verified`
+rows with `fingerprint`. An older strict state reader counts a partial receipt
+as invalid and refuses ledger compaction. Upgrade state and bundle readers for
+complete evidence and retention, without migrating existing rows.
+
+Attempt bundles match these native reference IDs even outside the timestamp
+window and label them `native-reference-attempt`. Other included rows are
+`time-window-only` candidates when the ledger contains native correlations;
+legacy-only bundles retain their original warning and bytes. The recorded action
+is a verification rerun. The chain proves neither the cause of a repair nor
+success in another environment or current tree, and does not grant memory review,
+task completion, or execution authority. There is no CLI option for supplying
+accepted evidence. Existing memory review, hygiene and supersede/retire apply.
+
 `oms agent-memory recall` and `search` also cover the failure ledger. An open
 failure carries its recorded next step (`record --next`), and the newest failure
 of a resolved fingerprint carries how it was fixed (`resolve --how`), each as one

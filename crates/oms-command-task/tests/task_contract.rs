@@ -52,8 +52,12 @@ enum VerifyRace {
 
 struct Op {
     interfere: bool,
+    attempt: String,
 }
 impl ReferenceOperation for Op {
+    fn attempt_id(&self) -> Option<&str> {
+        Some(&self.attempt)
+    }
     fn validate(&mut self, request: &ReferenceWrite<'_>) -> Result<()> {
         if self.interfere {
             assert_eq!(
@@ -83,6 +87,7 @@ struct Fake {
     resolve_saw_receipt: Vec<bool>,
     references: usize,
     verify_race: Option<VerifyRace>,
+    snapshots: Vec<(String, String)>,
 }
 impl Services for Fake {
     fn state_repository(&mut self, work: &Path, _: &AtomicBool) -> Result<PathBuf> {
@@ -114,6 +119,7 @@ impl Services for Fake {
         }
         Ok(Box::new(Op {
             interfere: matches!(race, Some(VerifyRace::Publication)),
+            attempt: format!("reference-{}", self.references),
         }))
     }
     fn observe_journal(&mut self, request: JournalObservation<'_>) -> Result<()> {
@@ -124,10 +130,58 @@ impl Services for Fake {
         self.memory += 1;
         Ok(())
     }
+    fn failure_candidates(
+        &mut self,
+        repo: &Path,
+        id: &[u8],
+        command: &[u8],
+    ) -> Result<Vec<String>> {
+        use sha2::{Digest, Sha256};
+        let raw = std::fs::read(repo.join(".oms/task/current.md")).unwrap();
+        assert_eq!(packet::metadata(&raw, "task_id"), Some(id));
+        assert_eq!(packet::command(&raw), command);
+        self.snapshots.push((
+            format!("reference-{}", self.references),
+            format!("{:x}", Sha256::digest(&raw)),
+        ));
+        Ok(vec!["a".repeat(64)])
+    }
     fn observe_failure(&mut self, request: FailureObservation<'_>) -> Result<Vec<u8>> {
+        use sha2::{Digest, Sha256};
         self.failure_calls.push(request.exit);
+        let raw = std::fs::read(request.repo.join(".oms/task/current.md")).unwrap();
+        let evidence = request
+            .verification
+            .expect("native task must carry the actual published evidence");
+        assert_eq!(
+            Some(evidence.active_task_id()),
+            packet::metadata(&raw, "task_id")
+        );
+        assert_eq!(
+            evidence.command_sha256(),
+            oms_command_task::command_hash(request.command)
+        );
+        assert_eq!(
+            evidence.outcome_sha256(),
+            format!("{:x}", Sha256::digest(&raw))
+        );
+        let (snapshot_attempt, snapshot_hash) = self.snapshots.last().unwrap();
+        assert_eq!(
+            evidence.snapshot_attempt_id(),
+            Some(snapshot_attempt.as_str())
+        );
+        assert_eq!(evidence.snapshot_sha256(), snapshot_hash);
+        assert_eq!(
+            evidence.outcome_attempt_id(),
+            Some(format!("reference-{}", self.references).as_str())
+        );
+        assert_ne!(
+            evidence.snapshot_attempt_id(),
+            evidence.outcome_attempt_id()
+        );
+        assert_eq!(evidence.verified_state().is_some(), request.exit == 0);
+        assert_eq!(evidence.prior_failures(), Some(["a".repeat(64)].as_slice()));
         if request.exit == 0 {
-            let raw = std::fs::read(request.repo.join(".oms/task/current.md")).unwrap();
             self.resolve_saw_receipt.push(
                 packet::metadata(&raw, "status") == Some(b"verified".as_slice())
                     && ["verified_state", "verified_cmd_sha"].iter().all(|key| {
@@ -266,6 +320,7 @@ fn lifecycle_init_update_append_verify_close() {
     assert_eq!(code, 7, "{err}");
     assert_eq!(svc.failure_calls, [7]);
     assert!(svc.resolve_saw_receipt.is_empty());
+    assert_eq!(svc.snapshots.len(), 1);
     let body = std::fs::read(&packet).unwrap();
     assert_eq!(
         packet::metadata(&body, "status"),
@@ -281,11 +336,17 @@ fn lifecycle_init_update_append_verify_close() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("verification skipped; task remains active"));
     assert_eq!(svc.failure_calls, [7]);
+    assert_eq!(
+        svc.snapshots.len(),
+        1,
+        "skip never selects recovery candidates"
+    );
 
     let (code, _, err) = call(&repo, &mut svc, &["verify", "--verify", "true"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(svc.failure_calls, [7, 0]);
     assert_eq!(svc.resolve_saw_receipt, [true]);
+    assert_eq!(svc.snapshots.len(), 2);
     let (code, _, err) = call(&repo, &mut svc, &["close"]);
     assert_eq!(code, 0, "{err}");
     assert!(!packet.exists());

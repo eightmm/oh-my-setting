@@ -1041,29 +1041,35 @@ fn verify(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<i32> {
-    let (id, command) = task.operation(services, |reference| {
-        let raw = task
-            .store
-            .read()?
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| Error::new(2, "no active task"))?;
-        let body = packet::status(
-            task.apply(task.initialize(Some(raw.clone())))?,
-            "active",
-            &now(),
-        );
-        let id = packet::metadata(&body, "task_id")
-            .unwrap_or_default()
-            .to_vec();
-        let command = packet::command(&body);
-        task.publish(
-            "agent_task_verify_snapshot_unlocked",
-            Some(&raw),
-            &body,
-            reference,
-        )?;
-        Ok((id, command))
-    })?;
+    let (id, command, snapshot_sha256, snapshot_attempt_id) =
+        task.operation(services, |reference| {
+            let raw = task
+                .store
+                .read()?
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| Error::new(2, "no active task"))?;
+            let body = packet::status(
+                task.apply(task.initialize(Some(raw.clone())))?,
+                "active",
+                &now(),
+            );
+            let id = packet::metadata(&body, "task_id")
+                .unwrap_or_default()
+                .to_vec();
+            let command = packet::command(&body);
+            task.publish(
+                "agent_task_verify_snapshot_unlocked",
+                Some(&raw),
+                &body,
+                reference,
+            )?;
+            Ok((
+                id,
+                command,
+                hash(&body),
+                reference.attempt_id().map(str::to_owned),
+            ))
+        })?;
     if task.options.has("skip-verify-run") {
         let note = [
             b"command: ".as_slice(),
@@ -1103,6 +1109,7 @@ fn verify(
             "task has no stored Verify command; set one with --verify or use --skip-verify-run REASON",
         ));
     }
+    let prior_failures = services.failure_candidates(&task.repo, &id, &command).ok();
     let start = utc();
     let mut process = Command::new("bash");
     process
@@ -1141,24 +1148,37 @@ fn verify(
     }
     // Preserve the existing two receipt legs: the outcome is first recorded
     // active; only the successful CAS adds fresh state and command receipts.
-    finalize(task, services, &id, &note, None)?;
+    let mut outcome = finalize(task, services, &id, &note, None)?;
+    let mut verified_state = None;
     if result.exit == 0 {
         let fingerprint = git::state_fingerprint(&task.repo, task.interrupted)?;
-        finalize(
+        outcome = finalize(
             task,
             services,
             &id,
             &note,
             Some((&fingerprint, &git::command_hash(&command))),
         )?;
+        verified_state = Some(fingerprint);
     }
     // Resolve advisory failures only after the successful receipt is accepted.
     let summary = failure_summary(&result.tail);
+    let verification = services::VerificationEvidence {
+        active_task_id: id,
+        snapshot_attempt_id,
+        snapshot_sha256,
+        outcome_attempt_id: outcome.attempt_id,
+        outcome_sha256: outcome.sha256,
+        command_sha256: git::command_hash(&command),
+        verified_state,
+        prior_failures,
+    };
     match services.observe_failure(FailureObservation {
         repo: &task.repo,
         command: &command,
         exit: result.exit,
         summary: &summary,
+        verification: Some(&verification),
     }) {
         Ok(advisory) => {
             if !advisory.is_empty() {
@@ -1212,13 +1232,17 @@ fn verify(
     }
     Ok(0)
 }
+struct PublishedOutcome {
+    sha256: String,
+    attempt_id: Option<String>,
+}
 fn finalize(
     task: &Task<'_>,
     services: &mut dyn Services,
     id: &[u8],
     note: &[u8],
     receipts: Option<(&str, &str)>,
-) -> Result<()> {
+) -> Result<PublishedOutcome> {
     task.operation(services,|reference|{
         let raw=task.store.read()?.ok_or_else(||Error::new(4,"task rotated during verification; outcome was not recorded"))?;
         if packet::metadata(&raw,"task_id")!=Some(id){return Err(Error::new(4,"task rotated during verification; outcome belongs to the retired packet and was not recorded"));}
@@ -1230,7 +1254,8 @@ fn finalize(
             if git::state_fingerprint(&task.repo,task.interrupted)?!=state{return Err(Error::new(4,"repository changed before verification receipt; pass was not recorded"));}
             body=packet::set_metadata(&body,"verified_state",state.as_bytes());body=packet::set_metadata(&body,"verified_cmd_sha",command.as_bytes());body=packet::status(body,"verified",&now());
         }
-        task.publish("agent_task_verify_finalize_unlocked",Some(&raw),&body,reference)
+        task.publish("agent_task_verify_finalize_unlocked",Some(&raw),&body,reference)?;
+        Ok(PublishedOutcome { sha256: hash(&body), attempt_id: reference.attempt_id().map(str::to_owned) })
     })
 }
 fn failure_summary(raw: &[u8]) -> Vec<u8> {
