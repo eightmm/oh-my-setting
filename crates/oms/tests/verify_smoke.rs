@@ -260,6 +260,14 @@ fn run_seeded_trial(root: &Path, name: &str, seed: u64) -> (Vec<String>, i64, i6
 
 #[test]
 fn verify_core_e2e() {
+    // Root `./verify` sets `OMS_VERIFY_DEFER_CORE_E2E=1` during its workspace
+    // `unit_integration` stage so this real CLI smoke runs once in dedicated
+    // `core_e2e` (which leaves the variable unset and requires a non-empty
+    // `OMS_VERIFY_REPORT`). Direct Cargo and hosted CI runs leave it unset.
+    if std::env::var_os("OMS_VERIFY_DEFER_CORE_E2E").is_some_and(|v| v == "1") {
+        return;
+    }
+
     let seed: u64 = std::env::var("OMS_VERIFY_SEED")
         .ok()
         .filter(|s| !s.is_empty())
@@ -309,18 +317,21 @@ fn verify_fail_fast_and_zero_test_negative_controls() {
     fs::copy(&verify_src, &verify).expect("copy verify");
     fs::set_permissions(&verify, fs::Permissions::from_mode(0o755)).expect("chmod");
 
-    let run = |args: &[&str]| {
+    let run = |args: &[&str], extra_env: &[(&str, &str)]| {
         let base_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned());
         let mut cmd = Command::new("bash");
         cmd.arg(&verify).args(args);
         configure_private_env(&mut cmd, work.path());
         cmd.env("PATH", format!("{}:{base_path}", bin.display()))
             .env("TMPDIR", work.path());
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         cmd.output().expect("run verify")
     };
 
-    assert_eq!(run(&["--help"]).status.code(), Some(0));
-    assert_eq!(run(&["--bogus"]).status.code(), Some(2));
+    assert_eq!(run(&["--help"], &[]).status.code(), Some(0));
+    assert_eq!(run(&["--bogus"], &[]).status.code(), Some(2));
 
     let m1 = repo.join("lint-ran");
     write_exec(
@@ -331,7 +342,7 @@ fn verify_fail_fast_and_zero_test_negative_controls() {
         &repo.join("scripts/check.sh"),
         &format!("#!/usr/bin/env bash\ntouch '{}'\nexit 0\n", m1.display()),
     );
-    let o1 = run(&[]);
+    let o1 = run(&[], &[]);
     assert_eq!(o1.status.code(), Some(42));
     assert!(String::from_utf8_lossy(&o1.stderr).contains("stage=type") && !m1.exists());
 
@@ -347,19 +358,114 @@ fn verify_fail_fast_and_zero_test_negative_controls() {
         &repo.join("scripts/check.sh"),
         "#!/usr/bin/env bash\nexit 17\n",
     );
-    let o2 = run(&[]);
+    let o2 = run(&[], &[]);
     assert_eq!(o2.status.code(), Some(17));
     assert!(
         String::from_utf8_lossy(&o2.stderr).contains("stage=architecture_lint") && !m2.exists()
     );
 
-    write_exec(&bin.join("cargo"), "#!/usr/bin/env bash\nexit 0\n");
     write_exec(
         &repo.join("scripts/check.sh"),
         "#!/usr/bin/env bash\nexit 0\n",
     );
-    let o3 = run(&[]);
-    let err3 = String::from_utf8_lossy(&o3.stderr);
-    assert_eq!(o3.status.code(), Some(1));
-    assert!(err3.contains("stage=core_e2e") && err3.contains("empty_or_zero_test_smoke_report"));
+    write_exec(
+        &bin.join("cargo"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+defer="${OMS_VERIFY_DEFER_CORE_E2E:-}"
+rep="${OMS_VERIFY_REPORT:+1}"
+case " $* " in
+  *" check --workspace "*)
+    printf 'type defer=%s report=%s\n' "$defer" "$rep" >> "$FAKE_CARGO_LOG"
+    ;;
+  *" test --workspace "*)
+    printf 'unit defer=%s report=%s\n' "$defer" "$rep" >> "$FAKE_CARGO_LOG"
+    [ "${FAKE_CARGO_MODE:-ok}" != "unit_fail" ] || exit 23
+    ;;
+  *" test "*" -p oms --test verify_smoke verify_core_e2e "*)
+    printf 'e2e defer=%s report=%s seed=%s\n' "$defer" "$rep" "${OMS_VERIFY_SEED:-}" >> "$FAKE_CARGO_LOG"
+    [ "${FAKE_CARGO_MODE:-ok}" != "e2e_fail" ] || exit 29
+    if [ "${FAKE_CARGO_MODE:-ok}" = "ok" ] && [ -z "$defer" ] && [ -n "${OMS_VERIFY_REPORT:-}" ]; then
+      printf '{"synthetic":true,"stage":"core_e2e"}\n' > "$OMS_VERIFY_REPORT"
+    fi
+    ;;
+  *)
+    printf 'unexpected:%s\n' "$*" >> "$FAKE_CARGO_LOG"
+    exit 99
+    ;;
+esac
+"#,
+    );
+
+    let log = work.path().join("cargo.log");
+    let log_s = log.to_str().expect("utf8 log");
+
+    let o_ok = run(
+        &["--seed", "42"],
+        &[
+            ("FAKE_CARGO_LOG", log_s),
+            ("FAKE_CARGO_MODE", "ok"),
+            ("OMS_VERIFY_DEFER_CORE_E2E", "1"),
+            ("OMS_VERIFY_REPORT", "/nonexistent/inherited-report.json"),
+        ],
+    );
+    assert_eq!(o_ok.status.code(), Some(0));
+    let out_ok = String::from_utf8_lossy(&o_ok.stdout);
+    assert!(
+        out_ok.contains(r#"{"synthetic":true,"stage":"core_e2e"}"#)
+            && out_ok.contains("verify: stage=core_e2e status=ok")
+    );
+    assert_eq!(
+        fs::read_to_string(&log).expect("read ok log"),
+        "type defer= report=\nunit defer=1 report=\ne2e defer= report=1 seed=42\n"
+    );
+
+    let _ = fs::remove_file(&log);
+    let o_unit = run(
+        &[],
+        &[
+            ("FAKE_CARGO_LOG", log_s),
+            ("FAKE_CARGO_MODE", "unit_fail"),
+            ("OMS_VERIFY_DEFER_CORE_E2E", "0"),
+        ],
+    );
+    assert_eq!(o_unit.status.code(), Some(23));
+    assert!(String::from_utf8_lossy(&o_unit.stderr).contains("stage=unit_integration"));
+    assert_eq!(
+        fs::read_to_string(&log).expect("read unit_fail log"),
+        "type defer= report=\nunit defer=1 report=\n"
+    );
+
+    let _ = fs::remove_file(&log);
+    let o_e2e = run(
+        &[],
+        &[("FAKE_CARGO_LOG", log_s), ("FAKE_CARGO_MODE", "e2e_fail")],
+    );
+    let err_e2e = String::from_utf8_lossy(&o_e2e.stderr);
+    assert_eq!(o_e2e.status.code(), Some(29));
+    assert!(
+        err_e2e.contains("stage=core_e2e") && !err_e2e.contains("empty_or_zero_test_smoke_report")
+    );
+    assert_eq!(
+        fs::read_to_string(&log).expect("read e2e_fail log"),
+        "type defer= report=\nunit defer=1 report=\ne2e defer= report=1 seed=20261123\n"
+    );
+
+    let _ = fs::remove_file(&log);
+    let o_miss = run(
+        &[],
+        &[
+            ("FAKE_CARGO_LOG", log_s),
+            ("FAKE_CARGO_MODE", "missing_report"),
+        ],
+    );
+    let err_miss = String::from_utf8_lossy(&o_miss.stderr);
+    assert_eq!(o_miss.status.code(), Some(1));
+    assert!(
+        err_miss.contains("stage=core_e2e") && err_miss.contains("empty_or_zero_test_smoke_report")
+    );
+    assert_eq!(
+        fs::read_to_string(&log).expect("read missing_report log"),
+        "type defer= report=\nunit defer=1 report=\ne2e defer= report=1 seed=20261123\n"
+    );
 }
