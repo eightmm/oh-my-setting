@@ -278,6 +278,47 @@ struct TestServices;
 struct TestPlanServices;
 struct NoGuard;
 impl PublicationGuard for NoGuard {}
+
+#[cfg(target_os = "linux")]
+const ADMISSION_STARTUP_FAULT: &str = "OMS_CT_ADMISSION_STARTUP_FAULT";
+
+#[cfg(target_os = "linux")]
+struct AdmissionStartupFault {
+    native: oms_reference::controller::Controller,
+    foreground: std::thread::ThreadId,
+    event_path: PathBuf,
+    retained_lock: Option<std::sync::Mutex<Option<oms_command_operations::lock::FileLock>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl oms_reference::controller::ExecutingImage for AdmissionStartupFault {
+    fn verify_current(&self, image: &fs::File) -> oms_reference::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        self.native.check()?;
+        let bound = image.metadata().map_err(|e| e.to_string())?;
+        let live = fs::metadata("/proc/self/exe").map_err(|e| e.to_string())?;
+        assert_eq!((bound.dev(), bound.ino()), (live.dev(), live.ino()));
+        if std::thread::current().id() == self.foreground {
+            return Ok(());
+        }
+        if let Some(retained) = &self.retained_lock {
+            // Scope registration has finished. Keep a real competing lock alive
+            // until the foreground returns and releases its last controller clone.
+            let mut retained = retained.lock().unwrap();
+            if retained.is_none() {
+                *retained = Some(oms_command_operations::lock::FileLock::acquire(
+                    &self.event_path,
+                    &AtomicBool::new(false),
+                )?);
+            }
+        } else if oms_command_operations::lock::runtime_lock_dir(&self.event_path)?.is_dir() {
+            // The native producer acquired the lock and projected the ledger.
+            return Err("fixture stops the initial heartbeat before append".into());
+        }
+        Ok(())
+    }
+}
+
 fn test_group_resolver(
     gid: u32,
 ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
@@ -302,11 +343,34 @@ impl Services for TestServices {
     fn plan(&self) -> Option<&dyn oms_command_plan::Services> {
         Some(&TestPlanServices)
     }
+    #[cfg(target_os = "linux")]
+    fn controller(&self) -> oms_command_landing::Result<oms_reference::controller::Controller> {
+        use oms_reference::controller::Controller;
+        let native = Controller::capture_current()?;
+        let Ok(mode) = std::env::var(ADMISSION_STARTUP_FAULT) else {
+            return Ok(native);
+        };
+        assert!(matches!(mode.as_str(), "lock" | "projection"));
+        Ok(Controller::from_authenticated_descriptor(
+            fs::File::open("/proc/self/exe")?,
+            std::sync::Arc::new(AdmissionStartupFault {
+                native,
+                foreground: std::thread::current().id(),
+                event_path: oms_command_operations::event_path(&std::env::current_dir()?),
+                retained_lock: (mode == "lock").then(|| std::sync::Mutex::new(None)),
+            }),
+        )?)
+    }
     fn supervise(
         &self,
         request: &oms_command_landing::services::VerifyRequest,
         _: &AtomicBool,
     ) -> oms_command_landing::Result<Execution> {
+        #[cfg(target_os = "linux")]
+        assert!(
+            std::env::var_os(ADMISSION_STARTUP_FAULT).is_none(),
+            "an unready reference monitor must block the admission verifier"
+        );
         let started = std::time::Instant::now();
         let out = Command::new(&request.argv[0])
             .args(&request.argv[1..])
@@ -873,6 +937,74 @@ fn patch_admit_runs_locally_without_services() {
     // the private capture lives outside the repository and must be readable
     let (code, out, err) = iso.run("patch-admit", &repo, &["--patch", patch]);
     assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn patch_admit_timeout_stops_before_verification_and_publication() {
+    use std::time::{Duration, Instant};
+    let iso = Isolated::new();
+    for (fault, last_phase, state, events_expected) in [
+        ("projection", "lifecycle-projection-ready", "blocked", 4),
+        ("lock", "initial-heartbeat-started", "working", 3),
+    ] {
+        let repo = iso.repo(fault);
+        let patch = real_patch(&iso, &repo);
+        let patch_bytes = fs::read(repo.join(patch)).unwrap();
+        let report = iso.tmp.join("admission.md");
+        let started = Instant::now();
+        let (code, out, err) = iso.run_with_services(
+            "patch-admit",
+            &repo,
+            &[
+                "--patch",
+                patch,
+                "--report",
+                report.to_str().unwrap(),
+                "--verify",
+                "true",
+            ],
+            &[(ADMISSION_STARTUP_FAULT, fault), ("OMS_LOCK_TIMEOUT", "8")],
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            (Duration::from_millis(1500)..Duration::from_secs(7)).contains(&elapsed),
+            "{fault}: unexpected startup timeout and cleanup duration: {elapsed:?} ({err})"
+        );
+        let phase = format!(
+            "error: reference monitor did not become ready (last_phase={last_phase}, phase_elapsed_ms="
+        );
+        let (reported, disposition) = err
+            .trim_end()
+            .strip_prefix(&phase)
+            .and_then(|detail| detail.split_once(')'))
+            .unwrap_or_else(|| panic!("{err}"));
+        assert!(reported.parse::<u64>().is_ok_and(|ms| ms <= 1500), "{err}");
+        if fault == "lock" {
+            assert!(disposition.contains("lifecycle attempt remains"), "{err}");
+        } else {
+            assert_eq!(disposition, "", "{err}");
+        }
+        assert!(!report.exists());
+        assert!(!repo.join(".oms/artifacts/index.jsonl").exists());
+        assert_eq!(fs::read_dir(&iso.tmp).unwrap().count(), 0);
+        assert_eq!(fs::read(repo.join(patch)).unwrap(), patch_bytes);
+        iso.git(&repo, &["diff", "--exit-code", "HEAD", "--"]);
+
+        let (events, attempts) = oms_command_operations::load_projection(&repo).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].get("tool").text(), Some("patch-admit"));
+        assert_eq!(attempts[0].get("state").text(), Some(state));
+        assert_eq!(events.len(), events_expected);
+        assert!(events.iter().all(|event| {
+            matches!(
+                event.get("event_type").text(),
+                Some("attempt.created" | "attempt.state_changed")
+            )
+        }));
+    }
 }
 
 #[test]

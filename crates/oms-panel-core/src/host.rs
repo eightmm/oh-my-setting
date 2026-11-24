@@ -188,7 +188,7 @@ pub fn absent<S: crate::Services + ?Sized>(
         .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
         || !crate::hex(refs["panel_socket_digest"].as_str().unwrap_or_default(), 64)
     {
-        return Ok(false);
+        return Ok(crate::release::boot_changed(refs, "wrapper"));
     }
     if crate::release::identity_gone(refs, "tmux_server") {
         return Ok(true);

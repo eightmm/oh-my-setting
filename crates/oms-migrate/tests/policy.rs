@@ -102,6 +102,35 @@ fn rust_suppressions_must_be_typed_outside_literals_and_fixture_directories() {
             "crates/x/src/y.rs:5: #[allow(clippy::needless_return)] allows clippy::needless_return; add a reason-bearing #[expect(clippy::needless_return, reason = \"...\")] or fix the code; extending the allowlist in policy.rs needs review",
         ]
     );
+    for reason in [
+        r#""""#,
+        "\" \u{2003} \t\"",
+        r#"" \t\r\n ""#,
+        r#""\x20\x09""#,
+        r#""\u{20_03}\u{2029}""#,
+        "\"\\\n    \t\"",
+        r#"r"""#,
+        concat!("r##\"", " \t\u{2003}\n", "\"##"),
+    ] {
+        let input = format!("#[cfg_attr(test, expect(unused_mut, reason = {reason}))]");
+        assert_eq!(
+            source_violations(RS, &input),
+            [format!(
+                "{RS}:1: #[cfg_attr(test,expect(unused_mut,reason={reason}))] without a reason; add reason = \"...\""
+            )]
+        );
+        assert!(source_violations("crates/x/tests/fixtures/y.rs", &input).is_empty());
+    }
+    for reason in [
+        r#""from the wire format""#,
+        r#""\\n""#,
+        r#"" \x41 ""#,
+        r#""\u{0041}""#,
+        r##"r#" \t "#"##,
+    ] {
+        let input = format!("#[expect(unused_mut, reason = {reason})]");
+        assert!(source_violations(RS, &input).is_empty(), "{input}");
+    }
     assert!(
         source_violations("crates/x/tests/support/mod.rs", "#![allow(dead_code)]\n").is_empty()
     );

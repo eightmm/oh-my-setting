@@ -539,11 +539,22 @@ impl<'a> Plan<'a> {
         }
     }
     pub fn load(&self) -> Result<Snapshot> {
-        self.load_from_snapshot(self.plan_file_snapshot()?)
+        self.load_from_snapshot(self.read_snapshot()?)
     }
-    fn plan_file_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
+    fn read_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
         self.plan_storage()
             .snapshot(&self.context.plan_file, MAX_JSON, true)
+    }
+    /// Read the task against a stable Plan file while a sibling may publish
+    /// Review. Hold the writer's guard only for the bounded file snapshot.
+    pub fn show_task_with_locked_snapshot(&self, id: &str) -> Result<Response> {
+        let req = Request::new(Action::Show).with("id", id);
+        req.validate()?;
+        let snap = self.read_locked_snapshot()?;
+        self.query(&req, &mut self.load_from_snapshot(snap)?)
+    }
+    fn read_locked_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
+        self.locked(false, None, || self.read_snapshot())
     }
     fn load_from_snapshot(&self, snap: Option<storage::FileSnapshot>) -> Result<Snapshot> {
         let raw = snap.as_ref().map(|s| s.raw.clone());
@@ -943,7 +954,7 @@ impl<'a> Plan<'a> {
         operation: &str,
     ) -> Result<Value> {
         self.context.parent()?;
-        let raw = self.locked(false, None, || self.plan_file_snapshot())?;
+        let raw = self.read_locked_snapshot()?;
         let mut snapshot = self.load_from_snapshot(raw)?;
         snapshot.require_contract()?;
         let task = snapshot.task(issued.task_id())?.clone();

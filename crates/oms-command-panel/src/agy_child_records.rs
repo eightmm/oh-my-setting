@@ -213,6 +213,25 @@ pub(crate) fn scan_lead_turn(
     .ok()
 }
 
+pub(crate) fn scan_selected_lead_turn(
+    parent_jsonl: &[u8],
+    parent_recent: bool,
+    lead_id: &str,
+    turn: &str,
+    selected: impl Fn(&AgyChildLocator) -> bool,
+    mut admits_workspace: impl FnMut(&str) -> bool,
+) -> Option<AgyLeadScan> {
+    scan_lead_turn_core(
+        parent_jsonl,
+        parent_recent,
+        lead_id,
+        Some(turn),
+        |record, uri| selected(record) && admits_workspace(uri),
+        None,
+    )
+    .ok()
+}
+
 /// Re-verifies parent Turn ownership and extracts bounded, redacted child replies.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_child_chat(
@@ -943,9 +962,16 @@ fn scan_lead_turn_stage(
     recent: bool,
     lead_id: &str,
     expected_turn: Option<&str>,
-    admits: impl FnMut(&str) -> bool,
+    mut admits: impl FnMut(&str) -> bool,
 ) -> Stage<AgyLeadScan> {
-    scan_lead_turn_core(parent, recent, lead_id, expected_turn, admits, None)
+    scan_lead_turn_core(
+        parent,
+        recent,
+        lead_id,
+        expected_turn,
+        |_, uri| admits(uri),
+        None,
+    )
 }
 
 fn scan_lead_turn_core(
@@ -953,7 +979,7 @@ fn scan_lead_turn_core(
     recent: bool,
     lead_id: &str,
     expected_turn: Option<&str>,
-    mut admits: impl FnMut(&str) -> bool,
+    mut admits: impl FnMut(&AgyChildLocator, &str) -> bool,
     mut setup_target: Option<&mut SelectedSetupTarget<'_>>,
 ) -> Stage<AgyLeadScan> {
     gate(is_uuid(lead_id), "lead-id")?;
@@ -1070,7 +1096,7 @@ fn scan_lead_turn_core(
             counts.get(&loc.child_id).copied() == Some(1),
             "duplicate-child",
         )?;
-        if !sends.contains(&loc.child_id) && uris.iter().all(|u| admits(u)) {
+        if !sends.contains(&loc.child_id) && uris.iter().all(|u| admits(&loc, u)) {
             children.push(loc);
         }
     }
@@ -1190,11 +1216,18 @@ fn extract_selected_child_chat_and_setup_stage(
     turn: &str,
     exp: &AgyChildLocator,
     repo_uri: Option<&str>,
-    admits: impl FnMut(&str) -> bool,
+    mut admits: impl FnMut(&str) -> bool,
 ) -> Stage<(String, AgyRecordedSetup)> {
     gate(exp.lead_id == lead && exp.turn == turn, "locator")?;
     let mut target = SelectedSetupTarget::new(&exp.child_id, repo_uri);
-    let scan = scan_lead_turn_core(p, pr, lead, Some(turn), admits, Some(&mut target))?;
+    let scan = scan_lead_turn_core(
+        p,
+        pr,
+        lead,
+        Some(turn),
+        |record, uri| record == exp && admits(uri),
+        Some(&mut target),
+    )?;
     gate(scan.children.contains(exp), "locator")?;
     let setup = target.resolve().ok_or("locator")?;
     let chat = child_replies_stage(c, cr, exp)?;

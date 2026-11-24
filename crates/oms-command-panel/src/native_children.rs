@@ -7,7 +7,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 const TRANSCRIPT: &str = ".system_generated/logs/transcript.jsonl";
 const MAX_TRANSCRIPT: usize = 4 * 1024 * 1024;
@@ -114,6 +116,8 @@ thread_local!(static LEGACY_PARENT_READS: std::cell::Cell<usize> = const { std::
 thread_local!(static LEGACY_CANDIDATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 #[cfg(all(test, target_os = "linux"))]
 thread_local!(static LEGACY_CHILD_BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(all(test, target_os = "linux"))]
+thread_local!(static AGY_PARENT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn reset_agy_legacy_reads() {
@@ -121,6 +125,7 @@ pub(crate) fn reset_agy_legacy_reads() {
     LEGACY_PARENT_READS.with(|n| n.set(0));
     LEGACY_CANDIDATE_READS.with(|n| n.set(0));
     LEGACY_CHILD_BODY_READS.with(|n| n.set(0));
+    AGY_PARENT_BYTES.with(|n| n.set(0));
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -174,14 +179,24 @@ pub(crate) fn observe(
     repo: &Path,
     terminal: &str,
     agy_parent: &mut AgyParent,
+    reuse_agy_roster: bool,
 ) -> ObservedChildren {
     let Ok(owner) = terminals::process(pid) else {
+        agy_parent.clear_roster_proof();
         return ObservedChildren::default();
     };
     let observed = ObservedChildren {
         rows: match provider {
             "claude" => claude(pid, repo),
-            "antigravity" => agy(pid, &owner.birth, repo, terminal, agy_parent),
+            "antigravity" => agy(
+                pid,
+                &owner.birth,
+                repo,
+                terminal,
+                agy_parent,
+                reuse_agy_roster,
+                Instant::now(),
+            ),
             _ => None,
         }
         .unwrap_or_default(),
@@ -190,6 +205,7 @@ pub(crate) fn observe(
     if terminals::process(pid).is_ok_and(|current| current == owner) {
         observed
     } else {
+        agy_parent.clear_roster_proof();
         ObservedChildren::default()
     }
 }
@@ -1633,7 +1649,6 @@ impl CodexResponseUsage {
 }
 
 struct CodexUsageObservation {
-    offset: usize,
     payload: Value,
     usage: CodexResponseUsage,
     model: Option<String>,
@@ -1672,7 +1687,8 @@ fn codex_history_parts(
     let mut current = None;
     let mut messages = Vec::new();
     let mut observations = BTreeMap::<String, Option<CodexUsageObservation>>::new();
-    for (offset, line) in codex_complete_records(body, recent_only).enumerate() {
+    let mut latest_response = None;
+    for line in codex_complete_records(body, recent_only) {
         let Ok(event) = oms_panel_core::decode(line, MAX_LINE) else {
             current = None;
             // An unreadable complete row can hide a conflicting response record.
@@ -1714,24 +1730,28 @@ fn codex_history_parts(
             {
                 let response_id = text(payload, "response_id");
                 if codex_rollout_identifier(response_id) {
-                    observations
-                        .entry(response_id.to_owned())
-                        .and_modify(|known| {
-                            if known
-                                .as_ref()
-                                .is_some_and(|first| first.payload != *payload)
-                            {
-                                *known = None;
-                            }
-                        })
-                        .or_insert_with(|| {
-                            Some(CodexUsageObservation {
-                                offset,
-                                usage: CodexResponseUsage::parse(payload)?,
+                    if let Some(known) = observations.get_mut(response_id) {
+                        if known
+                            .as_ref()
+                            .is_some_and(|first| first.payload != *payload)
+                        {
+                            *known = None;
+                        }
+                    } else {
+                        // First-seen identities define recency. Replayed records
+                        // cannot restore an older response after a newer one fails.
+                        latest_response = Some(response_id.to_owned());
+                        observations.insert(
+                            response_id.to_owned(),
+                            CodexResponseUsage::parse(payload).map(|usage| CodexUsageObservation {
+                                usage,
                                 payload: payload.clone(),
                                 model: None,
-                            })
-                        });
+                            }),
+                        );
+                    }
+                } else {
+                    latest_response = None;
                 }
             }
             "event_msg"
@@ -1760,26 +1780,23 @@ fn codex_history_parts(
         .filter_map(|(turn, message)| contexts[&turn].then_some(message))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let observation = usage_session.and_then(|_| {
-        observations
-            .into_values()
-            .flatten()
-            .filter(|observation| {
-                contexts
-                    .get(text(&observation.payload, "turn_id"))
-                    .is_none_or(|exact| *exact)
-            })
-            .max_by_key(|observation| observation.offset)
-            .map(|mut observation| {
-                let turn = text(&observation.payload, "turn_id");
-                observation.model = contexts
-                    .get(turn)
-                    .copied()
-                    .filter(|exact| *exact)
-                    .and_then(|_| models.remove(turn).flatten());
-                observation
-            })
-    });
+    let observation = usage_session
+        .and(latest_response)
+        .and_then(|response| observations.remove(&response).flatten())
+        .filter(|observation| {
+            contexts
+                .get(text(&observation.payload, "turn_id"))
+                .is_none_or(|exact| *exact)
+        })
+        .map(|mut observation| {
+            let turn = text(&observation.payload, "turn_id");
+            observation.model = contexts
+                .get(turn)
+                .copied()
+                .filter(|exact| *exact)
+                .and_then(|_| models.remove(turn).flatten());
+            observation
+        });
     (history, observation)
 }
 
@@ -1806,13 +1823,93 @@ pub(crate) fn chat_tail(history: &str) -> Option<String> {
     (!safe.is_empty()).then(|| safe.to_owned())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) enum AgyParent {
     #[default]
     Unseen,
-    Legacy(PathBuf),
+    Legacy(PathBuf, Option<Arc<AgyLegacyPromotionMiss>>),
     // Once this pane needs a tail, it must prove custody on every observation.
-    Bounded,
+    Bounded(Option<Arc<AgyRoster>>),
+}
+
+impl AgyParent {
+    fn take_roster(&mut self) -> Option<Arc<AgyRoster>> {
+        match self {
+            Self::Bounded(projection) => projection.take(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn clear_roster_proof(&mut self) {
+        match self {
+            Self::Legacy(_, miss) => *miss = None,
+            Self::Bounded(roster) => *roster = None,
+            Self::Unseen => {}
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn empty_roster_watch(&self) -> Option<Arc<crate::wakeup::AgyRosterWatch>> {
+        match self {
+            Self::Bounded(Some(roster)) => roster.watch.clone(),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) struct AgyLegacyPromotionMiss {
+    pid: u32,
+    birth: String,
+    repo: PathBuf,
+    anchor_digest: String,
+    version: AgyLegacyVersion,
+    retry_after: Option<Instant>,
+}
+
+struct AgyLegacyVersion {
+    path: PathBuf,
+    directory: Stat,
+    file: Stat,
+    private_directory: bool,
+}
+
+impl AgyLegacyVersion {
+    /// This stamp only suppresses repeating a failed promotion. The ordinary
+    /// legacy read and strict promotion each enforce their own file checks.
+    fn sample(path: PathBuf) -> Option<Self> {
+        let dir = path.parent()?;
+        let strict = agy_dir_strict(dir);
+        let private_directory = strict.is_some();
+        let (fd, directory) = strict.or_else(|| agy_dir(dir))?;
+        let file = fs::statat(&fd, path.file_name()?, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        (FileType::from_raw_mode(file.st_mode) == FileType::RegularFile && file.st_nlink == 1)
+            .then_some(Self {
+                path,
+                directory,
+                file,
+                private_directory,
+            })
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.private_directory == other.private_directory
+            && codex_same_identity(&self.directory, &other.directory)
+            && codex_same_version(&self.directory, &other.directory)
+            && codex_same_identity(&self.file, &other.file)
+            && codex_same_version(&self.file, &other.file)
+    }
+}
+
+pub(crate) struct AgyRoster {
+    custody: crate::agy_lead_custody::AgyLeadCustody,
+    // None identifies the independently validated, markerless display mode.
+    anchor_digest: Option<String>,
+    directory: Stat,
+    transcript: Stat,
+    rows: Vec<Value>,
+    #[cfg(target_os = "linux")]
+    watch: Option<Arc<crate::wakeup::AgyRosterWatch>>,
 }
 
 fn agy_oversized(brain: &Path, file: &Path) -> bool {
@@ -1820,53 +1917,129 @@ fn agy_oversized(brain: &Path, file: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.len() > MAX_TRANSCRIPT as u64)
 }
 
+struct AgyTranscript {
+    dir: PathBuf,
+    directory: Stat,
+    file: File,
+    stat: Stat,
+}
+
+enum AgyRosterFailure {
+    Unavailable,
+    InvalidBytes(Box<Stat>),
+}
+
+impl AgyTranscript {
+    fn open(custody: &crate::agy_lead_custody::AgyLeadCustody) -> Option<Self> {
+        let transcript = Path::new(TRANSCRIPT);
+        let dir = custody
+            .app_root
+            .join("brain")
+            .join(&custody.conversation_id)
+            .join(transcript.parent()?);
+        let (opened, directory) = agy_dir_strict(&dir)?;
+        let fd = fs::openat(
+            &opened,
+            transcript.file_name()?,
+            AGY_FILE_FLAGS,
+            Mode::empty(),
+        )
+        .ok()?;
+        let stat = fs::fstat(&fd).ok()?;
+        (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
+            && agy_strict_stat(&stat))
+        .then_some(Self {
+            dir,
+            directory,
+            file: File::from(fd),
+            stat,
+        })
+    }
+
+    fn rows(
+        &mut self,
+        anchor: Option<&str>,
+        tail_limit: usize,
+    ) -> Result<(Vec<Value>, usize), AgyRosterFailure> {
+        let unavailable = |_| AgyRosterFailure::Unavailable;
+        // The byte preceding the suffix lets a record at the exact LF boundary survive.
+        let size = u64::try_from(self.stat.st_size).map_err(|_| AgyRosterFailure::Unavailable)?;
+        let len = size.min(tail_limit as u64 + 1);
+        self.file
+            .seek(SeekFrom::Start(size - len))
+            .map_err(unavailable)?;
+        let mut bytes = vec![0; len as usize];
+        self.file.read_exact(&mut bytes).map_err(unavailable)?;
+        #[cfg(all(test, target_os = "linux"))]
+        AGY_PARENT_BYTES.with(|n| n.set(n.get() + bytes.len()));
+        if let Some(rows) = agy_recent_turn(&bytes, size > tail_limit as u64, anchor) {
+            return Ok(rows);
+        }
+        let after = fs::fstat(&self.file).map_err(|_| AgyRosterFailure::Unavailable)?;
+        if codex_same_identity(&self.stat, &after) && codex_same_version(&self.stat, &after) {
+            Err(AgyRosterFailure::InvalidBytes(Box::new(self.stat)))
+        } else {
+            Err(AgyRosterFailure::Unavailable)
+        }
+    }
+
+    fn confirm(&self, custody: &crate::agy_lead_custody::AgyLeadCustody) -> bool {
+        note_legacy_custody_call(1);
+        if crate::agy_lead_custody::agy_lead_custody(custody.pid, &custody.birth, &custody.repo)
+            .as_ref()
+            != Some(custody)
+        {
+            return false;
+        }
+        (|| {
+            let (reopened, directory) = agy_dir_strict(&self.dir)?;
+            let after = fs::fstat(&self.file).ok()?;
+            let name = Path::new(TRANSCRIPT).file_name()?;
+            let named = fs::statat(&reopened, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+            Some(
+                codex_same_identity(&self.directory, &directory)
+                    && codex_same_identity(&self.stat, &after)
+                    && codex_same_version(&self.stat, &after)
+                    && codex_same_identity(&self.stat, &named)
+                    && codex_same_version(&self.stat, &named),
+            )
+        })() == Some(true)
+    }
+}
+
 fn agy_custody_rows(
     custody: &crate::agy_lead_custody::AgyLeadCustody,
     anchor: Option<&str>,
+    tail_limit: usize,
 ) -> Option<(Vec<Value>, usize)> {
-    let dir = custody
-        .app_root
-        .join("brain")
-        .join(&custody.conversation_id)
-        .join(Path::new(TRANSCRIPT).parent()?);
-    let name = Path::new(TRANSCRIPT).file_name()?;
-    let (opened, opened_stat) = agy_dir_strict(&dir)?;
-    let fd = fs::openat(&opened, name, AGY_FILE_FLAGS, Mode::empty()).ok()?;
-    let before = fs::fstat(&fd).ok()?;
-    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
-        || before.st_nlink != 1
-        || !agy_strict_stat(&before)
-    {
-        return None;
-    }
-    // The byte preceding the suffix lets a record at the exact LF boundary survive.
-    let size = u64::try_from(before.st_size).ok()?;
-    let len = size.min(MAX_TRANSCRIPT as u64 + 1);
-    let offset = size - len;
-    let mut file = File::from(fd);
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut bytes = vec![0; len as usize];
-    file.read_exact(&mut bytes).ok()?;
-    let rows = agy_recent_turn(&bytes, size > MAX_TRANSCRIPT as u64, anchor)?;
-    note_legacy_custody_call(1);
-    if crate::agy_lead_custody::agy_lead_custody(custody.pid, &custody.birth, &custody.repo)
-        .as_ref()
-        != Some(custody)
-    {
-        return None;
-    }
-    let (reopened, reopened_stat) = agy_dir_strict(&dir)?;
-    let after = fs::fstat(&file).ok()?;
-    let named = fs::statat(&reopened, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
-    if !codex_same_identity(&opened_stat, &reopened_stat)
-        || !codex_same_identity(&before, &after)
-        || !codex_same_version(&before, &after)
-        || !codex_same_identity(&before, &named)
-        || !codex_same_version(&before, &named)
-    {
-        return None;
-    }
-    Some(rows)
+    let mut transcript = AgyTranscript::open(custody)?;
+    let rows = transcript.rows(anchor, tail_limit).ok()?;
+    transcript.confirm(custody).then_some(rows)
+}
+
+pub(crate) fn agy_submitted_user_turn(
+    pid: u32,
+    birth: &str,
+    repo: &Path,
+    turn: &str,
+    expected: &str,
+) -> bool {
+    const SEND_TAIL_LIMIT: usize = 64 * 1024;
+    crate::agy_lead_custody::agy_lead_custody(pid, birth, repo)
+        .and_then(|custody| agy_custody_rows(&custody, None, SEND_TAIL_LIMIT))
+        .is_some_and(|(rows, start)| {
+            // agy_recent_turn first validates the latest explicit user row and its wrapper.
+            agy_user_request(&rows[start - 1]).is_some_and(|(body, _)| {
+                body == expected && body.lines().next().and_then(codex_turn) == Some(turn)
+            })
+        })
+}
+
+fn agy_user_request(row: &Value) -> Option<(&str, &str)> {
+    text(row, "content")
+        .strip_prefix("<USER_REQUEST>\n")?
+        .split_once("\n</USER_REQUEST>")
 }
 
 fn agy_display_request_suffix(suffix: &str) -> bool {
@@ -1916,9 +2089,7 @@ fn agy_recent_turn(
     let user = |row: &Value| row["type"] == "USER_INPUT" || row["source"] == "USER_EXPLICIT";
     let current = rows.iter().rposition(user)?;
     let input = &rows[current];
-    let (body, suffix) = text(input, "content")
-        .strip_prefix("<USER_REQUEST>\n")?
-        .split_once("\n</USER_REQUEST>")?;
+    let (body, suffix) = agy_user_request(input)?;
     let first = body.lines().next()?;
     let turn = codex_turn(first)?;
     if input["type"] != "USER_INPUT"
@@ -1990,8 +2161,19 @@ fn agy(
     repo: &Path,
     terminal: &str,
     parent: &mut AgyParent,
+    reuse_roster: bool,
+    now: Instant,
 ) -> Option<Vec<Value>> {
-    let anchor = agy_display_anchor(terminal)?;
+    let previous = parent.take_roster();
+    let Some(anchor) = agy_display_anchor(terminal) else {
+        parent.clear_roster_proof();
+        return None;
+    };
+    if anchor.is_none()
+        && let AgyParent::Legacy(_, miss) = parent
+    {
+        *miss = None;
+    }
     let matches_prompt = |rows: &[Value], anchor: &str| {
         rows.iter().any(|row| {
             row["type"] == "USER_INPUT"
@@ -2006,33 +2188,34 @@ fn agy(
         .map(|h| PathBuf::from(h).join(".gemini/antigravity-cli/brain"));
 
     // 1. Warm cache: direct read of the cached parent transcript without custody or read_dir.
-    if matches!(parent, AgyParent::Legacy(file)
+    if matches!(parent, AgyParent::Legacy(file, _)
         if home.as_ref().is_some_and(|brain| agy_oversized(brain, file)))
     {
-        *parent = AgyParent::Bounded;
+        *parent = AgyParent::Bounded(None);
     }
     let cached_rows = (|| {
         let anchor = anchor?;
-        let AgyParent::Legacy(file) = &*parent else {
+        let AgyParent::Legacy(file, _) = &*parent else {
             return None;
         };
         let store = Store::open(home.as_ref()?).ok()?;
         let rows = jsonl(&store, file)?;
         if matches_prompt(&rows, anchor) {
             note_legacy_parent_read(1);
-            Some(rows)
+            Some((rows, store.repo().to_path_buf()))
         } else {
             note_legacy_candidate_read(1);
             None
         }
     })();
-    if anchor.is_some() && cached_rows.is_none() && matches!(parent, AgyParent::Legacy(_)) {
+    if anchor.is_some() && cached_rows.is_none() && matches!(parent, AgyParent::Legacy(..)) {
         *parent = AgyParent::Unseen;
     }
 
-    let mut bounded = None;
-    let rows = if let Some(rows) = cached_rows {
-        rows
+    let warm_legacy = cached_rows.is_some();
+    let mut small_custody = None;
+    let (rows, legacy_root) = if let Some(cached) = cached_rows {
+        cached
     } else if let Some(custody) = {
         note_legacy_custody_call(1);
         crate::agy_lead_custody::agy_lead_custody(pid, birth, repo)
@@ -2040,15 +2223,18 @@ fn agy(
         // 2. Optimized custody-proved cold path: direct read of custody.conversation_id only.
         let brain = custody.app_root.join("brain");
         let file = PathBuf::from(&custody.conversation_id).join(TRANSCRIPT);
-        if anchor.is_none() || matches!(parent, AgyParent::Bounded) || agy_oversized(&brain, &file)
+        if anchor.is_none()
+            || matches!(parent, AgyParent::Bounded(_))
+            || agy_oversized(&brain, &file)
         {
-            if anchor.is_some() {
-                *parent = AgyParent::Bounded;
+            if anchor.is_some() || reuse_roster {
+                *parent = AgyParent::Bounded(None);
             }
-            let (rows, start) = agy_custody_rows(&custody, anchor)?;
-            bounded = Some((start, custody));
-            note_legacy_parent_read(1);
-            rows
+            let cache = match parent {
+                AgyParent::Bounded(cache) if reuse_roster => Some(cache),
+                _ => None,
+            };
+            return agy_bounded_roster(&custody, anchor, cache, previous).ok();
         } else {
             let store = Store::open(&brain).ok()?;
             let rows = jsonl(&store, &file)?;
@@ -2057,12 +2243,13 @@ fn agy(
                 return None;
             }
             note_legacy_parent_read(1);
-            *parent = AgyParent::Legacy(file);
-            rows
+            *parent = AgyParent::Legacy(file, None);
+            small_custody = Some(custody);
+            (rows, store.repo().to_path_buf())
         }
     } else {
         // 3. Legacy fallback cold path only when custody is unavailable.
-        if matches!(parent, AgyParent::Bounded) {
+        if matches!(parent, AgyParent::Bounded(_)) {
             return None;
         }
         let anchor = anchor?;
@@ -2102,67 +2289,228 @@ fn agy(
         };
         note_legacy_parent_read(1);
         note_legacy_candidate_read(scanned.saturating_sub(1));
-        *parent = AgyParent::Legacy(file);
-        rows
+        *parent = AgyParent::Legacy(file, None);
+        (rows, store.repo().to_path_buf())
     };
 
-    let scope = bounded.as_ref().map(|(start, custody)| AgyDisplayScope {
-        first_spawn: *start,
+    let roster = agy_roster_rows(&rows, &mut AgyWorkspaces::new(repo), None);
+    let AgyParent::Legacy(file, miss) = parent else {
+        return Some(roster);
+    };
+    if !reuse_roster || !roster.is_empty() || (!warm_legacy && small_custody.is_none()) {
+        *miss = None;
+        return Some(roster);
+    }
+
+    let anchor_digest = oms_panel_core::digest(anchor?.as_bytes());
+    let version = AgyLegacyVersion::sample(legacy_root.join(file));
+    if let Some(miss) = miss.as_ref()
+        && miss.pid == pid
+        && miss.birth == birth
+        && miss.repo == repo
+        && miss.anchor_digest == anchor_digest
+        && miss.retry_after.is_none_or(|deadline| now < deadline)
+        && version
+            .as_ref()
+            .is_some_and(|version| miss.version.matches(version))
+    {
+        return Some(roster);
+    }
+    *miss = None;
+
+    let custody = small_custody.or_else(|| {
+        note_legacy_custody_call(1);
+        crate::agy_lead_custody::agy_lead_custody(pid, birth, repo)
+    });
+    let same_source = custody.as_ref().is_none_or(|custody| {
+        version.as_ref().is_some_and(|version| {
+            custody
+                .app_root
+                .join("brain")
+                .join(&custody.conversation_id)
+                .join(TRANSCRIPT)
+                == version.path
+        })
+    });
+    // An empty anchored roster can wake only after the same strict
+    // descriptor and current-Turn proof as the bounded Board path.
+    // Unavailable custody can recover without a transcript write.
+    let mut retry_after = Some(now + crate::watch::EVENT_BACKED_FALLBACK);
+    if let Some(custody) = custody.as_ref() {
+        let mut cache = None;
+        match agy_bounded_roster(custody, anchor, Some(&mut cache), None) {
+            Ok(verified) => {
+                if let Some(cache) = cache {
+                    *parent = AgyParent::Bounded(Some(cache));
+                    return Some(verified);
+                }
+                if !verified.is_empty() {
+                    return Some(verified);
+                }
+            }
+            Err(AgyRosterFailure::InvalidBytes(rejected))
+                if version.as_ref().is_some_and(|version| {
+                    codex_same_identity(&version.file, &rejected)
+                        && codex_same_version(&version.file, &rejected)
+                }) =>
+            {
+                retry_after = None;
+            }
+            Err(_) => {}
+        }
+    }
+    if same_source
+        && let Some(version) = version
+        && AgyLegacyVersion::sample(version.path.clone())
+            .is_some_and(|after| version.matches(&after))
+    {
+        *miss = Some(Arc::new(AgyLegacyPromotionMiss {
+            pid,
+            birth: birth.to_owned(),
+            repo: repo.to_path_buf(),
+            anchor_digest,
+            version,
+            retry_after,
+        }));
+    }
+    Some(roster)
+}
+
+fn agy_bounded_roster(
+    custody: &crate::agy_lead_custody::AgyLeadCustody,
+    anchor: Option<&str>,
+    mut cache: Option<&mut Option<Arc<AgyRoster>>>,
+    previous: Option<Arc<AgyRoster>>,
+) -> Result<Vec<Value>, AgyRosterFailure> {
+    let mut transcript = AgyTranscript::open(custody).ok_or(AgyRosterFailure::Unavailable)?;
+    let anchor_digest = anchor.map(|anchor| oms_panel_core::digest(anchor.as_bytes()));
+    if let Some(cache) = cache.as_deref_mut()
+        && let Some(previous) = previous.as_ref()
+        && previous.custody == *custody
+        && previous.anchor_digest == anchor_digest
+        && codex_same_identity(&previous.directory, &transcript.directory)
+        && codex_same_identity(&previous.transcript, &transcript.stat)
+        && codex_same_version(&previous.transcript, &transcript.stat)
+    {
+        let rows = previous.rows.clone();
+        if !transcript.confirm(custody) {
+            return Err(AgyRosterFailure::Unavailable);
+        }
+        *cache = Some(previous.clone());
+        return Ok(rows);
+    }
+    let (rows, start) = transcript.rows(anchor, MAX_TRANSCRIPT)?;
+    let scope = AgyDisplayScope {
+        first_spawn: start,
         custody,
         derived: anchor.is_none(),
-    });
-    let children = agy_children(&rows, &mut AgyWorkspaces::new(repo), scope);
-    Some(
-        children
-            .into_iter()
-            .rev()
-            .take(3)
-            .map(
-                |AgyProjectedChild {
-                     id,
-                     title,
-                     model,
-                     started,
-                     spawn_result_idx,
-                     recovered,
-                 }| {
-                    if recovered {
-                        // A parent delivery proves a message, which can precede
-                        // termination. The recovered identity proves no lifecycle.
-                        return row("antigravity", &id, &title, &model, started, "", "unknown");
-                    }
-                    let finished = rows[spawn_result_idx + 1..]
-                        .iter()
-                        .rev()
-                        .filter(|msg| {
-                            msg["type"] == "SYSTEM_MESSAGE"
-                                && msg["source"] == "SYSTEM"
-                                && msg["status"] == "DONE"
-                                && (scope.is_none() || msg.get("truncated_fields").is_none())
+    };
+    let mut workspaces = AgyWorkspaces::new(&custody.repo);
+    let rows = agy_roster_rows(&rows, &mut workspaces, Some(scope));
+    let cache = cache.filter(|_| {
+        workspaces.verdicts.is_empty()
+            && rows.iter().all(|row| {
+                ["updated_at", "created_at", "started_at", "ended_at"]
+                    .into_iter()
+                    .all(|field| {
+                        row.get(field).is_none_or(|value| {
+                            value.as_str().is_some_and(|stamp| {
+                                stamp.is_empty()
+                                    || (stamp.len() <= 35
+                                        && chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
+                            })
                         })
-                        .find_map(|msg| {
-                            agy_delivery(text(msg, "content"), &id).map(|body| (msg, body))
-                        });
-                    let (state, updated, answer) = match finished {
-                        Some((msg, body)) => (
-                            "done",
-                            Some(text(msg, "created_at"))
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(started),
-                            body,
-                        ),
-                        None => ("unknown", started, ""),
-                    };
-                    let mut call = row("antigravity", &id, &title, &model, updated, answer, state);
-                    if let Some((msg, _)) = finished {
-                        call["started_at"] = json!(started);
-                        call["ended_at"] = json!(text(msg, "created_at"));
-                    }
-                    call
-                },
-            )
-            .collect(),
-    )
+                    })
+            })
+    });
+    #[cfg(target_os = "linux")]
+    let watch = cache.as_ref().filter(|_| rows.is_empty()).and_then(|_| {
+        previous
+            .as_deref()
+            .filter(|previous| {
+                previous.custody == *custody
+                    && previous.anchor_digest == anchor_digest
+                    && codex_same_identity(&previous.directory, &transcript.directory)
+                    && codex_same_identity(&previous.transcript, &transcript.stat)
+            })
+            .and_then(|previous| previous.watch.as_ref())
+            .filter(|watch| watch.active())
+            .cloned()
+            .or_else(|| crate::wakeup::AgyRosterWatch::arm(&transcript.file))
+    });
+    if !transcript.confirm(custody) {
+        return Err(AgyRosterFailure::Unavailable);
+    }
+    note_legacy_parent_read(1);
+    if let Some(cache) = cache {
+        *cache = Some(Arc::new(AgyRoster {
+            custody: custody.clone(),
+            anchor_digest,
+            directory: transcript.directory,
+            transcript: transcript.stat,
+            rows: rows.clone(),
+            #[cfg(target_os = "linux")]
+            watch,
+        }));
+    }
+    Ok(rows)
+}
+
+fn agy_roster_rows(
+    rows: &[Value],
+    workspaces: &mut AgyWorkspaces,
+    scope: Option<AgyDisplayScope<'_>>,
+) -> Vec<Value> {
+    agy_children(rows, workspaces, scope)
+        .into_iter()
+        .rev()
+        // The Board can show the bounded roster. Usage samples only its first three.
+        .take(crate::agy_child_records::SPAWN_BUDGET)
+        .map(
+            |AgyProjectedChild {
+                 id,
+                 title,
+                 model,
+                 started,
+                 spawn_result_idx,
+                 recovered,
+             }| {
+                if recovered {
+                    // A parent delivery proves a message, which can precede
+                    // termination. The recovered identity proves no lifecycle.
+                    return row("antigravity", &id, &title, &model, started, "", "unknown");
+                }
+                let finished = rows[spawn_result_idx + 1..]
+                    .iter()
+                    .rev()
+                    .filter(|msg| {
+                        msg["type"] == "SYSTEM_MESSAGE"
+                            && msg["source"] == "SYSTEM"
+                            && msg["status"] == "DONE"
+                            && (scope.is_none() || msg.get("truncated_fields").is_none())
+                    })
+                    .find_map(|msg| {
+                        agy_delivery(text(msg, "content"), &id).map(|body| (msg, body))
+                    });
+                let (state, updated, answer) = match finished {
+                    Some((msg, body)) => (
+                        "done",
+                        Some(text(msg, "created_at"))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(started),
+                        body,
+                    ),
+                    None => ("unknown", started, ""),
+                };
+                let mut call = row("antigravity", &id, &title, &model, updated, answer, state);
+                if let Some((msg, _)) = finished {
+                    call["started_at"] = json!(started);
+                    call["ended_at"] = json!(text(msg, "created_at"));
+                }
+                call
+            },
+        )
+        .collect()
 }
 
 fn agy_child_model(event: &Value, tool: &Value) -> String {
@@ -2592,6 +2940,15 @@ fn agy_private(stat: &Stat, common: &Stat) -> bool {
 /// One bounded, single-line pointer file read without following symlinks; the
 /// caller checks the returned stat with `agy_private`.
 fn agy_meta(dir: &OwnedFd, name: &str, bytes: &mut usize) -> Option<(String, Stat)> {
+    agy_meta_checked(dir, name, bytes, |_, _| true)
+}
+
+fn agy_meta_checked(
+    dir: &OwnedFd,
+    name: &str,
+    bytes: &mut usize,
+    admissible: impl FnOnce(&OwnedFd, &Stat) -> bool,
+) -> Option<(String, Stat)> {
     let fd = fs::openat(dir, name, AGY_FILE_FLAGS, Mode::empty()).ok()?;
     let before = fs::fstat(&fd).ok()?;
     let size = usize::try_from(before.st_size)
@@ -2599,7 +2956,10 @@ fn agy_meta(dir: &OwnedFd, name: &str, bytes: &mut usize) -> Option<(String, Sta
         .filter(|&size| size <= AGY_META_LIMIT)?;
     // The probe includes one byte past the size and is spent even if it fails.
     *bytes = bytes.checked_sub(size + 1)?;
-    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile || before.st_nlink != 1 {
+    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
+        || before.st_nlink != 1
+        || !admissible(&fd, &before)
+    {
         return None;
     }
     let file = File::from(fd);
@@ -2811,62 +3171,232 @@ pub(crate) fn agy_dir_strict(path: &Path) -> Option<(OwnedFd, Stat)> {
     None
 }
 
-/// Strict workspace authority for AGY child chat reads: owner-only write (`0o022 == 0`),
-/// symlink-free ancestors, `st_nlink == 1` on files, and post-scan re-walk confirmation.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) struct AgyStrictWorkspaces {
-    root: String,
-    repo: PathBuf,
-    common: Option<Option<(PathBuf, OwnedFd, Stat)>>,
-    verdicts: BTreeMap<String, bool>,
-    bytes: usize,
-    trail: Vec<(PathBuf, bool, (fs::Dev, u64))>,
+type AgyWorkspaceTrail = Vec<(PathBuf, AgyWorkspaceEntry)>;
+type AgyGitCommon = (PathBuf, OwnedFd, Stat);
+
+enum AgyWorkspaceEntry {
+    Directory(Stat, Option<oms_safe_fs::Root>),
+    Metadata(Stat),
+    Missing,
+}
+
+#[derive(Default)]
+struct AgyWorkspaceAuthority<'a> {
+    group: Option<&'a dyn Fn(u32) -> bool>,
+    proven_groups: BTreeMap<u32, bool>,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-impl AgyStrictWorkspaces {
+impl AgyWorkspaceAuthority<'_> {
+    fn private_group(&mut self, gid: u32) -> bool {
+        let Some(group) = self.group else {
+            return false;
+        };
+        *self.proven_groups.entry(gid).or_insert_with(|| group(gid))
+    }
+
+    fn directory(&mut self, path: &Path, trail: &mut AgyWorkspaceTrail) -> Option<(OwnedFd, Stat)> {
+        if let Some((fd, stat)) = agy_dir_strict(path) {
+            trail.push((path.to_owned(), AgyWorkspaceEntry::Directory(stat, None)));
+            return Some((fd, stat));
+        }
+        self.group?;
+        let root =
+            oms_safe_fs::Root::open_private_workspace(path, |gid| self.private_group(gid)).ok()?;
+        let fd = root
+            .pinned_private_directory()
+            .ok()?
+            .try_clone_to_owned()
+            .ok()?;
+        let stat = fs::fstat(&fd).ok()?;
+        if stat.st_uid != rustix::process::geteuid().as_raw() {
+            return None;
+        }
+        trail.push((
+            path.to_owned(),
+            AgyWorkspaceEntry::Directory(stat, Some(root)),
+        ));
+        Some((fd, stat))
+    }
+
+    fn child_directory(
+        &mut self,
+        dir: &OwnedFd,
+        parent: &Path,
+        name: &str,
+        trail: &mut AgyWorkspaceTrail,
+    ) -> Option<(OwnedFd, Stat)> {
+        let expected = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        let child = self.directory(&parent.join(name), trail)?;
+        let named = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        (workspace_same_directory(&expected, &child.1)
+            && workspace_same_directory(&named, &child.1))
+        .then_some(child)
+    }
+
+    fn allows_file(&mut self, fd: &OwnedFd, stat: &Stat) -> bool {
+        FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
+            && (agy_strict_stat(stat)
+                || (self.group.is_some()
+                    && oms_safe_fs::workspace_file_has_mode_only_group_access(fd, stat)
+                    && self.private_group(stat.st_gid)))
+    }
+
+    fn metadata(
+        &mut self,
+        dir: &OwnedFd,
+        parent: &Path,
+        name: &str,
+        bytes: &mut usize,
+        trail: &mut AgyWorkspaceTrail,
+    ) -> Option<String> {
+        let before = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        let (value, opened) = agy_meta_checked(dir, name, bytes, |fd, stat| {
+            workspace_same_file(&before, stat) && self.allows_file(fd, stat)
+        })?;
+        let named = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        if !workspace_same_file(&named, &opened) {
+            return None;
+        }
+        trail.push((parent.join(name), AgyWorkspaceEntry::Metadata(opened)));
+        Some(value)
+    }
+
+    fn confirm_entry(&mut self, path: &Path, entry: &AgyWorkspaceEntry) -> Option<()> {
+        match entry {
+            AgyWorkspaceEntry::Directory(expected, held) => {
+                let now = if let Some(root) = held {
+                    root.recheck_private_workspace(|gid| self.private_group(gid))
+                        .ok()?;
+                    fs::fstat(root.pinned_private_directory().ok()?).ok()?
+                } else {
+                    agy_dir_strict(path)?.1
+                };
+                workspace_same_directory(expected, &now).then_some(())
+            }
+            AgyWorkspaceEntry::Metadata(expected) => {
+                let (parent, name) = (path.parent()?, path.file_name()?);
+                let (dir, _) = self.directory(parent, &mut Vec::new())?;
+                let fd = fs::openat(&dir, name, AGY_FILE_FLAGS, Mode::empty()).ok()?;
+                let now = fs::fstat(&fd).ok()?;
+                let named = fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+                (workspace_same_file(expected, &now)
+                    && workspace_same_file(&named, &now)
+                    && self.allows_file(&fd, &now))
+                .then_some(())
+            }
+            AgyWorkspaceEntry::Missing => {
+                let (parent, name) = (path.parent()?, path.file_name()?);
+                let (dir, _) = self.directory(parent, &mut Vec::new())?;
+                matches!(
+                    fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW),
+                    Err(rustix::io::Errno::NOENT)
+                )
+                .then_some(())
+            }
+        }
+    }
+}
+
+fn workspace_same_directory(a: &Stat, b: &Stat) -> bool {
+    FileType::from_raw_mode(a.st_mode) == FileType::Directory
+        && FileType::from_raw_mode(b.st_mode) == FileType::Directory
+        && agy_same(a, b)
+        && (a.st_uid, a.st_gid, a.st_mode) == (b.st_uid, b.st_gid, b.st_mode)
+}
+
+fn workspace_same_file(a: &Stat, b: &Stat) -> bool {
+    codex_same_identity(a, b) && codex_same_version(a, b) && a.st_gid == b.st_gid
+}
+
+/// Direct workspace and registered linked-checkout authority. Only explicit
+/// reads may supply a private-group proof. The proof never applies to AGY logs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct AgyStrictWorkspaces<'a> {
+    root: String,
+    repo: PathBuf,
+    common: Option<Option<AgyGitCommon>>,
+    verdicts: BTreeMap<String, bool>,
+    bytes: usize,
+    trail: AgyWorkspaceTrail,
+    authority: AgyWorkspaceAuthority<'a>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<'a> AgyStrictWorkspaces<'a> {
     pub(crate) fn new(repo: &Path) -> Option<Self> {
+        Self::with_group(repo, None)
+    }
+
+    pub(crate) fn with_group(repo: &Path, group: Option<&'a dyn Fn(u32) -> bool>) -> Option<Self> {
         if repo.canonicalize().ok().as_deref() != Some(repo) {
             return None;
         }
         let repo_str = repo.to_str()?;
-        let (repo_fd, repo_stat) = agy_dir_strict(repo)?;
-        let mut trail = vec![(
-            repo.to_path_buf(),
-            false,
-            (repo_stat.st_dev, repo_stat.st_ino),
-        )];
-        match fs::statat(&repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(dot) => {
-                let kind = FileType::from_raw_mode(dot.st_mode);
-                let valid = match kind {
-                    FileType::Directory => {
-                        let (_, dot_stat) = agy_dir_strict(&repo.join(".git"))?;
-                        agy_same(&dot_stat, &dot)
-                    }
-                    FileType::RegularFile => dot.st_nlink == 1 && agy_strict_stat(&dot),
-                    _ => false,
-                };
-                if !valid {
-                    return None;
-                }
-                trail.push((
-                    repo.join(".git"),
-                    kind == FileType::RegularFile,
-                    (dot.st_dev, dot.st_ino),
-                ));
-            }
-            Err(rustix::io::Errno::NOENT) => {}
-            Err(_) => return None,
-        }
-        Some(Self {
+        let mut result = Self {
             root: format!("file://{repo_str}"),
             repo: repo.to_path_buf(),
             common: None,
             verdicts: BTreeMap::new(),
             bytes: AGY_META_BUDGET,
-            trail,
-        })
+            trail: Vec::new(),
+            authority: AgyWorkspaceAuthority {
+                group,
+                ..Default::default()
+            },
+        };
+        let (repo_fd, _) = result.authority.directory(repo, &mut result.trail)?;
+        match fs::statat(&repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(dot) => match FileType::from_raw_mode(dot.st_mode) {
+                FileType::Directory => {
+                    let common = result.authority.child_directory(
+                        &repo_fd,
+                        repo,
+                        ".git",
+                        &mut result.trail,
+                    )?;
+                    result.common = Some(Some((repo.join(".git"), common.0, common.1)));
+                }
+                FileType::RegularFile => {
+                    let fd = fs::openat(&repo_fd, ".git", AGY_FILE_FLAGS, Mode::empty()).ok()?;
+                    let now = fs::fstat(&fd).ok()?;
+                    if !workspace_same_file(&dot, &now) || !result.authority.allows_file(&fd, &now)
+                    {
+                        return None;
+                    }
+                    result
+                        .trail
+                        .push((repo.join(".git"), AgyWorkspaceEntry::Metadata(now)));
+                    if group.is_some() {
+                        // A relaxed direct worktree must prove its own backlink, even
+                        // when the child record names only that current checkout.
+                        let common = agy_common_strict(
+                            repo,
+                            &mut result.authority,
+                            &mut result.bytes,
+                            &mut result.trail,
+                        )?;
+                        agy_linked_strict(
+                            &common,
+                            &result.root,
+                            &mut result.authority,
+                            &mut result.bytes,
+                            &mut result.trail,
+                        )?;
+                        result.common = Some(Some(common));
+                    }
+                }
+                _ => return None,
+            },
+            Err(rustix::io::Errno::NOENT) => {
+                result
+                    .trail
+                    .push((repo.join(".git"), AgyWorkspaceEntry::Missing));
+            }
+            Err(_) => return None,
+        }
+        Some(result)
     }
 
     pub(crate) fn accepts(&mut self, uri: &str) -> bool {
@@ -2879,16 +3409,21 @@ impl AgyStrictWorkspaces {
         if self.verdicts.len() >= AGY_URIS_PER_FRAME {
             return false;
         }
-        let (repo, bytes, trail) = (&self.repo, &mut self.bytes, &mut self.trail);
+        let (repo, authority, bytes, trail) = (
+            &self.repo,
+            &mut self.authority,
+            &mut self.bytes,
+            &mut self.trail,
+        );
         let common = self.common.get_or_insert_with(|| {
             let mut local = Vec::new();
-            let found = agy_common_strict(repo, bytes, &mut local)?;
+            let found = agy_common_strict(repo, authority, bytes, &mut local)?;
             trail.extend(local);
             Some(found)
         });
         let verdict = common.as_ref().is_some_and(|common| {
             let mut local = Vec::new();
-            if agy_linked_strict(common, uri, bytes, &mut local).is_some() {
+            if agy_linked_strict(common, uri, authority, bytes, &mut local).is_some() {
                 trail.extend(local);
                 true
             } else {
@@ -2900,80 +3435,78 @@ impl AgyStrictWorkspaces {
     }
 
     pub(crate) fn confirm(&self) -> bool {
-        self.trail.iter().all(|(path, is_file, ident)| {
-            if *is_file {
-                let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-                    return false;
-                };
-                let Some((dir_fd, _)) = agy_dir_strict(parent) else {
-                    return false;
-                };
-                let Ok(fd) = fs::openat(&dir_fd, name, AGY_FILE_FLAGS, Mode::empty()) else {
-                    return false;
-                };
-                let Ok(now) = fs::fstat(&fd) else {
-                    return false;
-                };
-                FileType::from_raw_mode(now.st_mode) == FileType::RegularFile
-                    && now.st_nlink == 1
-                    && agy_strict_stat(&now)
-                    && (now.st_dev, now.st_ino) == *ident
-            } else {
-                agy_dir_strict(path).is_some_and(|(_, now)| (now.st_dev, now.st_ino) == *ident)
+        self.confirm_group_membership()
+            .is_some_and(|proof| proof.recheck())
+    }
+
+    pub(crate) fn confirm_group_membership(&self) -> Option<AgyWorkspaceConfirmation<'_>> {
+        let mut fresh = AgyWorkspaceAuthority {
+            group: self.authority.group,
+            ..Default::default()
+        };
+        let confirmed = self.trail.iter().all(|(_, entry)| match entry {
+            AgyWorkspaceEntry::Directory(_, Some(root)) => root
+                .recheck_private_workspace(|gid| fresh.private_group(gid))
+                .is_ok(),
+            AgyWorkspaceEntry::Metadata(stat) if !agy_strict_stat(stat) => {
+                fresh.private_group(stat.st_gid)
             }
+            _ => true,
+        });
+        confirmed.then_some(AgyWorkspaceConfirmation {
+            trail: &self.trail,
+            groups: fresh.proven_groups,
         })
+    }
+}
+
+pub(crate) struct AgyWorkspaceConfirmation<'a> {
+    trail: &'a AgyWorkspaceTrail,
+    groups: BTreeMap<u32, bool>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl AgyWorkspaceConfirmation<'_> {
+    /// Re-walk names and ACL metadata using the groups checked before the pane
+    /// fence. This stage must never call the host account database again.
+    pub(crate) fn recheck(&self) -> bool {
+        let confirmed = |gid| self.groups.get(&gid) == Some(&true);
+        let mut authority = AgyWorkspaceAuthority {
+            group: (!self.groups.is_empty()).then_some(&confirmed),
+            ..Default::default()
+        };
+        self.trail
+            .iter()
+            .all(|(path, entry)| authority.confirm_entry(path, entry).is_some())
     }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn agy_common_strict(
     repo: &Path,
+    authority: &mut AgyWorkspaceAuthority<'_>,
     bytes: &mut usize,
-    trail: &mut Vec<(PathBuf, bool, (fs::Dev, u64))>,
-) -> Option<(PathBuf, OwnedFd, Stat)> {
-    let (repo_fd, _) = agy_dir_strict(repo)?;
+    trail: &mut AgyWorkspaceTrail,
+) -> Option<AgyGitCommon> {
+    let (repo_fd, _) = authority.directory(repo, trail)?;
     let dot = fs::statat(&repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW).ok()?;
     if FileType::from_raw_mode(dot.st_mode) == FileType::Directory {
-        let path = repo.join(".git");
-        let (fd, stat) = agy_dir_strict(&path)?;
-        if !agy_same(&stat, &dot) {
-            return None;
-        }
-        trail.push((path.clone(), false, (stat.st_dev, stat.st_ino)));
-        return Some((path, fd, stat));
+        let (fd, stat) = authority.child_directory(&repo_fd, repo, ".git", trail)?;
+        return Some((repo.join(".git"), fd, stat));
     }
-    let (pointer, pointer_stat) = agy_meta(&repo_fd, ".git", bytes)?;
-    if !agy_strict_stat(&pointer_stat) {
-        return None;
-    }
-    trail.push((
-        repo.join(".git"),
-        true,
-        (pointer_stat.st_dev, pointer_stat.st_ino),
-    ));
+    let pointer = authority.metadata(&repo_fd, repo, ".git", bytes, trail)?;
     let admin = agy_join(repo, pointer.strip_prefix("gitdir: ")?)?;
-    let (admin_fd, admin_stat) = agy_dir_strict(&admin)?;
-    trail.push((admin.clone(), false, (admin_stat.st_dev, admin_stat.st_ino)));
+    let (admin_fd, admin_stat) = authority.directory(&admin, trail)?;
     match fs::statat(&admin_fd, "commondir", AtFlags::SYMLINK_NOFOLLOW) {
-        Err(rustix::io::Errno::NOENT) => Some((admin, admin_fd, admin_stat)),
+        Err(rustix::io::Errno::NOENT) => {
+            trail.push((admin.join("commondir"), AgyWorkspaceEntry::Missing));
+            Some((admin, admin_fd, admin_stat))
+        }
         Err(_) => None,
         Ok(_) => {
-            let (shared, shared_stat) = agy_meta(&admin_fd, "commondir", bytes)?;
-            if !agy_strict_stat(&shared_stat) {
-                return None;
-            }
-            trail.push((
-                admin.join("commondir"),
-                true,
-                (shared_stat.st_dev, shared_stat.st_ino),
-            ));
+            let shared = authority.metadata(&admin_fd, &admin, "commondir", bytes, trail)?;
             let common_path = agy_join(&admin, &shared)?;
-            let (common_fd, common_stat) = agy_dir_strict(&common_path)?;
-            trail.push((
-                common_path.clone(),
-                false,
-                (common_stat.st_dev, common_stat.st_ino),
-            ));
+            let (common_fd, common_stat) = authority.directory(&common_path, trail)?;
             Some((common_path, common_fd, common_stat))
         }
     }
@@ -2981,31 +3514,19 @@ fn agy_common_strict(
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn agy_linked_strict(
-    common: &(PathBuf, OwnedFd, Stat),
+    common: &AgyGitCommon,
     uri: &str,
+    authority: &mut AgyWorkspaceAuthority<'_>,
     bytes: &mut usize,
-    trail: &mut Vec<(PathBuf, bool, (fs::Dev, u64))>,
+    trail: &mut AgyWorkspaceTrail,
 ) -> Option<()> {
     let path = uri.strip_prefix("file://")?;
     if path.contains(['%', '?', '#', '\\']) || path.chars().any(char::is_control) {
         return None;
     }
     let tree = Path::new(path);
-    let (tree_fd, tree_stat) = agy_dir_strict(tree)?;
-    trail.push((
-        tree.to_path_buf(),
-        false,
-        (tree_stat.st_dev, tree_stat.st_ino),
-    ));
-    let (pointer, pointer_stat) = agy_meta(&tree_fd, ".git", bytes)?;
-    if !agy_strict_stat(&pointer_stat) {
-        return None;
-    }
-    trail.push((
-        tree.join(".git"),
-        true,
-        (pointer_stat.st_dev, pointer_stat.st_ino),
-    ));
+    let (tree_fd, tree_stat) = authority.directory(tree, trail)?;
+    let pointer = authority.metadata(&tree_fd, tree, ".git", bytes, trail)?;
     let admin = agy_join(tree, pointer.strip_prefix("gitdir: ")?)?;
     let name = admin.file_name()?.to_str()?;
     let worktrees = admin.parent()?;
@@ -3013,72 +3534,26 @@ fn agy_linked_strict(
         return None;
     }
     let worktrees_parent = worktrees.parent()?;
-    let (_, worktrees_parent_stat) = agy_dir_strict(worktrees_parent)?;
-    if !agy_same(&worktrees_parent_stat, &common.2) {
+    let (_, worktrees_parent_stat) = authority.directory(worktrees_parent, trail)?;
+    if !workspace_same_directory(&worktrees_parent_stat, &common.2) {
         return None;
     }
-    trail.push((
-        worktrees_parent.to_path_buf(),
-        false,
-        (worktrees_parent_stat.st_dev, worktrees_parent_stat.st_ino),
-    ));
-    let registry = fs::openat(&common.1, "worktrees", CODEX_DIR_FLAGS, Mode::empty()).ok()?;
-    let registry_stat = fs::fstat(&registry).ok()?;
-    if FileType::from_raw_mode(registry_stat.st_mode) != FileType::Directory
-        || !agy_strict_stat(&registry_stat)
-    {
-        return None;
-    }
-    trail.push((
-        common.0.join("worktrees"),
-        false,
-        (registry_stat.st_dev, registry_stat.st_ino),
-    ));
-    let record = fs::openat(&registry, name, CODEX_DIR_FLAGS, Mode::empty()).ok()?;
-    let record_stat = fs::fstat(&record).ok()?;
-    if FileType::from_raw_mode(record_stat.st_mode) != FileType::Directory
-        || !agy_strict_stat(&record_stat)
-    {
-        return None;
-    }
-    trail.push((
-        common.0.join("worktrees").join(name),
-        false,
-        (record_stat.st_dev, record_stat.st_ino),
-    ));
-    let (backlink, backlink_stat) = agy_meta(&record, "gitdir", bytes)?;
-    let (shared, shared_stat) = agy_meta(&record, "commondir", bytes)?;
-    if !agy_strict_stat(&backlink_stat) || !agy_strict_stat(&shared_stat) {
-        return None;
-    }
-    trail.push((
-        admin.join("gitdir"),
-        true,
-        (backlink_stat.st_dev, backlink_stat.st_ino),
-    ));
-    trail.push((
-        admin.join("commondir"),
-        true,
-        (shared_stat.st_dev, shared_stat.st_ino),
-    ));
-    let (_, admin_stat) = agy_dir_strict(&admin)?;
-    trail.push((admin.clone(), false, (admin_stat.st_dev, admin_stat.st_ino)));
+    let (registry, _) = authority.child_directory(&common.1, &common.0, "worktrees", trail)?;
+    let (record, record_stat) =
+        authority.child_directory(&registry, &common.0.join("worktrees"), name, trail)?;
+    let backlink = authority.metadata(&record, &admin, "gitdir", bytes, trail)?;
+    let shared = authority.metadata(&record, &admin, "commondir", bytes, trail)?;
+    let (_, admin_stat) = authority.directory(&admin, trail)?;
     let (backlink, shared) = (agy_join(&admin, &backlink)?, agy_join(&admin, &shared)?);
-    if !agy_same(&record_stat, &admin_stat) || backlink != tree.join(".git") {
+    if !workspace_same_directory(&record_stat, &admin_stat) || backlink != tree.join(".git") {
         return None;
     }
-    let (_, shared_dir_stat) = agy_dir_strict(&shared)?;
-    trail.push((
-        shared,
-        false,
-        (shared_dir_stat.st_dev, shared_dir_stat.st_ino),
-    ));
-    let (_, tree_recheck_stat) = agy_dir_strict(tree)?;
+    let (_, shared_dir_stat) = authority.directory(&shared, trail)?;
+    let (_, tree_recheck_stat) = authority.directory(tree, trail)?;
     let common_now = fs::fstat(&common.1).ok()?;
-    (agy_same(&shared_dir_stat, &common.2)
-        && agy_same(&tree_recheck_stat, &tree_stat)
-        && agy_same(&common_now, &common.2)
-        && agy_strict_stat(&common_now))
+    (workspace_same_directory(&shared_dir_stat, &common.2)
+        && workspace_same_directory(&tree_recheck_stat, &tree_stat)
+        && workspace_same_directory(&common_now, &common.2))
     .then_some(())
 }
 
@@ -3671,7 +4146,7 @@ mod tests {
                 &[
                     first.clone(),
                     latest.clone(),
-                    first,
+                    first.clone(),
                     parent_usage.clone(),
                     sibling.clone(),
                     wrong_session.clone(),
@@ -3754,6 +4229,42 @@ mod tests {
             fixture.write(fixture.date, CHILD, &rows);
             fixture.projection(TURN).unwrap().rows.remove(0)
         };
+        let mut invalid_latest = latest.clone();
+        invalid_latest["payload"]["usage"]["input_tokens"] = json!(-1);
+        let mut conflicting_latest = latest.clone();
+        conflicting_latest["payload"]["usage"]["total_tokens"] = json!(20);
+        let mut invalid_id = latest.clone();
+        invalid_id["payload"]["response_id"] = json!("two words");
+        let recovered = record("response-three", counters(20, 4, 7, 3, 2, 24));
+        // A later owned response withholds stale counters even when an older
+        // response is still valid; only a new response can restore them.
+        for mut records in [
+            vec![first.clone(), invalid_latest],
+            vec![first.clone(), latest.clone(), conflicting_latest.clone()],
+            vec![
+                first.clone(),
+                latest.clone(),
+                conflicting_latest,
+                first.clone(),
+            ],
+            vec![first.clone(), invalid_id],
+        ] {
+            assert_eq!(output(&child, &records), "Ordinary owned reply");
+            assert!(
+                projected(&child, &records)
+                    .get("native_response_usage")
+                    .is_none()
+            );
+            records.push(recovered.clone());
+            assert_eq!(
+                output(&child, &records),
+                "Ordinary owned reply\n\nCodex recorded response usage · in 20 · out 4 · cache 7/3 · reasoning 2 · total 24"
+            );
+            assert_eq!(
+                projected(&child, &records)["native_response_usage"]["response"]["total_tokens"],
+                24
+            );
+        }
         let valid = projected(&child, &[latest.clone(), latest.clone()]);
         assert_eq!(valid["native_response_usage"]["turn"]["total_tokens"], 280);
         assert_eq!(
@@ -5900,6 +6411,9 @@ mod tests {
             let legacy_id = std::env::var("OMS_TEST_LEGACY").unwrap();
             let unknown_id = std::env::var("OMS_TEST_UNKNOWN").unwrap();
             let terminal = format!("> {prompt_line}\n");
+            let observe = |provider, pid, repo: &Path, terminal: &str, parent: &mut AgyParent| {
+                super::observe(provider, pid, repo, terminal, parent, false)
+            };
 
             reset_agy_legacy_reads();
             let mut cached = AgyParent::default();
@@ -5910,9 +6424,10 @@ mod tests {
                 0,
                 "cold observe read child body files"
             );
-            let AgyParent::Legacy(ref file) = cached else {
+            let AgyParent::Legacy(ref file, _) = cached else {
                 panic!("expected short parent in legacy cache");
             };
+            let legacy_file = file.clone();
             let transcript = PathBuf::from(std::env::var_os("HOME").unwrap())
                 .join(".gemini/antigravity-cli/brain")
                 .join(file);
@@ -5933,10 +6448,104 @@ mod tests {
             );
 
             let current = std::fs::read(&transcript).unwrap();
+            let birth = oms_panel_core::terminals::process(lead_pid).unwrap().birth;
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                "01234567890123456789",
+                &prompt_line
+            ));
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                "0",
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+
+            let mut quoted: Vec<Value> = current
+                .strip_suffix(b"\n")
+                .unwrap()
+                .split(|&b| b == b'\n')
+                .take(2)
+                .map(|line| serde_json::from_slice(line).unwrap())
+                .collect();
+            // This raw model response could match the visible user-row pattern exactly.
+            quoted[1] = json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE",
+                "status":"DONE","content":format!("> {prompt_line}")});
+            let model_quote = quoted
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&transcript, &model_quote).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+
+            let header_only = format!("{TASK_PREFIX} Turn {TURN}. You own this provider's work.");
+            quoted[1] = json!({"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT",
+                "status":"DONE","content":format!("<USER_REQUEST>\n{header_only}\n</USER_REQUEST>")});
+            let short_request = quoted
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&transcript, &short_request).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &header_only
+            ));
+
+            const GEOMETRY_TURN: &str = "014589abcde2345678fa";
+            crate::orchestrator::tests::check_ordinary_agy_delivery_geometry(
+                GEOMETRY_TURN,
+                |body| {
+                    assert!(!agy_submitted_user_turn(
+                        lead_pid,
+                        &birth,
+                        &repo,
+                        GEOMETRY_TURN,
+                        body
+                    ));
+                    let request = json!({"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT",
+                        "status":"DONE","content":format!("<USER_REQUEST>\n{body}\n</USER_REQUEST>")});
+                    std::fs::write(&transcript, format!("{}\n{request}\n", quoted[0])).unwrap();
+                },
+                |body| agy_submitted_user_turn(lead_pid, &birth, &repo, GEOMETRY_TURN, body),
+            );
+
             let mut long = vec![b'x'; MAX_TRANSCRIPT];
             long.push(b'\n');
             long.extend_from_slice(&current);
             std::fs::write(&transcript, &long).unwrap();
+            assert!(agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
             reset_agy_legacy_reads();
             let recent = observe("antigravity", lead_pid, &repo, &terminal, &mut cached);
             assert_eq!(
@@ -5944,7 +6553,7 @@ mod tests {
                 "oversized parent lost current children"
             );
             assert_eq!(legacy_agy_read_index(), (2, 1, 0, 0));
-            assert!(matches!(cached, AgyParent::Bounded));
+            assert!(matches!(cached, AgyParent::Bounded(None)));
 
             let mut boundary = b"\n".to_vec();
             boundary.extend_from_slice(&current);
@@ -5964,6 +6573,13 @@ mod tests {
             let mut incomplete = long.clone();
             incomplete.extend_from_slice(b"{\"type\":\"USER_INPUT\"");
             std::fs::write(&transcript, incomplete).unwrap();
+            assert!(!agy_submitted_user_turn(
+                lead_pid,
+                &birth,
+                &repo,
+                TURN,
+                &prompt_line
+            ));
             assert!(
                 observe("antigravity", lead_pid, &repo, &terminal, &mut cached)
                     .rows
@@ -5996,6 +6612,212 @@ mod tests {
                 output.push(b'\n');
                 std::fs::write(&transcript, output).unwrap();
             };
+
+            {
+                let bounded_bytes = MAX_TRANSCRIPT + 1;
+                let bytes_read = || AGY_PARENT_BYTES.with(std::cell::Cell::get);
+                let mut board = AgyParent::default();
+                let sample = |screen: &str, parent: &mut AgyParent, verified_board| {
+                    super::observe(
+                        "antigravity",
+                        lead_pid,
+                        &repo,
+                        screen,
+                        parent,
+                        verified_board,
+                    )
+                    .rows
+                };
+                // Mixed workspaces always revalidate the linked tree.
+                std::fs::write(&transcript, &long).unwrap();
+                reset_agy_legacy_reads();
+                for _ in 0..2 {
+                    assert_eq!(sample(&terminal, &mut board, true), cold.rows);
+                }
+                assert_eq!(bytes_read(), 2 * bounded_bytes);
+                assert!(matches!(board, AgyParent::Bounded(None)));
+
+                let mut root_rows = records.clone();
+                let linked = repo.with_file_name("repo-wt");
+                root_rows[5]["content"] =
+                    json!(text(&records[5], "content").replace(&uri(&linked), &uri(&repo)));
+                overwrite(&root_rows);
+                reset_agy_legacy_reads();
+                let root_roster = sample(&terminal, &mut board, true);
+                assert_eq!(root_roster, cold.rows);
+                assert_eq!(legacy_agy_read_index(), (2, 1, 0, 0));
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert!(matches!(board, AgyParent::Bounded(Some(_))));
+                reset_agy_legacy_reads();
+                for _ in 0..20 {
+                    assert_eq!(sample(&terminal, &mut board, true), root_roster);
+                }
+                assert_eq!(legacy_agy_read_index(), (40, 0, 0, 0));
+                assert_eq!(bytes_read(), 0);
+
+                let mut delivery = root_rows[8].clone();
+                delivery["step_index"] = json!(9);
+                let content =
+                    text(&delivery, "content").replace("PARENT_DELIVERED_TEXT", "APPENDED_RESULT");
+                delivery["content"] = json!(content);
+                let mut writer = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&transcript)
+                    .unwrap();
+                writeln!(writer, "{delivery}").unwrap();
+                drop(writer);
+                assert!(
+                    sample(&terminal, &mut board, true)
+                        .iter()
+                        .any(|row| row["native_answer"] == "APPENDED_RESULT")
+                );
+                assert_eq!(bytes_read(), bounded_bytes);
+
+                // Same-size rewrite with restored mtime must still miss on ctime.
+                let before = std::fs::metadata(&transcript).unwrap();
+                let replacement = std::fs::read_to_string(&transcript)
+                    .unwrap()
+                    .replace("APPENDED_RESULT", "REWRITTEN_REPLY");
+                assert_eq!(replacement.len() as u64, before.len());
+                std::fs::write(&transcript, &replacement).unwrap();
+                File::open(&transcript)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+                    .unwrap();
+                reset_agy_legacy_reads();
+                let rewritten = sample(&terminal, &mut board, true);
+                assert!(
+                    rewritten
+                        .iter()
+                        .any(|row| row["native_answer"] == "REWRITTEN_REPLY")
+                );
+                assert_eq!(bytes_read(), bounded_bytes);
+
+                let moved = transcript.with_file_name("replacement.jsonl");
+                std::fs::write(&moved, &replacement).unwrap();
+                std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600)).unwrap();
+                std::fs::rename(&moved, &transcript).unwrap();
+                reset_agy_legacy_reads();
+                assert_eq!(sample(&terminal, &mut board, true), rewritten);
+                assert_eq!(bytes_read(), bounded_bytes);
+                for mode in [0o640, 0o660, 0o600] {
+                    std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(mode))
+                        .unwrap();
+                    reset_agy_legacy_reads();
+                    let shown = sample(&terminal, &mut board, true);
+                    if mode == 0o660 {
+                        assert!(shown.is_empty() && matches!(board, AgyParent::Bounded(None)));
+                        assert_eq!(bytes_read(), 0);
+                    } else {
+                        assert_eq!(shown, rewritten);
+                        assert_eq!(bytes_read(), bounded_bytes);
+                    }
+                }
+
+                reset_agy_legacy_reads();
+                let shorter = terminal.replace(" Extra\n", "\n");
+                assert_eq!(sample(&shorter, &mut board, true), rewritten);
+                assert_eq!(bytes_read(), bounded_bytes);
+                reset_agy_legacy_reads();
+                let markerless = "Antigravity terminal ready\n";
+                let derived = sample(markerless, &mut board, true);
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert_eq!(sample(markerless, &mut board, true), derived);
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert_eq!(sample(markerless, &mut board, false), derived);
+                assert_eq!(bytes_read(), 2 * bounded_bytes);
+                assert!(matches!(board, AgyParent::Bounded(None)));
+
+                // A successful empty projection has the same metadata fences.
+                overwrite(&root_rows[..2]);
+                reset_agy_legacy_reads();
+                assert!(sample(&terminal, &mut board, true).is_empty());
+                assert!(matches!(board, AgyParent::Bounded(Some(_))));
+                assert_eq!(bytes_read(), bounded_bytes);
+                assert!(sample(&terminal, &mut board, true).is_empty());
+                assert_eq!(bytes_read(), bounded_bytes);
+                println!(
+                    "AGY parent body: {bounded_bytes} bytes cold, 0 bytes across 20 stable frames"
+                );
+                let short = root_rows[..2]
+                    .iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>();
+                let unterminated = short.strip_suffix('\n').unwrap();
+                std::fs::write(&transcript, unterminated).unwrap();
+                let mut warm = AgyParent::Legacy(legacy_file.clone(), None);
+                let retry_delay = crate::watch::EVENT_BACKED_FALLBACK;
+                let sample_at = |screen: &str, parent: &mut AgyParent, now| {
+                    agy(lead_pid, &birth, &repo, screen, parent, true, now).unwrap()
+                };
+                assert!(sample(&terminal, &mut warm, false).is_empty());
+                assert!(matches!(warm, AgyParent::Legacy(_, None)));
+                reset_agy_legacy_reads();
+                assert!(sample(&terminal, &mut warm, true).is_empty());
+                assert!(matches!(warm, AgyParent::Legacy(_, Some(_))));
+                assert_eq!(legacy_agy_read_index(), (1, 1, 0, 0));
+                assert_eq!(bytes_read(), unterminated.len());
+                reset_agy_legacy_reads();
+                for _ in 0..8 {
+                    assert!(sample(&terminal, &mut warm, true).is_empty());
+                }
+                assert!(
+                    sample_at(&terminal, &mut warm, Instant::now() + retry_delay * 2).is_empty()
+                );
+                assert_eq!(legacy_agy_read_index(), (0, 9, 0, 0));
+                assert_eq!(bytes_read(), 0);
+
+                reset_agy_legacy_reads();
+                assert!(sample(&shorter, &mut warm, true).is_empty());
+                assert_eq!(legacy_agy_read_index(), (1, 1, 0, 0));
+                assert_eq!(bytes_read(), unterminated.len());
+
+                // The completed version can arm the original warm slot.
+                std::fs::write(&transcript, &short).unwrap();
+                reset_agy_legacy_reads();
+                assert!(sample(&terminal, &mut warm, true).is_empty());
+                assert!(warm.empty_roster_watch().is_some());
+                assert_eq!(legacy_agy_read_index(), (2, 2, 0, 0));
+                assert_eq!(bytes_read(), short.len());
+
+                // Custody may recover independently of the transcript version.
+                let presence = transcript.ancestors().nth(5).unwrap().join("presence");
+                std::fs::set_permissions(&presence, std::fs::Permissions::from_mode(0o770))
+                    .unwrap();
+                let version = AgyLegacyVersion::sample(transcript.clone()).unwrap();
+                let mut warm = AgyParent::Legacy(legacy_file, None);
+                let started = Instant::now();
+                reset_agy_legacy_reads();
+                assert!(sample_at(&terminal, &mut warm, started).is_empty());
+                assert!(matches!(warm, AgyParent::Legacy(_, Some(_))));
+                assert_eq!(legacy_agy_read_index(), (1, 1, 0, 0));
+                assert_eq!(bytes_read(), 0);
+                reset_agy_legacy_reads();
+                for _ in 0..8 {
+                    assert!(sample_at(&terminal, &mut warm, started).is_empty());
+                }
+                assert_eq!(legacy_agy_read_index(), (0, 8, 0, 0));
+                assert_eq!(bytes_read(), 0);
+
+                std::fs::set_permissions(&presence, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                assert!(version.matches(&AgyLegacyVersion::sample(transcript.clone()).unwrap()));
+                reset_agy_legacy_reads();
+                let deadline = started + retry_delay;
+                let just_before = deadline - std::time::Duration::from_nanos(1);
+                assert!(sample_at(&terminal, &mut warm, just_before).is_empty());
+                assert!(warm.empty_roster_watch().is_none());
+                assert_eq!(legacy_agy_read_index(), (0, 1, 0, 0));
+                assert_eq!(bytes_read(), 0);
+
+                reset_agy_legacy_reads();
+                assert!(sample_at(&terminal, &mut warm, deadline).is_empty());
+                assert!(warm.empty_roster_watch().is_some());
+                assert_eq!(legacy_agy_read_index(), (2, 2, 0, 0));
+                assert_eq!(bytes_read(), short.len());
+                std::fs::write(&transcript, &long).unwrap();
+            }
+
             let mut tool_omitted = records.clone();
             for index in [2, 4, 6] {
                 tool_omitted[index]["truncated_fields"] = json!(["tool_calls"]);
@@ -6204,7 +7026,7 @@ mod tests {
                     .map(|child| child.id.as_str())
                     .collect::<Vec<_>>(),
                 ids,
-                "all four creation records must be admitted before the three-row display cap"
+                "all four creation records must be admitted"
             );
             reset_agy_legacy_reads();
             let visible = observe_candidate(&three_and_one, &mut cached);
@@ -6214,7 +7036,8 @@ mod tests {
                     .iter()
                     .map(|row| text(row, "participant"))
                     .collect::<Vec<_>>(),
-                [fourth_id, &unknown_id, &legacy_id].map(|id| participant_id("antigravity", id))
+                [fourth_id, &unknown_id, &legacy_id, &delivered_id]
+                    .map(|id| participant_id("antigravity", id))
             );
             assert!(
                 visible
@@ -6276,7 +7099,7 @@ mod tests {
                 );
             }
             overwrite(&three_and_one);
-            let mut legacy = AgyParent::Legacy(PathBuf::from("unrelated/unchanged.jsonl"));
+            let mut legacy = AgyParent::Legacy(PathBuf::from("unrelated/unchanged.jsonl"), None);
             reset_agy_legacy_reads();
             assert_eq!(
                 observe("antigravity", lead_pid, &repo, markerless, &mut legacy).rows,
@@ -6284,7 +7107,7 @@ mod tests {
             );
             assert_eq!(legacy_agy_read_index(), (2, 1, 0, 0));
             assert!(
-                matches!(legacy, AgyParent::Legacy(ref path) if path == Path::new("unrelated/unchanged.jsonl"))
+                matches!(legacy, AgyParent::Legacy(ref path, None) if path == Path::new("unrelated/unchanged.jsonl"))
             );
             let ambiguous_capture = format!("{terminal}{terminal}{markerless}");
             let malformed = format!("{terminal}> {TASK_PREFIX} Turn clipped\n{markerless}");
@@ -6368,8 +7191,30 @@ mod tests {
             overwrite(&three_and_one);
             let mut fresh = AgyParent::default();
             reset_agy_legacy_reads();
-            assert!(agy(lead_pid, "bad-birth", &repo, markerless, &mut fresh).is_none());
-            assert!(agy(lead_pid, &owner.birth, &worktree, markerless, &mut fresh).is_none());
+            assert!(
+                agy(
+                    lead_pid,
+                    "bad-birth",
+                    &repo,
+                    markerless,
+                    &mut fresh,
+                    false,
+                    Instant::now()
+                )
+                .is_none()
+            );
+            assert!(
+                agy(
+                    lead_pid,
+                    &owner.birth,
+                    &worktree,
+                    markerless,
+                    &mut fresh,
+                    false,
+                    Instant::now()
+                )
+                .is_none()
+            );
             assert!(
                 observe("antigravity", 0, &repo, markerless, &mut fresh)
                     .rows
@@ -6471,13 +7316,26 @@ mod tests {
                     "bad-birth",
                     &repo,
                     &terminal,
-                    &mut AgyParent::default()
+                    &mut AgyParent::default(),
+                    false,
+                    Instant::now(),
                 )
                 .unwrap()
                 .len(),
                 3
             );
-            assert!(agy(lead_pid, "bad-birth", &repo, &terminal, &mut cached).is_none());
+            assert!(
+                agy(
+                    lead_pid,
+                    "bad-birth",
+                    &repo,
+                    &terminal,
+                    &mut cached,
+                    false,
+                    Instant::now()
+                )
+                .is_none()
+            );
             assert_eq!(agy_legacy_child_reads(), 0);
 
             let by_id = |cid: &str| {

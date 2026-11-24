@@ -560,14 +560,21 @@ fn spawn_main(
     start_lock.check()?;
     let ident = panel_room(repo, &session, options, &start_lock, services, stop)?;
     start_lock.check()?;
-    release_dead_mains(repo, services, stop)?;
-    require(
-        live_mains(repo, &session, Some(&ident), None, services, stop)? < MAX_LIVE_MAINS,
-        "another main is live or unverified; finish it before starting another",
-    )?;
     {
         let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-        check_legacy_main(repo, &session, None, services, stop)?;
+        release_dead_mains(repo, &start_lock, &sess_lock, services, stop)?;
+        require(
+            live_mains(repo, &session, Some(&ident), None, services, stop)? < MAX_LIVE_MAINS,
+            "another main is live or unverified; finish it before starting another",
+        )?;
+        check_legacy_main(
+            repo,
+            &session,
+            None,
+            Some((&start_lock, &sess_lock)),
+            services,
+            stop,
+        )?;
         sess_lock.check()?;
     }
 
@@ -681,7 +688,7 @@ fn split_panel<'a>(
             (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
             if owner.is_some()
                 && configured.is_none()
-                && let Some(existing) =
+                && let StartupMainProbe::Verified(existing) =
                     verified_startup_main(repo, &session, requested_room, services, stop)?
             {
                 let to_board = pick_existing_main(&existing, policy, stop)?;
@@ -696,8 +703,10 @@ fn split_panel<'a>(
                     "Managed session changed during Main selection; retry",
                 )?;
                 require(
-                    verified_startup_main(repo, &session, requested_room, services, stop)?.as_ref()
-                        == Some(&existing),
+                    matches!(
+                        verified_startup_main(repo, &session, requested_room, services, stop)?,
+                        StartupMainProbe::Verified(ref current) if current == &existing
+                    ),
                     "Main changed during selection; retry",
                 )?;
                 start_lock.check()?;
@@ -847,14 +856,21 @@ fn split_panel<'a>(
         start_lock.check()?;
         let ident = panel_room(repo, &session, options, &start_lock, services, stop)?;
         start_lock.check()?;
-        release_dead_mains(repo, services, stop)?;
-        require(
-            live_mains(repo, &session, Some(&ident), None, services, stop)? < MAX_LIVE_MAINS,
-            "another main is live or unverified; finish it before starting another",
-        )?;
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-            check_legacy_main(repo, &session, None, services, stop)?;
+            release_dead_mains(repo, &start_lock, &sess_lock, services, stop)?;
+            require(
+                live_mains(repo, &session, Some(&ident), None, services, stop)? < MAX_LIVE_MAINS,
+                "another main is live or unverified; finish it before starting another",
+            )?;
+            check_legacy_main(
+                repo,
+                &session,
+                None,
+                Some((&start_lock, &sess_lock)),
+                services,
+                stop,
+            )?;
             sess_lock.check()?;
         }
         start_lock.check()?;
@@ -889,7 +905,14 @@ fn split_panel<'a>(
     } else {
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-            check_legacy_main(repo, &session, None, services, stop)?;
+            check_legacy_main(
+                repo,
+                &session,
+                None,
+                Some((&start_lock, &sess_lock)),
+                services,
+                stop,
+            )?;
             sess_lock.check()?;
         }
         let ident = if let Some(resume) = options.get("resume") {
@@ -1069,25 +1092,31 @@ fn startup_native_candidate(
     Ok(candidate)
 }
 
+enum StartupMainProbe {
+    None,
+    Unverified,
+    Verified(Box<StartupMain>),
+}
+
 fn verified_startup_main(
     repo: &Path,
     session: &str,
     requested_room: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<Option<StartupMain>> {
+) -> Result<StartupMainProbe> {
     const FORMAT: &str = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_owner}\t#{@oms_panel_harness}\t#{@oms_panel_room}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_native_pane}\t.";
-    const UNAVAILABLE: &str =
-        "Current Main generation could not be verified; use --reopen to reconnect";
     let Some(pane) = startup_native_candidate(repo, session, services, stop)? else {
-        return Ok(None);
+        return Ok(StartupMainProbe::None);
     };
-    let capture = terminals::tmux(
+    let Ok(capture) = terminals::tmux(
         services,
         repo,
         &crate::commands::strings(&["display-message", "-p", "-t", &pane.pane, FORMAT]),
         stop,
-    )?;
+    ) else {
+        return Ok(StartupMainProbe::Unverified);
+    };
     let fields: Vec<_> = capture.split('\t').collect();
     let [
         id,
@@ -1105,64 +1134,70 @@ fn verified_startup_main(
         ".",
     ] = fields.as_slice()
     else {
-        return Err(Error::new(UNAVAILABLE));
+        return Ok(StartupMainProbe::Unverified);
     };
-    require(
-        *name == session
-            && *window == pane.window
-            && *pane_id == pane.pane
-            && native == pane_id
-            && main_capability(harness).is_some_and(|capability| capability.owner == *owner)
-            && [room_id, attempt, member]
-                .into_iter()
-                .all(|value| crate::identifier(value).is_ok()),
-        UNAVAILABLE,
-    )?;
+    if *name != session
+        || *window != pane.window
+        || *pane_id != pane.pane
+        || native != pane_id
+        || !main_capability(harness).is_some_and(|capability| capability.owner == *owner)
+        || ![room_id, attempt, member]
+            .into_iter()
+            .all(|value| crate::identifier(value).is_ok())
+    {
+        return Ok(StartupMainProbe::Unverified);
+    }
     require(
         requested_room.is_none_or(|requested| requested == *room_id),
         "existing Main belongs to a different room; existing sessions preserved",
     )?;
-    let session = terminals::provider_session_proof(services, repo, id, stop)?;
-    let process = terminals::process(pid.parse().map_err(Error::new)?)?;
-    require(
-        process.uid == rustix::process::getuid().as_raw(),
-        UNAVAILABLE,
-    )?;
-    let attempts = crate::commands::query(
+    let Ok(session) = terminals::provider_session_proof(services, repo, id, stop) else {
+        return Ok(StartupMainProbe::Unverified);
+    };
+    let Ok(pid) = pid.parse() else {
+        return Ok(StartupMainProbe::Unverified);
+    };
+    let Ok(process) = terminals::process(pid) else {
+        return Ok(StartupMainProbe::Unverified);
+    };
+    if process.uid != rustix::process::getuid().as_raw() {
+        return Ok(StartupMainProbe::Unverified);
+    }
+    let Ok(attempts) = crate::commands::query(
         services,
         NativeCommand::Events,
         repo,
         &["list", "--json"],
         stop,
-    )?;
+    ) else {
+        return Ok(StartupMainProbe::Unverified);
+    };
     let mut live = rows(&attempts).iter().filter(|event| {
         event["attempt_id"] == *attempt
             || (event["tool"] == "panel-main"
                 && event["terminal"] != true
                 && event["refs"]["panel_room_id"] == *room_id)
     });
-    require(
-        live.next().is_some_and(|event| {
-            event["attempt_id"] == *attempt
-                && event["provider"] == *owner
-                && event["tool"] == "panel-main"
-                && event["terminal"] == false
-                && event["refs"]["panel_role"] == "main"
-                && event["refs"]["panel_room_id"] == *room_id
-                && event["refs"]["panel_harness"] == *harness
-                && state::main_participant(event) == *member
-                && event["state"]
-                    .as_str()
-                    .is_some_and(|phase| state::LIVE_STATES.contains(&phase))
-        }) && live.next().is_none(),
-        UNAVAILABLE,
-    )?;
-    require(
-        current_auto_orchestrator_room(repo, room_id, member, owner, services, stop)
-            && terminals::process(process.pid).ok().as_ref() == Some(&process),
-        UNAVAILABLE,
-    )?;
-    Ok(Some(StartupMain {
+    let matched = live.next().is_some_and(|event| {
+        event["attempt_id"] == *attempt
+            && event["provider"] == *owner
+            && event["tool"] == "panel-main"
+            && event["terminal"] == false
+            && event["refs"]["panel_role"] == "main"
+            && event["refs"]["panel_room_id"] == *room_id
+            && event["refs"]["panel_harness"] == *harness
+            && state::main_participant(event) == *member
+            && event["state"]
+                .as_str()
+                .is_some_and(|phase| state::LIVE_STATES.contains(&phase))
+    }) && live.next().is_none();
+    if !matched
+        || !current_auto_orchestrator_room(repo, room_id, member, owner, services, stop)
+        || terminals::process(process.pid).ok().as_ref() != Some(&process)
+    {
+        return Ok(StartupMainProbe::Unverified);
+    }
+    Ok(StartupMainProbe::Verified(Box::new(StartupMain {
         pane,
         session,
         process,
@@ -1171,7 +1206,7 @@ fn verified_startup_main(
         room: (*room_id).into(),
         attempt: (*attempt).into(),
         member: (*member).into(),
-    }))
+    })))
 }
 
 fn verify_startup_board(
@@ -1285,21 +1320,124 @@ fn try_reuse_native_main(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<bool> {
-    let Some(base) = startup_native_candidate(repo, session, services, stop)? else {
-        return Ok(false);
-    };
-    start_lock.check()?;
-    check_reattach_room(repo, &base, requested_room, services, stop)?;
-    start_lock.check()?;
-    reopen_pane(repo, prefix, &base, false, services, stop)?;
-    start_lock.check()?;
-    terminals::tmux(
+    if let Some(base) = startup_native_candidate(repo, session, services, stop)? {
+        start_lock.check()?;
+        check_reattach_room(repo, &base, requested_room, services, stop)?;
+        start_lock.check()?;
+        reopen_pane(repo, prefix, &base, false, services, stop)?;
+        start_lock.check()?;
+        terminals::tmux(
+            services,
+            repo,
+            &crate::commands::strings(&["select-window", "-t", &base.pane]),
+            stop,
+        )?;
+        return Ok(true);
+    }
+    if let Some(window) = fallback_live_main_window(repo, session, requested_room, services, stop)?
+    {
+        start_lock.check()?;
+        terminals::tmux(
+            services,
+            repo,
+            &crate::commands::strings(&["select-window", "-t", &window]),
+            stop,
+        )?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn fallback_live_main_window(
+    repo: &Path,
+    session: &str,
+    requested_room: Option<&str>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Option<String>> {
+    let raw = terminals::tmux(
         services,
         repo,
-        &crate::commands::strings(&["select-window", "-t", &base.pane]),
+        &crate::commands::strings(&[
+            "list-windows",
+            "-t",
+            &format!("={session}"),
+            "-F",
+            "#{window_id}\t#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}\t#{window_name}\t#{@oms_panel_harness}\t#{@oms_provider_session}\t#{@oms_panel_repo}\t.",
+        ]),
         stop,
     )?;
-    Ok(true)
+    let canon = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let canon_str = canon.to_string_lossy();
+    let mut matches = Vec::new();
+    for line in raw.replace('\r', "").lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [
+            window,
+            owner,
+            room,
+            member,
+            name,
+            harness,
+            provider,
+            win_repo,
+            ".",
+        ] = fields.as_slice()
+        else {
+            continue;
+        };
+        if !crate::commands::valid_target(window, '@') {
+            continue;
+        }
+        if crate::orchestrator::PROVIDERS.contains(provider)
+            && owner.is_empty()
+            && member.is_empty()
+            && harness.is_empty()
+        {
+            continue;
+        }
+        let native = !member.is_empty()
+            || !harness.is_empty()
+            || (!owner.is_empty() && *name != "control")
+            || main_capability(name).is_some();
+        if !native {
+            continue;
+        }
+        if !win_repo.is_empty() && *win_repo != canon_str.as_ref() {
+            continue;
+        }
+        matches.push(((*window).to_owned(), (*room).to_owned()));
+    }
+    require(
+        matches.len() <= 1,
+        "multiple native Main panes found; reopen from the intended OMS window",
+    )?;
+    let Some((window, bound_room)) = matches.into_iter().next() else {
+        return Ok(None);
+    };
+    if let Some(requested) = requested_room {
+        crate::identifier(requested)?;
+        require(
+            !bound_room.is_empty(),
+            "existing Main room is unavailable; existing sessions preserved",
+        )?;
+        require(
+            bound_room == requested,
+            "existing Main belongs to a different room; existing sessions preserved",
+        )?;
+        let room = crate::commands::query(
+            services,
+            NativeCommand::Room,
+            repo,
+            &["show", "--id", requested, "--exact", "--json"],
+            stop,
+        )?;
+        require(
+            room["id"] == requested && room["closed"] == false,
+            "selected Main room is unavailable or closed; existing sessions preserved",
+        )?;
+    }
+    Ok(Some(window))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2922,7 +3060,14 @@ fn run_native(
             .as_ref()
             .map(|pane| pane.window.clone())
             .or_else(|| pending_window_id(repo, services, stop));
-        check_legacy_main(repo, &session, pending.as_deref(), services, stop)?;
+        check_legacy_main(
+            repo,
+            &session,
+            pending.as_deref(),
+            start_lock.as_ref().map(|lock| (lock, &session_lock)),
+            services,
+            stop,
+        )?;
         session_lock.check()?;
     }
 
@@ -3027,15 +3172,27 @@ fn run_native(
             format!("panel_session_digest={}", &digest[..32]),
         ]);
     }
+    start_args.extend([
+        "--ref".into(),
+        "panel_heartbeat_interval=60".into(),
+        "--ref".into(),
+        "panel_heartbeat_ttl=300".into(),
+    ]);
     let wrapper = terminals::process(std::process::id()).ok();
     if let Some(wrapper) = &wrapper {
-        let host = if managed_session() { "tmux" } else { "inline" };
+        let managed = managed_session();
+        let host = if managed { "tmux" } else { "inline" };
         for item in [
             format!("panel_host={host}"),
             format!("panel_wrapper_pid={}", wrapper.pid),
             format!("panel_wrapper_identity={}", wrapper.birth),
         ] {
             start_args.extend(["--ref".into(), item]);
+        }
+        if managed {
+            for item in tmux_host_refs(repo, services, stop) {
+                start_args.extend(["--ref".into(), item]);
+            }
         }
     }
     if auto_orchestrators {
@@ -4777,7 +4934,50 @@ fn ensure_room(
     Ok(id.into())
 }
 
-fn release_dead_mains(repo: &Path, services: &dyn Services, stop: &AtomicBool) -> Result<()> {
+fn tmux_host_refs(repo: &Path, services: &dyn Services, stop: &AtomicBool) -> Vec<String> {
+    let Ok(pane) = std::env::var("TMUX_PANE") else {
+        return vec![];
+    };
+    if !crate::commands::valid_target(&pane, '%') {
+        return vec![];
+    }
+    let Some(raw) = tmux_quiet(
+        services,
+        repo,
+        &["display-message", "-p", "#{pid}\t#{socket_path}"],
+        stop,
+    ) else {
+        return vec![];
+    };
+    let fields: Vec<&str> = raw.trim().split('\t').collect();
+    let [pid_raw, socket_raw] = fields.as_slice() else {
+        return vec![];
+    };
+    let Ok(pid) = pid_raw.parse::<u32>() else {
+        return vec![];
+    };
+    let Ok(server) = terminals::process(pid) else {
+        return vec![];
+    };
+    let Ok(canon_socket) = std::fs::canonicalize(socket_raw) else {
+        return vec![];
+    };
+    let socket_digest = oms_panel_core::digest(canon_socket.as_os_str().as_encoded_bytes());
+    vec![
+        format!("panel_pane_id={pane}"),
+        format!("panel_tmux_server_pid={}", server.pid),
+        format!("panel_tmux_server_identity={}", server.birth),
+        format!("panel_socket_digest={socket_digest}"),
+    ]
+}
+
+fn release_dead_mains(
+    repo: &Path,
+    start_lock: &oms_panel_core::Transaction<'_>,
+    sess_lock: &oms_panel_core::Transaction<'_>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
     let raw = crate::commands::query(
         services,
         NativeCommand::Events,
@@ -4787,8 +4987,10 @@ fn release_dead_mains(repo: &Path, services: &dyn Services, stop: &AtomicBool) -
     )?;
     let classified = release::classify(repo, rows(&raw), services);
     for item in rows(&classified["releasable"]) {
-        if let Some(id) = item["attempt"].as_str() {
-            let _ = release::release(repo, id, services, stop);
+        if let Some(id) = item["attempt"].as_str()
+            && release::release_locked(repo, id, start_lock, sess_lock, services, stop).is_ok()
+        {
+            eprintln!("oms panel: released crashed main {id}");
         }
     }
     Ok(())
@@ -4814,10 +5016,16 @@ fn check_legacy_main(
     repo: &Path,
     session: &str,
     pending_window: Option<&str>,
+    locks: Option<(
+        &oms_panel_core::Transaction<'_>,
+        &oms_panel_core::Transaction<'_>,
+    )>,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<()> {
-    release_dead_mains(repo, services, stop)?;
+    if let Some((start_lock, sess_lock)) = locks {
+        release_dead_mains(repo, start_lock, sess_lock, services, stop)?;
+    }
     let raw = crate::commands::query(
         services,
         NativeCommand::Events,
@@ -6894,6 +7102,29 @@ exec /bin/sleep 30"#,
                 assert_eq!(attempt["refs"]["panel_room_id"], *room);
                 assert_eq!(attempt["refs"][super::MAIN_PERMISSIONS_REF], "native");
                 assert_eq!(attempt["refs"]["panel_native_scheduling"], "unmanaged");
+                assert_eq!(attempt["refs"]["panel_host"], "tmux");
+                assert_eq!(attempt["refs"]["panel_heartbeat_interval"], "60");
+                assert_eq!(attempt["refs"]["panel_heartbeat_ttl"], "300");
+                assert!(
+                    attempt["refs"]["panel_pane_id"]
+                        .as_str()
+                        .is_some_and(|v| v.starts_with('%'))
+                );
+                assert!(
+                    attempt["refs"]["panel_tmux_server_pid"]
+                        .as_str()
+                        .is_some_and(|v| v.parse::<u32>().is_ok_and(|pid| pid > 0))
+                );
+                assert!(
+                    attempt["refs"]["panel_tmux_server_identity"]
+                        .as_str()
+                        .is_some_and(|v| !v.is_empty())
+                );
+                assert!(
+                    attempt["refs"]["panel_socket_digest"]
+                        .as_str()
+                        .is_some_and(|v| v.len() == 64)
+                );
                 assert_eq!(attempt["terminal"], false);
                 let room_state = crate::commands::query(
                     &RealCliParsers,
@@ -7062,7 +7293,8 @@ exec /bin/sleep 30"#,
             }
         };
         let rejected = TempRepo::new();
-        let managed = super::session_candidates(&rejected.0)[0].clone();
+        let managed = super::session_candidates(&rejected.0)[1].clone();
+        assert_ne!(managed, session);
         let control = socket
             .command()
             .args([
@@ -7079,7 +7311,11 @@ exec /bin/sleep 30"#,
             ])
             .output()
             .unwrap();
-        assert!(control.status.success());
+        assert!(
+            control.status.success(),
+            "{}",
+            String::from_utf8_lossy(&control.stderr)
+        );
         for argv in [
             [
                 "set-option",
@@ -8304,8 +8540,8 @@ exec /bin/sleep 30
             closed_room: false,
             ..closed
         };
-        assert!(super::check_legacy_main(&dir.0, "oms-test", None, &pending, &stop).is_err());
-        super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &pending, &stop).unwrap();
+        assert!(super::check_legacy_main(&dir.0, "oms-test", None, None, &pending, &stop).is_err());
+        super::check_legacy_main(&dir.0, "oms-test", Some("@1"), None, &pending, &stop).unwrap();
         let empty = crate::cli::Options::parse(&[]).unwrap();
         for terminal in [false, true] {
             for reference in [None, Some(Value::from("")), Some(Value::from("foreign"))] {
@@ -8345,6 +8581,269 @@ exec /bin/sleep 30
                 }
             }
         }
+    }
+
+    #[test]
+    fn check_legacy_main_releases_crashed_main_while_holding_panel_locks() {
+        const CHILD: &str = "OMS_RELEASE_LOCKS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = TempRepo::new();
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.env_clear();
+            for key in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+                if let Some(val) = std::env::var_os(key) {
+                    cmd.env(key, val);
+                }
+            }
+            let output = cmd
+                .args([
+                    "--exact",
+                    "native_panel::native_lifecycle_contract::check_legacy_main_releases_crashed_main_while_holding_panel_locks",
+                    "--nocapture",
+                ])
+                .env("HOME", &home.0)
+                .env("XDG_CACHE_HOME", home.0.join(".cache"))
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let body = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{body}");
+            assert!(body.contains("1 passed;"), "{body}");
+            return;
+        }
+        let dir = TempRepo::new();
+        let stop = AtomicBool::new(false);
+        let svc = RealCliParsers;
+        let mut dead = std::process::Command::new("/bin/true").spawn().unwrap();
+        let dead_pid = dead.id();
+        let _ = dead.wait();
+        let start_args = vec![
+            "start".into(),
+            "--provider".into(),
+            "codex".into(),
+            "--tool".into(),
+            "panel-main".into(),
+            "--ref".into(),
+            "panel_role=main".into(),
+            "--ref".into(),
+            "panel_owner=codex".into(),
+            "--ref".into(),
+            "panel_harness=codex".into(),
+            "--ref".into(),
+            "panel_host=tmux".into(),
+            "--ref".into(),
+            "panel_pane_id=%1".into(),
+            "--ref".into(),
+            format!("panel_socket_digest={}", "a".repeat(64)),
+            "--ref".into(),
+            format!("panel_tmux_server_pid={dead_pid}"),
+            "--ref".into(),
+            "panel_tmux_server_identity=dead:1".into(),
+            "--ref".into(),
+            format!("panel_wrapper_pid={dead_pid}"),
+            "--ref".into(),
+            "panel_wrapper_identity=dead:2".into(),
+            "--ref".into(),
+            format!("panel_native_pid={dead_pid}"),
+            "--ref".into(),
+            "panel_native_identity=dead:3".into(),
+            "--ref".into(),
+            "panel_room_id=room-crashed".into(),
+            "--then".into(),
+            "starting".into(),
+            "--then".into(),
+            "working".into(),
+        ];
+        let crashed = event_id(&dir.0, &start_args, &svc, &stop).unwrap();
+        let store = super::Store::open(&dir.0).unwrap();
+        let start_lock = store
+            .transaction("panel-main-start", std::time::Duration::from_secs(1))
+            .unwrap();
+        let sess_lock = store
+            .transaction("panel-main-session", std::time::Duration::from_secs(1))
+            .unwrap();
+        super::check_legacy_main(
+            &dir.0,
+            "oms-crashed",
+            None,
+            Some((&start_lock, &sess_lock)),
+            &svc,
+            &stop,
+        )
+        .unwrap();
+        let shown = crate::commands::query(
+            &svc,
+            NativeCommand::Events,
+            &dir.0,
+            &["show", "--attempt", &crashed, "--json"],
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(shown["state"], Value::from("abandoned"));
+        assert_eq!(shown["terminal"], Value::from(true));
+        assert_eq!(shown["reason_code"], Value::from("panel_main_released"));
+    }
+
+    #[test]
+    fn unverified_or_unmatched_existing_main_attaches_instead_of_refusing() {
+        struct ExistingMainMock {
+            repo: PathBuf,
+            discoverable: bool,
+            selected: std::cell::RefCell<Vec<String>>,
+        }
+        impl PeerExecutor for ExistingMainMock {
+            fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                let args: Vec<_> = request.argv.iter().map(|v| v.to_str().unwrap()).collect();
+                let stdout = match args.as_slice() {
+                    ["tmux", "list-panes", "-a", "-F", _] => {
+                        if self.discoverable {
+                            let repo = crate::commands::shell_quote(self.repo.to_str().unwrap());
+                            format!(
+                                "oms-fixture\t@1\t%1\t0\t\toms panel --repo {repo} --launch codex\noms-fixture\t@1\t%2\t0\t\toms panel --repo {repo} --watch"
+                            )
+                        } else {
+                            String::new()
+                        }
+                    }
+                    ["tmux", "display-message", "-p", "-t", "%1", _] => {
+                        // Missing @oms_panel_main_attempt / @oms_panel_native_pane -> unverified
+                        "oms-fixture\t$1\t@1\t%1\t1\t0\tcodex\tcodex\troom-1\t\t\t\t.".into()
+                    }
+                    ["tmux", "list-windows", "-t", "=oms-fixture", "-F", _] => format!(
+                        "@1\tcodex\troom-1\tatt-1\tcodex\tcodex\t\t{}\t.",
+                        self.repo.display()
+                    ),
+                    [
+                        "tmux",
+                        "show-option",
+                        "-w",
+                        "-v",
+                        "-t",
+                        "%1",
+                        "@oms_panel_room",
+                    ] => "room-1".into(),
+                    [
+                        "tmux",
+                        action @ ("select-pane" | "select-window"),
+                        "-t",
+                        target,
+                    ] => {
+                        self.selected
+                            .borrow_mut()
+                            .push(format!("{action}:{target}"));
+                        String::new()
+                    }
+                    _ => {
+                        return Err(oms_panel_core::Error::new(format!(
+                            "unexpected mock tmux {args:?}"
+                        )));
+                    }
+                };
+                Ok(CommandOutput {
+                    stdout: stdout.into_bytes(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+        impl Services for ExistingMainMock {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                assert_eq!(command, NativeCommand::Room);
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(&serde_json::json!({
+                        "id": "room-1",
+                        "closed": false,
+                        "participants": [],
+                    }))
+                    .unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+
+        let dir = TempRepo::new();
+        let stop = AtomicBool::new(false);
+        let store = super::Store::open(&dir.0).unwrap();
+        let lock = store
+            .transaction("panel-main-start", std::time::Duration::from_secs(1))
+            .unwrap();
+        let prefix = vec!["oms".into()];
+
+        // 1. Discoverable native pane that cannot pass full Main-swap verification
+        // returns Unverified so startup attaches via try_reuse_native_main.
+        let unverified = ExistingMainMock {
+            repo: dir.0.clone(),
+            discoverable: true,
+            selected: Default::default(),
+        };
+        assert!(matches!(
+            super::verified_startup_main(&dir.0, "oms-fixture", None, &unverified, &stop).unwrap(),
+            super::StartupMainProbe::Unverified
+        ));
+        assert!(
+            super::try_reuse_native_main(
+                &dir.0,
+                &prefix,
+                "oms-fixture",
+                None,
+                &lock,
+                &unverified,
+                &stop
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            *unverified.selected.borrow(),
+            ["select-pane:%1", "select-window:%1"]
+        );
+
+        // 2. Tagged Main window whose start command wasn't recognized still attaches
+        // cleanly, while refusing a mismatched --room.
+        let tagged_only = ExistingMainMock {
+            repo: dir.0.clone(),
+            discoverable: false,
+            selected: Default::default(),
+        };
+        assert!(
+            super::try_reuse_native_main(
+                &dir.0,
+                &prefix,
+                "oms-fixture",
+                Some("room-other"),
+                &lock,
+                &tagged_only,
+                &stop
+            )
+            .unwrap_err()
+            .message
+            .contains("different room")
+        );
+        assert!(
+            super::try_reuse_native_main(
+                &dir.0,
+                &prefix,
+                "oms-fixture",
+                Some("room-1"),
+                &lock,
+                &tagged_only,
+                &stop
+            )
+            .unwrap()
+        );
+        assert_eq!(*tagged_only.selected.borrow(), ["select-window:@1"]);
     }
 }
 
