@@ -95,8 +95,20 @@ fn base(repo: &Path, value: &str, context: &Context<'_>) -> Result<String> {
     )?;
     Ok(String::from_utf8_lossy(&bytes).trim().into())
 }
+pub(crate) fn pin_base(args: &mut Args, repo: &Path, context: &Context<'_>) -> Result<String> {
+    if args.has("_review-base") {
+        return Ok(args.get("_review-base").to_owned());
+    }
+    let sha = base(repo, args.value("base", "HEAD"), context)?;
+    args.set_value("_review-base", &sha);
+    Ok(sha)
+}
 pub(crate) fn scope(args: &Args, repo: &Path, context: &Context<'_>) -> Result<(V, Vec<u8>)> {
-    let base = base(repo, args.value("base", "HEAD"), context)?;
+    let base = if args.has("_review-base") {
+        args.get("_review-base").to_owned()
+    } else {
+        base(repo, args.value("base", "HEAD"), context)?
+    };
     let head = base_ref(repo, "HEAD", context)?;
     let diff_base = args.value("_review-since", &base);
     let patch = process::git(
@@ -128,6 +140,7 @@ pub(crate) fn scope(args: &Args, repo: &Path, context: &Context<'_>) -> Result<(
     )?;
     let (covers, criterion_context) = coverage(args, repo, context)?;
     let criteria_sha256 = storage::hash(&criterion_context.json(false)?);
+    let diff_bytes = if args.has("no-diff") { 0 } else { patch.len() };
     Ok((
         obj([
             ("schema", 1usize.into()),
@@ -140,6 +153,7 @@ pub(crate) fn scope(args: &Args, repo: &Path, context: &Context<'_>) -> Result<(
             ("base", base.into()),
             ("head", head.into()),
             ("diff_sha256", storage::hash(&patch).into()),
+            ("diff_bytes", V::Num(diff_bytes.to_string())),
             ("diff_included", (!args.has("no-diff")).into()),
             ("tracked_clean", dirty.is_empty().into()),
             ("paths", V::Arr(paths)),
@@ -195,7 +209,39 @@ pub fn artifact_sections(raw: &str, require_exit: bool) -> (String, Option<i32>)
         .and_then(|s| s.parse::<i32>().ok());
     (answer, code)
 }
+fn artifact_diagnostics(raw: &str) -> Option<String> {
+    let mut after_output = None;
+    let mut diag_start = None;
+    let mut diag_end = None;
+    let mut offset = 0usize;
+    for line in raw.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content == "## Output" {
+            after_output = Some(offset + line.len());
+            diag_start = None;
+            diag_end = None;
+        } else if content == "## Diagnostics" && after_output.is_some() {
+            diag_start = Some(offset + line.len());
+            diag_end = Some(raw.len());
+        } else if content == "## Exit" && diag_start.is_some() {
+            diag_end = Some(offset);
+        }
+        offset += line.len();
+    }
+    let (start, end) = diag_start.zip(diag_end)?;
+    raw[start..end]
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
 pub fn verdict(answer: &str, code: Option<i32>, complete: bool) -> (&'static str, Option<f64>) {
+    if !complete && code == Some(124) {
+        return ("timed_out", None);
+    }
+    if code == Some(130) {
+        return ("interrupted", None);
+    }
     if code != Some(0) || !complete || providers::answer_quality(answer) != "ok" {
         return ("incomplete", None);
     }
@@ -284,11 +330,28 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     for (_stem, (round, name)) in seats {
         let provider = name.split('-').next().unwrap_or("").to_owned();
         let bytes = storage::read(&repo, &directory.join(&name), false)?;
-        let (answer, code) = artifact_sections(&String::from_utf8_lossy(&bytes), true);
-        let (state, confidence) = verdict(&answer, code, true);
+        let raw = String::from_utf8_lossy(&bytes);
+        let (answer, code) = artifact_sections(&raw, true);
+        let (mut state, confidence) = verdict(&answer, code, true);
+        let mut detail = None;
+        if state == "incomplete"
+            && code.is_none()
+            && let Some(diag) = artifact_diagnostics(&raw)
+        {
+            if let Some(rest) = diag.strip_prefix("error: timed out after ") {
+                state = "timed_out";
+                detail = Some(format!("timed out after {rest}"));
+            } else if peer::is_interrupted_line(&diag) {
+                state = "interrupted";
+                detail = Some("interrupted".into());
+            }
+        }
         states.push(state);
-        output.push_str(&format!("{provider}: {state}\n"));
-        values.push(obj([
+        output.push_str(&format!(
+            "{provider}: {}\n",
+            detail.as_deref().unwrap_or(state)
+        ));
+        let mut row = obj([
             ("provider", provider.into()),
             ("verdict", state.into()),
             (
@@ -297,14 +360,25 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             ),
             ("round", V::Num(round.to_string())),
             ("artifact", name.into()),
-        ]));
+        ]);
+        if let Some(detail) = detail {
+            row.set("detail", detail);
+        }
+        values.push(row);
     }
     let code = overall(&states);
-    let value = obj([
+    let scope_base = storage::read(&repo, &directory.join(format!("_scope-{run}.json")), false)
+        .ok()
+        .and_then(|bytes| V::parse(&bytes).ok())
+        .and_then(|doc| (!text(&doc, "base").is_empty()).then(|| doc.get("base").clone()));
+    let mut value = obj([
         ("run", run.into()),
         ("overall", V::Num(code.to_string())),
         ("seats", V::Arr(values)),
     ]);
+    if let Some(base) = scope_base {
+        value.set("base", base);
+    }
     Ok((
         code,
         if args.has("json") {
@@ -576,6 +650,23 @@ pub(crate) fn finish(
             &dir.join(format!("_scope-{run}.json")),
             false,
         )?)?;
+        output.push_str(&format!("base: {}\n", text(&original, "base")));
+        for seat in seats {
+            let elapsed_secs = peer::rounded_secs(seat.elapsed);
+            let status_label = if !seat.complete && seat.code == 124 {
+                peer::timeout_message(seat.timeout_secs, seat.diff_bytes)
+            } else if seat.code == 130 {
+                "interrupted".to_owned()
+            } else if seat.complete && seat.code == 0 && seat.quality == "ok" {
+                "ok".to_owned()
+            } else {
+                "incomplete".to_owned()
+            };
+            output.push_str(&format!(
+                "{}: {status_label} (elapsed {elapsed_secs}s, diff {} bytes)\n",
+                seat.target.provider, seat.diff_bytes
+            ));
+        }
         let (current, _) = scope(args, repo, context)?;
         if original.get("diff_sha256") != current.get("diff_sha256")
             || original.get("head") != current.get("head")
@@ -591,6 +682,7 @@ pub(crate) fn finish(
         &dir.join(format!("_scope-{run}.json")),
         false,
     )?)?;
+    output.push_str(&format!("base: {}\n", text(&original, "base")));
     let (current, patch) = scope(args, repo, context)?;
     let diff = diff_lines(&patch);
     let mut changed = scope_changed(&original, &current);
@@ -605,8 +697,20 @@ pub(crate) fn finish(
     for seat in seats {
         let (state, confidence) = verdict(&seat.answer, Some(seat.code), seat.complete);
         states.push(state);
-        output.push_str(&format!("{}: {state}\n", seat.target.provider));
-        seat_rows.push(obj([
+        let elapsed_secs = peer::rounded_secs(seat.elapsed);
+        let detail = if state == "timed_out" {
+            Some(peer::timeout_message(seat.timeout_secs, seat.diff_bytes))
+        } else if state == "interrupted" {
+            Some("interrupted".to_owned())
+        } else {
+            None
+        };
+        let status_label = detail.as_deref().unwrap_or(state);
+        output.push_str(&format!(
+            "{}: {status_label} (elapsed {elapsed_secs}s, diff {} bytes)\n",
+            seat.target.provider, seat.diff_bytes
+        ));
+        let mut seat_row = obj([
             ("provider", seat.target.provider.clone().into()),
             ("verdict", state.into()),
             (
@@ -614,6 +718,8 @@ pub(crate) fn finish(
                 confidence.map_or(V::Null, |v| V::Num(v.to_string())),
             ),
             ("round", V::Num(seat.round.to_string())),
+            ("elapsed_secs", V::Num(elapsed_secs.to_string())),
+            ("diff_bytes", V::Num(seat.diff_bytes.to_string())),
             (
                 "artifact",
                 seat.artifact
@@ -623,7 +729,14 @@ pub(crate) fn finish(
                     .into_owned()
                     .into(),
             ),
-        ]));
+        ]);
+        if state == "timed_out" {
+            seat_row.set("timeout_secs", V::Num(seat.timeout_secs.to_string()));
+        }
+        if let Some(detail) = detail {
+            seat_row.set("detail", detail);
+        }
+        seat_rows.push(seat_row);
         let (findings, _) = if matches!(state, "pass" | "fail") {
             parse_findings(&seat.answer)
         } else {
@@ -863,6 +976,8 @@ pub(crate) fn finish(
     }
     let verdicts = obj([
         ("run", run.into()),
+        ("base", original.get("base").clone()),
+        ("head", original.get("head").clone()),
         ("overall", V::Num(code.to_string())),
         ("seats", V::Arr(seat_rows)),
     ]);
@@ -1602,7 +1717,8 @@ fn outcome(
     )
 }
 fn incremental(args: &mut Args, repo: &Path, dir: &Path, context: &Context<'_>) -> Result<()> {
-    let base = base(repo, args.required("base")?, context)?;
+    args.required("base")?;
+    let base = pin_base(args, repo, context)?;
     let head = base_ref(repo, "HEAD", context)?;
     let rows = storage::load(repo, Path::new(".oms/artifacts/index.jsonl"))?;
     let mut reason = "no earlier review recorded its head and base".to_owned();
