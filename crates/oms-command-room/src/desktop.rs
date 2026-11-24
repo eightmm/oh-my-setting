@@ -126,11 +126,121 @@ impl Room<'_> {
                 ("room", room["id"].clone()),
                 ("participant", room["owner"].clone()),
                 ("source", "room-session".into()),
+                (
+                    "participants",
+                    room.list("participants")
+                        .iter()
+                        .take(32)
+                        .map(|p| {
+                            obj([
+                                ("room", room["id"].clone()),
+                                ("participant", p["participant"].clone()),
+                                ("role", p["role"].clone()),
+                                ("provider", p["provider"].clone()),
+                                ("joined", p["joined"].clone()),
+                            ])
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+                (
+                    "participantsOmitted",
+                    (room.list("participants").len().saturating_sub(32) as u64).into(),
+                ),
                 ("state", "joined".into()),
                 ("incomplete", incomplete.into()),
             ]),
         );
         Ok(result)
+    }
+
+    /// Read an exact published Room. Only rows shared with this native Main and
+    /// involving the selected participant can cross into its conversation tab.
+    pub fn desktop_chat(
+        &self,
+        id: &str,
+        who: &str,
+        consumer: &str,
+        before: Option<u64>,
+    ) -> Result<Value> {
+        identifier(id, "room")?;
+        identifier(who, "participant")?;
+        if self.session.child
+            || self.session.participant.is_some()
+            || !hex(consumer, 32)
+            || before == Some(0)
+        {
+            return Err(Error::new("desktop chat needs a bound app conversation"));
+        }
+        let room = crate::project(&self.records(id)?)?;
+        let owner = room.text("owner");
+        let viewer = crate::model::member(&room, owner)?;
+        if room.text("id") != id
+            || room.flag("closed")
+            || room.flag("sealed")
+            || !room["successor"].is_null()
+            || !self.published_room(&room)?
+            || viewer.text("consumer") != consumer
+            || viewer.text("provider") != "codex"
+            || viewer.text("role") != "main"
+        {
+            return Err(Error::new("conversation is not the owner of this Room"));
+        }
+        let member = room
+            .list("participants")
+            .iter()
+            .find(|p| p.text("participant") == who)
+            .ok_or_else(|| Error::new("participant is not recorded in this Room"))?;
+        let mut messages = Vec::new();
+        let mut next = Value::Null;
+        let mut bytes = 0;
+        for m in room.list("messages").iter().rev() {
+            let seq = m["seq"]
+                .as_u64()
+                .ok_or_else(|| Error::new("invalid room message sequence"))?;
+            let visible_to = |participant: &str| {
+                m.text("sender") == participant
+                    || m.text("recipient") == participant
+                    || (m.text("recipient") == "all"
+                        && m.list("targets")
+                            .iter()
+                            .any(|target| target.as_str() == Some(participant)))
+            };
+            if seq < viewer.number("seq")
+                || before.is_some_and(|n| seq >= n)
+                || !visible_to(owner)
+                || !visible_to(who)
+            {
+                continue;
+            }
+            let item = obj([
+                ("seq", m["seq"].clone()),
+                ("at", m["ts"].clone()),
+                ("from", m["sender"].clone()),
+                ("to", m["recipient"].clone()),
+                ("kind", m["message_kind"].clone()),
+                ("text", m["text"].clone()),
+            ]);
+            bytes += encode(&item, false, true)?.len();
+            if messages.len() >= 12 || (!messages.is_empty() && bytes > 16_000) {
+                next = messages
+                    .last()
+                    .map(|m: &Value| m["seq"].clone())
+                    .unwrap_or(Value::Null);
+                break;
+            }
+            messages.push(item);
+        }
+        messages.reverse();
+        Ok(obj([
+            ("room", id.into()),
+            ("participant", who.into()),
+            ("provider", member["provider"].clone()),
+            ("source", "room".into()),
+            ("self", (owner == who).into()),
+            ("messages", messages.into()),
+            ("nextBefore", next),
+        ]))
     }
 
     pub(crate) fn desktop_start_status(&self, room: &str) -> Result<Value> {

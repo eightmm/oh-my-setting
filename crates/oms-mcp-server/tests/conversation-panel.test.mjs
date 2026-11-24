@@ -12,10 +12,16 @@ const script = html.match(/<script>([\s\S]+?)<\/script>/)[1];
 class Element extends EventTarget {
   value = '';
   children = [];
+  attributes = new Map();
+  scrollTop = 0;
+  get scrollHeight() { return this.children.length; }
   get textContent() { return this.children.map(child => child?.textContent ?? child).join(''); }
   set textContent(value) { this.children = [String(value ?? '')]; }
   add() {}
   append(...children) { this.children.push(...children); }
+  prepend(...children) { this.children.unshift(...children); }
+  setAttribute(name,value) { this.attributes.set(name,value); }
+  focus() {}
   replaceChildren(...children) { this.children = children; }
   querySelectorAll() { return []; }
   setCustomValidity() {}
@@ -27,6 +33,7 @@ async function panel(projects, dashboard = {}) {
   get('launch').elements = {main:{value:'codex'}};
   get('launch').reset = () => { get('brief').value = ''; };
   const window = new EventTarget();
+  window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
   const host = {status:null, failStart:true, replies:[]};
   function notify(payload) {
@@ -36,6 +43,7 @@ async function panel(projects, dashboard = {}) {
   }
   function tool(name, args) {
     calls.push({name, args});
+    if (host.tools?.[name]) return host.tools[name](args);
     switch (name) {
       case 'oms_list_projects': return {projects};
       case 'oms_panel_snapshot': return {dashboard:{project:args.project, ...dashboard}};
@@ -60,10 +68,14 @@ async function panel(projects, dashboard = {}) {
     if (id == null) return;
     let result = {};
     if (method === 'tools/call') {
-      try { result = {structuredContent:tool(params.name, params.arguments)}; }
+      try {
+        const value = tool(params.name, params.arguments);
+        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+      }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
-      if (params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) {
+      if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
         host.delay = null;
+        host.delayTool = null;
         host.delayedId = id;
         host.release = () => notify({id, result});
         return;
@@ -77,6 +89,7 @@ async function panel(projects, dashboard = {}) {
   return {get, calls, host, notify,
     async event(id, type) {
       get(id).dispatchEvent(new Event(type, {cancelable:true}));
+      if (type === 'click') get(id).onclick?.();
       await setImmediate();
     },
     async open(method, params) {
@@ -285,4 +298,132 @@ test('a slow refresh keeps the previous timestamp and lets the user change proje
   assert.equal(p.get('project').textContent, 'two');
   assert.equal(p.get('view').ariaBusy, 'false');
   assert.equal(p.get('launcher').open, false);
+});
+
+test('scoped chat navigation reads private bodies, paginates backwards and preserves history on refresh', async () => {
+  const main = {source:'room-session',state:'joined',provider:'codex',room:'room-one',participant:'owner'};
+  const p = await panel(['one'], {conversationMain:main});
+  const chat = args => ({...args, source:'room',messages:[{seq:args.before ? 1 : 4,text:args.before ? 'earlier' : 'latest'}],nextBefore:args.before ? null : 4});
+  p.host.tools = {oms_panel_chat:chat};
+  assert.ok(!p.calls.some(c => c.name === 'oms_panel_chat'));
+  await p.event('main-chat','click');
+  assert.equal(p.get('pane-chat').hidden,false);
+  assert.deepEqual(p.calls.at(-1).args.project,'one');
+  assert.match(p.get('chat-messages').textContent,/latest/);
+  await p.event('chat-older','click');
+  assert.equal(p.calls.at(-1).args.before,4);
+  assert.match(p.get('chat-messages').textContent,/earlier.*latest/);
+  await p.event('refresh','click');
+  assert.match(p.get('chat-messages').textContent,/earlier.*latest/);
+  await p.event('chat-back','click'); assert.equal(p.get('pane-overview').hidden,false);
+  await p.event('tab-chat','click'); assert.match(p.get('chat-messages').textContent,/earlier.*latest/);
+});
+
+test('a project change discards a pending private result and clears selected members', async () => {
+  const p = await panel(['one','two'], {conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner'}});
+  p.get('project-choice').value = 'one'; await p.event('project-choice','change');
+  p.host.tools = {oms_panel_chat:args => ({...args,source:'room',messages:[{seq:1,text:'old private result'}]})};
+  p.host.delayTool = 'oms_panel_chat';
+  await p.event('main-chat','click');
+  p.get('project-choice').value = 'two'; await p.event('project-choice','change');
+  p.host.release(); await setImmediate();
+  assert.equal(p.get('project').textContent,'two');
+  assert.equal(p.get('pane-overview').hidden,false);
+  assert.doesNotMatch(p.get('chat-messages').textContent,/private/);
+  assert.equal(p.get('chat-back').hidden,true);
+});
+
+test('usage and Git stay on demand and preserve scope, unknown measurements and PR head evidence', async () => {
+  const p = await panel(['one'], {git:{available:true,branch:'main',dirty:false}});
+  const pr = {number:7,headBranch:'topic',baseBranch:'main',scope:'linkedWorktree',matchesLocalHead:false,url:'https://other.example/pull/7',
+    draft:true,checks:{passed:1,failed:0,pending:2,other:0}};
+  p.host.tools = {oms_panel_git_status:() => ({git:{available:true,branch:'main'},github:{status:'available',repository:'org/repo',pullRequests:[pr]}}),
+    oms_panel_usage:() => ({providers:[{provider:'codex',windows:[{used:0,name:'주간'}]}],attempts:[{id:'a1',provider:'codex',tokens:null,source:null}],
+      providerTotals:[{provider:'codex',calls:4,tokenReports:2,tokens:810,reportedCostMicrousd:0,reportedCostCalls:1,estimatedCostMicrousd:210000,estimatedCostCalls:2}]})};
+  assert.equal(p.calls.filter(c => Object.hasOwn(p.host.tools,c.name)).length,0);
+  await p.event('tab-git','click');
+  assert.match(p.get('git-content').textContent,/연결된 워크트리.*로컬 HEAD 불일치/);
+  assert.match(p.get('git-content').textContent,/통과 1 · 실패 0 · 대기 2/);
+  await p.event('tab-usage','click');
+  assert.match(p.get('usage-content').textContent,/0% 사용/);
+  assert.match(p.get('usage-content').textContent,/토큰 미확인/);
+  assert.match(p.get('usage-content').textContent,/토큰 소계 810 · 사용량 보고 2\/4회/);
+  assert.match(p.get('usage-content').textContent,/보고 비용 US\$0 · 1회/);
+  assert.match(p.get('usage-content').textContent,/추정 비용 US\$0.21 · 2회/);
+  await p.event('tab-git','click');
+  assert.equal(p.calls.filter(c => c.name === 'oms_panel_git_status').length,1);
+});
+
+test('TUI inspection is on demand, pages in both directions and discards a superseded view', async () => {
+  const p = await panel(['one'], {commandStatus:{available:true,total:9,active:2,executing:1}});
+  p.host.tools = {oms_panel_tui_view:({view,page}) => ({view,page,status:'ready',columns:[{key:'task',label:'작업'}],
+    rows:[{task:view+'-'+page}],nextPage:page===1 ? 2 : null})};
+  await p.event('tab-activity','click'); assert.ok(!p.calls.some(c => c.name==='oms_panel_tui_view'));
+  p.get('tui-view').value='plan'; await p.event('tui-view','change'); await p.event('tui-next','click');
+  assert.match(p.get('tui-rows').textContent,/plan-2/);
+  await p.event('tui-prev','click'); assert.match(p.get('tui-rows').textContent,/plan-1/);
+  p.host.delayTool='oms_panel_tui_view'; p.get('tui-view').value='health'; await p.event('tui-view','change');
+  p.get('tui-view').value='jobs'; await p.event('tui-view','change'); p.host.release(); await setImmediate();
+  assert.match(p.get('tui-rows').textContent,/jobs-1/);
+  assert.doesNotMatch(p.get('tui-rows').textContent,/health/);
+});
+
+test('private attempt detail requires the selected actor, attempt and original source on every page', async () => {
+  const p = await panel(['one'],{conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner'}});
+  let patch = 'initial', returnedId;
+  p.host.tools = {oms_panel_chat:a => ({room:a.room,participant:a.participant,source:'room',messages:[],
+    attempts:[{id:'a1',tool:'peer-review',state:'done',sections:['info','events']}],
+    evidence:a.section && {attempt:returnedId || a.attempt,section:a.section,page:a.page,source:'indexed-patch',
+      lines:[a.section+' '+a.page],proofs:{diff:'initial'},digest:a.section === 'diff' ? patch : null,
+      nextPage:a.section === 'diff' && a.page===1 ? 2 : null}})};
+  await p.event('main-chat','click');
+  assert.equal(p.calls.at(-1).args.section,undefined);
+  p.get('evidence-attempt').value='a1'; await p.event('evidence-attempt','change');
+  assert.equal(p.get('evidence-lines').textContent,'info 1');
+  const click = async label => {
+    p.get('evidence-actions').children.find(button => button.textContent===label).dispatchEvent(new Event('click'));
+    await setImmediate();
+  };
+  assert.doesNotMatch(p.get('evidence-actions').textContent,/변경 파일|기록된 답변/);
+  await click('패치');
+  assert.equal(p.get('evidence-lines').textContent,'diff 1');
+  patch='new';
+  await p.event('evidence-next','click');
+  assert.equal(p.get('evidence-lines').textContent,'');
+  assert.match(p.get('evidence-status').textContent,/근거가 바뀌었습니다/);
+  assert.deepEqual(Object.entries(p.calls.at(-1).args).sort(),Object.entries({project:'one',room:'r',participant:'owner',attempt:'a1',section:'diff',page:2}).sort());
+  returnedId='other'; await click('이벤트');
+  assert.match(p.get('evidence-status').textContent,/일치하지 않습니다/);
+  assert.equal(p.get('evidence-lines').textContent,'');
+});
+
+test('TUI partial totals and failed next pages preserve the last observed rows and navigation', async () => {
+  const p = await panel(['one']);
+  let state='unavailable';
+  p.host.tools = {oms_panel_tui_view:({view,page}) => ({view,page,status:page===1?'ready':state,
+    columns:[{key:'item',label:'항목'}],rows:page===1?[{item:'retained row'}]:[],nextPage:page===1?2:null,
+    total:page===1?1:undefined,incomplete:true})};
+  await p.event('tab-activity','click');
+  p.get('tui-view').value='log'; await p.event('tui-view','change');
+  assert.match(p.get('tui-status').textContent,/확인된 합계 1건.*일부 조회/);
+  await p.event('tui-next','click');
+  assert.match(p.get('tui-status').textContent,/조회할 수 없습니다/);
+  assert.match(p.get('tui-rows').textContent,/retained row/);
+  assert.equal(p.get('tui-next').hidden,false);
+  state='ready'; await p.event('tui-next','click');
+  assert.match(p.get('tui-status').textContent,/이 페이지에서 확인된 기록 없음 · 일부 조회/);
+  assert.doesNotMatch(p.get('tui-status').textContent,/전체 0|합계 0/);
+});
+
+test('a compact snapshot reports only positive omissions and keeps empty samples uncertain', async () => {
+  const p = await panel(['one'], {attemptsTrimmed:2,operationsTrimmed:1,attentionTrimmed:0,activeAttemptsTrimmed:3,
+    active:0,activeAttempts:[],attempts:[],reviews:{available:true},
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner'}});
+  assert.match(p.get('status').textContent,/요약에서 생략된 기록 · 최근 실행 2건, 결과물 1건, 미종료 실행 3건/);
+  assert.doesNotMatch(p.get('status').textContent,/주의 항목/);
+  assert.match(p.get('leads').textContent,/확인하지 못했습니다/);
+  assert.match(p.get('operations').textContent,/결과물 미확인/);
+  assert.match(p.get('activity').textContent,/실행 기록 미확인/);
+  const full = await panel(['one'], {attemptsTrimmed:0});
+  assert.doesNotMatch(full.get('status').textContent,/생략/);
 });

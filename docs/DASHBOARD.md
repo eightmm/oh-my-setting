@@ -311,3 +311,31 @@ mapped connection identifies a project by alias. The plugin accepts the
 project paths from the host configuration. SSH uses strict host key
 verification and disables forwarding and interactive authentication.
 [Plugin thread entrypoints](https://developers.openai.com/plugins/build/extensions).
+
+### Git and GitHub in the desktop panel
+
+The dashboard reads the selected checkout's branch, full HEAD, tracked and
+untracked changes, upstream, and local ahead/behind counts in one Git status
+call. Counts compare against the locally stored upstream ref. Detached HEAD,
+unborn branches and missing upstreams retain the values Git can establish.
+
+The GitHub action invokes `oms_panel_git_status` (CLI equivalent
+`oms github panel-status --repo PATH --json`). It reads open pull requests
+from the checkout's github.com origin using the runtime host's GitHub CLI.
+For the selected branch it shows whether the local HEAD matches the PR.
+It also recognizes PRs whose origin branch **and** head match a registered
+linked worktree. A fork with a coincident branch name does not qualify.
+The title, check counts and up to six named checks belong to the observed PR head. Failed and pending checks appear first. Zero checks means none
+were reported. The response marks truncated or partial results, unsupported
+origins, and unavailable GitHub access. Opening or refreshing the dashboard
+uses local Git alone. This action does not fetch refs or change the checkout.
+
+In the panel, **Usage** shows the provider and attempt counters that OMS
+actually recorded. **Chat** reads messages shared with the enrolled Main and
+the selected participant. Inspect its linked result or evidence when available.
+The TUI views read the native Board, plan, teams, routing policy, metrics,
+results, and workspaces on demand. Sessions, Attention, Past, Council and
+Activity require this conversation's enrolled Main. Council shows the number
+of recorded answers and their model names when a validated linked thread
+exists. Activity shows recent Room message metadata addressed to the Main.
+Capacity shows the recorded resource policy and its occupancy when configured.

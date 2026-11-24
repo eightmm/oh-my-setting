@@ -165,6 +165,102 @@ fn ownership_help_and_resolution() {
     });
 }
 #[test]
+fn desktop_participant_reader_pages_only_shared_messages() {
+    isolated(
+        "desktop_participant_reader_pages_only_shared_messages",
+        || {
+            let repo = Repo::new();
+            success(run(
+                &repo,
+                &["new", "--id", "scope-room", "--participant", "owner"],
+            ));
+            let native = "01900000-0000-7000-8000-000000000002";
+            for (id, provider, role) in [
+                ("owner", "codex", "main"),
+                ("agy-lead", "antigravity", "worker"),
+                ("other", "claude", "worker"),
+            ] {
+                let mut argv = vec![
+                    "join",
+                    "--id",
+                    "scope-room",
+                    "--participant",
+                    id,
+                    "--provider",
+                    provider,
+                    "--role",
+                    role,
+                ];
+                if id == "owner" {
+                    argv.extend(["--native-session", native]);
+                }
+                success(run(&repo, &argv));
+            }
+            let post = |from: &str, to: &str, body: &str| {
+                success(run(
+                    &repo,
+                    &[
+                        "send",
+                        "--id",
+                        "scope-room",
+                        "--participant",
+                        from,
+                        "--to",
+                        to,
+                        "--text",
+                        body,
+                    ],
+                ))
+            };
+            post("other", "agy-lead", "private sibling text");
+            post("owner", "other", "another participant only");
+            for n in 1..=15 {
+                post("agy-lead", "owner", &format!("answer {n}"));
+            }
+            use sha2::{Digest, Sha256};
+            let hash = format!("{:x}", Sha256::digest(native.as_bytes()));
+            let digest = &hash[..32];
+            let room = oms_command_room::Room::open(
+                &repo.0,
+                Default::default(),
+                &EMPTY,
+                &STOP,
+                false,
+                false,
+            )
+            .unwrap();
+            let latest = room
+                .desktop_chat("scope-room", "agy-lead", digest, None)
+                .unwrap();
+            assert_eq!(latest.text("provider"), "antigravity");
+            assert_eq!(latest.list("messages").len(), 12);
+            assert_eq!(
+                latest.list("messages").last().unwrap().text("text"),
+                "answer 15"
+            );
+            let older = room
+                .desktop_chat(
+                    "scope-room",
+                    "agy-lead",
+                    digest,
+                    latest["nextBefore"].as_u64(),
+                )
+                .unwrap();
+            assert_eq!(older.list("messages").len(), 3);
+            assert_eq!(older.list("messages")[0].text("text"), "answer 1");
+            assert!(older["nextBefore"].is_null());
+            for (id, who, selector) in [
+                ("scope-room", "unknown", digest),
+                ("unknown", "agy-lead", digest),
+                ("scope-room", "agy-lead", "00000000000000000000000000000000"),
+            ] {
+                assert!(room.desktop_chat(id, who, selector, None).is_err());
+            }
+        },
+    );
+}
+
+#[test]
 fn room_lifecycle_and_cursor() {
     isolated("room_lifecycle_and_cursor", || {
         let repo = Repo::new();

@@ -92,6 +92,41 @@ ul { list-style: none; }
 .approval p { white-space: pre-wrap; margin: .3rem 0; }
 .approval code { font-size: .8rem; }
 .review { color: var(--warm); background: var(--warm-bg); }
+.tabs { display: flex; gap: .2rem; border-bottom: 1px solid var(--line); margin: .85rem 0 .3rem; }
+.tabs button { flex: 1; max-width: 9rem; min-width: 0; min-height: 2.7rem; padding: .3rem; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; font-weight: 600; }
+.tabs button[aria-selected="true"] { color: var(--brand); border-bottom-color: var(--brand); }
+.tabs button[aria-selected="false"]:hover { background: var(--tint); border-color: transparent; }
+.meta-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .6rem; align-items: start; }
+.link-action { background: transparent; color: var(--brand); border-color: var(--main-line); font-size: .85rem; font-weight: 650; }
+.lead .link-action { margin-top: .4rem; }
+.lead h4 button { padding: 0; min-height: 1.8rem; border: none; background: transparent; text-align: left; }
+#current-main label { cursor: pointer; }
+.usage-window { display: grid; grid-template-columns: minmax(0,1fr) minmax(3rem,7rem); gap: .4rem; align-items: center; }
+meter { width: 100%; accent-color: var(--brand); }
+.small-title { margin: .9rem 0 .35rem; }
+.rows { display: grid; gap: .5rem; margin-top: .55rem; }
+.rows article, .message { border: 1px solid var(--line); border-radius: .6rem; padding: .65rem .8rem; min-width: 0; }
+.rows article p + p, .message p { margin-top: .22rem; }
+.detail-title { display: flex; flex-wrap: wrap; gap: .4rem .75rem; justify-content: space-between; align-items: baseline; margin-bottom: .55rem; }
+.selection { display: grid; gap: .35rem; align-content: start; }
+.selection button { text-align: left; min-width: 0; }
+.selection button[aria-pressed="true"] { border-color: var(--brand); background: var(--tint); }
+.selection small { display: block; color: var(--muted); }
+.chat-grid { display: grid; gap: 1rem; }
+.messages { padding: 0; list-style: none; display: grid; gap: .5rem; max-height: 26rem; overflow: auto; }
+.message p { white-space: pre-wrap; }
+#evidence-lines { margin: .55rem 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .85rem/1.55 ui-monospace, monospace; }
+#evidence-actions { margin-top: .5rem; }
+#evidence-actions button[aria-pressed="true"] { border-color: var(--brand); background: var(--tint); }
+.table-wrap { overflow: auto; max-width: 100%; }
+table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+th, td { text-align: left; vertical-align: top; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+.table-wrap td { min-width: 5rem; max-width: 24rem; }
+#chat-older { margin-bottom: .5rem; }
+a { color: var(--brand); text-underline-offset: .18em; }
+@media (min-width: 43rem) { .chat-grid { grid-template-columns: minmax(10rem,1fr) minmax(0,2.4fr); } }
+@media (max-width: 28rem) { .tabs button { font-size: .83rem; } .meta-row { grid-template-columns: 1fr; } }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -108,8 +143,17 @@ ul { list-style: none; }
   <p id="receipt" role="status"></p>
   <div id="view" hidden>
     <div class="cluster project-line"><h2 id="project"></h2><p id="branch"></p><time id="updated"></time></div>
+    <nav class="tabs" role="tablist" aria-label="프로젝트 보기">
+      <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview">개요</button>
+      <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1">대화</button>
+      <button id="tab-activity" role="tab" aria-selected="false" aria-controls="pane-activity" tabindex="-1">활동</button>
+      <button id="tab-usage" role="tab" aria-selected="false" aria-controls="pane-usage" tabindex="-1">사용량</button>
+      <button id="tab-git" role="tab" aria-selected="false" aria-controls="pane-git" tabindex="-1">Git · PR</button>
+    </nav>
+    <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
     <section class="card main-card" aria-labelledby="current-main">
-      <p class="muted">현재 대화의 Overall Main</p><h2 id="current-main"></h2><p id="main-state"></p>
+      <div class="meta-row"><div><p class="muted">현재 대화의 Overall Main</p><h2 id="current-main"></h2></div>
+        <button class="link-action" id="main-chat" type="button" hidden>Main 대화 보기</button></div><p id="main-state"></p>
       <dl class="identity" id="identity">
         <dt>작업방</dt><dd id="room"></dd><dt>참여자</dt><dd id="participant"></dd>
       </dl>
@@ -152,6 +196,43 @@ ul { list-style: none; }
       <details class="history" id="alerts"><summary>확인이 필요한 항목</summary><ul id="attention"></ul></details>
     </section>
     </div>
+    </div>
+    <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
+      <div class="detail-title"><h2>작업방 대화</h2><button id="chat-back" type="button" hidden>이전 보기로</button></div>
+      <div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자"></div>
+        <div><h3 id="chat-title"></h3><p id="chat-status" class="muted" role="status"></p>
+          <button id="chat-older" type="button" hidden>이전 메시지</button>
+          <ol class="messages" id="chat-messages" aria-label="시간순 작업방 메시지" tabindex="0"></ol>
+          <div id="chat-result"></div><div id="chat-native"></div>
+          <section class="history" id="chat-evidence" aria-label="호출별 실행 근거" hidden>
+            <label for="evidence-attempt">기록된 호출</label> <select id="evidence-attempt"></select>
+            <div id="evidence-actions" class="cluster"></div>
+            <p id="evidence-status" role="status" class="muted"></p><pre id="evidence-lines" hidden></pre>
+            <div class="cluster"><button id="evidence-prev" type="button" hidden>근거 이전 페이지</button><button id="evidence-next" type="button" hidden>근거 다음 페이지</button></div>
+          </section>
+        </div>
+      </div>
+    </section>
+    <section class="card" id="pane-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+      <h2>프로젝트 활동</h2><p id="core-state"></p><p id="command-state" class="muted"></p>
+      <section class="history"><div class="cluster"><label for="tui-view">OMS TUI 상세</label><select id="tui-view">
+        <option value="">보기 선택</option>
+        <optgroup label="런타임"><option value="overview">개요</option><option value="health">건강 상태</option><option value="providers">공급자</option><option value="metrics">지표</option><option value="capacity">용량</option><option value="log">로그</option></optgroup>
+        <optgroup label="협업"><option value="teams">팀</option><option value="sessions">세션</option><option value="plan">계획</option><option value="attention">확인할 항목</option><option value="results">결과</option><option value="debate">토론</option></optgroup>
+        <optgroup label="실행"><option value="routes">경로</option><option value="workspaces">워크스페이스</option><option value="jobs">작업</option><option value="past">지난 실행</option></optgroup>
+      </select></div><p id="tui-status" role="status" class="muted"></p>
+      <div id="tui-rows" class="table-wrap" role="region" aria-label="선택한 OMS TUI 기록" tabindex="0"></div>
+      <div class="cluster"><button id="tui-prev" type="button" hidden>이전 페이지</button><button id="tui-next" type="button" hidden>다음 페이지</button></div></section>
+      <h3 class="small-title">명령·작업 타임라인</h3><ul id="command-list"></ul>
+    </section>
+    <section class="card" id="pane-usage" role="tabpanel" aria-labelledby="tab-usage" tabindex="0" hidden>
+      <h2>토큰 사용량</h2><p id="usage-status" class="muted" role="status"></p>
+      <div id="usage-content"></div>
+    </section>
+    <section class="card" id="pane-git" role="tabpanel" aria-labelledby="tab-git" hidden>
+      <h2>Git · GitHub PR</h2><p id="git-local"></p><p id="git-status" class="muted" role="status"></p>
+      <div id="git-content" class="rows"></div>
+    </section>
   </div>
 </main>
 <script>
@@ -175,8 +256,80 @@ const pendingOpens = [];
 const pendingErrors = [];
 let retryStart;
 let contextTypes;
+let canOpenLinks = false;
 let contextKey;
 let contextQueue = Promise.resolve();
+const tabs = ['overview','chat','activity','usage','git'];
+let currentTab = 'overview', dashboardData, members = [], selectedMember, olderCursor, backTarget, chatRows = [];
+let availableAttempts = [], evidenceId, evidenceSection, evidencePage = 1, evidenceNext, evidenceProofs = {};
+const evidenceNames = {info:'실행 정보', events:'이벤트', files:'변경 파일', diff:'패치', transcript:'기록된 답변'};
+let tuiPages = [], tuiNext;
+const jobs = new Map(), loaded = new Set(), tabScroll = new Map();
+
+function showTab(tab, focus = false, origin) {
+  if (tab !== currentTab) {
+    backTarget = tab === 'chat' ? {tab:currentTab,origin:origin || el('tab-' + currentTab)} : undefined;
+    el('chat-back').hidden = !backTarget;
+    tabScroll.set(currentTab, window.scrollY || 0);
+    currentTab = tab;
+    for (const key of tabs) {
+      const selected = key === tab;
+      el('pane-' + key).hidden = !selected;
+      el('tab-' + key).setAttribute('aria-selected', String(selected));
+      el('tab-' + key).tabIndex = selected ? 0 : -1;
+    }
+    window.scrollTo(0, tabScroll.get(tab) || 0);
+  }
+  if (focus) el('tab-' + tab).focus();
+  loadTab(tab);
+}
+
+for (const [index, tab] of tabs.entries()) {
+  const button = el('tab-' + tab);
+  button.addEventListener('click', () => showTab(tab));
+  button.addEventListener('keydown', event => {
+    const dest = {ArrowRight:(index + 1) % tabs.length, ArrowLeft:(index + tabs.length - 1) % tabs.length, Home:0, End:tabs.length - 1}[event.key];
+    if (dest !== undefined) { event.preventDefault(); showTab(tabs[dest], true); }
+  });
+}
+
+function validRead(key, ticket, expected) {
+  return !disposed && expected === generation && jobs.get(key) === ticket;
+}
+
+async function detailRead(key, name, args, success, failure) {
+  const ticket = Symbol(), expected = generation;
+  jobs.set(key, ticket);
+  try {
+    const response = await tool(name, args, expected);
+    if (validRead(key, ticket, expected)) success(key === 'chat' || key === 'evidence' ? response._meta?.chat : response.structuredContent);
+  } catch (error) {
+    if (validRead(key, ticket, expected)) failure(error);
+  } finally {
+    if (jobs.get(key) === ticket) jobs.delete(key);
+  }
+}
+
+function loadTab(tab, force = false) {
+  if (!dashboardData) return;
+  if (tab === 'chat') {
+    if (selectedMember && (force || (!loaded.has('chat') && !jobs.has('chat')))) loadChat();
+    return;
+  }
+  if (tab === 'activity') {
+    if (el('tui-view').value && (force || (!loaded.has('tui') && !jobs.has('tui')))) loadTui();
+    return;
+  }
+  if (tab !== 'usage' && tab !== 'git') return;
+  if (!force && (jobs.has(tab) || loaded.has(tab))) return;
+  const status = el(tab + '-status');
+  status.textContent = tab === 'git' ? 'GitHub PR과 검사를 조회하는 중…' : '기록된 사용량을 조회하는 중…';
+  detailRead(tab, tab === 'git' ? 'oms_panel_git_status' : 'oms_panel_usage', {}, data => {
+    status.textContent = '';
+    if (tab === 'git') renderGit(data); else renderUsage(data);
+    loaded.add(tab);
+  }, error => { status.textContent = error.message; loaded.delete(tab); });
+}
 
 function updateContext(data) {
   if (!contextTypes) return;
@@ -234,6 +387,7 @@ window.addEventListener('message', event => {
     if (msg.method === 'ui/resource-teardown' && !disposed) {
       disposed = true;
       generation++;
+      jobs.clear(); clearChat();
       setBusy(true, true);
       el('view').hidden = true;
       el('status').textContent = '패널이 닫혔습니다.';
@@ -306,7 +460,142 @@ function node(tag, text, className) {
   return element;
 }
 
+const formatCount = n => Number.isFinite(n) ? n.toLocaleString('ko-KR') : '미확인';
+const providerName = p => names[p] || p || '공급자 미확인';
+function dateLabel(stamp) {
+  const ms = typeof stamp === 'number' ? stamp * 1000 : Date.parse(stamp);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleString() : '';
+}
+function action(text, fn) {
+  const button = node('button', text, 'link-action');
+  button.type = 'button'; button.addEventListener('click', fn);
+  return button;
+}
+async function openHostLink(url, status) {
+  const expected = generation, tab = currentTab, participant = selectedMember?.participant;
+  try {
+    const result = await request('ui/open-link',{url});
+    if (result?.isError) throw new Error('앱에서 링크를 열 수 없습니다.');
+  } catch (error) {
+    if (!disposed && expected === generation && tab === currentTab && (tab !== 'chat' || participant === selectedMember?.participant)) {
+      status.textContent = error.message;
+    }
+  }
+}
+function localGit(git) {
+  if (!git?.available) return '현재 체크아웃의 Git 상태 미확인';
+  return [git.branch || '분리된 HEAD', git.head?.slice(0,12), git.dirty === true ? '작업 트리 변경 있음' :
+    git.dirty === false ? '작업 트리 깨끗함' : '작업 트리 미확인',
+    git.upstream && ('추적 브랜치 ' + git.upstream), Number.isInteger(git.ahead) && ('앞섬 ' + git.ahead),
+    Number.isInteger(git.behind) && ('뒤처짐 ' + git.behind)].filter(Boolean).join(' · ');
+}
+
+function renderGit(data) {
+  if (!data?.git || !data.github) throw new Error('Git·PR 응답을 확인할 수 없습니다.');
+  el('git-local').textContent = localGit(data.git);
+  const github = data.github, content = el('git-content');
+  content.replaceChildren();
+  const summary = [github.repository, dateLabel(github.observedAt), github.incomplete && '일부 조회'].filter(Boolean);
+  if (github.status === 'unsupported') summary.push('GitHub PR 조회를 지원하지 않는 원격 저장소');
+  else if (github.status !== 'available') summary.push('GitHub PR 조회 불가');
+  else if (!github.pullRequests?.length) summary.push('조회한 체크아웃에 연결된 열린 PR 없음');
+  el('git-status').textContent = summary.join(' · ');
+  for (const pr of github.pullRequests || []) {
+    const card = node('article', ''), title = node('h3', '');
+    const text = ['PR #' + pr.number, pr.title].filter(Boolean).join(' · ');
+    const url = 'https://github.com/' + github.repository + '/pull/' + pr.number;
+    if (pr.url === url && /^[a-zA-Z0-9-]+\/(?!\.{1,2}$)[\w.-]+$/.test(github.repository) && Number.isSafeInteger(pr.number) && pr.number > 0) {
+      const link = node('a', text); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      link.setAttribute('aria-label', github.repository + ' ' + text + ' GitHub에서 열기');
+      link.addEventListener('click', event => {
+        if (!canOpenLinks) return;
+        event.preventDefault();
+        openHostLink(url,el('git-status'));
+      });
+      title.append(link);
+    } else title.textContent = text;
+    card.append(title, node('p', [pr.headBranch, '→', pr.baseBranch, pr.draft ? '초안' : pr.state].filter(Boolean).join(' ')));
+    card.append(node('p', [pr.scope === 'linkedWorktree' ? '연결된 워크트리' : '현재 체크아웃', pr.head?.slice(0,12),
+      pr.matchesLocalHead === true ? '로컬 HEAD 일치' : pr.matchesLocalHead === false ? '로컬 HEAD 불일치' : 'HEAD 비교 미확인'].filter(Boolean).join(' · '), 'muted'));
+    const c = pr.checks;
+    card.append(node('p', !c ? '검사 상태 미확인' : [c.passed,c.failed,c.pending,c.other].every(n => n === 0)
+      ? '보고된 검사 없음' : '검사 · 통과 ' + formatCount(c.passed) + ' · 실패 ' + formatCount(c.failed) + ' · 대기 ' + formatCount(c.pending) + ' · 기타 ' + formatCount(c.other)));
+    if (c?.items?.length) {
+      const checks = node('ul','');
+      for (const check of c.items) {
+        const li = node('li','','entry');
+        li.append(node('span',check.name),node('strong',({failed:'실패',pending:'대기',passed:'통과',other:'기타'})[check.status] || '상태 미확인'));
+        checks.append(li);
+      }
+      card.append(checks);
+    }
+    content.append(card);
+  }
+}
+
+function renderUsage(data) {
+  if (!Array.isArray(data?.providers) || !Array.isArray(data.attempts)) throw new Error('사용량 응답을 확인할 수 없습니다.');
+  const content = el('usage-content');
+  content.replaceChildren();
+  content.append(node('h3', '프로젝트 누적 · 물리 호출 영수증', 'small-title'));
+  const totals = node('div','','rows');
+  if (!Array.isArray(data.providerTotals)) totals.append(node('p','프로젝트 호출 영수증 수집 상태 미확인','muted'));
+  else if (!data.providerTotals.length) totals.append(node('p','기록된 프로젝트 호출 영수증 없음','muted'));
+  else for (const t of data.providerTotals) {
+    const card = node('article','');
+    card.append(node('h3',providerName(t.provider)),node('p','보고된 토큰 소계 ' + formatCount(t.tokens) + ' · 사용량 보고 ' +
+      formatCount(t.tokenReports) + '/' + formatCount(t.calls) + '회'));
+    for (const [title,amount,calls] of [['보고 비용',t.reportedCostMicrousd,t.reportedCostCalls],['추정 비용',t.estimatedCostMicrousd,t.estimatedCostCalls]]) {
+      const cost = Number.isFinite(amount) && calls > 0 ? 'US$' + (amount / 1e6).toLocaleString('en-US',{maximumFractionDigits:6}) : '기록 없음';
+      card.append(node('p',title + ' ' + cost + ' · ' + formatCount(calls) + '회','muted'));
+    }
+    totals.append(card);
+  }
+  content.append(totals,node('h3', '호스트 공급자 사용량', 'small-title'));
+  const providers = node('div', '', 'rows');
+  for (const p of data.providers) {
+    const card = node('article', ''); card.append(node('h3', providerName(p.provider)));
+    for (const w of p.windows || []) {
+      const row = node('div','','usage-window');
+      const usage = Number.isFinite(w.used) ? (w.stale ? '마지막 관측 ' : '') + formatCount(w.used) + '% 사용' : '사용률 미확인';
+      const age = Number.isFinite(w.age_seconds) ? Math.max(0,Math.floor(w.age_seconds / 60)) : null;
+      row.append(node('p', [w.name, usage, w.source, w.stale && (age == null ? '오래된 기록' : formatCount(age) + '분 전 기록'),
+        dateLabel(w.resets_at) && '초기화 ' + dateLabel(w.resets_at)].filter(Boolean).join(' · ')));
+      if (Number.isFinite(w.used) && w.used >= 0 && w.used <= 100) {
+        const meter = node('meter',''); meter.min = 0; meter.max = 100; meter.value = w.used; meter.setAttribute('aria-label',(w.name || '구간') + ' 사용률'); row.append(meter);
+      }
+      card.append(row);
+    }
+    if (p.windowsOmitted > 0) card.append(node('p','표시 한도 밖의 사용 구간 ' + formatCount(p.windowsOmitted) + '개','muted'));
+    if (Number.isFinite(p.contextUsed) || Number.isFinite(p.cacheReadShare)) card.append(node('p', [
+      Number.isFinite(p.contextUsed) && '컨텍스트 ' + formatCount(p.contextUsed) + '%',
+      Number.isFinite(p.cacheReadShare) && '캐시 읽기 비중 ' + formatCount(p.cacheReadShare) + '%'].filter(Boolean).join(' · ')));
+    const recent = p.recent7d;
+    if (recent) card.append(node('p', '최근 7일 OMS 위임 · 호출 ' + formatCount(recent.calls) + ' · 입력 ' + formatCount(recent.input) +
+      ' · 출력 ' + formatCount(recent.output) + ' · 캐시 읽기 ' + formatCount(recent.cacheRead), 'muted'));
+    if (!p.windows?.length && !recent && !Number.isFinite(p.contextUsed) && !Number.isFinite(p.cacheReadShare)) card.append(node('p', '수집된 공급자 사용량 없음', 'muted'));
+    providers.append(card);
+  }
+  if (!data.providers.length) providers.append(node('p', '수집된 공급자 사용량 없음', 'muted'));
+  content.append(providers, node('h3', '프로젝트 시도별 토큰 기록', 'small-title'));
+  const attempts = node('div', '', 'rows');
+  for (const a of data.attempts) {
+    const card = node('article', ''); card.append(node('h3', [providerName(a.provider), a.id].filter(Boolean).join(' · ')));
+    card.append(node('p', ['토큰 ' + formatCount(a.tokens), a.source === 'receipt' ? '실행 영수증' : a.source === 'events' ? '이벤트 기록' : '출처 미확인',
+      Number.isFinite(a.reportedCalls) && Number.isFinite(a.calls) && '사용량 보고 ' + formatCount(a.reportedCalls) + '/' + formatCount(a.calls) + '회',
+      Number.isFinite(a.costMicrousd) && '이벤트 기록 비용 US$' + (a.costMicrousd / 1e6).toLocaleString('en-US',{maximumFractionDigits:6})].filter(Boolean).join(' · ')));
+    for (const b of a.breakdown || []) card.append(node('p', [providerName(b.provider), '호출 ' + formatCount(b.calls),
+      '입력 ' + formatCount(b.input), '출력 ' + formatCount(b.output), '캐시 읽기 ' + formatCount(b.cacheRead), '캐시 쓰기 ' + formatCount(b.cacheWrite)].join(' · '), 'muted'));
+    attempts.append(card);
+  }
+  if (!data.attempts.length) attempts.append(node('p', '최근 시도에 귀속된 토큰 기록 없음', 'muted'));
+  if (data.attemptsOmitted > 0) attempts.append(node('p','표시 한도 밖의 시도 ' + formatCount(data.attemptsOmitted) + '건','muted'));
+  content.append(attempts);
+}
+
 function render(d) {
+  dashboardData = d;
+  el('git-local').textContent = localGit(d.git);
   el('project').textContent = d.project || 'OMS 프로젝트';
   el('branch').textContent = d.branch || '';
   el('goal').textContent = d.goal || '기록된 목표 없음';
@@ -321,12 +610,22 @@ function render(d) {
   el('alerts').hidden = !d.attention?.length;
   const date = new Date(d.updated);
   el('updated').textContent = d.updated && Number.isFinite(date.getTime()) ? '최근 조회 ' + date.toLocaleString() : '';
-  el('status').textContent = d.degraded ? '일부 상태를 수집하지 못했습니다.' : '';
+  const omitted = [['attemptsTrimmed','최근 실행'],['operationsTrimmed','결과물'],['attentionTrimmed','주의 항목'],['activeAttemptsTrimmed','미종료 실행']]
+    .filter(([key]) => Number.isSafeInteger(d[key]) && d[key] > 0).map(([key,label]) => label + ' ' + formatCount(d[key]) + '건');
+  el('status').textContent = [d.degraded && '일부 상태를 수집하지 못했습니다.',
+    omitted.length > 0 && '요약에서 생략된 기록 · ' + omitted.join(', ')].filter(Boolean).join(' ');
   el('view').hidden = false;
 }
 
 function clearProject() {
   el('view').hidden = true;
+  jobs.clear(); loaded.clear(); tabScroll.clear(); dashboardData = undefined;
+  selectedMember = backTarget = olderCursor = tuiNext = undefined; chatRows = [];
+  clearEvidence(); availableAttempts = []; el('chat-evidence').hidden = true;
+  members = []; tuiPages = []; el('tui-view').value = '';
+  for (const id of ['chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows']) el(id).replaceChildren();
+  for (const id of ['main-chat','chat-back','chat-older','tui-next','tui-prev']) el(id).hidden = true;
+  showTab('overview'); tabScroll.clear();
   updateContext(null);
   retryStart = undefined;
   el('launch').reset();
@@ -392,10 +691,205 @@ function isMain(attempt) {
   return attempt.role === 'main' || attempt.tool === 'panel-main';
 }
 
+function memberKey(m) { return JSON.stringify([m.room,m.participant]); }
+function memberLabel(m) {
+  return [providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role && 'Room ' + m.role, m.participant, m.joined === false && '참여 종료'].filter(Boolean).join(' · ');
+}
+function clearChat() {
+  jobs.delete('chat'); loaded.delete('chat'); olderCursor = undefined; chatRows = [];
+  el('chat-older').hidden = true;
+  el('chat-messages').replaceChildren(); el('chat-result').replaceChildren(); el('chat-native').replaceChildren();
+  clearEvidence(); availableAttempts = []; el('chat-evidence').hidden = true;
+}
+function selectMember(member, origin, attempt) {
+  if (!members.some(m => memberKey(m) === memberKey(member))) return;
+  if (!selectedMember || memberKey(selectedMember) !== memberKey(member)) clearChat();
+  selectedMember = member;
+  renderMemberList();
+  showTab('chat',false,origin);
+  if (attempt) {
+    if (loaded.has('chat')) chooseEvidence(attempt);
+    else evidenceId = attempt;
+  }
+  el('chat-title').focus({preventScroll:true});
+}
+
+function clearEvidence() {
+  jobs.delete('evidence'); evidenceId = evidenceSection = evidenceNext = undefined;
+  evidenceProofs = {}; evidencePage = 1;
+  el('evidence-lines').textContent = ''; el('evidence-lines').hidden = true;
+  el('evidence-actions').replaceChildren(); el('evidence-status').textContent = '';
+  el('evidence-prev').hidden = el('evidence-next').hidden = true;
+}
+function renderAttempts(page) {
+  availableAttempts = Array.isArray(page.attempts) ? page.attempts : [];
+  const select = el('evidence-attempt');
+  select.replaceChildren(); select.add(new Option('호출 선택',''));
+  for (const a of availableAttempts) select.add(new Option([a.tool,a.id,a.state].filter(Boolean).join(' · '),a.id));
+  el('chat-evidence').hidden = !availableAttempts.length && !evidenceId;
+  if (evidenceId) {
+    if (!availableAttempts.some(a => a.id === evidenceId)) {
+      clearEvidence(); el('evidence-status').textContent = '조회된 작업방 호출 목록에서 해당 시도를 확인할 수 없습니다.';
+    } else {
+      select.value = evidenceId;
+      readEvidence(evidenceSection || 'info',evidencePage);
+    }
+  } else if (page.attemptsOmitted > 0) el('evidence-status').textContent = '최근 호출 목록 일부 표시';
+}
+function chooseEvidence(id) {
+  clearEvidence();
+  if (!id) return;
+  if (!availableAttempts.some(a => a.id === id)) {
+    el('chat-evidence').hidden = false;
+    el('evidence-status').textContent = '조회된 작업방 호출 목록에서 해당 시도를 확인할 수 없습니다.';
+    return;
+  }
+  evidenceId = id;
+  el('evidence-attempt').value = id; readEvidence('info',1);
+}
+function readEvidence(section,page) {
+  const m = selectedMember, id = evidenceId;
+  const attempt = availableAttempts.find(a => a.id === id);
+  if (!m || !attempt || !(Object.hasOwn(evidenceNames,section)) ||
+    !(attempt.sections?.includes(section) || Object.hasOwn(evidenceProofs,section))) return;
+  const status = el('evidence-status'), lines = el('evidence-lines');
+  evidenceSection = section; evidencePage = page;
+  status.textContent = evidenceNames[section] + ' 조회 중…';
+  lines.hidden = true; lines.textContent = '';
+  el('evidence-prev').hidden = el('evidence-next').hidden = true;
+  detailRead('evidence','oms_panel_chat',{room:m.room,participant:m.participant,attempt:id,section,page}, result => {
+    const evidence = result?.evidence;
+    if (result?.room !== m.room || result.participant !== m.participant || evidence?.attempt !== id ||
+        evidence.section !== section || evidence.page !== page || !Array.isArray(evidence.lines)) {
+      throw new Error('선택한 호출과 근거 응답이 일치하지 않습니다.');
+    }
+    if (section === 'info') evidenceProofs = evidence.proofs || {};
+    if (Object.hasOwn(evidenceProofs,section) && evidenceProofs[section] !== evidence.digest) {
+      throw new Error('보관된 근거가 바뀌었습니다. 실행 정보를 다시 확인하세요.');
+    }
+    const buttons = el('evidence-actions'); buttons.replaceChildren();
+    for (const [key,label] of Object.entries(evidenceNames)) {
+      if (!attempt.sections?.includes(key) && !Object.hasOwn(evidenceProofs,key)) continue;
+      const button = action(label, () => readEvidence(key,1));
+      button.setAttribute('aria-pressed',String(key === section)); buttons.append(button);
+    }
+    lines.textContent = evidence.lines.join('\n'); lines.hidden = !evidence.lines.length;
+    status.textContent = [attempt.id,evidence.source, page + '페이지',evidence.truncated && '긴 줄 일부 표시',
+      !evidence.lines.length && '기록 없음'].filter(Boolean).join(' · ');
+    evidenceNext = Number.isSafeInteger(evidence.nextPage) && evidence.nextPage > page ? evidence.nextPage : null;
+    el('evidence-prev').hidden = page === 1; el('evidence-next').hidden = evidenceNext == null;
+  }, error => { status.textContent = error.message; });
+}
+el('evidence-attempt').addEventListener('change',() => chooseEvidence(el('evidence-attempt').value));
+el('evidence-prev').addEventListener('click',() => { if (evidencePage > 1) readEvidence(evidenceSection,evidencePage - 1); });
+el('evidence-next').addEventListener('click',() => { if (evidenceNext != null) readEvidence(evidenceSection,evidenceNext); });
+function renderMemberList() {
+  const list = el('chat-members');
+  list.replaceChildren();
+  for (const m of members) {
+    const button = action(memberLabel(m), () => selectMember(m, button));
+    button.setAttribute('aria-pressed', String(Boolean(selectedMember && memberKey(m) === memberKey(selectedMember))));
+    list.append(button);
+  }
+  if (dashboardData?.conversationMain?.participantsOmitted > 0) list.append(node('p','추가 참여자 ' + formatCount(dashboardData.conversationMain.participantsOmitted) + '명 생략','muted'));
+  el('chat-title').tabIndex = -1;
+  el('chat-title').textContent = selectedMember ? memberLabel(selectedMember) : '참여자 대화';
+  if (!selectedMember) el('chat-status').textContent = members.length ? '메시지를 읽을 참여자를 선택하세요.' : '현재 대화와 연결된 작업방 참여자 미확인';
+}
+function loadChat(before) {
+  const m = selectedMember;
+  if (!m) return;
+  const status = el('chat-status'), older = el('chat-older'), list = el('chat-messages');
+  status.textContent = before == null ? '작업방 메시지를 조회하는 중…' : '이전 메시지를 조회하는 중…';
+  older.disabled = true;
+  detailRead('chat', 'oms_panel_chat', {room:m.room, participant:m.participant, ...(before == null ? {} : {before})}, page => {
+    if (page?.source !== 'room' || page.room !== m.room || page.participant !== m.participant || !Array.isArray(page.messages) ||
+      !page.messages.every((msg,i,rows) => Number.isSafeInteger(msg.seq) && (i === 0 || msg.seq > rows[i-1].seq) && (before == null || msg.seq < before))) {
+      throw new Error('선택한 작업방·참여자와 메시지 응답이 일치하지 않습니다.');
+    }
+    const oldest = page.messages[0]?.seq;
+    const overlaps = before == null && chatRows.some(row => row.seq === oldest);
+    const history = overlaps ? chatRows.filter(row => row.seq < oldest) : [];
+    const top = list.scrollTop, height = list.scrollHeight, nearEnd = list.scrollHeight - list.clientHeight - top < 8;
+    chatRows = before != null ? [...page.messages,...chatRows] : [...history,...page.messages];
+    const items = (before == null ? chatRows : page.messages).map(message => {
+      const li = node('li', '', 'message');
+      li.append(node('small', [dateLabel(message.at), message.from, message.to && '→ ' + message.to, message.kind].filter(Boolean).join(' · '), 'muted'), node('p', message.text || ''));
+      return li;
+    });
+    if (before == null) {
+      list.replaceChildren(...items);
+      renderAttempts(page);
+      list.scrollTop = !overlaps || nearEnd ? list.scrollHeight : top;
+      const result = el('chat-result'); result.replaceChildren();
+      if (page.result?.text) result.append(node('h3', '기록된 실행 결과', 'small-title'),
+        node('p',[page.result.kind,page.result.attempt,dateLabel(page.result.at),page.result.truncated && '일부 표시'].filter(Boolean).join(' · '),'muted'), node('p',page.result.text,'message'));
+      const native = el('chat-native'); native.replaceChildren();
+      if (canOpenLinks && page.self === true && m.participant === dashboardData?.conversationMain?.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '')) {
+        native.append(action('Codex 원래 대화 열기', () => openHostLink(page.nativeUri,status)));
+      }
+    } else {
+      list.prepend(...items);
+      list.scrollTop = top + list.scrollHeight - height;
+    }
+    if (!history.length) olderCursor = Number.isSafeInteger(page.nextBefore) && page.nextBefore === oldest && page.nextBefore > 0 ? page.nextBefore : null;
+    older.hidden = olderCursor == null; older.disabled = false;
+    status.textContent = m.room + ' · ' + (list.children.length ? '작업방 기록 ' + list.children.length + '건' : '기록된 작업방 메시지 없음');
+    loaded.add('chat');
+  }, error => {
+    if (before == null) clearChat();
+    status.textContent = error.message;
+    older.disabled = false;
+  });
+}
+el('chat-older').addEventListener('click', () => { if (olderCursor != null && !jobs.has('chat')) loadChat(olderCursor); });
+el('chat-back').addEventListener('click', () => {
+  if (!backTarget) return;
+  const {tab,origin} = backTarget; backTarget = undefined; el('chat-back').hidden = true;
+  showTab(tab); (origin?.isConnected ? origin : el('tab-' + tab)).focus({preventScroll:true});
+});
+
+function loadTui(page = tuiPages.at(-1) || 1) {
+  const view = el('tui-view').value;
+  if (!view) return;
+  const status = el('tui-status'), table = el('tui-rows');
+  status.textContent = 'TUI 기록을 조회하는 중…'; el('tui-prev').disabled = el('tui-next').disabled = true;
+  detailRead('tui', 'oms_panel_tui_view', {view,page}, data => {
+    if (data?.view !== view || data.page !== page) throw new Error('선택한 TUI 보기와 응답이 일치하지 않습니다.');
+    if (data.status !== 'ready' || !Array.isArray(data.columns) || !Array.isArray(data.rows)) {
+      throw new Error('이 TUI 보기를 조회할 수 없습니다.');
+    }
+    table.replaceChildren();
+    const grid = node('table',''), head = node('thead',''), header = node('tr',''), body = node('tbody','');
+    for (const c of data.columns) { const th = node('th',c.label); th.scope = 'col'; header.append(th); }
+    head.append(header);
+    for (const row of data.rows) { const tr = node('tr',''); for (const c of data.columns) tr.append(node('td', row[c.key] ?? '—')); body.append(tr); }
+    grid.append(head,body); if (data.rows.length) table.append(grid);
+    const total = Number.isSafeInteger(data.total) && data.total >= 0 ? data.total : null;
+    status.textContent = [page + '페이지', data.rows.length ? '표시 ' + data.rows.length + '건' :
+      total === 0 && !data.incomplete ? '기록 없음' : '이 페이지에서 확인된 기록 없음',
+      total != null && (data.incomplete ? '확인된 합계 ' : '전체 ') + formatCount(total) + '건',
+      data.incomplete && '일부 조회'].filter(Boolean).join(' · ');
+    tuiNext = Number.isSafeInteger(data.nextPage) && data.nextPage > page ? data.nextPage : null;
+    if (tuiPages.includes(page)) tuiPages = tuiPages.slice(0,tuiPages.indexOf(page)+1); else tuiPages.push(page);
+    el('tui-prev').hidden = tuiPages.length < 2; el('tui-next').hidden = tuiNext == null;
+    el('tui-prev').disabled = el('tui-next').disabled = false; loaded.add('tui');
+  },error => { status.textContent = error.message; el('tui-prev').disabled = el('tui-next').disabled = false; });
+}
+el('tui-view').addEventListener('change', () => {
+  jobs.delete('tui'); loaded.delete('tui'); tuiPages = []; tuiNext = null;
+  el('tui-rows').replaceChildren(); el('tui-status').textContent = '';
+  el('tui-prev').hidden = el('tui-next').hidden = true; loadTui();
+});
+el('tui-next').addEventListener('click', () => { if (tuiNext != null) loadTui(tuiNext); });
+el('tui-prev').addEventListener('click', () => { if (tuiPages.length > 1) loadTui(tuiPages.at(-2)); });
+
 function renderConversation(d) {
   const main = d.conversationMain;
   const joined = main?.source === 'room-session' && main.state === 'joined' && main.room && main.participant && names[main.provider];
-  el('current-main').textContent = joined ? names[main.provider] + ' Main' : 'Main 미확인';
+  const current = el('current-main');
+  current.textContent = joined ? '' : 'Main 미확인';
+  if (joined) { const label = node('label',names[main.provider] + ' Main'); label.htmlFor = 'main-chat'; current.append(label); }
   el('main-state').textContent = joined
     ? '작업방 소유자로 참여 중' + (main.incomplete ? ' · 작업방 목록 일부 조회' : '')
     : '이 대화와 연결된 작업방 소유자를 확인할 수 없습니다.';
@@ -403,11 +897,22 @@ function renderConversation(d) {
   el('participant').textContent = joined ? main.participant : '미확인';
   el('identity').hidden = !joined;
   el('room-leads').hidden = !joined;
+  members = joined ? (main.participants || []).filter(m => m.room === main.room && typeof m.participant === 'string' && m.participant) : [];
+  if (joined && !members.some(m => m.participant === main.participant)) members.unshift({room:main.room, participant:main.participant, provider:main.provider, role:'main'});
+  if (selectedMember) {
+    selectedMember = members.find(m => memberKey(m) === memberKey(selectedMember));
+    if (!selectedMember) clearChat();
+  }
+  renderMemberList();
+  const mainChat = el('main-chat');
+  mainChat.hidden = !joined;
+  mainChat.setAttribute('aria-label',joined ? names[main.provider] + ' Main 작업방 대화 보기' : 'Main 대화 보기');
+  mainChat.onclick = joined ? () => selectMember(members.find(m => m.participant === main.participant), mainChat) : null;
   const cards = el('leads');
   cards.replaceChildren();
   if (!joined) return;
   const active = d.activeAttempts || [];
-  const complete = Array.isArray(d.activeAttempts) && d.active === active.length;
+  const complete = Array.isArray(d.activeAttempts) && !(d.activeAttemptsTrimmed > 0) && d.active === active.length;
   const roomLeads = active.filter(attempt => attempt.room === main.room && isLead(attempt));
   if (!roomLeads.length) {
     cards.append(node('p', complete ? '미종료 Lead 기록 없음' : '조회한 기록에서 이 작업방의 Lead를 확인하지 못했습니다.', 'muted'));
@@ -416,9 +921,18 @@ function renderConversation(d) {
   const providerName = attempt => names[attempt.provider] || attempt.provider || '공급자 미확인';
   for (const provider of new Set(roomLeads.map(providerName))) {
     const card = node('article', '', 'lead');
-    card.append(node('h4', provider + ' Lead'));
-    for (const lead of roomLeads.filter(attempt => providerName(attempt) === provider)) {
+    const group = roomLeads.filter(attempt => providerName(attempt) === provider);
+    const person = group.every(a => a.participant === group[0].participant) ? members.find(m => m.participant === group[0].participant) : null;
+    const heading = node('h4',person ? '' : provider + ' Lead');
+    if (person) {
+      const jump = action(provider + ' Lead', () => selectMember(person,jump));
+      jump.setAttribute('aria-label',memberLabel(person) + ' 대화 보기'); heading.append(jump);
+    }
+    card.append(heading);
+    for (const lead of group) {
       card.append(node('p', [lead.state || '상태 미확인', lead.task || lead.id].filter(Boolean).join(' · '), 'muted'));
+      const member = members.find(m => m.participant === lead.participant);
+      if (member && !person) { const button = action(member.participant + ' 대화', () => selectMember(member,button)); card.append(button); }
     }
     cards.append(card);
   }
@@ -426,12 +940,36 @@ function renderConversation(d) {
 
 function renderActivity(d) {
   const attempts = d.attempts || [];
+  const state = d.commandStatus;
+  el('core-state').textContent = ['계획된 작업 ' + formatCount(d.tasks), d.taskStatus, d.degraded === true && '런타임 일부 조회'].filter(Boolean).join(' · ');
+  el('command-state').textContent = state?.available
+    ? ['실행 시도 ' + formatCount(state.total), '미종료 ' + formatCount(state.active), '실행 상태 ' + formatCount(state.executing),
+      ...Object.entries(state.byState || {}).map(([key,value]) => key + ' ' + formatCount(value))].join(' · ')
+    : 'OMS 명령 집계 미확인';
+  const timeline = el('command-list'); timeline.replaceChildren();
+  const recorded = new Map([...attempts,...(d.activeAttempts || [])].filter(a => a.id).map(a => [a.id,a]));
+  const events = [
+    ...attempts.map(a => ({id:a.id, at:a.updated, what:a.tool || '실행 시도', ref:a.task || a.id, who:a.provider, state:a.state})),
+    ...(d.operations || []).map(o => ({id:o.attempt, at:o.updated, what:o.kind || '결과물', ref:o.artifactId, who:o.provider, state:o.status, exit:o.exit}))
+  ].sort((a,b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  for (const event of events) {
+    const li = node('li','','entry'), label = node('span',[event.what, event.who && providerName(event.who)].filter(Boolean).join(' · '));
+    label.append(node('small',[dateLabel(event.at) || '시각 미확인',event.ref].filter(Boolean).join(' · ')));
+    const attempt = recorded.get(event.id);
+    const member = attempt && members.find(m => m.room === attempt.room && m.participant === attempt.participant);
+    if (member) {
+      const link = action('호출 근거 보기',() => selectMember(member,link,attempt.id));
+      link.setAttribute('aria-label',attempt.id + ' 호출 근거 보기'); label.append(link);
+    }
+    li.append(label,node('strong',[event.state, Number.isInteger(event.exit) && '종료 코드 ' + event.exit].filter(Boolean).join(' · ') || '상태 미확인')); timeline.append(li);
+  }
+  if (!events.length) timeline.append(node('li','조회된 실행 기록 없음','muted'));
   const team = el('repo-team');
   team.replaceChildren();
-  const members = (d.activeAttempts || []).filter(row => isMain(row) || isLead(row));
-  if (d.main && !members.some(row => row.id === d.main.id && row.tool === d.main.tool &&
-    row.room === d.main.room && row.provider === d.main.provider)) members.unshift(d.main);
-  for (const member of members) {
+  const repoMembers = (d.activeAttempts || []).filter(row => isMain(row) || isLead(row));
+  if (d.main && !repoMembers.some(row => row.id === d.main.id && row.tool === d.main.tool &&
+    row.room === d.main.room && row.provider === d.main.provider)) repoMembers.unshift(d.main);
+  for (const member of repoMembers) {
     const item = node('li', '', 'entry');
     const role = member === d.main || isMain(member) ? 'Main' : 'Lead';
     const name = names[member.provider] || member.provider || '공급자 미확인';
@@ -439,7 +977,7 @@ function renderActivity(d) {
       node('strong', member.state || '상태 미확인'));
     team.append(item);
   }
-  if (!members.length) team.append(node('li', '조회한 기록에서 Main·Lead 미확인', 'muted'));
+  if (!repoMembers.length) team.append(node('li', '조회한 기록에서 Main·Lead 미확인', 'muted'));
   const activity = el('activity');
   activity.replaceChildren();
   for (const attempt of attempts) {
@@ -448,7 +986,7 @@ function renderActivity(d) {
     item.append(node('span', label.join(' · ')), node('strong', attempt.state || '상태 미확인'));
     activity.append(item);
   }
-  if (!attempts.length) activity.append(node('li', d.active == null ? '최근 실행 기록 미확인' : '최근 실행 기록 없음', 'muted'));
+  if (!attempts.length) activity.append(node('li', d.active == null || d.attemptsTrimmed > 0 ? '최근 실행 기록 미확인' : '최근 실행 기록 없음', 'muted'));
 
   const acceptance = d.acceptance, reviews = d.reviews;
   el('criteria').textContent = acceptance?.available === true
@@ -471,7 +1009,7 @@ function renderActivity(d) {
     item.append(label, node('strong', outcome.join(' · ')));
     operations.append(item);
   }
-  if (!d.operations?.length) operations.append(node('li', reviews?.available === true ? '최근 보관된 결과물 없음' : '최근 결과물 미확인', 'muted'));
+  if (!d.operations?.length) operations.append(node('li', reviews?.available === true && !(d.operationsTrimmed > 0) ? '최근 보관된 결과물 없음' : '최근 결과물 미확인', 'muted'));
 }
 
 function renderApprovals(rows, incomplete) {
@@ -525,8 +1063,9 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw new Error('앱 대화에서 OMS 패널을 여세요.');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.1.0'}, appCapabilities:{}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.2.0'}, appCapabilities:{}, protocolVersion:'2026-01-26'});
       const formats = info?.hostCapabilities?.updateModelContext;
+      canOpenLinks = Boolean(info?.hostCapabilities?.openLinks);
       if (formats?.text || formats?.structuredContent) contextTypes = formats;
       send({method:'ui/notifications/initialized', params:{}});
     })().catch(error => { initializing = undefined; throw error; });
@@ -580,6 +1119,8 @@ async function loadStatus(expected, recover = true) {
     render(dashboard);
     renderConversation(dashboard);
     renderActivity(dashboard);
+    loaded.clear();
+    loadTab(currentTab,true);
     el('approval-progress').textContent = '승인 목록을 확인하는 중…';
     try {
       const response = await tool('oms_list_approvals', {}, expected);

@@ -255,13 +255,13 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 7);
+    assert_eq!(tools.as_array().unwrap().len(), 11);
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v4.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v5.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -280,6 +280,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v1.html"),
         json!("ui://oms/conversation-panel/v2.html"),
         json!("ui://oms/conversation-panel/v3.html"),
+        json!("ui://oms/conversation-panel/v4.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -371,6 +372,122 @@ fn conversation_panel() {
         assert!(regular.tool("oms_start_main", json!({}))["error"].is_object());
     }
     let thread = "01900000-0000-7000-8000-000000000001";
+    let detail = json!({"room":"fixture","participant":"owner","provider":"codex","self":true,"source":"room","messages":[{"text":"dedicated widget reader body"}]});
+    fixture_settings(&source, json!({"stdout":detail.to_string()}));
+    assert!(
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "oms_panel_chat"
+                && v["_meta"]["ui"]["visibility"] == json!(["app"]))
+    );
+    bad(
+        &c.tool(
+            "oms_panel_chat",
+            json!({"room":"fixture","participant":"owner"}),
+        ),
+        "bound conversation",
+    );
+    let result=c.call("tools/call",json!({"name":"oms_panel_chat","arguments":{"room":"fixture","participant":"owner","before":42},"_meta":{"threadId":thread}}));
+    assert_eq!(
+        result["result"]["_meta"]["chat"]["messages"],
+        detail["messages"]
+    );
+    assert_eq!(
+        result["result"]["_meta"]["chat"]["nativeUri"],
+        format!("codex://threads/{thread}")
+    );
+    for k in ["content", "structuredContent"] {
+        let public = result["result"][k].to_string();
+        assert!(!public.contains("dedicated widget reader body") && !public.contains(thread));
+    }
+    let argv = record(&source)["argv"].clone();
+    assert!(!argv.to_string().contains(thread));
+    assert_eq!(argv[3], "--desktop-chat");
+    assert_eq!(argv[10].as_str().unwrap().len(), 32);
+    let evidence = |client: &mut Client, args: Value| {
+        client.call(
+            "tools/call",
+            json!({"name":"oms_panel_chat","arguments":args,"_meta":{"threadId":thread}}),
+        )
+    };
+    good(&evidence(
+        &mut c,
+        json!({"room":"fixture","participant":"owner","section":"files","attempt":"bound-attempt","page":2}),
+    ));
+    let recorded = record(&source);
+    assert_eq!(
+        &recorded["argv"].as_array().unwrap()[11..],
+        [
+            "--evidence-section",
+            "files",
+            "--evidence-attempt",
+            "bound-attempt",
+            "--page",
+            "2"
+        ]
+        .map(Value::from)
+    );
+    bad(
+        &evidence(
+            &mut c,
+            json!({"room":"fixture","participant":"owner","section":"raw","attempt":"bound-attempt"}),
+        ),
+        "Unsupported",
+    );
+    bad(
+        &evidence(
+            &mut c,
+            json!({"room":"fixture","participant":"owner","section":"files","attempt":"../other"}),
+        ),
+        "Invalid",
+    );
+    bad(
+        &evidence(
+            &mut c,
+            json!({"room":"fixture","participant":"owner","section":"files","attempt":"bound-attempt","before":5}),
+        ),
+        "cursor",
+    );
+
+    assert!(
+        c.tool(
+            "oms_panel_chat",
+            json!({"room":"fixture","participant":"owner","threadId":thread})
+        )["error"]
+            .is_object()
+    );
+    let view = json!({"view":"plan","page":2,"columns":[],"rows":[],"status":"ready"});
+    fixture_settings(&source, json!({"stdout":view.to_string()}));
+    assert_eq!(
+        payload(&c.tool("oms_panel_tui_view", json!({"view":"plan","page":2}))),
+        view
+    );
+    bad(
+        &c.tool("oms_panel_tui_view", json!({"view":"--launch"})),
+        "Unsupported",
+    );
+    bad(
+        &c.tool("oms_panel_tui_view", json!({"view":"plan","page":-1})),
+        "Invalid",
+    );
+    for (name, body, argv) in [
+        (
+            "oms_panel_usage",
+            json!({"providers":[],"attempts":[]}),
+            json!(["panel", "--repo", repo, "--desktop-usage", "--json"]),
+        ),
+        (
+            "oms_panel_git_status",
+            json!({"git":{},"github":{}}),
+            json!(["github", "panel-status", "--repo", repo, "--json"]),
+        ),
+    ] {
+        fixture_settings(&source, json!({"stdout":body.to_string()}));
+        assert_eq!(payload(&c.tool(name, json!({}))), body);
+        assert_eq!(record(&source)["argv"], argv);
+    }
     let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
     fixture_settings(
         &source,
@@ -2853,7 +2970,9 @@ fn fake_oms() {
             return;
         }
     }
-    if args.iter().any(|v| v == "--conversation-digest") {
+    if args.first().is_some_and(|v| v == "dashboard")
+        && args.iter().any(|v| v == "--conversation-digest")
+    {
         let mut report: Value = serde_json::from_str(cfg["stdout"].as_str().unwrap()).unwrap();
         report["dashboard"]["conversationBinding"] = cfg["binding"]["conversationBinding"]
             .as_str()

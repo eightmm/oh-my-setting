@@ -12,13 +12,36 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v4.html";
+const URI: &str = "ui://oms/conversation-panel/v5.html";
+const V4: &str = "ui://oms/conversation-panel/v4.html";
 const V3: &str = "ui://oms/conversation-panel/v3.html";
 const V1: &str = "ui://oms/conversation-panel/v1.html";
 const V2: &str = "ui://oms/conversation-panel/v2.html";
 const OPEN: &str = "oms_open_panel";
 const PROJECTS: &str = "oms_list_projects";
 const SNAPSHOT: &str = "oms_panel_snapshot";
+const USAGE: &str = "oms_panel_usage";
+const CHAT: &str = "oms_panel_chat";
+const GIT: &str = "oms_panel_git_status";
+const VIEW: &str = "oms_panel_tui_view";
+const VIEWS: &[&str] = &[
+    "overview",
+    "health",
+    "providers",
+    "teams",
+    "sessions",
+    "plan",
+    "attention",
+    "results",
+    "metrics",
+    "routes",
+    "workspaces",
+    "jobs",
+    "past",
+    "debate",
+    "capacity",
+    "log",
+];
 const START: &str = "oms_start_main";
 const START_STATUS: &str = "oms_start_status";
 const APPROVALS: &str = "oms_list_approvals";
@@ -32,7 +55,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
         && request["method"] == "tools/call"
         && matches!(
             request["params"]["name"].as_str(),
-            Some(SNAPSHOT | START | START_STATUS | APPROVALS | DECIDE)
+            Some(SNAPSHOT | USAGE | CHAT | GIT | VIEW | START | START_STATUS | APPROVALS | DECIDE)
         )
 }
 
@@ -59,8 +82,39 @@ pub(super) fn definitions() -> Value {
     opener["_meta"]["ui"]["resourceUri"] = json!(URI);
     opener["_meta"]["openai/outputTemplate"] = json!(URI);
     opener["_meta"]["openai/ui"] = json!({"entrypoints":[{"type":"thread"}]});
+    let ident = json!({"type":"string","pattern":"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$"});
+    let mut chat = make(
+        CHAT,
+        "Read an exact Room participant’s messages shared with this conversation and its recorded result.",
+        json!({"project":project,"room":ident,"participant":ident,"before":{"type":"integer","minimum":1},"section":{"type":"string","enum":["info","events","files","diff","transcript"]},"attempt":ident,"page":{"type":"integer","minimum":1,"maximum":10000}}),
+        &["room", "participant"],
+        false,
+    );
+    chat["_meta"]["ui"]["visibility"] = json!(["app"]);
     json!([
         opener,
+        chat,
+        make(
+            USAGE,
+            "Read recorded usage for recent OMS attempts and local provider quota windows.",
+            scope.clone(),
+            &[],
+            false
+        ),
+        make(
+            GIT,
+            "Read Git working tree and matching GitHub pull request status.",
+            scope.clone(),
+            &[],
+            false
+        ),
+        make(
+            VIEW,
+            "Read one page of a supported OMS terminal panel view.",
+            json!({"project":project,"view":{"type":"string","enum":VIEWS.to_vec()},"page":{"type":"integer","minimum":1,"maximum":1000}}),
+            &["view"],
+            false
+        ),
         make(
             PROJECTS,
             "List projects configured by the OMS host.",
@@ -341,7 +395,7 @@ impl Server<'_> {
             "resources/list" => {
                 json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
             }
-            "resources/read" if matches!(params["uri"].as_str(), Some(URI | V1 | V2 | V3)) => {
+            "resources/read" if matches!(params["uri"].as_str(), Some(URI | V1 | V2 | V3 | V4)) => {
                 json!({"contents":[{
                     "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
                     "_meta":{"ui":{"csp":{"connectDomains":[],"resourceDomains":[]}}}
@@ -352,7 +406,17 @@ impl Server<'_> {
                 let name = params["name"].as_str().unwrap_or("");
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
-                    OPEN | APPROVALS | SNAPSHOT => &["project"],
+                    OPEN | APPROVALS | SNAPSHOT | GIT | USAGE => &["project"],
+                    CHAT => &[
+                        "project",
+                        "room",
+                        "participant",
+                        "before",
+                        "section",
+                        "attempt",
+                        "page",
+                    ],
+                    VIEW => &["project", "view", "page"],
                     START_STATUS => &["project", "requestId"],
                     START => &["project", "main", "goal", "requestId"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
@@ -366,7 +430,38 @@ impl Server<'_> {
                 }) {
                     return error(id, -32602, "unknown or invalid desktop tool arguments");
                 }
-                response(self.panel_call(name, args, &params["_meta"]))
+                let result = self.panel_call(name, args, &params["_meta"]);
+                if name == CHAT {
+                    match result {
+                        Ok(mut data) => {
+                            if data["self"] == true
+                                && data["provider"] == "codex"
+                                && let Some(thread) =
+                                    params["_meta"]["threadId"].as_str().filter(|v| uuid(v))
+                            {
+                                data["nativeUri"] = json!(format!("codex://threads/{thread}"));
+                            }
+                            let summary = json!({"room":data["room"],"participant":data["participant"],"source":data["source"],"count":data["messages"].as_array().map(Vec::len)});
+                            let mut result = response(Ok(summary));
+                            if crate::output::outbound(data.to_string().as_bytes(), &Value::Null)
+                                .is_err()
+                            {
+                                return reply(
+                                    id,
+                                    response(Err(
+                                        "OMS withheld this conversation during its outbound scan."
+                                            .into(),
+                                    )),
+                                );
+                            }
+                            result["_meta"]["chat"] = data;
+                            result
+                        }
+                        Err(e) => response(Err(e)),
+                    }
+                } else {
+                    response(result)
+                }
             }
             _ => return error(id, -32601, "method not found"),
         };
@@ -393,6 +488,18 @@ impl Server<'_> {
             // Never return captured diagnostic prefixes. In particular the
             // capture may end in the middle of a credential or private path.
             let known = [
+                (
+                    "Room chat unavailable for this conversation",
+                    "The current conversation is no longer the confirmed Main of that Room. Refresh the panel.",
+                ),
+                (
+                    "attempt unavailable for this Room participant",
+                    "This attempt is unavailable for the selected Room participant.",
+                ),
+                (
+                    "evidence binding changed during collection",
+                    "The selected attempt changed. Refresh the participant reader.",
+                ),
                 (
                     "room id already exists",
                     "This request is already reserved. Use oms_start_status with its original requestId.",
@@ -484,6 +591,115 @@ impl Server<'_> {
             Ok(format!("oms-app-{key}"))
         };
         let argv = match name {
+            CHAT => {
+                let thread = meta["threadId"]
+                    .as_str()
+                    .filter(|v| uuid(v))
+                    .ok_or("Open this reader from the Room owner's bound conversation.")?;
+                let ident = |key: &str| -> PanelResult<OsString> {
+                    args[key]
+                        .as_str()
+                        .filter(|v| {
+                            (1..=160).contains(&v.len())
+                                && v.as_bytes()[0].is_ascii_alphanumeric()
+                                && v.bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                        })
+                        .map(OsString::from)
+                        .ok_or_else(|| "Invalid Room or participant.".into())
+                };
+                let mut cmd = vec![
+                    "panel".into(),
+                    "--repo".into(),
+                    path,
+                    "--desktop-chat".into(),
+                    "--json".into(),
+                    "--room".into(),
+                    ident("room")?,
+                    "--participant".into(),
+                    ident("participant")?,
+                    "--conversation-digest".into(),
+                    crate::storage::hash(thread)[..32].into(),
+                ];
+                if let Some(section) = args.get("section") {
+                    let section = section
+                        .as_str()
+                        .filter(|s| {
+                            matches!(*s, "info" | "events" | "files" | "diff" | "transcript")
+                        })
+                        .ok_or("Unsupported evidence section.")?;
+                    if args.get("before").is_some() {
+                        return Err("Evidence uses page, not a Room cursor.".into());
+                    }
+                    cmd.extend([
+                        "--evidence-section".into(),
+                        section.into(),
+                        "--evidence-attempt".into(),
+                        ident("attempt")?,
+                    ]);
+                    if let Some(p) = args.get("page") {
+                        let p = p
+                            .as_i64()
+                            .filter(|n| (1..=10000).contains(n))
+                            .ok_or("Invalid evidence page.")?;
+                        cmd.extend(["--page".into(), p.to_string().into()]);
+                    }
+                } else if args.get("page").is_some() || args.get("attempt").is_some() {
+                    return Err("Select an evidence section for this attempt.".into());
+                }
+                if let Some(before) = args.get("before") {
+                    let before = before
+                        .as_i64()
+                        .filter(|n| *n > 0)
+                        .ok_or("Invalid chat cursor.")?;
+                    cmd.extend(["--before".into(), before.to_string().into()]);
+                }
+                cmd
+            }
+            USAGE => vec![
+                "panel".into(),
+                "--repo".into(),
+                path,
+                "--desktop-usage".into(),
+                "--json".into(),
+            ],
+            GIT => vec![
+                "github".into(),
+                "panel-status".into(),
+                "--repo".into(),
+                path,
+                "--json".into(),
+            ],
+            VIEW => {
+                let view = args["view"]
+                    .as_str()
+                    .filter(|name| VIEWS.contains(name))
+                    .ok_or("Unsupported OMS view.")?;
+                let page = match args.get("page") {
+                    Some(v) => v
+                        .as_i64()
+                        .filter(|n| (1..=1000).contains(n))
+                        .ok_or("Invalid OMS page.")?,
+                    None => 1,
+                };
+                let mut cmd = vec![
+                    "panel".into(),
+                    "--repo".into(),
+                    path,
+                    "--desktop-view".into(),
+                    view.into(),
+                    "--page".into(),
+                    page.to_string().into(),
+                    "--json".into(),
+                ];
+                if let Some(thread) = meta["threadId"].as_str().filter(|v| uuid(v)) {
+                    cmd.extend([
+                        "--conversation-digest".into(),
+                        crate::storage::hash(thread)[..32].into(),
+                    ]);
+                }
+                cmd
+            }
             START_STATUS => vec![
                 "room".into(),
                 "desktop-start-status".into(),
@@ -581,7 +797,26 @@ impl Server<'_> {
             _ => unreachable!(),
         };
         let (data, _) = self.panel_exec(&repo, argv, false)?;
+        if data.to_string().len() > crate::OUTPUT_LIMIT {
+            return Err("OMS desktop detail exceeds the response limit.".into());
+        }
         match name {
+            CHAT if data["room"] == args["room"]
+                && data["participant"] == args["participant"]
+                && data["source"] == "room"
+                && data["messages"].is_array() =>
+            {
+                Ok(data)
+            }
+            USAGE if data["providers"].is_array() && data["attempts"].is_array() => Ok(data),
+            GIT if data["git"].is_object() && data["github"].is_object() => Ok(data),
+            VIEW if data["view"] == args["view"]
+                && data["page"].as_i64() == Some(args["page"].as_i64().unwrap_or(1))
+                && data["columns"].is_array()
+                && data["rows"].is_array() =>
+            {
+                Ok(data)
+            }
             START
                 if data["status"] == "started"
                     && data["attempt"].as_str().is_some_and(|id| !id.is_empty())

@@ -23,6 +23,12 @@ before any action.
 - For progress, use `oms_panel_snapshot` and describe recorded work, including
   any unavailable status. A launch receipt alone does not establish that a
   lead completed its assignment.
+- For branch, PR and checks, call `oms_panel_git_status` on demand. For
+  provider and attempt usage use `oms_panel_usage`. For a native Board
+  section, call `oms_panel_tui_view` with its view and page. For messages
+  shared with an enrolled Main, open the panel and select the participant
+  in Chat. The widget calls its private `oms_panel_chat` tool.
+  Report unavailable, unreported and partial data as returned.
 - For approvals, call `oms_list_approvals`. Show the specific operation for
   review. After the user explicitly approves or denies that item, pass its
   exact ID, version and digest to `oms_decide_approval`. Refresh stale items

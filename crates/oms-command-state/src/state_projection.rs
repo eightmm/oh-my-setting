@@ -21,29 +21,6 @@ fn query(ctx: &Context<'_>, argv: &[&str]) -> String {
         .map(|b| String::from_utf8_lossy(&b).trim().to_owned())
         .unwrap_or_default()
 }
-fn git_status(status: &str) -> (String, String, String, Option<u64>) {
-    let mut head = String::new();
-    let mut branch = String::new();
-    let mut upstream = String::new();
-    let mut ahead = None;
-    for line in status.lines() {
-        if let Some(value) = line.strip_prefix("# branch.oid ") {
-            if value != "(initial)" {
-                head = value.into();
-            }
-        } else if let Some(value) = line.strip_prefix("# branch.head ") {
-            if value != "(detached)" {
-                branch = value.into();
-            }
-        } else if let Some(value) = line.strip_prefix("# branch.upstream ") {
-            upstream = value.into();
-        } else if let Some(value) = line.strip_prefix("# branch.ab +") {
-            ahead = value.split_whitespace().next().and_then(|n| n.parse().ok());
-        }
-    }
-    (head, branch, upstream, ahead)
-}
-
 pub(super) fn alive(row: &Value) -> Option<bool> {
     let raw = row.get("pid");
     let pid = raw
@@ -241,13 +218,27 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
             ),
         ]),
     )?;
-    let status = query(ctx, &["git", "status", "--porcelain=v2", "--branch"]);
-    let (head, branch, upstream, ahead) = git_status(&status);
+    let mut command = vec![
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ];
+    command.extend_from_slice(oms_work_inspect::git::STATUS_ARGS);
+    let status = helpers::query(ctx, &command).unwrap_or_default();
+    let git = oms_work_inspect::git::snapshot(&status);
+    let head = git["head"].as_str().unwrap_or_default();
+    let branch = git["branch"].as_str().unwrap_or_default();
+    let upstream = git["upstream"].as_str().unwrap_or_default();
+    let ahead = git["ahead"].as_u64();
+    state.set("git", json::parse(git.to_string().as_bytes())?)?;
     let (ci_rows, _) = rows(ctx, ".oms/ci.jsonl");
     let mut ci = ci_rows.last().cloned().unwrap_or_else(json::empty);
     let fresh = !head.is_empty()
         && !ci.text("sha").is_empty()
-        && (head.starts_with(ci.text("sha")) || ci.text("sha").starts_with(&head));
+        && (head.starts_with(ci.text("sha")) || ci.text("sha").starts_with(head));
     let ci_state = if fresh {
         "current"
     } else if ahead.is_some_and(|a| a > 0)
@@ -1172,6 +1163,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
     Ok(object([
         ("schema", number(1)),
         ("kind", string("oms-dashboard")),
+        ("git", state.get("git").clone()),
         ("generated_at", string(timestamp(epoch())?)),
         (
             "repo",
@@ -1311,6 +1303,12 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
             ("provider", label(provider, 64)),
             ("tool", label(row.get("tool"), 96)),
             ("role", label(refs.get("panel_role"), 64)),
+            (
+                "participant",
+                label(refs.get("panel_room_participant"), 160),
+            ),
+            ("created", label(row.get("created_at"), 64)),
+            ("reason", label(row.get("reason_code"), 96)),
             ("room", label(refs.get("panel_room_id"), 128)),
             ("task", label(row.get("task_id"), 192)),
             ("state", label(row.get("state"), 64)),
@@ -1349,8 +1347,16 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
     let acceptance = report.get("acceptance");
     let operations = report.get("operations");
     let reviews = report.get("reviews");
-    let dashboard = object([
+    let operation_count = |key: &str| {
+        if attempts.get("available").truth() {
+            count(attempts.get(key))
+        } else {
+            Value::Null
+        }
+    };
+    let mut dashboard = object([
         ("scope", string("repository")),
+        ("git", report.get("git").clone()),
         (
             "conversationMain",
             conversation.get("conversationMain").clone(),
@@ -1400,6 +1406,23 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
         ("attempts", rows(attempts.get("recent"), 16, attempt)),
         ("activeAttempts", rows(active, 8, attempt)),
         (
+            "commandStatus",
+            object([
+                ("total", operation_count("total")),
+                ("active", operation_count("active")),
+                ("executing", operation_count("executing")),
+                (
+                    "byState",
+                    if attempts.get("available").truth() {
+                        attempts.get("by_state").clone()
+                    } else {
+                        Value::Null
+                    },
+                ),
+                ("available", attempts.get("available").clone()),
+            ]),
+        ),
+        (
             "attention",
             rows(report.get("attention").get("items"), 8, |v| {
                 object([
@@ -1421,6 +1444,17 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
                         v.get("exit").int().ok().map(number).unwrap_or(Value::Null),
                     ),
                     ("artifactId", label(v.get("artifact_id"), 128)),
+                    ("attempt", label(v.get("attempt_id"), 160)),
+                    ("task", label(v.get("task_id"), 160)),
+                    (
+                        "verifyExit",
+                        v.get("verify_exit")
+                            .int()
+                            .ok()
+                            .map(number)
+                            .unwrap_or(Value::Null),
+                    ),
+                    ("verifyStatus", label(v.get("verify_status"), 64)),
                 ])
             }),
         ),
@@ -1443,6 +1477,28 @@ pub(super) fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
             ]),
         ),
     ]);
+    // Allocate headroom for MCP framing and escaped multibyte labels. Trim
+    // complete rows only, keeping the goal and exact conversation identity.
+    let mut bytes = crate::json::encoded(&dashboard).map_or(usize::MAX, |v| v.len());
+    if bytes > 52_000 {
+        for key in ["attempts", "operations", "attention", "activeAttempts"] {
+            if bytes <= 52_000 {
+                break;
+            }
+            if let Value::Array(mut saved) = dashboard.get(key).clone() {
+                let count = saved.len();
+                while bytes > 52_000
+                    && let Some(row) = saved.pop()
+                {
+                    bytes = bytes.saturating_sub(
+                        crate::json::encoded(&row).map_or(0, |v| v.len().saturating_sub(1)),
+                    );
+                }
+                let _ = dashboard.set(&format!("{key}Trimmed"), number(count - saved.len()));
+                let _ = dashboard.set(key, Value::Array(saved));
+            }
+        }
+    }
     object([
         ("schema", number(1)),
         ("kind", string("oms-panel-snapshot")),

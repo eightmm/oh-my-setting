@@ -1461,7 +1461,7 @@ pub fn results_page(
                 && row["artifact"].is_string()
                 && !["empty", "no_answer"].contains(&text(row, "answer_quality").as_str())
             {
-                match indexed_artifact(&store, row).and_then(|v| answer(&v)) {
+                match indexed_answer(&store, row) {
                     Ok(answer) => {
                         call.insert("answer".into(), answer.into());
                         call.insert("answer_truncated".into(), false.into());
@@ -2179,6 +2179,12 @@ fn round_delta(store: &Store, attempts: &[Value], rows: &[&Value]) -> Option<Val
         }
         Ok(serde_json::json!({"since_round":number,"count":files.len(),"files":&files[..files.len().min(20)]}))
     })().unwrap_or_else(|_| serde_json::json!({"issue":"unavailable"})))
+}
+
+/// Extract the same scrubbed answer used by the terminal result reader from
+/// an indexed artifact whose location and content digest have been verified.
+pub fn indexed_answer(store: &Store, row: &Value) -> Result<String> {
+    answer(&indexed_artifact(store, row)?)
 }
 
 pub fn indexed_artifact(store: &Store, row: &Value) -> Result<Vec<u8>> {

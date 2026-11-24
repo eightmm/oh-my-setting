@@ -1,5 +1,5 @@
 //! `oms github`: an offline status over the local GitHub reference cache, the
-//! only network reads (`refresh`, `adopt-merged`) and the only external write
+//! network reads (`panel-status`, `refresh`, `adopt-merged`) and the only external write
 //! (`post-evidence`) for references in the origin repository. Remote JSON is
 //! untrusted: it is size-bounded, strictly parsed and checked against the
 //! requested reference before any row is written. Errors are fixed text and
@@ -20,6 +20,9 @@ use std::{
     path::Path,
     time::Duration,
 };
+
+#[path = "github_panel.rs"]
+mod panel;
 
 const WRITES_REL: &str = ".oms/github/writes.jsonl";
 const PACKET_REL: &str = ".oms/task/current.md";
@@ -69,14 +72,14 @@ impl Kind {
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let action = o.action("");
     let allowed: &[&str] = match action {
-        "status" => &["repo", "json"],
+        "status" | "panel-status" => &["repo", "json"],
         "refresh" => &["repo", "issue", "pull", "linked", "ttl-s"],
         "adopt-merged" => &["repo", "limit", "apply", "expected-sha256", "ttl-s"],
         "post-evidence" => &["repo", "issue", "pull", "yes"],
         _ => {
             return Err(Error::new(
                 2,
-                "github action must be status, refresh, adopt-merged or post-evidence",
+                "github action must be status, panel-status, refresh, adopt-merged or post-evidence",
             ));
         }
     };
@@ -87,6 +90,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     // `root` is the execution checkout (origin, declaration, task packet,
     // land receipts); `state` holds the shared cache, ledger and plan, so every
     // checkout of one repository sees one evidence ledger.
+    if action == "panel-status" {
+        return panel::status(c, o);
+    }
     let root = c.repo(o)?;
     let state = c.state(&root);
     let git = Git::new(&root, c.interrupted);

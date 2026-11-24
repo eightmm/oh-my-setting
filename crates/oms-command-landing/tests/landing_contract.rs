@@ -3251,6 +3251,11 @@ impl GhRepo {
 printf '%s\n' "$*" >> '{log}'
 dir='{dir}' method=GET endpoint= body=
 args=("$@")
+if [ "$1 $2" = "pr list" ]; then
+  [ -f "$dir/panel-prs" ] || exit 1
+  printf '%s\n' "$(<"$dir/panel-prs")"
+  exit 0
+fi
 for ((i = 0; i < ${{#args[@]}}; i++)); do
   case "${{args[i]}}" in
     --method) method=${{args[i+1]}} ;;
@@ -4255,4 +4260,110 @@ fn land_pr_merge_preserves_head_branch_when_dependent_pr_is_open_or_unverified()
             "{status}"
         );
     }
+}
+
+#[test]
+fn github_panel_matches_current_and_verified_linked_worktrees() {
+    let iso = Isolated::new();
+    let r = GhRepo::new(&iso, "desktop-git", false);
+    let linked = iso.home.path().join("worktree");
+    iso.git(
+        &r.repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let head = iso.git_out(&r.repo, &["rev-parse", "HEAD"]);
+    let old = "a".repeat(40);
+    let row = |n: i32, branch: &str, oid: &str, fork: bool| {
+        format!(
+            r#"{{"number":{n},"title":"Team PR","state":"OPEN","isDraft":false,"headRefName":"{branch}","baseRefName":"main","headRefOid":"{oid}","isCrossRepository":{fork},"statusCheckRollup":[{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}},{{"__typename":"StatusContext","state":"PENDING"}},{{"__typename":"StatusContext","context":"lint","state":"FAILURE"}},{{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"}}],"url":"https://example.invalid/private"}}"#
+        )
+    };
+    let prs = [
+        row(1, "main", &old, false),
+        row(2, "feature", &head, false),
+        row(3, "feature", &head, true),
+        row(4, "feature", &old, false),
+        row(5, "unrelated", &head, false),
+    ];
+    fs::write(r.dir.join("panel-prs"), format!("[{}]", prs.join(","))).unwrap();
+    let get = |path: &Path| {
+        let (code, out, err) = r.run_in(&iso, path, &["panel-status", "--json"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(!out.contains("example.invalid") && !out.contains("secret-filename"));
+        V::parse(out.as_bytes()).unwrap()
+    };
+    fs::write(r.repo.join("secret-filename"), "private").unwrap();
+    let data = get(&r.repo);
+    assert!(matches!(data.get("git").get("dirty"), V::Bool(true)));
+    assert_eq!(data.get("git").get("head").text(), Some(head.as_str()));
+    assert!(matches!(data.get("git").get("ahead"), V::Null));
+    let github = data.get("github");
+    assert_eq!(github.get("status").text(), Some("available"));
+    let rows = github.get("pullRequests").array();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("scope").text(), Some("checkout"));
+    assert!(matches!(rows[0].get("matchesLocalHead"), V::Bool(false)));
+    assert_eq!(
+        rows[1].get("url").text(),
+        Some("https://github.com/example-org/example-repo/pull/2")
+    );
+    assert_eq!(rows[1].get("scope").text(), Some("linkedWorktree"));
+    assert_eq!(rows[1].get("title").text(), Some("Team PR"));
+    assert_eq!(
+        rows[1].get("checks").get("items").array()[0]
+            .get("name")
+            .text(),
+        Some("lint")
+    );
+    for key in ["passed", "failed", "pending", "other"] {
+        assert!(matches!(rows[1].get("checks").get(key),V::Num(n) if n=="1"));
+    }
+    let data = get(&linked);
+    assert_eq!(data.get("git").get("branch").text(), Some("feature"));
+    assert!(matches!(data.get("git").get("dirty"), V::Bool(false)));
+    assert_eq!(
+        data.get("github").get("pullRequests").array()[0]
+            .get("scope")
+            .text(),
+        Some("checkout")
+    );
+    fs::write(r.dir.join("panel-prs"), "[]").unwrap();
+    assert!(
+        get(&r.repo)
+            .get("github")
+            .get("pullRequests")
+            .array()
+            .is_empty()
+    );
+    fs::remove_file(r.dir.join("panel-prs")).unwrap();
+    assert_eq!(
+        get(&r.repo).get("github").get("status").text(),
+        Some("unavailable")
+    );
+    let calls = r.calls();
+    assert!(calls.lines().all(|s| s.starts_with(
+        "pr list --repo github.com/example-org/example-repo --state open --limit 51 --json "
+    )));
+    let nested = r.repo.join("nested-project");
+    fs::create_dir_all(nested.join(".oms")).unwrap();
+    let (code, out, err) = r.run(
+        &iso,
+        &["panel-status", "--repo", nested.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let nested = V::parse(out.as_bytes()).unwrap();
+    assert!(matches!(nested.get("git").get("available"), V::Bool(false)));
+    assert!(matches!(nested.get("github").get("repository"), V::Null));
+    iso.git(&r.repo, &["remote", "remove", "origin"]);
+    assert_eq!(
+        get(&r.repo).get("github").get("status").text(),
+        Some("unsupported")
+    );
+    assert_eq!(r.calls(), calls);
 }
