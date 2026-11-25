@@ -1902,8 +1902,10 @@ To refresh panel boards after landing from another clone, use `oms sync-shared
 `git merge`. Calls register a shared lock before canonical snapshots and retain
 it through final guards and receipts; sync takes the same admission gate
 exclusively through fetch and `merge --ff-only`. It returns exit 75 with
-`deferred: N calls running (ids...)` while calls remain, and refuses dirty
-(including untracked files), detached, ahead or diverged trees; any local branch may follow the target.
+`deferred: N calls running (ids...)` while calls remain, and refuses tracked or
+staged edits, detached, ahead or diverged trees; untracked files from other tools may
+stay, and `merge --ff-only` still refuses one the target would overwrite. Any
+local branch may follow the target.
 New calls wait at most five seconds for an active sync, then refuse safely;
 retry them after sync finishes. Dead PID/start identities are reclaimed,
 while incomplete or unprovable lock owners continue to block. This refresh
@@ -1913,18 +1915,11 @@ To request this refresh as a separate step of landing, add
 `--sync-shared /path/to/shared-checkout` to `oms land`. PATH is required and
 independent of `--handoff-receipt-to PATH`; use both to transfer landing evidence
 and then refresh that checkout. Sync runs only after land passes and any handoff
-succeeds. Deferred (exit 75) or refused sync leaves land passed with exit zero;
-the land log and text status show `sync deferred: reason` or
-`sync refused: reason`. Retry the same command when the checkout is idle and
-clean. Omitting the flag preserves the target HEAD, index and worktree during
-handoff.
-
-The refresh outcome is stored in `sync/<request>.json` beside the producer's
-landing receipt, with `sync.state` (`running`, `passed`, `deferred` or `refused`),
-path, exit code and reason. `oms land status` includes this companion's `sync`
-fields in JSON and text output. Keeping this mutable operation separate preserves
-the original landing receipt bytes and handed-off digests, including on retries;
-the companion is not imported as landing evidence.
+succeeds. A deferred (exit 75) or refused sync leaves land passed with exit
+zero and prints `land: sync deferred: reason` or `land: sync refused: reason`;
+run `oms sync-shared` again when the checkout is idle and clean. The sync
+outcome is not written into the landing receipt. Omitting the flag preserves
+the target HEAD, index and worktree during handoff.
 
 `oms land notes --from REV --to REV [--output NEW_FILE]` prints a release-notes skeleton
 for that range: first-parent commit subjects grouped by Conventional Commit type, `!`
