@@ -767,3 +767,59 @@ impl Server<'_> {
 pub fn peer_owner(arguments: &[std::ffi::OsString]) -> io::Result<()> {
     peer::owner(arguments)
 }
+
+#[cfg(test)]
+mod read_records_tests {
+    use super::*;
+
+    /// Serves `bytes`, then reports EOF; with `signal`, the flag is set at that
+    /// EOF as the stdio wake reader does when a signal arrives.
+    struct Input<'a> {
+        bytes: &'a [u8],
+        flag: &'a AtomicBool,
+        signal: bool,
+    }
+    impl io::Read for Input<'_> {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            unreachable!("read_records uses BufRead")
+        }
+    }
+    impl BufRead for Input<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.bytes.is_empty() && self.signal {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+            Ok(self.bytes)
+        }
+        fn consume(&mut self, n: usize) {
+            self.bytes = &self.bytes[n..];
+        }
+    }
+
+    fn dispatched(bytes: &[u8], signal: bool) -> usize {
+        let flag = AtomicBool::new(false);
+        let mut input = Input {
+            bytes,
+            flag: &flag,
+            signal,
+        };
+        let mut count = 0;
+        read_records(&flag, &mut input, |record| {
+            assert!(record.is_ok());
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        count
+    }
+
+    #[test]
+    fn shutdown_discards_only_an_unterminated_record() {
+        let partial = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        assert_eq!(dispatched(partial, true), 0);
+        assert_eq!(dispatched(partial, false), 1);
+        let complete = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}
+"#;
+        assert_eq!(dispatched(complete, true), 1);
+    }
+}

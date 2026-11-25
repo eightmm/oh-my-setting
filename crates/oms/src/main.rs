@@ -1160,10 +1160,13 @@ impl std::io::Read for WakeStdin {
                 continue;
             }
             // NVAL also reads: a closed fd 0 is EOF as in std, and a device
-            // poll cannot watch falls back to the former blocking read.
+            // poll cannot watch falls back to the former blocking read, where a
+            // restarted read(2) still waits for input before seeing a signal.
+            // AGAIN is returned as std's stdin did, so a non-blocking fd that
+            // poll reports ready without data cannot spin here.
             match rustix::io::read(&self.stdin, &mut *buf) {
                 Ok(n) => return Ok(n),
-                Err(Errno::INTR | Errno::AGAIN) => continue,
+                Err(Errno::INTR) => continue,
                 Err(Errno::BADF) => return Ok(0),
                 Err(e) => return Err(e.into()),
             }
