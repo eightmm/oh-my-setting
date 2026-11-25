@@ -29,6 +29,7 @@ mod core;
 mod cursor;
 mod desktop;
 pub use desktop::ConversationPanelAttempt;
+mod issue_handoff;
 mod model;
 mod relay;
 mod services;
@@ -42,13 +43,13 @@ pub use model::{
     REPEAT_AFTER, ROLES, SECOND_REMINDER_AFTER, age, member as participant, safe_room_path,
 };
 pub use model::{
+    AttemptRoom, declared_scopes, event_shape, identifier, main_owner_matches, open_questions,
+    overlaps, project, prompt_message, reminder_id, review_ids, unread_messages, visible_to,
+};
+pub use model::{
     CALL_RESERVE, CARRY_CALLS, CARRY_MESSAGES, MAIN_RESERVE, MAX_CALLS, MAX_HOPS, MAX_MESSAGES,
     MAX_METADATA_BYTES, MAX_PARTICIPANTS, MAX_ROOMS, MAX_SCAN_BYTES, MAX_SCAN_ENTRIES,
     MESSAGE_RESERVE, ROLLOVER_CALLS, ROLLOVER_MESSAGES,
-};
-pub use model::{
-    declared_scopes, event_shape, identifier, main_owner_matches, open_questions, overlaps,
-    project, prompt_message, reminder_id, review_ids, unread_messages, visible_to,
 };
 pub use oms_contract_markdown::scope::normalize as normalize_scope;
 pub use relay::{Relay, relay_request};
@@ -110,7 +111,8 @@ pub(crate) fn checkpoint(stop: &AtomicBool) -> Result<()> {
     }
 }
 
-pub(crate) fn outbound_clean(bytes: &[u8]) -> Result<bool> {
+/// Check projected Room data against the bounded host outbound policy.
+pub fn outbound_clean(bytes: &[u8]) -> Result<bool> {
     value::outbound_clean(bytes)
 }
 

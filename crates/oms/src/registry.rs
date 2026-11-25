@@ -7,6 +7,7 @@ const USAGE: &[u8] = br#"Usage: oms <tool> [args...]
        oms                         # terminal control panel (interactive TTY)
        oms list [--all]
        oms help
+       oms --version
 
 Dispatch to an oh-my-setting harness tool by name. `list` prints daily work,
 collaboration, delivery and maintenance entrypoints; `list --all` also reveals
@@ -328,8 +329,12 @@ pub(super) fn is_public(tool: &std::ffi::OsStr) -> bool {
 }
 
 pub(super) fn owns(args: &[OsString]) -> bool {
-    args.first()
-        .is_some_and(|arg| matches!(arg.as_bytes(), b"help" | b"list" | b"-h" | b"--help"))
+    args.first().is_some_and(|arg| {
+        matches!(
+            arg.as_bytes(),
+            b"help" | b"list" | b"-h" | b"--help" | b"--version"
+        )
+    })
 }
 
 pub(super) fn run(args: &[OsString], _source: &Path) -> (i32, Vec<u8>, Vec<u8>) {
@@ -337,6 +342,20 @@ pub(super) fn run(args: &[OsString], _source: &Path) -> (i32, Vec<u8>, Vec<u8>) 
     let err = Vec::new();
     let selected = match args.first().map(|arg| arg.as_bytes()) {
         Some(b"-h" | b"--help") => return (0, USAGE.to_vec(), err),
+        Some(b"--version") if args.len() == 1 => {
+            return (
+                0,
+                format!("{}\n", oms_runtime::CORE_VERSION).into_bytes(),
+                err,
+            );
+        }
+        Some(b"--version") => {
+            return (
+                2,
+                out,
+                b"error: oms --version takes no arguments\n".to_vec(),
+            );
+        }
         Some(b"help") => {
             out.extend_from_slice(USAGE);
             out.push(b'\n');
