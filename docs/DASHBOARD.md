@@ -218,7 +218,10 @@ This 570-pixel Chromium capture uses a local example project with three recorded
 In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
 to ask one Claude or AGY researcher a question. Submitting the form invokes the
 selected provider once and can use its allowance. **요청 상태 확인** checks the
-same request ID. **검토 대화 보기** opens the Room handoff and the provider's
+same request ID. If the operation was found but its Room receipt is missing,
+**작업방에 실행 기록 연결** links the existing operation. It is also available
+in the researcher’s conversation. Linking rechecks Room ownership and never
+starts another provider. **검토 대화 보기** opens the Room handoff and the provider's
 recorded answer. A pending request or missing answer remains visible as such.
 The research request grants no write scope, Lead role or approval.
 To share an answer, choose **Attach review result** (검토 결과 첨부), review the

@@ -472,7 +472,11 @@ impl Server<'_> {
         self.start_bound_peer(args, None)
     }
 
-    pub(crate) fn start_bound_peer(&self, args: &Value, assignment: Option<&str>) -> ToolResult {
+    pub(crate) fn start_bound_peer(
+        &self,
+        args: &Value,
+        assignment: Option<(&str, &str)>,
+    ) -> ToolResult {
         if delegated()
             && !(matches!(args["kind"].as_str(), Some("message" | "ack"))
                 && truthy(&args["participant"]))
@@ -556,26 +560,30 @@ impl Server<'_> {
             self.config.oms_program.as_deref(),
             &self.config.peer_owner,
         )?;
-        let mut random = [0u8; 4];
-        File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut random))
-            .map_err(|e| format!("error: {e}"))?;
-        let stamp =
-            chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).format("%Y%m%dT%H%M%SZ");
-        let op = format!(
-            "{kind}-{stamp}-{}",
-            random
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
+        let op = if let Some((operation, _)) = assignment {
+            operation.to_owned()
+        } else {
+            let mut random = [0u8; 4];
+            File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut random))
+                .map_err(|e| format!("error: {e}"))?;
+            let stamp =
+                chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).format("%Y%m%dT%H%M%SZ");
+            format!(
+                "{kind}-{stamp}-{}",
+                random
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            )
+        };
         if kind == "ask" && thread.is_empty() {
             thread = op.clone();
         }
         let dir_path = repo.join(RUN_ROOT).join(&op);
         let started = storage::now();
         let mut meta = json!({"operation":op,"kind":kind,"targets":targets,"started_at":started,"answer_storage":"operation","cancellation_supported":true,"title":prefix_chars(&prompt.split(crate::whitespace).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "),160)});
-        if let Some(binding) = assignment {
+        if let Some((_, binding)) = assignment {
             meta["panel_assignment"] = json!(binding);
         }
         if !thread.is_empty() {

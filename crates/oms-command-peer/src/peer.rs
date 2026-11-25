@@ -645,6 +645,8 @@ pub(crate) struct Seat {
     pub code: i32,
     pub complete: bool,
     pub quality: String,
+    /// Review verdict read from the raw answer before redaction, so a redacted tail cannot change it.
+    pub verdict: Option<(&'static str, Option<f64>)>,
     pub round: usize,
     pub elapsed: std::time::Duration,
     pub timeout_secs: u64,
@@ -847,6 +849,7 @@ fn call_routed(
             code: 0,
             complete: false,
             quality: "empty".into(),
+            verdict: None,
             round,
             artifact_sha256: String::new(),
             output_start: 0,
@@ -1087,7 +1090,24 @@ fn call_routed(
     } else if !result.stderr.is_empty() {
         diagnostics.extend_from_slice(&safety::redact(&result.stderr)?);
     }
-    let mut bytes = header.into_bytes();
+    // Only a completed answer can lose its verdict to redaction; timeouts keep the diagnostics path.
+    let verdict = (tool == "peer-review" && result.complete).then(|| {
+        crate::review::verdict(
+            &String::from_utf8_lossy(&result.stdout),
+            Some(result.code),
+            result.complete,
+        )
+    });
+    // The verdict goes right under the title, before any provider-controlled text.
+    let title = header.find("\n\n").map_or(0, |at| at + 2);
+    let mut bytes = header.as_bytes()[..title].to_vec();
+    if let Some((state, confidence)) = verdict {
+        bytes.extend_from_slice(format!("- verdict: {state}\n").as_bytes());
+        if let Some(confidence) = confidence {
+            bytes.extend_from_slice(format!("- confidence: {confidence}\n").as_bytes());
+        }
+    }
+    bytes.extend_from_slice(&header.as_bytes()[title..]);
     bytes.extend_from_slice(b"\n## Output\n\n");
     let output_start = bytes.len();
     bytes.extend_from_slice(answer.as_bytes());
@@ -1162,6 +1182,7 @@ fn call_routed(
         code: result.code,
         complete: result.complete,
         quality,
+        verdict,
         round,
         artifact_sha256,
         output_start,

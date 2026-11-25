@@ -6,6 +6,7 @@ use crate::{
 };
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 #[path = "state_projection.rs"]
 mod projection;
@@ -34,22 +35,41 @@ fn collector(result: Result<Value>, present: bool) -> Value {
     }
 }
 
-fn plan(
-    ctx: &Context<'_>,
+fn plan_action(
+    repo: &Path,
     action: oms_command_plan::Action,
     host: &dyn HostServices,
+    interrupted: &AtomicBool,
 ) -> Result<Value> {
     let req = oms_command_plan::Request::new(action).flag("json");
-    let mut context = oms_command_plan::Context::from_environment(&req, &ctx.repo)?;
-    context.state_repo = ctx.repo.clone();
-    context.plan_file = ctx.repo.join(".oms/plan/tasks.json");
-    let plan = oms_command_plan::Plan::open(context, host.plan_services(), ctx.interrupted)?;
+    let mut context = oms_command_plan::Context::from_environment(&req, repo)?;
+    context.state_repo = repo.to_path_buf();
+    context.plan_file = repo.join(".oms/plan/tasks.json");
+    let plan = oms_command_plan::Plan::open(context, host.plan_services(), interrupted)?;
     let response = plan.execute(&req)?;
     require(
         response.code == 0,
         String::from_utf8_lossy(&response.stderr),
     )?;
     json::parse(&response.stdout)
+}
+
+fn plan(
+    ctx: &Context<'_>,
+    action: oms_command_plan::Action,
+    host: &dyn HostServices,
+) -> Result<Value> {
+    plan_action(&ctx.repo, action, host, ctx.interrupted)
+}
+
+pub(crate) fn plan_status(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    host: &dyn HostServices,
+) -> Result<Value> {
+    crate::checkpoint(interrupted)?;
+    let repo = repo.canonicalize().map_err(|e| error(2, e))?;
+    plan_action(&repo, oms_command_plan::Action::Status, host, interrupted)
 }
 
 pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Value> {

@@ -6,7 +6,126 @@ use crate::json::{self, Value, empty, list, number, object, string};
 use crate::{Plan, Request, Response, Result, Snapshot, error, require};
 use std::collections::BTreeSet;
 
+/// Process-local result of a bounded issue read by the trusted autonomy adapter.
+pub struct IssueObservation {
+    proposal: String,
+    execution: std::path::PathBuf,
+    state: std::path::PathBuf,
+    observed: std::time::Instant,
+    github_id: Value,
+    revision: String,
+}
+
+fn valid_revision(s: &str) -> bool {
+    s.len() == 20
+        && s.bytes()
+            .zip(b"0000-00-00T00:00:00Z")
+            .all(|(actual, expected)| {
+                if expected.is_ascii_digit() {
+                    actual.is_ascii_digit()
+                } else {
+                    actual == *expected
+                }
+            })
+        && chrono::DateTime::parse_from_rfc3339(s).is_ok()
+}
+
+/// The exact canonical GitHub fields pinned by intent, planning and first admission.
+/// Parsing these bytes grants no evidence of a live fetch.
+pub fn issue_document(
+    raw: &[u8],
+    url: &str,
+    number: u64,
+    require_open: bool,
+) -> Result<(Value, String)> {
+    let row = json::parse_bounded(raw, 512 * 1024)?;
+    let observed_url = row.text("html_url");
+    require(
+        (!require_open || (row.opt("body").is_some() && row.text("state") == "open"))
+            && row.opt("pull_request").is_none()
+            && row.get("number").int()? == i128::from(number)
+            && u64::try_from(row.get("id").int()?).is_ok_and(|id| id > 0)
+            && observed_url.eq_ignore_ascii_case(url)
+            && (!require_open
+                || observed_url.starts_with("https://github.com/")
+                    && observed_url.ends_with(&format!("/issues/{number}")))
+            && valid_revision(row.text("updated_at"))
+            && !row.text("title").is_empty()
+            && row.text("title").chars().count() <= 1024,
+        "reviewed GitHub issue closed or identity/revision changed",
+    )?;
+    let body = if row.get("body") == &Value::Null {
+        ""
+    } else {
+        row.get("body").str()?
+    };
+    let frozen = object([
+        ("id", row.get("id").clone()),
+        ("number", row.get("number").clone()),
+        ("url", string(url.to_ascii_lowercase())),
+        ("updated_at", row.get("updated_at").clone()),
+        ("title", row.get("title").clone()),
+        ("body", string(body)),
+    ]);
+    Ok((frozen, observed_url.to_owned()))
+}
+
 impl Plan<'_> {
+    pub fn observe_issue(
+        &self,
+        proposal: &[u8],
+        fetch: impl FnOnce(&str) -> Result<Vec<u8>>,
+    ) -> Result<IssueObservation> {
+        self.context.parent()?;
+        let p = json::parse_bounded(proposal, 1024 * 1024)?;
+        let source = p.get("issue_source");
+        self.validate_issue_source(&p, source)?;
+        let (slug, n) = p
+            .text("issue")
+            .split_once('#')
+            .ok_or_else(|| error("invalid issue identity"))?;
+        let number: u64 = n.parse().map_err(|_| error("invalid issue number"))?;
+        let url = format!("https://github.com/{slug}/issues/{number}");
+        let raw = fetch(&format!("repos/{slug}/issues/{number}"))?;
+        let (frozen, _) = issue_document(&raw, &url, number, true)?;
+        require(
+            json::hash(&frozen)? == source.text("sha256"),
+            "reviewed GitHub issue source changed",
+        )?;
+        Ok(IssueObservation {
+            proposal: json::sha(proposal),
+            execution: self.context.execution_repo.clone(),
+            state: self.context.state_repo.clone(),
+            observed: std::time::Instant::now(),
+            github_id: frozen.get("id").clone(),
+            revision: frozen.text("updated_at").to_owned(),
+        })
+    }
+
+    pub fn with_issue_observation(mut self, proof: Option<IssueObservation>) -> Self {
+        self.observed_issue = proof;
+        self
+    }
+
+    fn validate_issue_source(&self, proposal: &Value, source: &Value) -> Result<()> {
+        json::keys(source, &["issue", "sha256"], &["with_requirements"])?;
+        let issues = crate::engine::Issues::load(self);
+        require(
+            self.context.canonical()
+                && source
+                    .opt("with_requirements")
+                    .is_none_or(|v| v == &Value::Bool(true))
+                && (self.source.repo() == self.store.repo()
+                    || self.git().namespace_path()? == self.state_git().namespace_path()?)
+                && proposal.get("schema").is_int(2)
+                && proposal.text("issue") == source.text("issue")
+                && json::hex(source.text("sha256"), 64)
+                && issues.required()?
+                && issues.canonical(self, source.text("issue"))? == source.text("issue"),
+            "invalid reviewed Project issue or repository binding",
+        )
+    }
+
     pub(crate) fn proposal(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         let path = req
             .path("proposal")
@@ -31,7 +150,10 @@ impl Plan<'_> {
             "proposal bytes changed after review",
         )?;
         let p = json::parse_legacy(&raw, 1024 * 1024)?;
-        if p.opt("discussion").is_some() {
+        if p.opt("discussion").is_some()
+            || p.opt("issue_source").is_some()
+            || p.get("schema").is_int(2)
+        {
             // Typed native lineage has one unambiguous interpretation at both
             // entry points; retain legacy parsing only for legacy proposals.
             json::parse_bounded(&raw, 1024 * 1024)?;
@@ -49,10 +171,14 @@ impl Plan<'_> {
                 "acceptance_files",
                 "tasks",
             ],
-            &["issue", "discussion"],
+            &["issue", "discussion", "issue_source"],
         )?;
         require(
-            p.get("schema").is_int(1) && p.text("kind") == "agent-plan-proposal",
+            p.get("schema").is_int(if p.opt("issue_source").is_some() {
+                2
+            } else {
+                1
+            }) && p.text("kind") == "agent-plan-proposal",
             "proposal has an unsupported schema/kind",
         )?;
         crate::discussion::validate_proposal(&self.store, &p)?;
@@ -65,6 +191,11 @@ impl Plan<'_> {
             p.text("plan_sha256") == req.value("expected-plan-sha256")?,
             "proposal plan digest does not match apply CAS",
         )?;
+        let strict = p.opt("issue_source");
+        if let Some(source) = strict {
+            self.validate_issue_source(&p, source)?;
+        }
+        let proposal_sha = req.value("expected-proposal-sha256")?;
         let prefix = p.get("id_prefix").str()?;
         require(
             prefix.is_empty() || valid_id(prefix),
@@ -324,8 +455,33 @@ impl Plan<'_> {
                 present == prepared.len(),
                 "proposal is partially present; refusing non-atomic recovery",
             )?;
+            let intake = s.task(prepared[0].text("id"))?.opt("issue_intake");
+            if let Some(source) = strict {
+                let record = intake.ok_or_else(|| error("missing accepted issue intake"))?;
+                json::keys(
+                    record,
+                    &["source", "proposal_sha256", "github_id", "revision"],
+                    &[],
+                )?;
+                require(
+                    record.get("source") == source
+                        && record.text("proposal_sha256") == proposal_sha
+                        && record.get("github_id").int()? > 0
+                        && valid_revision(record.text("revision")),
+                    "existing task differs from exact reviewed issue intake",
+                )?;
+            } else {
+                require(
+                    intake.is_none(),
+                    "existing task was accepted from a pinned issue",
+                )?;
+            }
             for row in &prepared {
                 let current = s.task(row.text("id"))?;
+                require(
+                    current.opt("issue_intake") == intake,
+                    "existing task has different issue intake",
+                )?;
                 require(
                     current.get("discussion") == row.get("discussion"),
                     "existing task discussion differs from reviewed proposal",
@@ -368,12 +524,19 @@ impl Plan<'_> {
                 )?;
             }
             if bound {
+                if strict.is_some() {
+                    self.git().ancestor(p.text("base_sha"), "HEAD")?;
+                }
                 return Ok(Response::text(format!(
                     "plan: proposal already applied ({})",
                     seen.join(",")
                 )));
             }
         }
+        require(
+            strict.is_none() || present == 0,
+            "existing issue intake lacks its reviewed project contract",
+        )?;
         require(
             !bare || !issues.required()?,
             "GitHub project mode: every proposal task requires an issue",
@@ -440,6 +603,29 @@ impl Plan<'_> {
                     "plan: proposal already applied ({})",
                     seen.join(",")
                 )));
+            }
+        }
+        if let Some(source) = strict {
+            let proof = self.observed_issue.as_ref().ok_or_else(|| {
+                error(
+                    "first issue intake requires a fresh open-source check through plan-from-spec",
+                )
+            })?;
+            require(
+                proof.proposal == proposal_sha
+                    && proof.execution == self.context.execution_repo
+                    && proof.state == self.context.state_repo
+                    && proof.observed.elapsed().as_secs() < 30,
+                "issue observation expired or bound to another proposal or repository",
+            )?;
+            let record = object([
+                ("source", source.clone()),
+                ("proposal_sha256", string(proposal_sha)),
+                ("github_id", proof.github_id.clone()),
+                ("revision", string(&proof.revision)),
+            ]);
+            for task in &mut prepared {
+                task.set("issue_intake", record.clone())?;
             }
         }
         for task in prepared {

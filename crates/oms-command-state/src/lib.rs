@@ -29,6 +29,20 @@ pub use oms_command_plan::{Error, Result};
 pub type Output = (i32, Vec<u8>, Vec<u8>);
 pub use failures::{observe_task_verification, task_failure_candidates};
 
+/// Read-only plan status directly from the plan engine, sharing `oms state`'s collector path.
+pub fn plan_status(repo: &Path, interrupted: &AtomicBool) -> Result<Value> {
+    plan_status_with_host(repo, interrupted, &NoHostServices)
+}
+
+/// Like `plan_status`, using explicit host plan services.
+pub fn plan_status_with_host(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    host: &dyn HostServices,
+) -> Result<Value> {
+    state::plan_status(repo, interrupted, host)
+}
+
 pub const COMMANDS: &[&str] = &[
     "state",
     "state-verify",

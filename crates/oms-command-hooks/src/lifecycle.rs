@@ -1056,24 +1056,21 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         let plan_goal = text(&plan, "goal").trim();
         if !plan_goal.is_empty() {
             let accept = flat(text(&plan, "accept"));
-            let state_out = oms_command_state::run_with_source(
-                "state",
-                &["--repo".into(), repo.as_os_str().into(), "--json".into()],
-                &repo,
-                ctx.source,
-                ctx.interrupted,
-            );
-            let plan_state = (state_out.0 == 0)
-                .then(|| document(&state_out.1))
-                .flatten()
-                .and_then(|doc| doc.get("plan").cloned());
-            if let Some(plan_state) = plan_state.filter(|p| p["healthy"] == true) {
-                if plan_state["all_closed"] != true {
+            if let Ok(plan_state) = oms_command_state::plan_status(&repo, ctx.interrupted)
+                && plan_state.object().is_ok()
+            {
+                if !matches!(
+                    plan_state.get("all_closed"),
+                    oms_command_state::Value::Bool(true)
+                ) {
                     let mut counts = BTreeMap::<String, u64>::new();
-                    if let Some(by_state) = plan_state["by_state"].as_object() {
+                    if let Ok(by_state) = plan_state.get("by_state").object() {
                         for (state, count) in by_state {
-                            if let Some(n) = count.as_u64() {
-                                counts.insert(state.clone(), n);
+                            if let Ok(state) = std::str::from_utf8(state)
+                                && let Ok(n) = count.int()
+                                && let Ok(n) = u64::try_from(n)
+                            {
+                                counts.insert(state.to_owned(), n);
                             }
                         }
                     }
@@ -1091,18 +1088,24 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
                             format!(" [{summary}]")
                         }
                     ));
-                    let contract = &plan_state["contract"];
-                    if contract["bound"] == true && contract["satisfied"] != true {
-                        let blocker = text(contract, "blocker");
+                    let contract = plan_state.get("contract");
+                    if matches!(contract.get("bound"), oms_command_state::Value::Bool(true))
+                        && !matches!(
+                            contract.get("satisfied"),
+                            oms_command_state::Value::Bool(true)
+                        )
+                    {
+                        let blocker = contract.text("blocker");
                         if blocker.is_empty() {
                             lines.push("  contract: blocked".into());
                         } else {
                             lines.push(format!("  contract: blocked ({blocker})"));
                         }
                     }
-                    let actionable_ids: Vec<&str> = plan_state["actionable"]
-                        .as_array()
-                        .map(|rows| rows.iter().filter_map(Value::as_str).collect())
+                    let actionable_ids: Vec<&str> = plan_state
+                        .get("actionable")
+                        .array()
+                        .map(|rows| rows.iter().filter_map(|row| row.str().ok()).collect())
                         .unwrap_or_default();
                     if !actionable_ids.is_empty() {
                         lines.push(format!(
@@ -1862,8 +1865,42 @@ mod tests {
         }
     }
 
+    fn run_isolated_resume_test(test_name: &str, task_ttl: Option<&str>) -> bool {
+        if std::env::var_os("OMS_HOOK_TTL_ISOLATED").is_some() {
+            return false;
+        }
+        let mut cmd = std::process::Command::new(std::env::current_exe().expect("exe"));
+        cmd.args(["--exact", test_name, "--nocapture"])
+            .env("OMS_HOOK_TTL_ISOLATED", "1")
+            .env_remove("OMS_RESUME_HOOK")
+            .env_remove("OMS_RESUME_MEMORY")
+            .env_remove("OMS_STATE_REPO");
+        match task_ttl {
+            Some(ttl) => {
+                cmd.env("OMS_AGENT_TASK_TTL", ttl);
+            }
+            None => {
+                cmd.env_remove("OMS_AGENT_TASK_TTL");
+            }
+        }
+        let output = cmd.output().expect("spawn isolated test");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     #[test]
     fn resume_marks_dormant_and_stale_packets_and_uses_plan_engine_actionable() {
+        if run_isolated_resume_test(
+            "lifecycle::tests::resume_marks_dormant_and_stale_packets_and_uses_plan_engine_actionable",
+            None,
+        ) {
+            return;
+        }
         let tmp = TempDir::new("resume-stale");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
@@ -1896,9 +1933,27 @@ mod tests {
             interrupted: &cancel,
             host: &host,
         };
+        // Break an unrelated `oms state` collector (`.oms/runs/spine.jsonl` as a directory)
+        // to prove `resume()` reads plan status from the plan engine directly instead of a
+        // full `oms state` run.
+        let broken_runs_spine = repo.join(".oms/runs/spine.jsonl");
+        fs::create_dir_all(&broken_runs_spine).expect("block runs spine");
+        let broken_state = oms_command_state::run_with_source(
+            "state",
+            &["--repo".into(), repo.as_os_str().into(), "--json".into()],
+            &repo,
+            &repo,
+            &cancel,
+        );
+        assert_ne!(
+            broken_state.0, 0,
+            "full oms state should fail when runs spine is unreadable"
+        );
+
         let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
         assert_eq!(code, 0);
         let out = String::from_utf8(stdout).expect("utf8");
+        fs::remove_dir_all(repo.join(".oms/runs")).expect("remove blocked runs dir");
 
         assert!(out.contains("dormant (idle 6d)"), "{out}");
         assert!(!out.contains("stale (idle"), "{out}");
@@ -1909,7 +1964,11 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("cargo test --dormant-verify-marker"), "{out}");
-        assert!(out.contains("- plan: Current live plan goal"), "{out}");
+        assert!(
+            out.contains("- plan: Current live plan goal [ready=8]"),
+            "{out}"
+        );
+        assert!(!out.contains("[status unavailable]"), "{out}");
         assert!(
             out.contains("actionable: 8 (t1, t2, t3, t4, t5 +3 more)"),
             "{out}"
@@ -1992,7 +2051,7 @@ mod tests {
         assert_eq!(code, 0);
         let blocked_out = String::from_utf8(stdout).expect("utf8");
         assert!(
-            blocked_out.contains("- plan: Contract-blocked plan goal"),
+            blocked_out.contains("- plan: Contract-blocked plan goal [ready=8]"),
             "{blocked_out}"
         );
         assert!(
@@ -2003,27 +2062,39 @@ mod tests {
             !blocked_out.contains("actionable:"),
             "resume must show 0 actionable when PROJECT.md contract blocks work:\n{blocked_out}"
         );
+
+        // When the plan engine itself fails on a malformed plan, keep `[status unavailable]`
+        // and the `accept` line.
+        fs::write(
+            repo.join(".oms/plan/tasks.json"),
+            serde_json::to_vec(&json!({
+                "schema": 3,
+                "goal": "Broken plan goal",
+                "accept": "verify green",
+                "tasks": "not-an-object",
+            }))
+            .expect("serialize broken plan"),
+        )
+        .expect("write broken plan");
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &ctx);
+        assert_eq!(code, 0);
+        let broken_out = String::from_utf8(stdout).expect("utf8");
+        assert!(
+            broken_out.contains("- plan: Broken plan goal [status unavailable]"),
+            "{broken_out}"
+        );
+        assert!(
+            broken_out.contains("  accept: verify green"),
+            "{broken_out}"
+        );
     }
 
     #[test]
     fn resume_state_status_agree_on_dormant_when_ttl_exceeds_72h() {
-        if std::env::var_os("OMS_HOOK_TTL_ISOLATED").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().expect("exe"))
-                .args([
-                    "--exact",
-                    "lifecycle::tests::resume_state_status_agree_on_dormant_when_ttl_exceeds_72h",
-                    "--nocapture",
-                ])
-                .env("OMS_HOOK_TTL_ISOLATED", "1")
-                .env("OMS_AGENT_TASK_TTL", "864000")
-                .output()
-                .expect("spawn isolated test");
-            assert!(
-                output.status.success(),
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if run_isolated_resume_test(
+            "lifecycle::tests::resume_state_status_agree_on_dormant_when_ttl_exceeds_72h",
+            Some("864000"),
+        ) {
             return;
         }
         let tmp = TempDir::new("resume-ttl");
@@ -2085,6 +2156,12 @@ mod tests {
 
     #[test]
     fn resume_keeps_fresh_packet_caps_long_verify_and_keeps_plan_before_truncation() {
+        if run_isolated_resume_test(
+            "lifecycle::tests::resume_keeps_fresh_packet_caps_long_verify_and_keeps_plan_before_truncation",
+            None,
+        ) {
+            return;
+        }
         let tmp = TempDir::new("resume-fresh");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
@@ -2156,9 +2233,10 @@ mod tests {
             "{capped_out}"
         );
         assert!(
-            capped_out.contains("- plan: Must survive resume truncation"),
+            capped_out.contains("- plan: Must survive resume truncation [ready=7]"),
             "{capped_out}"
         );
+        assert!(!capped_out.contains("[status unavailable]"), "{capped_out}");
         assert!(
             capped_out.contains("actionable: 7 (p1, p2, p3, p4, p5 +2 more)"),
             "{capped_out}"
