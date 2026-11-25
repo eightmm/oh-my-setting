@@ -4,7 +4,6 @@
 //! only when their identity, ordering and measured baseline are known.
 use super::*;
 use crate::value::{encode, obj};
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -1295,26 +1294,19 @@ pub fn record_before(
         interrupted,
     )
     .map_err(|error| error.in_file(super::dispatch::LOCK))?;
-    let dispatch_lost = Cell::new(false);
-    append_revision(&dispatch, receipt, interrupted, deadline, &dispatch_lost).map_err(|error| {
-        dispatch.error(error).in_file(if dispatch_lost.get() {
-            super::dispatch::LOCK
-        } else {
-            RECEIPTS
-        })
-    })
+    append_revision(&dispatch, receipt, interrupted, deadline)
+        .map_err(|error| dispatch.error(error).in_file(RECEIPTS))
 }
 fn append_revision(
     dispatch: &super::dispatch::Transaction<'_>,
     receipt: &Receipt,
     interrupted: &AtomicBool,
     deadline: Instant,
-    dispatch_lost: &Cell<bool>,
 ) -> Result<bool, StoreError> {
     let target = canonical_index(dispatch.repo(), Some(Path::new(RECEIPTS)), false, false)?;
     let guard = acquire_before(&target, interrupted, Some(deadline))?;
     let held = || {
-        dispatch.check().inspect_err(|_| dispatch_lost.set(true))?;
+        dispatch.check()?;
         guard.check().map_err(StoreError::Lock)
     };
     let root = Root::open(dispatch.repo())?;

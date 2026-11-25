@@ -39,8 +39,10 @@ impl Error {
     pub fn file(&self) -> Option<&'static str> {
         self.file
     }
+    /// The first attribution wins: a caller naming the step it ran must not
+    /// relabel a lost dispatch lock.
     pub(super) fn in_file(mut self, file: &'static str) -> Self {
-        self.file = Some(file);
+        self.file.get_or_insert(file);
         self
     }
 }
@@ -60,6 +62,7 @@ pub struct Transaction<'a> {
     guard: Guard,
     interrupted: &'a AtomicBool,
     published: Cell<bool>,
+    lost: Cell<bool>,
 }
 impl<'a> Transaction<'a> {
     pub fn acquire(repo: &Path, timeout: Duration, interrupted: &'a AtomicBool) -> Result<Self> {
@@ -104,6 +107,7 @@ impl<'a> Transaction<'a> {
             guard,
             interrupted,
             published: Cell::new(false),
+            lost: Cell::new(false),
         })
     }
     pub fn repo(&self) -> &Path {
@@ -114,11 +118,19 @@ impl<'a> Transaction<'a> {
         if visible {
             self.published.set(true);
         }
-        Error::new(source, self.published.get() || visible)
+        let error = Error::new(source, self.published.get() || visible);
+        if self.lost.get() {
+            error.in_file(LOCK)
+        } else {
+            error
+        }
     }
     pub(super) fn check(&self) -> std::result::Result<(), StoreError> {
         cancelled(self.interrupted)?;
-        self.guard.check().map_err(StoreError::Lock)
+        self.guard
+            .check()
+            .inspect_err(|_| self.lost.set(true))
+            .map_err(StoreError::Lock)
     }
     fn validate_path(&self, relative: &Path) -> std::result::Result<(), StoreError> {
         super::paths::validate(&self.root, &self.repo().join(relative), false)

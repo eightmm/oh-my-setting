@@ -293,7 +293,8 @@ fn begin_inner(
     let timeout = deadline
         .saturating_duration_since(Instant::now())
         .min(Duration::from_secs(10));
-    let tx = dispatch::Transaction::acquire(repo, timeout, interrupted)?;
+    let tx = dispatch::Transaction::acquire(repo, timeout, interrupted)
+        .map_err(|error| error.in_file(dispatch::LOCK))?;
     let snapshot = tx.snapshot()?;
     // Transaction validated strict JSON before this private value conversion.
     let mut registry = match snapshot.as_deref() {

@@ -351,7 +351,25 @@ fn dispatch_reservations_share_exact_flock_and_preserve_partial_publications() {
     assert!(!error.publication_uncertain);
     stop.store(false, Ordering::Release);
     let tx = Transaction::acquire(&root.0, timeout, &stop).unwrap();
+    // Replacing the lock inode loses the guard; the registry is not at fault.
+    let lock = root.0.join(dispatch::LOCK);
+    std::fs::rename(&lock, lock.with_extension("moved")).unwrap();
+    std::fs::write(&lock, b"").unwrap();
+    for error in [
+        tx.snapshot().unwrap_err(),
+        tx.replace(Some(foreign), seed).unwrap_err(),
+    ] {
+        assert_eq!(
+            error.source,
+            oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Changed)
+        );
+        assert_eq!(error.file(), Some(dispatch::LOCK));
+    }
+    drop(tx);
+    std::fs::rename(lock.with_extension("moved"), &lock).unwrap();
+    let tx = Transaction::acquire(&root.0, timeout, &stop).unwrap();
     let error = tx.replace(Some(seed), seed).unwrap_err();
+    assert_eq!(error.file(), Some(dispatch::REGISTRY));
     assert!(
         !error.publication_uncertain,
         "a fresh failed CAS has no publication effect"
@@ -564,13 +582,19 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
     let terminal = observe(receipt, 1, 7, Cost::Unpriced);
     let ledger = root.0.join(usage::RECEIPTS);
     let pending = std::fs::read(&ledger).unwrap();
+    let patience = Duration::from_secs(oms_lock::legacy_seconds(
+        std::env::var_os("OMS_TEST_CALL_TIMEOUT").as_deref(),
+        30,
+    ));
+    let (contended, contention) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         let mut waiting = None;
         physical::begin_checked(
             &root.0,
             physical_request(identity("call_admitted"), false),
             &stop,
-            deadline(),
+            // Outlasts the bounded wait for the contender inside admission.
+            Instant::now() + patience * 2,
             |_, projection| {
                 assert_eq!(projection.calls[0].receipt.phase, Phase::Pending);
                 let refused = usage::record_before(
@@ -587,9 +611,46 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
                 assert_eq!(refused.file(), Some(dispatch::LOCK));
                 assert!(!refused.publication_uncertain);
                 assert_eq!(std::fs::read(&ledger).unwrap(), pending);
-                waiting = Some(
-                    scope.spawn(|| usage::record_before(&root.0, &terminal, &stop, deadline())),
+                let busy = physical::begin(
+                    &root.0,
+                    identity("call_contending"),
+                    None,
+                    false,
+                    &stop,
+                    Instant::now() + Duration::from_millis(70),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    busy.source,
+                    oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Busy)
                 );
+                assert_eq!(busy.file(), Some(dispatch::LOCK));
+                waiting = Some(scope.spawn(|| {
+                    let contended = contended;
+                    let give_up = Instant::now() + patience * 2;
+                    loop {
+                        let attempt = Instant::now() + Duration::from_millis(70);
+                        match usage::record_before(&root.0, &terminal, &stop, attempt) {
+                            Err(error)
+                                if error.source
+                                    == oms_command_telemetry::store::StoreError::Lock(
+                                        oms_lock::Error::Busy,
+                                    )
+                                    && Instant::now() < give_up =>
+                            {
+                                // An expired attempt names no file and proves
+                                // nothing. The receiver closes after proof.
+                                if error.file() == Some(dispatch::LOCK) {
+                                    let _ = contended.send(());
+                                }
+                            }
+                            outcome => return outcome,
+                        }
+                    }
+                }));
+                // Admission keeps dispatch until the settlement has been refused by it.
+                contention.recv_timeout(patience).unwrap();
+                drop(contention);
                 Ok(())
             },
         )
