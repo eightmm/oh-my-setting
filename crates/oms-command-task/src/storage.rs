@@ -14,8 +14,6 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicI32, Ordering},
-    thread,
-    time::Duration,
 };
 
 pub(crate) const MAX_PACKET: usize = 32 * 1024 * 1024;
@@ -403,32 +401,18 @@ pub(crate) fn locked<T>(
         oms_lock::Settings::from_env().map_err(|e| error("lock settings", e))?,
     )
     .map_err(|e| error("task lock", e))?;
-    let cancel = oms_lock::Cancellation::default();
-    let done = AtomicBool::new(false);
-    let guard = thread::scope(|scope| {
-        scope.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if interrupted.load(Ordering::Relaxed) {
-                    cancel.cancel();
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
+    let guard = lock
+        .acquire_with_cancel(|| interrupted.load(Ordering::Relaxed))
+        .map_err(|e| {
+            if interrupted.load(Ordering::Relaxed) {
+                Error::new(
+                    crate::process::interrupted_code(signal),
+                    "interrupted while acquiring task lock",
+                )
+            } else {
+                error("task lock", e)
             }
-        });
-        let result = lock.acquire(Some(&cancel));
-        done.store(true, Ordering::Relaxed);
-        result
-    })
-    .map_err(|e| {
-        if interrupted.load(Ordering::Relaxed) {
-            Error::new(
-                crate::process::interrupted_code(signal),
-                "interrupted while acquiring task lock",
-            )
-        } else {
-            error("task lock", e)
-        }
-    })?;
+        })?;
     checkpoint(interrupted, signal)?;
     guard.check().map_err(|e| error("task lock authority", e))?;
     let result = action();
