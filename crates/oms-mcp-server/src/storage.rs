@@ -1,7 +1,7 @@
 use crate::value::Value;
 use crate::{MAX_ANSWER, RUN_ROOT, operation};
 use chrono::{DateTime, Utc};
-use oms_safe_fs::{Policy, Root};
+
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
 use rustix::process::getuid;
 use sha2::{Digest, Sha256};
@@ -122,53 +122,10 @@ pub(crate) fn display(value: &Value) -> crate::value::Text {
         .cloned()
         .unwrap_or_else(|| repr(value).into())
 }
-pub(crate) fn started(id: &str) -> (&str, String) {
-    let mut p = id.split('-');
-    let kind = p.next().unwrap_or("");
-    let s = p.next().unwrap_or("");
-    let stamp = if s.len() == 16 && s.as_bytes()[8] == b'T' {
-        format!(
-            "{}-{}-{}T{}:{}:{}Z",
-            &s[..4],
-            &s[4..6],
-            &s[6..8],
-            &s[9..11],
-            &s[11..13],
-            &s[13..15]
-        )
-    } else {
-        String::new()
-    };
-    (kind, stamp)
-}
-pub(crate) fn read(repo: &Path, label: &str, limit: usize) -> Result<Vec<u8>, String> {
-    Root::open(repo)
-        .and_then(|r| {
-            r.read(
-                label,
-                limit,
-                Policy {
-                    single_link: true,
-                    owner: None,
-                    max_components: Some(64),
-                },
-            )
-        })
-        .map_err(|e| {
-            format!("error: missing, unsafe, changed, or oversized operation file ({e:?})")
-        })
-}
-pub(crate) fn read_run(dir: &Path, name: &str, limit: usize) -> Result<Vec<u8>, String> {
-    let repo = dir
-        .ancestors()
-        .nth(4)
-        .ok_or("error: invalid operation directory")?;
-    let op = dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or("error: invalid operation")?;
-    read(repo, &format!("{RUN_ROOT}/{op}/{name}"), limit)
-}
+pub(crate) use oms_command_operations::peer_operations::{
+    read_repo_file as read, read_run, started,
+};
+
 pub(crate) fn meta(dir: &Path) -> Value {
     read_run(dir, "meta.json", 256 * 1024)
         .ok()

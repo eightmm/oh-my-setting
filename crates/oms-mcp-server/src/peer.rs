@@ -4,7 +4,6 @@ use crate::{
     MAX_ANSWER, OUTPUT_LIMIT, PAGE_BYTES, RUN_ROOT, Server, ToolResult, delegated, integer,
     matches, operation, prefix_chars, pretty, text, thread_id,
 };
-use rustix::process::Pid;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
@@ -88,62 +87,8 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     }
     Ok(values)
 }
-pub(super) fn status(dir: &Path) -> (&'static str, Option<i64>) {
-    status_with(
-        dir,
-        || storage::read_run(dir, "status", 4096),
-        |pid| rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH),
-    )
-}
+pub(super) use oms_command_operations::peer_operations::{age, status};
 
-fn status_with(
-    dir: &Path,
-    read_status: impl Fn() -> Result<Vec<u8>, String>,
-    owner_gone: impl FnOnce(Pid) -> bool,
-) -> (&'static str, Option<i64>) {
-    let terminal_exit = || {
-        let read = match read_status() {
-            // The owner can publish the status between the secure read and
-            // this presence check. Confirm the bytes before treating it as invalid.
-            Err(_) if dir.join("status").symlink_metadata().is_ok() => read_status(),
-            Err(_) => return None,
-            result => result,
-        };
-        Some(read.map_or(1, |bytes| {
-            String::from_utf8_lossy(&bytes)
-                .trim_matches(crate::whitespace)
-                .parse()
-                .unwrap_or(1)
-        }))
-    };
-    if let Some(exit) = terminal_exit() {
-        return ("done", Some(exit));
-    }
-    let pid = storage::read_run(dir, "pid", 4096)
-        .ok()
-        .and_then(|b| {
-            String::from_utf8_lossy(&b)
-                .trim_matches(crate::whitespace)
-                .parse::<i32>()
-                .ok()
-        })
-        .filter(|pid| *pid > 0)
-        .and_then(Pid::from_raw);
-    if pid.is_some_and(owner_gone) {
-        // A completed owner publishes its exit before it can disappear.
-        return terminal_exit().map_or(("stalled", None), |exit| ("done", Some(exit)));
-    }
-    ("running", None)
-}
-fn age(dir: &Path) -> Option<i64> {
-    [dir.join("prompt.txt"), dir.to_owned()]
-        .iter()
-        .find_map(|p| p.metadata().ok()?.modified().ok())
-        .map(|t| match SystemTime::now().duration_since(t) {
-            Ok(d) => d.as_secs() as i64,
-            Err(e) => -(e.duration().as_secs() as i64),
-        })
-}
 fn tail(dir: &Path) -> String {
     let result = (|| -> io::Result<String> {
         let root = dir
@@ -1370,6 +1315,8 @@ fn owner_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oms_command_operations::peer_operations::status_with;
+    use rustix::process::Pid;
 
     #[test]
     fn peer_status_observes_atomic_publication_before_reporting_failure_or_stall() {

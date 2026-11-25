@@ -236,9 +236,7 @@ pub(crate) fn delegated() -> bool {
     std::env::var("OMS_HARNESS_CHILD").as_deref() == Ok("1")
         || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|value| value != "0")
 }
-pub(crate) fn whitespace(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
-}
+pub(crate) use oms_command_operations::peer_operations::whitespace;
 pub(crate) fn prefix_chars(s: &str, limit: usize) -> String {
     s.chars().take(limit).collect()
 }
