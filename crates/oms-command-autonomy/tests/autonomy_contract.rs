@@ -2120,7 +2120,7 @@ impl Repo {
 }
 const ORIGIN: &str = "git@github.com:example-org/example-repo.git";
 const ISSUE: &str = "example-org/example-repo#7";
-const ANSWER: &str = r#"{"tasks": [{"id": "t1", "title": "one", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []}]}"#;
+const ANSWER: &str = r#"{"tasks": [{"id": "t1", "title": "one", "brief": "Implement the scoped task", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []}]}"#;
 
 fn intake(tool: &str, repo: &Repo, services: &Planner, args: &[&str]) -> (i32, String, String) {
     let (code, out, err) = run_with_services(

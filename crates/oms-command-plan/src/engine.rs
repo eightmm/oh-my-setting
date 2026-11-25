@@ -5,7 +5,6 @@ use crate::storage::{self, ACTIVE, MAX_JSON, MAX_PATCH, Store};
 use crate::{Action, Request, Response, Result, drift, error, require};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -2304,15 +2303,23 @@ impl<'a> Plan<'a> {
         let path = req
             .path("brief-file")
             .ok_or_else(|| error("--brief-file requires a path"))?;
-        let file = std::fs::File::open(self.context.cwd.join(path))
-            .map_err(|e| error(format!("cannot open brief file: {e}")))?;
-        let mut bytes = Vec::new();
-        file.take((MAX_BRIEF + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| error(format!("cannot read brief file: {e}")))?;
-        require(bytes.len() <= MAX_BRIEF, "brief file exceeds 65536 bytes")?;
+        let absolute = crate::cli::physical_leaf(&self.context.cwd, path.as_os_str());
+        let root = crate::storage::Store::open(
+            absolute
+                .parent()
+                .ok_or_else(|| error("brief parent unavailable"))?,
+        )?
+        .with_group_resolver(self.services.group_membership_resolver());
+        let bytes = root.read(
+            absolute
+                .file_name()
+                .ok_or_else(|| error("brief file name unavailable"))?,
+            MAX_BRIEF,
+        )?;
         screen(&bytes)?;
-        String::from_utf8(bytes).map_err(|_| error("brief file must be UTF-8"))
+        let brief = String::from_utf8(bytes).map_err(|_| error("brief file must be UTF-8"))?;
+        require(!brief.trim().is_empty(), "brief file must not be empty")?;
+        Ok(brief)
     }
     fn cancel(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         self.canonical_existing(s)?;

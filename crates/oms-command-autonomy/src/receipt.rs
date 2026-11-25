@@ -2551,6 +2551,18 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         apply_args.set("apply", &frozen);
         apply_args.set("expected-proposal-sha256", expected);
         let reviewed = value::parse(&ctx.store.read(&frozen, MAX_FILE)?)?;
+        let tasks = reviewed["tasks"]
+            .as_array()
+            .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
+        for task in tasks {
+            require(
+                !value::text(task, "brief").trim().is_empty(),
+                format!(
+                    "proposal task {} has no work brief; revise and review the proposal with a brief for every task",
+                    value::text(task, "id")
+                ),
+            )?;
+        }
         if row["stage"] == "proposal-review"
             && row.get("issue").is_none()
             && crate::github::Mode::load(ctx)?.active.is_some()
@@ -4671,7 +4683,7 @@ mod tests {
             "allowed_envelope": ["src", "tests/ok.sh"],
             "acceptance_files": ["tests/check.sh"],
             "tasks": [
-                {"id": "t1", "title": "first", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []},
+                {"id": "t1", "title": "first", "brief": "Implement first task", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []},
             ],
         });
         let raw_prop = value::pretty(&proposal).unwrap();
@@ -4810,10 +4822,36 @@ mod tests {
             "allowed_envelope": ["src", "tests/ok.sh"],
             "acceptance_files": ["tests/check.sh"],
             "tasks": [
-                {"id": "t1", "title": "first", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []},
-                {"id": "t2", "title": "second", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": ["t1"]},
+                {"id": "t1", "title": "first", "brief": "Implement first task", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []},
+                {"id": "t2", "title": "second", "brief": "Implement second task", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": ["t1"]},
             ],
         });
+        let mut missing = proposal.clone();
+        missing["tasks"][0].as_object_mut().unwrap().remove("brief");
+        let missing_raw = value::pretty(&missing).unwrap();
+        let missing_digest = value::hash(&missing_raw);
+        let missing_path = plan_dir.join("missing-brief.json");
+        private(&missing_path, &missing_raw);
+        let mut missing_row = row.clone();
+        missing_row["stage"] = "proposal-review".into();
+        missing_row["proposal"] = json!({"path": missing_path, "sha256": missing_digest});
+        dir.write_receipt(&missing_row);
+        let stop = AtomicBool::new(false);
+        let services = Host;
+        let missing_ctx = Context::new(dir.0.clone(), dir.0.clone(), &services, &stop).unwrap();
+        let argv: Vec<std::ffi::OsString> = approved_continuation(&missing_row)
+            .unwrap()
+            .into_iter()
+            .skip(2)
+            .map(Into::into)
+            .collect();
+        let missing_args = Args::parse("autopilot", &argv).unwrap();
+        let Err(err) = execute(&missing_ctx, &missing_args) else {
+            panic!("missing brief must be refused")
+        };
+        assert!(err.message.contains("no work brief"), "{}", err.message);
+        assert!(!dir.plan("tasks.json").exists());
+        std::fs::remove_file(dir.plan("autopilot-run.json")).unwrap();
         let raw_prop = value::pretty(&proposal).unwrap();
         let prop_digest = value::hash(&raw_prop);
         let prop_path = plan_dir.join(format!("approved-proposal-{prop_digest}.json"));
@@ -4934,7 +4972,7 @@ mod tests {
             "allowed_envelope": ["src", "tests/ok.sh"],
             "acceptance_files": ["tests/check.sh"],
             "tasks": [
-                {"id": "t2", "title": "second", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": ["t1"]},
+                {"id": "t2", "title": "second", "brief": "Implement second task", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": ["t1"]},
             ],
         });
         let contract = crate::planning::contract(&ctx).unwrap();

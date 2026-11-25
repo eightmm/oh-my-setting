@@ -350,7 +350,9 @@ impl Plan<'_> {
                 "capacity_full"
             }));
         }
-        let selected = eligible.into_iter().next();
+        let selected = eligible
+            .into_iter()
+            .find(|t| !req.has("claim") || !t.text("brief").trim().is_empty());
         let Some(mut t) = selected else {
             let mut response = Response {
                 code: 3,
@@ -449,6 +451,7 @@ impl Plan<'_> {
                     ("title", t.get("title").clone()),
                     ("allowed", t.get("allowed_paths").clone()),
                     ("verify", t.get("verify").clone()),
+                    ("brief", string(t.text("brief"))),
                     ("depends", t.get("depends").clone()),
                     ("why_ready", string(why)),
                     ("task_sha256", string(json::hash(&t)?)),

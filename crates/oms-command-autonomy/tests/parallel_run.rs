@@ -502,6 +502,33 @@ fn state(repo: &Repo, id: &str) -> Value {
 }
 
 #[test]
+fn parallel_skips_tasks_without_briefs() {
+    if scrubbed_child("parallel_skips_tasks_without_briefs") {
+        return;
+    }
+    let repo = fixture(&[("t2-briefed", "b/")]);
+    let mock = Mock::default();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "t1-unbriefed",
+            "--title",
+            "missing",
+            "--allowed",
+            "a/",
+            "--verify",
+            "true",
+        ],
+    );
+    let (_, out, err) = run(&repo, &mock, &["--parallel"]);
+    assert!(out.contains("started=1"), "{out}{err}");
+    assert_eq!(state(&repo, "t1-unbriefed")["state"], "ready");
+    assert_ne!(state(&repo, "t2-briefed")["state"], "ready");
+}
+
+#[test]
 fn parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling() {
     if scrubbed_child("parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling") {
         return;

@@ -2129,6 +2129,7 @@ exec "$real_git" "$@"
                 "failure",
                 "cancel",
                 "repair",
+                "missing-brief",
             ];
             let modes: &[&str] = match std::env::var("OMS_RESUME_SESSION").as_deref() {
                 Ok("fixture-ambient-resume") => &["ambient-resume"],
@@ -2179,6 +2180,14 @@ exec "$real_git" "$@"
                     );
                 if mode == "read-role" {
                     task_request = task_request.with("role", "researcher");
+                }
+                if mode == "missing-brief" {
+                    task_request = Request::new(Action::Add)
+                        .with("id", "t1")
+                        .with("title", "update tracked.txt")
+                        .with("allowed", "tracked.txt,denied.txt")
+                        .with("forbidden", "denied.txt")
+                        .with("verify", "test -s tracked.txt");
                 }
                 host.plan(task_request);
                 let mut issued = host.plan(
@@ -2265,7 +2274,8 @@ exec "$real_git" "$@"
                 let pre_start_refusal = late_git_change
                     || matches!(
                         mode,
-                        "ambient-resume"
+                        "missing-brief"
+                            | "ambient-resume"
                             | "worktree-alias-before-start"
                             | "worktree-alias-under-start-lock"
                     );
@@ -2299,7 +2309,9 @@ exec "$real_git" "$@"
                     String::from_utf8_lossy(&output.2)
                 );
                 if let Some((snapshot, prior_events, prior_plan)) = before {
-                    let reason = if mode == "ambient-resume" {
+                    let reason = if mode == "missing-brief" {
+                        "agent-plan amend --id t1 --brief-file PATH"
+                    } else if mode == "ambient-resume" {
                         "OMS_RESUME_SESSION cannot select a provider session for Plan delegation"
                     } else if late_git_change {
                         "Plan worker Git generation changed before Start"

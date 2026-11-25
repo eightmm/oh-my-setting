@@ -98,7 +98,8 @@ fn pick(
                     let id = value::text(t, "id");
                     let paths = strings(&t["allowed"]);
                     let resources = strings(&t["resources"]);
-                    !attempted.contains(id)
+                    !value::text(t, "brief").trim().is_empty()
+                        && !attempted.contains(id)
                         && !flights.contains_key(id)
                         && !flights.values().any(|f| {
                             overlaps(&f.paths, &paths)
