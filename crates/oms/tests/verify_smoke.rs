@@ -316,6 +316,11 @@ fn verify_fail_fast_and_zero_test_negative_controls() {
     let verify = repo.join("verify");
     fs::copy(&verify_src, &verify).expect("copy verify");
     fs::set_permissions(&verify, fs::Permissions::from_mode(0o755)).expect("chmod");
+    mkdir_private(&repo.join("scripts/lib"));
+    for lib in ["file-lock", "poll", "cargo-target-lock"] {
+        let name = format!("scripts/lib/{lib}.sh");
+        fs::copy(verify_src.with_file_name(&name), repo.join(&name)).expect("copy lock library");
+    }
 
     let run = |args: &[&str], extra_env: &[(&str, &str)]| {
         let base_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned());
