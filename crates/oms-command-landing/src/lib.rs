@@ -172,6 +172,7 @@ pub fn run_with_services(
             source,
             interrupted,
             services,
+            relay_repo: std::cell::RefCell::new(None),
         };
         match tool {
             "patch-admit" => admission::execute(&context, &options),
@@ -204,6 +205,7 @@ pub(crate) struct Context<'a> {
     pub source: &'a Path,
     pub interrupted: &'a AtomicBool,
     pub services: &'a dyn Services,
+    relay_repo: std::cell::RefCell<Option<std::path::PathBuf>>,
 }
 impl Context<'_> {
     fn repo(&self, options: &cli::Options) -> Result<std::path::PathBuf> {

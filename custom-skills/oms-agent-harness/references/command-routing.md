@@ -75,7 +75,7 @@ not ordinary tasks. GPU/Slurm/experiments stay project-specific.
 
 | Need | Use | Boundary |
 |---|---|---|
-| Gate/PR/CI/merge/update | `oms land`; read `oms land status` | Committed worktree; GitHub PR by default, merge only with `--merge`; detached job, external receipt; not `patch-land`. |
+| Gate/PR/CI/merge/update | `oms land` in the background or wait for its relay notice; read `oms land status` once when resuming | Committed worktree; GitHub PR by default, merge only with `--merge`; detached job, external receipt; not `patch-land`. |
 | Schedule adopted-repo maintenance | `oms tick register`, then `oms tick install` | Hourly sweep; GC requires `OMS_TICK_GC=1`. |
 
 Tick and auto-update share scheduler selection, not timers or ownership.

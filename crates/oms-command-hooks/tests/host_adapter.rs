@@ -1732,6 +1732,44 @@ fn harness_hook_pi_relay_hint_outside_a_panel_shows_the_relay_card_once() {
 }
 
 #[test]
+fn relay_shows_distinct_land_cards_once_per_session() {
+    if !clean_env_child(
+        "relay_shows_distinct_land_cards_once_per_session",
+        &[("OMS_RELAY", "1")],
+    ) {
+        return;
+    }
+    let tmp = TempDir::new("land-relay");
+    let repo = git_repo(&tmp);
+    let dir = repo.join(".oms/hooks/relay");
+    fs::create_dir_all(&dir).unwrap();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let ended = chrono::DateTime::from_timestamp(secs as i64, 0)
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    for n in 1..=2 {
+        fs::write(
+            dir.join(format!("land-{n:032x}-00000001.json")),
+            serde_json::json!({"schema":1,"ended_at":ended,"message":format!("land {n} passed")})
+                .to_string(),
+        )
+        .unwrap();
+    }
+    let start = serde_json::json!({"hook_event_name":"SessionStart","source":"startup","cwd":repo,"session_id":"land-session"});
+    let (code, out) = harness(&tmp, "relay-hint", &start);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("land 1 passed") && out.contains("land 2 passed"),
+        "{out}"
+    );
+    assert_eq!(harness(&tmp, "relay-hint", &start), (0, String::new()));
+}
+
+#[test]
 fn claude_app_notify_parses_options_strictly_and_discovers_sessions_only_for_a_wakeup() {
     let name = "claude_app_notify_parses_options_strictly_and_discovers_sessions_only_for_a_wakeup";
     if !clean_env_child(name, &[]) {

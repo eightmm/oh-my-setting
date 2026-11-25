@@ -1197,6 +1197,48 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             )
         ));
     }
+    let dir = repo.join(".oms/hooks/relay");
+    let mut cards = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let valid = name
+                .strip_prefix("land-")
+                .and_then(|s| s.strip_suffix(".json"))
+                .is_some_and(|s| {
+                    s.len() == 41
+                        && s.as_bytes()[32] == b'-'
+                        && s.bytes()
+                            .enumerate()
+                            .all(|(i, b)| i == 32 || b.is_ascii_hexdigit())
+                });
+            valid.then_some((name, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(seen) = old["seen"].as_object_mut() {
+        seen.retain(|key, _| {
+            !key.starts_with("land-") || cards.iter().any(|(name, _)| name == key)
+        });
+    }
+    for (name, path) in cards.into_iter().rev().take(20).rev() {
+        let card = load(&path);
+        let ended = text(&card, "ended_at");
+        let Some(at) = epoch(ended) else { continue };
+        if ctx.snapshot.seconds() - at > max || old["seen"][&name] == ended {
+            continue;
+        }
+        old["seen"][&name] = json!(ended);
+        lines.push(format!(
+            "[oms relay] {}",
+            safe_text(
+                text(&card, "message"),
+                cap("OMS_RELAY_BYTES", 800, 120, 4000) as usize
+            )
+        ));
+    }
     if lines.is_empty() {
         return String::new();
     }

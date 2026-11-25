@@ -4327,10 +4327,39 @@ fn land_direct_still_gates_then_pushes_the_target() {
     let args = ["--gate", "exit 1", "--ignore-siblings", "--ci-wait", "0"];
     let failed = iso.run_with_services("land", &repo, &args, &[]);
     assert_eq!(failed.0, 1, "{failed:?}");
+    let relay = repo.join(".oms/hooks/relay");
+    let cards = || {
+        fs::read_dir(&relay)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("land-"))
+            .map(|e| e.path())
+            .collect::<Vec<_>>()
+    };
+    let failed_cards = cards();
+    assert_eq!(failed_cards.len(), 1);
+    let failed_card = fs::read(&failed_cards[0]).unwrap();
+    assert!(failed_card.len() < 4096);
+    assert_eq!(
+        V::parse(&failed_card).unwrap().get("state").text(),
+        Some("failed")
+    );
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
     let args = ["--gate", "true", "--ignore-siblings", "--ci-wait", "0"];
     let pushed = iso.run_with_services("land", &repo, &args, &[]);
     assert_eq!(pushed.0, 0, "{pushed:?}");
+    let passed_cards = cards();
+    assert_eq!(passed_cards.len(), 2);
+    let passed_card = passed_cards
+        .iter()
+        .find(|p| !failed_cards.contains(p))
+        .unwrap();
+    let passed_card = fs::read(passed_card).unwrap();
+    assert!(passed_card.len() < 4096);
+    assert_eq!(
+        V::parse(&passed_card).unwrap().get("state").text(),
+        Some("passed")
+    );
     assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     assert!(status.contains("\"mode\": \"direct\""), "{status}");

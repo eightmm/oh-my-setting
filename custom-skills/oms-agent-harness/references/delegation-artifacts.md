@@ -364,8 +364,7 @@ create a local nontracking branch with `git checkout --no-track -b oms/<task>`,
 admit patches there and rebase on the remote target. No upstream is needed.
 After verification and authorized commit, `oms land` publishes the verified SHA:
 a GitHub PR that merges only with `--merge`, else a direct push.
-Read `oms land status --repo PATH` (`active: true`), never infer activity from
-`pgrep`. A concurrent land exits 75 after `OMS_LOCK_TIMEOUT` (default 300s);
+Run land in the background or wait for its relay notice; use `oms land status --repo PATH` once when resuming. The lock probe (`active: true`) is the activity evidence. A concurrent land exits 75 after `OMS_LOCK_TIMEOUT` (default 300s);
 retry after the active land finishes. The shared-checkout campaign exception
 does not authorize the main to commit there itself or publish without authority.
 Authorized campaign publication uses a Draft PR or `oms land` from its work branch.

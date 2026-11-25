@@ -211,11 +211,128 @@ fn finish_checked(
     } else {
         save(path, row, c.interrupted)?;
     }
+    let _ = relay_card(c, row, state);
     Ok(Output {
         code: i32::from(!matches!(state, "passed" | "awaiting-merge")),
         stdout: format!("land: {message}\nreceipt: {}\n", path.display()).into_bytes(),
         stderr: vec![],
     })
+}
+fn relay_card(c: &Context<'_>, row: &V, state: &str) -> Result<()> {
+    let repo = c.relay_repo.borrow();
+    let repo = repo
+        .as_ref()
+        .ok_or_else(|| Error::new(2, "relay repository unavailable"))?;
+    let root = c.state(repo)?;
+    let dir = root.join(".oms/hooks/relay");
+    let sha = string(row, "sha").chars().take(7).collect::<String>();
+    let branch = if string(row, "head_branch").is_empty() {
+        Git::new(repo, c.interrupted)
+            .text(&["branch", "--show-current"])
+            .unwrap_or_default()
+    } else {
+        string(row, "head_branch")
+    };
+    let environment: Vec<_> = std::env::vars_os().collect();
+    let entries: Vec<_> = environment
+        .iter()
+        .map(|(k, v)| (k.as_encoded_bytes(), v.as_encoded_bytes()))
+        .collect();
+    let limit = std::env::var("OMS_RELAY_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(800)
+        .clamp(120, 4000);
+    let clean = |s: &str| {
+        let bytes = oms_scrub::redact(s.as_bytes(), &entries)
+            .ok()
+            .map(|r| r.bytes)
+            .unwrap_or_else(|| b"[withheld]".to_vec());
+        let mut value = String::from_utf8_lossy(&bytes).into_owned();
+        if let Some(home) = std::env::var_os("HOME").filter(|h| h != "/") {
+            value = value.replace(home.to_string_lossy().as_ref(), "~");
+        }
+        let re = regex::Regex::new(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+").expect("constant regex");
+        let value = re.replace_all(&value, "~");
+        let value = value
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut end = value.len().min(limit);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value[..end].to_owned()
+    };
+    let number = row.get("pr_number").py().parse::<u64>().ok();
+    let outcome = format!(
+        "land {} {}{}",
+        clean(&sha),
+        state,
+        number.map(|n| format!(" PR #{n}")).unwrap_or_default()
+    );
+    let url = string(row, "pr_url");
+    let url = if url.starts_with("https://")
+        && !url.contains('@')
+        && !url.contains('?')
+        && !url.contains('#')
+    {
+        clean(&url)
+    } else {
+        String::new()
+    };
+    let card = obj([
+        ("schema", 1usize.into()),
+        ("ended_at", string(row, "finished_at").into()),
+        ("head", clean(&sha).into()),
+        ("branch", clean(&branch).into()),
+        ("state", state.into()),
+        (
+            "pr_number",
+            number.map(|n| V::from(n as usize)).unwrap_or(V::Null),
+        ),
+        ("pr_url", url.into()),
+        ("message", outcome.into()),
+    ]);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = format!("land-{stamp:032x}-{:08x}.json", std::process::id());
+    storage::replace(
+        &root,
+        &PathBuf::from(".oms/hooks/relay").join(&name),
+        None,
+        &card.json(false)?,
+    )?;
+    if std::fs::canonicalize(&dir)? != root.join(".oms/hooks/relay") {
+        return Ok(());
+    }
+    let mut cards = std::fs::read_dir(&dir)?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix("land-")
+                .and_then(|s| s.strip_suffix(".json"))
+                .is_some_and(|s| {
+                    s.len() == 41
+                        && s.as_bytes()[32] == b'-'
+                        && s.bytes()
+                            .enumerate()
+                            .all(|(i, b)| i == 32 || b.is_ascii_hexdigit())
+                })
+                .then_some((name, e.path()))
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|a, b| a.0.cmp(&b.0));
+    let remove = cards.len().saturating_sub(20);
+    for (_, path) in cards.into_iter().take(remove) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -1622,6 +1739,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         _ => return Err(Error::new(2, "unknown land action")),
     }
     let repo = c.repo(o)?;
+    *c.relay_repo.borrow_mut() = Some(repo.clone());
     let git = Git::new(&repo, c.interrupted);
     let directory = state_directory(&git)?;
     if o.action("") == "status" {
