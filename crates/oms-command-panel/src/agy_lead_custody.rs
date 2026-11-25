@@ -980,9 +980,13 @@ mod tests {
 
             let default_lock = fixture.lock_path(UUID1);
             let lock_file = spec.lock_file.unwrap_or(&default_lock);
-            let mut cmd = if spec.use_flock {
-                let mut c = Command::new("flock");
-                c.arg("-n");
+            // A new session has no controlling terminal, so interactive bash
+            // skips job control. From a background process group of a
+            // terminal it would otherwise stop itself with SIGTTIN.
+            let mut cmd = Command::new("setsid");
+            if spec.use_flock {
+                let c = &mut cmd;
+                c.args(["flock", "-n"]);
                 if spec.no_fork {
                     c.arg("-F");
                 }
@@ -994,12 +998,9 @@ mod tests {
                     c.arg("flock").arg("-n").arg("-F").arg(second);
                 }
                 c.args(["bash", "-c", &quoted_exec]);
-                c
             } else {
-                let mut c = Command::new("bash");
-                c.args(["-c", &quoted_exec]);
-                c
-            };
+                cmd.args(["bash", "-c", &quoted_exec]);
+            }
 
             cmd.env_clear()
                 .env("PATH", "/usr/local/bin:/usr/bin:/bin")
