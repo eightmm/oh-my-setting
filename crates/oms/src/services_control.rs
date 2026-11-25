@@ -2825,7 +2825,7 @@ mod gc_host_tests {
         // The plan engine ignores the stored schema, so object-form tasks read under any schema.
         std::fs::write(
             plan_dir.join("tasks.json"),
-            br#"{"schema":2,"tasks":{"task-active":{"id":"task-active","state":"running"},"task-done":{"id":"task-done","state":"done"}}}"#,
+            br#"{"schema":2,"tasks":{"task-active":{"id":"task-active","state":"running","attempt_id":"att-live-1"},"task-done":{"id":"task-done","state":"done"}}}"#,
         )
         .unwrap();
         assert_eq!(
