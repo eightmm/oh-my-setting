@@ -193,6 +193,61 @@ fn validate(
     }
     Ok((repo, worktree))
 }
+const HYGIENE_STAMP: &str = ".oms-scratch-hygiene.stamp";
+const HYGIENE_INTERVAL_SECS: u64 = 3600;
+
+fn claim_hygiene_slot(base: &Path, now: u64) -> bool {
+    let Ok(root) = storage::root(base) else {
+        return false;
+    };
+    let options = oms_safe_fs::MutationOptions {
+        read: oms_safe_fs::ByteReadOptions {
+            missing_ok: true,
+            max_bytes: 64,
+        },
+        create_parent: false,
+        max_output: 64,
+        ..oms_safe_fs::MutationOptions::default()
+    };
+    root.atomic_mutate(
+        Path::new(HYGIENE_STAMP),
+        options,
+        |current| -> std::result::Result<Vec<u8>, ()> {
+            let last = std::str::from_utf8(current)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            if let Some(last) = last
+                && now.saturating_sub(last) < HYGIENE_INTERVAL_SECS
+            {
+                return Err(());
+            }
+            Ok(format!("{now}\n").into_bytes())
+        },
+    )
+    .is_ok()
+}
+
+fn hygiene_pass(c: &Context<'_>, base: &Path, repo: &Path) -> Vec<u8> {
+    if crate::child() || c.interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+        return Vec::new();
+    }
+    if !claim_hygiene_slot(base, crate::timestamp()) {
+        return Vec::new();
+    }
+    let Ok(report) = c.services.cleanup(repo, true, c.interrupted) else {
+        return Vec::new();
+    };
+    let removed = match report.get("removable") {
+        crate::V::Num(n) => n.parse::<usize>().unwrap_or(0),
+        _ => 0,
+    };
+    if removed > 0 {
+        format!("scratch-worktree: cleaned {removed} item(s)\n").into_bytes()
+    } else {
+        Vec::new()
+    }
+}
+
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     parent()?;
     let action = o.action("");
@@ -256,7 +311,13 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             }
             return Err(e);
         }
-        return Ok(Output::text(format!("{}\n", worktree.display())));
+        drop(_registry);
+        let stderr = hygiene_pass(c, &base, &repo);
+        return Ok(Output {
+            code: 0,
+            stdout: format!("{}\n", worktree.display()).into_bytes(),
+            stderr,
+        });
     }
     if !base.exists() {
         return if action == "list" {
@@ -481,4 +542,252 @@ pub(crate) fn branch_sweep(c: &Context<'_>, repo: &Path) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Services, obj, run_with_services};
+    use std::ffi::OsString;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const CASE: &str = "OMS_WORKTREE_UT_CASE";
+    const ROOT: &str = "OMS_WORKTREE_UT_ROOT";
+
+    struct CountingCleanup {
+        calls: AtomicUsize,
+        removable: usize,
+        fail: Option<i32>,
+    }
+    impl Services for CountingCleanup {
+        fn cleanup(&self, _repo: &Path, apply: bool, interrupted: &AtomicBool) -> Result<crate::V> {
+            assert!(apply, "automatic hygiene pass must run cleanup with apply");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(code) = self.fail {
+                if code == 130 {
+                    interrupted.store(true, Ordering::SeqCst);
+                }
+                return Err(Error::new(code, "simulated hygiene failure"));
+            }
+            Ok(obj([
+                ("text", "".into()),
+                ("removable", self.removable.into()),
+                ("kept", 0usize.into()),
+            ]))
+        }
+    }
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn setup_repo(root: &Path) -> (PathBuf, PathBuf) {
+        let repo = root.join("repo");
+        let managed = root.join("managed");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        git_ok(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git_ok(&repo, &["add", "a.txt"]);
+        git_ok(&repo, &["commit", "-qm", "init"]);
+        (
+            std::fs::canonicalize(repo).unwrap(),
+            std::fs::canonicalize(managed).unwrap(),
+        )
+    }
+
+    fn run_isolated(case: &str, extra_env: &[(&str, &str)]) {
+        let root =
+            std::env::temp_dir().join(format!("oms-wt-hygiene-ut-{}-{case}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        std::fs::write(
+            root.join("gitconfig"),
+            "[user]\n\tname = t\n\temail = t@example.invalid\n",
+        )
+        .unwrap();
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "worktree::tests::isolated_entry",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", root.join("home"))
+        .env("TMPDIR", &root)
+        .env("OMS_DELEGATE_WORKTREE_ROOT", root.join("managed"))
+        .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .env(CASE, case)
+        .env(ROOT, &root);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "{case}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn add_args() -> Vec<OsString> {
+        let ppid = rustix::process::getppid()
+            .map(|p| p.as_raw_nonzero().get().to_string())
+            .unwrap();
+        vec!["add".into(), "--owner-pid".into(), OsString::from(ppid)]
+    }
+
+    fn run_case(case: &str, root: &Path) {
+        let (repo, managed) = setup_repo(root);
+        let flag = AtomicBool::new(false);
+        match case {
+            "rate-limit" => {
+                let services = CountingCleanup {
+                    calls: AtomicUsize::new(0),
+                    removable: 2,
+                    fail: None,
+                };
+                let args = add_args();
+                let (code, out, err) =
+                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &services);
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                let wt1 = PathBuf::from(String::from_utf8_lossy(&out).trim());
+                assert!(wt1.join("a.txt").is_file(), "worktree 1 must exist");
+                assert_eq!(String::from_utf8_lossy(&out).lines().count(), 1);
+                assert_eq!(
+                    String::from_utf8_lossy(&err),
+                    "scratch-worktree: cleaned 2 item(s)\n"
+                );
+                assert_eq!(services.calls.load(Ordering::SeqCst), 1);
+                let stamp = managed.join(HYGIENE_STAMP);
+                assert!(stamp.is_file(), "stamp file must be created");
+
+                // Second add within the hour is suppressed by the stamp.
+                let (code, out, err) =
+                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &services);
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                let wt2 = PathBuf::from(String::from_utf8_lossy(&out).trim());
+                assert!(wt2.join("a.txt").is_file(), "worktree 2 must exist");
+                assert!(err.is_empty(), "suppressed pass must emit no stderr");
+                assert_eq!(
+                    services.calls.load(Ordering::SeqCst),
+                    1,
+                    "rate-limit stamp must suppress second pass within the hour"
+                );
+
+                // Backdating the stamp past one hour allows a new pass; zero removals emit no stderr.
+                let expired = crate::timestamp().saturating_sub(HYGIENE_INTERVAL_SECS + 10);
+                std::fs::write(&stamp, format!("{expired}\n")).unwrap();
+                let quiet = CountingCleanup {
+                    calls: AtomicUsize::new(0),
+                    removable: 0,
+                    fail: None,
+                };
+                let (code, out, err) =
+                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &quiet);
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+                assert!(PathBuf::from(String::from_utf8_lossy(&out).trim()).is_dir());
+                assert!(err.is_empty(), "zero removals must emit no stderr");
+                assert_eq!(quiet.calls.load(Ordering::SeqCst), 1);
+            }
+            "failure-tolerant" => {
+                let failing = CountingCleanup {
+                    calls: AtomicUsize::new(0),
+                    removable: 0,
+                    fail: Some(2),
+                };
+                let args = add_args();
+                let (code, out, err) =
+                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &failing);
+                assert_eq!(code, 0, "hygiene failure must not fail add");
+                let wt1 = PathBuf::from(String::from_utf8_lossy(&out).trim());
+                assert!(wt1.join("a.txt").is_file(), "worktree 1 must exist");
+                assert!(err.is_empty(), "hygiene failure must not pollute stderr");
+                assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
+
+                // Remove stamp so interruption test also invokes cleanup.
+                let _ = std::fs::remove_file(managed.join(HYGIENE_STAMP));
+                let interrupting = CountingCleanup {
+                    calls: AtomicUsize::new(0),
+                    removable: 0,
+                    fail: Some(130),
+                };
+                let (code, out, err) = run_with_services(
+                    "scratch-worktree",
+                    &args,
+                    &repo,
+                    &repo,
+                    &flag,
+                    &interrupting,
+                );
+                assert_eq!(code, 0, "hygiene interruption must not fail add");
+                let wt2 = PathBuf::from(String::from_utf8_lossy(&out).trim());
+                assert!(wt2.join("a.txt").is_file(), "worktree 2 must exist");
+                assert!(err.is_empty());
+                assert_eq!(interrupting.calls.load(Ordering::SeqCst), 1);
+            }
+            "harness-child-skips" => {
+                let services = CountingCleanup {
+                    calls: AtomicUsize::new(0),
+                    removable: 1,
+                    fail: None,
+                };
+                let context = Context {
+                    cwd: &repo,
+                    source: &repo,
+                    interrupted: &flag,
+                    services: &services,
+                };
+                let err = hygiene_pass(&context, &managed, &repo);
+                assert!(err.is_empty());
+                assert_eq!(services.calls.load(Ordering::SeqCst), 0);
+                assert!(!managed.join(HYGIENE_STAMP).exists());
+            }
+            other => panic!("unknown case {other}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "re-executed by isolated worktree hygiene cases"]
+    fn isolated_entry() {
+        let (Some(case), Some(root)) = (std::env::var_os(CASE), std::env::var_os(ROOT)) else {
+            return;
+        };
+        run_case(&case.to_string_lossy(), Path::new(&root));
+    }
+
+    #[test]
+    fn scratch_hygiene_rate_limit_suppresses_second_pass_within_hour() {
+        run_isolated("rate-limit", &[]);
+    }
+
+    #[test]
+    fn scratch_hygiene_failure_and_interruption_leave_add_successful() {
+        run_isolated("failure-tolerant", &[]);
+    }
+
+    #[test]
+    fn scratch_hygiene_skips_for_harness_child() {
+        run_isolated("harness-child-skips", &[("OMS_HARNESS_CHILD", "1")]);
+    }
 }

@@ -1014,6 +1014,23 @@ const RESIDUE_KINDS: &[(&str, &str)] = &[
     ("land", "wt"),
     ("agy-read", "tree"),
 ];
+const CARGO_CACHEDIR_TAG: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+const BUILD_OUTPUT_IDLE_SECS: u64 = 24 * 60 * 60;
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
 
 struct Report {
     lines: String,
@@ -1032,6 +1049,19 @@ impl Report {
                 "would remove"
             },
             path.display()
+        );
+    }
+    fn remove_build_output(&mut self, path: &Path, bytes: u64) {
+        self.removable += 1;
+        self.lines += &format!(
+            "{}: {} ({})\n",
+            if self.apply {
+                "removed build output"
+            } else {
+                "would remove build output"
+            },
+            path.display(),
+            format_bytes(bytes)
         );
     }
     fn keep(&mut self, path: &Path, reason: &str) {
@@ -1480,7 +1510,11 @@ fn remove_residue(
     }
     Ok(())
 }
-fn temp_dirs(repo: &Path, report: &mut Report, interrupted: &AtomicBool) -> Result<()> {
+fn temp_dirs(
+    repo: &Path,
+    report: &mut Report,
+    interrupted: &AtomicBool,
+) -> Result<std::collections::BTreeSet<PathBuf>> {
     let tmp = std::env::var_os("TMPDIR")
         .filter(|v| !v.is_empty())
         .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
@@ -1489,6 +1523,7 @@ fn temp_dirs(repo: &Path, report: &mut Report, interrupted: &AtomicBool) -> Resu
         bases.push(resolver.managed_root);
     }
     let mut seen = std::collections::BTreeSet::new();
+    let mut removed_dirs = std::collections::BTreeSet::new();
     let uid = users::get_current_uid();
     for base in bases {
         let Some(base) = plain_dir(&base) else {
@@ -1546,6 +1581,7 @@ fn temp_dirs(repo: &Path, report: &mut Report, interrupted: &AtomicBool) -> Resu
             };
             if !report.apply {
                 report.remove(&dir, "dead harness temp dir");
+                removed_dirs.insert(dir);
                 continue;
             }
             // Recheck immediately before removal: marker, owner and proof.
@@ -1561,9 +1597,208 @@ fn temp_dirs(repo: &Path, report: &mut Report, interrupted: &AtomicBool) -> Resu
                 continue;
             }
             match remove_residue(repo, &dir, &marker, worktree.as_deref(), kind, interrupted) {
-                Ok(()) => report.remove(&dir, "dead harness temp dir"),
+                Ok(()) => {
+                    report.remove(&dir, "dead harness temp dir");
+                    removed_dirs.insert(dir);
+                }
                 Err(reason) => report.keep(&dir, reason),
             }
+        }
+    }
+    Ok(removed_dirs)
+}
+
+fn recently_modified(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
+    let Ok(mtime) = meta.modified() else {
+        return true;
+    };
+    match now.duration_since(mtime) {
+        Ok(age) => age < std::time::Duration::from_secs(BUILD_OUTPUT_IDLE_SECS),
+        Err(_) => true,
+    }
+}
+
+fn has_cargo_cachedir_tag(target: &Path, uid: u32) -> bool {
+    use rustix::fs::{FileType, Mode, OFlags, fstat, open, openat};
+    use std::io::Read;
+
+    let Ok(dir_fd) = open(
+        target,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    let Ok(dir_stat) = fstat(&dir_fd) else {
+        return false;
+    };
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory || dir_stat.st_uid != uid {
+        return false;
+    }
+    let Ok(tag_fd) = openat(
+        &dir_fd,
+        "CACHEDIR.TAG",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    let Ok(tag_stat) = fstat(&tag_fd) else {
+        return false;
+    };
+    if FileType::from_raw_mode(tag_stat.st_mode) != FileType::RegularFile
+        || tag_stat.st_uid != uid
+        || !(0..=4096).contains(&tag_stat.st_size)
+    {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let file = std::fs::File::from(tag_fd);
+    if file.take(4097).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    buf.starts_with(CARGO_CACHEDIR_TAG)
+}
+
+fn scratch_worktree_dir(dir: &Path, suffix: &str, uid: u32) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != uid {
+        return None;
+    }
+    let (_, fields) = read_marker(dir)?;
+    let marked = PathBuf::from(fields.get("worktree")?);
+    let leaf = marked.file_name().and_then(|n| n.to_str())?;
+    if leaf != "wt" && leaf != format!("wt-{suffix}") {
+        return None;
+    }
+    let expected = dir.join(leaf);
+    let wt_meta = std::fs::symlink_metadata(&expected).ok()?;
+    if !wt_meta.is_dir() || wt_meta.file_type().is_symlink() || wt_meta.uid() != uid {
+        return None;
+    }
+    let worktree = plain_dir(&expected)?;
+    if worktree != expected || plain_dir(&marked).as_ref() != Some(&worktree) {
+        return None;
+    }
+    Some(worktree)
+}
+
+fn eligible_cargo_target(worktree: &Path, uid: u32, now: std::time::SystemTime) -> Option<PathBuf> {
+    let target = worktree.join("target");
+    let meta = std::fs::symlink_metadata(&target).ok()?;
+    if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != uid {
+        return None;
+    }
+    if plain_dir(&target).as_ref() != Some(&target) {
+        return None;
+    }
+    if !has_cargo_cachedir_tag(&target, uid) {
+        return None;
+    }
+    if recently_modified(&meta, now) {
+        return None;
+    }
+    let entries = std::fs::read_dir(&target).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let child = entry.path();
+        let child_meta = std::fs::symlink_metadata(&child).ok()?;
+        if !child_meta.is_dir() || child_meta.file_type().is_symlink() {
+            continue;
+        }
+        if recently_modified(&child_meta, now) {
+            return None;
+        }
+        match std::fs::symlink_metadata(child.join(".fingerprint")) {
+            Ok(fp_meta) => {
+                if recently_modified(&fp_meta, now) {
+                    return None;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    Some(target)
+}
+
+fn dir_bytes(root: &Path, interrupted: &AtomicBool) -> Result<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        interrupt(interrupted)?;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn scratch_build_outputs(
+    removed_dirs: &std::collections::BTreeSet<PathBuf>,
+    report: &mut Report,
+    interrupted: &AtomicBool,
+) -> Result<()> {
+    let Ok(resolver) = oms_reference::repository::Resolver::from_env() else {
+        return Ok(());
+    };
+    let Some(base) = plain_dir(&resolver.managed_root) else {
+        return Ok(());
+    };
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Ok(());
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    let uid = users::get_current_uid();
+    for entry in entries {
+        interrupt(interrupted)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(suffix) = name.strip_prefix("oh-my-setting-scratch.") else {
+            continue;
+        };
+        if suffix.is_empty() {
+            continue;
+        }
+        let dir = base.join(&name);
+        if removed_dirs.contains(&dir) {
+            continue;
+        }
+        let Some(worktree) = scratch_worktree_dir(&dir, suffix, uid) else {
+            continue;
+        };
+        let now = std::time::SystemTime::now();
+        let Some(target) = eligible_cargo_target(&worktree, uid, now) else {
+            continue;
+        };
+        let bytes = dir_bytes(&target, interrupted)?;
+        if !report.apply {
+            report.remove_build_output(&target, bytes);
+            continue;
+        }
+        // Recheck immediately before removal.
+        let rechecked = scratch_worktree_dir(&dir, suffix, uid)
+            .filter(|w| *w == worktree)
+            .and_then(|w| eligible_cargo_target(&w, uid, std::time::SystemTime::now()));
+        if rechecked.as_ref() != Some(&target) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => report.remove_build_output(&target, bytes),
+            Err(_) => report.keep(&target, "build output could not be removed"),
         }
     }
     Ok(())
@@ -1661,11 +1896,13 @@ pub(crate) fn cleanup(
         apply,
     };
     legacy_links(source, &mut report);
+    let mut removed_dirs = std::collections::BTreeSet::new();
     if let Ok(repo) = std::fs::canonicalize(repo)
         && git(&repo, &["rev-parse", "--git-dir"], interrupted).is_ok()
     {
-        temp_dirs(&repo, &mut report, interrupted)?;
+        removed_dirs = temp_dirs(&repo, &mut report, interrupted)?;
     }
+    scratch_build_outputs(&removed_dirs, &mut report, interrupted)?;
     report.lines += &if apply {
         format!(
             "\ncleanup: removed {} item(s), {} kept with work\n",
@@ -1876,9 +2113,251 @@ mod tests {
         ])
     }
 
+    fn set_mtime_secs_ago(path: &Path, secs: u64) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(secs) as i64;
+        let spec = rustix::fs::Timespec {
+            tv_sec: ts,
+            tv_nsec: 0,
+        };
+        let times = rustix::fs::Timestamps {
+            last_access: spec,
+            last_modification: spec,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &times,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    }
+
+    fn make_scratch_worktree(managed_root: &Path, repo: &Path, suffix: &str, pid: u32) -> PathBuf {
+        std::fs::create_dir_all(managed_root).unwrap();
+        let dir = managed_root.join(format!("oh-my-setting-scratch.{suffix}"));
+        std::fs::create_dir(&dir).unwrap();
+        let wt = dir.join(format!("wt-{suffix}"));
+        git_ok(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                wt.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(
+            dir.join(".oh-my-setting-tmp"),
+            format!(
+                "kind=oh-my-setting-temp\ntemporary=1\npid={pid}\nrepo={}\nworktree={}\n",
+                repo.display(),
+                wt.display()
+            ),
+        )
+        .unwrap();
+        wt
+    }
+
+    fn init_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git_ok(path, &["init", "-q"]);
+        std::fs::write(path.join("a.txt"), "a\n").unwrap();
+        std::fs::write(path.join(".gitignore"), "/target/\n").unwrap();
+        git_ok(path, &["add", "a.txt", ".gitignore"]);
+        git_ok(path, &["commit", "-qm", "init"]);
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = Command::new("git").arg("--version").spawn().unwrap();
+        let pid = child.id();
+        let status = child.wait().unwrap();
+        assert!(status.success());
+        pid
+    }
+
+    fn populate_cargo_target(wt: &Path, tag: Option<&[u8]>, age_secs: u64) -> PathBuf {
+        let target = wt.join("target");
+        let debug = target.join("debug");
+        let fp = debug.join(".fingerprint");
+        std::fs::create_dir_all(&fp).unwrap();
+        std::fs::write(fp.join("crate.json"), "{}\n").unwrap();
+        std::fs::write(debug.join("artifact.bin"), vec![b'x'; 2048]).unwrap();
+        if let Some(tag) = tag {
+            std::fs::write(target.join("CACHEDIR.TAG"), tag).unwrap();
+        }
+        if age_secs > 0 {
+            set_mtime_secs_ago(&fp, age_secs);
+            set_mtime_secs_ago(&debug, age_secs);
+            set_mtime_secs_ago(&target, age_secs);
+        }
+        target
+    }
+
     fn run_case(case: &str, root: &Path) {
         let stop = Arc::new(AtomicBool::new(false));
         let control = ControlServices::new(&stop, root).unwrap();
+        if case == "cleanup-build-output" {
+            let repo = root.join("repo");
+            let other_repo = root.join("other-repo");
+            init_repo(&repo);
+            init_repo(&other_repo);
+            let managed = oms_reference::repository::Resolver::from_env()
+                .unwrap()
+                .managed_root;
+            let live = std::process::id();
+            let dead = dead_pid();
+            let cargo_tag = b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n";
+            let idle_age = BUILD_OUTPUT_IDLE_SECS + 3600;
+
+            // 1. Idle tagged targets across live owner, kept dirty worktree, and another repo.
+            let wt_live = make_scratch_worktree(&managed, &repo, "idlelive", live);
+            std::fs::create_dir_all(wt_live.join(".oms")).unwrap();
+            std::fs::write(wt_live.join(".oms/keep.txt"), "keep\n").unwrap();
+            let t_live = populate_cargo_target(&wt_live, Some(cargo_tag), idle_age);
+
+            let wt_dirty = make_scratch_worktree(&managed, &repo, "idledirty", dead);
+            std::fs::write(wt_dirty.join("a.txt"), "dirty\n").unwrap();
+            let t_dirty = populate_cargo_target(&wt_dirty, Some(cargo_tag), idle_age);
+
+            let wt_other = make_scratch_worktree(&managed, &other_repo, "idleother", live);
+            let t_other = populate_cargo_target(&wt_other, Some(cargo_tag), idle_age);
+
+            // 2. Recent targets: recent root, recent subdir, recent .fingerprint.
+            let wt_recent_root = make_scratch_worktree(&managed, &repo, "recroot", live);
+            let t_recent_root = populate_cargo_target(&wt_recent_root, Some(cargo_tag), idle_age);
+            set_mtime_secs_ago(&t_recent_root, 60);
+
+            let wt_recent_sub = make_scratch_worktree(&managed, &repo, "recsub", live);
+            let t_recent_sub = populate_cargo_target(&wt_recent_sub, Some(cargo_tag), idle_age);
+            set_mtime_secs_ago(&t_recent_sub.join("debug"), 60);
+            set_mtime_secs_ago(&t_recent_sub, idle_age);
+
+            let wt_recent_fp = make_scratch_worktree(&managed, &repo, "recfp", live);
+            let t_recent_fp = populate_cargo_target(&wt_recent_fp, Some(cargo_tag), idle_age);
+            set_mtime_secs_ago(&t_recent_fp.join("debug/.fingerprint"), 60);
+            set_mtime_secs_ago(&t_recent_fp.join("debug"), idle_age);
+            set_mtime_secs_ago(&t_recent_fp, idle_age);
+
+            // 3. Untagged and invalid/symlinked CACHEDIR.TAG targets.
+            let wt_untagged = make_scratch_worktree(&managed, &repo, "untagged", live);
+            let t_untagged = populate_cargo_target(&wt_untagged, None, idle_age);
+
+            let wt_bad_tag = make_scratch_worktree(&managed, &repo, "badtag", live);
+            let t_bad_tag = populate_cargo_target(&wt_bad_tag, Some(b"not a tag\n"), idle_age);
+
+            let wt_sym_tag = make_scratch_worktree(&managed, &repo, "symtag", live);
+            let external_tag = root.join("external-tag");
+            std::fs::write(&external_tag, cargo_tag).unwrap();
+            let t_sym_tag = populate_cargo_target(&wt_sym_tag, None, idle_age);
+            std::os::unix::fs::symlink(&external_tag, t_sym_tag.join("CACHEDIR.TAG")).unwrap();
+            set_mtime_secs_ago(&t_sym_tag, idle_age);
+
+            // 4. Symlinked target/ pointing to an external idle tagged directory.
+            let wt_symlink = make_scratch_worktree(&managed, &repo, "symlink", live);
+            let external_target = root.join("external-target");
+            std::fs::create_dir_all(external_target.join("debug/.fingerprint")).unwrap();
+            std::fs::write(external_target.join("CACHEDIR.TAG"), cargo_tag).unwrap();
+            set_mtime_secs_ago(&external_target.join("debug/.fingerprint"), idle_age);
+            set_mtime_secs_ago(&external_target.join("debug"), idle_age);
+            set_mtime_secs_ago(&external_target, idle_age);
+            let t_symlink = wt_symlink.join("target");
+            std::os::unix::fs::symlink(&external_target, &t_symlink).unwrap();
+
+            let off = AtomicBool::new(false);
+            let dry = cleanup(root, &repo, false, &off).unwrap();
+            let dry_text = text(&dry, "text");
+            assert_eq!(dry.get("removable").py(), "3", "{dry_text}");
+            for target in [&t_live, &t_dirty, &t_other] {
+                let prefix = format!("would remove build output: {} (", target.display());
+                assert!(
+                    dry_text
+                        .lines()
+                        .any(|l| l.starts_with(&prefix) && l.ends_with(" KiB)")),
+                    "expected dry-run line for {}: {dry_text}",
+                    target.display()
+                );
+                assert!(
+                    target.is_dir(),
+                    "dry run must not remove {}",
+                    target.display()
+                );
+            }
+            for kept_target in [
+                &t_recent_root,
+                &t_recent_sub,
+                &t_recent_fp,
+                &t_untagged,
+                &t_bad_tag,
+                &t_sym_tag,
+                &t_symlink,
+            ] {
+                assert!(
+                    !dry_text.contains(&kept_target.display().to_string()),
+                    "unexpected listing for {}: {dry_text}",
+                    kept_target.display()
+                );
+            }
+
+            let applied = cleanup(root, &repo, true, &off).unwrap();
+            let applied_text = text(&applied, "text");
+            assert_eq!(applied.get("removable").py(), "3", "{applied_text}");
+            for target in [&t_live, &t_dirty, &t_other] {
+                let prefix = format!("removed build output: {} (", target.display());
+                assert!(
+                    applied_text.lines().any(|l| l.starts_with(&prefix)),
+                    "expected apply line for {}: {applied_text}",
+                    target.display()
+                );
+                assert!(!target.exists(), "apply must remove {}", target.display());
+            }
+            // Worktrees, tracked files, dirty edits and .oms/ remain untouched.
+            assert_eq!(
+                std::fs::read_to_string(wt_live.join("a.txt")).unwrap(),
+                "a\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(wt_live.join(".oms/keep.txt")).unwrap(),
+                "keep\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(wt_dirty.join("a.txt")).unwrap(),
+                "dirty\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(wt_other.join("a.txt")).unwrap(),
+                "a\n"
+            );
+
+            // Recent, untagged, bad-tag, symlink-tag and symlinked target/ all stay intact.
+            for kept_target in [
+                &t_recent_root,
+                &t_recent_sub,
+                &t_recent_fp,
+                &t_untagged,
+                &t_bad_tag,
+                &t_sym_tag,
+            ] {
+                assert!(kept_target.is_dir(), "must keep {}", kept_target.display());
+            }
+            assert!(
+                std::fs::symlink_metadata(&t_symlink)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "symlinked target/ must stay intact"
+            );
+            assert!(
+                external_target.join("CACHEDIR.TAG").is_file(),
+                "symlink destination must stay intact"
+            );
+            return;
+        }
         if case == "publication-review" {
             public_plan(
                 &control,
@@ -2403,5 +2882,9 @@ mod tests {
     #[test]
     fn panel_publication_product_finishes_through_the_native_plan_entry() {
         isolated("publication-product");
+    }
+    #[test]
+    fn cleanup_reclaims_only_idle_tagged_scratch_build_outputs() {
+        isolated("cleanup-build-output");
     }
 }
