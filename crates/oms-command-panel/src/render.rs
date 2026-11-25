@@ -1619,16 +1619,13 @@ fn main_token_observation_is_live(
     idle_at.is_none_or(|idle| observed_at > idle)
 }
 
-fn panel_main_has_live_pane_activity(report: &Value, call: &Value) -> bool {
+/// `provider_activity` describes separate Lead panes, never the panel Main, so only native
+/// children bound to this Main's participant count as its live activity.
+fn panel_main_has_live_children(report: &Value, call: &Value) -> bool {
     if report["collection"]["pending"] == true {
         return false;
     }
     let participant = text(call, "participant");
-    let provider = text(call, "provider");
-    let observed = &report["provider_activity"][provider];
-    if observed == "working" || observed["state"] == "working" {
-        return true;
-    }
     rows(&report["native_children"]).iter().any(|child| {
         !participant.is_empty()
             && text(child, "parent") == participant
@@ -1655,7 +1652,7 @@ fn apply_board_projection(report: &Value, all: &mut Vec<Value>) {
                 let fresh_tokens =
                     main_token_observation_is_live(report, call, board_main, idle_attempt);
                 if fresh_tokens
-                    || (!explicit_idle_hook && panel_main_has_live_pane_activity(report, call))
+                    || (!explicit_idle_hook && panel_main_has_live_children(report, call))
                 {
                     continue;
                 }
@@ -16914,9 +16911,16 @@ mod tests {
             "{summary:?}"
         );
 
-        // 3. When live pane activity is observed on the panel Main, it stays working.
+        // 3. A busy separate Lead pane of the same provider is not Main activity, but a live
+        // native child bound to the Main keeps it working.
+        let mut lead_busy = with_idle.report.clone();
+        lead_busy["provider_activity"] = json!({"codex": "working"});
+        let lead_rows = visible(&lead_busy, &navigation::Navigation::default());
+        assert_eq!(lead_rows[0]["role"], "main");
+        assert_eq!(lead_rows[0]["state"], "idle");
         let mut live_pane_report = with_idle.report.clone();
-        live_pane_report["provider_activity"] = json!({"codex": "working"});
+        live_pane_report["native_children"] =
+            json!([{"participant": "child-1", "parent": "att_idle_panel", "state": "working"}]);
         let live_rows = visible(&live_pane_report, &navigation::Navigation::default());
         assert_eq!(live_rows[0]["role"], "main");
         assert_eq!(live_rows[0]["state"], "working");
