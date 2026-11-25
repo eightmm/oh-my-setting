@@ -266,15 +266,27 @@ pub(crate) fn models(
         }
         let cache_file = cachedir.join(format!("{provider}.env"));
         let _cache_guard = r::lock(&cache_file, &paths.cwd)?;
+        let existing_models_probe = if r::exists(&cache_file) {
+            String::from_utf8_lossy(&r::read(&cache_file, r::LIMIT)?)
+                .lines()
+                .find_map(|line| {
+                    line.split_once('=')
+                        .filter(|(key, _)| *key == "models_probe")
+                        .map(|(_, value)| value.to_owned())
+                })
+                .filter(|value| !value.is_empty())
+        } else {
+            None
+        };
         let spelling = crate::agy_surface::resolve_binary(paths, binary.into());
         let original = crate::agy_surface::identity(paths, spelling.as_deref())
             .unwrap_or_else(|_| "absent".into());
-        let mut probe_status = "skipped";
+        let mut probe_status: Option<&str> = None;
         let mut model_efforts = Vec::<String>::new();
         let mut usable = false;
         let mut reachable = false;
         let mut release = None;
-        let mut catalog = Vec::<String>::new();
+        let mut catalog_rows = Vec::<String>::new();
         let mut evidence = model_probe::Evidence::absent();
         if let Some(program) = &found.as_ref().filter(|p| intact(p).unwrap_or(false)) {
             let args = model_probe::version_args(provider)
@@ -316,12 +328,12 @@ pub(crate) fn models(
                 Duration::from_secs(10),
             )?;
             r::check(flag)?;
-            evidence = model_probe::inspect(provider, version_code, out.0, &out.1);
+            evidence = model_probe::inspect(provider, version_code, out.0, &out.1, &out.2);
             usable = evidence.usable();
             reachable = evidence.reachable;
             if live && usable && reachable {
                 if provider == "codex" {
-                    probe_status = "failed";
+                    probe_status = Some("failed");
                     match crate::mcp_probe::codex_models(program, &paths.cwd, flag) {
                         Ok(result) => {
                             for row in result.as_array().unwrap() {
@@ -337,7 +349,7 @@ pub(crate) fn models(
                                             && !s.chars().any(char::is_control)
                                     })
                                 {
-                                    catalog.push(name.into());
+                                    catalog_rows.push(name.into());
                                     let scale = row["supportedReasoningEfforts"]
                                         .as_array()
                                         .into_iter()
@@ -363,7 +375,7 @@ pub(crate) fn models(
                         }
                     }
                 } else if ["antigravity", "opencode"].contains(&provider) {
-                    probe_status = "failed";
+                    probe_status = Some("failed");
                     let settle = if provider == "antigravity" {
                         let raw = std::env::var("OMS_CAPABILITY_SETTLE_WAIT")
                             .unwrap_or_else(|_| "2".into());
@@ -399,13 +411,16 @@ pub(crate) fn models(
                             Duration::from_secs(30),
                         )?;
                         if out.0 == 0 {
-                            catalog = normalize_models(&String::from_utf8_lossy(&out.1));
-                            if !catalog.is_empty() {
+                            catalog_rows = model_probe::clean_catalog_rows(
+                                provider,
+                                &String::from_utf8_lossy(&out.1),
+                            );
+                            if !catalog_rows.is_empty() {
                                 break;
                             }
                         }
                     }
-                    if catalog.is_empty() {
+                    if catalog_rows.is_empty() {
                         warnings.push(format!(
                             "{provider}: model catalog unavailable; previous catalog retained"
                         ));
@@ -420,18 +435,18 @@ pub(crate) fn models(
             {
                 usable = false;
                 reachable = false;
-                catalog.clear();
+                catalog_rows.clear();
                 model_efforts.clear();
-                probe_status = "failed";
+                probe_status = Some("failed");
                 warnings.push(format!(
                     "{provider}: binary changed during capability probe"
                 ));
             }
-            if !catalog.is_empty() {
-                probe_status = "ok";
+            if !catalog_rows.is_empty() {
+                probe_status = Some("ok");
                 r::atomic(
                     &cachedir.join(format!("{provider}.models")),
-                    format!("{}\n", catalog.join("\n")).as_bytes(),
+                    format!("{}\n", catalog_rows.join("\n")).as_bytes(),
                 )?;
                 if !model_efforts.is_empty() {
                     r::atomic(
@@ -441,14 +456,40 @@ pub(crate) fn models(
                 }
             }
         }
+        let effort_values = if provider == "codex" && usable {
+            let efforts_file = cachedir.join(format!("{provider}.efforts"));
+            let scales = if r::exists(&efforts_file) {
+                model_probe::parse_effort_scales(&String::from_utf8_lossy(&r::read(
+                    &efforts_file,
+                    r::LIMIT,
+                )?))
+            } else {
+                BTreeMap::new()
+            };
+            let union = model_probe::union_effort_scales(&scales);
+            if union.is_empty() {
+                evidence.effort_values.clone()
+            } else {
+                union
+            }
+        } else {
+            evidence.effort_values.clone()
+        };
         let mut fields = evidence.cache_fields(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| r::Error(2, "clock unavailable".into()))?
                 .as_secs(),
         );
+        fields.insert("effort_values".into(), effort_values.join(" "));
         fields.insert("binary_key".into(), original);
-        fields.insert("models_probe".into(), probe_status.into());
+        fields.insert(
+            "models_probe".into(),
+            probe_status
+                .map(str::to_owned)
+                .or(existing_models_probe)
+                .unwrap_or_else(|| "skipped".into()),
+        );
         let snapshot = model_probe::cache_text(&fields);
         r::atomic(&cache_file, snapshot.as_bytes())?;
         if found.is_none() {
@@ -459,13 +500,18 @@ pub(crate) fn models(
         if usable && reachable && family != "unknown" {
             families.insert(family);
         }
-        if catalog.is_empty() {
+        let catalog_raw = if !catalog_rows.is_empty() {
+            catalog_rows.join("\n")
+        } else {
             let file = cachedir.join(format!("{provider}.models"));
             if r::exists(&file) {
-                catalog = normalize_models(&String::from_utf8_lossy(&r::read(&file, r::LIMIT)?));
+                String::from_utf8_lossy(&r::read(&file, r::LIMIT)?).into_owned()
+            } else {
+                String::new()
             }
-        }
-        let routable = routable(provider, &catalog);
+        };
+        let catalog = model_probe::catalog_selectors(provider, &catalog_raw);
+        let routable = model_probe::routable_models(&catalog, provider);
         let configured = if provider == "codex" {
             let file = paths.codex_config()?;
             if r::exists(&file) {
@@ -497,7 +543,7 @@ pub(crate) fn models(
         if standing == Some(false) {
             warnings.push(format!("{provider}: configured default is not routable (previous generation or foreign family)"));
         }
-        rows.push(json!({"provider":provider,"binary":binary,"installed":found.is_some(),"usable":usable,"version":release,"provider_default_reachable":reachable,"family":family,"effort_mechanism":evidence.effort_mechanism,"effort_values":evidence.effort_values,"configured_default":configured,"configured_default_routable":standing,"routable":routable}));
+        rows.push(json!({"provider":provider,"binary":binary,"installed":found.is_some(),"usable":usable,"version":release,"provider_default_reachable":reachable,"family":family,"effort_mechanism":evidence.effort_mechanism,"effort_values":effort_values,"configured_default":configured,"configured_default_routable":standing,"routable":routable}));
     }
     if strict && families.len() < 2 {
         errors.push("model-family diversity needs at least two usable families".into());
@@ -528,134 +574,4 @@ fn intact(binary: &Path) -> Result<bool> {
         }
     }
     Ok(true)
-}
-fn normalize_models(raw: &str) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    raw.lines()
-        .filter_map(|s| {
-            let s = s.split('\t').next().unwrap_or("").trim();
-            (!s.is_empty()
-                && s != "Fetching available models..."
-                && s.len() <= 256
-                && !s.chars().any(char::is_control)
-                && seen.insert(s.to_owned()))
-            .then(|| s.to_owned())
-        })
-        .take(500)
-        .collect()
-}
-fn generation(model: &str) -> Option<(u64, u64)> {
-    let mut parts = model
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty());
-    let major = parts
-        .find(|s| s.chars().all(|c| c.is_ascii_digit()))?
-        .parse()
-        .ok()?;
-    let minor = parts
-        .next()
-        .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    Some((major, minor))
-}
-fn role(model: &str) -> Option<&str> {
-    let (version, family) = model.strip_prefix("gpt-")?.rsplit_once('-')?;
-    if !["astra", "sol", "terra", "luna"].contains(&family) {
-        return None;
-    }
-    let pieces = version.split('.').collect::<Vec<_>>();
-    (pieces.len() <= 2
-        && pieces
-            .iter()
-            .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())))
-    .then_some(family)
-}
-fn family(provider: &str, model: &str) -> &'static str {
-    let lower = model.to_ascii_lowercase();
-    let inferred =
-        if lower.contains("glm") || lower.starts_with("zai/") || lower.starts_with("zhipu") {
-            "zhipu"
-        } else if lower.contains("grok") || lower.starts_with("xai/") {
-            "xai"
-        } else if lower.contains("gemini")
-            || lower.starts_with("google/")
-            || lower.starts_with("vertex")
-        {
-            "google"
-        } else if lower.contains("claude") || lower.starts_with("anthropic/") {
-            "anthropic"
-        } else if lower.contains("gpt") || lower.starts_with("openai/") {
-            "openai"
-        } else if lower.contains("qwen") || lower.starts_with("alibaba/") {
-            "alibaba"
-        } else if lower.contains("deepseek") {
-            "deepseek"
-        } else if lower.contains("mistral") {
-            "mistral"
-        } else if lower.contains("moonshot") || lower.contains("kimi") {
-            "moonshot"
-        } else if lower.contains("minimax") {
-            "minimax"
-        } else if lower.contains("muse") || lower.starts_with("meta/") {
-            "meta"
-        } else {
-            "unknown"
-        };
-    match provider {
-        "codex" => "openai",
-        "muse" => "meta",
-        "kimi" => "moonshot",
-        "grok" => "xai",
-        "gemini" => "google",
-        "qwen" => "alibaba",
-        "deepseek" => "deepseek",
-        "claude" if inferred == "unknown" => "anthropic",
-        _ => inferred,
-    }
-}
-fn routable(provider: &str, catalog: &[String]) -> Vec<String> {
-    let primary = match provider {
-        "codex" => "openai",
-        "claude" => "anthropic",
-        "grok" => "xai",
-        "gemini" => "google",
-        "qwen" => "alibaba",
-        "deepseek" => "deepseek",
-        "vibe" => "mistral",
-        "muse" => "meta",
-        "kimi" => "moonshot",
-        _ => "",
-    };
-    let tiers = provider == "codex" && catalog.iter().any(|s| role(s).is_some());
-    let rows = catalog
-        .iter()
-        .filter_map(|model| {
-            if tiers {
-                return Some((
-                    model,
-                    format!("codex-{}", role(model)?),
-                    Some(generation(model)?),
-                ));
-            }
-            let mut group = family(provider, model);
-            if group == "unknown" && !primary.is_empty() {
-                group = primary;
-            }
-            if !primary.is_empty() && group != primary {
-                return None;
-            }
-            Some((model, group.to_owned(), generation(model)))
-        })
-        .collect::<Vec<_>>();
-    let newest_major = rows.iter().filter_map(|r| r.2.map(|g| g.0)).max();
-    rows.iter()
-        .filter(|(_, group, observed)| {
-            (!tiers || observed.map(|g| g.0) == newest_major)
-                && !rows
-                    .iter()
-                    .any(|(_, other, newer)| other == group && newer.is_some() && newer > observed)
-        })
-        .map(|(model, _, _)| (*model).clone())
-        .collect()
 }

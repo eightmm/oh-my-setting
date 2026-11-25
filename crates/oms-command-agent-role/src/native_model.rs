@@ -35,21 +35,67 @@ pub fn fixed_effort_model(provider: &str, model: &str) -> Option<&'static str> {
         .find(|candidate| candidate.eq_ignore_ascii_case(model))
 }
 
-/// Exact AGY model selector from a bare ID or an ID followed by a display label.
-pub fn agy_catalog_selector(row: &str) -> Option<&str> {
-    let id = if let Some((id, label)) = row.split_once('\t') {
-        if label.trim().is_empty() || label.chars().any(char::is_control) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgyCatalogRow<'a> {
+    pub selector: &'a str,
+    pub base_model: &'a str,
+    pub effort: Option<&'static str>,
+    pub label: Option<&'a str>,
+}
+
+fn label_agrees_with_effort(label: &str, effort: &str) -> bool {
+    label
+        .trim_end()
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once('('))
+        .is_some_and(|(_, tag)| tag.trim().eq_ignore_ascii_case(effort))
+}
+
+/// Parse one AGY catalog row into its selector, base model, optional effort
+/// (only when the selector ends in `-<effort>` for a known effort and the
+/// trailing parenthesised label agrees), and optional display label.
+pub fn agy_catalog_row(row: &str) -> Option<AgyCatalogRow<'_>> {
+    let (selector, label) = if let Some((id, raw_label)) = row.split_once('\t') {
+        let trimmed = raw_label.trim();
+        if trimmed.is_empty() || raw_label.chars().any(char::is_control) {
             return None;
         }
-        id
+        (id, Some(trimmed))
     } else {
-        row
+        (row, None)
     };
-    (!id.is_empty()
-        && id
+    if selector.is_empty()
+        || selector.len() > 256
+        || !selector
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:".contains(&byte)))
-    .then_some(id)
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:".contains(&byte))
+    {
+        return None;
+    }
+    let (base_model, effort) = selector
+        .rsplit_once('-')
+        .filter(|(prefix, _)| !prefix.is_empty())
+        .and_then(|(prefix, suffix)| {
+            let effort = EFFORTS
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == suffix)?;
+            label
+                .filter(|text| label_agrees_with_effort(text, effort))
+                .map(|_| (prefix, Some(effort)))
+        })
+        .unwrap_or((selector, None));
+    Some(AgyCatalogRow {
+        selector,
+        base_model,
+        effort,
+        label,
+    })
+}
+
+/// Exact AGY model selector from a bare ID or an ID followed by a display label.
+pub fn agy_catalog_selector(row: &str) -> Option<&str> {
+    agy_catalog_row(row).map(|parsed| parsed.selector)
 }
 
 /// Validate the existing native transport vocabulary without inventing a model
