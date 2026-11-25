@@ -1048,18 +1048,29 @@ fn observe_pr_ci(
                 }
             }
         }
+        let mut now = Instant::now();
         let state = if let Some(run) = found {
             let id = run.get("databaseId");
             let mut state = ci::conclusion(&run, &snapshot.head)?;
             if state == "success" {
                 let detail = ci::run_details(c, r.destination, id, &snapshot.head);
                 crate::check(c.interrupted)?;
+                now = Instant::now();
                 let confirmed = detail.and_then(|detail| {
                     let state = ci::conclusion(&detail, &snapshot.head)?;
-                    if state == "success" {
-                        scope = ci::successful_scope(&detail, &snapshot.head)?;
+                    if state != "success" {
+                        return Ok(state);
                     }
-                    Ok(state)
+                    match ci::successful_scope(&detail, &snapshot.head) {
+                        Ok(observed) => {
+                            scope = observed;
+                            Ok(state)
+                        }
+                        Err(_) if now < deadline && ci::jobs_settling(&detail, &snapshot.head) => {
+                            Ok("pending".into())
+                        }
+                        Err(e) => Err(e),
+                    }
                 });
                 state = match confirmed {
                     Ok(state) => state,
@@ -1073,6 +1084,8 @@ fn observe_pr_ci(
                         )));
                     }
                 };
+            } else {
+                now = Instant::now();
             }
             row.set(
                 "ci",
@@ -1083,7 +1096,7 @@ fn observe_pr_ci(
             row.set("ci", obj([("conclusion", "pending".into())]));
             "pending".into()
         };
-        if state != "pending" || Instant::now() >= deadline {
+        if state != "pending" || now >= deadline {
             break state;
         }
         let next = deadline.min(Instant::now() + Duration::from_secs(10));
