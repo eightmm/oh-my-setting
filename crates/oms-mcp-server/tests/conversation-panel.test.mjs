@@ -152,6 +152,23 @@ for (const status of ['reserved', 'recorded', 'not_found']) {
   });
 }
 
+test('Main launch uses all selected Lead preferences only when the user submits', async () => {
+  const p = await panel(['one']);
+  const mark = p.calls.length;
+  p.get('launch').elements.main.value='claude';
+  for (const provider of ['codex','claude','agy']) {
+    p.get('lead-' + provider).checked = true;
+    await p.event('lead-' + provider,'change');
+  }
+  assert.equal(p.calls.length,mark);
+  p.host.failStart=false;
+  p.get('brief').value='Check the release.';
+  await p.event('launch','submit');
+  const request=p.calls.find(c=>c.name==='oms_start_main').args;
+  assert.equal(request.main,'claude');
+  assert.equal(request.goal,'Requested provider Leads: Codex, Claude, AGY. Check the release.');
+});
+
 test('automatic reserved receipt clears the initial launch error style', async () => {
   const p = await ambiguousStart('reserved');
   const start = p.calls.find(c => c.name === 'oms_start_main');
@@ -488,19 +505,31 @@ test('overview opens only bound work conversations, labels confirmed Main, and r
   const p=await panel(['one'],{conversationBinding:'matched',
     conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner',participants:[member]},
     activeAttempts:[{...member,task:'Test changes',state:'verifying'},{...member,room:'another',task:'Wrong room'}],
-    attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}});
+    attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}}, {message:true,compose:true});
   p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]}),oms_panel_tui_view:args=>({...args,status:'ready',columns:[],rows:[]})};
   assert.match(p.get('header-main').textContent,/Codex Main$/); assert.equal(p.get('header-main').hidden,false);
   assert.equal(p.get('plan-ratio').textContent,'0 / 3'); assert.equal(p.get('acceptance-bar').value,1);
+  assert.equal(p.get('team-open').hidden,false);
+  await p.event('team-open','click');
+  assert.equal(p.get('pane-chat').hidden,false);
+  assert.equal(p.get('more-views').open,true);
+  await p.event('chat-back','click');
+  assert.equal(p.get('more-views').open,false);
   const threads=p.get('thread-rows'); assert.equal(threads.children.length,1); assert.match(threads.textContent,/Test changes.*검증 중/);
   threads.children[0].dispatchEvent(new Event('click')); await setImmediate();
   assert.equal(p.calls.at(-1).args.participant,'native-lead'); assert.equal(p.calls.at(-1).args.room,'r');
+  assert.equal(p.get('follow-up').hidden,false);
+  await p.event('follow-up','click');
+  const follow=p.host.messages.at(-1);
+  assert.equal(follow._meta['openai/message'].send,false);
+  assert.match(follow.content[0].text,/native-lead/);
   await p.event('chat-back','click'); await p.event('header-main','click'); assert.equal(p.calls.at(-1).args.participant,'owner');
   await p.event('chat-back','click'); await p.event('plan-open','click');
   assert.equal(p.get('pane-activity').hidden,false); assert.equal(p.calls.at(-1).args.view,'plan');
   assert.equal(p.get('approval-card').hidden,true);
   const unknown = await panel(['one'],{tasks:4,tasksVerified:null,acceptance:{available:true,total:0,verified:0}});
   assert.equal(unknown.get('header-main').hidden,true); assert.equal(unknown.get('plan-strip').hidden,true);
+  assert.equal(unknown.get('team-open').hidden,true);
   assert.equal(unknown.get('acceptance-bar').hidden,true); assert.equal(unknown.get('work-threads').hidden,true);
 });
 
@@ -567,7 +596,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.2');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.3');
   for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
     const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
     assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
@@ -967,8 +996,8 @@ const focusCount = p => [...p.elements.values()].reduce((sum, element) => sum + 
 test('Korean and English catalogs match, and every static node and message key resolves', async () => {
   const p = await panel(['one']);
   const ko = p.run('MSG.ko'), en = p.run('MSG.en');
-  const catalog = p.run('catalogRows').split('\n').map(line => line.split(' | '));
-  assert.ok(catalog.every(row => row.length === 3 && row[0] && row[2]), 'one key and two language columns per row');
+  const catalog = p.run('catalogRows').split('\n').map(line => line.split('\t'));
+  assert.ok(catalog.every(row => (row.length === 2 || row.length === 3) && row[0] && row.at(-1)), 'one key and one or two language columns per row');
   assert.equal(new Set(catalog.map(row => row[0])).size, catalog.length, 'translation keys are unique');
   assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
   for (const key of Object.keys(ko)) {
@@ -1017,7 +1046,7 @@ for (const [name, options, expected] of [
     assert.equal(p.get('tab-chat').textContent, expected === 'en' ? 'Chat' : '대화');
     assert.equal(p.get('goal').textContent, '목표 goal');
     assert.equal(p.get('status').textContent, '');
-    assert.equal(p.get('current-scope').textContent, expected === 'en' ? 'Current Main' : '현재 Main');
+    assert.equal(p.get('current-scope').textContent, expected === 'en' ? 'This chat' : '이 대화');
   });
 }
 
@@ -1436,12 +1465,14 @@ function findNodes(root, predicate, found = []) {
 }
 const stateChips = root => findNodes(root, el => /\bstate-chip\b/.test(el.className || ''));
 
-test('first-screen order prioritizes decision, running work, latest results, and project map last without double-nested details', async () => {
+test('overview leads with decisions, goal and work before the roster and folded results', async () => {
   const overview = html.slice(html.indexOf('id="pane-overview"'), html.indexOf('id="pane-work"'));
-  const order = ['id="approval-card"', 'id="alerts"', 'id="room-leads"', 'id="now-work"', 'id="goal-card"', 'id="latest-results"', 'id="map-preview"'];
+  const order = ['id="approval-card"', 'id="alerts"', 'id="goal-card"', 'id="now-work"', 'id="room-leads"', 'id="latest-results"', 'id="map-preview"'];
   const positions = order.map(marker => overview.indexOf(marker));
   assert.ok(positions.every(pos => pos >= 0), 'all overview sections exist');
   for (let i = 1; i < positions.length; i++) assert.ok(positions[i - 1] < positions[i], `${order[i - 1]} before ${order[i]}`);
+  assert.match(overview, /<details class="card" id="latest-results">/);
+  assert.match(overview, /<button id="team-open" type="button" data-i18n="tab.chat" hidden>/);
   // No double-nested <details> inside #pane-overview.
   let depth = 0, maxDepth = 0;
   for (const [, close] of overview.matchAll(/<(\/?)details\b/g)) {

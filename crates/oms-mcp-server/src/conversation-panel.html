@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OMS · 프로젝트 제어</title>
 <style>
-:root{color-scheme:light dark;--bg:#f6f7f8;--surface:#fff;--ink:#14171a;--muted:#5d636a;--line:#e1e4e7;--control-border:#767e87;--tint:#eef0f2;--brand:#1f5a4d;--on-brand:#fff;--main-line:#b4c3be;--warm:#84520f;--warm-bg:#fbf5e9;--attention:#9a3412;--attention-bg:#fff7ed;--accent:#0f766e;--accent-bg:#f0fdfa;--success:#15803d;--success-bg:#f0fdf4;--success-muted:#1f5a4d;--success-muted-bg:#eef6f3;--error:#b42318;--error-bg:#fef2f2;--info:#1d4ed8;--info-bg:#eff6ff;--r:.5rem;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#0a0a0c;--surface:#131316;--ink:#f1f1f3;--muted:#9b9ea8;--line:#26272c;--control-border:#6b7280;--tint:#1c1d21;--brand:#a3d8bf;--on-brand:#0e2419;--main-line:#3c4743;--warm:#fbbf24;--warm-bg:#292112;--attention:#fb923c;--attention-bg:#2b1b12;--accent:#2dd4bf;--accent-bg:#102624;--success:#4ade80;--success-bg:#11261a;--success-muted:#86efac;--success-muted-bg:#13261d;--error:#f97066;--error-bg:#2c1616;--info:#60a5fa;--info-bg:#14213d}}
+:root{color-scheme:light dark;--bg:#f4f4f8;--surface:#fff;--ink:#202131;--muted:#575b70;--line:#dedfea;--control-border:#767e87;--tint:#ebebf3;--brand:#5042a6;--on-brand:#fff;--main-line:#bdbae0;--warm:#84520f;--warm-bg:#fbf5e9;--attention:#9a3412;--attention-bg:#fff7ed;--accent:#0f766e;--accent-bg:#f0fdfa;--success:#15803d;--success-bg:#f0fdf4;--success-muted:#1f5a4d;--success-muted-bg:#eef6f3;--error:#b42318;--error-bg:#fef2f2;--info:#1d4ed8;--info-bg:#eff6ff;--r:.5rem;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#13141d;--surface:#1b1d2a;--ink:#eff0fa;--muted:#a9aec5;--line:#35394c;--control-border:#6b7280;--tint:#282b3f;--brand:#c8beff;--on-brand:#241c48;--main-line:#4d5270;--warm:#fbbf24;--warm-bg:#292112;--attention:#fb923c;--attention-bg:#2b1b12;--accent:#2dd4bf;--accent-bg:#102624;--success:#4ade80;--success-bg:#11261a;--success-muted:#86efac;--success-muted-bg:#13261d;--error:#f97066;--error-bg:#2c1616;--info:#60a5fa;--info-bg:#14213d}}
 *{box-sizing:border-box}
 body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic","Noto Sans CJK KR",system-ui,sans-serif;overflow-wrap:anywhere;-webkit-font-smoothing:antialiased}
-main{max-width:42rem;margin:auto;padding:0 clamp(.75rem,3vw,1.1rem) 1.5rem}
+main{max-width:44rem;margin:auto;padding:0 clamp(.75rem,3vw,1.1rem) 1.5rem}
 h1,h2,h3,h4,p,ul,dl,dd,fieldset,legend{margin:0;padding:0}
 h1{font-size:.95rem;letter-spacing:-.02em;font-weight:750}
 h2,legend{font-size:.95rem;font-weight:700}
@@ -23,7 +23,7 @@ button:disabled{opacity:.5;cursor:default}
 header,.cluster,.between{display:flex;align-items:center;gap:.55rem}
 header,.between{justify-content:space-between}
 .cluster,.between{flex-wrap:wrap}
-header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);padding:.45rem 0;gap:.4rem;flex-wrap:wrap}
+header{background:var(--bg);border-bottom:1px solid var(--line);padding:.45rem 0;gap:.4rem;flex-wrap:wrap}
 header .wordmark{display:flex;align-items:center;gap:.42rem;min-width:0;margin-right:auto}
 header:has(#scope:not([hidden])) #project{display:none}
 .brand{place-items:center;display:grid;grid-template-columns:repeat(2,.3rem);grid-template-rows:repeat(2,.3rem);gap:2px;width:1.5rem;height:1.5rem;border-radius:.4rem;background:var(--tint);align-content:center;justify-content:center;flex-shrink:0}
@@ -35,7 +35,7 @@ header:has(#scope:not([hidden])) #project{display:none}
 #scope{margin:0;flex:0 1 auto;min-width:0}
 #scope label{color:var(--muted);font-size:.78rem}
 select{max-width:100%;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);min-height:2rem;border-radius:.4rem;padding:.15rem .45rem}
-#project-choice{max-width:min(11rem,42vw);min-height:2rem;font-size:.8rem}
+#project-choice{width:min(11rem,42vw);min-height:2rem;font-size:.8rem}
 #language-choice{flex:0 0 auto;max-width:5.4rem;min-height:2rem;font-size:.78rem}
 #display-mode,#refresh{font-size:.78rem;white-space:nowrap;min-height:2rem;padding:.2rem .55rem;flex-shrink:0}
 #display-mode:hover:not(:disabled),#refresh:hover:not(:disabled){border-color:var(--brand);background:var(--tint)}
@@ -54,8 +54,6 @@ details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:'▸';color:var(--muted);font-size:.8em;flex-shrink:0;transition:transform .12s}
 details[open]>summary::before{transform:rotate(90deg)}
 .alerts-preview{font-weight:400;font-size:.78rem;min-width:0;flex:1 1 8rem}
-.approval-idle{font-size:.78rem;padding:.25rem 0}
-.approval-idle:empty{display:none}
 .state-chip,.count-badge{--c:var(--muted);--cbg:var(--tint);display:inline-flex;align-items:center;gap:.26rem;white-space:nowrap;font-size:.74rem;font-weight:650;line-height:1.25;padding:.12rem .42rem;border-radius:.35rem;color:var(--c);background:var(--cbg);border:1px solid color-mix(in srgb,var(--c) 34%,transparent);flex-shrink:0}
 .count-badge{font-variant-numeric:tabular-nums;border-color:var(--line)}
 .state-glyph{font-family:var(--mono);font-size:.82em}
@@ -114,7 +112,8 @@ meter{width:100%;accent-color:var(--brand)}
 .selection{display:grid;gap:.3rem;align-content:start}
 .selection button{text-align:left;min-width:0;display:flex;gap:.5rem;align-items:center}
 .selection button[aria-pressed="true"],#evidence-actions button[aria-pressed="true"]{border-color:var(--brand);background:var(--tint)}
-.chat-grid{display:grid;gap:.85rem}
+.chat-grid{display:grid;gap:.65rem}
+#chat-members{grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))}
 .messages{padding:0;list-style:none;display:grid;max-height:26rem;overflow:auto}
 .message p{white-space:pre-wrap}
 #evidence-lines{margin:.5rem 0;white-space:pre-wrap;overflow-wrap:anywhere;font:.8rem/1.55 var(--mono);background:var(--tint);border-radius:var(--r);padding:.6rem .7rem}
@@ -138,8 +137,8 @@ a{color:var(--brand);text-underline-offset:.18em}
 #approval-card.awaiting-action h2{color:var(--warm)}
 #goal.goal-short{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 #goal-expand{padding:.2rem .5rem;min-height:2rem}
-#goal-card{margin:.5rem 0;padding:.7rem .85rem;background:var(--surface);border:1px solid var(--line);border-radius:.65rem}
-#goal{line-height:1.42;font-weight:700;letter-spacing:-.02em;font-size:1.04rem;margin:.2rem 0 .45rem;text-wrap:balance}
+#goal-card{padding:.85rem;background:color-mix(in srgb,var(--brand) 6%,var(--surface));border:1px solid var(--main-line);border-radius:.75rem}
+#goal{line-height:1.4;font-weight:720;letter-spacing:-.025em;font-size:1.18rem;margin:.26rem 0 .52rem;text-wrap:pretty}
 .measure{display:grid;gap:.3rem}
 .measure p{font-size:.76rem;color:var(--muted)}
 progress{width:100%;height:.28rem;border:0;border-radius:.4rem;overflow:hidden;appearance:none;background:var(--line);accent-color:var(--brand)}
@@ -158,12 +157,15 @@ progress::-moz-progress-bar{background:var(--brand)}
 .avatar-claude{background:#e8b7a1;color:#48281d}
 .avatar-agy,.avatar-antigravity{background:#c2c2e7;color:#30304c}
 .avatar-pi{background:#b3d1e9;color:#223b4f}
-#launcher{padding:.45rem 0}
+#launcher{padding:0 .18rem}
+.lead-picks{margin:.55rem 0}
+.lead-picks input{accent-color:var(--brand)}
 #launcher summary,.history summary{font-size:.82rem}
 #launcher summary{color:var(--brand)}
 .project-meta{display:inline-flex;flex-wrap:wrap;gap:.05rem .55rem}
-.leads-region{padding:.45rem 0 .5rem;border:0}
-.leads{display:grid;grid-template-columns:1fr;gap:.35rem;margin-top:.4rem}
+#now-work,.leads-region{border:0;padding:.45rem .18rem}
+#now-heading,#leads-heading{color:var(--ink);font-size:.9rem}
+.leads{display:grid;margin-top:.2rem}
 .leads>p{padding-top:.25rem}
 .plan-strip{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding-block:.4rem 0}
 .plan-strip strong{font-variant-numeric:tabular-nums}
@@ -191,7 +193,8 @@ progress::-moz-progress-bar{background:var(--brand)}
 .main-line{display:flex;gap:.55rem;align-items:center;min-height:2rem;color:var(--muted);font-size:.76rem}
 #header-main{display:inline-flex;align-items:center;gap:.35rem;min-height:2rem;border:0;padding:0 .3rem;background:transparent;color:var(--ink);font-weight:650}
 #header-main::after{content:'›';color:var(--muted)}
-.lead{min-width:0;width:100%;display:grid;grid-template-columns:1.8rem minmax(0,1fr) auto auto;gap:.55rem;align-items:center;text-align:left;padding:.5rem .65rem;background:var(--surface);border:1px solid var(--control-border);border-radius:.55rem}
+.lead{min-width:0;width:100%;display:grid;grid-template-columns:1.8rem minmax(0,1fr) auto auto;gap:.5rem;align-items:center;text-align:left;padding:.5rem .1rem;background:transparent;border:0;border-bottom:1px solid var(--line);border-radius:0}
+.lead:last-child{border-bottom:0}
 button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 .lead .avatar{width:1.65rem;height:1.65rem;border-radius:.48rem}
 .work-title{display:grid;gap:.05rem}
@@ -268,8 +271,20 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 .detail-map .map-node{min-height:2.4rem}
 .detail-map-groups{min-width:0}
 .detail-map .map-deps{margin-top:.45rem;padding-top:.4rem}
-.more-views{margin:.15rem 0 .3rem}
-.more-views>summary{font-size:.8rem;color:var(--muted)}
+.view-nav{position:sticky;top:0;z-index:2;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:.25rem .45rem;margin:0 0 .5rem;padding:.25rem 0;background:var(--bg)}
+.view-nav .tabs{margin:0}
+#tabs-primary{background:var(--tint);border:0;border-radius:.55rem;padding:.2rem}
+#tabs-primary button{flex:1 0 auto;min-height:2rem;margin:0;padding:.2rem .42rem;border:0;border-radius:.35rem}
+#tabs-primary button[aria-selected="true"]{background:var(--surface);color:var(--brand)}
+@media (max-width:23rem){#tabs-primary button{font-size:.79rem;padding-inline:.25rem}}
+.view-nav:has(.more-views[open])>*{grid-column:1/-1}
+.more-views>summary{font-size:.8rem;color:var(--muted);padding-inline:.2rem;white-space:nowrap}
+#tabs-secondary{margin-top:.2rem}
+#pane-overview{display:grid;gap:.55rem}
+#pane-overview>:is(#overview-backlog,#provider-options,#alerts,#approval-card){margin:0}
+#now-active .task-row:first-child{border-top:0}
+#now-active>p:empty,#now-results>p:empty{display:none}
+#team-open{border:0;background:none;padding:.1rem .25rem;color:var(--brand);font-size:.76rem}
 .task-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:.15rem .6rem;width:100%;text-align:left;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent;padding:.55rem .1rem;min-height:2.6rem}
 .task-row[aria-current="true"]{border-left:3px solid var(--brand);padding-left:.5rem}
 .task-row small{color:var(--muted);font-size:.76rem;grid-column:1 / -1}
@@ -282,7 +297,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 .waiting-dashboard .main-line,.waiting-dashboard #pane-overview>:not(.map-preview):not(#now-work):not(#latest-results),.waiting-dashboard #source-details{display:none}
 .waiting-dashboard #tabs-secondary button:not(#tab-project){visibility:hidden}
 .waiting-dashboard #more-summary{display:none}
-@media (forced-colors:active){:focus-visible{outline:2px solid Highlight;outline-offset:2px}button,input,select,textarea,.state-chip,.count-badge,.map-dep-chip{border:1px solid ButtonBorder}.tabs button[aria-selected="true"]{border-bottom:2px solid Highlight}#status.degraded,#approval-card.awaiting-action{border:1px solid CanvasText;border-left:4px solid Highlight}.choice input:checked+span{outline:2px solid Highlight}.primary{background:Highlight;color:HighlightText;border-color:Highlight}}
+@media (forced-colors:active){:focus-visible{outline:2px solid Highlight;outline-offset:2px}button,input,select,textarea,.state-chip,.count-badge,.map-dep-chip{border:1px solid ButtonBorder}.tabs button[aria-selected="true"]{border-bottom:2px solid Highlight}#tabs-primary button[aria-selected="true"]{border:1px solid Highlight}#status.degraded,#approval-card.awaiting-action{border:1px solid CanvasText;border-left:4px solid Highlight}.choice input:checked+span{outline:2px solid Highlight}.primary{background:Highlight;color:HighlightText;border-color:Highlight}}
 </style>
 </head>
 <body>
@@ -298,14 +313,15 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 <p id="receipt" role="status"></p>
 <noscript><p class="muted" lang="ko">이 호스트에서 패널 UI를 실행할 수 없으면 텍스트 MCP 도구(oms_list_projects, oms_panel_snapshot) 또는 CLI(oms dashboard)로 같은 관측 리비전과 상태를 확인하세요.</p><p class="muted" lang="en">If this host cannot run the panel UI, use the text MCP tools (oms_list_projects, oms_panel_snapshot) or the CLI (oms dashboard) to check the same observation revision and status.</p></noscript>
 <div id="view" hidden>
-<div class="main-line"><span id="current-scope">현재 Main</span><button id="header-main" hidden></button><span id="current-main" class="muted"></span></div>
+<div class="main-line"><span id="current-scope">이 대화</span><button id="header-main" hidden></button><span id="current-main" class="muted"></span></div>
+<div class="view-nav">
 <nav class="tabs" id="tabs-primary" role="tablist" aria-label="프로젝트 보기" data-i18n-attr="aria-label:tabs">
 <button id="tab-overview" role="tab" aria-selected="true" aria-controls="pane-overview" data-i18n="tab.overview">지금</button>
 <button id="tab-work" role="tab" aria-selected="false" aria-controls="pane-work" tabindex="-1" data-i18n="tab.work">작업</button>
 <button id="tab-results" role="tab" aria-selected="false" aria-controls="pane-results" tabindex="-1" data-i18n="tab.results">결과</button>
 <button id="tab-relations" role="tab" aria-selected="false" aria-controls="pane-relations" tabindex="-1" data-i18n="tab.relations">관계도</button>
 </nav>
-<details id="more-views" class="more-views"><summary id="more-summary" data-i18n="moreViews">더 보기 · 프로젝트 지도 · 대화 · 지표 · Git</summary>
+<details id="more-views" class="more-views"><summary id="more-summary" data-i18n="moreViews">더 보기</summary>
 <nav class="tabs" id="tabs-secondary" role="tablist" aria-label="더 보기 화면" data-i18n-attr="aria-label:tabsMore">
 <button id="tab-project" role="tab" aria-selected="false" aria-controls="pane-project"></button>
 <button id="tab-chat" role="tab" aria-selected="false" aria-controls="pane-chat" tabindex="-1" data-i18n="tab.chat">대화</button>
@@ -313,22 +329,15 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 <button id="tab-usage" role="tab" aria-selected="false" aria-controls="pane-usage" tabindex="-1" data-i18n="tab.usage">지표</button>
 <button id="tab-git" role="tab" aria-selected="false" aria-controls="pane-git" tabindex="-1">Git · PR</button>
 </nav></details>
+</div>
 <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
 <section id="approval-card" class="card" aria-labelledby="approvals-heading">
 <div class="section-head"><h2 id="approvals-heading">승인 요청</h2><span id="approval-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span class="state-word" data-i18n="state.waiting">확인 필요</span></span></div>
 <p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
 </section>
-<p id="approval-idle" class="approval-idle muted" role="status"></p>
+<p id="approval-idle" class="sr-only" role="status"></p>
 <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
 <button id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
-<section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-<h2 id="leads-heading" class="section-head"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><div id="leads" class="leads"></div>
-</section>
-<section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
-<section class="card" id="now-work" aria-labelledby="now-heading">
-<h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
-<div id="now-active" class="rows"></div>
-</section>
 <section class="card" id="goal-card" aria-labelledby="goal-heading">
 <h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
 <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
@@ -337,14 +346,41 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 <button id="plan-open" data-i18n="planOpen">계획 보기 ›</button>
 </div>
 </section>
-<section class="card" id="latest-results" aria-labelledby="now-results-heading">
-<h2 id="now-results-heading" data-i18n="w.nowResults" class="section-label">작업 결과</h2>
+<details id="launcher" class="card"><summary data-i18n="launcher">새 Main 선택</summary>
+<form id="launch">
+<fieldset id="controls"><legend data-i18n="chooseMain">Main 공급자</legend>
+<div class="choices">
+<label class="choice"><input type="radio" name="main" value="codex" checked><span>Codex</span></label>
+<label class="choice"><input type="radio" name="main" value="claude"><span>Claude</span></label>
+<label class="choice"><input type="radio" name="main" value="agy"><span>AGY</span></label>
+<label class="choice"><input type="radio" name="main" value="pi"><span>Pi</span></label>
+</div>
+<fieldset class="lead-picks"><legend data-i18n="leadPick">함께 요청할 Lead</legend><div class="cluster">
+<label><input id="lead-codex" type="checkbox"> Codex</label>
+<label><input id="lead-claude" type="checkbox"> Claude</label>
+<label><input id="lead-agy" type="checkbox"> AGY</label>
+</div></fieldset>
+<label for="brief" data-i18n="briefLabel">새 작업 목표</label>
+<input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
+<button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
+</fieldset>
+</form></details>
+<section class="card" id="now-work" aria-labelledby="now-heading">
+<h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
+<div id="now-active" class="rows"></div>
+</section>
+<section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
+<div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span> <span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><button id="team-open" type="button" data-i18n="tab.chat" hidden>대화</button></div><div id="leads" class="leads"></div>
+</section>
+<section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
+<details class="card" id="latest-results">
+<summary id="now-results-heading" data-i18n="w.nowResults">작업 결과</summary>
 <div id="now-results" class="rows"></div>
 <div class="evidence"><p id="reviews" class="muted"></p></div>
 <ul id="latest-operations" hidden></ul>
-</section>
+</details>
 <details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
-<p id="peer-proof" class="muted" data-i18n="peer.proof" hidden>이 작업방의 Main 참여를 확인했습니다. 검토를 요청하면 다른 작업방의 소유 기록까지 확인한 뒤 호출합니다.</p>
+<p id="peer-proof" class="muted" data-i18n="peer.proof" hidden>Main을 확인했습니다. 검토 호출 전 다른 작업방의 소유권도 확인합니다.</p>
 <form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
 <label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
 <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" class="form-input" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
@@ -358,20 +394,6 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 <button id="provider-load" data-i18n="providerLoad">호스트 상태 조회</button>
 </details>
 <button id="overview-backlog"><span data-i18n="backlog">GitHub 열린 작업 전체 맡기기</span> <span aria-hidden="true">↗</span></button>
-<details id="launcher" class="card"><summary data-i18n="launcher">별도 Main에 새 목표 전달</summary>
-<form id="launch">
-<fieldset id="controls"><legend data-i18n="chooseMain">새 Main 선택</legend>
-<div class="choices">
-<label class="choice"><input type="radio" name="main" value="codex" checked><span>Codex</span></label>
-<label class="choice"><input type="radio" name="main" value="claude"><span>Claude</span></label>
-<label class="choice"><input type="radio" name="main" value="agy"><span>AGY</span></label>
-<label class="choice"><input type="radio" name="main" value="pi"><span>Pi</span></label>
-</div>
-<label for="brief" data-i18n="briefLabel">새 작업 목표</label>
-<input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
-<button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
-</fieldset>
-</form></details>
 <details class="card" id="project-records">
 <summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span></summary>
 <dl class="metrics">
@@ -433,7 +455,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
 <div class="detail-title"><h2 data-i18n="chatHeading">작업방 대화</h2><button id="chat-back" data-i18n="chatBack" hidden>이전 보기로</button></div>
 <div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자" data-i18n-attr="aria-label:chatMembers"></div>
-<div><h3 id="chat-title"></h3><p id="chat-status" class="muted" role="status"></p>
+<div><div class="section-head"><h3 id="chat-title"></h3><button id="follow-up" type="button" class="link-action" data-i18n="followUp" hidden>후속 요청 초안</button></div><p id="chat-status" class="muted" role="status"></p>
 <button id="chat-older" data-i18n="chatOlder" hidden>이전 메시지</button>
 <ol class="messages" id="chat-messages" aria-label="시간순 작업방 메시지" data-i18n-attr="aria-label:chatMessages" tabindex="0"></ol>
 <div id="chat-result"></div>
@@ -608,602 +630,604 @@ function initLanguage() {
 }
 // One row per key, with Korean and English text. Static Korean labels come from the markup.
 const MSG = {ko:{}, en:{}};
-const catalogRows = `share.manual | 이 호스트에서는 복사한 뒤 대화에 붙여넣으세요. | Copy the answer and paste it into this conversation on this host.
-peer.assign |  | Request a read-only review
-peer.legend |  | Reviewer for this room
-peer.provider |  | Provider
-peer.prompt |  | Review request
-peer.hint |  | Enter the code to check or a question
-peer.start |  | Call one reviewer
-peer.proof |  | Your Main membership in this Room is confirmed. Requesting a review checks ownership across Rooms before calling the reviewer.
-peer.inventory | 작업방 목록을 모두 확인할 수 없어 배정 권한을 검증하지 못했습니다. 같은 요청의 상태를 다시 확인할 수 있습니다. | OMS could not verify assignment authority because the Room inventory is incomplete. You can check the same request again.
-peer.check |  | Check request status
-peer.chat |  | Open review conversation
-peer.next |  | Request another review
-peer.role | 연구원 | Researcher
-peer.result | 읽기 전용 검토 결과 | Read-only review
-peer.reading | 요청 기록 확인 중… | Checking the request record…
-peer.sending | 검토 요청을 보내는 중… | Submitting the review request…
-peer.mismatch | 요청 기록이 일치하지 않습니다. | The request record does not match.
-peer.absent | 기록된 요청이 없습니다. | No recorded request.
-peer.badActor | 검토자 기록이 일치하지 않습니다. | The recorded reviewer does not match.
-peer.accepted | {p} 검토 요청 접수 · {title} | {p} review requested · {title}
-peer.unknown | 검토자 시작 여부를 확인하지 못했습니다. 같은 요청의 상태를 확인하세요. | Reviewer start is unconfirmed. Check this request’s status.
-peer.error | {error} · 요청 상태를 확인하세요. | {error} · Check this request’s status.
-peer.working | 검토자가 응답을 작성 중입니다. | The reviewer is preparing an answer.
-peer.empty | 호출이 끝났습니다. 조회한 기록에 답변이 없습니다. | The call ended. No answer was found in the records retrieved.
-peer.failed | 검토 호출이 실패했습니다. | The review call failed.
-peer.repair |  | Link operation to Room
-peer.recovered | 검토 실행 기록을 찾았습니다. 이 작업방에 연결하려면 확인하세요. | Review operation found. Confirm to link it to this Room.
-peer.unconfirmed | 검토 요청은 기록되었고 실행 상태는 미확인입니다. | Review request recorded. Execution status is unconfirmed.
-share.choose |  | Attach review result
-share.label |  | Selected answer
-share.send |  | Send to this conversation
-share.copy |  | Copy answer
-share.cancel |  | Cancel
-share.preview | {p}의 답변을 확인한 뒤 전달하세요. | Review the answer from {p} before sharing.
-share.partial | {p}의 답변 중 아래에 표시된 부분만 전달합니다. | Only the portion of the answer from {p} shown here will be shared.
-share.copied | 선택한 답변을 복사했습니다. | Selected answer copied.
-share.select | 답변을 선택했습니다. 복사해 현재 대화에 붙여넣으세요. | Answer selected. Copy and paste it into this conversation.
-share.already | 이 결과는 이미 전송을 요청했습니다. 현재 대화에서 확인하세요. | Sending this result was already requested. Check the conversation.
-share.sending | 선택한 답변을 보내는 중… | Sending the selected answer…
-share.sent | 선택한 답변을 현재 대화로 보냈습니다. | Selected answer sent to this conversation.
-share.rejected | 호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다. | The host declined to send the answer. You can copy it instead.
-share.unknown | 호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요. | Delivery is unconfirmed. Check the conversation before copying the answer.
-title | OMS · 프로젝트 제어 | OMS · Project control
-language |  | Language (언어)
-project |  | Project
-refresh |  | Refresh
-unknown | 미확인 | Unknown
-noInfo | 정보 없음 | No data
-providerUnknown | 공급자 미확인 | Unknown provider
-statusUnknown | 상태 미확인 | Status unknown
-partial | 일부 조회 | Partially retrieved
-noRecords | 기록 없음 | No records
-projectDefault | OMS 프로젝트 | OMS project
-selectProject | 프로젝트 선택 | Select a project
-draft | 초안 | Draft
-pageN | {page}페이지 | Page {page}
-prevPage |  | Previous page
-nextPage |  | Next page
-closed | 패널이 닫혔습니다. | The panel was closed.
-timeout | 응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요. | The request timed out. Refresh to check the result.
-hostFail | 앱이 요청을 처리하지 못했습니다. | The app could not process the request.
-projChanged | 프로젝트가 변경되었습니다. | The project changed.
-toolFail | OMS 도구 호출에 실패했습니다. | The OMS tool call failed.
-linkFail | 앱에서 링크를 열 수 없습니다. | The app cannot open the link.
-openApp | 앱 대화에서 OMS 패널을 여세요. | Open the OMS panel from an app conversation.
-tab.chat |  | Chat
-tab.activity |  | Activity
-tabs |  | Project views
-tab.overview |  | Now
-tab.work |  | Work
-tab.results |  | Results
-tab.relations |  | Relationships
-tab.usage |  | Metrics
-tabsMore |  | More views
-moreViews |  | More · Project map · Chat · Metrics · Git
-taskSections |  | Task detail sections
-task.overview |  | Summary
-task.changes |  | Changes
-task.verification |  | Verification
-task.history |  | History
-w.back |  | ← Back to list
-w.now |  | Work in progress
-w.nowResults |  | Task results
-w.owners |  | Owner linkage
-w.deps |  | Task dependencies
-w.loading | 작업 목록을 읽는 중… | Reading work items…
-w.unavailable | 작업 목록을 사용할 수 없습니다: {v} | Work items are unavailable: {v}
-w.bad | 작업 목록 형식을 확인할 수 없습니다. | The work item response was not recognized.
-w.count | 작업 {n}개 | {n} work items
-w.omitted | {n}개는 표시 범위 밖입니다. | {n} more are outside the shown range.
-w.dropped | 식별자가 없는 항목 {n}개는 제외했습니다. | {n} items without an id were left out.
-w.dup | 식별자가 겹친 작업 {n}개는 구분할 수 없어 제외했습니다. | {n} items with a repeated id cannot be told apart and were left out.
-w.empty | 관측된 작업이 없습니다. | No work items observed.
-w.noneActive | 진행 중인 작업이 없습니다. | No work in progress.
-w.noneResults | 결과가 기록된 작업이 없습니다. | No work item has a recorded result.
-w.noResultCount | 결과가 기록되지 않은 작업 {n}개 | {n} work items have no recorded result
-w.owner | 담당: {v} | Owner: {v}
-w.ownerUnknown | 담당 미확인 | Owner unknown
-w.id | ID {v} | ID {v}
-g.planned | 예정 | Planned
-g.active | 진행 | In progress
-g.review | 검토 | Review
-g.done | 완료 | Done
-g.other | 기타 상태 | Other states
-w.na | 미확인 | Unavailable
-w.evidenceNo | 검증 근거 없음 | No verification evidence
-w.ownersNote | 작업 기록에 적힌 담당 값으로만 묶습니다. 보고·상하 관계나 provider 소속은 추론하지 않습니다. | Grouped only by the owner value in the work record. Reporting lines and provider membership are not inferred.
-w.depsNote | 선행 작업 → 후속 작업 관계만 표시하며 담당 연결과 섞지 않습니다. | Shows only prerequisite → follow-up edges, never mixed with owner linkage.
-w.depsUnknown | 선행 정보 미확인 | Prerequisites unavailable
-w.depsNone | 선행 작업 없음 | No prerequisites
-w.pre | 선행: {v} | Before: {v}
-w.post | 후속: {v} | After: {v}
-w.missingDep | {id} (목록에 없음) | {id} (not in list)
-w.cycle | 순환 의존이 관측되어 그대로 표시합니다: {v} | A dependency cycle was observed and is shown as recorded: {v}
-w.gone | 이 작업은 현재 관측 결과에 없습니다: {id} | This task is not in the current observation: {id}
-w.revChanged | 작업 상세 버전이 변경되었습니다 ({a} → {b}). | Task detail version changed since opened ({a} → {b}).
-w.detailUnavailable | 작업 상세를 읽을 수 없습니다. | Task details could not be read.
-w.fState | 상태 | State
-w.fOwner | 담당(작업 기록) | Owner (work record)
-w.fIssue | 이슈 | Issue
-w.fPre | 선행 작업 | Prerequisites
-w.fPost | 후속 작업 | Follow-ups
-w.fRev | 작업 상세 버전 | Task detail version
-w.fId | 작업 ID | Task ID
-w.fResult | 결과 참조 | Result reference
-w.fVerify | 검증 근거 | Verification evidence
-w.noPreview | 이 작업 기록에는 미리보기 또는 diff가 포함되지 않았습니다. | No preview or diff is included in this work record.
-w.resultNone | 결과가 기록되지 않았습니다. | No result is recorded.
-w.verifyNone | 검증 근거가 기록되지 않았습니다. 미실행인지 누락인지 구분할 수 없습니다. | No verification evidence is recorded; not-run and missing cannot be told apart.
-w.verifyNoRev | 이 기록의 상세 버전을 확인할 수 없습니다. | The detail version of this record is unknown.
-w.histNone | 이 작업에 연결된 이벤트·시도 기록의 범위를 확인할 수 없어 표시하지 않습니다. | The scope of events and attempts linked to this task is unknown, so none are shown.
-w.histOpen | 프로젝트 전체 활동 열기 (이 작업 전용 아님) | Open project-wide activity (not specific to this task)
-w.viewAll | 작업 전체 보기 | View all work
-alerts |  | Items needing attention
-alerts.count | {n}건 | {n} items
-alertsOpen |  | View attention items
-goalHeading |  | Project goal
-planStrip |  | Project task verification
-planVerified |  | Planned tasks verified
-planOpen |  | View plan ›
-map.parent |  | Parent
-map.deps |  | Dependencies
-threads |  | Other work conversations
-providerOptions |  | Lead candidates · Codex, Claude, AGY
-providerLoad |  | Check host status
-backlog |  | Hand all open GitHub work to Main
-launcher |  | Send a new goal to a separate Main
-chooseMain |  | Choose a new Main
-briefLabel |  | New work goal
-briefPlaceholder |  | Enter the goal Main will pursue with its Leads.
-start |  | Send goal
-records |  | Full project record
-metricActive |  | Attempts without a closing record
-metricTasks |  | Planned tasks
-metricState |  | Current state
-historyTeam |  | Project Main and Lead records
-historyOps |  | Recently stored artifacts
-historyRuns |  | Recent executions
-chatHeading |  | Room conversation
-chatBack |  | Back to previous view
-chatMembers |  | Conversation participants
-chatOlder |  | Earlier messages
-chatMessages |  | Room messages in time order
-evidenceRegion |  | Execution evidence by call
-evidenceCall |  | Recorded call
-evidencePrev |  | Previous evidence page
-evidenceNext |  | Next evidence page
-activityHeading |  | Project activity
-tuiLabel |  | OMS TUI details
-tui.choose |  | Choose a view
-tui.runtime |  | Runtime
-tui.collab |  | Collaboration
-tui.run |  | Execution
-tui.overview |  | Overview
-tui.health |  | Health
-tui.providers |  | Providers
-tui.metrics |  | Metrics
-tui.capacity |  | Capacity
-tui.log |  | Log
-tui.teams |  | Teams
-tui.sessions |  | Sessions
-tui.plan |  | Plan
-tui.attention |  | Attention
-tui.results |  | Results
-tui.debate |  | Debate
-tui.routes |  | Routes
-tui.workspaces |  | Workspaces
-tui.jobs |  | Jobs
-tui.past |  | Past runs
-tuiRegion |  | Selected OMS TUI records
-timeline |  | Command and job timeline
-usageHeading |  | Token usage
-gitBacklog |  | Hand all open work to Main
-gitEditor |  | GitHub item work goal
-gitAssignee |  | Assign request to
-gitAuto |  | Main chooses the Lead
-gitGoalLabel |  | Goal to send to the conversation
-gitCopy |  | Copy goal
-gitNew |  | Use as a separate Main goal
-gitView |  | GitHub view
-gitKind.checkout |  | Checkout PRs · checks
-gitKind.issues |  | Repository issues
-gitKind.pullRequests |  | Repository PRs
-gitFind |  | Find by number
-gitLookup |  | Look up
-source |  | Connection info
-room |  | Room
-participant |  | Participant
-obsRevision |  | Observation revision
-obsBasis |  | Observation basis
-obsCompleteness |  | Collection status
-appAndOms |  | App and OMS
-hostSupport |  | Support and connection paths by host
-hostSupport1 |  | Codex Desktop provides a chat tab. CLI and IDE use the project's OMS MCP tools or local OMS skills.
-hostSupport2 |  | Claude Chat supports remote HTTPS connectors; Desktop also supports local stdio. Side-panel availability depends on the account and per-conversation rollout. Claude Code's native Mods are a separate feature: terminal 2.1.287+, Code in Desktop 2.1.286+ and the VS Code extension 2.1.299+ support them depending on settings, and 2.1.304+ needs no flag.
-hostSupport3 |  | Antigravity App 2.34.0+ opens the panel through local stdio or a configured remote MCP. CLI and IDE use text tools. Local OMS needs no tunnel.
-connectionView |  | Connection details
-cv.connections |  | Harnesses and readiness
-cv.modelcatalog |  | Model and effort catalog
-cv.routes |  | Expected routing · accounts
-cv.attribution |  | Execution response evidence
-harness |  | Harness
-connectionRefresh |  | Reload connection details
-connectionDraft |  | Draft a new goal with this harness
-sv.connections | 설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다. | Installation is checked on the PATH of the host running OMS. Authentication and actual runnability are checked separately.
-sv.modelcatalog | 로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다. | Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.
-sv.routes | 프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다. | Expected routing for the project's next call. Only confirmed logical aliases are shown for accounts.
-sv.attribution | 선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다. | Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.
-state.running | 실행 중 | Running
-state.starting | 시작 중 | Starting
-state.active | 활성 | Active
-state.open | 열림 | Open
-state.planned | 예정 | Planned
-state.passed | 통과 | Passed
-state.supported | 근거 있음 | Supported
-state.claimed | 점유됨 | Claimed
-state.landing | 착지 중 | Landing
-state.verifying | 검증 중 | Verifying
-state.review | 검토 중 | In review
-state.waiting |  | Needs you
-state.blocked | 차단됨 | Blocked
-state.ready | 준비됨 | Ready
-state.queued | 대기 중 | Pending
-state.done | 완료 | Done
-state.completed | 완료 | Completed
-state.exited | 종료됨 | Exited
-state.accepted | 검증 완료 | Verified
-state.closed | 닫힘 | Closed
-state.cancelled | 취소됨 | Cancelled
-state.abandoned | 중단됨 | Abandoned
-state.interrupted | 중단됨 | Interrupted
-state.failed | 실패 | Failed
-state.rejected | 반려됨 | Rejected
-state.timed_out | 시간 초과 | Timed out
-state.orphaned | 연결 끊김 | Orphaned
-state.guard_stop | 가드 정지 | Guard stop
-state.partial | 일부 | Partial
-state.degraded | 저하 | Degraded
-state.stale | 일부·만료 | Stale
-state.unknown | 미확인 | Unknown
-kind.issue | 이슈 # | Issue #
-kind.pr | PR # | PR #
-git.unknown | 현재 체크아웃의 Git 상태 미확인 | Git status of the current checkout is unknown
-git.detached | 분리된 HEAD | Detached HEAD
-git.dirty | 작업 트리 변경 있음 | Working tree has changes
-git.clean | 작업 트리 깨끗함 | Working tree clean
-git.dirtyUnknown | 작업 트리 미확인 | Working tree unknown
-git.upstream | 추적 브랜치 {v} | Upstream {v}
-git.ahead | 앞섬 {n} | Ahead {n}
-git.behind | 뒤처짐 {n} | Behind {n}
-git.prefix | {p} Lead에게 다음 작업을 배정해 주세요.  | Please assign the following work to the {p} Lead.\x20
-git.prefixAny | 담당 Lead를 정해 다음 작업을 배정해 주세요.  | Please choose a Lead and assign the following work.\x20
-git.review |  | Review issue version
-git.reading | 이슈 버전을 확인하고 있습니다… | Checking the issue version…
-git.proof | 열린 이슈 · 수정 시각 {rev} | Open issue · Updated {rev}
-git.noProof | 선택한 이슈의 버전을 확인할 수 없습니다. | Could not verify the selected issue version.
-git.draft | 작업 목표 작성 | Draft work goal
-git.draftAria | {label} 작업 목표 작성 | {label}: draft work goal
-git.editorHint | 대화로 보내면 Main이 이 목표로 작업을 시작할 수 있습니다. | Once sent to the conversation, Main can start working on this goal.
-git.noRepo | 현재 프로젝트의 GitHub 저장소를 확인할 수 없습니다. | Cannot determine this project's GitHub repository.
-git.backlogLabel | {repo} · 전체 열린 작업 | {repo} · all open work
-git.backlogBody | {url} 저장소의 모든 열린 이슈와 PR을 마지막 페이지까지 조회하세요. 기존 PR과 검증 결과, 중복 및 의존성을 확인하고 작업 순서를 정하세요. oms_panel_git_status의 inventory를 issues와 pullRequests로 각각 조회하고 nextCursor가 없을 때까지 다음 페이지를 읽으세요. 조회 실패·누락은 미확인으로 표시하세요. 각 작업을 적합한 Lead와 진행하고 결과, 검증 근거, 남은 항목을 대화에 보고하세요. 게시나 병합은 별도의 명시적 승인 후 진행하세요. | List every open issue and PR in the {url} repository through the last page. Check existing PRs, verification results, duplicates and dependencies, then decide the work order. Query the oms_panel_git_status inventory separately for issues and pullRequests and read further pages until nextCursor is absent. Mark failed or missing lookups as unknown. Run each task with a suitable Lead and report results, verification evidence and remaining items in the conversation. Publish or merge only after separate explicit approval.
-git.loading | GitHub PR과 검사를 조회하는 중… | Loading GitHub PRs and checks…
-git.remoteUnsupported | GitHub PR 조회를 지원하지 않는 원격 저장소 | Remote repository does not support GitHub PR lookup
-git.prUnavailable | GitHub PR 조회 불가 | GitHub PR lookup unavailable
-git.noOpenPr | 조회한 체크아웃에 연결된 열린 PR 없음 | No open PR linked to the checked-out branch
-git.scope | GitHub Projects 읽기 권한(read:project)이 필요합니다. | GitHub Projects read permission (read:project) is required.
-git.listUnsupported | 이 저장소에서 지원하지 않는 목록입니다. | This repository does not support this list.
-git.listFail | GitHub 목록을 조회할 수 없습니다. | Cannot retrieve the GitHub list.
-git.shown | {n}건 표시 | {n} shown
-git.noItems | 조회된 항목 없음 | No items found
-git.boardUnknown | 보드 식별 정보 미확인 | Board identity unknown
-git.boardView | 보드 상세 보기 | View board details
-git.boardLoading | 보드 조회 중… | Loading board…
-git.timeout | GitHub 조회 시간이 초과됐습니다. | GitHub lookup timed out.
-git.rateLimit | GitHub 요청 한도에 도달했습니다. | GitHub rate limit reached.
-git.boardNotInCatalog | 현재 저장소에서 확인한 연결 목록에 이 보드가 없습니다. | This board is not in the connected list found for this repository.
-git.boardUnverified | 이 저장소에서 보드와 연결 정보를 확인할 수 없습니다. | Cannot verify the board and its link to this repository.
-git.class.candidate | 검토 후보 | Candidate
-git.class.blocked | 선행 이슈 진행 중 | Blocked by an open prerequisite
-git.class.unverified | 추가 확인 필요 | Needs verification
-git.class.plan_linked | 기존 Plan 연결 | Linked to an existing Plan
-git.class.board_in_progress | 보드에서 진행 중 | In progress on the board
-git.class.closed_board | 닫힌 보드 | Closed board
-git.class.duplicate | 중복 | Duplicate
-git.class.archived | 보관됨 | Archived
-git.class.unknown | 분류 미확인 | Unclassified
-git.class.draft | 초안 | Draft
-git.class.foreign | 다른 저장소 | Other repository
-git.class.epic | 에픽 | Epic
-git.class.closed | 닫힘 | Closed
-git.class.pull_request | PR | PR
-git.page | {page}쪽 · {n}건 | Page {page} · {n} items
-git.missingFields | 확인되지 않은 필드 {v} | Unverified fields {v}
-git.badNumber | 1~9999999999 사이의 정수 번호를 입력하세요. | Enter an integer between 1 and 9999999999.
-git.finding | GitHub 항목을 찾는 중… | Looking up the GitHub item…
-git.closed | 이미 닫힌 항목입니다. | This item is already closed.
-git.notOpenNow | 현재 열린 상태를 확인할 수 없습니다. | Cannot confirm that it is currently open.
-git.notFound | 이 저장소에서 해당 열린 항목을 확인할 수 없습니다. | Cannot find that open item in this repository.
-git.sendMain | 현재 Main 대화에 보내기 | Send to current Main conversation
-git.share | 현재 대화에 공유 | Share to current conversation
-git.copied | 목표를 복사했습니다. | Goal copied.
-git.selected | 목표를 선택했습니다. 복사해 현재 대화에서 사용할 수 있습니다. | Goal selected. Copy it to use in the current conversation.
-git.sending | 현재 대화로 전달하는 중… | Sending to the current conversation…
-git.sentMain | 현재 Main 대화에 배정 요청을 전달했습니다. | Assignment request sent to the current Main conversation.
-git.shared | 현재 대화에 목표를 공유했습니다. | Goal shared to the current conversation.
-git.sendUnknown | 전달 여부를 대화에서 확인하세요. 작성한 목표는 복사할 수 있습니다. | Check the conversation to see whether it was delivered. You can copy the goal you wrote.
-git.tooLong | 기존 목표와 합치면 2,000자를 넘습니다. 전달할 내용을 줄이세요. | Combined with the existing goal it exceeds 2,000 characters. Shorten what you send.
-git.badResponse | Git·PR 응답을 확인할 수 없습니다. | Cannot read the Git/PR response.
-git.staleItem | 새 목록에서 열린 상태를 확인하지 못했습니다. 번호로 다시 조회해 선택하세요. | The new list did not confirm it is open. Look it up by number again and select it.
-git.openAria | {repo} {text} GitHub에서 열기 | Open {repo} {text} on GitHub
-git.linkedWorktree | 연결된 워크트리 | Linked worktree
-git.currentCheckout | 현재 체크아웃 | Current checkout
-git.headMatch | 로컬 HEAD 일치 | Matches local HEAD
-git.headDiffer | 로컬 HEAD 불일치 | Differs from local HEAD
-git.headUnknown | HEAD 비교 미확인 | HEAD comparison unknown
-git.checksUnknown | 검사 상태 미확인 | Check status unknown
-git.noChecks | 보고된 검사 없음 | No checks reported
-git.checks | 검사 · 통과 {p} · 실패 {f} · 대기 {w} · 기타 {o} | Checks · passed {p} · failed {f} · pending {w} · other {o}
-git.check.failed | 실패 | Failed
-git.check.pending | 대기 중 | Pending
-git.check.passed | 통과 | Passed
-git.check.other | 기타 | Other
-usage.loading | 기록된 사용량을 조회하는 중… | Loading recorded usage…
-usage.badResponse | 사용량 응답을 확인할 수 없습니다. | Cannot read the usage response.
-usage.totals | 프로젝트 누적 · 물리 호출 영수증 | Project totals · physical call receipts
-usage.totalsUnknown | 프로젝트 호출 영수증 수집 상태 미확인 | Project call receipt collection status unknown
-usage.totalsNone | 기록된 프로젝트 호출 영수증 없음 | No project call receipts recorded
-usage.tokens | 보고된 토큰 소계 {tokens} · 사용량 보고 {r}/{c}회 | Reported token subtotal {tokens} · usage reported in {r}/{c} calls
-usage.reportedCost | 보고 비용 | Reported cost
-usage.estimatedCost | 추정 비용 | Estimated cost
-usage.noRecord | 기록 없음 | No record
-usage.costLine | {title} {cost} · {n}회 | {title} {cost} · {n} calls
-usage.hostUsage | 호스트 공급자 사용량 | Host provider usage
-usage.lastObserved | 마지막 관측  | Last observed\x20
-usage.used | {n}% 사용 | {n}% used
-usage.unknown | 사용률 미확인 | Usage unknown
-usage.stale | 오래된 기록 | Stale record
-usage.ago | {n}분 전 기록 | Recorded {n} min ago
-usage.resets | 초기화 {d} | Resets {d}
-usage.window | 구간 | Window
-usage.windowAria | {name} 사용률 | {name} usage
-usage.windowsOmitted | 표시 한도 밖의 사용 구간 {n}개 | {n} usage windows beyond the display limit
-usage.context | 컨텍스트 {n}% | Context {n}%
-usage.cacheShare | 캐시 읽기 비중 {n}% | Cache read share {n}%
-usage.recent | 최근 7일 OMS 위임 · 호출 {c} · 입력 {i} · 출력 {o} · 캐시 읽기 {r} | OMS delegation, last 7 days · calls {c} · input {i} · output {o} · cache read {r}
-usage.none | 수집된 공급자 사용량 없음 | No provider usage collected
-usage.attempts | 프로젝트 시도별 토큰 기록 | Token records by project attempt
-usage.tokenCount | 토큰 {n} | Tokens {n}
-usage.receipt | 실행 영수증 | Execution receipt
-usage.events | 이벤트 기록 | Event log
-usage.sourceUnknown | 출처 미확인 | Source unknown
-usage.reportedCalls | 사용량 보고 {r}/{c}회 | Usage reported in {r}/{c} calls
-usage.eventCost | 이벤트 기록 비용 {v} | Event-log cost {v}
-usage.b.calls | 호출 {n} | Calls {n}
-usage.b.input | 입력 {n} | Input {n}
-usage.b.output | 출력 {n} | Output {n}
-usage.b.cacheRead | 캐시 읽기 {n} | Cache read {n}
-usage.b.cacheWrite | 캐시 쓰기 {n} | Cache write {n}
-usage.attemptsNone | 최근 시도에 귀속된 토큰 기록 없음 | No token records attributed to recent attempts
-usage.attemptsOmitted | 표시 한도 밖의 시도 {n}건 | {n} attempts beyond the display limit
-goalNone | 기록된 목표 없음 | No goal recorded
-obs.basis | 다중 원장 관측 (비원자적) | Multi-ledger observation (non-atomic)
-obs.basisUnknown | 관측 기준 미확인 | Observation basis unknown
-obs.complete | 전체 관측 | Full observation
-obs.partial | 일부 관측 | Partial observation
-obs.unknown | 관측 상태 미확인 | Observation status unknown
-obs.omitted | 생략 {n}건 | Omitted {n}
-obs.trimmed | 축약 {n}건 | Trimmed {n}
-src.git | Git | Git
-src.task | 작업 | Tasks
-src.plan | 계획 | Plan
-src.attempts | 실행 | Executions
-src.artifacts | 결과물 | Artifacts
-src.acceptance | 수락 근거 | Acceptance evidence
-src.conversation | 대화 | Conversation
-srcState.unavailable | 미확인 | Unknown
-srcState.partial | 일부 수집 | Partially collected
-srcState.ambiguous | 연결 불명확 | Ambiguous link
-srcState.stale | 만료된 기록 | Stale record
-obs.needsAttention | 확인 필요 · {v} | Needs attention · {v}
-obs.latestArtifact | 저장소 최근 결과물 {v} | Latest repository artifact {v}
-obs.lastChecked | 최근 조회 {d} | Last checked {d}
-omit.attempts | 최근 실행 | Recent executions
-omit.operations | 결과물 | Artifacts
-omit.attention | 주의 항목 | Attention items
-omit.active | 미종료 실행 | Open executions
-labelCount | {label} {n}건 | {label} {n}
-degraded | 일부 상태를 수집하지 못했습니다. | Some status could not be collected.
-omittedRecords | 요약에서 생략된 기록 · {v} | Records omitted from the summary · {v}
-conn.checking | OMS 연결 확인 중 | Checking OMS connection
-conn.unknownProject | 프로젝트 연결 미확인 | Project connection unknown
-conn.selectProject | OMS 연결됨 · 프로젝트 선택 필요 | OMS connected · select a project
-conn.loaded | OMS 연결됨 · 프로젝트 상태 조회됨 | OMS connected · project status loaded
-conn.failed | OMS 연결 또는 프로젝트 조회 실패 | OMS connection or project lookup failed
-conn.needsConnection | OMS와 프로젝트 연결을 확인한 뒤 조회할 수 있습니다. | You can look this up after the OMS and project connection is confirmed.
-conn.loading | 연결 내역을 확인하는 중… | Checking connection details…
-conn.rows | {n}건 표시 | {n} shown
-conn.none | 확인된 기록 없음 | No records confirmed
-conn.fail | 현재 연결 내역을 확인할 수 없습니다. OMS 연결과 프로젝트 권한을 확인하고 다시 조회하세요. | Cannot retrieve connection details. Check the OMS connection and project permissions, then try again.
-conn.checkPermissions | 프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요. | Check project permissions and the host MCP connection, then try again.
-project.unreachable | 대화에서 지정한 프로젝트에 연결할 수 없습니다. | Cannot connect to the project specified in the conversation.
-project.choose | OMS를 사용할 프로젝트를 선택하세요. | Select a project to use with OMS.
-member.left | 참여 종료 | Left
-member.omitted | 추가 참여자 {n}명 생략 | {n} more participants omitted
-evidence.choose | 호출 선택 | Select a call
-evidence.missing | 조회된 작업방 호출 목록에서 해당 시도를 확인할 수 없습니다. | That attempt is not in the retrieved room call list.
-evidence.partial | 최근 호출 목록 일부 표시 | Showing part of the recent call list
-evidence.loading | {name} 조회 중… | Loading {name}…
-evidence.mismatch | 선택한 호출과 근거 응답이 일치하지 않습니다. | The evidence response does not match the selected call.
-evidence.changed | 보관된 근거가 바뀌었습니다. 실행 정보를 다시 확인하세요. | The stored evidence changed. Check the run info again.
-evidence.truncated | 긴 줄 일부 표시 | Long lines truncated
-ev.info | 실행 정보 | Run info
-ev.events | 이벤트 | Events
-ev.files | 변경 파일 | Changed files
-ev.diff | 패치 | Patch
-ev.transcript | 기록된 답변 | Recorded reply
-chat.title | 참여자 대화 | Participant conversation
-chat.pick | 메시지를 읽을 참여자를 선택하세요. | Select a participant to read messages.
-chat.noMembers | 현재 대화와 연결된 작업방 참여자 미확인 | No room participants linked to this conversation found
-chat.loading | 작업방 메시지를 조회하는 중… | Loading room messages…
-chat.loadingOlder | 이전 메시지를 조회하는 중… | Loading earlier messages…
-chat.mismatch | 선택한 작업방·참여자와 메시지 응답이 일치하지 않습니다. | The message response does not match the selected room and participant.
-chat.result | 기록된 실행 결과 | Recorded execution result
-chat.partial | 일부 표시 | Partially shown
-chat.native | Codex 원래 대화 열기 | Open original Codex conversation
-chat.count | 작업방 기록 {n}건 | {n} room records
-chat.none | 기록된 작업방 메시지 없음 | No room messages recorded
-tui.loading | TUI 기록을 조회하는 중… | Loading TUI records…
-tui.mismatch | 선택한 TUI 보기와 응답이 일치하지 않습니다. | The response does not match the selected TUI view.
-tui.unavailable | 이 TUI 보기를 조회할 수 없습니다. | Cannot load this TUI view.
-tui.shown | 표시 {n}건 | {n} shown
-tui.noneOnPage | 이 페이지에서 확인된 기록 없음 | No records confirmed on this page
-tui.confirmedTotal | 확인된 합계 {n}건 | Confirmed total {n}
-tui.total | 전체 {n}건 | Total {n}
-thread.aria | {task} · {p} 대화 열기 | Open conversation: {task} · {p}
-prov.loading | 호스트 공급자 상태를 확인하는 중… | Checking host provider status…
-prov.unavailable | 호스트 공급자 상태를 확인할 수 없습니다. | Cannot determine host provider status.
-prov.usable | 호스트 사용 가능 | Available on host
-prov.unusable | 호스트 사용 불가 | Unavailable on host
-prov.installed | 설치됨 · 사용 가능 여부 미확인 | Installed · availability unknown
-prov.notInstalled | 설치되지 않음 | Not installed
-prov.unknown | 사용 가능 여부 미확인 | Availability unknown
-prov.partial | 호스트 목록 일부 조회 | Host list partially retrieved
-prov.basis | 현재 프로젝트 호스트 기준 | Based on the current project host
-main.repoScope | 저장소 Main | Repository Main
-main.current | 현재 Main | Current Main
-main.unknown | Main 미확인 | Main unknown
-main.joined | 작업방 소유자로 참여 중 | Joined as room owner
-main.partialRooms |  · 작업방 목록 일부 조회 |  · Room list partially retrieved
-main.noOwner | 이 대화와 연결된 작업방 소유자를 확인할 수 없습니다. | Cannot determine the room owner linked to this conversation.
-main.repoRecorded | 저장소에 기록된 Main | Main recorded in the repository
-main.thisConversation | 이 대화의 Main | Main of this conversation
-main.repoLeads | 저장소의 Lead 활동 | Repository Lead activity
-main.roomLead | 작업방 Lead | Room Lead
-main.noRepoMain | 저장소 실행 기록에서 Main을 확인할 수 없습니다. | Cannot determine Main from repository execution records.
-main.headerAria | 이 대화의 {name} 작업방 대화 보기 | View the room conversation of {name} for this conversation
-lead.none | 미종료 Lead 기록 없음 | No open Lead records
-lead.unseen | 조회한 기록에서 미종료 Lead를 확인하지 못했습니다. | No open Lead found in the retrieved records.
-lead.taskUnknown | 작업 미확인 | Task unknown
-lead.aria | {assignee} · {task} · {p} 대화 열기 | Open conversation: {assignee} · {task} · {p}
-act.planned | 계획된 작업 {n} | Planned tasks {n}
-act.partialRuntime | 런타임 일부 조회 | Runtime partially retrieved
-act.attempts | 실행 시도 {n} | Execution attempts {n}
-act.open | 미종료 {n} | Open {n}
-act.executing | 실행 상태 {n} | Executing {n}
-act.unknown | OMS 명령 집계 미확인 | OMS command totals unknown
-act.attempt | 실행 시도 | Execution attempt
-act.artifact | 결과물 | Artifact
-act.timeUnknown | 시각 미확인 | Time unknown
-act.viewEvidence | 호출 근거 보기 | View call evidence
-act.viewEvidenceAria | {id} 호출 근거 보기 | View call evidence for {id}
-act.exit | 종료 코드 {n} | Exit code {n}
-act.noEvents | 조회된 실행 기록 없음 | No execution records retrieved
-act.roomUnknown | 작업방 미확인 | Room unknown
-act.noTeam | 조회한 기록에서 Main·Lead 미확인 | No Main or Lead found in the retrieved records
-act.recentUnknown | 최근 실행 기록 미확인 | Recent execution records unknown
-act.recentNone | 최근 실행 기록 없음 | No recent execution records
-act.criteria | 완료 기준 검증 · {v} / {n}개 | Completion criteria verified · {v} / {n}
-act.complete |  · 완료 |  · Complete
-act.incomplete |  · 미완료 |  · Incomplete
-act.completeUnknown |  · 완료 여부 미확인 |  · Completion unknown
-act.criteriaUnknown | 완료 기준 미확인 | Completion criteria unknown
-act.reviews | 보관된 리뷰 기록 · 통과 {p} · 실패 {f} · 판정 없음 {u} | Stored review records · passed {p} · failed {f} · no verdict {u}
-act.reviewsUnknown | 보관된 리뷰 기록 미확인 | Stored review records unknown
-act.opsNone | 최근 보관된 결과물 없음 | No recent stored artifacts
-act.opsUnknown | 최근 결과물 미확인 | Recent artifacts unknown
-appr.count | 승인 요청 {n}건 | Approval requests ({n})
-appr.list | 승인 목록 | Approvals
-appr.partial | 승인 목록을 일부만 조회했습니다. | Only part of the approval list was retrieved.
-appr.idle | ✓ 대기 중인 승인 없음 | ✓ No pending approvals
-appr.scope | 결정 범위 · Main이 요청한 다음 작업 | Decision scope · next work requested by Main
-appr.action | 작업 · {v} | Action · {v}
-appr.target | 대상 · {v} | Target · {v}
-appr.sender | 요청자 · {v} | Requester · {v}
-appr.approve | 이 요청 승인 | Approve this request
-appr.deny | 이 요청 거절 | Deny this request
-appr.mismatch | 결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요. | The decision response does not match the request. Check the approval list.
-appr.approved | 승인 처리됨 · {id} | Approved · {id}
-appr.denied | 거절 처리됨 · {id} | Denied · {id}
-appr.checking | 승인 목록을 확인하는 중… | Checking approvals…
-appr.bad | 승인 목록 응답을 읽을 수 없습니다. | Cannot read the approval list response.
-surf.codexApp | Codex 앱 | Codex App
-surf.kindUnknown | {b} · 화면 종류 미확인 | {b} · surface unknown
-surf.unknown | 호스트 미확인 | Unknown host
-host.html | HTML 표시됨 ·  | HTML rendered ·\x20
-host.noReply | 호스트 응답 미확인 | Host response unknown
-host.mode |  · 표시 모드 {v} |  · Display mode {v}
-host.expand | 크게 보기 | Expand
-host.collapse | 대화로 돌아가기 | Back to chat
-host.unknownRest |  · 사이드 패널·네이티브 Mod·전송 경로(로컬/터널/원격) 미확인 |  · side panel, native Mods and transport path (local/tunnel/remote) unknown
-host.readOnly |  · 읽기 전용 프로필 |  · Read-only profile
-host.control |  · 대화 제어 프로필 |  · Conversation-control profile
-host.checked |  · 마지막 조회 {v} |  · Last checked {v}
-cf.installed | 설치됨 | Installed
-cf.notInstalled | 미설치 | Not installed
-cf.authRequired | 인증 필요 | Authentication required
-cf.authVerified | 인증 확인 | Authenticated
-cf.yes | 예 | Yes
-cf.no | 아니오 | No
-cf.verifiedSession | 검증된 세션 필요 | Verified session required
-cf.unsupported | 미지원 | Unsupported
-cl.ready | 실행 준비 | Ready to run
-cl.missingTool | 필수 도구 누락 | Required tool missing
-cl.observe | 관찰 | Observation
-cl.memberConfirmed | 현재 대화의 Main 멤버십 확인 | Main membership in this conversation confirmed
-cl.sessionUnknown | 현재 세션 미확인 | Current session unconfirmed
-cl.control | 대화 제어 | Conversation control
-cl.readOnly | 읽기 전용 | Read-only
-cl.perRequest | 각 요청에서 작업방·권한 확인 | Room and permissions checked on each request
-guide.codex | Codex 로그인 안내 | Codex sign-in guide
-guide.claude | Claude 로그인 안내 | Claude sign-in guide
-guide.agy | Antigravity 공식 안내 | Antigravity official guide
-guide.pi | Pi의 CodexGateway 로그인 안내 | Pi CodexGateway sign-in guide
-start.reserved | 별도 Main 시작 요청 접수됨 · {room} | Separate Main start request received · {room}
-start.recorded | {p} Main · {state} · {attempt} | {p} Main · {state} · {attempt}
-start.unknown | 시작 상태를 확인할 수 없습니다. 진행 상황을 새로고침하세요. | Cannot determine the start status. Refresh to check progress.
-start.started | {p} Main 시작됨 · {room} · {attempt} | {p} Main started · {room} · {attempt}
-start.badResponse | 시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요. | Cannot confirm the start response. Refresh to check progress.
-goalRule | 목표를 한 줄로 1~2,000자 입력하세요. | Enter the goal on one line, 1–2,000 characters.
-status.partial | ~ 일부 | ~ Partial
-status.stale | 이전 조회 결과를 표시하고 있습니다. 새 상태를 확인하는 중… | Showing the previous result. Checking the new status…
-status.checking | 대화의 Main과 프로젝트 상태를 확인하는 중… | Checking the conversation's Main and project status…
-status.badList | 프로젝트 목록 응답을 읽을 수 없습니다. | Cannot read the project list response.
-status.badSnapshot | 프로젝트 상태 응답을 읽을 수 없습니다. | Cannot read the project status response.
-mutate.working | 요청을 처리하는 중… | Processing the request…
-scratch.heading |  | Managed worktree history
-scratch.unavailable | 작업트리 기록을 확인할 수 없습니다. | Worktree records are unavailable.
-scratch.empty | 이 프로젝트에 기록된 작업트리 실행이 없습니다. | No worktree executions recorded for this project.
-scratch.partial | 일부 기록만 확인했습니다. | Only part of the history was observed.
-scratch.omitted | 실행 기록 {n}개 생략 | {n} execution records omitted
-scratch.unverified | 소유 미확인 {n}개 | {n} unverified
-scratch.unexamined | 미조회 {n}개 | {n} unexamined
-scratch.sources | 작업트리 {n}개 생략 | {n} worktrees omitted
-scratch.recorded | 기록된 상태 · {s} | Recorded state · {s}
-scratch.at | 기록 시각 · {at} | Recorded at · {at}
-git.rec.scope | 이 페이지에 표시된 항목별 판단입니다. | Readiness is assessed per item on this page.
-git.rec.recommended | 추천 · {reason} | Recommended · {reason}
-git.rec.excluded | 제외 · {reason} | Excluded · {reason}
-git.rec.unverified | 추천 보류 · {reason} | Unverified · {reason}
-git.rec.ready_with_priority | Ready이고 우선순위가 P0~P2이며 열린 선행 이슈나 기존 Plan 연결이 발견되지 않았습니다. | Ready at priority P0–P2, with no open blockers or existing Plan link observed.
-git.rec.status_not_ready | 상태가 Ready가 아닙니다. | Status is not Ready.
-git.rec.priority_unrecognized | 우선순위가 P0·P1·P2 중 하나인지 확인할 수 없습니다. | Priority could not be confirmed as P0, P1 or P2.
-git.rec.partial_response | GitHub가 일부 정보만 반환했습니다. | GitHub returned partial data.
-git.rec.plan_unverified | 기존 Plan 또는 작업 연결을 확인할 수 없습니다. | Existing Plan or task links could not be verified.
-git.rec.field_schema_unverified | 보드 필드나 선택 항목의 식별자를 확인할 수 없습니다. | Board field or option identities could not be verified.
-git.rec.dependencies_unknown | 선행 이슈 정보를 모두 확인하지 못했습니다. | Blocker information is incomplete.
-git.rec.item_evidence_incomplete | 이슈 또는 보드 항목 정보가 불완전합니다. | Issue or board item details are incomplete.
-git.rec.field_selection_unverified | 선택된 필드 값을 확인할 수 없습니다. | Selected field values could not be verified.
-git.rec.absent | 서버가 추천 정보를 보내지 않았습니다. | The server did not provide a recommendation.
-git.rec.unknown | 추천 상태나 판단 근거를 확인할 수 없습니다. | The recommendation or its reason could not be verified.
-scratch.queued | 대기열에 등록 | Queued`;
+const catalogRows = `share.manual	이 호스트에서는 복사한 뒤 대화에 붙여넣으세요.	Copy the answer and paste it into this conversation on this host.
+peer.assign	Request a read-only review
+peer.legend	Reviewer for this room
+peer.provider	Provider
+peer.prompt	Review request
+peer.hint	Enter the code to check or a question
+peer.start	Call one reviewer
+peer.proof	Room Main confirmed. Ownership across Rooms is checked before calling the reviewer.
+peer.inventory	작업방 목록을 모두 확인할 수 없어 배정 권한을 검증하지 못했습니다. 같은 요청의 상태를 다시 확인할 수 있습니다.	OMS could not verify assignment authority because the Room inventory is incomplete. You can check the same request again.
+peer.check	Check request status
+peer.chat	Open review conversation
+peer.next	Request another review
+peer.role	연구원	Researcher
+peer.result	읽기 전용 검토 결과	Read-only review
+peer.reading	요청 기록 확인 중…	Checking the request record…
+peer.sending	검토 요청을 보내는 중…	Submitting the review request…
+peer.mismatch	요청 기록이 일치하지 않습니다.	The request record does not match.
+peer.absent	기록된 요청이 없습니다.	No recorded request.
+peer.badActor	검토자 기록이 일치하지 않습니다.	The recorded reviewer does not match.
+peer.accepted	{p} 검토 요청 접수 · {title}	{p} review requested · {title}
+peer.unknown	검토자 시작 여부를 확인하지 못했습니다. 같은 요청의 상태를 확인하세요.	Reviewer start is unconfirmed. Check this request’s status.
+peer.error	{error} · 요청 상태를 확인하세요.	{error} · Check this request’s status.
+peer.working	검토자가 응답을 작성 중입니다.	The reviewer is preparing an answer.
+peer.empty	호출이 끝났습니다. 조회한 기록에 답변이 없습니다.	The call ended. No answer was found in the records retrieved.
+peer.failed	검토 호출이 실패했습니다.	The review call failed.
+peer.repair	Link operation to Room
+peer.recovered	검토 실행 기록을 찾았습니다. 이 작업방에 연결하려면 확인하세요.	Review operation found. Confirm to link it to this Room.
+peer.unconfirmed	검토 요청은 기록되었고 실행 상태는 미확인입니다.	Review request recorded. Execution status is unconfirmed.
+share.choose	Attach review result
+share.label	Selected answer
+share.send	Send to this conversation
+share.copy	Copy answer
+share.cancel	Cancel
+share.preview	{p}의 답변을 확인한 뒤 전달하세요.	Review the answer from {p} before sharing.
+share.partial	{p}의 답변 중 아래에 표시된 부분만 전달합니다.	Only the portion of the answer from {p} shown here will be shared.
+share.copied	선택한 답변을 복사했습니다.	Selected answer copied.
+share.select	답변을 선택했습니다. 복사해 현재 대화에 붙여넣으세요.	Answer selected. Copy and paste it into this conversation.
+share.already	이 결과는 이미 전송을 요청했습니다. 현재 대화에서 확인하세요.	Sending this result was already requested. Check the conversation.
+share.sending	선택한 답변을 보내는 중…	Sending the selected answer…
+share.sent	선택한 답변을 현재 대화로 보냈습니다.	Selected answer sent to this conversation.
+share.rejected	호스트가 전송을 거절했습니다. 답변을 복사할 수 있습니다.	The host declined to send the answer. You can copy it instead.
+share.unknown	호스트 응답 미확인 · 현재 대화를 확인한 뒤 필요하면 답변을 복사하세요.	Delivery is unconfirmed. Check the conversation before copying the answer.
+title	OMS · 프로젝트 제어	OMS · Project control
+language	Language (언어)
+project	Project
+refresh	Refresh
+unknown	미확인	Unknown
+noInfo	정보 없음	No data
+providerUnknown	공급자 미확인	Unknown provider
+statusUnknown	상태 미확인	Status unknown
+partial	일부 조회	Partially retrieved
+noRecords	기록 없음	No records
+projectDefault	OMS 프로젝트	OMS project
+selectProject	프로젝트 선택	Select a project
+draft	초안	Draft
+pageN	{page}페이지	Page {page}
+prevPage	Previous page
+nextPage	Next page
+closed	패널이 닫혔습니다.	The panel was closed.
+timeout	응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요.	The request timed out. Refresh to check the result.
+hostFail	앱이 요청을 처리하지 못했습니다.	The app could not process the request.
+projChanged	프로젝트가 변경되었습니다.	The project changed.
+toolFail	OMS 도구 호출에 실패했습니다.	The OMS tool call failed.
+linkFail	앱에서 링크를 열 수 없습니다.	The app cannot open the link.
+openApp	앱 대화에서 OMS 패널을 여세요.	Open the OMS panel from an app conversation.
+tab.chat	Chat
+tab.activity	Activity
+tabs	Project views
+tab.overview	Now
+tab.work	Work
+tab.results	Results
+tab.relations	Relations
+tab.usage	Metrics
+tabsMore	More views
+moreViews	More
+taskSections	Task detail sections
+task.overview	Summary
+task.changes	Changes
+task.verification	Verification
+task.history	History
+w.back	← Back to list
+w.now	Work in progress
+w.nowResults	Task results
+w.owners	Owner linkage
+w.deps	Task dependencies
+w.loading	작업 목록을 읽는 중…	Reading work items…
+w.unavailable	작업 목록을 사용할 수 없습니다: {v}	Work items are unavailable: {v}
+w.bad	작업 목록 형식을 확인할 수 없습니다.	The work item response was not recognized.
+w.count	작업 {n}개	{n} work items
+w.omitted	{n}개는 표시 범위 밖입니다.	{n} more are outside the shown range.
+w.dropped	식별자가 없는 항목 {n}개는 제외했습니다.	{n} items without an id were left out.
+w.dup	식별자가 겹친 작업 {n}개는 구분할 수 없어 제외했습니다.	{n} items with a repeated id cannot be told apart and were left out.
+w.empty	관측된 작업이 없습니다.	No work items observed.
+w.noneActive	진행 중인 작업이 없습니다.	No work in progress.
+w.noneResults	결과가 기록된 작업이 없습니다.	No work item has a recorded result.
+w.noResultCount	결과가 기록되지 않은 작업 {n}개	{n} work items have no recorded result
+w.owner	담당: {v}	Owner: {v}
+w.ownerUnknown	담당 미확인	Owner unknown
+w.id	ID {v}	ID {v}
+g.planned	예정	Planned
+g.active	진행	In progress
+g.review	검토	Review
+g.done	완료	Done
+g.other	기타 상태	Other states
+w.na	미확인	Unavailable
+w.evidenceNo	검증 근거 없음	No verification evidence
+w.ownersNote	작업 기록에 적힌 담당 값으로만 묶습니다. 보고·상하 관계나 provider 소속은 추론하지 않습니다.	Grouped only by the owner value in the work record. Reporting lines and provider membership are not inferred.
+w.depsNote	선행 작업 → 후속 작업 관계만 표시하며 담당 연결과 섞지 않습니다.	Shows only prerequisite → follow-up edges, never mixed with owner linkage.
+w.depsUnknown	선행 정보 미확인	Prerequisites unavailable
+w.depsNone	선행 작업 없음	No prerequisites
+w.pre	선행: {v}	Before: {v}
+w.post	후속: {v}	After: {v}
+w.missingDep	{id} (목록에 없음)	{id} (not in list)
+w.cycle	순환 의존이 관측되어 그대로 표시합니다: {v}	A dependency cycle was observed and is shown as recorded: {v}
+w.gone	이 작업은 현재 관측 결과에 없습니다: {id}	This task is not in the current observation: {id}
+w.revChanged	작업 상세 버전이 변경되었습니다 ({a} → {b}).	Task detail version changed since opened ({a} → {b}).
+w.detailUnavailable	작업 상세를 읽을 수 없습니다.	Task details could not be read.
+w.fState	상태	State
+w.fOwner	담당(작업 기록)	Owner (work record)
+w.fIssue	이슈	Issue
+w.fPre	선행 작업	Prerequisites
+w.fPost	후속 작업	Follow-ups
+w.fRev	작업 상세 버전	Task detail version
+w.fId	작업 ID	Task ID
+w.fResult	결과 참조	Result reference
+w.fVerify	검증 근거	Verification evidence
+w.noPreview	이 작업 기록에는 미리보기 또는 diff가 포함되지 않았습니다.	No preview or diff is included in this work record.
+w.resultNone	결과가 기록되지 않았습니다.	No result is recorded.
+w.verifyNone	검증 근거가 기록되지 않았습니다. 미실행인지 누락인지 구분할 수 없습니다.	No verification evidence is recorded; not-run and missing cannot be told apart.
+w.verifyNoRev	이 기록의 상세 버전을 확인할 수 없습니다.	The detail version of this record is unknown.
+w.histNone	이 작업에 연결된 이벤트·시도 기록의 범위를 확인할 수 없어 표시하지 않습니다.	The scope of events and attempts linked to this task is unknown, so none are shown.
+w.histOpen	프로젝트 전체 활동 열기 (이 작업 전용 아님)	Open project-wide activity (not specific to this task)
+w.viewAll	작업 전체 보기	View all work
+alerts	Items needing attention
+alerts.count	{n}건	{n} items
+alertsOpen	View attention items
+goalHeading	Project goal
+planStrip	Project task verification
+planVerified	Planned tasks verified
+planOpen	View plan ›
+map.parent	Parent
+map.deps	Dependencies
+threads	Other work conversations
+providerOptions	Lead candidates · Codex, Claude, AGY
+providerLoad	Check host status
+backlog	Hand all open GitHub work to Main
+launcher	Choose a new Main
+leadPick	Lead preferences
+chooseMain	Main provider
+briefLabel	New work goal
+briefPlaceholder	Enter the goal Main will pursue with its Leads.
+start	Send goal
+records	Full project record
+metricActive	Attempts without a closing record
+metricTasks	Planned tasks
+metricState	Current state
+historyTeam	Project Main and Lead records
+historyOps	Recently stored artifacts
+historyRuns	Recent executions
+chatHeading	Room conversation
+chatBack	Back to previous view
+followUp	Draft a follow-up
+chatMembers	Conversation participants
+chatOlder	Earlier messages
+chatMessages	Room messages in time order
+evidenceRegion	Execution evidence by call
+evidenceCall	Recorded call
+evidencePrev	Previous evidence page
+evidenceNext	Next evidence page
+activityHeading	Project activity
+tuiLabel	OMS TUI details
+tui.choose	Choose a view
+tui.runtime	Runtime
+tui.collab	Collaboration
+tui.run	Execution
+tui.overview	Overview
+tui.health	Health
+tui.providers	Providers
+tui.metrics	Metrics
+tui.capacity	Capacity
+tui.log	Log
+tui.teams	Teams
+tui.sessions	Sessions
+tui.plan	Plan
+tui.attention	Attention
+tui.results	Results
+tui.debate	Debate
+tui.routes	Routes
+tui.workspaces	Workspaces
+tui.jobs	Jobs
+tui.past	Past runs
+tuiRegion	Selected OMS TUI records
+timeline	Command and job timeline
+usageHeading	Token usage
+gitBacklog	Hand all open work to Main
+gitEditor	GitHub item work goal
+gitAssignee	Assign request to
+gitAuto	Main chooses the Lead
+gitGoalLabel	Goal to send to the conversation
+gitCopy	Copy goal
+gitNew	Use as a separate Main goal
+gitView	GitHub view
+gitKind.checkout	Checkout PRs · checks
+gitKind.issues	Repository issues
+gitKind.pullRequests	Repository PRs
+gitFind	Find by number
+gitLookup	Look up
+source	Connection info
+room	Room
+participant	Participant
+obsRevision	Observation revision
+obsBasis	Observation basis
+obsCompleteness	Collection status
+appAndOms	App and OMS
+hostSupport	Support and connection paths by host
+hostSupport1	Codex Desktop supports a chat tab. CLI and IDE use OMS tools.
+hostSupport2	Claude Chat supports remote HTTPS; Desktop also supports local stdio. Side-panel availability varies by account and conversation.
+hostSupport3	AGY 2.34.0+ supports local stdio or remote MCP. CLI and IDE use text tools.
+connectionView	Connection details
+cv.connections	Harnesses and readiness
+cv.modelcatalog	Model and effort catalog
+cv.routes	Expected routing · accounts
+cv.attribution	Execution response evidence
+harness	Harness
+connectionRefresh	Reload connection details
+connectionDraft	Draft a new goal with this harness
+sv.connections	설치 상태는 OMS 실행 호스트의 PATH에서 확인합니다. 인증과 실제 실행 가능 여부는 별도로 확인합니다.	Installation is checked on the PATH of the host running OMS. Authentication and actual runnability are checked separately.
+sv.modelcatalog	로컬 공급자 카탈로그의 마지막 보고값입니다. 공급자 단위 강도는 개별 모델의 지원 근거와 구분합니다.	Last values reported by the local provider catalog. Provider-level effort is kept distinct from per-model support evidence.
+sv.routes	프로젝트의 다음 호출에 대한 라우팅 예상값입니다. 계정은 확인된 논리 별칭만 표시합니다.	Expected routing for the project's next call. Only confirmed logical aliases are shown for accounts.
+sv.attribution	선택한 프로젝트의 보관된 실행 기록입니다. 전송에서 확인한 모델만 응답 모델로 표시합니다. 응답 계정·강도는 기록이 없으면 미확인입니다.	Stored execution records for the selected project. Only models confirmed from transport are shown as the response model. Response account and effort are unknown when not recorded.
+state.running	실행 중	Running
+state.starting	시작 중	Starting
+state.active	활성	Active
+state.open	열림	Open
+state.planned	예정	Planned
+state.passed	통과	Passed
+state.supported	근거 있음	Supported
+state.claimed	점유됨	Claimed
+state.landing	착지 중	Landing
+state.verifying	검증 중	Verifying
+state.review	검토 중	In review
+state.waiting	Needs you
+state.blocked	차단됨	Blocked
+state.ready	준비됨	Ready
+state.queued	대기 중	Pending
+state.done	완료	Done
+state.completed	완료	Completed
+state.exited	종료됨	Exited
+state.accepted	검증 완료	Verified
+state.closed	닫힘	Closed
+state.cancelled	취소됨	Cancelled
+state.abandoned	중단됨	Abandoned
+state.interrupted	중단됨	Interrupted
+state.failed	실패	Failed
+state.rejected	반려됨	Rejected
+state.timed_out	시간 초과	Timed out
+state.orphaned	연결 끊김	Orphaned
+state.guard_stop	가드 정지	Guard stop
+state.partial	일부	Partial
+state.degraded	저하	Degraded
+state.stale	일부·만료	Stale
+state.unknown	미확인	Unknown
+kind.issue	이슈 #	Issue #
+kind.pr	PR #	PR #
+git.unknown	현재 체크아웃의 Git 상태 미확인	Git status of the current checkout is unknown
+git.detached	분리된 HEAD	Detached HEAD
+git.dirty	작업 트리 변경 있음	Working tree has changes
+git.clean	작업 트리 깨끗함	Working tree clean
+git.dirtyUnknown	작업 트리 미확인	Working tree unknown
+git.upstream	추적 브랜치 {v}	Upstream {v}
+git.ahead	앞섬 {n}	Ahead {n}
+git.behind	뒤처짐 {n}	Behind {n}
+git.prefix	{p} Lead에게 다음 작업을 배정해 주세요. 	Please assign the following work to the {p} Lead.\x20
+git.prefixAny	담당 Lead를 정해 다음 작업을 배정해 주세요. 	Please choose a Lead and assign the following work.\x20
+git.review	Review issue version
+git.reading	이슈 버전을 확인하고 있습니다…	Checking the issue version…
+git.proof	열린 이슈 · 수정 시각 {rev}	Open issue · Updated {rev}
+git.noProof	선택한 이슈의 버전을 확인할 수 없습니다.	Could not verify the selected issue version.
+git.draft	작업 목표 작성	Draft work goal
+git.draftAria	{label} 작업 목표 작성	{label}: draft work goal
+git.editorHint	대화로 보내면 Main이 이 목표로 작업을 시작할 수 있습니다.	Once sent to the conversation, Main can start working on this goal.
+git.noRepo	현재 프로젝트의 GitHub 저장소를 확인할 수 없습니다.	Cannot determine this project's GitHub repository.
+git.backlogLabel	{repo} · 전체 열린 작업	{repo} · all open work
+git.backlogBody	{url} 저장소의 모든 열린 이슈와 PR을 마지막 페이지까지 조회하세요. 기존 PR과 검증 결과, 중복 및 의존성을 확인하고 작업 순서를 정하세요. oms_panel_git_status의 inventory를 issues와 pullRequests로 각각 조회하고 nextCursor가 없을 때까지 다음 페이지를 읽으세요. 조회 실패·누락은 미확인으로 표시하세요. 각 작업을 적합한 Lead와 진행하고 결과, 검증 근거, 남은 항목을 대화에 보고하세요. 게시나 병합은 별도의 명시적 승인 후 진행하세요.	List every open issue and PR in the {url} repository through the last page. Check existing PRs, verification results, duplicates and dependencies, then decide the work order. Query the oms_panel_git_status inventory separately for issues and pullRequests and read further pages until nextCursor is absent. Mark failed or missing lookups as unknown. Run each task with a suitable Lead and report results, verification evidence and remaining items in the conversation. Publish or merge only after separate explicit approval.
+git.loading	GitHub PR과 검사를 조회하는 중…	Loading GitHub PRs and checks…
+git.remoteUnsupported	GitHub PR 조회를 지원하지 않는 원격 저장소	Remote repository does not support GitHub PR lookup
+git.prUnavailable	GitHub PR 조회 불가	GitHub PR lookup unavailable
+git.noOpenPr	조회한 체크아웃에 연결된 열린 PR 없음	No open PR linked to the checked-out branch
+git.scope	GitHub Projects 읽기 권한(read:project)이 필요합니다.	GitHub Projects read permission (read:project) is required.
+git.listUnsupported	이 저장소에서 지원하지 않는 목록입니다.	This repository does not support this list.
+git.listFail	GitHub 목록을 조회할 수 없습니다.	Cannot retrieve the GitHub list.
+git.shown	{n}건 표시	{n} shown
+git.noItems	조회된 항목 없음	No items found
+git.boardUnknown	보드 식별 정보 미확인	Board identity unknown
+git.boardView	보드 상세 보기	View board details
+git.boardLoading	보드 조회 중…	Loading board…
+git.timeout	GitHub 조회 시간이 초과됐습니다.	GitHub lookup timed out.
+git.rateLimit	GitHub 요청 한도에 도달했습니다.	GitHub rate limit reached.
+git.boardNotInCatalog	현재 저장소에서 확인한 연결 목록에 이 보드가 없습니다.	This board is not in the connected list found for this repository.
+git.boardUnverified	이 저장소에서 보드와 연결 정보를 확인할 수 없습니다.	Cannot verify the board and its link to this repository.
+git.class.candidate	검토 후보	Candidate
+git.class.blocked	선행 이슈 진행 중	Blocked by an open prerequisite
+git.class.unverified	추가 확인 필요	Needs verification
+git.class.plan_linked	기존 Plan 연결	Linked to an existing Plan
+git.class.board_in_progress	보드에서 진행 중	In progress on the board
+git.class.closed_board	닫힌 보드	Closed board
+git.class.duplicate	중복	Duplicate
+git.class.archived	보관됨	Archived
+git.class.unknown	분류 미확인	Unclassified
+git.class.draft	초안	Draft
+git.class.foreign	다른 저장소	Other repository
+git.class.epic	에픽	Epic
+git.class.closed	닫힘	Closed
+git.class.pull_request	PR	PR
+git.page	{page}쪽 · {n}건	Page {page} · {n} items
+git.missingFields	확인되지 않은 필드 {v}	Unverified fields {v}
+git.badNumber	1~9999999999 사이의 정수 번호를 입력하세요.	Enter an integer between 1 and 9999999999.
+git.finding	GitHub 항목을 찾는 중…	Looking up the GitHub item…
+git.closed	이미 닫힌 항목입니다.	This item is already closed.
+git.notOpenNow	현재 열린 상태를 확인할 수 없습니다.	Cannot confirm that it is currently open.
+git.notFound	이 저장소에서 해당 열린 항목을 확인할 수 없습니다.	Cannot find that open item in this repository.
+git.sendMain	현재 Main 대화에 보내기	Send to current Main conversation
+git.share	현재 대화에 공유	Share to current conversation
+git.copied	목표를 복사했습니다.	Goal copied.
+git.selected	목표를 선택했습니다. 복사해 현재 대화에서 사용할 수 있습니다.	Goal selected. Copy it to use in the current conversation.
+git.sending	현재 대화로 전달하는 중…	Sending to the current conversation…
+git.sentMain	현재 Main 대화에 배정 요청을 전달했습니다.	Assignment request sent to the current Main conversation.
+git.shared	현재 대화에 목표를 공유했습니다.	Goal shared to the current conversation.
+git.sendUnknown	전달 여부를 대화에서 확인하세요. 작성한 목표는 복사할 수 있습니다.	Check the conversation to see whether it was delivered. You can copy the goal you wrote.
+git.tooLong	기존 목표와 합치면 2,000자를 넘습니다. 전달할 내용을 줄이세요.	Combined with the existing goal it exceeds 2,000 characters. Shorten what you send.
+git.badResponse	Git·PR 응답을 확인할 수 없습니다.	Cannot read the Git/PR response.
+git.staleItem	새 목록에서 열린 상태를 확인하지 못했습니다. 번호로 다시 조회해 선택하세요.	The new list did not confirm it is open. Look it up by number again and select it.
+git.openAria	{repo} {text} GitHub에서 열기	Open {repo} {text} on GitHub
+git.linkedWorktree	연결된 워크트리	Linked worktree
+git.currentCheckout	현재 체크아웃	Current checkout
+git.headMatch	로컬 HEAD 일치	Matches local HEAD
+git.headDiffer	로컬 HEAD 불일치	Differs from local HEAD
+git.headUnknown	HEAD 비교 미확인	HEAD comparison unknown
+git.checksUnknown	검사 상태 미확인	Check status unknown
+git.noChecks	보고된 검사 없음	No checks reported
+git.checks	검사 · 통과 {p} · 실패 {f} · 대기 {w} · 기타 {o}	Checks · passed {p} · failed {f} · pending {w} · other {o}
+git.check.failed	실패	Failed
+git.check.pending	대기 중	Pending
+git.check.passed	통과	Passed
+git.check.other	기타	Other
+usage.loading	기록된 사용량을 조회하는 중…	Loading recorded usage…
+usage.badResponse	사용량 응답을 확인할 수 없습니다.	Cannot read the usage response.
+usage.totals	프로젝트 누적 · 물리 호출 영수증	Project totals · physical call receipts
+usage.totalsUnknown	프로젝트 호출 영수증 수집 상태 미확인	Project call receipt collection status unknown
+usage.totalsNone	기록된 프로젝트 호출 영수증 없음	No project call receipts recorded
+usage.tokens	보고된 토큰 소계 {tokens} · 사용량 보고 {r}/{c}회	Reported token subtotal {tokens} · usage reported in {r}/{c} calls
+usage.reportedCost	보고 비용	Reported cost
+usage.estimatedCost	추정 비용	Estimated cost
+usage.noRecord	기록 없음	No record
+usage.costLine	{title} {cost} · {n}회	{title} {cost} · {n} calls
+usage.hostUsage	호스트 공급자 사용량	Host provider usage
+usage.lastObserved	마지막 관측 	Last observed\x20
+usage.used	{n}% 사용	{n}% used
+usage.unknown	사용률 미확인	Usage unknown
+usage.stale	오래된 기록	Stale record
+usage.ago	{n}분 전 기록	Recorded {n} min ago
+usage.resets	초기화 {d}	Resets {d}
+usage.window	구간	Window
+usage.windowAria	{name} 사용률	{name} usage
+usage.windowsOmitted	표시 한도 밖의 사용 구간 {n}개	{n} usage windows beyond the display limit
+usage.context	컨텍스트 {n}%	Context {n}%
+usage.cacheShare	캐시 읽기 비중 {n}%	Cache read share {n}%
+usage.recent	최근 7일 OMS 위임 · 호출 {c} · 입력 {i} · 출력 {o} · 캐시 읽기 {r}	OMS delegation, last 7 days · calls {c} · input {i} · output {o} · cache read {r}
+usage.none	수집된 공급자 사용량 없음	No provider usage collected
+usage.attempts	프로젝트 시도별 토큰 기록	Token records by project attempt
+usage.tokenCount	토큰 {n}	Tokens {n}
+usage.receipt	실행 영수증	Execution receipt
+usage.events	이벤트 기록	Event log
+usage.sourceUnknown	출처 미확인	Source unknown
+usage.reportedCalls	사용량 보고 {r}/{c}회	Usage reported in {r}/{c} calls
+usage.eventCost	이벤트 기록 비용 {v}	Event-log cost {v}
+usage.b.calls	호출 {n}	Calls {n}
+usage.b.input	입력 {n}	Input {n}
+usage.b.output	출력 {n}	Output {n}
+usage.b.cacheRead	캐시 읽기 {n}	Cache read {n}
+usage.b.cacheWrite	캐시 쓰기 {n}	Cache write {n}
+usage.attemptsNone	최근 시도에 귀속된 토큰 기록 없음	No token records attributed to recent attempts
+usage.attemptsOmitted	표시 한도 밖의 시도 {n}건	{n} attempts beyond the display limit
+goalNone	기록된 목표 없음	No goal recorded
+obs.basis	다중 원장 관측 (비원자적)	Multi-ledger observation (non-atomic)
+obs.basisUnknown	관측 기준 미확인	Observation basis unknown
+obs.complete	전체 관측	Full observation
+obs.partial	일부 관측	Partial observation
+obs.unknown	관측 상태 미확인	Observation status unknown
+obs.omitted	생략 {n}건	Omitted {n}
+obs.trimmed	축약 {n}건	Trimmed {n}
+src.git	Git	Git
+src.task	작업	Tasks
+src.plan	계획	Plan
+src.attempts	실행	Executions
+src.artifacts	결과물	Artifacts
+src.acceptance	수락 근거	Acceptance evidence
+src.conversation	대화	Conversation
+srcState.unavailable	미확인	Unknown
+srcState.partial	일부 수집	Partially collected
+srcState.ambiguous	연결 불명확	Ambiguous link
+srcState.stale	만료된 기록	Stale record
+obs.needsAttention	확인 필요 · {v}	Needs attention · {v}
+obs.latestArtifact	저장소 최근 결과물 {v}	Latest repository artifact {v}
+obs.lastChecked	최근 조회 {d}	Last checked {d}
+omit.attempts	최근 실행	Recent executions
+omit.operations	결과물	Artifacts
+omit.attention	주의 항목	Attention items
+omit.active	미종료 실행	Open executions
+labelCount	{label} {n}건	{label} {n}
+degraded	일부 상태를 수집하지 못했습니다.	Some status could not be collected.
+omittedRecords	요약에서 생략된 기록 · {v}	Records omitted from the summary · {v}
+conn.checking	OMS 연결 확인 중	Checking OMS connection
+conn.unknownProject	프로젝트 연결 미확인	Project connection unknown
+conn.selectProject	OMS 연결됨 · 프로젝트 선택 필요	OMS connected · select a project
+conn.loaded	OMS 연결됨 · 프로젝트 상태 조회됨	OMS connected · project status loaded
+conn.failed	OMS 연결 또는 프로젝트 조회 실패	OMS connection or project lookup failed
+conn.needsConnection	OMS와 프로젝트 연결을 확인한 뒤 조회할 수 있습니다.	You can look this up after the OMS and project connection is confirmed.
+conn.loading	연결 내역을 확인하는 중…	Checking connection details…
+conn.rows	{n}건 표시	{n} shown
+conn.none	확인된 기록 없음	No records confirmed
+conn.fail	현재 연결 내역을 확인할 수 없습니다. OMS 연결과 프로젝트 권한을 확인하고 다시 조회하세요.	Cannot retrieve connection details. Check the OMS connection and project permissions, then try again.
+conn.checkPermissions	프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요.	Check project permissions and the host MCP connection, then try again.
+project.unreachable	대화에서 지정한 프로젝트에 연결할 수 없습니다.	Cannot connect to the project specified in the conversation.
+project.choose	OMS를 사용할 프로젝트를 선택하세요.	Select a project to use with OMS.
+member.left	참여 종료	Left
+member.omitted	추가 참여자 {n}명 생략	{n} more participants omitted
+evidence.choose	호출 선택	Select a call
+evidence.missing	조회된 작업방 호출 목록에서 해당 시도를 확인할 수 없습니다.	That attempt is not in the retrieved room call list.
+evidence.partial	최근 호출 목록 일부 표시	Showing part of the recent call list
+evidence.loading	{name} 조회 중…	Loading {name}…
+evidence.mismatch	선택한 호출과 근거 응답이 일치하지 않습니다.	The evidence response does not match the selected call.
+evidence.changed	보관된 근거가 바뀌었습니다. 실행 정보를 다시 확인하세요.	The stored evidence changed. Check the run info again.
+evidence.truncated	긴 줄 일부 표시	Long lines truncated
+ev.info	실행 정보	Run info
+ev.events	이벤트	Events
+ev.files	변경 파일	Changed files
+ev.diff	패치	Patch
+ev.transcript	기록된 답변	Recorded reply
+chat.title	참여자 대화	Participant conversation
+chat.pick	메시지를 읽을 참여자를 선택하세요.	Select a participant to read messages.
+chat.noMembers	현재 대화와 연결된 작업방 참여자 미확인	No room participants linked to this conversation found
+chat.loading	작업방 메시지를 조회하는 중…	Loading room messages…
+chat.loadingOlder	이전 메시지를 조회하는 중…	Loading earlier messages…
+chat.mismatch	선택한 작업방·참여자와 메시지 응답이 일치하지 않습니다.	The message response does not match the selected room and participant.
+chat.result	기록된 실행 결과	Recorded execution result
+chat.partial	일부 표시	Partially shown
+chat.native	Codex 원래 대화 열기	Open original Codex conversation
+chat.count	작업방 기록 {n}건	{n} room records
+chat.none	기록된 작업방 메시지 없음	No room messages recorded
+tui.loading	TUI 기록을 조회하는 중…	Loading TUI records…
+tui.mismatch	선택한 TUI 보기와 응답이 일치하지 않습니다.	The response does not match the selected TUI view.
+tui.unavailable	이 TUI 보기를 조회할 수 없습니다.	Cannot load this TUI view.
+tui.shown	표시 {n}건	{n} shown
+tui.noneOnPage	이 페이지에서 확인된 기록 없음	No records confirmed on this page
+tui.confirmedTotal	확인된 합계 {n}건	Confirmed total {n}
+tui.total	전체 {n}건	Total {n}
+thread.aria	{task} · {p} 대화 열기	Open conversation: {task} · {p}
+prov.loading	호스트 공급자 상태를 확인하는 중…	Checking host provider status…
+prov.unavailable	호스트 공급자 상태를 확인할 수 없습니다.	Cannot determine host provider status.
+prov.usable	호스트 사용 가능	Available on host
+prov.unusable	호스트 사용 불가	Unavailable on host
+prov.installed	설치됨 · 사용 가능 여부 미확인	Installed · availability unknown
+prov.notInstalled	설치되지 않음	Not installed
+prov.unknown	사용 가능 여부 미확인	Availability unknown
+prov.partial	호스트 목록 일부 조회	Host list partially retrieved
+prov.basis	현재 프로젝트 호스트 기준	Based on the current project host
+main.repoScope	저장소 Main	Repository Main
+main.current	이 대화	This chat
+main.unknown	Main 미확인	Main unknown
+main.joined	작업방 소유자로 참여 중	Joined as room owner
+main.partialRooms	 · 작업방 목록 일부 조회	 · Room list partially retrieved
+main.noOwner	이 대화와 연결된 작업방 소유자를 확인할 수 없습니다.	Cannot determine the room owner linked to this conversation.
+main.repoRecorded	저장소에 기록된 Main	Main recorded in the repository
+main.thisConversation	이 대화의 Main	Main of this conversation
+main.repoLeads	저장소의 Lead 활동	Repository Lead activity
+main.roomLead	작업방 Lead	Room Leads
+main.noRepoMain	저장소 실행 기록에서 Main을 확인할 수 없습니다.	Cannot determine Main from repository execution records.
+main.headerAria	이 대화의 {name} 작업방 대화 보기	View the room conversation of {name} for this conversation
+lead.none	미종료 Lead 기록 없음	No open Lead records
+lead.unseen	조회한 기록에서 미종료 Lead를 확인하지 못했습니다.	No open Lead found in the retrieved records.
+lead.taskUnknown	작업 미확인	Task unknown
+lead.aria	{assignee} · {task} · {p} 대화 열기	Open conversation: {assignee} · {task} · {p}
+act.planned	계획된 작업 {n}	Planned tasks {n}
+act.partialRuntime	런타임 일부 조회	Runtime partially retrieved
+act.attempts	실행 시도 {n}	Execution attempts {n}
+act.open	미종료 {n}	Open {n}
+act.executing	실행 상태 {n}	Executing {n}
+act.unknown	OMS 명령 집계 미확인	OMS command totals unknown
+act.attempt	실행 시도	Execution attempt
+act.artifact	결과물	Artifact
+act.timeUnknown	시각 미확인	Time unknown
+act.viewEvidence	호출 근거 보기	View call evidence
+act.viewEvidenceAria	{id} 호출 근거 보기	View call evidence for {id}
+act.exit	종료 코드 {n}	Exit code {n}
+act.noEvents	조회된 실행 기록 없음	No execution records retrieved
+act.roomUnknown	작업방 미확인	Room unknown
+act.noTeam	조회한 기록에서 Main·Lead 미확인	No Main or Lead found in the retrieved records
+act.recentUnknown	최근 실행 기록 미확인	Recent execution records unknown
+act.recentNone	최근 실행 기록 없음	No recent execution records
+act.criteria	완료 기준 검증 · {v} / {n}개	Completion criteria verified · {v} / {n}
+act.complete	 · 완료	 · Complete
+act.incomplete	 · 미완료	 · Incomplete
+act.completeUnknown	 · 완료 여부 미확인	 · Completion unknown
+act.criteriaUnknown	완료 기준 미확인	Completion criteria unknown
+act.reviews	보관된 리뷰 기록 · 통과 {p} · 실패 {f} · 판정 없음 {u}	Stored review records · passed {p} · failed {f} · no verdict {u}
+act.reviewsUnknown	보관된 리뷰 기록 미확인	Stored review records unknown
+act.opsNone	최근 보관된 결과물 없음	No recent stored artifacts
+act.opsUnknown	최근 결과물 미확인	Recent artifacts unknown
+appr.count	승인 요청 {n}건	Approval requests ({n})
+appr.list	승인 목록	Approvals
+appr.partial	승인 목록을 일부만 조회했습니다.	Only part of the approval list was retrieved.
+appr.idle	✓ 대기 중인 승인 없음	✓ No pending approvals
+appr.scope	결정 범위 · Main이 요청한 다음 작업	Decision scope · next work requested by Main
+appr.action	작업 · {v}	Action · {v}
+appr.target	대상 · {v}	Target · {v}
+appr.sender	요청자 · {v}	Requester · {v}
+appr.approve	이 요청 승인	Approve this request
+appr.deny	이 요청 거절	Deny this request
+appr.mismatch	결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요.	The decision response does not match the request. Check the approval list.
+appr.approved	승인 처리됨 · {id}	Approved · {id}
+appr.denied	거절 처리됨 · {id}	Denied · {id}
+appr.checking	승인 목록을 확인하는 중…	Checking approvals…
+appr.bad	승인 목록 응답을 읽을 수 없습니다.	Cannot read the approval list response.
+surf.codexApp	Codex 앱	Codex App
+surf.kindUnknown	{b} · 화면 종류 미확인	{b} · surface unknown
+surf.unknown	호스트 미확인	Unknown host
+host.html	HTML 표시됨 · 	HTML rendered ·\x20
+host.noReply	호스트 응답 미확인	Host response unknown
+host.mode	 · 표시 모드 {v}	 · Display mode {v}
+host.expand	크게 보기	Expand
+host.collapse	대화로 돌아가기	Back to chat
+host.unknownRest	 · 사이드 패널·네이티브 Mod·전송 경로(로컬/터널/원격) 미확인	 · side panel, native Mods and transport path (local/tunnel/remote) unknown
+host.readOnly	 · 읽기 전용 프로필	 · Read-only profile
+host.control	 · 대화 제어 프로필	 · Conversation-control profile
+host.checked	 · 마지막 조회 {v}	 · Last checked {v}
+cf.installed	설치됨	Installed
+cf.notInstalled	미설치	Not installed
+cf.authRequired	인증 필요	Authentication required
+cf.authVerified	인증 확인	Authenticated
+cf.yes	예	Yes
+cf.no	아니오	No
+cf.verifiedSession	검증된 세션 필요	Verified session required
+cf.unsupported	미지원	Unsupported
+cl.ready	실행 준비	Ready to run
+cl.missingTool	필수 도구 누락	Required tool missing
+cl.observe	관찰	Observation
+cl.memberConfirmed	현재 대화의 Main 멤버십 확인	Main membership in this conversation confirmed
+cl.sessionUnknown	현재 세션 미확인	Current session unconfirmed
+cl.control	대화 제어	Conversation control
+cl.readOnly	읽기 전용	Read-only
+cl.perRequest	각 요청에서 작업방·권한 확인	Room and permissions checked on each request
+guide.codex	Codex 로그인 안내	Codex sign-in guide
+guide.claude	Claude 로그인 안내	Claude sign-in guide
+guide.agy	Antigravity 공식 안내	Antigravity official guide
+guide.pi	Pi의 CodexGateway 로그인 안내	Pi CodexGateway sign-in guide
+start.reserved	별도 Main 시작 요청 접수됨 · {room}	Separate Main start request received · {room}
+start.recorded	{p} Main · {state} · {attempt}	{p} Main · {state} · {attempt}
+start.unknown	시작 상태를 확인할 수 없습니다. 진행 상황을 새로고침하세요.	Cannot determine the start status. Refresh to check progress.
+start.started	{p} Main 시작됨 · {room} · {attempt}	{p} Main started · {room} · {attempt}
+start.badResponse	시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요.	Cannot confirm the start response. Refresh to check progress.
+goalRule	목표를 한 줄로 1~2,000자 입력하세요.	Enter the goal on one line, 1–2,000 characters.
+status.partial	~ 일부	~ Partial
+status.stale	이전 조회 결과를 표시하고 있습니다. 새 상태를 확인하는 중…	Showing the previous result. Checking the new status…
+status.checking	대화의 Main과 프로젝트 상태를 확인하는 중…	Checking the conversation's Main and project status…
+status.badList	프로젝트 목록 응답을 읽을 수 없습니다.	Cannot read the project list response.
+status.badSnapshot	프로젝트 상태 응답을 읽을 수 없습니다.	Cannot read the project status response.
+mutate.working	요청을 처리하는 중…	Processing the request…
+scratch.heading	Managed worktree history
+scratch.unavailable	작업트리 기록을 확인할 수 없습니다.	Worktree records are unavailable.
+scratch.empty	이 프로젝트에 기록된 작업트리 실행이 없습니다.	No worktree executions recorded for this project.
+scratch.partial	일부 기록만 확인했습니다.	Only part of the history was observed.
+scratch.omitted	실행 기록 {n}개 생략	{n} execution records omitted
+scratch.unverified	소유 미확인 {n}개	{n} unverified
+scratch.unexamined	미조회 {n}개	{n} unexamined
+scratch.sources	작업트리 {n}개 생략	{n} worktrees omitted
+scratch.recorded	기록된 상태 · {s}	Recorded state · {s}
+scratch.at	기록 시각 · {at}	Recorded at · {at}
+git.rec.scope	이 페이지에 표시된 항목별 판단입니다.	Readiness is assessed per item on this page.
+git.rec.recommended	추천 · {reason}	Recommended · {reason}
+git.rec.excluded	제외 · {reason}	Excluded · {reason}
+git.rec.unverified	추천 보류 · {reason}	Unverified · {reason}
+git.rec.ready_with_priority	Ready이고 우선순위가 P0~P2이며 열린 선행 이슈나 기존 Plan 연결이 발견되지 않았습니다.	Ready at priority P0–P2, with no open blockers or existing Plan link observed.
+git.rec.status_not_ready	상태가 Ready가 아닙니다.	Status is not Ready.
+git.rec.priority_unrecognized	우선순위가 P0·P1·P2 중 하나인지 확인할 수 없습니다.	Priority could not be confirmed as P0, P1 or P2.
+git.rec.partial_response	GitHub가 일부 정보만 반환했습니다.	GitHub returned partial data.
+git.rec.plan_unverified	기존 Plan 또는 작업 연결을 확인할 수 없습니다.	Existing Plan or task links could not be verified.
+git.rec.field_schema_unverified	보드 필드나 선택 항목의 식별자를 확인할 수 없습니다.	Board field or option identities could not be verified.
+git.rec.dependencies_unknown	선행 이슈 정보를 모두 확인하지 못했습니다.	Blocker information is incomplete.
+git.rec.item_evidence_incomplete	이슈 또는 보드 항목 정보가 불완전합니다.	Issue or board item details are incomplete.
+git.rec.field_selection_unverified	선택된 필드 값을 확인할 수 없습니다.	Selected field values could not be verified.
+git.rec.absent	서버가 추천 정보를 보내지 않았습니다.	The server did not provide a recommendation.
+git.rec.unknown	추천 상태나 판단 근거를 확인할 수 없습니다.	The recommendation or its reason could not be verified.
+scratch.queued	대기열에 등록	Queued`;
 for (const line of catalogRows.split('\n')) {
-  const [key,ko,en] = line.split(' | ');
-  if (ko) MSG.ko[key] = ko;
-  if (en) MSG.en[key] = en;
+  const [key, first, second] = line.split('\t');
+  if (second !== undefined) MSG.ko[key] = first;
+  MSG.en[key] = second ?? first;
 }
 // The first-paint markup owns the Korean text, including accessible names.
 const staticLabels = [];
@@ -1246,6 +1270,7 @@ let gitReady = false, overviewBacklog = false;
 const gitDrafts = new Map();
 let contextKey;
 let contextQueue = Promise.resolve();
+const leadProviders = ['codex','claude','agy'];
 const tabLists = [['overview','work','results','relations'],['project','chat','activity','usage','git']], tabs = tabLists.flat();
 let workData, workError = '', selectedTask, taskOrigin, taskOpen = false, taskSection = 'overview';
 const taskRows = new Map();
@@ -1379,9 +1404,9 @@ function paintGraph(loading = false) {
     const compact=location!=='list',title=r.label||r.path||r.id;
     const relations=linksFor(r.id).map(l=>graphLink(l.edge,l.direction)),extras=relations.length>1?' +'+(relations.length-1):'';
     const size=Number.isSafeInteger(r.file_count)&&r.file_count>0?choice('파일 '+formatCount(r.file_count)+'개',formatCount(r.file_count)+(r.file_count===1?' file':' files')):'';
-    const description=[graphKind(r.kind),size].filter(Boolean).join(' · '),button=action('',()=>enterNode(r),compact?'map-node':'explorer-item');
+    const description=joinDetails([graphKind(r.kind),size]),button=action('',()=>enterNode(r),compact?'map-node':'explorer-item');
     const rest=Number.isSafeInteger(r.omitted_children)&&r.omitted_children>0?choice('생략된 하위 항목 '+r.omitted_children+'개',r.omitted_children+' omitted children'):'';
-    button.title=[r.path||title,description,...relations,rest].filter(Boolean).join(' · ');
+    button.title=joinDetails([r.path||title,description,...relations,rest]);
     button.setAttribute('aria-label',button.title);button.setAttribute('data-explorer-key',location+':'+r.id);
     const text=node('span','');text.append(node('strong',title),node('small',compact?(size||(relations.length?relations[0]+extras:description)):description));
     if(!compact) for(const relation of relations) text.append(node('small',relation));
@@ -1393,7 +1418,7 @@ function paintGraph(loading = false) {
     const arrow=first?.direction==='out'?'→':first?.direction==='in'?'←':'↻',relations=depLinks.map(l=>graphLink(l.edge,l.direction));
     const b=action('',()=>enterNode(r),'map-dep-chip');
     b.setAttribute('data-relation-group','dependency');b.setAttribute('data-direction',first?.direction||'out');b.setAttribute('data-explorer-key',location+':'+r.id);
-    b.title=[r.path||title,...relations].filter(Boolean).join(' · ');b.setAttribute('aria-label',b.title);
+    b.title=joinDetails([r.path||title,...relations]);b.setAttribute('aria-label',b.title);
     const a=node('span',arrow,'dep-arrow');a.setAttribute('aria-hidden','true');
     b.append(a,node('strong',title),node('small',relations[0]?relations[0].replace(/^[→←↻]\s*/,'')+(relations.length>1?' +'+(relations.length-1):''):''));
     const li=node('li','');li.append(b);return li;
@@ -1418,10 +1443,10 @@ function paintGraph(loading = false) {
   const partial=data.completeness==='partial'||data.limits?.truncated===true;
   const missing = data.status==='not_found' ? choice('일치하는 노드 없음','No matching node') : data.status==='unknown' ? choice('구조를 확인할 수 없음','Structure unavailable') :
     !shown ? choice('조회된 노드 없음','No nodes returned') : !rows.length ? choice('연결된 노드 없음','No connected nodes') : '';
-  el('map-status').textContent=[source,basis,span,missing,partial && choice('일부 표시','Partial view')].filter(Boolean).join(' · ');
+  el('map-status').textContent=joinDetails([source,basis,span,missing,partial && choice('일부 표시','Partial view')]);
   const omitted=data.selection?.omittedNeighbors;
   const omittedLabel=Number.isSafeInteger(omitted) && omitted>0 ? choice('선택 항목 연결 '+omitted+'개 생략',omitted+' links omitted for this selection') : '';
-  el('graph-info').textContent=[el('map-status').textContent,omittedLabel,query && choice('필터 결과 ','Filtered: ')+filtered.length].filter(Boolean).join(' · ');
+  el('graph-info').textContent=joinDetails([el('map-status').textContent,omittedLabel,query && choice('필터 결과 ','Filtered: ')+filtered.length]);
   if (selected?.id?.startsWith('symbol:') && selected.id===focus && focus===graphTrail.at(-1)?.id) {
     const d=data.definition, info=el('graph-info');
     info.append(node('br',''));
@@ -1578,7 +1603,7 @@ function showTab(tab, focus = false, origin) {
       const stop = list.includes(tab) ? tab : list[0];
       for (const key of list) el('tab-' + key).tabIndex = key === stop ? 0 : -1;
     }
-    if (!tabLists[0].includes(tab)) el('more-views').open = true;
+    el('more-views').open = !tabLists[0].includes(tab);
     window.scrollTo(0, tabScroll.get(tab) || 0);
   }
   if (focus) el('tab-' + tab).focus();
@@ -1596,6 +1621,7 @@ function bindTabs(items, prefix, select) {
   }
 }
 for (const list of tabLists) bindTabs(list, 'tab-', showTab);
+el('team-open').addEventListener('click', () => showTab('chat', true, el('team-open')));
 
 // Task-centered navigation. Every view reads the same oms_panel_work_items projection and opens
 // one shared detail by the item's own id; labels are display text only and never identify a task.
@@ -1633,11 +1659,18 @@ function loadWork(force) {
     loaded.add('work'); paintTasks();
   }, error => { workData = undefined; workError = error.message || t('toolFail'); paintTasks(); });
 }
+function shortUpdate(attempt) {
+  const date = new Date(attempt?.updated || '');
+  return Number.isFinite(date.getTime()) ? date.toLocaleString(locale(), {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+}
 function taskRow(item, pane, extra) {
   const row = node('button', '', 'task-row'), key = pane + ':' + item.id;
   row.type = 'button';
+  const room = dashboardData?.conversationBinding === 'matched' && dashboardData.conversationMain?.room;
+  const activity = pane === 'now' && room && dashboardData.activeAttempts?.filter(a => a.room === room && a.task === item.id);
   row.append(node('strong', item.title || item.id), stateChip(item.state, {extraClass: 'task-state'}),
-    node('small', [t('w.id', {v:item.id}), item.owner ? t('w.owner', {v:item.owner}) : t('w.ownerUnknown'), extra].filter(Boolean).join(' · ')));
+    node('small', () => joinDetails([pane !== 'now' && t('w.id', {v:item.id}), item.owner ? t('w.owner', {v:item.owner}) : t('w.ownerUnknown'),
+      activity?.length === 1 && shortUpdate(activity[0]), extra])));
   if (selectedTask?.id === item.id) row.setAttribute('aria-current', 'true');
   row.addEventListener('click', () => openTask(item.id, key));
   taskRows.set(key, row);
@@ -1663,10 +1696,10 @@ function paintTasks(loading = false) {
   taskRows.clear();
   const data = workData, items = data?.items || [];
   const unavailable=data?.availability==='unavailable';
-  const status = loading && !data ? () => t('w.loading') : workError ? () => t('w.unavailable', {v:workError}) : unavailable ? () => choice('프로젝트의 작업 기록을 확인할 수 없습니다.','Work records for this project are unavailable.') : () => [
+  const status = loading && !data ? () => t('w.loading') : workError ? () => t('w.unavailable', {v:workError}) : unavailable ? () => choice('프로젝트의 작업 기록을 확인할 수 없습니다.','Work records for this project are unavailable.') : () => joinDetails([
     t('w.count', {n:formatCount(items.length)}), data?.availability==='partial' && choice('일부 기록','Partial records'),
     data?.omitted && t('w.omitted', {n:formatCount(data.omitted)}), data?.dropped && t('w.dropped', {n:formatCount(data.dropped)}),
-    data?.repeated && t('w.dup', {n:formatCount(data.repeated)})].filter(Boolean).join(' · ');
+    data?.repeated && t('w.dup', {n:formatCount(data.repeated)})]);
   for (const id of ['now-status', 'work-status', 'results-status', 'relations-status']) put(id, status);
   const active = items.filter(i => ['active', 'review'].includes(taskGroup(i))), withResult = items.filter(i => i.result);
   if (data && !unavailable && !workError) put('now-status',()=>choice('조회된 작업 '+formatCount(items.length)+'개 중 진행·검토 '+formatCount(active.length)+'개',formatCount(active.length)+' in progress or review out of '+formatCount(items.length)+' observed'));
@@ -1702,7 +1735,7 @@ function paintRelations(items, data) {
   for (const item of items) {
     const post = items.filter(o => o.depends?.includes(item.id)).map(o => name(o.id));
     const pre = item.depends === null ? t('w.depsUnknown') : item.depends.length ? t('w.pre', {v:item.depends.map(id => data.byId.has(id) ? name(id) : t('w.missingDep', {id})).join(', ')}) : t('w.depsNone');
-    deps.push(taskRow(item, 'rel-dep', [pre, post.length && t('w.post', {v:post.join(', ')})].filter(Boolean).join(' · ')));
+    deps.push(taskRow(item, 'rel-dep', joinDetails([pre, post.length && t('w.post', {v:post.join(', ')})])));
   }
   el('deps-list').replaceChildren(...(deps.length ? deps : [node('p', data && data.availability!=='unavailable' && !workError ? choice('조회된 연결 없음','No links in this view') : '', 'muted')]));
 }
@@ -2021,6 +2054,7 @@ function stateWithExit(raw,exit){
   if(Number.isInteger(exit)) wrap.append(' · ',node('span',()=>t('act.exit',{n:exit}),'muted'));
   return wrap;
 }
+function joinDetails(parts) { return parts.filter(Boolean).join(' · '); }
 function dateLabel(stamp) {
   const ms = typeof stamp === 'number' ? stamp * 1000 : Date.parse(stamp);
   return Number.isFinite(ms) ? new Date(ms).toLocaleString(locale()) : '';
@@ -2043,10 +2077,10 @@ async function openHostLink(url, status) {
 }
 function localGit(git) {
   if (!git?.available) return t('git.unknown');
-  return [git.branch || t('git.detached'), git.head?.slice(0,12), git.dirty === true ? t('git.dirty') :
+  return joinDetails([git.branch || t('git.detached'), git.head?.slice(0,12), git.dirty === true ? t('git.dirty') :
     git.dirty === false ? t('git.clean') : t('git.dirtyUnknown'),
     git.upstream && t('git.upstream',{v:git.upstream}), Number.isInteger(git.ahead) && t('git.ahead',{n:git.ahead}),
-    Number.isInteger(git.behind) && t('git.behind',{n:git.behind})].filter(Boolean).join(' · ');
+    Number.isInteger(git.behind) && t('git.behind',{n:git.behind})]);
 }
 
 const repoSlug = /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
@@ -2134,7 +2168,7 @@ function renderGitCatalog() {
       else if (github.status !== 'available') summary.push(t('git.prUnavailable'));
       else if (!github.pullRequests?.length) summary.push(t('git.noOpenPr'));
     }
-    return summary.filter(Boolean).join(' · ');
+    return joinDetails(summary);
   });
   if (kind === 'checkout') return;
   const list = gitData.github.work?.[kind];
@@ -2143,8 +2177,8 @@ function renderGitCatalog() {
       list?.status === 'unsupported' ? t('git.listUnsupported') : t('git.listFail'));
     return;
   }
-  put(status, () => [list.items.length ? t('git.shown',{n:formatCount(list.items.length)}) : t('git.noItems'),
-    list.incomplete && t('partial')].filter(Boolean).join(' · '));
+  put(status, () => joinDetails([list.items.length ? t('git.shown',{n:formatCount(list.items.length)}) : t('git.noItems'),
+    list.incomplete && t('partial')]));
   function row(parent,item,type) {
     const card = node('article','');
     const action = gitAction(type,item);
@@ -2214,15 +2248,15 @@ function boardDetails(container, board) {
         article.append(node('p',() => t('git.rec.' + advice,{reason:t(reason)})));
         const hints = ['Status','Priority','Area','Phase'].flatMap(k => entry.fields?.[k]?.name ? [k + ' ' + entry.fields[k].name] : []);
         const showClass = entry.title && advice === 'unverified';
-        if (showClass || hints.length) article.append(node('p',() => [showClass && label(),...hints].filter(Boolean).join(' · '),'muted'));
+        if (showClass || hints.length) article.append(node('p',() => joinDetails([showClass && label(),...hints]),'muted'));
         if (advice === 'recommended') {
           const action = gitAction('issue',entry); if (action) article.append(action);
         }
         rows.append(article);
       }
       const missing = data.board.fields?.missing || [];
-      put(note, () => [dateLabel(github.observedAt),t('git.page',{page:page + 1,n:data.items.length}),
-        data.incomplete && t('partial'), missing.length && t('git.missingFields',{v:missing.join(', ')}),t('git.rec.scope')].filter(Boolean).join(' · '));
+      put(note, () => joinDetails([dateLabel(github.observedAt),t('git.page',{page:page + 1,n:data.items.length}),
+        data.incomplete && t('partial'), missing.length && t('git.missingFields',{v:missing.join(', ')}),t('git.rec.scope')]));
       if (data.nextCursor && !pages.includes(data.nextCursor)) pages.push(data.nextCursor);
     } catch (error) {
       if (expected === generation && observation === gitData) {
@@ -2368,7 +2402,7 @@ function renderGit(data) {
   content.replaceChildren();
   for (const pr of github.pullRequests || []) {
     const card = node('article', ''), title = node('h3', '');
-    const text = ['PR #' + pr.number, pr.title].filter(Boolean).join(' · ');
+    const text = joinDetails(['PR #' + pr.number, pr.title]);
     const url = 'https://github.com/' + github.repository + '/pull/' + pr.number;
     if (catalogUrl('pull',pr)) {
       const link = node('a', text); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
@@ -2381,8 +2415,8 @@ function renderGit(data) {
       title.append(link);
     } else title.textContent = text;
     card.append(title, node('p', () => [pr.headBranch, '→', pr.baseBranch, pr.draft ? t('draft') : pr.state].filter(Boolean).join(' ')));
-    card.append(node('p', () => [pr.scope === 'linkedWorktree' ? t('git.linkedWorktree') : t('git.currentCheckout'), pr.head?.slice(0,12),
-      pr.matchesLocalHead === true ? t('git.headMatch') : pr.matchesLocalHead === false ? t('git.headDiffer') : t('git.headUnknown')].filter(Boolean).join(' · '), 'muted'));
+    card.append(node('p', () => joinDetails([pr.scope === 'linkedWorktree' ? t('git.linkedWorktree') : t('git.currentCheckout'), pr.head?.slice(0,12),
+      pr.matchesLocalHead === true ? t('git.headMatch') : pr.matchesLocalHead === false ? t('git.headDiffer') : t('git.headUnknown')]), 'muted'));
     const c = pr.checks;
     card.append(node('p', () => !c ? t('git.checksUnknown') : [c.passed,c.failed,c.pending,c.other].every(n => n === 0)
       ? t('git.noChecks') : t('git.checks',{p:formatCount(c.passed),f:formatCount(c.failed),w:formatCount(c.pending),o:formatCount(c.other)})));
@@ -2429,8 +2463,8 @@ function renderUsage(data) {
       row.append(node('p', () => {
         const usage = Number.isFinite(w.used) ? (w.stale ? t('usage.lastObserved') : '') + t('usage.used',{n:formatCount(w.used)}) : t('usage.unknown');
         const age = Number.isFinite(w.age_seconds) ? Math.max(0,Math.floor(w.age_seconds / 60)) : null;
-        return [w.name, usage, w.source, w.stale && (age == null ? t('usage.stale') : t('usage.ago',{n:formatCount(age)})),
-          dateLabel(w.resets_at) && t('usage.resets',{d:dateLabel(w.resets_at)})].filter(Boolean).join(' · ');
+        return joinDetails([w.name, usage, w.source, w.stale && (age == null ? t('usage.stale') : t('usage.ago',{n:formatCount(age)})),
+          dateLabel(w.resets_at) && t('usage.resets',{d:dateLabel(w.resets_at)})]);
       }));
       if (Number.isFinite(w.used) && w.used >= 0 && w.used <= 100) {
         const meter = node('meter',''); meter.min = 0; meter.max = 100; meter.value = w.used;
@@ -2439,9 +2473,9 @@ function renderUsage(data) {
       card.append(row);
     }
     if (p.windowsOmitted > 0) card.append(node('p',() => t('usage.windowsOmitted',{n:formatCount(p.windowsOmitted)}),'muted'));
-    if (Number.isFinite(p.contextUsed) || Number.isFinite(p.cacheReadShare)) card.append(node('p', () => [
+    if (Number.isFinite(p.contextUsed) || Number.isFinite(p.cacheReadShare)) card.append(node('p', () => joinDetails([
       Number.isFinite(p.contextUsed) && t('usage.context',{n:formatCount(p.contextUsed)}),
-      Number.isFinite(p.cacheReadShare) && t('usage.cacheShare',{n:formatCount(p.cacheReadShare)})].filter(Boolean).join(' · ')));
+      Number.isFinite(p.cacheReadShare) && t('usage.cacheShare',{n:formatCount(p.cacheReadShare)})])));
     const recent = p.recent7d;
     if (recent) card.append(node('p', () => t('usage.recent',{c:formatCount(recent.calls),i:formatCount(recent.input),o:formatCount(recent.output),r:formatCount(recent.cacheRead)}), 'muted'));
     if (!p.windows?.length && !recent && !Number.isFinite(p.contextUsed) && !Number.isFinite(p.cacheReadShare)) card.append(node('p', () => t('usage.none'), 'muted'));
@@ -2451,10 +2485,10 @@ function renderUsage(data) {
   content.append(providers, node('h3', () => t('usage.attempts'), 'small-title'));
   const attempts = node('div', '', 'rows');
   for (const a of data.attempts) {
-    const card = node('article', ''); card.append(node('h3', () => [providerName(a.provider), a.id].filter(Boolean).join(' · ')));
-    card.append(node('p', () => [t('usage.tokenCount',{n:formatCount(a.tokens)}), a.source === 'receipt' ? t('usage.receipt') : a.source === 'events' ? t('usage.events') : t('usage.sourceUnknown'),
+    const card = node('article', ''); card.append(node('h3', () => joinDetails([providerName(a.provider), a.id])));
+    card.append(node('p', () => joinDetails([t('usage.tokenCount',{n:formatCount(a.tokens)}), a.source === 'receipt' ? t('usage.receipt') : a.source === 'events' ? t('usage.events') : t('usage.sourceUnknown'),
       Number.isFinite(a.reportedCalls) && Number.isFinite(a.calls) && t('usage.reportedCalls',{r:formatCount(a.reportedCalls),c:formatCount(a.calls)}),
-      Number.isFinite(a.costMicrousd) && t('usage.eventCost',{v:'US$' + money(a.costMicrousd)})].filter(Boolean).join(' · ')));
+      Number.isFinite(a.costMicrousd) && t('usage.eventCost',{v:'US$' + money(a.costMicrousd)})])));
     for (const b of a.breakdown || []) card.append(node('p', () => [providerName(b.provider), t('usage.b.calls',{n:formatCount(b.calls)}),
       t('usage.b.input',{n:formatCount(b.input)}), t('usage.b.output',{n:formatCount(b.output)}), t('usage.b.cacheRead',{n:formatCount(b.cacheRead)}), t('usage.b.cacheWrite',{n:formatCount(b.cacheWrite)})].join(' · '), 'muted'));
     attempts.append(card);
@@ -2466,6 +2500,7 @@ function renderUsage(data) {
 
 function render(d) {
   dashboardData = d;
+  if (workData) paintTasks();
   put('git-local', () => localGit(d.git));
   put('project', () => d.project || t('projectDefault')); el('project').title = el('project').textContent;
   const measured = (n,total) => Number.isSafeInteger(n) && Number.isSafeInteger(total) && total > 0 && n >= 0 && n <= total;
@@ -2496,10 +2531,10 @@ function render(d) {
   const completeness=()=>obs&&['complete','partial','unknown'].includes(obs.completeness)?t('obs.'+obs.completeness):(d.degraded?t('obs.partial'):t('obs.unknown'));
   const ev=obs?.evidence&&typeof obs.evidence==='object'?obs.evidence:null;
   const omittedCount=Number.isSafeInteger(ev?.omitted)&&ev.omitted>0?ev.omitted:0,trimmedCount=Number.isSafeInteger(ev?.trimmed)&&ev.trimmed>0?ev.trimmed:0;
-  put('observation-completeness',()=>[completeness(),omittedCount>0&&t('obs.omitted',{n:formatCount(omittedCount)}),trimmedCount>0&&t('obs.trimmed',{n:formatCount(trimmedCount)})].filter(Boolean).join(' · '));
+  put('observation-completeness',()=>joinDetails([completeness(),omittedCount>0&&t('obs.omitted',{n:formatCount(omittedCount)}),trimmedCount>0&&t('obs.trimmed',{n:formatCount(trimmedCount)})]));
   const sourceKeys=['git','task','plan','attempts','artifacts','acceptance','conversation'],sourceStates=['unavailable','partial','ambiguous','stale'];
   const degradedSources=()=>sourceKeys.flatMap(k=>{const s=obs?.sources?.[k];return sourceStates.includes(s)?[t('src.'+k)+' ('+t('srcState.'+s)+')']:[];});
-  put('observation-sources',()=>{const u=degradedSources();return [u.length>0&&t('obs.needsAttention',{v:u.join(', ')}),typeof ev?.head==='string'&&/^[a-f0-9]{12}$/i.test(ev.head)&&'HEAD '+ev.head,typeof ev?.latestArtifact==='string'&&/^[a-z0-9_-]{1,128}$/i.test(ev.latestArtifact)&&t('obs.latestArtifact',{v:ev.latestArtifact})].filter(Boolean).join(' · ');});
+  put('observation-sources',()=>{const u=degradedSources();return joinDetails([u.length>0&&t('obs.needsAttention',{v:u.join(', ')}),typeof ev?.head==='string'&&/^[a-f0-9]{12}$/i.test(ev.head)&&'HEAD '+ev.head,typeof ev?.latestArtifact==='string'&&/^[a-z0-9_-]{1,128}$/i.test(ev.latestArtifact)&&t('obs.latestArtifact',{v:ev.latestArtifact})]);});
   const observedStamp=(typeof obs?.observedAt==='string'&&obs.observedAt)||d.updated,date=new Date(observedStamp);
   put('updated',()=>observedStamp&&Number.isFinite(date.getTime())?t('obs.lastChecked',{d:date.toLocaleString(locale())}):'');
   const omitted=[['attemptsTrimmed','omit.attempts'],['operationsTrimmed','omit.operations'],['attentionTrimmed','omit.attention'],['activeAttemptsTrimmed','omit.active']].filter(([k])=>Number.isSafeInteger(d[k])&&d[k]>0);
@@ -2616,7 +2651,7 @@ function isMain(attempt) {
 
 function memberKey(m) { return JSON.stringify([m.room,m.participant]); }
 function memberLabel(m) {
-  return [providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role === 'researcher' ? t('peer.role') : m.role && 'Room ' + m.role, m.participant, m.joined === false && t('member.left')].filter(Boolean).join(' · ');
+  return joinDetails([providerName(m.provider), m.participant === dashboardData?.conversationMain?.participant ? 'Main' : m.role === 'researcher' ? t('peer.role') : m.role === 'lead' ? 'Lead' : m.role, m.participant, m.joined === false && t('member.left')]);
 }
 function clearChat() {
   clearReviewAttachment();
@@ -2755,7 +2790,7 @@ function renderAttempts(page) {
   select.replaceChildren(); select.add(choose);
   for (const a of availableAttempts) {
     const option = new Option('', a.id);
-    put(option, () => [a.tool, a.id, a.state && stateLabel(a.state)].filter(Boolean).join(' · '));
+    put(option, () => joinDetails([a.tool, a.id, a.state && stateLabel(a.state)]));
     select.add(option);
   }
   el('chat-evidence').hidden = !availableAttempts.length && !evidenceId;
@@ -2806,8 +2841,8 @@ function readEvidence(section,page) {
       button.setAttribute('aria-pressed',String(key === section)); buttons.append(button);
     }
     lines.textContent = evidence.lines.join('\n'); lines.hidden = !evidence.lines.length;
-    put(status, () => [attempt.id,evidence.source, t('pageN',{page}),evidence.truncated && t('evidence.truncated'),
-      !evidence.lines.length && t('noRecords')].filter(Boolean).join(' · '));
+    put(status, () => joinDetails([attempt.id,evidence.source, t('pageN',{page}),evidence.truncated && t('evidence.truncated'),
+      !evidence.lines.length && t('noRecords')]));
     evidenceNext = Number.isSafeInteger(evidence.nextPage) && evidence.nextPage > page ? evidence.nextPage : null;
     el('evidence-prev').hidden = page === 1; el('evidence-next').hidden = evidenceNext == null;
   }, error => { put(status, () => error.message); });
@@ -2824,10 +2859,26 @@ function renderMemberList() {
     list.append(button);
   }
   if (dashboardData?.conversationMain?.participantsOmitted > 0) list.append(node('p',() => t('member.omitted',{n:formatCount(dashboardData.conversationMain.participantsOmitted)}),'muted'));
+  el('follow-up').hidden = !selectedMember || !canCompose;
   el('chat-title').tabIndex = -1;
   put('chat-title', () => selectedMember ? memberLabel(selectedMember) : t('chat.title'));
   if (!selectedMember) put('chat-status', () => t(members.length ? 'chat.pick' : 'chat.noMembers'));
 }
+on('follow-up','click', async () => {
+  const m = selectedMember, button = el('follow-up'), scope = generation;
+  if (button.hidden || button.disabled || !m || !canCompose || disposed || busy || currentTab !== 'chat') return;
+  button.disabled = true;
+  const target = memberLabel(m);
+  try {
+    const reply = await insertComposerDraft(choice('작업방 ' + m.room + '의 ' + target + '에게 아래 후속 요청을 전달해 주세요.',
+      'Follow up with ' + target + ' in room ' + m.room + '.') + '\n\n');
+    if (reply?.isError) throw uiError('hostFail');
+    if (scope === generation && m === selectedMember) put('chat-status', () => choice('현재 대화에 초안을 넣었습니다.', 'Draft added to the current chat.'));
+  } catch {
+    if (scope === generation && m === selectedMember) put('chat-status', () => t('hostFail'));
+  } finally { button.disabled = false; }
+});
+
 function loadChat(before) {
   const m = selectedMember;
   if (!m) return;
@@ -2846,7 +2897,7 @@ function loadChat(before) {
     chatRows = before != null ? [...page.messages,...chatRows] : [...history,...page.messages];
     const items = (before == null ? chatRows : page.messages).map(message => {
       const li = node('li', '', 'message');
-      li.append(node('small', () => [dateLabel(message.at), message.from, message.to && '→ ' + message.to, message.kind].filter(Boolean).join(' · '), 'muted'), node('p', message.text || ''));
+      li.append(node('small', () => joinDetails([dateLabel(message.at), message.from, message.to && '→ ' + message.to, message.kind]), 'muted'), node('p', message.text || ''));
       return li;
     });
     if (before == null) {
@@ -2855,7 +2906,7 @@ function loadChat(before) {
       list.scrollTop = !overlaps || nearEnd ? list.scrollHeight : top;
       const result = el('chat-result'); result.replaceChildren();
       if (page.result?.text) result.append(node('h3', () => t('chat.result'), 'small-title'),
-        node('p',() => [page.result.kind === 'read-only provider' ? t('peer.result') : page.result.kind,page.result.attempt,dateLabel(page.result.at),page.result.truncated && t('chat.partial')].filter(Boolean).join(' · '),'muted'), node('p',page.result.text,'message'));
+        node('p',() => joinDetails([page.result.kind === 'read-only provider' ? t('peer.result') : page.result.kind,page.result.attempt,dateLabel(page.result.at),page.result.truncated && t('chat.partial')]),'muted'), node('p',page.result.text,'message'));
       prepareReviewAttachment(page,m);
       if (page.assignment && !page.result?.text) {
         const execution = page.assignment.execution;
@@ -2924,10 +2975,10 @@ function loadTui(page = tuiPages.at(-1) || 1) {
     for (const row of data.rows) { const tr = node('tr',''); for (const c of data.columns) tr.append(node('td', row[c.key] ?? '—')); body.append(tr); }
     grid.append(head,body); if (data.rows.length) table.append(grid);
     const total = Number.isSafeInteger(data.total) && data.total >= 0 ? data.total : null;
-    put(status, () => [t('pageN',{page}), data.rows.length ? t('tui.shown',{n:data.rows.length}) :
+    put(status, () => joinDetails([t('pageN',{page}), data.rows.length ? t('tui.shown',{n:data.rows.length}) :
       total === 0 && !data.incomplete ? t('noRecords') : t('tui.noneOnPage'),
       total != null && t(data.incomplete ? 'tui.confirmedTotal' : 'tui.total',{n:formatCount(total)}),
-      data.incomplete && t('partial')].filter(Boolean).join(' · '));
+      data.incomplete && t('partial')]));
     tuiNext = Number.isSafeInteger(data.nextPage) && data.nextPage > page ? data.nextPage : null;
     if (tuiPages.includes(page)) tuiPages = tuiPages.slice(0,tuiPages.indexOf(page)+1); else tuiPages.push(page);
     el('tui-prev').hidden = tuiPages.length < 2; el('tui-next').hidden = tuiNext == null;
@@ -2969,7 +3020,7 @@ function renderTeam(d) {
     seen.add(member.participant);
     const row = action('',() => selectMember(member,row));
     const content = node('span','');
-    content.append(node('strong',record.task),node('small',() => [providerName(member.provider),member.participant].filter(Boolean).join(' · ')));
+    content.append(node('strong',record.task),node('small',() => joinDetails([providerName(member.provider),member.participant])));
     const chip = stateChip(record.state);
     const arrow = node('span','›'); arrow.setAttribute('aria-hidden','true');
     row.append(content,chip,arrow); putAttr(row,'aria-label',() => t('thread.aria',{task:record.task,p:member.participant}));
@@ -2986,7 +3037,7 @@ function loadProviderOptions() {
       throw uiError('prov.unavailable');
     }
     providerData = data; rows.replaceChildren();
-    for (const provider of ['codex','claude','agy']) {
+    for (const provider of leadProviders) {
       const info = data.rows.find(row => row.provider === provider || (provider === 'agy' && row.provider === 'antigravity'));
       const state = () => info?.usable === true ? t('prov.usable') : info?.usable === false ? t('prov.unusable') :
         info?.installed === true ? t('prov.installed') : info?.installed === false ? t('prov.notInstalled') : t('prov.unknown');
@@ -3077,9 +3128,10 @@ function renderConversation(d) {
   put('lead-scope', () => t(isReadOnly ? 'main.repoLeads' : 'main.roomLead'));
   if (readOnly) {
     put(current, () => d.main?.provider ? providerName(d.main.provider) + ' Main' : t('main.unknown'));
-    put('main-state', () => d.main ? [stateLabel(d.main.state),d.main.room].filter(Boolean).join(' · ') : t('main.noRepoMain'));
+    put('main-state', () => d.main ? joinDetails([stateLabel(d.main.state),d.main.room]) : t('main.noRepoMain'));
   }
   el('room-leads').hidden = !joined && !readOnly;
+  el('team-open').hidden = !joined;
   el('git-send').hidden = !canMessage || (!joined && !readOnly);
   members = joined ? (main.participants || []).filter(m => m.room === main.room && typeof m.participant === 'string' && m.participant) : [];
   if (peerMember && peerMember.room === scope && !members.some(m => memberKey(m) === memberKey(peerMember))) members.push(peerMember);
@@ -3119,11 +3171,12 @@ function renderConversation(d) {
     const assignee = providerName(lead.provider) + ' Lead';
     const avatar = node('span',''); paintAvatar(avatar,lead);
     const text = node('span','','work-title');
-    text.append(node('small',assignee),node('strong',() => [lead.task || lead.id || t('lead.taskUnknown'),isReadOnly && lead.room].filter(Boolean).join(' · ')));
+    const task = workData?.byId.get(lead.task)?.title || lead.task || lead.id;
+    text.append(node('strong',assignee),node('small',() => joinDetails([task || t('lead.taskUnknown'),shortUpdate(lead),isReadOnly && lead.room])));
     const state = stateChip(lead.state, {extraClass: 'lead-state'});
     card.append(avatar,text,state);
     if (member) {
-      putAttr(card,'aria-label',() => t('lead.aria',{assignee,task:lead.task || lead.id || '',p:member.participant}));
+      putAttr(card,'aria-label',() => t('lead.aria',{assignee,task:task || '',p:member.participant}));
       const arrow = node('span','›','arrow'); arrow.setAttribute('aria-hidden','true'); card.append(arrow);
     }
     cards.append(card);
@@ -3148,7 +3201,7 @@ function renderScratch(history) {
     const label = sources.get(row?.sourceId);
     if (!label || !row.id) { skipped = true; continue; }
     const item = node('li','','entry'), detail = node('div','');
-    detail.append(node('strong',label), node('div',() => [row.provider && providerName(row.provider),row.tool].filter(Boolean).join(' · '),'muted'),
+    detail.append(node('strong',label), node('div',() => joinDetails([row.provider && providerName(row.provider),row.tool]),'muted'),
       node('div',() => t('scratch.recorded',{s:recordedStateLabel(row.state)})),
       node('div',() => t('scratch.at',{at:dateLabel(row.updatedAt) || t('unknown')}),'muted'));
     item.append(detail); list.append(item);
@@ -3168,14 +3221,14 @@ function renderScratch(history) {
 function renderActivity(d){
   renderScratch(d.managedScratch);
   const attempts=d.attempts||[],state=d.commandStatus;
-  put('core-state',()=>[t('act.planned',{n:formatCount(d.tasks)}),d.taskStatus&&stateLabel(d.taskStatus),d.degraded===true&&t('act.partialRuntime')].filter(Boolean).join(' · '));
+  put('core-state',()=>joinDetails([t('act.planned',{n:formatCount(d.tasks)}),d.taskStatus&&stateLabel(d.taskStatus),d.degraded===true&&t('act.partialRuntime')]));
   put('command-state',()=>state?.available?[t('act.attempts',{n:formatCount(state.total)}),t('act.open',{n:formatCount(state.active)}),t('act.executing',{n:formatCount(state.executing)}),...Object.entries(state.byState||{}).map(([k,v])=>stateLabel(k)+' '+formatCount(v))].join(' · '):t('act.unknown'));
   const timeline=el('command-list');timeline.replaceChildren();
   const recorded=new Map([...attempts,...(d.activeAttempts||[])].filter(a=>a.id).map(a=>[a.id,a]));
   const events=[...attempts.map(a=>({id:a.id,at:a.updated,what:a.tool||(()=>t('act.attempt')),ref:a.task||a.id,who:a.provider,state:a.state})),...(d.operations||[]).map(o=>({id:o.attempt,at:o.updated,what:o.kind||(()=>t('act.artifact')),ref:o.artifactId,who:o.provider,state:o.status,exit:o.exit}))].sort((a,b)=>(Date.parse(b.at)||0)-(Date.parse(a.at)||0));
   for(const event of events){
     const li=node('li','','entry'),label=node('span','');
-    label.append(node('span',()=>[typeof event.what==='function'?event.what():event.what,event.who&&providerName(event.who)].filter(Boolean).join(' · ')),node('small',()=>[dateLabel(event.at)||t('act.timeUnknown'),event.ref].filter(Boolean).join(' · ')));
+    label.append(node('span',()=>joinDetails([typeof event.what==='function'?event.what():event.what,event.who&&providerName(event.who)])),node('small',()=>joinDetails([dateLabel(event.at)||t('act.timeUnknown'),event.ref])));
     const attempt=recorded.get(event.id),member=attempt&&members.find(m=>m.room===attempt.room&&m.participant===attempt.participant);
     if(member){const link=action(()=>t('act.viewEvidence'),()=>selectMember(member,link,attempt.id));putAttr(link,'aria-label',()=>t('act.viewEvidenceAria',{id:attempt.id}));label.append(link);}
     li.append(label,stateWithExit(event.state,event.exit));timeline.append(li);
@@ -3186,18 +3239,18 @@ function renderActivity(d){
   if(d.main&&!repoMembers.some(r=>r.id===d.main.id&&r.tool===d.main.tool&&r.room===d.main.room&&r.provider===d.main.provider)) repoMembers.unshift(d.main);
   for(const m of repoMembers){
     const item=node('li','','entry'),role=m===d.main||isMain(m)?'Main':'Lead',name=()=>names[m.provider]||m.provider||t('providerUnknown');
-    item.append(node('span',()=>[name()+' '+role,m.room||t('act.roomUnknown'),m.task].filter(Boolean).join(' · ')),stateChip(m.state));team.append(item);
+    item.append(node('span',()=>joinDetails([name()+' '+role,m.room||t('act.roomUnknown'),m.task])),stateChip(m.state));team.append(item);
   }
   if(!repoMembers.length) team.append(node('li',()=>t('act.noTeam'),'muted'));
   const activity=el('activity');activity.replaceChildren();
-  for(const a of attempts){const item=node('li','','entry');item.append(node('span',[names[a.provider]||a.provider,a.tool,a.task,a.room].filter(Boolean).join(' · ')),stateChip(a.state));activity.append(item);}
+  for(const a of attempts){const item=node('li','','entry');item.append(node('span',joinDetails([names[a.provider]||a.provider,a.tool,a.task,a.room])),stateChip(a.state));activity.append(item);}
   if(!attempts.length) activity.append(node('li',()=>t(d.active==null||d.attemptsTrimmed>0?'act.recentUnknown':'act.recentNone'),'muted'));
   const acceptance=d.acceptance,reviews=d.reviews;
   put('criteria',()=>acceptance?.available===true?t('act.criteria',{v:acceptance.verified??'?',n:acceptance.total??'?'})+t(acceptance.complete===true?'act.complete':acceptance.complete===false?'act.incomplete':'act.completeUnknown'):t('act.criteriaUnknown'));
   put('reviews',()=>reviews?.available===true?t('act.reviews',{p:reviews.passed??'?',f:reviews.failed??'?',u:reviews.unknown??'?'}):t('act.reviewsUnknown'));
   const operationRow=o=>{
     const item=node('li','','entry'),label=node('span',''),stamp=Date.parse(o.updated);
-    label.append(node('span',()=>[o.kind||t('act.artifact'),names[o.provider]||o.provider].filter(Boolean).join(' · ')));
+    label.append(node('span',()=>joinDetails([o.kind||t('act.artifact'),names[o.provider]||o.provider])));
     if(o.artifactId) label.append(node('small',o.artifactId));
     if(Number.isFinite(stamp)) label.append(node('small',()=>new Date(stamp).toLocaleString(locale())));
     item.append(label,stateWithExit(o.status,o.exit));return item;
@@ -3392,7 +3445,7 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw uiError('openApp');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.2'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.3'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || {k:'surf.unknown'};
       hostLocale = typeof info?.hostContext?.locale === 'string' ? info.hostContext.locale : '';
@@ -3548,8 +3601,10 @@ async function mutate(action, onSuccess, expected = generation, recoverAfter = (
 on('launch','submit', event => {
   event.preventDefault();
   if (readOnly || busy || el('view').hidden) return;
-  const goal = el('brief').value.trim();
-  if (!goal || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
+  const brief = el('brief').value.trim();
+  const leads = leadProviders.filter(p => el('lead-' + p).checked).map(p => providerName(p));
+  const goal = leads.length ? 'Requested provider Leads: ' + leads.join(', ') + '. ' + brief : brief;
+  if (!brief || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
     el('launcher').open = true;
     el('brief').focus();
     briefInvalid = true; el('brief').setCustomValidity(t('goalRule'));
