@@ -291,6 +291,36 @@ pub fn read_index(
     Ok(body)
 }
 
+fn mutate_options(missing_ok: bool) -> MutationOptions {
+    MutationOptions {
+        read: ByteReadOptions {
+            missing_ok,
+            max_bytes: MAX_INPUT_BYTES,
+        },
+        create_parent: missing_ok,
+        max_output: MAX_INDEX_BYTES,
+        ..MutationOptions::default()
+    }
+}
+fn guarded<'a>(
+    root: &'a Root,
+    target: &'a Path,
+    expected: Option<&'a [u8]>,
+    interrupted: &'a AtomicBool,
+    transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, StoreError> + 'a,
+) -> impl FnOnce(&[u8]) -> Result<Vec<u8>, StoreError> + 'a {
+    move |old| {
+        cancelled(interrupted)?;
+        paths::validate(root, target, false)?;
+        if expected.is_some_and(|expected| expected != old) {
+            return Err(StoreError::Changed);
+        }
+        let new = transform(old)?;
+        lines(&new)?;
+        cancelled(interrupted)?;
+        Ok(new)
+    }
+}
 fn mutate(
     root: &Root,
     target: &Path,
@@ -302,26 +332,28 @@ fn mutate(
     paths::validate(root, target, missing_ok)?;
     let outcome = root.atomic_mutate(
         target,
-        MutationOptions {
-            read: ByteReadOptions {
-                missing_ok,
-                max_bytes: MAX_INPUT_BYTES,
-            },
-            create_parent: missing_ok,
-            max_output: MAX_INDEX_BYTES,
-            ..MutationOptions::default()
-        },
-        |old| {
-            cancelled(interrupted)?;
-            paths::validate(root, target, false)?;
-            if expected.is_some_and(|expected| expected != old) {
-                return Err(StoreError::Changed);
-            }
-            let new = transform(old)?;
-            lines(&new)?;
-            cancelled(interrupted)?;
-            Ok(new)
-        },
+        mutate_options(missing_ok),
+        guarded(root, target, expected, interrupted, transform),
+    )?;
+    Ok(outcome.bytes)
+}
+/// [`mutate`], with a last authority check between the synced replacement and
+/// its rename. An unchanged result publishes nothing and skips the check.
+fn mutate_checked(
+    root: &Root,
+    target: &Path,
+    missing_ok: bool,
+    expected: Option<&[u8]>,
+    interrupted: &AtomicBool,
+    transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, StoreError>,
+    before_publish: impl FnOnce() -> Result<(), StoreError>,
+) -> Result<Vec<u8>, StoreError> {
+    paths::validate(root, target, missing_ok)?;
+    let outcome = root.atomic_mutate_checked(
+        target,
+        mutate_options(missing_ok),
+        guarded(root, target, expected, interrupted, transform),
+        before_publish,
     )?;
     Ok(outcome.bytes)
 }

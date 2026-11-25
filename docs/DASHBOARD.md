@@ -125,7 +125,7 @@ one requires a schema bump.
 | `generated_at` | UTC timestamp | snapshot time |
 | `repo` | `{name, branch, head}` | directory name, branch, 12-character HEAD, or `null` |
 | `coverage` | string | the OMS-managed-records-only statement |
-| `collection` | `{ok, sources: {state, artifacts, attempts}}` | each source is `"ok"` or a sanitized error |
+| `collection` | `{ok, sources: {state, goal, artifacts, attempts}}` | each source is `"ok"` or a sanitized error; only `goal: "ok"` with a `null` goal confirms that no goal is recorded |
 | `goal` | `{text, source}` or `null` | recorded objective (`task`, `plan`, or `project`) |
 | `scope` | `{allowed[], forbidden[], source}` or `null` | `source` is `unbounded` when nothing is recorded |
 | `task` | object or `null` | `present, healthy, task_id, status, verification, stale, next` |

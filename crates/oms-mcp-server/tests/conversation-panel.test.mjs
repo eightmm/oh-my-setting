@@ -604,6 +604,57 @@ test('changed alias target, unconfirmed status and stale host or read responses 
   await p.open('input',{arguments:{project:'two'}});
   p.host.release();await setImmediate();assert.ok(!p.calls.some(c=>c.name===managedOpen));
 });
+test('Pi Main keeps its run and parent-linked Leads without adopting another participant',async()=>{
+  const run=(id,participant,extra)=>({room:main.room,id,...(participant&&{participant}),tool:'panel-main',role:'main',provider:'pi',state:'working',...extra});
+  const child=(id,parentAttempt)=>({room:main.room,id,parentAttempt,role:'lead',provider:'claude',state:'running',taskTitle:id});
+  // The harness may be unverified, and a fresh launch has no participant ref: its attempt ID is the participant.
+  for(const [harness,owner] of [['pi',run('m','owner')],[null,run('m','owner')],['pi',run('owner')]]) {
+    const d={...dashboard,conversationMain:{...main,harness,participants:[]},conversationAttempts:
+      [run('other','someone-else'),{...owner,taskTitle:'Drive Pi'},child('mine',owner.id),child('foreign','other')]};
+    const p=await panel(['one'],d,{locale:'en'});
+    assert.match(p.get('main-status').textContent,/Working · Drive Pi/);
+    const slots=p.get('leads').children;
+    assert.equal(slots.length,3);
+    assert.match(slots[1].textContent,/Claude Lead.*mine.*Running/);
+    assert.doesNotMatch(p.get('leads').textContent,/foreign/);
+  }
+});
+test('a degraded, partial or trimmed snapshot keeps a visible status until a clean read',async()=>{
+  const d={};
+  const p=await panel(['one'],d,{locale:'en'});
+  assert.equal(p.get('status').textContent,'');
+  for(const [fields,expected] of [[{degraded:true},/could not be collected/],[{observation:{completeness:'unknown'}},/could not be collected/],
+    [{observation:{completeness:'partial'}},/partial status/],[{conversationAttemptsOmitted:2},/partial status/],
+    [{activeAttemptsTrimmed:1},/partial status/],[{degraded:false,observation:{completeness:'complete'}},/^$/]]) {
+    for(const key of Object.keys(d))delete d[key];
+    Object.assign(d,fields);await p.event('refresh','click');
+    assert.match(p.get('status').textContent,expected);
+  }
+  d.degraded=true;await p.event('refresh','click');await choose(p,'ko');
+  assert.match(p.get('status').textContent,/수집하지 못했습니다/);
+});
+test('a stored Issue receipt is not reported as delivered without a confirmed context update',async()=>{
+  const reference='https://github.com/Example/Library/issues/7',hash='a'.repeat(64),requestId='aaaaaaaa-bbbb-8ccc-8ddd-eeeeeeeeeeee';
+  const tools={oms_panel_git_status:()=>({issuePreview:{kind:'github-issue',state:'open',reference,revision:'2026-06-01T00:00:00Z',sha256:hash}}),
+    oms_reviewed_issue_status:()=>({schema:1,kind:'oms-reviewed-issue-receipt',status:'recorded',requestId,room:main.room,participant:main.participant,issue:'Example/Library#7',sha256:hash})};
+  for(const context of [false,true]) {
+    const p=await panel(['one'],dashboard,{locale:'en',context,tools});
+    p.host.rejectContext=true;
+    await p.event('new-goal','click');p.get('brief').value=reference;await p.event('brief','input');
+    await p.event('issue-review','click');await setImmediate();
+    assert.match(p.get('issue-evidence').textContent,/Receipt saved only.*not confirmed/);
+    assert.doesNotMatch(p.get('issue-evidence').textContent,/added to|unconfirmed/);
+    assert.equal(p.get('issue-record').disabled,false);
+    if(context) {
+      p.host.rejectContext=false;await p.event('issue-record','click');await setImmediate();
+      assert.match(p.get('issue-evidence').textContent,/added to the current Main's context/);
+      assert.equal(p.get('issue-record').disabled,true);
+      assert.deepEqual({...p.host.contexts.at(-1).structuredContent},{project:'one',room:main.room,owner:main.participant,
+        requestId,kind:'oms-reviewed-issue-receipt',status:'recorded',issue:'Example/Library#7',sha256:hash});
+    }
+    assert.ok(!p.calls.some(c=>c.name==='oms_record_reviewed_issue'));
+  }
+});
 test('the team respects parent, provider, terminal membership and partial visibility',async()=>{
   const d={...dashboard,conversationMain:{...main,participants:[{...lead,parent:'someone-else'},{...lead,participant:'left',joined:false},
     {...lead,participant:'other',provider:'agy'}],participantsOmitted:1},conversationAttempts:
