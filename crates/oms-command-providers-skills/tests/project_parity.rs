@@ -377,6 +377,47 @@ fn models_preview_preserves_full_catalog_routability() {
     );
     assert_eq!(row["catalog_probe"], "ok");
 
+    let (code, codex_text, err) = isolated(
+        "models",
+        &["--providers", "codex,claude"],
+        tmp.path(),
+        &oms_source(),
+        &[
+            ("HOME", utf8(&home)),
+            ("OMS_CAPABILITY_DIR", utf8(&cache)),
+            ("PATH", ""),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        codex_text.contains("## codex (absent)\nmodels:\n"),
+        "missing codex header/models block: {codex_text}"
+    );
+    assert!(
+        codex_text.contains("  gpt-6.2-sol: medium high xhigh max ultra\n"),
+        "missing routable codex model scale: {codex_text}"
+    );
+    assert!(
+        codex_text.contains("  gpt-6.1-sol: low medium high xhigh max (not routed)\n"),
+        "missing not-routed codex model scale: {codex_text}"
+    );
+    assert!(
+        codex_text.contains("  gpt-5.0-sol (not routed)\n"),
+        "missing unscaled codex model: {codex_text}"
+    );
+    assert!(
+        codex_text.contains("  claude-sonnet-5-5 (not routed)\n"),
+        "missing foreign codex catalog model: {codex_text}"
+    );
+    assert!(
+        codex_text.contains("effort: config low medium high xhigh max ultra\n"),
+        "missing codex effort mechanism line: {codex_text}"
+    );
+    assert!(
+        codex_text.contains("## claude (absent)\nmodels: unknown\neffort: unknown \n"),
+        "missing unknown catalog fallback: {codex_text}"
+    );
+
     let (code, out, err) = isolated(
         "models",
         &["--providers", "deepseek,vibe,openhands", "--json"],
@@ -504,8 +545,53 @@ fn models_preview_preserves_full_catalog_routability() {
     assert_eq!(code, 0, "{err}");
     assert!(!text_out.contains('\t'), "raw tab label leaked: {text_out}");
     assert!(
-        text_out.contains("gemini-4-carbon-high"),
-        "missing selector in text output: {text_out}"
+        text_out.contains("## antigravity (absent)\nmodels:\n"),
+        "missing antigravity header/models block: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-4-carbon: low medium high\n"),
+        "missing grouped base model scale: {text_out}"
+    );
+    assert_eq!(
+        text_out.matches("  gemini-4-carbon:").count(),
+        1,
+        "base model duplicated in text output: {text_out}"
+    );
+    assert!(
+        !text_out.contains("gemini-4-carbon-high"),
+        "raw effort selector leaked into text output: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-4-neon: high xhigh\n"),
+        "missing neon scale: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-4-oxygen-low\n"),
+        "missing unsuffixed/unmapped routable model: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-pro-orchestrator: fixed\n"),
+        "missing fixed-effort orchestrator: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-pro-orchestrator-argon: fixed\n"),
+        "missing fixed-effort argon orchestrator: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-pro-orchestrator-neon (not routed)\n"),
+        "missing not-routed unmapped model: {text_out}"
+    );
+    assert!(
+        text_out.contains("  claude-opus-5-5: high (not routed)\n"),
+        "missing not-routed grouped model: {text_out}"
+    );
+    assert!(
+        text_out.contains("  gemini-3.0-flash-low (not routed)\n"),
+        "missing older flash model: {text_out}"
+    );
+    assert!(
+        text_out.contains("effort: unknown \n"),
+        "missing effort line: {text_out}"
     );
 
     // Probe stderr help (agy) and unparenthesised level list (pi).
