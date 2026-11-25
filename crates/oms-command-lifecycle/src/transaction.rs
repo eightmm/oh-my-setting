@@ -195,7 +195,9 @@ impl Transaction {
         } else {
             false
         };
-        let deferred = old_link.is_some() && link_source.is_some();
+        // A staged link would expose its skill before the journal records it, so link
+        // sources are staged only after save.
+        let deferred = link_source.is_some();
         let (hidden_new_skill, new) = if deferred {
             let probe = self.path.with_file_name(format!("link-probe-{suffix}"));
             symlink(link_source.as_ref().unwrap(), &probe)?;
@@ -723,34 +725,24 @@ fn rollback(j: &Journal) -> Result<()> {
             if undo.is_some() {
                 return r::fail("unexpected lifecycle undo content");
             }
-            if current_old != c.old {
-                let already_restored = fs::symlink_metadata(&c.target)
-                    .is_ok_and(|m| m.file_type().is_symlink())
-                    && fs::read_link(&c.target)
-                        .is_ok_and(|path| path.as_os_str().as_bytes() == link);
-                if !already_restored {
-                    if current_new.is_some() && current_new != c.new {
-                        return r::fail("rollback conflict; lifecycle recovery journal retained");
-                    }
-                    remove(&c.target)?;
-                    symlink(OsString::from_vec(link.clone()), &c.target)?;
+            let is_old_link = || {
+                fs::symlink_metadata(&c.target).is_ok_and(|m| m.file_type().is_symlink())
+                    && fs::read_link(&c.target).is_ok_and(|p| p.as_os_str().as_bytes() == link)
+            };
+            if !is_old_link() {
+                if current_new.is_some() && current_new != c.new {
+                    return r::fail("rollback conflict; lifecycle recovery journal retained");
                 }
-                if let Some(mode) = c.old_link_mode {
-                    #[cfg(target_os = "macos")]
-                    let mode = mode as u16;
-                    match rustix::fs::chmodat(
-                        rustix::fs::CWD,
-                        &c.target,
-                        rustix::fs::Mode::from_raw_mode(mode & 0o7777),
-                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                    ) {
-                        Ok(()) | Err(rustix::io::Errno::OPNOTSUPP) => {}
-                        Err(e) => return Err(std::io::Error::from(e).into()),
-                    }
-                }
-                if c.identity(&c.target, false)? != c.old {
-                    return r::fail("restored link identity changed; recovery journal retained");
-                }
+                remove(&c.target)?;
+                symlink(OsString::from_vec(link.clone()), &c.target)?;
+            }
+            // Mode is restored on every pass so a resumed recovery finishes it, and is
+            // best effort: a recreated link may not carry the mode where lchmod is absent.
+            if let Some(mode) = c.old_link_mode {
+                restore_link_mode(&c.target, mode)?;
+            }
+            if !is_old_link() {
+                return r::fail("restored link changed; recovery journal retained");
             }
         } else if undo.is_some() {
             if undo != c.old || (current_new.is_some() && current_new != c.new) {
@@ -793,6 +785,30 @@ fn cleanup(j: &Journal) -> Result<()> {
         r::sync_dir(c.target.parent().unwrap())?;
     }
     Ok(())
+}
+fn restore_link_mode(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mode = mode as u16;
+    match rustix::fs::chmodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::Mode::from_raw_mode(mode & 0o7777),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(()) => Ok(()),
+        // NOTSUP and OPNOTSUPP are one value on Linux but differ on macOS.
+        Err(e)
+            if [
+                rustix::io::Errno::OPNOTSUPP,
+                rustix::io::Errno::NOTSUP,
+                rustix::io::Errno::NOSYS,
+            ]
+            .contains(&e) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
 }
 fn read_old_link(path: &Path) -> Result<(Option<Vec<u8>>, Option<u32>)> {
     match fs::symlink_metadata(path) {
@@ -1328,6 +1344,22 @@ mod tests {
             drop(tx);
             Transaction::begin(&paths).unwrap().commit().unwrap();
             assert_eq!(fs::read_link(&target).unwrap(), old_text);
+            assert!(siblings_with_skill_md(&skills).is_empty());
+        }
+        let fresh = skills.join("oms-fresh");
+        for point in [1, 2] {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            LINK_CRASH.with(|hook| hook.set(point));
+            assert!(tx.link(&fresh, &new).is_err());
+            LINK_CRASH.with(|hook| hook.set(0));
+            assert_eq!(
+                siblings_with_skill_md(&skills).len(),
+                usize::from(point == 2)
+            );
+            tx.complete = true;
+            drop(tx);
+            Transaction::begin(&paths).unwrap().commit().unwrap();
+            assert!(!r::exists(&fresh));
             assert!(siblings_with_skill_md(&skills).is_empty());
         }
         {
