@@ -597,10 +597,14 @@ fn rust_workspace_cache_and_impact() {
         ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"core\"]\n"),
         (
             "app/Cargo.toml",
-            "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
+            "[package]\nname = \"app\"\n[dependencies]\napp_core = { package = \"core\", path = \"../core\" }\n",
         ),
         ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
         ("app/src/lib.rs", "pub fn app() {}\n"),
+        (
+            "app/src/chain.rs",
+            "pub fn run() { run_with_source() }\nfn run_with_source() { run_with_services(&Unavailable) }\nfn run_with_services(_: &Unavailable) {}\nfn elsewhere() { core() }\nstruct Unavailable;\nuse app_core::core;\n",
+        ),
         (
             "core/src/lib.rs",
             "pub fn core() {}\nimpl First { pub fn new() -> Self { Self } }\nimpl Second { pub fn new() -> Self { Self } }\n",
@@ -654,9 +658,54 @@ fn rust_workspace_cache_and_impact() {
             .iter()
             .all(|s| s["signature"].as_str().unwrap().contains("fn new()"))
     );
+    // `core` exists only in another file, so same-name resolution must not
+    // turn `elsewhere` into a caller.
+    let calls = |graph: &Value| -> Vec<Value> {
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e["relation"] == "calls"
+                    && e["source"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("symbol:app/src/chain.rs::"))
+            })
+            .cloned()
+            .collect()
+    };
+    let cold_calls = calls(&graph);
+    let id = |name: &str| format!("symbol:app/src/chain.rs::function:{name}");
+    let digest = &graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id("run").as_str())
+        .unwrap()["source_digest"];
+    let expected: Vec<Value> = [
+        ("run", "run_with_source", 1),
+        ("run_with_source", "run_with_services", 2),
+    ]
+    .iter()
+    .map(|(source, target, line)| {
+        json!({"source":id(source),"target":id(target),"relation":"calls","confidence":"INFERRED","evidence":{"path":"app/src/chain.rs","source_digest":digest,"line":line}})
+    })
+    .collect();
+    assert_eq!(cold_calls, expected);
+    for (direction, other) in [("in", "run"), ("out", "run_with_services")] {
+        assert_eq!(
+            f.graph()
+                .neighbors(&id("run_with_source"), "calls", direction)
+                .unwrap(),
+            vec![
+                json!({"id":id(other),"relation":"calls","direction":direction,"confidence":"INFERRED"})
+            ]
+        );
+    }
     let warm = f.build();
     assert!(warm["stats"]["cached"].as_u64().unwrap() > 0);
     assert_eq!(warm["stats"]["parsed"], 0);
+    assert_eq!(calls(&project::load(&f.state()).unwrap()), cold_calls);
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .args(args)
