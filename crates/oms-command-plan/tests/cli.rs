@@ -250,6 +250,15 @@ fn brief_file_round_trip_and_bounds() {
         );
     }
     assert_eq!(go(&r, &["add", "--id", "0", "--title", "no brief"]).0, 0);
+    let preview = go(&r, &["next", "--provider", "codex", "--json"]);
+    assert_eq!(preview.0, 0, "{preview:?}");
+    assert_eq!(
+        oms_command_plan::json::parse(preview.1.as_bytes())
+            .unwrap()
+            .text("id"),
+        "a",
+        "a non-claiming selector must skip brief-less tasks too"
+    );
     let next = go(&r, &["next", "--claim", "--provider", "codex", "--json"]);
     assert_eq!(next.0, 0, "{next:?}");
     assert_eq!(
@@ -2100,7 +2109,23 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
     let tmp = Tmp::new();
     let repo = repo(&tmp);
     assert_eq!(go(&repo, &["init", "--goal", "g"]).0, 0);
-    assert_eq!(go(&repo, &["add", "--id", "a", "--title", "a"]).0, 0);
+    fs::write(repo.join("brief.txt"), "expiry fixture work").unwrap();
+    assert_eq!(
+        go(
+            &repo,
+            &[
+                "add",
+                "--id",
+                "a",
+                "--title",
+                "a",
+                "--brief-file",
+                "brief.txt"
+            ]
+        )
+        .0,
+        0
+    );
     let stop = AtomicBool::new(false);
     let claim = Request::new(Action::Claim)
         .with("id", "a")
@@ -4524,7 +4549,13 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
     assert_eq!(c, 0, "{e}");
     assert_eq!(task(&p, "p1").text("issue"), format!("{REPO}#21"));
     assert_eq!(task(&p, "p1").text("brief"), "reviewed work");
-    let (c, o, e) = proposal("", r##","issue":"#21""##);
+    let (c, _, e) = proposal("", r##","issue":"#21""##);
+    assert_ne!(
+        c, 0,
+        "a replay without the reviewed brief must not count as applied"
+    );
+    assert!(e.contains("does not match reviewed proposal"), "{e}");
+    let (c, o, e) = proposal("", r##","issue":"#21","brief":"reviewed work""##);
     assert_eq!(c, 0, "{e}");
     assert!(o.contains("already applied"), "{o}");
     let raw = fs::read(p.join(".oms/plan/tasks.json")).unwrap();

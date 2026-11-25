@@ -378,6 +378,23 @@ fn base(ctx: &Context<'_>, remote: &str, branch: &str) -> Result<String> {
         "cannot resolve review base to a local commit",
     ))
 }
+/// Plan-run refuses brief-less tasks, so a new proposal must not be bound for review without them;
+/// `live` skips this so a legacy receipt stays inspectable and cancellable.
+fn require_briefs(proposal: &Value) -> Result<()> {
+    let tasks = proposal["tasks"]
+        .as_array()
+        .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
+    for task in tasks {
+        require(
+            !value::text(task, "brief").trim().is_empty(),
+            format!(
+                "proposal task {} has no work brief; revise and review the proposal with a brief for every task",
+                value::text(task, "id")
+            ),
+        )?;
+    }
+    Ok(())
+}
 fn validate_bound_proposal(ctx: &Context<'_>, row: &Value, proposal: &Value) -> Result<()> {
     require(
         row["contract"].get("issue_requirements").is_some()
@@ -1442,6 +1459,7 @@ fn propose(
     let sha = value::hash(&bytes);
     let proposal = value::parse(&bytes)?;
     validate_bound_proposal(ctx, row, &proposal)?;
+    require_briefs(&proposal)?;
     if complete.is_none() {
         ctx.append(PROGRESS,&json!({"schema":1,"kind":"autopilot-planning","owner_id":row["owner_id"],
             "intent_sha256":intent,"recovery_sha256":recovery,"phase":"completed","proposal":{"path":path,"sha256":sha},"ts":value::now()}))?;
@@ -2397,6 +2415,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             let spec = planning::contract(ctx)?;
             planning::validate(ctx, &proposal, &spec, 12)?;
             validate_bound_proposal(ctx, &fresh, &proposal)?;
+            require_briefs(&proposal)?;
             require(
                 envelope(value::text(&fresh["contract"], "allowed"))?
                     == planning::strings(&proposal["allowed_envelope"])?,
@@ -2551,18 +2570,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         apply_args.set("apply", &frozen);
         apply_args.set("expected-proposal-sha256", expected);
         let reviewed = value::parse(&ctx.store.read(&frozen, MAX_FILE)?)?;
-        let tasks = reviewed["tasks"]
-            .as_array()
-            .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
-        for task in tasks {
-            require(
-                !value::text(task, "brief").trim().is_empty(),
-                format!(
-                    "proposal task {} has no work brief; revise and review the proposal with a brief for every task",
-                    value::text(task, "id")
-                ),
-            )?;
-        }
+        require_briefs(&reviewed)?;
         if row["stage"] == "proposal-review"
             && row.get("issue").is_none()
             && crate::github::Mode::load(ctx)?.active.is_some()

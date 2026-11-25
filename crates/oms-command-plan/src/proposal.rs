@@ -510,12 +510,13 @@ impl Plan<'_> {
                     "contracts",
                     "priority",
                     "issue",
+                    "brief",
                 ] {
                     let default = if field == "priority" {
                         number(0)
                     } else if field == "assignment" {
                         empty()
-                    } else if ["verify", "role", "issue"].contains(&field) {
+                    } else if ["verify", "role", "issue", "brief"].contains(&field) {
                         string("")
                     } else {
                         Value::Array(vec![])

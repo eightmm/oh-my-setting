@@ -350,14 +350,24 @@ impl Plan<'_> {
                 "capacity_full"
             }));
         }
-        let selected = eligible
+        // A task without a work brief cannot be dispatched, so no selector may pick it.
+        let (briefed, unbriefed): (Vec<Value>, Vec<Value>) = eligible
             .into_iter()
-            .find(|t| !req.has("claim") || !t.text("brief").trim().is_empty());
-        let Some(mut t) = selected else {
+            .partition(|t| !t.text("brief").trim().is_empty());
+        let Some(mut t) = briefed.into_iter().next() else {
             let mut response = Response {
                 code: 3,
                 ..Default::default()
             };
+            if !unbriefed.is_empty() {
+                response.stderr.extend(
+                    format!(
+                        "plan: {} ready task(s) lack a work brief; use agent-plan amend --id ID --brief-file PATH\n",
+                        unbriefed.len()
+                    )
+                    .as_bytes(),
+                );
+            }
             if s.contract.get("satisfied") != &Value::Bool(true) {
                 response.stderr.extend(
                     format!(
