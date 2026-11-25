@@ -26,7 +26,7 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     host_mutation()?;
     if args.get("--login").is_some() || args.has("--login-menu") {
         if args.get("--login").is_some() && args.has("--login-menu") {
-            return Err(error("choose --login PROVIDER[:ID] or --login-menu"));
+            return Err(error("choose --login PROVIDER or --login-menu"));
         }
         if args.get("--account").is_some()
             || args.get("--home").is_some()
@@ -396,23 +396,6 @@ fn validate_claude_registry(
     for row in accounts {
         validate_account_row(row, false).map_err(|_| error("invalid Claude registry"))?;
     }
-    let other_shared_homes = if shared["providers"].get("claude").is_none() {
-        None
-    } else {
-        let mut other = std::collections::BTreeSet::new();
-        for (owner, settings) in shared["providers"].as_object().into_iter().flatten() {
-            if owner == "claude" {
-                continue;
-            }
-            for row in settings["accounts"].as_array().into_iter().flatten() {
-                if let Some(h) = row["home"].as_str() {
-                    other.insert(physical(Path::new(h))?);
-                }
-            }
-        }
-        Some(other)
-    };
-    let foreign_shared_homes = other_shared_homes.as_ref().unwrap_or(shared_homes);
     let mut ids = std::collections::BTreeSet::new();
     let mut homes = std::collections::BTreeSet::new();
     homes.insert(default_claude.to_owned());
@@ -422,11 +405,14 @@ fn validate_claude_registry(
         if !ids.insert(rid.to_owned()) || !homes.insert(rhome.clone()) {
             return Err(error("duplicate provider account id or canonical home"));
         }
-        if foreign_shared_homes.contains(&rhome) {
+        if shared["providers"].get("claude").is_none() && shared_homes.contains(&rhome) {
             return Err(error("duplicate provider account id or canonical home"));
         }
     }
-    if !accounts.is_empty() && foreign_shared_homes.contains(default_claude) {
+    if !accounts.is_empty()
+        && shared["providers"].get("claude").is_none()
+        && shared_homes.contains(default_claude)
+    {
         return Err(error("duplicate provider account id or canonical home"));
     }
     Ok(())
@@ -1958,124 +1944,27 @@ fn login_overrides(provider: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LoginTarget {
-    provider: String,
-    account_id: Option<String>,
-}
-fn parse_login_spec(raw: &str) -> Result<LoginTarget> {
+fn parse_login_spec(raw: &str) -> Result<&'static str> {
     let (provider, account_id) = match raw.split_once(':') {
         Some((p, id)) => (p, Some(id)),
         None => (raw, None),
     };
-    match provider {
-        "codex" | "claude" => {
-            if let Some(id) = account_id
-                && !valid_account_id(id)
-            {
-                return Err(error("invalid provider account id"));
-            }
-            Ok(LoginTarget {
-                provider: provider.to_owned(),
-                account_id: account_id.map(str::to_owned),
-            })
+    let canonical = match provider {
+        "codex" => "codex",
+        "claude" => "claude",
+        "antigravity" => "antigravity",
+        _ => {
+            return Err(error(
+                "unsupported login provider; expected codex, claude, or antigravity",
+            ));
         }
-        "antigravity" => {
-            if account_id.is_some() {
-                return Err(error(
-                    "antigravity does not support per-account sign-in; use --login antigravity",
-                ));
-            }
-            Ok(LoginTarget {
-                provider: "antigravity".to_owned(),
-                account_id: None,
-            })
-        }
-        _ => Err(error(
-            "unsupported login provider; expected codex, claude, or antigravity",
-        )),
-    }
-}
-fn validate_login_home(path: &Path) -> Result<()> {
-    if path.as_os_str().as_encoded_bytes().ends_with(b"/")
-        || path.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::CurDir | std::path::Component::ParentDir
-            )
-        })
-    {
+    };
+    if account_id.is_some() {
         return Err(error(
-            "account home must be a clean absolute path without trailing slash, `.` or `..`",
+            "per-account sign-in is not available yet; run the provider's sign-in with that account's home",
         ));
     }
-    let parent = path.parent().ok_or_else(|| error("invalid home parent"))?;
-    private_parents(parent)?;
-    let _directory = open_home(path, None)?;
-    let resolved = path.canonicalize()?;
-    if let Some(resolved_parent) = resolved.parent() {
-        private_parents(resolved_parent)?;
-    }
-    Ok(())
-}
-fn registered_provider_accounts(provider: &str) -> Result<Vec<(String, PathBuf)>> {
-    if !["codex", "claude"].contains(&provider) {
-        return Ok(Vec::new());
-    }
-    let config = account_config_dir()?;
-    let registry = config.join("provider-accounts.json");
-    let raw = optional(&registry)?;
-    let shared = if raw.is_empty() {
-        json!({"schema":1,"providers":{}})
-    } else {
-        json(&raw)?
-    };
-    let shared_homes = validate_shared_registry(&shared)?;
-    let claude_registry = config.join("provider-accounts.claude.json");
-    let claude_raw = optional(&claude_registry)?;
-    let claude_state = if claude_raw.is_empty() {
-        None
-    } else {
-        let default_claude = physical(&home()?.join(".claude"))?;
-        let claude_doc = json(&claude_raw)?;
-        validate_claude_registry(&claude_doc, &default_claude, &shared, &shared_homes)?;
-        Some((default_claude, claude_doc))
-    };
-    if let Some(entries) = shared["providers"][provider]["accounts"].as_array() {
-        let mut out = Vec::with_capacity(entries.len());
-        for row in entries {
-            let (id, home_str) = validate_account_row(row, true)?;
-            out.push((id.to_owned(), PathBuf::from(home_str)));
-        }
-        return Ok(out);
-    }
-    if provider == "claude"
-        && let Some((default_claude, claude_doc)) = claude_state
-        && let Some(entries) = claude_doc["accounts"].as_array()
-        && !entries.is_empty()
-    {
-        let mut out = vec![("default".to_owned(), default_claude)];
-        for row in entries {
-            let (id, home_str) = validate_account_row(row, false)?;
-            out.push((id.to_owned(), PathBuf::from(home_str)));
-        }
-        return Ok(out);
-    }
-    Ok(Vec::new())
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LoginEntry {
-    provider: String,
-    account_id: Option<String>,
-    home_env: Option<(&'static str, PathBuf)>,
-}
-impl LoginEntry {
-    fn label(&self) -> String {
-        match &self.account_id {
-            Some(id) => format!("{}:{id}", self.provider),
-            None => self.provider.clone(),
-        }
-    }
+    Ok(canonical)
 }
 const LOGIN_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const LOGIN_UNKNOWN_CODE: i32 = 3;
@@ -2103,52 +1992,6 @@ impl LoginStatus {
     }
 }
 
-fn resolve_login_entry(target: &LoginTarget) -> Result<LoginEntry> {
-    match target.provider.as_str() {
-        "codex" | "claude" => {
-            let env_key = if target.provider == "codex" {
-                "CODEX_HOME"
-            } else {
-                "CLAUDE_CONFIG_DIR"
-            };
-            if let Some(id) = &target.account_id {
-                let accounts = registered_provider_accounts(&target.provider)?;
-                let (_, path) = accounts
-                    .into_iter()
-                    .find(|(rid, _)| rid == id)
-                    .ok_or_else(|| error(format!("unknown {} account: {id}", target.provider)))?;
-                if id == "default" {
-                    Ok(LoginEntry {
-                        provider: target.provider.clone(),
-                        account_id: None,
-                        home_env: None,
-                    })
-                } else {
-                    validate_login_home(&path)?;
-                    Ok(LoginEntry {
-                        provider: target.provider.clone(),
-                        account_id: Some(id.clone()),
-                        home_env: Some((env_key, path)),
-                    })
-                }
-            } else {
-                Ok(LoginEntry {
-                    provider: target.provider.clone(),
-                    account_id: None,
-                    home_env: None,
-                })
-            }
-        }
-        "antigravity" => Ok(LoginEntry {
-            provider: "antigravity".to_owned(),
-            account_id: None,
-            home_env: None,
-        }),
-        _ => Err(error(
-            "unsupported login provider; expected codex, claude, or antigravity",
-        )),
-    }
-}
 fn provider_login_spec(provider: &str) -> Result<(&'static str, &'static [&'static str])> {
     match provider {
         "codex" => Ok(("codex", &["login"])),
@@ -2159,18 +2002,13 @@ fn provider_login_spec(provider: &str) -> Result<(&'static str, &'static [&'stat
         )),
     }
 }
-fn run_login_entry(entry: &LoginEntry, ctx: &Context<'_>) -> Result<(i32, String)> {
+fn run_login(provider: &str, ctx: &Context<'_>) -> Result<(i32, String)> {
     use std::io::Write;
-    let (binary, subargs) = provider_login_spec(&entry.provider)?;
-    if entry.account_id.is_some()
-        && let Some((_, home_path)) = &entry.home_env
-    {
-        validate_login_home(home_path)?;
-    }
+    let (binary, subargs) = provider_login_spec(provider)?;
     if !installed(binary) {
         return Err(error(format!("{binary} is not installed or not on PATH")));
     }
-    if entry.provider == "antigravity" {
+    if provider == "antigravity" {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(
             stdout,
@@ -2185,10 +2023,7 @@ fn run_login_entry(entry: &LoginEntry, ctx: &Context<'_>) -> Result<(i32, String
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if let Some((env_key, home_path)) = &entry.home_env {
-        command.env(env_key, home_path);
-    }
-    for var in login_overrides(&entry.provider) {
+    for var in login_overrides(provider) {
         command.env_remove(var);
     }
     // The child's own exit code is not evidence of sign-in; only the status check below is.
@@ -2199,22 +2034,19 @@ fn run_login_entry(entry: &LoginEntry, ctx: &Context<'_>) -> Result<(i32, String
         }
         Err(_) => return Err(error(format!("failed to run {binary}"))),
     }
-    let label = entry.label();
-    if entry.provider == "antigravity" {
+    if provider == "antigravity" {
         return Ok((
             LOGIN_UNKNOWN_CODE,
-            format!("{label}: sign-in not verifiable\n"),
+            format!("{provider}: sign-in not verifiable\n"),
         ));
     }
-    let home_path = entry.home_env.as_ref().map(|(_, path)| path.as_path());
-    let verified = login_status(&entry.provider, home_path, ctx)?;
-    let report = format!("{label}: {}\n", verified.label());
+    let verified = login_status(provider, None, ctx)?;
+    let report = format!("{provider}: {}\n", verified.label());
     Ok((verified.exit_code(), report))
 }
 fn login_direct(raw: &str, ctx: &Context<'_>) -> Result<Output> {
-    let target = parse_login_spec(raw)?;
-    let entry = resolve_login_entry(&target)?;
-    let (code, report) = run_login_entry(&entry, ctx)?;
+    let provider = parse_login_spec(raw)?;
+    let (code, report) = run_login(provider, ctx)?;
     Ok(Output {
         code,
         out: report.into_bytes(),
@@ -2223,62 +2055,27 @@ fn login_direct(raw: &str, ctx: &Context<'_>) -> Result<Output> {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MenuItem {
-    entry: LoginEntry,
+    provider: &'static str,
     status: String,
 }
-fn build_login_menu(ctx: &Context<'_>) -> Result<Vec<MenuItem>> {
-    build_login_menu_with(registered_provider_accounts, installed, |provider, home| {
-        login_status(provider, home, ctx)
-    })
+fn build_login_menu(ctx: &Context<'_>) -> Vec<MenuItem> {
+    build_login_menu_with(installed, |provider| login_status(provider, None, ctx))
 }
 fn build_login_menu_with(
-    mut accounts_for: impl FnMut(&str) -> Result<Vec<(String, PathBuf)>>,
     mut has_binary: impl FnMut(&str) -> bool,
-    mut status_for: impl FnMut(&str, Option<&Path>) -> Result<LoginStatus>,
-) -> Result<Vec<MenuItem>> {
-    let mut items = Vec::new();
-    for provider in ["codex", "claude"] {
-        let (binary, _) = provider_login_spec(provider)?;
-        let env_key = if provider == "codex" {
-            "CODEX_HOME"
+    mut status_for: impl FnMut(&str) -> Result<LoginStatus>,
+) -> Vec<MenuItem> {
+    let mut items = Vec::with_capacity(3);
+    for (provider, binary) in [("codex", "codex"), ("claude", "claude")] {
+        let status = if !has_binary(binary) {
+            format!("{binary} not installed")
         } else {
-            "CLAUDE_CONFIG_DIR"
+            match status_for(provider) {
+                Ok(status) => status.label(),
+                Err(err) => LoginStatus::Unknown(err.message).label(),
+            }
         };
-        let installed_bin = has_binary(binary);
-        let accounts = accounts_for(provider)?;
-        let rows: Vec<(Option<String>, Option<PathBuf>)> = if accounts.is_empty() {
-            vec![(None, None)]
-        } else {
-            accounts
-                .into_iter()
-                .map(|(id, path)| {
-                    if id == "default" {
-                        (None, None)
-                    } else {
-                        (Some(id), Some(path))
-                    }
-                })
-                .collect()
-        };
-        for (account_id, home_path) in rows {
-            let status = if !installed_bin {
-                format!("{binary} not installed")
-            } else if let Some(path) = home_path.as_deref()
-                && validate_login_home(path).is_err()
-            {
-                LoginStatus::Unknown("unsafe or missing home".to_owned()).label()
-            } else {
-                status_for(provider, home_path.as_deref())?.label()
-            };
-            items.push(MenuItem {
-                entry: LoginEntry {
-                    provider: provider.to_owned(),
-                    account_id,
-                    home_env: home_path.map(|path| (env_key, path)),
-                },
-                status,
-            });
-        }
+        items.push(MenuItem { provider, status });
     }
     let agy_status = if has_binary("agy") {
         "sign-in not verifiable".to_owned()
@@ -2286,24 +2083,20 @@ fn build_login_menu_with(
         "agy not installed".to_owned()
     };
     items.push(MenuItem {
-        entry: LoginEntry {
-            provider: "antigravity".to_owned(),
-            account_id: None,
-            home_env: None,
-        },
+        provider: "antigravity",
         status: agy_status,
     });
-    Ok(items)
+    items
 }
 fn format_login_menu(items: &[MenuItem]) -> String {
     let mut out = String::from("Provider sign-in:\n");
     for (idx, item) in items.iter().enumerate() {
-        let label = match &item.entry.account_id {
-            Some(id) => format!("{}:{id}", item.entry.provider),
-            None if item.entry.provider == "antigravity" => "antigravity".to_owned(),
-            None => format!("{} (default)", item.entry.provider),
-        };
-        out.push_str(&format!("  {}. {:<24} [{}]\n", idx + 1, label, item.status));
+        out.push_str(&format!(
+            "  {}. {:<16} [{}]\n",
+            idx + 1,
+            item.provider,
+            item.status
+        ));
     }
     out
 }
@@ -2345,18 +2138,7 @@ fn login_menu_with_terminals(
     if !stdin_is_tty || !stdout_is_tty {
         return Err(error("--login-menu requires an interactive terminal"));
     }
-    let items = match build_login_menu(ctx) {
-        Ok(items) => items,
-        Err(e) => {
-            eprintln!("error: {}", e.message);
-            wait_for_enter();
-            return Ok(Output {
-                code: e.code,
-                out: Vec::new(),
-                err: Vec::new(),
-            });
-        }
-    };
+    let items = build_login_menu(ctx);
     {
         let mut stdout = std::io::stdout().lock();
         let _ = write!(
@@ -2377,7 +2159,7 @@ fn login_menu_with_terminals(
         });
     }
     let selected = match parse_menu_choice(&line, items.len()) {
-        Ok(Some(idx)) => &items[idx].entry,
+        Ok(Some(idx)) => items[idx].provider,
         Ok(None) => {
             return Ok(Output {
                 code: 0,
@@ -2395,7 +2177,7 @@ fn login_menu_with_terminals(
             });
         }
     };
-    match run_login_entry(selected, ctx) {
+    match run_login(selected, ctx) {
         Ok((code, report)) => {
             let mut stdout = std::io::stdout().lock();
             let _ = write!(stdout, "{report}");
@@ -2450,15 +2232,18 @@ fn run_login_status_command(
     timeout: std::time::Duration,
 ) -> Result<LoginStatus> {
     if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
-        return Ok(LoginStatus::Unknown("status check interrupted".to_owned()));
+        return Ok(LoginStatus::Unknown(
+            "status check interrupted (exit 130)".to_owned(),
+        ));
     }
     let out = capture_timeout(command, interrupted, timeout)?;
     Ok(match out.code {
         0 => LoginStatus::SignedIn,
-        124 => LoginStatus::Unknown("status check timed out".to_owned()),
-        130 => LoginStatus::Unknown("status check interrupted".to_owned()),
-        127 => LoginStatus::Unknown(format!("{binary} not installed")),
-        _ => LoginStatus::NotSignedIn,
+        1 => LoginStatus::NotSignedIn,
+        124 => LoginStatus::Unknown("status check timed out (exit 124)".to_owned()),
+        130 => LoginStatus::Unknown("status check interrupted (exit 130)".to_owned()),
+        127 => LoginStatus::Unknown(format!("{binary} not installed (exit 127)")),
+        code => LoginStatus::Unknown(format!("status check failed (exit {code})")),
     })
 }
 fn stat_id(info: &rustix::fs::Stat) -> Value {
@@ -3489,102 +3274,62 @@ mod tests {
 
     #[test]
     fn login_spec_and_menu_parsing() {
-        assert_eq!(
-            parse_login_spec("codex").unwrap(),
-            LoginTarget {
-                provider: "codex".into(),
-                account_id: None,
-            }
-        );
-        assert_eq!(
-            parse_login_spec("codex:work").unwrap(),
-            LoginTarget {
-                provider: "codex".into(),
-                account_id: Some("work".into()),
-            }
-        );
-        assert_eq!(
-            parse_login_spec("claude:work").unwrap(),
-            LoginTarget {
-                provider: "claude".into(),
-                account_id: Some("work".into()),
-            }
-        );
-        assert_eq!(
-            parse_login_spec("antigravity").unwrap(),
-            LoginTarget {
-                provider: "antigravity".into(),
-                account_id: None,
-            }
-        );
-        for bad in ["antigravity:work", "antigravity:default", "antigravity:"] {
+        assert_eq!(parse_login_spec("codex").unwrap(), "codex");
+        assert_eq!(parse_login_spec("claude").unwrap(), "claude");
+        assert_eq!(parse_login_spec("antigravity").unwrap(), "antigravity");
+        for bad in [
+            "codex:work",
+            "codex:default",
+            "codex:Bad",
+            "codex:",
+            "claude:work",
+            "claude:UPPER",
+            "antigravity:work",
+            "antigravity:default",
+            "antigravity:",
+        ] {
             refused(
                 parse_login_spec(bad),
-                "antigravity does not support per-account sign-in",
+                "per-account sign-in is not available",
             );
         }
-        for bad in ["codex:", "codex:Bad", "claude:UPPER"] {
-            refused(parse_login_spec(bad), "invalid provider account id");
-        }
-        for bad in ["", "agy", "pi", "gemini:work"] {
+        for bad in ["", "agy", "pi", "gemini:work", ":work"] {
             refused(parse_login_spec(bad), "unsupported login provider");
         }
 
-        assert_eq!(parse_menu_choice("1\n", 4).unwrap(), Some(0));
-        assert_eq!(parse_menu_choice(" 4 ", 4).unwrap(), Some(3));
-        assert_eq!(parse_menu_choice("q\n", 4).unwrap(), None);
-        assert_eq!(parse_menu_choice("Q", 4).unwrap(), None);
-        assert_eq!(parse_menu_choice("  \n", 4).unwrap(), None);
-        for bad in ["0", "5", "-1", "abc", "1 2"] {
-            refused(parse_menu_choice(bad, 4), "invalid selection");
+        assert_eq!(parse_menu_choice("1\n", 3).unwrap(), Some(0));
+        assert_eq!(parse_menu_choice(" 3 ", 3).unwrap(), Some(2));
+        assert_eq!(parse_menu_choice("q\n", 3).unwrap(), None);
+        assert_eq!(parse_menu_choice("Q", 3).unwrap(), None);
+        assert_eq!(parse_menu_choice("  \n", 3).unwrap(), None);
+        for bad in ["0", "4", "-1", "abc", "1 2"] {
+            refused(parse_menu_choice(bad, 3), "invalid selection");
         }
 
         let menu = format_login_menu(&[
             MenuItem {
-                entry: LoginEntry {
-                    provider: "codex".into(),
-                    account_id: None,
-                    home_env: None,
-                },
+                provider: "codex",
                 status: LoginStatus::SignedIn.label(),
             },
             MenuItem {
-                entry: LoginEntry {
-                    provider: "codex".into(),
-                    account_id: Some("work".into()),
-                    home_env: Some(("CODEX_HOME", PathBuf::from("codex-work"))),
-                },
+                provider: "claude",
                 status: LoginStatus::NotSignedIn.label(),
             },
             MenuItem {
-                entry: LoginEntry {
-                    provider: "claude".into(),
-                    account_id: Some("bad".into()),
-                    home_env: Some(("CLAUDE_CONFIG_DIR", PathBuf::from("claude-bad"))),
-                },
-                status: LoginStatus::Unknown("unsafe or missing home".into()).label(),
-            },
-            MenuItem {
-                entry: LoginEntry {
-                    provider: "antigravity".into(),
-                    account_id: None,
-                    home_env: None,
-                },
+                provider: "antigravity",
                 status: "sign-in not verifiable".into(),
             },
         ]);
-        assert!(menu.contains("1. codex (default)"), "{menu}");
+        assert!(menu.contains("1. codex"), "{menu}");
         assert!(menu.contains("[signed in]"), "{menu}");
-        assert!(menu.contains("2. codex:work"), "{menu}");
+        assert!(menu.contains("2. claude"), "{menu}");
         assert!(menu.contains("[not signed in]"), "{menu}");
-        assert!(menu.contains("3. claude:bad"), "{menu}");
-        assert!(menu.contains("[unknown: unsafe or missing home]"), "{menu}");
-        assert!(menu.contains("4. antigravity"), "{menu}");
+        assert!(menu.contains("3. antigravity"), "{menu}");
         assert!(menu.contains("[sign-in not verifiable]"), "{menu}");
     }
 
     #[test]
-    fn login_status_reports_three_states_and_menu_flags_unsafe_home() {
+    fn login_status_reports_three_states_and_menu_handles_probe_errors() {
         use std::sync::atomic::AtomicBool;
         use std::time::Duration;
 
@@ -3608,24 +3353,37 @@ mod tests {
         assert_eq!(no_status.exit_code(), 1);
         assert_eq!(no_status.label(), "not signed in");
 
-        // Sleeping past a short timeout cap reports unknown (never "not signed in").
+        // Exit 2, exit 137, and real SIGKILL (128+9=137) all report unknown with the code.
+        for (script, expected_code) in [("exit 2", "2"), ("exit 137", "137"), ("kill -9 $$", "137")]
+        {
+            let status =
+                run_login_status_command(sh(script), "codex", &clear, LOGIN_STATUS_TIMEOUT)
+                    .unwrap();
+            assert!(
+                matches!(&status, LoginStatus::Unknown(reason) if reason.contains(expected_code)),
+                "{script}: {status:?}"
+            );
+            assert_eq!(status.exit_code(), LOGIN_UNKNOWN_CODE);
+            assert_ne!(status.exit_code(), 0);
+            assert_ne!(status.exit_code(), 1);
+        }
+
+        // Sleeping past a short timeout cap reports unknown with 124 (never "not signed in").
         let timed_out =
             run_login_status_command(sh("sleep 5"), "codex", &clear, Duration::from_millis(100))
                 .unwrap();
         assert!(
-            matches!(&timed_out, LoginStatus::Unknown(reason) if reason.contains("timed out")),
+            matches!(&timed_out, LoginStatus::Unknown(reason) if reason.contains("timed out") && reason.contains("124")),
             "{timed_out:?}"
         );
         assert_eq!(timed_out.exit_code(), LOGIN_UNKNOWN_CODE);
-        assert_ne!(timed_out.exit_code(), 0);
-        assert_ne!(timed_out.exit_code(), 1);
 
-        // Explicit 124 / 130 exit codes and pre-set interrupted flag all report unknown.
+        // Explicit 124 / 130 exit codes and pre-set interrupted flag all report unknown with code.
         let code_124 =
             run_login_status_command(sh("exit 124"), "codex", &clear, LOGIN_STATUS_TIMEOUT)
                 .unwrap();
         assert!(
-            matches!(&code_124, LoginStatus::Unknown(reason) if reason.contains("timed out")),
+            matches!(&code_124, LoginStatus::Unknown(reason) if reason.contains("timed out") && reason.contains("124")),
             "{code_124:?}"
         );
         assert_eq!(code_124.exit_code(), LOGIN_UNKNOWN_CODE);
@@ -3634,7 +3392,7 @@ mod tests {
             run_login_status_command(sh("exit 130"), "claude", &clear, LOGIN_STATUS_TIMEOUT)
                 .unwrap();
         assert!(
-            matches!(&code_130, LoginStatus::Unknown(reason) if reason.contains("interrupted")),
+            matches!(&code_130, LoginStatus::Unknown(reason) if reason.contains("interrupted") && reason.contains("130")),
             "{code_130:?}"
         );
         assert_eq!(code_130.exit_code(), LOGIN_UNKNOWN_CODE);
@@ -3643,100 +3401,66 @@ mod tests {
             run_login_status_command(sh("exit 0"), "claude", &interrupted, LOGIN_STATUS_TIMEOUT)
                 .unwrap();
         assert!(
-            matches!(&pre_interrupted, LoginStatus::Unknown(reason) if reason.contains("interrupted")),
+            matches!(&pre_interrupted, LoginStatus::Unknown(reason) if reason.contains("interrupted") && reason.contains("130")),
             "{pre_interrupted:?}"
         );
         assert_eq!(pre_interrupted.exit_code(), LOGIN_UNKNOWN_CODE);
 
-        // Menu rows: default home passes None (no env override), unsafe, missing, or symlinked
-        // registered homes report "unknown: unsafe or missing home" without probing status, and
-        // unknown status results surface directly in the menu.
-        let fx = Fixture::new("login-menu");
-        let good_home = fx.home("good", false);
-        let unsafe_home = fx.home("unsafe", false);
-        mode(&unsafe_home, 0o777);
-        let missing_home = fx.0.join("missing");
-        let sym_home = fx.0.join("sym-home");
-        std::os::unix::fs::symlink(&good_home, &sym_home).unwrap();
-        let unsafe_parent = fx.0.join("unsafe-parent");
-        fs::create_dir(&unsafe_parent).unwrap();
-        mode(&unsafe_parent, 0o777);
-        let unsafe_parent_sym = unsafe_parent.join("link-home");
-        std::os::unix::fs::symlink(&good_home, &unsafe_parent_sym).unwrap();
-        let trailing_slash_sym = PathBuf::from(format!("{}/", sym_home.display()));
-
-        assert!(validate_login_home(&good_home).is_ok());
-        refused(validate_login_home(&sym_home), "account home");
-        refused(
-            validate_login_home(&unsafe_parent_sym),
-            "unsafe account ancestor",
-        );
-        refused(validate_login_home(&trailing_slash_sym), "trailing slash");
-
-        let mut probed: Vec<(String, Option<PathBuf>)> = Vec::new();
+        // Menu always shows exactly three rows (codex, claude, antigravity).
+        let mut probed: Vec<String> = Vec::new();
         let items = build_login_menu_with(
-            |provider| match provider {
-                "codex" => Ok(vec![
-                    ("default".into(), fx.0.join("unused-default")),
-                    ("work".into(), good_home.clone()),
-                    ("bad".into(), unsafe_home.clone()),
-                    ("sym".into(), sym_home.clone()),
-                    ("unsafesym".into(), unsafe_parent_sym.clone()),
-                ]),
-                "claude" => Ok(vec![
-                    ("default".into(), fx.0.join("unused-claude-default")),
-                    ("gone".into(), missing_home.clone()),
-                    ("slashsym".into(), trailing_slash_sym.clone()),
-                ]),
-                _ => Ok(Vec::new()),
-            },
             |_| true,
-            |provider, home| {
-                probed.push((provider.to_owned(), home.map(Path::to_path_buf)));
-                match (provider, home) {
-                    ("codex", None) => Ok(LoginStatus::SignedIn),
-                    ("codex", Some(_)) => Ok(LoginStatus::Unknown("status check timed out".into())),
-                    ("claude", None) => Ok(LoginStatus::NotSignedIn),
-                    _ => panic!("unexpected status probe for {provider} {home:?}"),
+            |provider| {
+                probed.push(provider.to_owned());
+                match provider {
+                    "codex" => Ok(LoginStatus::SignedIn),
+                    "claude" => Ok(LoginStatus::NotSignedIn),
+                    _ => panic!("unexpected status probe for {provider}"),
                 }
             },
-        )
-        .unwrap();
-
-        assert_eq!(items.len(), 9);
-        assert_eq!(items[0].entry.account_id, None);
-        assert_eq!(items[0].entry.home_env, None);
+        );
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].provider, "codex");
         assert_eq!(items[0].status, "signed in");
-        assert_eq!(items[1].entry.account_id.as_deref(), Some("work"));
-        assert_eq!(
-            items[1].entry.home_env,
-            Some(("CODEX_HOME", good_home.clone()))
-        );
-        assert_eq!(items[1].status, "unknown: status check timed out");
-        assert_eq!(items[2].entry.account_id.as_deref(), Some("bad"));
-        assert_eq!(items[2].status, "unknown: unsafe or missing home");
-        assert_eq!(items[3].entry.account_id.as_deref(), Some("sym"));
-        assert_eq!(items[3].status, "unknown: unsafe or missing home");
-        assert_eq!(items[4].entry.account_id.as_deref(), Some("unsafesym"));
-        assert_eq!(items[4].status, "unknown: unsafe or missing home");
-        assert_eq!(items[5].entry.account_id, None);
-        assert_eq!(items[5].entry.home_env, None);
-        assert_eq!(items[5].status, "not signed in");
-        assert_eq!(items[6].entry.account_id.as_deref(), Some("gone"));
-        assert_eq!(items[6].status, "unknown: unsafe or missing home");
-        assert_eq!(items[7].entry.account_id.as_deref(), Some("slashsym"));
-        assert_eq!(items[7].status, "unknown: unsafe or missing home");
-        assert_eq!(items[8].entry.provider, "antigravity");
-        assert_eq!(items[8].status, "sign-in not verifiable");
+        assert_eq!(items[1].provider, "claude");
+        assert_eq!(items[1].status, "not signed in");
+        assert_eq!(items[2].provider, "antigravity");
+        assert_eq!(items[2].status, "sign-in not verifiable");
+        assert_eq!(probed, vec!["codex", "claude"]);
 
-        assert_eq!(
-            probed,
-            vec![
-                ("codex".into(), None),
-                ("codex".into(), Some(good_home)),
-                ("claude".into(), None),
-            ]
+        // A probe error on one row (e.g. spawn failure or output budget) marks that row unknown
+        // without aborting the menu, and the remaining rows still render.
+        let fx = Fixture::new("login-menu");
+        let items = build_login_menu_with(
+            |_| true,
+            |provider| match provider {
+                "codex" => run_login_status_command(
+                    Command::new(&fx.0),
+                    "codex",
+                    &clear,
+                    LOGIN_STATUS_TIMEOUT,
+                ),
+                "claude" => Err(error("child output exceeded its byte budget")),
+                _ => panic!("unexpected status probe for {provider}"),
+            },
         );
+        assert_eq!(items.len(), 3);
+        assert!(items[0].status.starts_with("unknown: "), "{:?}", items[0]);
+        assert_eq!(
+            items[1].status,
+            "unknown: child output exceeded its byte budget"
+        );
+        assert_eq!(items[2].status, "sign-in not verifiable");
+        let rendered = format_login_menu(&items);
+        assert!(rendered.contains("1. codex"), "{rendered}");
+        assert!(rendered.contains("2. claude"), "{rendered}");
+        assert!(rendered.contains("3. antigravity"), "{rendered}");
+
+        let missing = build_login_menu_with(|_| false, |_| panic!("must not probe missing binary"));
+        assert_eq!(missing.len(), 3);
+        assert_eq!(missing[0].status, "codex not installed");
+        assert_eq!(missing[1].status, "claude not installed");
+        assert_eq!(missing[2].status, "agy not installed");
 
         // --login-menu requires both stdin and stdout to be terminals.
         let ctx = Context {

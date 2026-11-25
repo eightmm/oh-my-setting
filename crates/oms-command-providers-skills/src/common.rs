@@ -120,13 +120,18 @@ impl ChildGroup {
         }
     }
     fn finish(&mut self) -> Result<i32> {
+        use std::os::unix::process::ExitStatusExt;
         if self.reaped {
             return Err(error("child has already been reaped"));
         }
         self.exited()?;
         let _ = rustix::process::kill_process_group(self.group, rustix::process::Signal::KILL);
         self.reaped = true;
-        Ok(self.child.wait()?.code().unwrap_or(1))
+        let status = self.child.wait()?;
+        Ok(status
+            .code()
+            .or_else(|| status.signal().map(|sig| 128 + sig))
+            .unwrap_or(1))
     }
 }
 impl Drop for ChildGroup {

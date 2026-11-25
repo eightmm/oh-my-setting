@@ -1969,40 +1969,36 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
         &[],
         |root| {
             let (codex_main, _) = seed(root, "codex");
-            let (claude_main, _) = seed(root, "claude");
-            ok(root, &["--account", "codex:work"]);
-            ok(root, &["--account", "claude:work"]);
+            let (_, _) = seed(root, "claude");
             write_login_stubs(root);
-            let cfg_before = snapshot(&config(root));
+            // Even a malformed registry file is never read by the login path.
+            let cfg_dir = config(root);
+            mk(&cfg_dir).unwrap();
+            fs::write(cfg_dir.join("provider-accounts.json"), "{not-json").unwrap();
+            let cfg_before = snapshot(&cfg_dir);
 
-            // Refusals: unknown account, antigravity:ID, bad provider, bad flags, non-TTY menu.
-            refused(root, &["--login", "codex:unknown"], "unknown codex account");
-            refused(
-                root,
-                &["--login", "claude:unknown"],
-                "unknown claude account",
-            );
-            refused(
-                root,
-                &["--login", "antigravity:work"],
-                "does not support per-account sign-in",
-            );
-            refused(
-                root,
-                &["--login", "antigravity:default"],
-                "does not support per-account sign-in",
-            );
-            refused(
-                root,
-                &["--login", "codex:Bad"],
-                "invalid provider account id",
-            );
+            // Refusals: PROVIDER:ID, bad provider, bad flags, non-TTY menu.
+            for spec in [
+                "codex:work",
+                "codex:unknown",
+                "claude:work",
+                "claude:unknown",
+                "antigravity:work",
+                "antigravity:default",
+                "codex:Bad",
+            ] {
+                refused(
+                    root,
+                    &["--login", spec],
+                    "per-account sign-in is not available",
+                );
+            }
             refused(root, &["--login", "agy"], "unsupported login provider");
             refused(root, &["--login", "pi"], "unsupported login provider");
             refused(
                 root,
                 &["--login", "codex", "--login-menu"],
-                "choose --login PROVIDER[:ID] or --login-menu",
+                "choose --login PROVIDER or --login-menu",
             );
             refused(
                 root,
@@ -2012,7 +2008,7 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             refused(root, &["--login-menu"], "interactive terminal");
 
             // Spawn child with every credential override set; verify they are removed on
-            // both login and status verification, home env is set, and stdio is inherited.
+            // both login and status verification, default home env stays unset, and stdio is inherited.
             let mut cmd = Command::new(std::env::current_exe().unwrap());
             cmd.args([
                 "--exact",
@@ -2056,8 +2052,6 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
 
             let trace = fs::read_to_string(root.join("home/login-trace.log")).unwrap();
             let lines: Vec<&str> = trace.lines().collect();
-            let codex_work = codex_main.join("accounts/work");
-            let claude_work = claude_main.join("accounts/work");
             let cwd = root.display();
             // Default home leaves CODEX_HOME / CLAUDE_CONFIG_DIR unset when ambient is unset,
             // and both sign-in and status check run in the same current_dir.
@@ -2070,18 +2064,6 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
                 "{trace}"
             );
             assert!(
-                lines.contains(
-                    &format!("codex-login|login|{}||{cwd}", codex_work.display()).as_str()
-                ),
-                "{trace}"
-            );
-            assert!(
-                lines.contains(
-                    &format!("codex-status|login status|{}||{cwd}", codex_work.display()).as_str()
-                ),
-                "{trace}"
-            );
-            assert!(
                 lines.contains(&format!("claude-login|auth login|UNSET||{cwd}").as_str()),
                 "{trace}"
             );
@@ -2089,22 +2071,9 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
                 lines.contains(&format!("claude-status|auth status|UNSET||{cwd}").as_str()),
                 "{trace}"
             );
-            assert!(
-                lines.contains(
-                    &format!("claude-login|auth login|{}||{cwd}", claude_work.display()).as_str()
-                ),
-                "{trace}"
-            );
-            assert!(
-                lines.contains(
-                    &format!("claude-status|auth status|{}||{cwd}", claude_work.display()).as_str()
-                ),
-                "{trace}"
-            );
             assert!(lines.contains(&"agy-login|0||UNSET|UNSET"), "{trace}");
 
-            // Ambient CODEX_HOME / CLAUDE_CONFIG_DIR are kept intact for default home and
-            // overridden only for registered :ID homes.
+            // Ambient CODEX_HOME / CLAUDE_CONFIG_DIR are kept intact for default-home sign-in.
             let ambient_codex = root.join("ambient-codex");
             let ambient_claude = root.join("ambient-claude");
             mk(&ambient_codex).unwrap();
@@ -2150,18 +2119,6 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             );
             assert!(
                 ambient_lines.contains(
-                    &format!("codex-login|login|{}||{cwd}", codex_work.display()).as_str()
-                ),
-                "{ambient_trace}"
-            );
-            assert!(
-                ambient_lines.contains(
-                    &format!("codex-status|login status|{}||{cwd}", codex_work.display()).as_str()
-                ),
-                "{ambient_trace}"
-            );
-            assert!(
-                ambient_lines.contains(
                     &format!(
                         "claude-login|auth login|{}||{cwd}",
                         ambient_claude.display()
@@ -2180,38 +2137,33 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
                 ),
                 "{ambient_trace}"
             );
-            assert!(
-                ambient_lines.contains(
-                    &format!("claude-login|auth login|{}||{cwd}", claude_work.display()).as_str()
-                ),
-                "{ambient_trace}"
-            );
-            assert!(
-                ambient_lines.contains(
-                    &format!("claude-status|auth status|{}||{cwd}", claude_work.display()).as_str()
-                ),
-                "{ambient_trace}"
-            );
 
             // Unverified login returns exit 1 and "not signed in".
-            fs::remove_file(codex_work.join("ok")).unwrap();
+            fs::remove_file(codex_main.join("ok")).unwrap();
             fs::write(root.join("home/skip-ok"), "").unwrap();
-            let res = connect(root, &["--login", "codex:work"]);
+            let res = connect(root, &["--login", "codex"]);
             assert_eq!(res.0, 1, "{res:?}");
-            assert!(res.1.contains("codex:work: not signed in"), "{}", res.1);
+            assert!(res.1.contains("codex: not signed in"), "{}", res.1);
             assert!(!res.1.contains("STUB_CODEX_OUT"), "{}", res.1);
 
-            // Timed-out (124) and interrupted (130) status checks report unknown with a
-            // distinct non-zero exit code, never "not signed in".
-            for (code, needle) in [("124", "timed out"), ("130", "interrupted")] {
+            // Exit codes other than 0/1 (timeout 124, interrupt 130, 2, 137) report unknown
+            // with the code and a distinct non-zero exit code, never "not signed in".
+            for (code, needle) in [
+                ("124", "timed out"),
+                ("130", "interrupted"),
+                ("2", "2"),
+                ("137", "137"),
+            ] {
                 fs::write(root.join("home/status-code"), format!("{code}\n")).unwrap();
-                let res = connect(root, &["--login", "codex:work"]);
+                let res = connect(root, &["--login", "codex"]);
                 assert!(
                     res.0 != 0 && res.0 != 1,
                     "code {code} must return distinct unknown exit: {res:?}"
                 );
                 assert!(
-                    res.1.contains("codex:work: unknown:") && res.1.contains(needle),
+                    res.1.contains("codex: unknown:")
+                        && res.1.contains(needle)
+                        && res.1.contains(code),
                     "{res:?}"
                 );
                 assert!(!res.1.contains("not signed in"), "{res:?}");
@@ -2229,90 +2181,7 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             }
 
             // Login never writes new state files or modifies registries.
-            assert_eq!(snapshot(&config(root)), cfg_before);
-
-            // Restore stubs to test registry security checks (symlinked homes and cross-registry claims).
-            write_login_stubs(root);
-            let shared_path = config(root).join("provider-accounts.json");
-            let claude_path = config(root).join("provider-accounts.claude.json");
-            let saved_shared = fs::read(&shared_path).unwrap();
-            let saved_claude = fs::read(&claude_path).unwrap();
-
-            // 1. Symlinked registered home (and symlink under an unsafe parent) are refused for direct login.
-            let real_target = root.join("sym-target");
-            mk(&real_target).unwrap();
-            private(&real_target, 0o700);
-            let direct_link = root.join("codex-sym-home");
-            symlink(&real_target, &direct_link).unwrap();
-            let unsafe_parent = root.join("unsafe-parent");
-            mk(&unsafe_parent).unwrap();
-            fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o777)).unwrap();
-            let unsafe_target = root.join("unsafe-sym-target");
-            mk(&unsafe_target).unwrap();
-            private(&unsafe_target, 0o700);
-            let unsafe_link = unsafe_parent.join("codex-link");
-            symlink(&unsafe_target, &unsafe_link).unwrap();
-
-            let mut tampered = rj(&shared_path);
-            tampered["providers"]["codex"]["accounts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"id": "sym", "home": direct_link}));
-            tampered["providers"]["codex"]["accounts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"id": "unsafesym", "home": unsafe_link}));
-            fs::write(&shared_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-            refused(root, &["--login", "codex:sym"], "account home");
-            refused(
-                root,
-                &["--login", "codex:unsafesym"],
-                "unsafe account ancestor",
-            );
-
-            // 2. Codex :ID whose home is also claimed in provider-accounts.claude.json is refused
-            //    both when providers.claude is absent from the shared registry and when it is present.
-            let clash_home = root.join("clash-home");
-            mk(&clash_home).unwrap();
-            private(&clash_home, 0o700);
-            let mut claude_doc: Value = serde_json::from_slice(&saved_claude).unwrap();
-            claude_doc["accounts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"id": "sharedclaim", "home": clash_home}));
-            fs::write(&claude_path, serde_json::to_vec(&claude_doc).unwrap()).unwrap();
-
-            let mut shared_no_claude: Value = serde_json::from_slice(&saved_shared).unwrap();
-            shared_no_claude["providers"]
-                .as_object_mut()
-                .unwrap()
-                .remove("claude");
-            shared_no_claude["providers"]["codex"]["accounts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"id": "clash", "home": clash_home}));
-            fs::write(&shared_path, serde_json::to_vec(&shared_no_claude).unwrap()).unwrap();
-            refused(
-                root,
-                &["--login", "codex:clash"],
-                "duplicate provider account id or canonical home",
-            );
-
-            let mut shared_with_claude: Value = serde_json::from_slice(&saved_shared).unwrap();
-            shared_with_claude["providers"]["codex"]["accounts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"id": "clash", "home": clash_home}));
-            fs::write(
-                &shared_path,
-                serde_json::to_vec(&shared_with_claude).unwrap(),
-            )
-            .unwrap();
-            refused(
-                root,
-                &["--login", "codex:clash"],
-                "duplicate provider account id or canonical home",
-            );
+            assert_eq!(snapshot(&cfg_dir), cfg_before);
         },
     );
 }
@@ -2332,12 +2201,8 @@ fn login_ambient_home_preserved_child() {
     );
     let out = ok(&root, &["--login", "codex"]);
     assert!(out.contains("codex: signed in"), "{out}");
-    let out = ok(&root, &["--login", "codex:work"]);
-    assert!(out.contains("codex:work: signed in"), "{out}");
     let out = ok(&root, &["--login", "claude"]);
     assert!(out.contains("claude: signed in"), "{out}");
-    let out = ok(&root, &["--login", "claude:work"]);
-    assert!(out.contains("claude:work: signed in"), "{out}");
 }
 
 #[test]
@@ -2356,15 +2221,9 @@ fn login_env_overrides_and_stdio_child() {
     assert!(out.contains("codex: signed in"), "{out}");
     assert!(!out.contains("STUB_CODEX_OUT"), "{out}");
 
-    let out = ok(&root, &["--login", "codex:work"]);
-    assert!(out.contains("codex:work: signed in"), "{out}");
-
     let out = ok(&root, &["--login", "claude"]);
     assert!(out.contains("claude: signed in"), "{out}");
     assert!(!out.contains("STUB_CLAUDE_OUT"), "{out}");
-
-    let out = ok(&root, &["--login", "claude:work"]);
-    assert!(out.contains("claude:work: signed in"), "{out}");
 
     // agy's exit code is not sign-in evidence, so the unknown code (3) is reported.
     let (code, out, _) = connect(&root, &["--login", "antigravity"]);

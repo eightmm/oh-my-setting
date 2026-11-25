@@ -1378,8 +1378,8 @@ is available to routing without editing JSON.
 `oms connect-services --account codex:credits --verify` checks `codex login
 status` for every registered Codex home, including the main home. It fails if
 any home or login cannot be verified, and does not make a model call. To run a
-provider's native sign-in interactively (or from the panel with `L`), use
-`oms connect-services --login PROVIDER[:ID]` (`codex`, `claude`, or
+provider's native sign-in interactively for the default home (or from the panel
+with `L`), use `oms connect-services --login PROVIDER` (`codex`, `claude`, or
 `antigravity`) or `oms connect-services --login-menu`.
 
 `--first` places the account ahead of existing accounts; the default `--last`
