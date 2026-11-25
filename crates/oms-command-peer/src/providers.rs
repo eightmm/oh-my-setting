@@ -335,11 +335,13 @@ fn route_with_source(
     if !target.account.is_empty() && isolated(&target.provider).is_none() {
         return fail("provider account isolation is unproved");
     }
+    // The route keeps the requested model so Plan and Autonomy identity checks
+    // hold; the transport passes the exact Antigravity selector to the CLI.
     if target.provider == "antigravity" && selected != "provider-default" {
-        selected = crate::native_model::agy_selector(&selected, &resolved);
-        model_name(&selected)?;
+        let exact = crate::native_model::agy_selector(&selected, &resolved);
+        model_name(&exact)?;
         if let Some(catalog) = antigravity_catalog()
-            && !catalog.contains(&selected)
+            && !catalog.contains(&exact)
         {
             return fail("model_effort_unavailable");
         }
@@ -1589,7 +1591,12 @@ impl Transport {
     }
     fn model(&mut self, route: &Route) {
         if route.model != "provider-default" {
-            self.option("--model", &route.model);
+            let model = if route.provider == "antigravity" {
+                crate::native_model::agy_selector(&route.model, &route.effort)
+            } else {
+                route.model.clone()
+            };
+            self.option("--model", model);
         }
     }
     fn effort(&mut self, route: &Route, flag: &str) {
@@ -4416,15 +4423,23 @@ mod bridge_route_tests {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
             let tier_agy = resolve_route(source, "agy", "", "", "reviewer").unwrap();
             assert_eq!(tier_agy.provider, "antigravity");
-            assert_eq!(tier_agy.model, "gemini-4-carbon-high");
+            // The route keeps the base model; only the CLI argument is the exact selector.
+            assert_eq!(tier_agy.model, "gemini-4-carbon");
             assert_eq!(tier_agy.effort, "high");
+            let command = transport(&tier_agy, b"inspect", source, false, 30).unwrap();
+            assert!(
+                command
+                    .argv
+                    .windows(2)
+                    .any(|w| w[0] == "--model" && w[1] == "gemini-4-carbon-high")
+            );
             assert!(!tier_agy.explicit);
             let tier_agy_override = resolve_route(source, "agy", "", "medium", "reviewer").unwrap();
-            assert_eq!(tier_agy_override.model, "gemini-4-carbon-medium");
+            assert_eq!(tier_agy_override.model, "gemini-4-carbon");
             assert_eq!(tier_agy_override.effort, "medium");
             let route = resolve_route(source, "agy", "custom", "high", "worker").unwrap();
             assert_eq!(route.provider, "antigravity");
-            assert_eq!(route.model, "custom-high");
+            assert_eq!(route.model, "custom");
             assert!(route.explicit);
             let default_agy = resolve_route(source, "agy", "", "high", "worker").unwrap();
             assert_eq!(default_agy.model, "provider-default");
@@ -4504,7 +4519,7 @@ mod bridge_route_tests {
             )
             .unwrap();
             let listed = resolve_route(source, "agy", "", "", "reviewer").unwrap();
-            assert_eq!(listed.model, "gemini-4-carbon-high");
+            assert_eq!(listed.model, "gemini-4-carbon");
             let listed_explicit =
                 resolve_route(source, "agy", "gemini-4-carbon-high", "high", "worker").unwrap();
             assert_eq!(listed_explicit.model, "gemini-4-carbon-high");
