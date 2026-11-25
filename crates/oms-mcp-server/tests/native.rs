@@ -1673,6 +1673,17 @@ fn conversation_panel() {
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
     assert_eq!(uri, "ui://oms/conversation-panel/v21.html");
+    // Codex uses the stdio transport configuration to decide whether to reuse a running server.
+    for package in [
+        include_str!("../../../plugins/oms/mcp.json"),
+        include_str!("../../../plugins/oms-ssh/oms/mcp.json"),
+    ] {
+        let manifest: Value = serde_json::from_str(package).unwrap();
+        let revision = manifest["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"]
+            .as_str()
+            .unwrap();
+        assert_eq!(uri, &format!("ui://oms/conversation-panel/{revision}.html"));
+    }
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
