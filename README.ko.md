@@ -68,10 +68,10 @@ oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 
 | 이름 | 호스트 | 기능 | 설치 방법 |
 |---|---|---|---|
-| [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) | Codex CLI | 프롬프트 스킬 라우팅, 압축 전 인수인계, 고위험 턴 가드, 내용 없는 라이프사이클 카운터 | OMS 설치기가 등록 (`oms update`로 유지) |
+| [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) | Codex CLI·데스크톱 앱 | 프롬프트 스킬 라우팅, 압축 전 인수인계, 고위험 턴 가드, 내용 없는 라이프사이클 카운터 | `codex`가 PATH에 있으면 OMS 설치기가 등록 (`oms update`로 유지) |
 | [`oms`](plugins/oms/plugin.json) | Codex 데스크톱, ChatGPT Work | `@OMS`: Main 선택, 목표 전달, Lead 추적, 승인 결정, `oms mcp-server` 기반 패널 도구 | 저장소 루트 마켓플레이스, 항목 `oms@oh-my-setting-local` ([안내](docs/DASHBOARD.md#register-a-marketplace-once)) |
 | [`oms`](plugins/oms-ssh/oms/plugin.json) (SSH 경유) | OpenSSH로 OMS 호스트에 연결하는 PC의 데스크톱 앱 | `oms-runtime` SSH 호스트 별칭으로 동일한 `@OMS` 도구 제공 | 마켓플레이스 경로 `plugins/oms-ssh`, 항목 `oms@oms-ssh` |
-| [`oms-panel`](plugins/oms-app/) (MCP App) | Antigravity App 2.34+, Claude Desktop | 앱 내부 대화형 OMS 패널(프로젝트, Board, GitHub, 사용량); 호스트가 허용하면 대화 옆이나 위에 확장 표시 요청 | Antigravity: 플러그인 디렉터리 설치; Claude Desktop: [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json)의 `oms-panel` 추가 ([안내](docs/DASHBOARD.md#claude-and-antigravity)) |
+| [`oms-panel`](plugins/oms-app/) (MCP App) | Antigravity App 2.34+, Claude Desktop | 앱 내부 읽기 전용 대화형 OMS 패널(프로젝트, Board, GitHub, 사용량); 호스트가 허용하면 대화 옆이나 위에 확장 표시 요청 | Antigravity: 플러그인 디렉터리 설치; Claude Desktop: [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json)의 `oms-panel` 추가 ([안내](docs/DASHBOARD.md#claude-and-antigravity)) |
 | [`oh-my-setting`](plugins/antigravity/plugin.json) (Antigravity) | Antigravity CLI/IDE | MCP 기반 하네스 상태: 작업 패킷, 실패 기록, 인수인계 요약, Work Journal | Antigravity가 있으면 OMS 설치기가 설치 |
 | [`oms-skills`](.claude-plugin/marketplace.json) | Claude Code | 플러그인에서만 스킬을 불러오는 환경용 `custom-skills/` OMS 스킬 9종; OMS 설치 필요; 훅·MCP·패널 미포함 | 선택 사항: `claude plugin marketplace add eightmm/oh-my-setting` 후 `claude plugin install oms-skills@oh-my-setting` ([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)). 일반 설치에서는 불필요(스킬이 중복 표시됨) |
 | [`oms-panel`](plugins/claude-code/) (Claude Code pane) | Claude Code v2.1.287+ | `oms dashboard --json`으로 그리는 대화 옆 읽기 전용 패널; `/oms-panel` | 미리보기: `claude --plugin-dir plugins/claude-code`; 마켓플레이스 미등록 ([README](plugins/claude-code/README.md)) |
