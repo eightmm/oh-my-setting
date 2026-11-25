@@ -785,7 +785,12 @@ pub fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String
 pub fn has_git_marker(dir: &Path) -> bool {
     let dot = dir.join(".git");
     match std::fs::symlink_metadata(&dot) {
-        Ok(meta) if meta.is_dir() => dot.join("HEAD").symlink_metadata().is_ok(),
+        // Only a proven absence of HEAD clears the marker; an unreadable
+        // `.git` still marks a repository for fail-closed callers.
+        Ok(meta) if meta.is_dir() => !matches!(
+            dot.join("HEAD").symlink_metadata(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        ),
         Ok(_) => true,
         Err(_) => false,
     }
@@ -1600,5 +1605,12 @@ mod tests {
         std::fs::create_dir(&linked).unwrap();
         symlink(with_head.join(".git"), linked.join(".git")).unwrap();
         assert!(has_git_marker(&linked));
+
+        use std::os::unix::fs::PermissionsExt;
+        let sealed = with_head.join(".git");
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = has_git_marker(&with_head);
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(unreadable);
     }
 }
