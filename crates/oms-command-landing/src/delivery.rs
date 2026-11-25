@@ -217,6 +217,102 @@ fn finish_checked(
         stderr: vec![],
     })
 }
+fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<()> {
+    if !matches!(
+        std::env::var("OMS_RELAY").as_deref(),
+        Err(_) | Ok("") | Ok("1")
+    ) {
+        return Ok(());
+    }
+    let repo = c.repo(o)?;
+    let root = c.state(&repo)?;
+    if !std::fs::symlink_metadata(root.join(".oms")).is_ok_and(|m| m.file_type().is_dir()) {
+        return Ok(());
+    }
+    storage::ensure_ignore(&root, c.interrupted)?;
+    // The receipt on disk is the last state this run recorded, whichever path it exited by.
+    let row = c
+        .relay_receipt
+        .borrow()
+        .as_ref()
+        .and_then(|path| storage::read_external(path, true).ok())
+        .and_then(|raw| V::parse(&raw).ok())
+        .unwrap_or(V::Null);
+    let row = &row;
+    // Head and branch come only from the receipt row: live HEAD may have moved,
+    // so a run that failed before recording one names no commit.
+    let sha = string(row, "sha").chars().take(12).collect::<String>();
+    let sha = if sha.len() >= 7
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        sha
+    } else {
+        String::new()
+    };
+    let branch = string(row, "head_branch");
+    let branch = if branch.len() <= 200
+        && branch
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+    {
+        branch
+    } else {
+        String::new()
+    };
+    let code = match result {
+        Ok(output) => output.code,
+        Err(error) => error.code,
+    };
+    let state = if matches!(result, Ok(output) if output.code == 0)
+        && matches!(string(row, "state").as_str(), "passed" | "awaiting-merge")
+    {
+        string(row, "state")
+    } else {
+        "failed".to_owned()
+    };
+    let number = row.get("pr_number").py().parse::<usize>().ok();
+    let url = string(row, "pr_url");
+    let valid_url = url.strip_prefix("https://github.com/").is_some_and(|rest| {
+        let parts: Vec<_> = rest.split('/').collect();
+        parts.len() == 4
+            && parts[2] == "pull"
+            && !parts[3].is_empty()
+            && parts[3].bytes().all(|b| b.is_ascii_digit())
+            && parts[..2].iter().all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
+    });
+    let message = if sha.is_empty() {
+        format!("land {state} (exit {code}); run oms land status")
+    } else {
+        format!("land {sha} {state} (exit {code}); run oms land status")
+    };
+    let card = obj([
+        ("schema", 1usize.into()),
+        ("ended_at", now().into()),
+        ("head", sha.into()),
+        ("branch", branch.into()),
+        ("state", state.into()),
+        ("exit", V::from(i64::from(code))),
+        ("pr_number", number.map(V::from).unwrap_or(V::Null)),
+        ("pr_url", if valid_url { url } else { String::new() }.into()),
+        ("message", message.into()),
+    ]);
+    let path = Path::new(".oms/hooks/relay/land.json");
+    let _guard = storage::lock(&root.join(path), c.interrupted)?;
+    let old = match std::fs::symlink_metadata(root.join(path)) {
+        Ok(_) => Some(storage::read(&root, path, false)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    storage::replace(&root, path, old.as_deref(), &card.json(false)?)?;
+    Ok(())
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Direct,
@@ -1604,6 +1700,24 @@ fn pr_motivation(git: &Git<'_>, o: &Options, base: &str, head: &str) -> Result<S
 }
 
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
+    // A harness child is refused before it runs and must not touch the parent's relay.
+    let run = o.action("").is_empty() && !o.has("check-manifest") && !crate::child();
+    let result = execute_inner(c, o);
+    if run {
+        let uninterrupted = AtomicBool::new(false);
+        let relay_context = Context {
+            cwd: c.cwd,
+            source: c.source,
+            interrupted: &uninterrupted,
+            services: c.services,
+            relay_receipt: std::cell::RefCell::new(c.relay_receipt.borrow().clone()),
+        };
+        let _ = relay_card(&relay_context, o, &result);
+    }
+    result
+}
+
+fn execute_inner(c: &Context<'_>, o: &Options) -> Result<Output> {
     if o.action("") == "wait" {
         return crate::wait::execute(c, o);
     }
@@ -1682,6 +1796,7 @@ fn execute_pass(
     previous_update: Option<&HeadUpdate>,
     updates: usize,
 ) -> Result<Pass> {
+    *c.relay_receipt.borrow_mut() = None;
     let env_mode = std::env::var("OMS_LAND_MODE").unwrap_or_default();
     require(
         ["", "direct", "pr"].contains(&env_mode.as_str()),
@@ -1996,6 +2111,8 @@ fn execute_pass(
         row.set("head_branch", head_branch.as_str());
     }
     save(&receipt, &row, c.interrupted)?;
+    // Only a receipt this pass validated and saved may name the card's head.
+    *c.relay_receipt.borrow_mut() = Some(receipt.clone());
     let ctx = Run {
         c,
         o,

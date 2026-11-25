@@ -21,7 +21,10 @@ pub fn internal_atomic_temp(root: &Path, relative: &str) -> bool {
         "hooks/sessions" | "hooks/panel-activity" => {
             matches(r"^[A-Za-z0-9._-]+\.json\.[a-z0-9_]{8}\.tmp$", name)
         }
-        "hooks/relay" => matches(r"^claude\.json\.[a-z0-9_]{8}\.tmp$", name),
+        "hooks/relay" => {
+            matches(r"^claude\.json\.[a-z0-9_]{8}\.tmp$", name)
+                || matches(r"^\.land\.json\.tmp\.[0-9]+\.[0-9]+\.[0-9]+$", name)
+        }
         "hooks" => {
             if let Some(date) = name.strip_prefix("state-hint.")
                 && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
