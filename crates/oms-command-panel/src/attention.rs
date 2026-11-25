@@ -117,6 +117,14 @@ pub(crate) fn plan_task_id<'a>(key: &'a str, task: &'a Value) -> &'a str {
         .unwrap_or("")
 }
 
+pub(crate) fn claim_expired(report: &Value, id: &str, task: &Value) -> Option<bool> {
+    if report["plan_attention"].is_object() {
+        report["plan_attention"][id]["claim_expired"].as_bool()
+    } else {
+        task["claim_expired"].as_bool()
+    }
+}
+
 pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
     let mut items = Vec::new();
     let calls = crate::render::calls(report);
@@ -264,35 +272,77 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
             .into_iter()
             .find(|v| !v.is_empty())
             .unwrap_or("");
-        if matches!(state, "claimed" | "running" | "held")
-            && !id.is_empty()
-            && !failing.contains(id)
-        {
-            let workers: Vec<_> = calls
+        if id.is_empty() {
+            continue;
+        }
+        let projection = &report["plan_attention"];
+        let candidate = &projection[id]["pr_review_candidate"];
+        let expired = claim_expired(report, id, task);
+        let claimed = matches!(state, "claimed" | "running");
+        let lease_unavailable = claimed && projection.is_object() && expired.is_none();
+        let (class, what) = if state == "review" && candidate.is_object() {
+            (
+                "decide",
+                format!(
+                    "PR {} {} ({}) · {} candidate",
+                    text(candidate, "reference"),
+                    text(candidate, "state"),
+                    text(candidate, "freshness"),
+                    text(candidate, "disposition")
+                ),
+            )
+        } else if matches!(state, "claimed" | "running" | "stale") && expired == Some(true) {
+            ("stale", "Plan lease expired".into())
+        } else if claimed || state == "held" {
+            let lease = text(task, "lease_id");
+            let mut workers = calls
                 .iter()
-                .filter(|v| crate::render::call_matches_plan_task(v, id, plan_id))
-                .collect();
-            if !workers.is_empty()
-                && workers.iter().all(|v| {
+                .filter(|call| {
+                    let call_lease = call["refs"]["panel_lease_id"]
+                        .as_str()
+                        .filter(|lease| !lease.is_empty())
+                        .unwrap_or_else(|| text(&call["refs"], "lease_id"));
+                    crate::render::call_matches_plan_task(call, id, plan_id)
+                        && (call_lease.is_empty() || call_lease == lease)
+                })
+                .peekable();
+            let workers_ended = !failing.contains(id)
+                && workers.peek().is_some()
+                && workers.all(|v| {
                     oms_panel_core::state::TERMINAL_STATES.contains(&text(v, "state"))
                         && !awaiting_admission.iter().any(|a| a == &v["participant"])
-                })
-            {
-                let stamp = [text(task, "claimed_at"), text(task, "updated")]
-                    .into_iter()
-                    .find(|v| !v.is_empty())
-                    .unwrap_or("");
-                items.push(Item {
-                    row_id: ("task".into(), id.into()),
-                    cls: "stale".into(),
-                    stamp: stamp.into(),
-                    who: format!("Task {id}"),
-                    what: "workers ended, still held".into(),
-                    task: Some(id.into()),
-                    unread: true,
                 });
+            match (workers_ended, lease_unavailable) {
+                (true, true) => (
+                    "stale",
+                    "workers ended, still held · Plan lease status unavailable".into(),
+                ),
+                (true, false) => ("stale", "workers ended, still held".into()),
+                (false, true) => ("info", "Plan lease status unavailable".into()),
+                (false, false) => continue,
             }
-        }
+        } else if state == "review"
+            && (task["pr"].is_string() || task["issue"].is_string())
+            && projection.is_object()
+            && projection.get(id).is_none()
+        {
+            ("info", "Plan review status unavailable".into())
+        } else {
+            continue;
+        };
+        let stamp = [text(task, "claimed_at"), text(task, "updated")]
+            .into_iter()
+            .find(|v| !v.is_empty())
+            .unwrap_or("");
+        items.push(Item {
+            row_id: ("task".into(), id.into()),
+            cls: class.into(),
+            stamp: stamp.into(),
+            who: format!("Task {id}"),
+            what,
+            task: Some(id.into()),
+            unread: true,
+        });
     }
     items.sort_by(|a, b| {
         let rank = |s: &str| {

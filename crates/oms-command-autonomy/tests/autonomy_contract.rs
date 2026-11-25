@@ -641,6 +641,64 @@ fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
 }
 
 #[test]
+fn goal_drive_reclaims_expired_claim_for_open_commit_intent() {
+    if scrubbed_child("goal_drive_reclaims_expired_claim_for_open_commit_intent") {
+        return;
+    }
+    let mock = FeedbackMock::new("unknown-after-start-error");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "expired",
+            "--title",
+            "Recover the expired claim",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    mock.plan(
+        &repo.0,
+        &["claim", "--id", "expired", "--provider", "codex"],
+    );
+    let plan_file = ".oms/plan/tasks.json";
+    let mut plan: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.0.join(plan_file)).unwrap()).unwrap();
+    let task = &mut plan["tasks"]["expired"];
+    let lease = task["lease_id"].clone();
+    assert!(lease.is_string());
+    task["claimed_at"] = json!("2000-01-01T00:00:00Z");
+    task["ttl"] = json!("1");
+    repo.write(plan_file, plan.to_string());
+    let shown = mock.plan(&repo.0, &["show", "--id", "expired"]);
+    assert_eq!(shown["state"], "stale");
+    assert_eq!(shown["stored_state"], "claimed");
+    repo.write(".oms/plan/progress.jsonl", format!("{}\n", json!({
+        "schema":1,"kind":"commit-intent","phase":"prepared",
+        "worktree":repo.0,"intent_id":"intent-expired","task_id":"expired","provider":"codex",
+        "lease_id":lease
+    })));
+
+    let out = run_with_services(
+        "goal-drive",
+        &["--commit-task".into(), "expired".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_ne!(out.0, 0, "{out:?}");
+    assert_eq!(FeedbackMock::count(&mock.lands), 0, "{out:?}");
+    assert_eq!(FeedbackMock::count(&mock.sends), 1, "{out:?}");
+    let resumed = mock.plan(&repo.0, &["show", "--id", "expired"]);
+    assert_eq!(resumed["state"], "running");
+    assert_ne!(resumed["lease_id"], lease);
+}
+
+#[test]
 fn plan_run_retains_exact_running_lease_on_unknown_worker_outcome() {
     if scrubbed_child("plan_run_retains_exact_running_lease_on_unknown_worker_outcome") {
         return;

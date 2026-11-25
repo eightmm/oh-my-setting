@@ -553,7 +553,9 @@ impl Services for SnapshotReads<'_> {
         stop: &AtomicBool,
     ) -> Result<CommandOutput> {
         require(repo == self.key.repo, "Board refresh repository mismatch")?;
-        if command == NativeCommand::Events && args == ["list", "--json"] {
+        if matches!(command, NativeCommand::Events | NativeCommand::Plan)
+            && args == ["list", "--json"]
+        {
             return self.service.command(command, repo, args, stop);
         }
         if command == NativeCommand::Room
@@ -740,6 +742,145 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn snapshot_reads_project_plan_expiry_and_keep_held_attention() {
+        use oms_command_plan::{
+            Action, Context, Plan, Request as PlanRequest, UnavailableServices,
+        };
+
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "oms-board-plan-{}",
+            oms_command_plan::storage::random_hex(8).unwrap()
+        )));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&scratch.0)
+            .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&scratch.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let key = RefreshKey::new(&scratch.0, None, None).unwrap();
+        let stop = AtomicBool::new(false);
+        let request = PlanRequest::new(Action::List).flag("json");
+        let mut context = Context::from_selected_state_before(
+            &request,
+            &key.repo,
+            &key.repo,
+            &key.repo,
+            &stop,
+            Instant::now() + WAIT,
+        )
+        .unwrap();
+        context.ts = "2026-11-24T12:00:00Z".into();
+        let lease = format!("lease_{}", "1".repeat(32));
+        let plan = json!({"plan_id":format!("plan_{}", "2".repeat(32)), "tasks":{
+            "expired":{"id":"expired","title":"Expired task","state":"claimed","depends":[],
+                "claimed_at":"2026-11-24T10:00:00Z","ttl":"3600","lease_id":lease},
+            "held":{"id":"held","title":"Held task","state":"running","depends":[],
+                "claimed_at":"2026-11-24T11:59:00Z","ttl":"3600","lease_id":lease},
+        }});
+        std::fs::create_dir_all(context.plan_file.parent().unwrap()).unwrap();
+        std::fs::write(&context.plan_file, plan.to_string()).unwrap();
+        let projected = Plan::open(context, &UnavailableServices, &stop)
+            .unwrap()
+            .execute(&request)
+            .unwrap();
+        assert_eq!(projected.code, 0, "{:?}", projected.stderr);
+        let projected: Value = serde_json::from_slice(&projected.stdout).unwrap();
+        let mut mismatched = projected.clone();
+        let expired = mismatched["tasks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|task| task["id"] == "expired")
+            .unwrap();
+        expired["task_sha256"] = json!("different-task-revision");
+
+        for (reading, lease_status, held_status) in [
+            (
+                Ok(projected),
+                "Plan lease expired",
+                "workers ended, still held",
+            ),
+            (
+                Ok(mismatched),
+                "Plan lease status unavailable",
+                "workers ended, still held",
+            ),
+            (
+                Err(Error::new("Plan read failed")),
+                "Plan lease status unavailable",
+                "workers ended, still held · Plan lease status unavailable",
+            ),
+        ] {
+            let (entered, calls) = mpsc::channel();
+            let (reply, response) = mpsc::channel();
+            let (stopped, _) = mpsc::channel();
+            let service = Probe {
+                entered,
+                response,
+                stopped,
+            };
+            let reads = SnapshotReads {
+                service: &service,
+                key: &key,
+            };
+            assert!(
+                reads
+                    .command(
+                        NativeCommand::Plan,
+                        &key.repo,
+                        &commands::strings(&["list"]),
+                        &stop
+                    )
+                    .is_err()
+            );
+            reply.send(Ok(json!([{
+                "attempt_id":"worker-current","tool":"peer-delegate","provider":"codex",
+                "state":"done","terminal":true,"task_id":"held","refs":{"panel_lease_id":lease}
+            }, {
+                "attempt_id":"worker-previous","tool":"peer-delegate","provider":"codex",
+                "state":"working","terminal":false,"task_id":"held","refs":{"panel_lease_id":format!("lease_{}", "3".repeat(32))}
+            }]))).unwrap();
+            reply.send(reading).unwrap();
+            drop(reply);
+            let (snapshot, _, _) = commands::snapshot_for(
+                &commands::Session::new(),
+                &key.repo,
+                None,
+                None,
+                &reads,
+                &stop,
+                false,
+            )
+            .unwrap();
+            assert_eq!(snapshot.report["plan"], plan);
+            assert_eq!(
+                calls.try_iter().collect::<Vec<_>>(),
+                [
+                    (
+                        NativeCommand::Events,
+                        commands::strings(&["list", "--json"])
+                    ),
+                    (NativeCommand::Plan, commands::strings(&["list", "--json"])),
+                ]
+            );
+            let attention = crate::attention::items(&snapshot.report, &Default::default());
+            for (id, status) in [("expired", lease_status), ("held", held_status)] {
+                let item = attention
+                    .iter()
+                    .find(|item| item.row_id == ("task".into(), id.into()))
+                    .unwrap_or_else(|| panic!("missing {id} in {attention:?}"));
+                assert_eq!(item.what, status);
+            }
         }
     }
 

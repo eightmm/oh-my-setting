@@ -229,11 +229,13 @@ Commands:
   show   --id ID                     Print one task as JSON. A bound task
                                      adds issue_cache {state, freshness
                                      fresh|stale|unavailable, captured_at,
-                                     title} read only from the local
-                                     .oms/github/cache.jsonl snapshot.
+                                     title, reason when unavailable} from the
+                                     local .oms/github/cache.jsonl snapshot.
+                                     Review tasks with a cached merged or
+                                     closed PR include pr_review_candidate.
   evidence-snapshot --id ID          Print one task plus its immutable plan_id
                                      for a plan-scoped evidence producer.
-  list   [--state STATE] [--json]    List tasks (optionally by state); --json
+  list   [--state STATE] [--json]    List tasks (optionally by projected state); --json
                                      emits every task's `show` view at once.
                                      Bound tasks show "issue REF (state,
                                      freshness)"; titles stay in --json.
@@ -286,8 +288,9 @@ Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 A claim whose last heartbeat (claimed_at, refreshed by touch) is older than
 OMS_PLAN_CLAIM_TTL seconds (default 3600; a numeric per-task --ttl wins) is a
 recovery candidate only if no exact task+current lease marker is live or
-unproven. Eligible claims read as EXPIRED in list/status/brief and show's
-claim_expired; ready/next offer them again, and next --claim mints a new lease
-to fence the old holder. Reclaim uses the same worker protection, including
-opted-in running tasks. Reads never write or renew claims; reclaim (and
-plan-run's pre-flight call to it) frees the stored row.
+unproven. List, status, show and brief project expired claimed or running tasks
+as stale. Show and list JSON keep the original stored_state and claim_expired.
+Ready/next can offer expired claims that have not started, and next --claim
+mints a new lease to fence the old holder. Reclaim uses the same worker
+protection, including opted-in running tasks. Reads never write or renew
+claims; reclaim (and plan-run's pre-flight call to it) frees the stored row.

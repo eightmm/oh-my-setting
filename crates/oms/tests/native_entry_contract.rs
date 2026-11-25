@@ -5707,6 +5707,64 @@ fn fixture_panel_tool(
 }
 
 #[test]
+fn mcp_dashboard_exposes_native_plan_stale_attention() {
+    use serde_json::{Value, json};
+    use std::fs;
+
+    let host = Landing::new();
+    let lease = format!("lease_{}", "1".repeat(32));
+    let plan = json!({"plan_id":format!("plan_{}", "2".repeat(32)), "tasks":{
+        "expired":{"id":"expired","title":"Expired task","state":"claimed","depends":[],
+            "claimed_at":"2000-01-01T00:00:00Z","ttl":"1","lease_id":lease},
+    }})
+    .to_string();
+    let plan_file = host.repo.join(".oms/plan/tasks.json");
+    fs::create_dir_all(plan_file.parent().unwrap()).unwrap();
+    fs::write(&plan_file, &plan).unwrap();
+    add_companions(&host.f, &["oms-mcp-peer-owner"]);
+    let binary = host.f.binary();
+    let snapshot = || {
+        let mut command = Command::new(&binary);
+        host.env(&mut command);
+        command
+            .arg("--oms-dispatch")
+            .arg(&host.f.0)
+            .arg(binary.parent().unwrap().file_name().unwrap())
+            .arg("--")
+            .current_dir(&host.repo);
+        fixture_panel_tool(command, "mcp-app", &host.repo, "oms_panel_snapshot").0["dashboard"]
+            .clone()
+    };
+    let dashboard = snapshot();
+    assert_eq!(
+        dashboard["observation"]["sources"]["plan"], "stale",
+        "{dashboard}"
+    );
+    let stale_alert = |dashboard: &Value| {
+        dashboard["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["code"] == "stale-plan-claims")
+            .map(|row| row["count"].clone())
+    };
+    assert_eq!(stale_alert(&dashboard), Some(json!(1)));
+
+    let marker = host.repo.join(".oms/delegations/writer.json");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(
+        marker,
+        json!({
+            "schema":1,"id":"writer","task_id":"expired","lease_id":lease,"pid":std::process::id()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(stale_alert(&snapshot()), None);
+    assert_eq!(fs::read_to_string(plan_file).unwrap(), plan);
+}
+
+#[test]
 fn panel_capabilities_matches_native_oms_list_all_without_side_effects() {
     let fixture = Fixture::new();
     add_companions(&fixture, &["oms-mcp-peer-owner"]);
