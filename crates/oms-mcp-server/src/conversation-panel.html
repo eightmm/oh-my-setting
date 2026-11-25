@@ -167,7 +167,8 @@ const messages = {
   "project.unreachable": ["대화에서 지정한 프로젝트에 연결할 수 없습니다.", "Cannot connect to the project specified in the conversation."],
   "providerUnknown": ["공급자 미확인", "Unknown provider"],
   "readingIssue": ["이슈 버전을 확인하는 중…", "Checking the issue version…"],
-  "received": ["현재 Main에 이 이슈를 전달했습니다.", "Issue recorded for the current Main."],
+  "received": ["이슈를 기록했고 현재 Main의 대화 컨텍스트에 전달했습니다.", "Issue recorded and added to the current Main's context."],
+  "receiptOnly": ["접수 기록만 저장했습니다. 현재 Main 전달은 확인되지 않았습니다.", "Receipt saved only. Delivery to the current Main is not confirmed."],
   "recordIssue": ["현재 Main에 이 이슈 전달", "Record this issue for the current Main"],
   "refresh": ["새로고침", "Refresh"],
   "refreshing": ["새로고침 중…", "Refreshing…"],
@@ -180,6 +181,8 @@ const messages = {
   "start.resubmit": ["이전 요청 기록이 없습니다. 변경한 목표를 시작하려면 다시 제출하세요.", "No prior start recorded. Submit again to start the edited goal."],
   "start.started": ["{p} Main에 목표를 전달했습니다.", "Goal sent to the new {p} Main."],
   "start.unknown": ["시작 상태를 확인할 수 없습니다. 진행 상황을 새로고침하세요.", "Cannot determine the start status. Refresh to check progress."],
+  "snapshot.degraded": ["일부 상태를 수집하지 못했습니다. 보이지 않는 항목은 없는 것이 아니라 미확인입니다.", "Some status could not be collected. Missing items are unknown, not absent."],
+  "snapshot.partial": ["일부 기록만 표시합니다. 생략되었거나 확인되지 않은 항목이 있습니다.", "Showing partial status. Some records are omitted or unconfirmed."],
   "state.abandoned": ["중단됨", "Abandoned"],
   "state.accepted": ["수락됨", "Accepted"],
   "state.active": ["활성", "Active"],
@@ -617,8 +620,11 @@ function issueOwner() {
 function verifiedLeads(main,d) {
   const scoped=Array.isArray(d.conversationAttempts), active=Array.isArray(d.activeAttempts)?d.activeAttempts:[];
   const records=scoped?d.conversationAttempts:[...active,...(d.attempts||[])];
+  // A panel-main row projects its harness as provider, which may differ from the Room's dispatch provider.
+  // Room and participant identify its owner; a fresh launch joins as its attempt ID.
   const ownerRecords=records.filter(r=>r?.id && isMain(r) && r.room===main.room &&
-    r.participant===main.participant && (!r.provider||providerName(r.provider)===providerName(main.provider)));
+    (r.tool==='panel-main'?(r.participant||r.id)===main.participant:
+      r.participant===main.participant && (!r.provider||providerName(r.provider)===providerName(main.provider))));
   const owners=new Set(ownerRecords.map(r=>r.id));
   const seen=new Set(), leads=[];
   for(const r of scoped?records:active) {
@@ -640,6 +646,13 @@ function verifiedLeads(main,d) {
 function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
   element.textContent=Object.hasOwn(names,provider)?providerName(provider).slice(0,1):'–';
+}
+function snapshotNotice(d) {
+  const completeness=d.observation?(d.observation.completeness||'unknown'):'';
+  if(d.degraded || completeness==='unknown')return 'snapshot.degraded';
+  const omitted=[d.attemptsTrimmed,d.activeAttemptsTrimmed,d.operationsTrimmed,d.attentionTrimmed,d.conversationAttemptsTrimmed,
+    d.conversationAttemptsOmitted,d.conversationMain?.participantsOmitted,d.managedScratch?.omittedAttempts].some(n=>n>0);
+  return omitted || (completeness && completeness!=='complete')?'snapshot.partial':'';
 }
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
@@ -775,7 +788,10 @@ async function receiptStatus(p,write=false) {
       (p.id && v.requestId!==p.id))throw uiError('uncertainIssue');
     if(!write && v.status==='not_found'){p.id=v.requestId;p.state='absent';}
     else if(v.status==='recorded' && v.schema===1 && v.kind==='oms-reviewed-issue-receipt' && v.room===p.room && v.participant===p.owner && v.issue===p.issue && v.sha256===p.sha256){
-      p.id=v.requestId;p.state='received';updateContext({project:project||null,...address,requestId:p.id,kind:v.kind,status:v.status});
+      p.id=v.requestId;
+      const delivered=await updateContext({project:project||null,...address,requestId:p.id,kind:v.kind,status:v.status,issue:v.issue,sha256:v.sha256});
+      if(!sameIssue(p))return;
+      p.state=delivered?'received':'receiptOnly';
     }else throw uiError('uncertainIssue');
   } catch {p.state='uncertainIssue';}
   finally {p.pending=false;paintIssue(p);}
@@ -822,7 +838,7 @@ async function loadStatus(expected,recover=true) {
     if(project && (!contextKey||contextKey==='null'))updateContext({project});
     const snapshot=await tool('oms_panel_snapshot',{},expected), d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
     if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
-    render(d);el('status').textContent='';
+    render(d);const notice=snapshotNotice(d);put('status',()=>notice?t(notice):'');
     if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();return;}
     try{
       const response=await tool('oms_list_approvals',{},expected);

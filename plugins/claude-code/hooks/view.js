@@ -107,7 +107,7 @@ export function headerLines(snapshot) {
 function goalLine(report) {
   const goal = report.goal
   if (!isObject(goal) || !goal.text) {
-    return report.collection?.sources?.state === 'ok'
+    return goal === null && report.collection?.sources?.goal === 'ok'
       ? line('Goal: none recorded', 'dim') : line('Goal: unavailable', 'warn')
   }
   return line('Goal: ' + shown(goal.text))
