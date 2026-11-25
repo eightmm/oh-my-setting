@@ -788,7 +788,9 @@ fn panel_interrupt_during_selected_python_request_returns_no_output() {
         br#"#!/bin/sh
 [ "$(dd bs=1 count=6 2>/dev/null)" = "$(printf 'OGPY\002\001')" ] || exit 1
 printf 'request\n' > "$0.ready"
-exec cat >/dev/null
+# Drain input with a builtin: stdout, the response pipe, must stay open
+# until the session cancels.
+while read -r _; do :; done
 "#,
     )
     .unwrap();
