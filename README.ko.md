@@ -66,7 +66,7 @@ oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 
 ## 하나의 패널, 모든 호스트
 
-oh-my-setting의 목표는 어느 에이전트에서 일하든 따라오는 하나의 프로젝트 패널입니다. Rust 런타임이 프로젝트 상태(목표, 계획, 시도, 리뷰와 관련 Git·GitHub·사용량 기록)를 관리하고, 모든 호스트는 따로 사본을 두지 않고 이 OMS 기록에서 화면을 그립니다. 에이전트 앱은 `oms mcp-server`에서 MCP App으로 받고, 터미널 패널과 Claude Code pane은 같은 머신의 OMS를 직접 읽습니다. 호스트마다 보여 주는 범위와 조작 가능 여부는 아래 표처럼 다릅니다.
+oh-my-setting의 목표는 어느 에이전트에서 일하든 따라오는 하나의 프로젝트 패널입니다. Rust 런타임이 프로젝트 상태(목표, 계획, 시도, 리뷰, 사용량)를 관리하고 Git·GitHub 상태는 그때그때 읽으며, 모든 호스트는 따로 사본을 두지 않고 OMS에서 화면을 그립니다. 에이전트 앱은 `oms mcp-server`에서 MCP App으로 받고, 터미널 패널과 Claude Code pane은 같은 머신의 OMS를 직접 읽습니다. 호스트마다 보여 주는 범위와 조작 가능 여부는 아래 표처럼 다릅니다.
 
 | 어디서 | 무엇을 볼 수 있나 | 연결 방법 |
 |---|---|---|
@@ -75,7 +75,7 @@ oh-my-setting의 목표는 어느 에이전트에서 일하든 따라오는 하�
 | **터미널** | Main 선택·전환, provider 개요, 쿼터, 결과 리더를 갖춘 Board. tmux 세션 관리 | `oms` ([터미널 패널](docs/TERMINAL-PANEL.md)) |
 | **Claude Code v2.1.287+** | `oms dashboard --json`으로 그리는 대화 옆 읽기 전용 `oms-panel` pane, `/oms-panel` | 미리보기, 마켓플레이스 미등록: `claude --plugin-dir plugins/claude-code` ([README](plugins/claude-code/README.md)) |
 
-패널과 별개로 설치기는 각 provider를 공유 하네스에 연결합니다. Codex에는 [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) 플러그인(스킬 라우팅, 압축 전 인수인계, 턴 가드)을, Antigravity CLI·IDE에는 [`oh-my-setting`](plugins/antigravity/plugin.json) 플러그인(MCP 기반 하네스 상태)을 등록하고, Claude Code에는 스킬·훅·MCP 서버를 직접 등록합니다. [`oms-skills`](.claude-plugin/marketplace.json)는 플러그인에서만 스킬을 불러오는 Claude Code 환경을 위한 선택적 수동 설치 플러그인입니다. OMS 설치가 필요하고, 일반 설치에서는 스킬이 두 번 보이므로 쓰지 않습니다([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
+패널과 별개로 설치기는 설치된 각 provider를 공유 하네스에 연결합니다. 모든 provider에 OMS 스킬을 연결하고, provider가 지원하는 곳에 OMS MCP 서버와 훅을 등록합니다. `codex`가 PATH에 있으면 Codex [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) 플러그인(스킬 라우팅, 압축 전 인수인계, 턴 가드)을, Antigravity가 있으면 Antigravity CLI·IDE용 [`oh-my-setting`](plugins/antigravity/plugin.json) 플러그인(MCP 기반 하네스 상태)을 추가로 설치합니다. [`oms-skills`](.claude-plugin/marketplace.json)는 플러그인에서만 스킬을 불러오는 Claude Code 환경을 위한 선택적 수동 설치 플러그인입니다. OMS 설치가 필요하고, 일반 설치에서는 스킬이 두 번 보이므로 쓰지 않습니다([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
 
 ### 터미널에서
 

@@ -66,7 +66,7 @@ oms uninstall    # Remove managed links and restore backed-up config files
 
 ## One panel, every host
 
-The goal of oh-my-setting is one project panel that follows you between agents. The Rust runtime keeps the project state (goal, plan, attempts, reviews and the related Git, GitHub and usage records), and every host draws its view from those OMS records instead of keeping its own copy. Agent apps receive it from `oms mcp-server` as an MCP App; the terminal panel and the Claude Code pane read OMS on the same machine. What each host shows and whether it can act differ, as the table lists.
+The goal of oh-my-setting is one project panel that follows you between agents. The Rust runtime keeps the project state (goal, plan, attempts, reviews, usage) and reads Git and GitHub status live, and every host draws its view from OMS instead of keeping its own copy. Agent apps receive it from `oms mcp-server` as an MCP App; the terminal panel and the Claude Code pane read OMS on the same machine. What each host shows and whether it can act differ, as the table lists.
 
 | Where | What you get | How to connect |
 |---|---|---|
@@ -75,7 +75,7 @@ The goal of oh-my-setting is one project panel that follows you between agents. 
 | **Terminal** | Board with Main selection and switching, provider overview, quota and the results reader; manages tmux sessions | `oms` ([terminal panel](docs/TERMINAL-PANEL.md)) |
 | **Claude Code v2.1.287+** | Read-only `oms-panel` pane beside the transcript, drawn from `oms dashboard --json`; `/oms-panel` | Preview, not in the marketplace yet: `claude --plugin-dir plugins/claude-code` ([README](plugins/claude-code/README.md)) |
 
-Separately from the panel, the installer wires each provider into the shared harness: Codex gets the [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) plugin (skill routing, pre-compaction handoff, turn guards), the Antigravity CLI and IDE get their [`oh-my-setting`](plugins/antigravity/plugin.json) plugin (harness state over MCP), and Claude Code gets the skills, hooks and MCP server registered directly. [`oms-skills`](.claude-plugin/marketplace.json) is an optional, manually installed Claude Code plugin with the same skills for setups that load skills only from plugins; it needs an OMS install and is not needed with a normal install, where the skills would be listed twice ([note](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
+Separately from the panel, the installer wires each installed provider into the shared harness: it links the OMS skills into every provider and registers the OMS MCP server and hooks where the provider supports them. When `codex` is on PATH it also registers the Codex [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) plugin (skill routing, pre-compaction handoff, turn guards), and when Antigravity is present it installs the Antigravity CLI and IDE [`oh-my-setting`](plugins/antigravity/plugin.json) plugin (harness state over MCP). [`oms-skills`](.claude-plugin/marketplace.json) is an optional, manually installed Claude Code plugin with the same skills for setups that load skills only from plugins; it needs an OMS install and is not needed with a normal install, where the skills would be listed twice ([note](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
 
 ### In the terminal
 
