@@ -2527,6 +2527,58 @@ fn fixed_argv() {
             "requires",
         );
     }
+    let symbol =
+        "symbol:crates/oms-command-room/src/desktop.rs::function:impl Room<'_>#2::assignment_owner";
+    fixture_settings(
+        &source,
+        json!({"stdout":json!([{"id":symbol}]).to_string()}),
+    );
+    let rows = payload(&c.tool(
+        "oms_project_graph_query",
+        json!({"query":"assignment_owner"}),
+    ));
+    good(&c.tool("oms_project_graph_trace", json!({"node":rows[0]["id"]})));
+    let trace = json!([
+        "graph",
+        "project",
+        "trace",
+        "--json",
+        "--depth",
+        "2",
+        "--direction",
+        "out",
+        symbol
+    ]);
+    assert_eq!(record(&source)["argv"], trace);
+    for node in [
+        "--help",
+        "file:../escape",
+        "symbol:src/../x::run",
+        "file:foo\\bar",
+        "symbol:a::f\ng",
+        "symbol:a::f\u{0085}g",
+        "symbol:a::f\u{202e}g",
+        "symbol:a::f\u{2060}g",
+        "symbol:a::f\u{2028}g",
+    ] {
+        bad(
+            &c.tool("oms_project_graph_trace", json!({"node":node})),
+            "requires",
+        );
+    }
+    assert_eq!(
+        record(&source)["argv"],
+        trace,
+        "invalid IDs never reached the command"
+    );
+    let prefix = "file:";
+    let at_limit = format!("{prefix}{}", "한".repeat(169));
+    assert_eq!(at_limit.len(), 512);
+    good(&c.tool("oms_project_graph_trace", json!({"node":at_limit})));
+    bad(
+        &c.tool("oms_project_graph_trace", json!({"node":at_limit+"x"})),
+        "requires",
+    );
     bad(&c.tool("oms_inbox", json!({"repo":17})), "repo must");
     bad(&c.tool("oms_inbox", json!({"repo":"missing"})), "no such");
 }
