@@ -468,11 +468,7 @@ pub fn list_peer_operations(
     }
     // Running records outrank stalled ones, and both outrank newer finished ones, so a live
     // run is never cut by the cap.
-    records.sort_by_key(|r| match r.status {
-        "running" => 0u8,
-        "stalled" => 1,
-        _ => 2,
-    });
+    records.sort_by_key(|r| crate::activity_rank(r.status));
     records.truncate(cap);
     records
 }

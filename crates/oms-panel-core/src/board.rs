@@ -126,22 +126,10 @@ fn parse_epoch(stamp: &str) -> Option<i64> {
 }
 
 fn is_active_peer_state(state: &str) -> bool {
-    matches!(
-        state,
-        "running" | "working" | "starting" | "queued" | "verifying"
-    )
+    oms_command_operations::ACTIVE_STATES.contains(&state)
 }
 
-/// Display order before any cap: running work, then stalled, then finished.
-pub(crate) fn activity_rank(state: &str) -> u8 {
-    if is_active_peer_state(state) {
-        0
-    } else if state == "stalled" {
-        1
-    } else {
-        2
-    }
-}
+pub(crate) use oms_command_operations::activity_rank;
 
 fn peer_operation_row(
     rec: &PeerOperationRecord,
