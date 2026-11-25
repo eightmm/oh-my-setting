@@ -85,32 +85,56 @@ fn room_log(ident: &str, rows: &[V]) -> bool {
             .any(|r| text(r.get("room_event"), "kind") == "created")
 }
 pub(crate) fn create(repo: &Path, ident: &str, topic: &str, context: &Context<'_>) -> Result<()> {
+    create_log(repo, ident, topic, context, false)?;
+    set_current(repo, ident, context)
+}
+
+fn create_log(
+    repo: &Path,
+    ident: &str,
+    topic: &str,
+    context: &Context<'_>,
+    fresh: bool,
+) -> Result<()> {
     safety::outbound(topic.as_bytes())?;
-    storage::log(repo, &path(ident)?, context.interrupted, |old, _| {
+    let path = path(ident)?;
+    let topic_bytes = || -> Result<Vec<u8>> {
+        if topic.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut bytes = obj([
+            ("schema", 1usize.into()),
+            ("thread", ident.into()),
+            ("seq", 1usize.into()),
+            ("ts", now().into()),
+            ("role", "topic".into()),
+            ("agent", agent().into()),
+            ("text", topic.into()),
+        ])
+        .json(false)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    };
+    if fresh {
+        if safety::child() && room_log(ident, &[]) {
+            return fail("a worker cannot create a room");
+        }
+        return storage::write(repo, &path, topic_bytes()?, false, context.interrupted);
+    }
+    storage::log(repo, &path, context.interrupted, |old, _| {
         let rows = storage::rows(old)?;
         if safety::child() && room_log(ident, &rows) {
             return fail("a worker cannot create a room");
         }
-        if !old.is_empty() {
-            return Ok((Vec::new(), ()));
-        }
-        let mut bytes = Vec::new();
-        if !topic.is_empty() {
-            let row = obj([
-                ("schema", 1usize.into()),
-                ("thread", ident.into()),
-                ("seq", 1usize.into()),
-                ("ts", now().into()),
-                ("role", "topic".into()),
-                ("agent", agent().into()),
-                ("text", topic.into()),
-            ]);
-            bytes = row.json(false)?;
-            bytes.push(b'\n');
-        }
-        Ok((bytes, ()))
-    })?;
-    set_current(repo, ident, context)
+        Ok((
+            if old.is_empty() {
+                topic_bytes()?
+            } else {
+                Vec::new()
+            },
+            (),
+        ))
+    })
 }
 fn agent() -> String {
     std::env::var("OMS_AGENT").unwrap_or_else(|_| "agent".into())
@@ -419,6 +443,7 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             "stale",
             "apply",
             "live",
+            "no-current",
             "notes-only",
             "require-open",
         ],
@@ -427,6 +452,9 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         return Ok(out(include_bytes!("help/thread.txt").to_vec()));
     }
     args.exact_operands(1)?;
+    if args.has("no-current") && !(args.action() == "new" && args.has("id") && args.has("live")) {
+        return fail("--no-current requires thread new --live --id ID");
+    }
     if args.has("room-event") && args.action() != "append" {
         return fail("--room-event applies to append");
     }
@@ -477,19 +505,19 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             let ident = ident
                 .filter(|_| args.has("id"))
                 .unwrap_or(crate::id("th-")?);
-            create(
-                &repo,
-                &ident,
-                args.value(
-                    "topic",
-                    if args.has("live") {
-                        "Live collaboration"
-                    } else {
-                        ""
-                    },
-                ),
-                context,
-            )?;
+            let topic = args.value(
+                "topic",
+                if args.has("live") {
+                    "Live collaboration"
+                } else {
+                    ""
+                },
+            );
+            if args.has("no-current") {
+                create_log(&repo, &ident, topic, context, true)?;
+            } else {
+                create(&repo, &ident, topic, context)?;
+            }
             if args.has("live") {
                 append(
                     &repo,

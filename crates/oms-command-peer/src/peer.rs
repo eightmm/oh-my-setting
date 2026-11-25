@@ -109,6 +109,9 @@ pub(crate) const FLAGS: &[&str] = &[
     "output-json",
 ];
 pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
+    parse_with_flags(argv, FLAGS)
+}
+fn parse_with_flags(argv: &[OsString], flags: &[&str]) -> Result<Args> {
     let mut expanded = Vec::new();
     for (i, value) in argv.iter().enumerate() {
         expanded.push(value.clone());
@@ -120,7 +123,7 @@ pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
             expanded.push("claude".into());
         }
     }
-    let args = Args::parse(&expanded, VALUES, FLAGS)?;
+    let args = Args::parse(&expanded, VALUES, flags)?;
     let team = process::TeamLocator::from_args(&args)?;
     if args.has("team-request-actions") && !args.has("team-requests") {
         return fail("--team-request-actions requires --team-requests");
@@ -143,7 +146,16 @@ pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
     Ok(args)
 }
 pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Result<Output> {
-    let args = parse(argv)?;
+    let args = if tool == "peer-ask" {
+        parse_with_flags(argv, &[FLAGS, &["no-current"]].concat())?
+    } else {
+        parse(argv)?
+    };
+    if args.has("no-current")
+        && (!storage::identifier(args.get("thread")) || args.has("new-thread"))
+    {
+        return fail("--no-current requires peer-ask --thread ID on an existing thread");
+    }
     if args.has("team-requests") && tool != "peer-ask" {
         return fail("Team requests are supported only by read-only peer-ask");
     }
@@ -1411,7 +1423,10 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         targets = valid;
     }
     if args.has("thread") && !dry(args, tool) && !args.has("export-only") {
-        if thread::current(&repo).as_deref() != Some(args.get("thread")) {
+        // Background callers already seeded their own explicit live thread.
+        // append requires that exact log to exist and checks closure under its lock.
+        if !args.has("no-current") && thread::current(&repo).as_deref() != Some(args.get("thread"))
+        {
             thread::create(&repo, args.get("thread"), args.get("topic"), context)?;
         }
         thread::append(

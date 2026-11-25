@@ -19,6 +19,12 @@ before any action.
   workflow. Verify the assignment and its receipt. Choosing a lead or sending
   an issue/PR reference into chat does not by itself start a managed Main or
   establish execution. Report the handoff as pending until acknowledged.
+- If the user asks to open all three Lead conversations, call `oms_open_panel`
+  with `leadConversations: true`, or call `oms_open_lead_conversations` for
+  the exact Room of the confirmed Main. A plain panel open only displays it.
+  Read `oms_lead_conversation_status` to confirm each provider answered.
+  Reuse the same Room after an uncertain response. Opening these conversations
+  requests readiness and does not assign project tasks.
 - If the user explicitly requests one read-only Claude or AGY review from the
   current verified Codex Main, call `oms_assign_provider` with the exact Room,
   one provider, a title, the task, and a fresh lowercase UUID. This starts one

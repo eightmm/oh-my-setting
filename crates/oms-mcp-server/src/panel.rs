@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v20.html";
+const URI: &str = "ui://oms/conversation-panel/v21.html";
+const V20: &str = "ui://oms/conversation-panel/v20.html";
 const V19: &str = "ui://oms/conversation-panel/v19.html";
 const V18: &str = "ui://oms/conversation-panel/v18.html";
 const V17: &str = "ui://oms/conversation-panel/v17.html";
@@ -69,6 +70,10 @@ const APPROVALS: &str = "oms_list_approvals";
 const DECIDE: &str = "oms_decide_approval";
 const RECORD_ISSUE: &str = "oms_record_reviewed_issue";
 const ISSUE_STATUS: &str = "oms_reviewed_issue_status";
+const OPEN_LEADS: &str = "oms_open_lead_conversations";
+const LEAD_STATUS: &str = "oms_lead_conversation_status";
+const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
+const LEAD_PROMPT: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
 const ASSIGN: &str = "oms_assign_provider";
 const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
@@ -157,6 +162,7 @@ fn assignment_directory(
         || proof["thread"] != op
         || proof["kind"] != "ask"
         || proof["panel_assignment"] != binding
+        || (data["purpose"] == "provider-lead" && proof["answer_storage"] != "operation")
         || proof["targets"] != json!([data["provider"]])
     {
         return if recovering {
@@ -191,6 +197,8 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | ISSUE_STATUS
                     | ASSIGN
                     | ASSIGN_RESULT
+                    | OPEN_LEADS
+                    | LEAD_STATUS
             )
         )
 }
@@ -215,10 +223,12 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     };
     let project = json!({"type":"string","description":"Exact alias from oms_list_projects when the host has a project map."});
     let scope = json!({"project":project});
+    let mut open_scope = scope.clone();
+    open_scope["leadConversations"] = json!({"type":"boolean","description":"Explicit intent to open provider Lead conversations. Opening the panel itself only displays it."});
     let mut opener = make(
         OPEN,
         "Open the OMS panel (expands beside or over the conversation when the host allows it).",
-        scope.clone(),
+        open_scope,
         &[],
         false,
     );
@@ -263,11 +273,27 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     );
     record_issue["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
     record_issue["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let mut open_leads = make(
+        OPEN_LEADS,
+        "Open one bounded OMS readiness conversation for each Codex, Claude and AGY Lead in this chat's verified Room. Reopening reuses the same requests.",
+        json!({"project":project,"room":ident,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"Optional previously observed physical project key; refuses if the binding changed."}}),
+        &["room"],
+        true,
+    );
+    open_leads["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
     let all = json!([
         opener,
         chat,
         record_issue,
         issue_status,
+        open_leads,
+        make(
+            LEAD_STATUS,
+            "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
+            json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS}}),
+            &["room"],
+            false
+        ),
         make(
             USAGE,
             "Read recorded usage for recent OMS attempts and local provider quota windows.",
@@ -1042,6 +1068,7 @@ impl Server<'_> {
                             | V17
                             | V18
                             | V19
+                            | V20
                     )
                 ) =>
             {
@@ -1058,7 +1085,10 @@ impl Server<'_> {
                 }
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
-                    OPEN | APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
+                    OPEN => &["project", "leadConversations"],
+                    OPEN_LEADS => &["project", "room", "projectKey"],
+                    LEAD_STATUS => &["project", "room", "provider"],
+                    APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
                         "issuePreview",
@@ -1116,7 +1146,29 @@ impl Server<'_> {
                 if name == GRAPH {
                     return self.graph_reply(id, params, result);
                 }
-                if name == ASSIGN_RESULT {
+                if name == LEAD_STATUS {
+                    match result {
+                        Ok(mut data) => {
+                            let private = data
+                                .as_object_mut()
+                                .and_then(|o| o.remove("leadConversation"));
+                            let mut result = response(Ok(data));
+                            if let Some(private) = private {
+                                if crate::output::outbound(
+                                    private.to_string().as_bytes(),
+                                    &Value::Null,
+                                )
+                                .is_err()
+                                {
+                                    return reply(id,response(Err("OMS withheld the Lead conversation during its outbound scan.".into())));
+                                }
+                                result["_meta"]["leadConversation"] = private;
+                            }
+                            result
+                        }
+                        Err(e) => response(Err(e)),
+                    }
+                } else if name == ASSIGN_RESULT {
                     match result {
                         Ok(data)
                             if crate::output::outbound(
@@ -1419,6 +1471,14 @@ impl Server<'_> {
                 self.panel_repo(args)?;
             }
             let mut result = json!({"panel":"OMS","project":args["project"]});
+            if let Some(flag) = args.get("leadConversations") {
+                let requested = flag
+                    .as_bool()
+                    .ok_or("leadConversations must be a boolean.")?;
+                if requested {
+                    result["leadConversations"] = json!(true);
+                }
+            }
             if self.config.profile == ToolProfile::McpApp {
                 result["readOnly"] = json!(true);
             }
@@ -1447,6 +1507,9 @@ impl Server<'_> {
                 .ok_or("A lowercase UUID requestId is required.")?;
             Ok(format!("oms-app-{key}"))
         };
+        if matches!(name, OPEN_LEADS | LEAD_STATUS) {
+            return self.lead_conversations(&repo, name, args, meta);
+        }
         if matches!(name, RECORD_ISSUE | ISSUE_STATUS) {
             return self.reviewed_issue(&repo, name, args, meta);
         }
@@ -2037,6 +2100,293 @@ impl Server<'_> {
         argv
     }
 
+    fn lead_conversations(
+        &self,
+        repo: &Path,
+        name: &str,
+        args: &Value,
+        meta: &Value,
+    ) -> PanelResult<Value> {
+        let thread = meta["threadId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("Open this control from the Room owner's bound conversation.")?;
+        let room = args["room"]
+            .as_str()
+            .filter(|v| crate::matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", v))
+            .ok_or("Invalid Room.")?;
+        let selected = args
+            .get("provider")
+            .map(|v| {
+                v.as_str()
+                    .filter(|p| LEAD_PROVIDERS.contains(p))
+                    .ok_or("Unsupported Lead provider.")
+            })
+            .transpose()?;
+        let digest = crate::storage::hash(thread);
+        let project_key = || -> PanelResult<String> {
+            if self.panel_repo(args)? != repo {
+                return Err(BINDING.into());
+            }
+            let stat = fs::symlink_metadata(repo).map_err(|_| BINDING.to_owned())?;
+            if !stat.is_dir() {
+                return Err(BINDING.into());
+            }
+            let mut identity = b"oms-lead-project-v1\0".to_vec();
+            identity.extend_from_slice(repo.as_os_str().as_encoded_bytes());
+            identity.extend_from_slice(&stat.dev().to_be_bytes());
+            identity.extend_from_slice(&stat.ino().to_be_bytes());
+            Ok(crate::storage::hash(identity))
+        };
+        let key = project_key()?;
+        if args
+            .get("projectKey")
+            .is_some_and(|v| v.as_str() != Some(key.as_str()))
+        {
+            return Err("The selected project changed. Reopen the panel for that project.".into());
+        }
+        let bound = || {
+            if project_key()? == key {
+                Ok(())
+            } else {
+                Err(BINDING.to_owned())
+            }
+        };
+        let mut rows = Vec::new();
+        let mut private = None;
+        let mut has_authority = false;
+        for provider in LEAD_PROVIDERS
+            .into_iter()
+            .filter(|p| selected.is_none_or(|s| s == *p))
+        {
+            bound()?;
+            let run = |action, request: Option<&str>, extra: &[(&str, &str)]| {
+                bound()?;
+                let argv = Self::assignment_argv(action, repo, room, request, &digest[..32], extra);
+                self.panel_exec(repo, argv, false).map(|(data, _)| data)
+            };
+            let provider_arg = [("--provider", provider)];
+            let mut row =
+                json!({"provider":provider,"requestId":Value::Null,"status":"unavailable"});
+            // The Room store resolves the address against the live Main and its current
+            // enrollment. The app cannot choose a different request, participant or peer.
+            let Ok(prior) = run("desktop-lead-status", None, &provider_arg) else {
+                rows.push(row);
+                continue;
+            };
+            let Some(request) = prior["request"].as_str().filter(|id| {
+                uuid(id)
+                    && id.as_bytes()[14] == b'8'
+                    && matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
+            }) else {
+                rows.push(row);
+                continue;
+            };
+            let canonical = if provider == "agy" {
+                "antigravity"
+            } else {
+                provider
+            };
+            let valid = |data: &Value| {
+                data["request"] == request
+                    && data["room"] == room
+                    && data["participant"] == format!("ask-{request}")
+                    && data["provider"] == canonical
+                    && data["purpose"] == "provider-lead"
+                    && data["role"] == "worker"
+                    && data["readOnly"] == true
+                    && data["task"] == LEAD_PROMPT
+                    && ((data["status"] == "assigned"
+                        && data["thread"].is_null()
+                        && data["operation"].is_null())
+                        || (data["status"] == "started"
+                            && data["operation"].as_str().is_some_and(crate::operation)
+                            && data["operation"] == data["thread"]))
+            };
+            if prior["status"] != "not_found" && !valid(&prior) {
+                rows.push(row);
+                continue;
+            }
+            has_authority = true;
+            row["requestId"] = json!(request);
+            let resolve = || -> PanelResult<(&'static str, Value)> {
+                let write = name == OPEN_LEADS;
+                let data = if write && prior["status"] == "not_found" {
+                    run("desktop-lead-open", Some(request), &provider_arg)?
+                } else {
+                    prior.clone()
+                };
+                if !write && data["status"] == "not_found" {
+                    return Ok(("not_started", Value::Null));
+                }
+                if !valid(&data) {
+                    return Err("Invalid Lead reservation.".into());
+                }
+                let binding =
+                    crate::storage::hash(json!([&digest[..32], room, request]).to_string());
+                let operation =
+                    assignment_address(&data, &binding).ok_or("Missing Lead operation address.")?;
+                if data["status"] == "started" && data["operation"] != operation {
+                    return Err("Invalid Lead operation.".into());
+                }
+                let mut linked = data["status"] == "started";
+                if !linked && write {
+                    // A stale reservation may recover its existing operation, never start it again.
+                    if prior["status"] == "not_found" && data["fresh"] == true {
+                        let proof = run("desktop-lead-status", Some(request), &provider_arg)?;
+                        if !valid(&proof)
+                            || proof["assignedAt"] != data["assignedAt"]
+                            || proof["status"] != "assigned"
+                        {
+                            return Err("Lead ownership or reservation changed.".into());
+                        }
+                        bound()?;
+                        if !self.start_assignment_peer(
+                            repo,
+                            provider,
+                            LEAD_PROMPT,
+                            &operation,
+                            &binding,
+                            true,
+                        )? {
+                            return Ok(("unconfirmed", Value::Null));
+                        }
+                    } else if assignment_directory(repo, &data, &operation, &binding, true)?
+                        .is_none()
+                    {
+                        return Ok(("unconfirmed", Value::Null));
+                    }
+                    let receipt = run(
+                        "desktop-assign-receipt",
+                        Some(request),
+                        &[("--operation", operation.as_str())],
+                    )?;
+                    linked = valid(&receipt)
+                        && receipt["assignedAt"] == data["assignedAt"]
+                        && receipt["operation"] == operation;
+                }
+                if !linked {
+                    return Ok(("unconfirmed", Value::Null));
+                }
+                let Some(dir) = assignment_directory(repo, &data, &operation, &binding, true)?
+                else {
+                    return Ok(("unconfirmed", Value::Null));
+                };
+                let (state, exit) = crate::peer::status(&dir);
+                if state == "running" {
+                    return Ok(("starting", Value::Null));
+                }
+                if state != "done" || exit != Some(0) {
+                    return Ok(("unavailable", Value::Null));
+                }
+                // The supervisor exit alone cannot attest a provider response. Inspect
+                // its own single-seat answer, keeping every byte out of model content.
+                let proof = self
+                    .peer_result(&json!({"repo":repo,"operation":operation}))
+                    .ok()
+                    .and_then(|r| r.as_str().and_then(|s| crate::value::from_str(s).ok()));
+                let Some(answer) = proof
+                    .as_ref()
+                    .filter(|p| {
+                        p["operation"] == operation
+                            && p["exit"] == 0
+                            && p["answer_details"]
+                                .as_array()
+                                .is_some_and(|d| d.len() == 1 && d[0]["exit"] == "0")
+                    })
+                    .and_then(|p| p["answer"].as_str())
+                    .filter(|text| !text.trim().is_empty())
+                else {
+                    return Ok(("unconfirmed", Value::Null));
+                };
+                let mut transcript = Value::Null;
+                if selected.is_some() {
+                    transcript = self.provider_thread(repo, &operation, canonical, "");
+                    if transcript["turns"].as_array().is_none_or(Vec::is_empty)
+                        || transcript.to_string().len() > crate::OUTPUT_LIMIT / 2
+                    {
+                        transcript = json!({"turns":[{"role":canonical,"text":answer.chars().take(4000).collect::<String>(),"at":Value::Null}],"cursor":Value::Null,"hasMore":false});
+                    }
+                }
+                let live = run("desktop-lead-status", Some(request), &provider_arg)?;
+                if !valid(&live)
+                    || live["operation"] != operation
+                    || live["assignedAt"] != data["assignedAt"]
+                {
+                    return Err("Lead receipt changed.".into());
+                }
+                // An operation can outlive its OMS thread. The native thread reader
+                // validates the log's exact ID and closed marker. A live thread
+                // created by start_bound_peer has its opening collaboration note.
+                bound()?;
+                let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+                let witness = self.command(
+                    &[
+                        "thread",
+                        "--repo",
+                        path,
+                        "--id",
+                        operation.as_str(),
+                        "context",
+                        "--require-open",
+                        "--notes-only",
+                        "--turns",
+                        "1",
+                        "--max-bytes",
+                        "256",
+                    ],
+                    repo,
+                    Duration::from_secs(5),
+                )?;
+                if witness.code != 0 || witness.stdout.is_empty() {
+                    return Ok(("unconfirmed", Value::Null));
+                }
+                Ok(("ready", transcript))
+            };
+            let (status, transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
+            row["status"] = json!(status);
+            if selected.is_some() {
+                private = Some(
+                    json!({"room":room,"provider":provider,"requestId":request,"status":status,"transcript":transcript}),
+                );
+            }
+            rows.push(row);
+        }
+        bound()?;
+        if !has_authority {
+            return Err("OMS could not verify the current Main in the selected Room.".into());
+        }
+        let mut result = json!({"room":room,"projectKey":key,"leads":rows});
+        if let Some(private) = private {
+            result["leadConversation"] = private;
+        }
+        Ok(result)
+    }
+
+    fn start_assignment_peer(
+        &self,
+        repo: &Path,
+        provider: &str,
+        task: &str,
+        operation: &str,
+        binding: &str,
+        preserve_current: bool,
+    ) -> PanelResult<bool> {
+        let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+        Ok(self
+            .start_bound_peer(
+                &json!({"repo":path,"kind":"ask","prompt":task,"providers":provider,
+            "debate_rounds":0,"include_memory":false,"include_task":false}),
+                Some((operation, binding)),
+                preserve_current,
+            )
+            .ok()
+            .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
+            .is_some_and(|v| {
+                v["started"] == true && v["operation"] == operation && v["thread"] == operation
+            }))
+    }
+
     /// Provider assignment for the Room owned by this exact bound conversation.
     /// Authority is the host `threadId` plus the Room's own joined-owner proof;
     /// the widget supplies only a Room name and a request id.
@@ -2222,19 +2572,7 @@ impl Server<'_> {
             return Ok(unconfirmed(&data));
         };
         if !repair && data["fresh"] == true {
-            let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
-            let started = self
-                .start_bound_peer(
-                    &json!({"repo":path,"kind":"ask","prompt":task,"providers":provider,
-                    "debate_rounds":0,"include_memory":false,"include_task":false}),
-                    Some((&operation, &binding)),
-                )
-                .ok()
-                .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
-                .is_some_and(|v| {
-                    v["started"] == true && v["operation"] == operation && v["thread"] == operation
-                });
-            if !started {
+            if !self.start_assignment_peer(repo, provider, task, &operation, &binding, false)? {
                 return Ok(unconfirmed(&data));
             }
         } else if (!repair && data["fresh"] != false)

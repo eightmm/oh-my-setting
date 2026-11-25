@@ -429,6 +429,17 @@ pub(crate) fn request_uuid(value: &str) -> bool {
         })
 }
 
+const LEAD_TASK: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
+
+fn lead_title(provider: &str) -> Option<&'static str> {
+    match provider {
+        "codex" => Some("Codex Lead"),
+        "claude" => Some("Claude Lead"),
+        "antigravity" => Some("AGY Lead"),
+        _ => None,
+    }
+}
+
 impl Room<'_> {
     /// The unique, joined, native Main of this exact Room, from the app
     /// connection's bound conversation only. A worker or participant session
@@ -509,12 +520,73 @@ impl Room<'_> {
         Ok(room)
     }
 
-    fn assignment_receipt(&self, room: &Value, request: &str, fresh: Option<bool>) -> Value {
+    /// A slot is private to this physical repository, Room and native Main.
+    /// UUIDv8 preserves the existing operation and protected message ID contract.
+    fn lead_request(&self, room: &Value, consumer: &str, provider: &str) -> String {
+        let repository = crate::digest(self.repo.as_os_str().as_encoded_bytes());
+        let digest = crate::digest(
+            format!(
+                "oms-desktop-lead-v1/{repository}/{}/{}/{consumer}/{provider}",
+                room.text("id"),
+                room.text("owner")
+            )
+            .as_bytes(),
+        );
+        format!(
+            "{}-{}-8{}-a{}-{}",
+            &digest[..8],
+            &digest[8..12],
+            &digest[13..16],
+            &digest[17..20],
+            &digest[20..32]
+        )
+    }
+
+    pub(crate) fn desktop_lead(
+        &self,
+        id: &str,
+        consumer: &str,
+        pinned: Option<&str>,
+        provider: &str,
+        open: bool,
+    ) -> Result<Value> {
+        self.check_desktop_consumer(id, consumer)?;
+        let operations = self.operations()?;
+        let room = self.assignment_owner_with(id, consumer, operations.as_ref())?;
+        drop(operations);
+        let provider = self.services.canonical_provider(provider)?;
+        let title = lead_title(&provider).ok_or_else(|| Error::new("unsupported Lead provider"))?;
+        let request = self.lead_request(&room, consumer, &provider);
+        if pinned.is_some_and(|pin| pin != request) {
+            return Err(Error::new(
+                "provider Lead request no longer matches this Main",
+            ));
+        }
+        let retained = self.assignment_receipt(&room, consumer, &request, None)?;
+        if retained.text("status") != "not_found" && retained.text("purpose") != "provider-lead" {
+            return Err(Error::new("provider Lead slot has conflicting evidence"));
+        }
+        if !open {
+            return Ok(retained);
+        }
+        self.record_assignment(&room, consumer, &request, &provider, title, LEAD_TASK)
+    }
+
+    fn assignment_receipt(
+        &self,
+        room: &Value,
+        consumer: &str,
+        request: &str,
+        fresh: Option<bool>,
+    ) -> Result<Value> {
         let who = format!("ask-{request}");
         let messages = room.list("messages");
         let find = |id: String| messages.iter().find(|m| m.text("id") == id);
         let Some(task) = find(format!("assign-{request}")) else {
-            return obj([("request", request.into()), ("status", "not_found".into())]);
+            return Ok(obj([
+                ("request", request.into()),
+                ("status", "not_found".into()),
+            ]));
         };
         let member = room
             .list("participants")
@@ -537,16 +609,35 @@ impl Room<'_> {
             ("status", "assigned".into()),
             ("operation", Value::Null),
         ]);
+        if task.text("message_kind") == "note" {
+            if !(task.text("text") == LEAD_TASK
+                && task.text("sender") == room.text("owner")
+                && task.text("recipient") == who
+                && member.is_some_and(|p| {
+                    p.flag("joined")
+                        && p.text("parent") == room.text("owner")
+                        && p.text("role") == "worker"
+                        && lead_title(p.text("provider")) == Some(p.text("label"))
+                        && p.list("owns").is_empty()
+                        && self.lead_request(room, consumer, p.text("provider")) == request
+                }))
+            {
+                return Err(Error::new(
+                    "provider Lead receipt no longer matches this Main",
+                ));
+            }
+            out.set("purpose", "provider-lead");
+        }
         if let Some(receipt) = find(format!("dispatch-{request}")) {
             let Some(operation) = receipt.text("text").strip_prefix("operation ") else {
-                return out;
+                return Ok(out);
             };
             if receipt.text("sender") != room.text("owner")
                 || receipt.text("recipient") != who
                 || receipt.text("message_kind") != "status"
                 || identifier(operation, "operation").is_err()
             {
-                return out;
+                return Ok(out);
             }
             out.set("thread", operation);
             out.set("status", "started");
@@ -555,7 +646,7 @@ impl Room<'_> {
         if let Some(fresh) = fresh {
             out.set("fresh", fresh);
         }
-        out
+        Ok(out)
     }
 
     /// Record one durable read-only provider assignment. `fresh` is true only
@@ -580,13 +671,33 @@ impl Room<'_> {
                 "assignment needs a supported provider, title and task",
             ));
         }
+        if ["codex", "claude", "antigravity"]
+            .iter()
+            .any(|p| self.lead_request(&room, consumer, p) == request)
+        {
+            return Err(Error::new("provider Lead requests are reserved"));
+        }
+        self.record_assignment(&room, consumer, request, &provider, title, task)
+    }
+
+    fn record_assignment(
+        &self,
+        room: &Value,
+        consumer: &str,
+        request: &str,
+        provider: &str,
+        title: &str,
+        task: &str,
+    ) -> Result<Value> {
+        let id = room.text("id");
+        let lead = self.lead_request(room, consumer, provider) == request;
         let owner = room.text("owner").to_owned();
         let who = format!("ask-{request}");
         let join = obj([
             ("kind", "join".into()),
             ("participant", who.as_str().into()),
-            ("provider", provider.as_str().into()),
-            ("role", "researcher".into()),
+            ("provider", provider.into()),
+            ("role", if lead { "worker" } else { "researcher" }.into()),
             ("model", Value::Null),
             ("label", title.into()),
             ("owns", Vec::<Value>::new().into()),
@@ -597,7 +708,7 @@ impl Room<'_> {
             ("id", format!("assign-{request}").into()),
             ("sender", owner.as_str().into()),
             ("recipient", who.as_str().into()),
-            ("message_kind", "handoff".into()),
+            ("message_kind", if lead { "note" } else { "handoff" }.into()),
         ]);
         let applied = self.append_batch_at(
             id,
@@ -606,8 +717,12 @@ impl Room<'_> {
                 (&event, task, Carry::DesktopOwner(consumer)),
             ],
         )?;
-        let state = crate::project(&self.records(id)?)?;
-        Ok(self.assignment_receipt(&state, request, Some(applied[1])))
+        let state = if lead {
+            self.assignment_owner(id, consumer, request)?
+        } else {
+            crate::project(&self.records(id)?)?
+        };
+        self.assignment_receipt(&state, consumer, request, Some(applied[1]))
     }
 
     pub(crate) fn desktop_assign_status(
@@ -617,7 +732,7 @@ impl Room<'_> {
         request: &str,
     ) -> Result<Value> {
         let state = self.assignment_owner(id, consumer, request)?;
-        Ok(self.assignment_receipt(&state, request, None))
+        self.assignment_receipt(&state, consumer, request, None)
     }
 
     /// Bind the peer operation the provider launch actually returned.
@@ -640,7 +755,7 @@ impl Room<'_> {
         let text = format!("operation {operation}");
         self.append_at(id, &event, &text, Carry::DesktopOwner(consumer))?;
         let state = crate::project(&self.records(id)?)?;
-        Ok(self.assignment_receipt(&state, request, None))
+        self.assignment_receipt(&state, consumer, request, None)
     }
 
     /// `assign-` and `dispatch-` ids are the only trusted association between
@@ -659,6 +774,11 @@ impl Room<'_> {
         };
         let who = format!("ask-{request}");
         let owner = state.text("owner");
+        let enrolled = member(state, &who)?;
+        let lead = enrolled.text("role") == "worker"
+            && enrolled.list("owns").is_empty()
+            && self.lead_request(state, consumer, enrolled.text("provider")) == request
+            && lead_title(enrolled.text("provider")) == Some(enrolled.text("label"));
         let ok = request_uuid(request)
             && !self.session.child
             && self.session.participant.is_none()
@@ -669,18 +789,24 @@ impl Room<'_> {
             })
             && e.text("sender") == owner
             && e.text("recipient") == who
-            && member(state, &who)
-                .is_ok_and(|p| p.text("role") == "researcher" && p.text("parent") == owner)
+            && enrolled.text("parent") == owner
+            && (lead || enrolled.text("role") == "researcher")
             && if dispatch {
                 e.text("message_kind") == "status"
-                    && state
-                        .list("messages")
-                        .iter()
-                        .any(|m| m.text("id") == format!("assign-{request}"))
+                    && state.list("messages").iter().any(|m| {
+                        m.text("id") == format!("assign-{request}")
+                            && (!lead
+                                || (m.text("message_kind") == "note"
+                                    && m.text("text") == LEAD_TASK
+                                    && m.text("sender") == owner
+                                    && m.text("recipient") == who))
+                    })
                     && matches!(
                         text.split_whitespace().collect::<Vec<_>>()[..],
                         ["operation", op] if identifier(op, "operation").is_ok()
                     )
+            } else if lead {
+                e.text("message_kind") == "note" && text == LEAD_TASK
             } else {
                 e.text("message_kind") == "handoff"
             };
