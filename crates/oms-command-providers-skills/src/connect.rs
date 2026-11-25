@@ -2152,21 +2152,20 @@ fn run_login_entry(entry: &LoginEntry, ctx: &Context<'_>) -> Result<(i32, String
     for var in login_overrides(&entry.provider) {
         command.env_remove(var);
     }
-    let status = match command.status() {
-        Ok(status) => status,
+    // The child's own exit code is not evidence of sign-in; only the status check below is.
+    match command.status() {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(error(format!("{binary} is not installed or not on PATH")));
         }
         Err(_) => return Err(error(format!("failed to run {binary}"))),
-    };
+    }
     let label = entry.label();
     if entry.provider == "antigravity" {
-        let code = if status.success() {
-            0
-        } else {
-            status.code().unwrap_or(1)
-        };
-        return Ok((code, format!("{label}: sign-in not verifiable\n")));
+        return Ok((
+            LOGIN_UNKNOWN_CODE,
+            format!("{label}: sign-in not verifiable\n"),
+        ));
     }
     let home_path = entry.home_env.as_ref().map(|(_, path)| path.as_path());
     let verified = login_status(&entry.provider, home_path, ctx)?;

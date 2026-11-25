@@ -2935,18 +2935,24 @@ fn login_tmux_session(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> Option<String> {
-    if let Some(session) = session_hint.filter(|id| commands::valid_target(id, '$')) {
-        return Some(session.to_owned());
-    }
-    let pane = caller_pane.filter(|id| commands::valid_target(id, '%'))?;
-    let session = oms_panel_core::terminals::tmux(
-        services,
-        repo,
-        &commands::strings(&["display-message", "-p", "-t", pane, "#{session_id}"]),
-        interrupted,
-    )
-    .ok()?;
-    commands::valid_target(&session, '$').then_some(session)
+    // The panel's own session first: the Main may run detached where the user cannot see a new window.
+    let own = caller_pane
+        .filter(|id| commands::valid_target(id, '%'))
+        .and_then(|pane| {
+            oms_panel_core::terminals::tmux(
+                services,
+                repo,
+                &commands::strings(&["display-message", "-p", "-t", pane, "#{session_id}"]),
+                interrupted,
+            )
+            .ok()
+        })
+        .filter(|session| commands::valid_target(session, '$'));
+    own.or_else(|| {
+        session_hint
+            .filter(|id| commands::valid_target(id, '$'))
+            .map(str::to_owned)
+    })
 }
 
 fn open_login_window(
@@ -12565,6 +12571,25 @@ fi
             commands::strings(&["tmux", "display-message", "-p", "-t", "%5", "#{session_id}"])
         );
         assert_eq!(calls[1][3], "$7:");
+        drop(calls);
+
+        // The panel's own session wins over the Board Main's session, which may be detached.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: Some("$7"),
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            Some("$3"),
+            Some("%5"),
+            &tmux,
+            &stop,
+        );
+        assert_eq!(notice, "Sign-in window opened");
+        assert_eq!(tmux.calls.lock().unwrap()[1][3], "$7:");
 
         // Unavailable executable does not open a window and reports the fallback command first.
         let tmux = LoginTmux {

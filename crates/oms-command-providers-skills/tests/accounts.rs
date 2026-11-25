@@ -2259,7 +2259,9 @@ fn login_env_overrides_and_stdio_child() {
     let out = ok(&root, &["--login", "claude:work"]);
     assert!(out.contains("claude:work: signed in"), "{out}");
 
-    let out = ok(&root, &["--login", "antigravity"]);
+    // agy's exit code is not sign-in evidence, so the unknown code (3) is reported.
+    let (code, out, _) = connect(&root, &["--login", "antigravity"]);
+    assert_eq!(code, 3, "{out}");
     assert!(out.contains("antigravity: sign-in not verifiable"), "{out}");
     assert!(!out.contains("STUB_AGY_OUT"), "{out}");
 }
