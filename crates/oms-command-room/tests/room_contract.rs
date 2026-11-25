@@ -1263,7 +1263,7 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                     ]),
                     &repo.0,
                     &STOP,
-                    &FixtureServices(&[terminal])
+                    &FixtureServices(std::slice::from_ref(&terminal))
                 )
                 .0,
                 2
@@ -1353,6 +1353,115 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                 "assignment is readable through the Room reader"
             );
             assert_eq!(chat.text("provider"), "claude");
+            assert!(again["purpose"].is_null());
+
+            let lead = |action, digest: &str, provider: &str, extra: &[&str]| {
+                let mut v = vec![
+                    action,
+                    "--id",
+                    "ask-room",
+                    "--conversation-digest",
+                    digest,
+                    "--provider",
+                    provider,
+                ];
+                v.extend_from_slice(extra);
+                run(&repo, &v)
+            };
+            let before = fs::read(&log).unwrap();
+            for (d, p, extra) in [
+                (other.as_str(), "claude", vec![]),
+                (digest.as_str(), "pi", vec![]),
+                (digest.as_str(), "codex", vec!["--label", "claim"]),
+                (digest.as_str(), "codex", vec!["--text", "inspect"]),
+                (digest.as_str(), "codex", vec!["--request", req]),
+            ] {
+                assert_ne!(lead("desktop-lead-open", d, p, &extra).0, 0);
+            }
+            assert_eq!(fs::read(&log).unwrap(), before);
+            let closed_main = run_with_services(
+                &args(&[
+                    "desktop-lead-open",
+                    "--id",
+                    "ask-room",
+                    "--conversation-digest",
+                    &digest,
+                    "--provider",
+                    "codex",
+                ]),
+                &repo.0,
+                &STOP,
+                &FixtureServices(std::slice::from_ref(&terminal)),
+            );
+            assert_ne!(closed_main.0, 0);
+            assert_eq!(fs::read(&log).unwrap(), before);
+            let mut requests = std::collections::BTreeSet::new();
+            for (provider, canonical, title) in [
+                ("codex", "codex", "Codex Lead"),
+                ("claude", "claude", "Claude Lead"),
+                ("agy", "antigravity", "AGY Lead"),
+            ] {
+                let before = fs::read(&log).unwrap();
+                let empty = success(lead("desktop-lead-status", &digest, provider, &[]));
+                let request = empty.text("request");
+                assert_eq!(empty.text("status"), "not_found");
+                assert_eq!(fs::read(&log).unwrap(), before);
+                assert!(requests.insert(request.to_owned()));
+                let open = || {
+                    success(lead(
+                        "desktop-lead-open",
+                        &digest,
+                        provider,
+                        &["--request", request],
+                    ))
+                };
+                let (first, second) = std::thread::scope(|scope| {
+                    let other = scope.spawn(open);
+                    (open(), other.join().unwrap())
+                });
+                assert_ne!(first.flag("fresh"), second.flag("fresh"));
+                assert_eq!(first.text("role"), "worker");
+                assert_eq!(first.text("purpose"), "provider-lead");
+                assert_eq!(first.text("title"), title);
+                assert_eq!(first.text("provider"), canonical);
+                assert_eq!(first.text("participant"), format!("ask-{request}"));
+                assert_eq!(first.text("status"), "assigned");
+                assert!(first["thread"].is_null() && first.flag("readOnly"));
+                let op = format!("fixture-{canonical}");
+                let linked = success(run(
+                    &repo,
+                    &[
+                        "desktop-assign-receipt",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        &digest,
+                        "--request",
+                        request,
+                        "--operation",
+                        &op,
+                    ],
+                ));
+                assert_eq!(linked.text("thread"), op);
+                let bytes = fs::read(&log).unwrap();
+                let recovered = success(lead("desktop-lead-status", &digest, canonical, &[]));
+                assert_eq!(recovered, linked);
+                assert!(!open().flag("fresh"));
+                let prior = success(run(
+                    &repo,
+                    &[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        &digest,
+                        "--request",
+                        request,
+                    ],
+                ));
+                assert_eq!(prior, recovered);
+                assert_eq!(fs::read(&log).unwrap(), bytes);
+            }
         },
     );
 }

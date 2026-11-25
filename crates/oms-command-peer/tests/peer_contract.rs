@@ -1205,24 +1205,73 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 } else {
                     "agy,codex"
                 };
+                let checkout = repo.0.as_path();
+                let run_thread = |args: &[&str]| run(&repo, checkout, "thread", args);
+                let pointer = checkout.join(".oms/threads/CURRENT");
+                let before = if mixed {
+                    success(run_thread(&[
+                        "new",
+                        "--id",
+                        "foreground",
+                        "--topic",
+                        "Current chat",
+                    ]));
+                    let before = fs::read(&pointer).unwrap();
+                    repo.write(".oms/threads/existing-empty.jsonl", "");
+                    assert_ne!(
+                        run_thread(&["new", "--live", "--no-current", "--id", "existing-empty"]).0,
+                        0
+                    );
+                    assert_eq!(
+                        fs::read(checkout.join(".oms/threads/existing-empty.jsonl")).unwrap(),
+                        b""
+                    );
+
+                    let seed = ["new", "--id", "fixture-council", "--live", "--no-current"];
+                    success(run_thread(&seed));
+                    assert_eq!(fs::read(&pointer).unwrap(), before);
+                    assert_ne!(run_thread(&seed).0, 0);
+                    assert_ne!(
+                        run_thread(&["show", "--no-current", "--id", "foreground"]).0,
+                        0
+                    );
+                    assert_ne!(run(&repo, checkout, "peer-ask", &["--no-current"]).0, 0);
+                    assert_ne!(
+                        run(
+                            &repo,
+                            checkout,
+                            "consult",
+                            &["--no-current", "--thread", "foreground"]
+                        )
+                        .0,
+                        0
+                    );
+                    Some(before)
+                } else {
+                    None
+                };
+                let mut argv = args(&[
+                    "--providers",
+                    targets,
+                    "--reasoning-effort",
+                    "high",
+                    "--debate",
+                    "1",
+                    "--deliberation",
+                    "--require-complete",
+                    "--thread",
+                    "fixture-council",
+                    "--prompt",
+                    "Inspect the fixture",
+                    "--no-task",
+                    "--no-memory",
+                ]);
+                if mixed {
+                    argv.push("--no-current".into());
+                }
                 let output = oms_command_peer::run_with_executor(
                     "peer-ask",
-                    &args(&[
-                        "--providers",
-                        targets,
-                        "--reasoning-effort",
-                        "high",
-                        "--debate",
-                        "1",
-                        "--deliberation",
-                        "--require-complete",
-                        "--thread",
-                        "fixture-council",
-                        "--prompt",
-                        "Inspect the fixture",
-                        "--no-task",
-                        "--no-memory",
-                    ]),
+                    &argv,
                     &repo.0,
                     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
                     &STOP,
@@ -1230,6 +1279,23 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 );
                 assert_eq!(output.0, expected_code, "{}", message(&output));
                 assert_eq!(probe.provider.calls.lock().unwrap().len(), expected_calls);
+                if let Some(before) = before {
+                    assert_eq!(fs::read(&pointer).unwrap(), before);
+                    let log = success(run_thread(&["show", "--id", "fixture-council", "--json"]));
+                    assert!(
+                        V::parse(&log)
+                            .unwrap()
+                            .array()
+                            .iter()
+                            .any(|row| row.get("role").text() == Some("answer"))
+                    );
+                } else {
+                    let current = success(run_thread(&["current"]));
+                    assert_eq!(
+                        String::from_utf8(current).unwrap().trim(),
+                        "fixture-council"
+                    );
+                }
                 if mixed {
                     let selected = [
                         ("gemini-pro-orchestrator-argon", None),
