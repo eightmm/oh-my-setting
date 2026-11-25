@@ -227,10 +227,19 @@ fn claim_hygiene_slot(base: &Path, now: u64) -> bool {
     .is_ok()
 }
 
-fn spawn_background_cleanup(exe: &Path, repo: &Path) -> std::io::Result<()> {
+fn cleanup_args(source: &Path, exe: &Path) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some((source, rev)) = oms_safe_fs::staged_dispatch_args(source, exe) {
+        args.extend(["--oms-dispatch".into(), source, rev, "--".into()]);
+    }
+    args.extend(["cleanup".into(), "--apply".into()]);
+    args
+}
+
+fn spawn_background_cleanup(source: &Path, exe: &Path, repo: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     std::process::Command::new(exe)
-        .args(["cleanup", "--apply"])
+        .args(cleanup_args(source, exe))
         .current_dir(repo)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -270,7 +279,7 @@ fn hygiene_pass(c: &Context<'_>, base: &Path, repo: &Path) -> Vec<u8> {
         crate::timestamp(),
         |repo| {
             let exe = std::env::current_exe()?;
-            spawn_background_cleanup(&exe, repo)
+            spawn_background_cleanup(c.source, &exe, repo)
         },
     )
 }
@@ -577,6 +586,33 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     #[test]
+    fn cleanup_args_use_staged_dispatch_when_available() {
+        let base = storage::Temp::new("oms-wt-hygiene-args").unwrap();
+        let rev = "a".repeat(40);
+        let payload = base.path.join("target/oms-native").join(&rev);
+        std::fs::create_dir_all(&payload).unwrap();
+        let exe = payload.join("oms");
+        std::fs::write(payload.join("manifest.json"), b"{}").unwrap();
+        std::fs::write(&exe, b"").unwrap();
+        let source = std::fs::canonicalize(&base.path).unwrap();
+        assert_eq!(
+            cleanup_args(&base.path, &exe),
+            vec![
+                "--oms-dispatch".to_owned(),
+                source.to_string_lossy().into_owned(),
+                rev,
+                "--".into(),
+                "cleanup".into(),
+                "--apply".into(),
+            ]
+        );
+        assert_eq!(
+            cleanup_args(&base.path, &base.path.join("cargo-built")),
+            vec!["cleanup", "--apply"]
+        );
+    }
+
+    #[test]
     fn claim_hygiene_slot_rate_limits_within_hour() {
         let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
         let stamp = base.path.join(HYGIENE_STAMP);
@@ -663,7 +699,7 @@ mod tests {
         let missing = base.path.join("missing-oms");
 
         let err = hygiene_pass_with(false, &flag, &base.path, &base.path, 10_000, |repo| {
-            spawn_background_cleanup(&missing, repo)
+            spawn_background_cleanup(&base.path, &missing, repo)
         });
         assert!(err.is_empty());
         assert!(base.path.join(HYGIENE_STAMP).is_file());
