@@ -724,6 +724,7 @@ fn valid_work_items_receipt(data: &Value) -> bool {
             || v.as_str()
                 .is_some_and(|s| s.chars().count() <= max && !s.chars().any(char::is_control))
     };
+    let optional = ["claimExpired", "issueCache", "prReviewCandidate"];
     data.as_object().is_some_and(|obj| obj.keys().count() == 4)
         && data["schema"] == 1
         && data["omitted"].as_i64().is_some_and(|n| n >= 0)
@@ -735,13 +736,27 @@ fn valid_work_items_receipt(data: &Value) -> bool {
             items.len() <= 64
                 && items.iter().all(|row| {
                     row.as_object().is_some_and(|obj| {
-                        obj.keys().count() == keys.len() && keys.iter().all(|k| obj.contains_key(k))
+                        keys.iter().all(|k| obj.contains_key(k))
+                            && obj.keys().all(|k| {
+                                k.as_str()
+                                    .is_some_and(|k| keys.contains(&k) || optional.contains(&k))
+                            })
                     }) && row["id"].as_str().is_some_and(id)
                         && nullable(&row["title"], 160)
                         && nullable(&row["issue"], 140)
                         && nullable(&row["state"], 32)
                         && nullable(&row["result"], 32)
                         && nullable(&row["verification"], 32)
+                        && match row.get("claimExpired") {
+                            Some(expired) => expired.as_bool() == Some(row["state"] == "stale"),
+                            None => row["state"] != "stale",
+                        }
+                        && row.get("issueCache").is_none_or(|cache| {
+                            row["issue"].is_string() && valid_issue_cache(cache)
+                        })
+                        && row.get("prReviewCandidate").is_none_or(|candidate| {
+                            row["state"] == "review" && valid_pr_candidate(candidate)
+                        })
                         && (row["owner"].is_null() || row["owner"].as_str().is_some_and(id))
                         && (row["revision"].is_null()
                             || row["revision"].as_str().is_some_and(|s| {
@@ -756,6 +771,60 @@ fn valid_work_items_receipt(data: &Value) -> bool {
                 })
         })
 }
+
+fn valid_issue_cache(cache: &Value) -> bool {
+    cache.as_object().is_some_and(|obj| {
+        obj.keys().count() == 3
+            && ["state", "freshness", "reason"]
+                .iter()
+                .all(|k| obj.contains_key(k))
+    }) && match cache["freshness"].as_str() {
+        Some("fresh" | "stale") => {
+            matches!(cache["state"].as_str(), Some("open" | "closed")) && cache["reason"].is_null()
+        }
+        Some("unavailable") => {
+            cache["state"].is_null()
+                && matches!(
+                    cache["reason"].as_str(),
+                    Some("cache missing" | "cache unreadable" | "no matching cache entry")
+                )
+        }
+        _ => false,
+    }
+}
+
+fn valid_pr_candidate(candidate: &Value) -> bool {
+    let reference = candidate["reference"]
+        .as_str()
+        .and_then(|s| s.split_once('#'))
+        .is_some_and(|(slug, n)| {
+            let segment = |s: &str| {
+                !matches!(s, "" | "." | "..")
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            };
+            slug.len() <= 128
+                && slug
+                    .split_once('/')
+                    .is_some_and(|(o, r)| segment(o) && segment(r))
+                && (1..=10).contains(&n.len())
+                && !n.starts_with('0')
+                && n.bytes().all(|b| b.is_ascii_digit())
+        });
+    candidate
+        .as_object()
+        .is_some_and(|obj| obj.keys().count() == 4)
+        && reference
+        && matches!(candidate["freshness"].as_str(), Some("fresh" | "stale"))
+        && matches!(
+            (
+                candidate["state"].as_str(),
+                candidate["disposition"].as_str()
+            ),
+            (Some("merged"), Some("completed-external")) | (Some("closed"), Some("superseded"))
+        )
+}
+
 fn valid_graph_node_id(value: &str) -> bool {
     if value == "dir:." {
         return true;
@@ -2767,4 +2836,59 @@ fn command_catalog(stdout: &str, offset: usize) -> PanelResult<Value> {
         page["nextOffset"] = json!(offset + count);
     }
     Ok(page)
+}
+
+#[cfg(test)]
+mod work_items_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_work_snapshot_keeps_expired_and_fenced_plan_states_distinct() {
+        let task = |id, state, expired| {
+            json!({
+                "id":id,"title":"Fixture task","state":state,"claimExpired":expired,
+                "owner":null,"depends":[],"issue":null,"result":null,"verification":null,
+                "revision":null
+            })
+        };
+        let mut review = task("review", "review", false);
+        review["issue"] = json!("example-org/example-repo#19");
+        review["issueCache"] =
+            json!({"state":null,"freshness":"unavailable","reason":"no matching cache entry"});
+        review["prReviewCandidate"] = json!({
+            "reference":"example-org/example-repo#19","state":"merged","freshness":"fresh",
+            "disposition":"completed-external"
+        });
+        let snapshot = json!({
+            "schema":1,"omitted":0,"availability":"ready","items":[
+                task("expired", "stale", true),
+                task("live", "running", false),
+                task("unproven", "claimed", false),
+                review
+            ]
+        });
+        assert!(valid_work_items_receipt(&snapshot));
+        let rendered = response(Ok(snapshot.clone()));
+        assert_eq!(rendered["isError"], false);
+        assert_eq!(rendered["structuredContent"], snapshot);
+
+        let change_item = |index, edit: fn(&mut Value)| {
+            let mut inconsistent = snapshot.clone();
+            let Value::Array(items) = &mut inconsistent["items"] else {
+                unreachable!();
+            };
+            edit(&mut items[index]);
+            inconsistent
+        };
+        let inconsistent = change_item(2, |item| item["state"] = json!("stale"));
+        assert!(!valid_work_items_receipt(&inconsistent));
+        let inconsistent = change_item(3, |item| {
+            item["issueCache"].as_object_mut().unwrap().remove("reason");
+        });
+        assert!(!valid_work_items_receipt(&inconsistent));
+        let inconsistent = change_item(3, |item| {
+            item["prReviewCandidate"]["disposition"] = json!("superseded");
+        });
+        assert!(!valid_work_items_receipt(&inconsistent));
+    }
 }

@@ -622,7 +622,59 @@ pub(crate) fn snapshot_for(
             snapshot.report["main_token_observation"] = tokens;
         }
     }
+    let plan = &snapshot.report["plan"];
+    if plan["tasks"].as_object().is_some_and(|tasks| {
+        tasks.values().any(|task| {
+            matches!(text(task, "state"), "claimed" | "running")
+                || (task["state"] == "review"
+                    && (task["pr"].is_string() || task["issue"].is_string()))
+        })
+    }) {
+        let projected = match query(
+            services,
+            NativeCommand::Plan,
+            repo,
+            &["list", "--json"],
+            stop,
+        ) {
+            Ok(list) => bind_plan_attention(plan, &list),
+            Err(err) if err.code == 130 => return Err(err),
+            // A missing entry in this map is an unavailable observation.
+            Err(_) => json!({}),
+        };
+        snapshot.report["plan_attention"] = projected;
+    }
     Ok((snapshot, quota_sources, write_slots))
+}
+
+fn bind_plan_attention(plan: &Value, list: &Value) -> Value {
+    let mut projected = serde_json::Map::new();
+    if list["schema"] == 1 && text(plan, "plan_id") == text(list, "plan_id") {
+        for task in rows(&list["tasks"]) {
+            let id = text(task, "id");
+            let stored = &plan["tasks"][id];
+            if !matches!(text(stored, "state"), "claimed" | "running" | "review")
+                || !task["claim_expired"].is_boolean()
+            {
+                continue;
+            }
+            // The watch snapshot retains the stored Plan for evidence joins.
+            // Apply display fields only to the exact task the Plan read checked.
+            if serde_json::to_vec(stored).is_ok_and(|raw| {
+                oms_command_plan::stored_task_revision(&raw)
+                    .is_ok_and(|rev| rev == text(task, "task_sha256"))
+            }) {
+                projected.insert(
+                    id.to_owned(),
+                    json!({
+                        "claim_expired": task["claim_expired"],
+                        "pr_review_candidate": task["pr_review_candidate"],
+                    }),
+                );
+            }
+        }
+    }
+    Value::Object(projected)
 }
 
 fn unix_now() -> f64 {
@@ -3383,6 +3435,240 @@ mod tests {
         let second = refresh();
         assert_eq!(second["plan"], bound);
         assert!(second["finalized"].get("task-1").is_none());
+    }
+
+    #[test]
+    fn leased_task_keeps_unstamped_finished_delegate_in_attention() {
+        let report = json!({
+            "plan":{"tasks":{"task-1":{"id":"task-1","state":"running","lease_id":"current"}}},
+            "attempts":{"recent":[{"attempt_id":"worker","tool":"peer-delegate",
+                "state":"done","terminal":true,"task_id":"task-1","refs":{}}]}
+        });
+        let items = crate::attention::items(&report, &Default::default());
+        assert!(
+            items
+                .iter()
+                .any(|item| item.what == "workers ended, still held"),
+            "{items:?}"
+        );
+    }
+
+    #[test]
+    fn leased_task_keeps_live_unstamped_reviewers_and_excludes_previous_lease() {
+        for tool in ["peer-review", "peer-ask"] {
+            let mut report = json!({
+                "plan":{"tasks":{"task-1":{"id":"task-1","state":"running","lease_id":"current"}}},
+                "attempts":{"recent":[
+                    {"attempt_id":"worker","tool":"peer-delegate","state":"done","terminal":true,
+                        "task_id":"task-1","refs":{"panel_lease_id":"current"}},
+                    {"attempt_id":"old","tool":"peer-delegate","state":"working","terminal":false,
+                        "task_id":"task-1","refs":{"lease_id":"previous"}}
+                ]}
+            });
+            let held = |report: &serde_json::Value| {
+                crate::attention::items(report, &Default::default())
+                    .iter()
+                    .any(|item| item.what == "workers ended, still held")
+            };
+            assert!(held(&report));
+            report["attempts"]["recent"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "attempt_id":"reviewer","tool":tool,"state":"working","terminal":false,
+                    "task_id":"task-1","refs":{}
+                }));
+            assert!(!held(&report), "{tool}");
+        }
+    }
+
+    #[test]
+    fn plan_attention_uses_the_canonical_lease_verdict_and_keeps_legacy_held_rows() {
+        use oms_command_plan::{Action, Context, Plan, Request, UnavailableServices};
+        struct TimedPlan(Context);
+        impl PeerExecutor for TimedPlan {
+            fn execute(
+                &self,
+                request: &ExecutionRequest,
+                stop: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                Attempts.execute(request, stop)
+            }
+        }
+        impl Services for TimedPlan {
+            fn command(
+                &self,
+                command: NativeCommand,
+                repo: &Path,
+                args: &[OsString],
+                stop: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                if command != NativeCommand::Plan {
+                    return Attempts.command(command, repo, args, stop);
+                }
+                assert_eq!(args, ["list", "--json"]);
+                let plan = Plan::open(self.0.clone(), &UnavailableServices, stop).unwrap();
+                let response = plan
+                    .execute(&Request::new(Action::List).flag("json"))
+                    .unwrap();
+                Ok(CommandOutput {
+                    code: response.code,
+                    stdout: response.stdout,
+                    stderr: response.stderr,
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-panel-lease-attention-{}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let repo = TempRepo(dir);
+        let repo = repo.0.as_path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q", "--"])
+                .arg(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:example-org/example-repo.git"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let stop = AtomicBool::new(false);
+        let request = Request::new(Action::List).flag("json");
+        let mut context = Context::from_selected_state_before(
+            &request,
+            repo,
+            repo,
+            repo,
+            &stop,
+            std::time::Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        context.ts = "2026-11-24T12:00:00Z".into();
+        let service = TimedPlan(context);
+        let reference = "example-org/example-repo#19";
+        let captured = json!("2026-11-24T11:59:00Z");
+        let cache = json!({
+            "reference":reference,"kind":"pull","state":"merged","title":"Cached title",
+            "labels":[],"body_sha256":"a".repeat(64),"ttl_s":900,
+            "captured_at":oms_panel_core::metrics::stamp(&captured).unwrap() as u64
+        });
+        store_file(
+            repo,
+            ".oms/github/cache.jsonl",
+            cache.to_string().as_bytes(),
+        );
+        let lease = format!("lease_{}", "1".repeat(32));
+        for state in ["claimed", "running"] {
+            let plan = json!({"plan_id":format!("plan_{}", "2".repeat(32)), "tasks":{
+                "task-1":{"id":"task-1","title":"Leased task","state":state,"depends":[],
+                    "claimed_at":"2026-11-24T10:00:00Z","ttl":"3600","lease_id":lease},
+                "task-2":{"id":"task-2","title":"Legacy task","status":"held","depends":[]},
+                "task-3":{"id":"task-3","title":"Review task","state":"review","depends":[],"issue":reference},
+                "task-4":{"id":"task-4","title":"Active task","state":"running","depends":[],
+                    "claimed_at":"2026-11-24T11:59:00Z","ttl":"3600","lease_id":lease},
+            }});
+            store_file(repo, ".oms/plan/tasks.json", plan.to_string().as_bytes());
+            let marker_path = ".oms/delegations/writer.json";
+            for pid in [None, Some(std::process::id()), Some(0)] {
+                if let Some(pid) = pid {
+                    let marker = json!({"schema":1,"id":"writer","task_id":"task-1","lease_id":lease,"pid":pid});
+                    store_file(repo, marker_path, marker.to_string().as_bytes());
+                }
+                let mut report =
+                    snapshot_with(&Session::new(), repo, &Options::default(), &service, &stop)
+                        .unwrap()
+                        .report;
+                assert_eq!(report["plan"], plan);
+                report["attempts"]["recent"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({
+                        "attempt_id":"worker-2","tool":"peer-delegate","provider":"codex",
+                        "state":"done","terminal":true,"task_id":"task-2","refs":{}
+                    }));
+                report["attempts"]["recent"].as_array_mut().unwrap().extend([
+                    json!({"attempt_id":"worker-current","tool":"peer-delegate","provider":"codex",
+                        "state":"done","terminal":true,"task_id":"task-4","refs":{"panel_lease_id":lease}}),
+                    json!({"attempt_id":"worker-previous","tool":"peer-delegate","provider":"codex",
+                        "state":"working","terminal":false,"task_id":"task-4",
+                        "refs":{"panel_lease_id":format!("lease_{}", "3".repeat(32))}}),
+                ]);
+                let attention = crate::attention::items(&report, &Default::default());
+                let summary = |id: &str| {
+                    attention
+                        .iter()
+                        .find(|item| item.row_id == ("task".into(), id.into()))
+                        .map(|item| (item.cls.as_str(), item.what.as_str()))
+                };
+                assert_eq!(
+                    summary("task-1"),
+                    Some((
+                        "stale",
+                        if pid.is_none() {
+                            "Plan lease expired"
+                        } else {
+                            "workers ended, still held"
+                        }
+                    ))
+                );
+                assert_eq!(
+                    summary("task-2"),
+                    Some(("stale", "workers ended, still held"))
+                );
+                assert_eq!(
+                    summary("task-4"),
+                    Some(("stale", "workers ended, still held"))
+                );
+                assert_eq!(
+                    summary("task-3"),
+                    Some((
+                        "decide",
+                        "PR example-org/example-repo#19 merged (fresh) · completed-external candidate"
+                    ))
+                );
+                let (_, work, _) = crate::desktop_board::work_items(repo, &service, &stop).unwrap();
+                let work: serde_json::Value = serde_json::from_slice(&work).unwrap();
+                let task = work["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|task| task["id"] == "task-1")
+                    .unwrap();
+                assert_eq!(task["state"], if pid.is_none() { "stale" } else { state });
+                assert_eq!(task["claimExpired"], pid.is_none());
+                let review = work["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|task| task["id"] == "task-3")
+                    .unwrap();
+                assert_eq!(review["issueCache"]["reason"], "no matching cache entry");
+                assert_eq!(
+                    review["prReviewCandidate"]["disposition"],
+                    "completed-external"
+                );
+                assert!(!work.to_string().contains("Cached title"));
+            }
+            std::fs::remove_file(repo.join(marker_path)).unwrap();
+        }
     }
 
     fn main_report(room: &str, attempt: &str, consumer: &str) -> serde_json::Value {

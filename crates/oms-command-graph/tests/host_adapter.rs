@@ -364,6 +364,117 @@ fn agent_and_acceptance_nodes_dispatch_through_host_services() {
 }
 
 #[test]
+fn expired_claims_stay_unverified_after_plan_run_and_on_resume() {
+    if scrubbed_child("expired_claims_stay_unverified_after_plan_run_and_on_resume") {
+        return;
+    }
+    struct ExpiringHost {
+        state: &'static str,
+        interrupt: bool,
+    }
+    impl HostServices for ExpiringHost {
+        fn invoke_command(
+            &self,
+            tool: &str,
+            _: &[OsString],
+            repo: &Path,
+            _: &[(String, String)],
+            _: Option<Duration>,
+            _: &AtomicBool,
+        ) -> oms_command_graph::Result<(i32, Vec<u8>, Vec<u8>, bool)> {
+            assert_eq!(tool, "plan-run");
+            run_plan(
+                repo,
+                Request::new(Action::Claim)
+                    .with("id", "task-1")
+                    .with("provider", "codex"),
+            );
+            let path = repo.join(".oms/plan/tasks.json");
+            let mut plan: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let task = &mut plan["tasks"]["task-1"];
+            task["state"] = self.state.into();
+            task["claimed_at"] = "2000-01-01T00:00:00Z".into();
+            task["ttl"] = "1".into();
+            fs::write(path, plan.to_string()).unwrap();
+            if self.interrupt {
+                return Err(oms_command_graph::Error {
+                    code: 130,
+                    message: "interrupted after claim".into(),
+                });
+            }
+            Ok((1, vec![], vec![], false))
+        }
+    }
+
+    for state in ["claimed", "running"] {
+        for interrupt in [false, true] {
+            let repo = TempDir::new("expired-claim");
+            init_git_repo(repo.path());
+            init_sample_plan(repo.path());
+            let spec_path = repo.path().join("exec-spec.json");
+            write_private(&spec_path, &serde_json::json!({
+                "schema":1, "id":"expired-claim", "entry":"work",
+                "nodes":{
+                    "work":{"kind":"agent","effect":"write","title":"Run task","plan_task":"task-1",
+                        "provider":"codex","proof":["plan.task.task-1.state", "plan.task.task-1.claim_expired"]},
+                    "done":{"kind":"terminal","title":"Done"},
+                },
+                "edges":[{"from":"work","to":"done","outcomes":["unverified"],
+                    "when":[format!("plan.task.task-1.state={state}"),"plan.task.task-1.claim_expired"]}],
+            }).to_string());
+            let host = ExpiringHost { state, interrupt };
+            let cancel = AtomicBool::new(false);
+            let invoke = |args: &[&str]| {
+                run_with_host(
+                    &argv(args),
+                    repo.path(),
+                    &cancel,
+                    None,
+                    None,
+                    &UnavailableServices,
+                    &host,
+                )
+            };
+            let mut out = invoke(&[
+                "exec",
+                "run",
+                spec_path.to_str().unwrap(),
+                "--worker",
+                "codex",
+                "--json",
+            ]);
+            let run = execution::events::latest(repo.path()).unwrap();
+            if interrupt {
+                assert_eq!(out.0, 130, "{out:?}");
+                out = invoke(&[
+                    "exec", "resume", "--run", &run, "--worker", "codex", "--json",
+                ]);
+            }
+            assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+            let result: serde_json::Value = serde_json::from_slice(&out.1).unwrap();
+            assert_eq!(result["primary"], "done", "{result}");
+            let events = execution::events::read(repo.path(), &run).unwrap();
+            let outcome = events
+                .iter()
+                .find(|row| {
+                    execution::st(row, "event") == "node_outcome"
+                        && execution::st(row, "node") == "work"
+                })
+                .unwrap();
+            assert_eq!(execution::st(outcome, "outcome"), "unverified");
+            assert_eq!(execution::st(outcome, "claimed_outcome"), "unverified");
+            let facts = outcome.get("facts");
+            assert_eq!(execution::st(facts, "plan.task.task-1.state"), state);
+            assert_eq!(
+                facts.get("plan.task.task-1.claim_expired"),
+                &execution::Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
 fn acceptance_node_fails_closed_without_host_services() {
     if scrubbed_child("acceptance_node_fails_closed_without_host_services") {
         return;

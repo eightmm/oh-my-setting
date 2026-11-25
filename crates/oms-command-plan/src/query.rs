@@ -1,7 +1,10 @@
 use crate::engine::{STATES, age, parse_ts, task_ttl};
 use crate::json::{self, Value, empty, list, number, object, string};
 use crate::{Action, Plan, Request, Response, Result, Snapshot, error, require};
+use oms_github::freshness::{self, Cached, Freshness};
 use std::collections::{BTreeMap, BTreeSet};
+
+const PROJECTED_STATES: &[&str] = &["stale"];
 
 impl Plan<'_> {
     pub(crate) fn view(&self, s: &mut Snapshot, t: &Value, details: bool) -> Result<Value> {
@@ -26,77 +29,123 @@ impl Plan<'_> {
         }
         Ok(v)
     }
-    /// Cached status for a bound task from the local snapshot cache only;
-    /// nothing here contacts GitHub. Unbound tasks have none.
-    pub(crate) fn issue_cache(&self, s: &mut Snapshot, t: &Value) -> Option<Value> {
-        let issue = t.text("issue");
-        if issue.is_empty() {
-            return None;
-        }
-        let cache = s.github_cache.get_or_insert_with(|| {
-            self.store
-                .optional(oms_github::freshness::CACHE_REL, 4 * 1024 * 1024)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        });
+    fn observed_github(
+        &self,
+        s: &mut Snapshot,
+        reference: &str,
+        kind: &str,
+    ) -> std::result::Result<(Cached, Freshness), &'static str> {
+        let cache = s
+            .github_cache
+            .get_or_insert_with(|| {
+                match self.store.optional(freshness::CACHE_REL, 4 * 1024 * 1024) {
+                    Ok(Some(raw)) => Ok(raw),
+                    Ok(None) => Err("cache missing"),
+                    Err(_) => Err("cache unreadable"),
+                }
+            })
+            .as_ref()
+            .map_err(|&reason| reason)?;
         let now = parse_ts(&self.context.ts).unwrap_or(0) as i64;
-        let (cached, freshness) = match oms_github::freshness::lookup(cache, issue, now) {
-            // A pull row never reports as issue state.
-            (Some(c), _) if c.kind != "issue" => {
-                (None, oms_github::freshness::Freshness::Unavailable)
-            }
-            found => found,
-        };
-        let freshness = match freshness {
-            oms_github::freshness::Freshness::Fresh => "fresh",
-            oms_github::freshness::Freshness::Stale => "stale",
-            oms_github::freshness::Freshness::Unavailable => "unavailable",
-        };
-        Some(match cached {
-            Some(c) => object([
+        let (row, freshness) = freshness::lookup(cache, reference, now);
+        row.filter(|row| row.kind == kind)
+            .map(|row| (row, freshness))
+            .ok_or("no matching cache entry")
+    }
+
+    fn issue_cache(&self, s: &mut Snapshot, issue: &str) -> Value {
+        match self.observed_github(s, issue, "issue") {
+            Ok((c, freshness)) => object([
                 ("state", string(c.state)),
-                ("freshness", string(freshness)),
+                ("freshness", string(freshness_name(freshness))),
                 ("captured_at", number(c.captured_at)),
                 ("title", string(c.title)),
             ]),
-            None => object([
+            Err(reason) => object([
                 ("state", Value::Null),
-                ("freshness", string(freshness)),
+                ("freshness", string("unavailable")),
                 ("captured_at", Value::Null),
                 ("title", Value::Null),
+                ("reason", string(reason)),
             ]),
-        })
+        }
     }
-    /// Human token for a bound task; the remote title stays JSON-only.
-    fn issue_note(&self, s: &mut Snapshot, t: &Value) -> Option<String> {
-        let cache = self.issue_cache(s, t)?;
-        let state = match cache.get("state") {
-            Value::Null => "unknown",
-            v => v.str().unwrap_or("unknown"),
+
+    fn pr_review_candidate(&self, s: &mut Snapshot, t: &Value) -> Option<Value> {
+        if t.text("state") != "review" {
+            return None;
+        }
+        // GitHub shares issue and PR numbers. A task bound to that exact
+        // reference can use a pull observation even without a separate PR pin.
+        let reference = [t.text("pr"), t.text("issue")]
+            .into_iter()
+            .find(|r| !r.is_empty())?;
+        let (row, freshness) = self.observed_github(s, reference, "pull").ok()?;
+        let disposition = match row.state.as_str() {
+            "merged" => "completed-external",
+            "closed" => "superseded",
+            _ => return None,
         };
-        Some(format!(
-            "{} ({state}, {})",
-            t.text("issue"),
-            cache.text("freshness")
-        ))
+        let origin = s
+            .github_origin
+            .get_or_init(|| crate::engine::resolve_origin(self).ok()?.ok())
+            .as_ref()?;
+        let (slug, _) = row.reference.split_once('#')?;
+        if !origin.matches(&oms_github::Slug::parse(slug).ok()?) {
+            return None;
+        }
+        Some(object([
+            ("reference", string(row.reference)),
+            ("state", string(row.state)),
+            ("disposition", string(disposition)),
+            ("freshness", string(freshness_name(freshness))),
+            ("captured_at", number(row.captured_at)),
+        ]))
+    }
+
+    fn projected_task(&self, s: &mut Snapshot, t: &Value, details: bool) -> Result<Value> {
+        let mut view = self.view(s, t, details)?;
+        let expired = if details {
+            view.get("claim_expired").truth()
+        } else {
+            let expired = self.expired(s, t, true)?;
+            view.set("claim_expired", Value::Bool(expired))?;
+            expired
+        };
+        if expired {
+            view.set("state", string("stale"))?;
+            view.set("stored_state", t.get("state").clone())?;
+        }
+        if !t.text("issue").is_empty() {
+            view.set("issue_cache", self.issue_cache(s, t.text("issue")))?;
+        }
+        if let Some(candidate) = self.pr_review_candidate(s, t) {
+            view.set("pr_review_candidate", candidate)?;
+        }
+        Ok(view)
+    }
+
+    /// Human token for a bound task; the remote title stays JSON-only.
+    fn issue_note(task: &Value) -> Option<String> {
+        let cache = task.opt("issue_cache")?;
+        let state = cache.get("state").str().unwrap_or("unknown");
+        let mut freshness = cache.text("freshness").to_owned();
+        if let Some(reason) = cache.opt("reason") {
+            freshness.push_str(&format!(": {}", reason.str().ok()?));
+        }
+        Some(format!("{} ({state}, {freshness})", task.text("issue"),))
     }
     fn expiry_note(&self, t: &Value) -> String {
-        format!(
-            "claim EXPIRED (age {}s >= ttl {}s, was @{})",
+        expiry_note(
             age(t, &self.context.ts).unwrap_or(0),
-            task_ttl(t, self.context.claim_ttl),
-            if t.text("provider").is_empty() {
-                "?"
-            } else {
-                t.text("provider")
-            }
+            i128::from(task_ttl(t, self.context.claim_ttl)),
+            t.text("provider"),
         )
     }
     fn brief(&self, s: &mut Snapshot, t: &Value) -> Result<String> {
-        let v = self.view(s, t, false)?;
+        let v = self.projected_task(s, t, false)?;
         let mut state = v.text("state").to_owned();
-        if self.expired(s, t, true)? {
+        if v.get("claim_expired").truth() {
             let claimable = if t.text("state") == "claimed" {
                 "; claimable"
             } else {
@@ -148,8 +197,11 @@ impl Plan<'_> {
                     .map_err(|_| error("assignment encoding unavailable"))?
             ));
         }
-        if let Some(note) = self.issue_note(s, t) {
+        if let Some(note) = Self::issue_note(&v) {
             lines.push(format!("issue: {note}"));
+        }
+        if let Some(candidate) = v.opt("pr_review_candidate") {
+            lines.push(pr_candidate_note(candidate));
         }
         for name in ["covers", "discovered_from", "role"] {
             if t.get(name).truth() {
@@ -170,10 +222,12 @@ impl Plan<'_> {
         match req.action {
             Show | EvidenceSnapshot => {
                 let t = s.task(req.value("id")?)?.clone();
-                let mut v = self.view(s, &t, false)?;
-                if req.action == EvidenceSnapshot {
+                let mut v = if req.action == EvidenceSnapshot {
                     self.verify_review_evidence(&t)?;
-                }
+                    self.view(s, &t, true)?
+                } else {
+                    self.projected_task(s, &t, true)?
+                };
                 if matches!(s.plan.get("project_contract"), Value::Object(_)) {
                     v.set("project_contract", s.plan.get("project_contract").clone())?;
                 }
@@ -182,18 +236,6 @@ impl Plan<'_> {
                         "plan_id",
                         s.plan.opt("plan_id").cloned().unwrap_or(string("")),
                     )?;
-                }
-                v.set("claim_expired", Value::Bool(self.expired(s, &t, true)?))?;
-                v.set("task_sha256", string(json::hash(&t)?))?;
-                if req.action == Show
-                    && let Some(cache) = self.issue_cache(s, &t)
-                {
-                    v.set("issue_cache", cache)?;
-                }
-                if matches!(t.text("state"), "claimed" | "running" | "review")
-                    && let Some(age) = age(&t, &self.context.ts)
-                {
-                    v.set("claim_age_s", number(age))?;
                 }
                 Response::json(&v)
             }
@@ -448,26 +490,26 @@ impl Plan<'_> {
     fn list(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         let filter = req.text("state")?;
         require(
-            filter.is_empty() || STATES.contains(&filter),
+            filter.is_empty() || STATES.contains(&filter) || PROJECTED_STATES.contains(&filter),
             format!("unknown --state: {filter}"),
         )?;
         let mut views = Vec::new();
         let mut lines = Vec::new();
         for t in s.ordered()? {
-            let mut view = self.view(s, &t, true)?;
+            let view = self.projected_task(s, &t, true)?;
             if !filter.is_empty() && view.text("state") != filter {
                 continue;
             }
             if req.has("json") {
-                if let Some(cache) = self.issue_cache(s, &t) {
-                    view.set("issue_cache", cache)?;
-                }
                 views.push(view);
                 continue;
             }
-            let issue = self
-                .issue_note(s, &t)
+            let issue = Self::issue_note(&view)
                 .map(|note| format!(" issue {note}"))
+                .unwrap_or_default();
+            let pull = view
+                .opt("pr_review_candidate")
+                .map(|candidate| format!(" {}", pr_candidate_note(candidate)))
                 .unwrap_or_default();
             let deps = t.get("depends").strings()?;
             let dep = if deps.is_empty() {
@@ -482,7 +524,8 @@ impl Plan<'_> {
             };
             let tag = if view.get("completion_verified") == &Value::Bool(false) {
                 " NOT VERIFIED".into()
-            } else if t.text("state") == "review"
+            } else if pull.is_empty()
+                && t.text("state") == "review"
                 && age(&t, &self.context.ts).is_some_and(|n| n >= 86400)
             {
                 format!(
@@ -495,7 +538,7 @@ impl Plan<'_> {
                 String::new()
             };
             lines.push(format!(
-                "{:<10} {:<9} {}{provider}{dep}{issue}{tag}",
+                "{:<10} {:<9} {}{provider}{dep}{issue}{tag}{pull}",
                 t.text("id"),
                 view.text("state"),
                 t.text("title")
@@ -582,10 +625,12 @@ impl Plan<'_> {
         let mut actionable = Vec::new();
         let mut stale = Vec::new();
         let mut reviews = Vec::new();
+        let mut review_candidates = Vec::new();
+        let mut issue_cache_unavailable = Vec::new();
         let mut open = Vec::new();
         let mut contract_stale = Vec::new();
         for t in &tasks {
-            let view = self.view(s, t, false)?;
+            let view = self.projected_task(s, t, false)?;
             if view.get("contract_stale").truth() {
                 contract_stale.push(t.text("id").to_owned());
             }
@@ -596,7 +641,7 @@ impl Plan<'_> {
             if !["done", "cancelled"].contains(&view.text("state")) {
                 open.push(t.clone());
             }
-            if self.expired(s, t, true)? {
+            if view.get("claim_expired").truth() {
                 stale.push(object([
                     ("id", t.get("id").clone()),
                     ("provider", t.get("provider").clone()),
@@ -604,7 +649,20 @@ impl Plan<'_> {
                     ("ttl_seconds", number(task_ttl(t, self.context.claim_ttl))),
                 ]));
             }
-            if t.text("state") == "review" && age(t, &self.context.ts).is_some_and(|n| n >= 86400) {
+            if let Some(reason) = view.get("issue_cache").opt("reason") {
+                issue_cache_unavailable.push(object([
+                    ("id", t.get("id").clone()),
+                    ("issue", t.get("issue").clone()),
+                    ("reason", reason.clone()),
+                ]));
+            }
+            if let Some(candidate) = view.opt("pr_review_candidate") {
+                let mut row = candidate.clone();
+                row.set("id", t.get("id").clone())?;
+                review_candidates.push(row);
+            } else if t.text("state") == "review"
+                && age(t, &self.context.ts).is_some_and(|n| n >= 86400)
+            {
                 reviews.push(object([
                     ("id", t.get("id").clone()),
                     ("provider", t.get("provider").clone()),
@@ -674,6 +732,11 @@ impl Plan<'_> {
             ("contract", s.contract.clone()),
             ("stale", Value::Array(stale)),
             ("stale_review", Value::Array(reviews)),
+            ("pr_review_candidates", Value::Array(review_candidates)),
+            (
+                "issue_cache_unavailable",
+                Value::Array(issue_cache_unavailable),
+            ),
             (
                 "contract_stale_tasks",
                 list(contract_stale.iter().map(String::as_str)),
@@ -736,6 +799,7 @@ impl Plan<'_> {
         let states = v.get("by_state");
         let counts = STATES
             .iter()
+            .chain(PROJECTED_STATES)
             .filter_map(|name| {
                 states
                     .opt(name)
@@ -767,18 +831,33 @@ impl Plan<'_> {
         if !s.contract.text("blocker").is_empty() {
             lines.push(format!("contract blocker: {}", s.contract.text("blocker")));
         }
+        for row in v.get("stale").array()? {
+            lines.push(format!(
+                "expired claim {}: {}",
+                row.text("id"),
+                expiry_note(
+                    row.get("age_seconds").int()?,
+                    row.get("ttl_seconds").int()?,
+                    row.text("provider")
+                ),
+            ));
+        }
         for t in s.ordered()? {
-            if self.expired(s, &t, true)? {
-                lines.push(format!(
-                    "expired claim {}: {}",
-                    t.text("id"),
-                    self.expiry_note(&t)
-                ));
-            }
             let view = self.view(s, &t, false)?;
             if view.text("state") == "blocked" {
                 lines.push(format!("blocked {}: {}", t.text("id"), view.text("reason")));
             }
+        }
+        for row in v.get("pr_review_candidates").array()? {
+            lines.push(format!("{}: {}", row.text("id"), pr_candidate_note(row)));
+        }
+        for row in v.get("issue_cache_unavailable").array()? {
+            lines.push(format!(
+                "issue cache unavailable for {} ({}): {}",
+                row.text("id"),
+                row.text("issue"),
+                row.text("reason"),
+            ));
         }
         for r in v.get("stale_review").array()? {
             lines.push(format!(
@@ -982,6 +1061,29 @@ impl Plan<'_> {
             .map_err(|e| error(e.to_string()))
     }
 }
+fn expiry_note(age: i128, ttl: i128, provider: &str) -> String {
+    let provider = if provider.is_empty() { "?" } else { provider };
+    format!("claim EXPIRED (age {age}s >= ttl {ttl}s, was @{provider})")
+}
+
+fn freshness_name(freshness: Freshness) -> &'static str {
+    match freshness {
+        Freshness::Fresh => "fresh",
+        Freshness::Stale => "stale",
+        Freshness::Unavailable => "unavailable",
+    }
+}
+
+fn pr_candidate_note(candidate: &Value) -> String {
+    format!(
+        "PR {} {} ({}); {} candidate",
+        candidate.text("reference"),
+        candidate.text("state"),
+        candidate.text("freshness"),
+        candidate.text("disposition"),
+    )
+}
+
 fn groups(s: &Snapshot) -> Result<Vec<(String, Vec<Value>)>> {
     let mut groups = Vec::<(String, Vec<Value>)>::new();
     for t in s.ordered()? {
