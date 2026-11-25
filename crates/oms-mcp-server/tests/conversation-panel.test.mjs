@@ -534,6 +534,8 @@ test('a stored Issue receipt is not reported as delivered without a confirmed co
       p.host.rejectContext=false;await p.event('issue-record','click');await setImmediate();
       assert.match(p.get('issue-evidence').textContent,/added to the current Main's context/);
       assert.equal(p.get('issue-record').disabled,true);
+      assert.deepEqual({...p.host.contexts.at(-1).structuredContent},{project:'one',room:main.room,owner:main.participant,
+        requestId,kind:'oms-reviewed-issue-receipt',status:'recorded',issue:'Example/Library#7',sha256:hash});
     }
     assert.ok(!p.calls.some(c=>c.name==='oms_record_reviewed_issue'));
   }

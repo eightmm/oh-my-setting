@@ -789,7 +789,7 @@ async function receiptStatus(p,write=false) {
     if(!write && v.status==='not_found'){p.id=v.requestId;p.state='absent';}
     else if(v.status==='recorded' && v.schema===1 && v.kind==='oms-reviewed-issue-receipt' && v.room===p.room && v.participant===p.owner && v.issue===p.issue && v.sha256===p.sha256){
       p.id=v.requestId;
-      const delivered=await updateContext({project:project||null,...address,requestId:p.id,kind:v.kind,status:v.status});
+      const delivered=await updateContext({project:project||null,...address,requestId:p.id,kind:v.kind,status:v.status,issue:v.issue,sha256:v.sha256});
       if(!sameIssue(p))return;
       p.state=delivered?'received':'receiptOnly';
     }else throw uiError('uncertainIssue');
