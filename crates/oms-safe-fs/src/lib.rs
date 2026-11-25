@@ -751,6 +751,34 @@ impl Root {
     }
 }
 
+/// Return `(--oms-dispatch, <source>, <rev>, --)` args when `exe` is a verified
+/// staged payload under `<source>/target/oms-native/<rev>/oms`, so child processes
+/// carry source authority rather than failing as bare direct binary calls.
+pub fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String)> {
+    if exe.file_name().and_then(|v| v.to_str()) != Some("oms") {
+        return None;
+    }
+    let rev_dir = exe.parent()?;
+    let rev = rev_dir.file_name().and_then(|v| v.to_str())?;
+    if rev.len() != 40 || !rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let native_dir = rev_dir.parent()?;
+    if native_dir.file_name().and_then(|v| v.to_str()) != Some("oms-native") {
+        return None;
+    }
+    let canon_source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let canon_parent = std::fs::canonicalize(native_dir).ok()?;
+    if canon_parent != canon_source.join("target/oms-native") {
+        return None;
+    }
+    let is_file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file());
+    if !is_file(&rev_dir.join("manifest.json")) || !is_file(exe) {
+        return None;
+    }
+    Some((canon_source.to_string_lossy().into_owned(), rev.to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,32 +1555,4 @@ mod tests {
             assert_eq!(result, Err(CaptureReadError::Unreadable));
         }
     }
-}
-
-/// Return `(--oms-dispatch, <source>, <rev>, --)` args when `exe` is a verified
-/// staged payload under `<source>/target/oms-native/<rev>/oms`, so child processes
-/// carry source authority rather than failing as bare direct binary calls.
-pub fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String)> {
-    if exe.file_name().and_then(|v| v.to_str()) != Some("oms") {
-        return None;
-    }
-    let rev_dir = exe.parent()?;
-    let rev = rev_dir.file_name().and_then(|v| v.to_str())?;
-    if rev.len() != 40 || !rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return None;
-    }
-    let native_dir = rev_dir.parent()?;
-    if native_dir.file_name().and_then(|v| v.to_str()) != Some("oms-native") {
-        return None;
-    }
-    let canon_source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
-    let canon_parent = std::fs::canonicalize(native_dir).ok()?;
-    if canon_parent != canon_source.join("target/oms-native") {
-        return None;
-    }
-    let is_file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file());
-    if !is_file(&rev_dir.join("manifest.json")) || !is_file(exe) {
-        return None;
-    }
-    Some((canon_source.to_string_lossy().into_owned(), rev.to_owned()))
 }
