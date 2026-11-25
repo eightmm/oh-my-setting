@@ -370,6 +370,31 @@ fn codex_configuration(paths: &Paths, expected: &Value) -> Value {
         "runtime_loading":"unverified"})
 }
 
+/// Reports a callback that never reached the trace writer apart from callback
+/// outcomes. A configuration gap is a lead; "none_found" covers only the plugin
+/// declaration and generated hooks, leaving tracing, event delivery, launcher
+/// and provider loading unattributed.
+fn provider_side(trace: &Value, configuration: &Value) -> Value {
+    let reach = if trace["attempts"].as_u64().is_some_and(|count| count > 0) {
+        "retained"
+    } else if trace["status"] == "missing" || trace["diagnosis"] == "no_callback_evidence" {
+        "not_observed"
+    } else {
+        "unknown"
+    };
+    let plugin = configuration["plugin_configuration"].as_str();
+    let hooks = configuration["generated_hooks"].as_str();
+    let gap = (reach == "not_observed").then_some(match (plugin, hooks) {
+        (Some("declared_disabled"), _) => "plugin_declared_disabled",
+        (Some("not_declared"), _) => "plugin_not_declared",
+        (_, Some("drifted")) => "generated_hooks_drifted",
+        (Some("declared_enabled"), Some("matches_expected")) => "none_found",
+        (Some("declared_enabled"), _) => "generated_hooks_unavailable",
+        _ => "plugin_configuration_unavailable",
+    });
+    json!({"managed_callback":reach, "configuration_gap":gap})
+}
+
 pub(crate) fn append(
     paths: &Paths,
     findings: &mut Vec<Value>,
@@ -429,8 +454,14 @@ pub(crate) fn append(
         .collect::<Vec<_>>()
         .join(", ");
     let configuration = codex_configuration(paths, &expected);
+    let provider = provider_side(&trace, &configuration);
+    let reach = provider["managed_callback"].as_str().unwrap();
+    let gap = provider["configuration_gap"]
+        .as_str()
+        .map(|gap| format!(" (configuration gap: {gap})"))
+        .unwrap_or_default();
     findings.push(json!({"section":"codex hook diagnostics", "level":"info",
-        "configuration":configuration, "trace":trace,
-        "message":format!("Codex hooks: plugin {}; generated hooks {}; diagnosis {diagnosis}{}; retained evidence cannot prove current account/session delivery. Missing receipts may mean disabled/unavailable tracing, no callback, or provider loading failure.", configuration["plugin_configuration"].as_str().unwrap(), configuration["generated_hooks"].as_str().unwrap(), if failures.is_empty() {String::new()} else {format!(" ({failures})")})}));
+        "configuration":configuration, "trace":trace, "provider_side":provider,
+        "message":format!("Codex hooks: plugin {}; generated hooks {}; managed callback {reach}{gap}; diagnosis {diagnosis}{}; retained evidence cannot prove current account/session delivery. Missing receipts may mean disabled/unavailable tracing, no callback, or provider loading failure.", configuration["plugin_configuration"].as_str().unwrap(), configuration["generated_hooks"].as_str().unwrap(), if failures.is_empty() {String::new()} else {format!(" ({failures})")})}));
     Ok(())
 }
