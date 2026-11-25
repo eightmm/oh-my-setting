@@ -75,7 +75,7 @@ oh-my-setting의 목표는 어느 에이전트에서 일하든 따라오는 하�
 | **터미널** | Main 선택·전환, provider 개요, 쿼터, 결과 리더를 갖춘 Board. tmux 세션 관리 | `oms` ([터미널 패널](docs/TERMINAL-PANEL.md)) |
 | **Claude Code v2.1.287+** | `oms dashboard --json`으로 그리는 대화 옆 읽기 전용 `oms-panel` pane, `/oms-panel` | 미리보기, 마켓플레이스 미등록: `claude --plugin-dir plugins/claude-code` ([README](plugins/claude-code/README.md)) |
 
-패널과 별개로 설치기는 provider를 공유 하네스에 연결합니다. 규칙, 스킬, 훅, MCP 등록 방식은 provider마다 다릅니다([설치 안내](docs/INSTALL.md)). `codex`가 PATH에 있으면 Codex [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) 플러그인(스킬 라우팅, 압축 전 인수인계, 턴 가드)을 등록하고, Antigravity가 있으면 Antigravity [`oh-my-setting`](plugins/antigravity/plugin.json) 플러그인(MCP 기반 하네스 상태)을 설치합니다. [`oms-skills`](.claude-plugin/marketplace.json)는 플러그인에서만 스킬을 불러오는 Claude Code 환경을 위한 선택적 수동 설치 플러그인입니다. OMS 설치가 필요하고, 일반 설치에서는 스킬이 두 번 보이므로 쓰지 않습니다([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
+패널과 별개로 설치기는 provider를 공유 하네스에 연결합니다. 규칙, 스킬, 훅, MCP 등록 방식은 provider마다 다릅니다([설치 안내](docs/INSTALL.ko.md)). `codex`가 PATH에 있으면 Codex [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) 플러그인(스킬 라우팅, 압축 전 인수인계, 턴 가드)을 등록하고, Antigravity가 있으면 Antigravity [`oh-my-setting`](plugins/antigravity/plugin.json) 플러그인(MCP 기반 하네스 상태)을 설치합니다. [`oms-skills`](.claude-plugin/marketplace.json)는 플러그인에서만 스킬을 불러오는 Claude Code 환경을 위한 선택적 수동 설치 플러그인입니다. OMS 설치가 필요하고, 일반 설치에서는 스킬이 두 번 보이므로 쓰지 않습니다([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
 
 ### 터미널에서
 
