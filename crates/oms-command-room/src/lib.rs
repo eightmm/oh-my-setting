@@ -111,7 +111,8 @@ pub(crate) fn checkpoint(stop: &AtomicBool) -> Result<()> {
     }
 }
 
-pub(crate) fn outbound_clean(bytes: &[u8]) -> Result<bool> {
+/// Check projected Room data against the bounded host outbound policy.
+pub fn outbound_clean(bytes: &[u8]) -> Result<bool> {
     value::outbound_clean(bytes)
 }
 

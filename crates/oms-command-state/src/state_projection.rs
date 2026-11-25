@@ -153,6 +153,124 @@ fn plan_updated_at(plan: &Value, plan_path: &Path) -> Option<String> {
     )
 }
 
+/// Join only current Room assignments to the same Plan bytes validated by status.
+fn conversation_task_titles(state: &Value, raw: &[u8], plan: &Value) -> Option<Value> {
+    let conversation = state.get("conversation");
+    let main = conversation.get("conversationMain");
+    let room = main.text("room");
+    let owner = main.text("participant");
+    let status = state.get("plan");
+    let plan_id = plan.text("plan_id");
+    if conversation.text("conversationBinding") != "matched"
+        || main.text("state") != "joined"
+        || main.text("provider").is_empty()
+        || room.is_empty()
+        || owner.is_empty()
+        || plan_id.is_empty()
+        || !matches!(status.get("healthy"), Value::Bool(true))
+    {
+        return None;
+    }
+    let rows = conversation.get("attempts").array().ok()?;
+    let members = main.get("participants").array().ok()?;
+    let mut owners = rows.iter().filter(|row| {
+        let refs = row.get("refs");
+        let id = row.text("attempt_id");
+        row.text("tool") == "panel-main"
+            && !id.is_empty()
+            && matches!(row.get("terminal"), Value::Bool(false))
+            && row.text("provider") == main.text("provider")
+            && attempt_room(row) == AttemptRoom::Named(room)
+            && refs.text("panel_role") == "main"
+            && refs
+                .opt("panel_room_participant")
+                .map_or(id, |v| v.str().unwrap_or(""))
+                == owner
+    });
+    let main_attempt = owners.next()?;
+    let main_id = main_attempt.text("attempt_id");
+    if owners.next().is_some() {
+        return None;
+    }
+    let mut titles = json::empty();
+    for row in rows {
+        let refs = row.get("refs");
+        let id = row.text("attempt_id");
+        let task_id = row.text("task_id");
+        let task = plan.get("tasks").get(task_id);
+        let lease = refs.text("lease_id");
+        if id.is_empty()
+            || task_id.is_empty()
+            || task.text("id") != task_id
+            || refs.text("plan_id") != plan_id
+            || lease.is_empty()
+            || task.text("lease_id") != lease
+            || attempt_room(row) != AttemptRoom::Named(room)
+            || [row.text("state"), task.text("state")]
+                .iter()
+                .any(|s| matches!(*s, "cancelled" | "canceled"))
+        {
+            continue;
+        }
+        let participant = if std::ptr::eq(row, main_attempt) {
+            owner
+        } else {
+            let participant = if row.text("tool") == "panel-native-assignment" {
+                if row.text("provider") != "codex"
+                    || refs.text("native_assignment_schema") != "1"
+                    || refs
+                        .opt("panel_room_participant")
+                        .is_some_and(|v| v.str().ok() != Some(id))
+                    || refs
+                        .opt("panel_role")
+                        .is_some_and(|v| v.str().ok() != Some("lead"))
+                {
+                    continue;
+                }
+                id
+            } else if refs.text("panel_role") == "lead" {
+                refs.text("panel_room_participant")
+            } else {
+                continue;
+            };
+            if participant.is_empty()
+                || participant == owner
+                || row.text("parent_attempt_id") != main_id
+                || !members.iter().any(|m| {
+                    m.text("room") == room
+                        && m.text("parent") == owner
+                        && m.text("participant") == participant
+                        && m.text("provider") == row.text("provider")
+                        && matches!(m.get("joined"), Value::Bool(true))
+                        && matches!(m.text("role"), "worker" | "lead")
+                })
+            {
+                continue;
+            }
+            participant
+        };
+        let title = task.text("title");
+        if ![owner, participant].contains(&task.text("claimed_by_participant"))
+            || title.len() > 640
+            || title.trim().is_empty()
+            || title == task_id
+            || title.chars().count() > 160
+            || title.chars().any(|c| {
+                c.is_control() || matches!(c, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            })
+            || !oms_command_room::outbound_clean(title.as_bytes()).unwrap_or(false)
+            || !json::encoded(task.get("title"))
+                .ok()
+                .is_some_and(|b| oms_command_room::outbound_clean(&b).unwrap_or(false))
+        {
+            continue;
+        }
+        titles.set(id, string(title)).ok()?;
+    }
+    (!titles.object().ok()?.is_empty() && status.text("plan_sha256") == json::sha(raw))
+        .then_some(titles)
+}
+
 pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Value) -> Result<()> {
     let task_text = storage::read(
         &ctx.repo,
@@ -218,11 +336,23 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
         string(next.join(" ").chars().take(200).collect::<String>()),
     )?;
     state.set("task", task)?;
-    let plan = file(ctx, ".oms/plan/tasks.json");
+    let plan_path = Path::new(".oms/plan/tasks.json");
     let mut projected = state.get("plan").clone();
-    if let Ok(plan) = &plan {
+    if let Ok(raw) = storage::read(&ctx.repo, plan_path, storage::MAX_FILE, true)
+        && let Ok(plan) = if raw.is_empty() {
+            Ok(json::empty())
+        } else {
+            json::parse(&raw)
+        }
+    {
+        if let Some(titles) = conversation_task_titles(state, &raw, &plan)
+            && let Some(mut conversation) = state.remove("conversation")
+        {
+            conversation.set("taskTitles", titles)?;
+            state.set("conversation", conversation)?;
+        }
         projected.set("goal", plan.get("goal").clone())?;
-        if let Some(updated_at) = plan_updated_at(plan, &ctx.repo.join(".oms/plan/tasks.json")) {
+        if let Some(updated_at) = plan_updated_at(&plan, &ctx.repo.join(plan_path)) {
             projected.set("updated_at", string(updated_at))?;
         }
     }
@@ -1870,7 +2000,13 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
     {
         let _ = dashboard.set(
             "conversationAttempts",
-            rows(conversation.get("attempts"), 24, attempt),
+            rows(conversation.get("attempts"), 24, |row| {
+                let mut item = attempt(row);
+                if let Some(title) = conversation.get("taskTitles").opt(row.text("attempt_id")) {
+                    let _ = item.set("taskTitle", title.clone());
+                }
+                item
+            }),
         );
         let _ = dashboard.set(
             "conversationAttemptsOmitted",
@@ -2841,6 +2977,111 @@ mod panel_snapshot_tests {
             assert_eq!(before.get(key), after.get(key), "{key}");
         }
         assert!(crate::json::encoded(&capped).unwrap().len() < 60_000);
+    }
+
+    #[test]
+    fn conversation_task_titles_require_the_current_plan_lease_and_room_hierarchy() {
+        use serde_json::json;
+        let title = "승인 화면 간소화";
+        let task = json!({"id":"work","title":title,"state":"claimed","lease_id":"l1","claimed_by_participant":"owner"});
+        let plan = json!({"plan_id":"current","tasks":{"work":task}});
+        let member = json!({"room":"here","participant":"assignment","parent":"owner","role":"worker","joined":true,"provider":"codex"});
+        let refs =
+            json!({"panel_role":"main","panel_room_id":"here","plan_id":"current","lease_id":"l1"});
+        let main = json!({"attempt_id":"owner","tool":"panel-main","provider":"codex","terminal":false,"task_id":"work","refs":refs});
+        let assigned = json!({"attempt_id":"assignment","tool":"panel-native-assignment","provider":"codex","parent_attempt_id":"owner","task_id":"work",
+            "refs":{"native_assignment_schema":"1","panel_room_id":"here","plan_id":"current","lease_id":"l1"}});
+        let joined = json!({"state":"joined","provider":"codex","participant":"owner","room":"here","participants":[member]});
+        let state = json!({"plan":{"healthy":true},"conversation":{"conversationBinding":"matched","conversationMain":joined,"attempts":[main,assigned]}});
+        let raw = serde_json::to_vec(&plan).unwrap();
+        let digest = json::sha(&raw);
+        let snapshot = |mut state: serde_json::Value, plan: &serde_json::Value, pinned: &str| {
+            state["plan"]["plan_sha256"] = json!(pinned);
+            let state = json::parse(&serde_json::to_vec(&state).unwrap()).unwrap();
+            let raw = serde_json::to_vec(plan).unwrap();
+            let mut conversation = state.get("conversation").clone();
+            if let Some(titles) =
+                conversation_task_titles(&state, &raw, &json::parse(&raw).unwrap())
+            {
+                conversation.set("taskTitles", titles).unwrap();
+            }
+            panel_snapshot(&Value::Null, &conversation)
+        };
+        let ok = snapshot(state.clone(), &plan, &digest);
+        let dashboard = ok.get("dashboard");
+        for row in dashboard.get("conversationAttempts").array().unwrap() {
+            assert_eq!(row.text("task"), "work");
+            assert_eq!(row.text("taskTitle"), title);
+        }
+        assert!(dashboard.opt("taskTitles").is_none());
+        let mut explicit_lead = state.clone();
+        let lead = &mut explicit_lead["conversation"]["attempts"][1];
+        lead["tool"] = json!("peer-delegate");
+        lead["refs"]["panel_role"] = json!("lead");
+        lead["refs"]["panel_room_participant"] = json!("assignment");
+        let explicit = snapshot(explicit_lead, &plan, &digest);
+        assert_eq!(
+            explicit
+                .get("dashboard")
+                .get("conversationAttempts")
+                .array()
+                .unwrap()[1]
+                .text("taskTitle"),
+            title
+        );
+        let tainted = concat!("/ho", "me/example/private");
+        for (field, value) in [
+            ("/refs/plan_id", "previous"),
+            ("/refs/lease_id", "previous"),
+            ("/refs/panel_room_id", "elsewhere"),
+            ("/task_id", "missing"),
+            ("/parent_attempt_id", "other"),
+            ("/attempt_id", "unknown-member"),
+            ("/provider", "other"),
+            ("/state", "cancelled"),
+            ("/refs/panel_role", "reviewer"),
+        ] {
+            let mut different = state.clone();
+            let assignment = &mut different["conversation"]["attempts"][1];
+            if let Some(key) = field.strip_prefix("/refs/") {
+                assignment["refs"][key] = json!(value);
+            } else {
+                assignment[&field[1..]] = json!(value);
+            }
+            let got = snapshot(different, &plan, &digest);
+            let rows = got
+                .get("dashboard")
+                .get("conversationAttempts")
+                .array()
+                .unwrap();
+            assert_eq!(rows[0].text("taskTitle"), title);
+            assert!(rows[1].opt("taskTitle").is_none(), "{field}");
+        }
+        for (key, value, fresh) in [
+            ("title", "다른 계획", false),
+            ("state", "cancelled", true),
+            ("claimed_by_participant", "other", true),
+            ("title", "private\ntext", true),
+            ("title", tainted, true),
+        ] {
+            let mut changed = plan.clone();
+            changed["tasks"]["work"][key] = json!(value);
+            let pin = if fresh {
+                json::sha(&serde_json::to_vec(&changed).unwrap())
+            } else {
+                digest.clone()
+            };
+            let got = snapshot(state.clone(), &changed, &pin);
+            for row in got
+                .get("dashboard")
+                .get("conversationAttempts")
+                .array()
+                .unwrap()
+            {
+                assert!(row.opt("taskTitle").is_none(), "{key}");
+                assert_eq!(row.text("task"), "work");
+            }
+        }
     }
 
     #[test]

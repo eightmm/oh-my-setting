@@ -325,17 +325,21 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v19.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v20.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
         assert!(html.len() < 240 * 1024);
-        let template = include_str!("../src/conversation-panel.html");
-        assert!(
-            html.lines()
-                .map(str::trim_start)
-                .eq(template.lines().map(str::trim_start))
+        assert_eq!(
+            html.as_bytes(),
+            include_bytes!("../src/conversation-panel.html")
         );
+        let legacy_uri = "ui://oms/conversation-panel/v19.html";
+        let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
+        let legacy = &legacy["result"]["contents"][0];
+        assert_eq!(legacy["uri"], legacy_uri);
+        assert_eq!(legacy["text"], view["result"]["contents"][0]["text"]);
+        assert_eq!(legacy["_meta"], view["result"]["contents"][0]["_meta"]);
         assert!(html.contains("ui/request-display-mode"));
         assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
         assert_eq!(
@@ -1482,7 +1486,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v19.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v20.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -1498,13 +1502,11 @@ fn conversation_panel() {
     assert_eq!(current["uri"], *uri);
     let html = current["text"].as_str().unwrap();
     assert!(html.len() < 240 * 1024);
-    let template = include_str!("../src/conversation-panel.html");
-    assert!(
-        html.lines()
-            .map(str::trim_start)
-            .eq(template.lines().map(str::trim_start))
+    assert_eq!(
+        html.as_bytes(),
+        include_bytes!("../src/conversation-panel.html")
     );
-    for marker in [r#"id="header-main""#, "lead-children", "nativeMainUri"] {
+    for marker in [r#"id="header-main""#, r#"id="leads""#, "nativeMainUri"] {
         assert!(html.contains(marker));
     }
     assert!(html.contains("ui/request-display-mode"));
@@ -1529,6 +1531,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v16.html"),
         json!("ui://oms/conversation-panel/v17.html"),
         json!("ui://oms/conversation-panel/v18.html"),
+        json!("ui://oms/conversation-panel/v19.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
