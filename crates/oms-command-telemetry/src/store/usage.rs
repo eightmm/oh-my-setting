@@ -4,6 +4,7 @@
 //! only when their identity, ordering and measured baseline are known.
 use super::*;
 use crate::value::{encode, obj};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -1265,65 +1266,62 @@ fn begin_inner(
 
 /// Idempotent append of an absolute snapshot or an explicit revision correction.
 /// Out-of-order revisions remain auditable but cannot replace newer evidence.
+/// Physical admission reads this ledger while holding only dispatch, so every
+/// revision takes dispatch then receipts, the registration order. The caller
+/// must not already hold either lock. Both waits share the lock timeout.
 pub fn record(
     repo: &Path,
     receipt: &Receipt,
     interrupted: &AtomicBool,
-) -> Result<bool, StoreError> {
-    validate(receipt)?;
-    let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
-    let _guard = acquire(&target, interrupted)?;
-    record_locked(repo, &target, receipt, interrupted, || Ok(()))
-}
-
-/// Settles a physical call registered under the dispatch writer. Physical
-/// admission reads this ledger while holding only dispatch, so settlement takes
-/// dispatch then receipts, the registration order, and waits as long as the
-/// standalone writer's lock timeout.
-pub fn record_physical(
-    repo: &Path,
-    receipt: &Receipt,
-    interrupted: &AtomicBool,
-) -> Result<bool, StoreError> {
+) -> Result<bool, super::dispatch::Error> {
     let timeout = oms_lock::Settings::from_env()
-        .map_err(StoreError::Lock)?
+        .map_err(|error| super::dispatch::Error::new(StoreError::Lock(error), false))?
         .timeout;
-    record_physical_before(repo, receipt, interrupted, Instant::now() + timeout)
+    record_before(repo, receipt, interrupted, Instant::now() + timeout)
 }
-/// Like [`record_physical`], with both lock waits bounded by one deadline.
-pub fn record_physical_before(
+/// Like [`record`], with both lock waits bounded by one deadline.
+pub fn record_before(
     repo: &Path,
     receipt: &Receipt,
     interrupted: &AtomicBool,
     deadline: Instant,
-) -> Result<bool, StoreError> {
-    validate(receipt)?;
-    before(interrupted, Some(deadline))?;
+) -> Result<bool, super::dispatch::Error> {
+    let initial = |error| super::dispatch::Error::new(error, false);
+    validate(receipt).map_err(initial)?;
+    before(interrupted, Some(deadline)).map_err(initial)?;
     let dispatch = super::dispatch::Transaction::acquire(
         repo,
         deadline.saturating_duration_since(Instant::now()),
         interrupted,
     )
-    .map_err(|error| error.source)?;
-    let target = canonical_index(dispatch.repo(), Some(Path::new(RECEIPTS)), false, false)?;
-    let guard = acquire_before(&target, interrupted, Some(deadline))?;
-    record_locked(dispatch.repo(), &target, receipt, interrupted, || {
-        dispatch.check()?;
-        guard.check().map_err(StoreError::Lock)
+    .map_err(|error| error.in_file(super::dispatch::LOCK))?;
+    let dispatch_lost = Cell::new(false);
+    append_revision(&dispatch, receipt, interrupted, deadline, &dispatch_lost).map_err(|error| {
+        dispatch.error(error).in_file(if dispatch_lost.get() {
+            super::dispatch::LOCK
+        } else {
+            RECEIPTS
+        })
     })
 }
-fn record_locked(
-    repo: &Path,
-    target: &Path,
+fn append_revision(
+    dispatch: &super::dispatch::Transaction<'_>,
     receipt: &Receipt,
     interrupted: &AtomicBool,
-    held: impl Fn() -> Result<(), StoreError>,
+    deadline: Instant,
+    dispatch_lost: &Cell<bool>,
 ) -> Result<bool, StoreError> {
-    let root = Root::open(repo)?;
+    let target = canonical_index(dispatch.repo(), Some(Path::new(RECEIPTS)), false, false)?;
+    let guard = acquire_before(&target, interrupted, Some(deadline))?;
+    let held = || {
+        dispatch.check().inspect_err(|_| dispatch_lost.set(true))?;
+        guard.check().map_err(StoreError::Lock)
+    };
+    let root = Root::open(dispatch.repo())?;
     held()?;
     let encoded = encode_receipt(receipt)?;
     let mut added = false;
-    mutate(&root, target, false, None, interrupted, |old| {
+    mutate(&root, &target, false, None, interrupted, |old| {
         let mut rows = receipts(old)?;
         if !rows
             .iter()
