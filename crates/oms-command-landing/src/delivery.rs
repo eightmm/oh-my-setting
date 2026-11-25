@@ -1730,6 +1730,8 @@ fn tail(r: &Run<'_>, output: &mut Output) -> Result<()> {
             }
             Err(error) if error.code == 130 => return Err(error),
             Err(error) => {
+                // Some cancelled steps surface as 75 or 2; the flag decides.
+                crate::check(c.interrupted)?;
                 let state = if error.code == 75 {
                     "deferred"
                 } else {
