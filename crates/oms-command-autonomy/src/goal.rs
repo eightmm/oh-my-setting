@@ -707,7 +707,11 @@ fn reconcile(ctx: &Context<'_>, args: &Args) -> Result<()> {
             "another task has an open commit intent; requested task cannot advance it",
         )?;
         let current = task(ctx, value::text(intent, "task_id"))?;
-        if ["review", "claimed"].contains(&value::text(&current, "state")) {
+        let state = value::text(&current, "state");
+        let expired_claim = state == "stale"
+            && current["claim_expired"] == true
+            && current["stored_state"] == "claimed";
+        if ["review", "claimed"].contains(&state) || expired_claim {
             let mut run_args = Args::default();
             run_args.set("id", value::text(intent, "task_id"));
             run_args.set("to", args.get("to", value::text(intent, "provider"))?);
@@ -732,7 +736,7 @@ fn reconcile(ctx: &Context<'_>, args: &Args) -> Result<()> {
                 result.code == 0,
                 "open commit intent could not complete its exact reviewed landing",
             )?;
-        } else if value::text(&current, "state") != "done" {
+        } else if state != "done" {
             let out = invoke(
                 ctx,
                 "patch-land",

@@ -410,8 +410,8 @@ pub struct Snapshot {
     pub(crate) registry: Value,
     pub(crate) markers: Option<Vec<Value>>,
     pub(crate) settled: BTreeSet<String>,
-    /// Lazily read local GitHub snapshot cache bytes; empty when absent.
-    pub(crate) github_cache: Option<Vec<u8>>,
+    pub(crate) github_cache: Option<std::result::Result<Vec<u8>, &'static str>>,
+    pub(crate) github_origin: std::cell::OnceCell<Option<oms_github::Slug>>,
 }
 impl Snapshot {
     pub fn tasks(&self) -> Result<&[(Vec<u8>, Value)]> {
@@ -639,6 +639,7 @@ impl<'a> Plan<'a> {
             markers: None,
             settled: BTreeSet::new(),
             github_cache: None,
+            github_origin: std::cell::OnceCell::new(),
         };
         let tasks = s.ordered()?;
         for task in tasks {

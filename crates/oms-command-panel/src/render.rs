@@ -598,6 +598,11 @@ fn call_badge(call: &Value) -> (String, &'static str) {
         return match (kind, text(call, "attention_class")) {
             ("message", "needs") => ("[? question]".to_owned(), SGR_GOLD_BOLD),
             ("message", _) => ("[· mail]".to_owned(), SGR_CYAN),
+            ("task", "decide") => ("[? review]".to_owned(), SGR_GOLD_BOLD),
+            ("task", "info") => ("[· plan]".to_owned(), SGR_CYAN),
+            ("task", "stale") if call["state"] == "stale" => {
+                ("[! stale]".to_owned(), SGR_AMBER_BOLD)
+            }
             ("task", _) => ("[! held]".to_owned(), SGR_AMBER_BOLD),
             _ => state_badge(text(call, "state")),
         };
@@ -2152,6 +2157,18 @@ fn attention_extra_rows(report: &Value, all: &[Value], items: &[attention::Item]
                 }));
             }
             "task" => {
+                let id = &item.row_id.1;
+                let state = if item.cls == "decide" {
+                    "review"
+                } else if item.cls == "info" {
+                    plan_task_state(&report["plan"]["tasks"][id])
+                } else if attention::claim_expired(report, id, &report["plan"]["tasks"][id])
+                    == Some(true)
+                {
+                    "stale"
+                } else {
+                    "held"
+                };
                 let title = if item.what.is_empty() {
                     item.who.clone()
                 } else {
@@ -2163,7 +2180,7 @@ fn attention_extra_rows(report: &Value, all: &[Value], items: &[attention::Item]
                     "alias": item.row_id.1,
                     "role": "task",
                     "provider": "plan",
-                    "state": "held",
+                    "state": state,
                     "title": title,
                     "purpose": item.what,
                     "task_id": item.row_id.1,
@@ -2272,7 +2289,13 @@ pub(crate) fn attention_row_dock(report: &Value, call: &Value) -> Option<(String
                 }
             };
             let state = task
-                .map(plan_task_state)
+                .map(|t| {
+                    if attention::claim_expired(report, id, t) == Some(true) {
+                        "stale"
+                    } else {
+                        plan_task_state(t)
+                    }
+                })
                 .filter(|s| !s.is_empty())
                 .unwrap_or("unknown");
             let task_title = task.map(|t| text(t, "title")).unwrap_or("");
@@ -4199,12 +4222,15 @@ fn room_plan(
                 }
             }
             "claimed" | "running" | "landing" | "held" => {
-                if task["claim_expired"] == true || stale_tasks.contains(task_id) {
+                if attention::claim_expired(report, task_id, task) == Some(true)
+                    || stale_tasks.contains(task_id)
+                {
                     stale += 1;
                 } else {
                     claimed += 1;
                 }
             }
+            "stale" => stale += 1,
             _ => {}
         }
     }
