@@ -754,6 +754,60 @@ pub(crate) fn latest(
         Ok(None)
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobDetail {
+    Accepted,
+    Settling,
+    Invalid,
+}
+
+fn job_detail(job: &V) -> JobDetail {
+    if job.get("name").text().unwrap_or("").is_empty() {
+        return JobDetail::Invalid;
+    }
+    let completed = match job.get("status") {
+        V::Null if !job.has("status") => true,
+        v => match v.text() {
+            Some("completed") => true,
+            Some("queued" | "in_progress" | "pending" | "waiting" | "requested") => false,
+            _ => return JobDetail::Invalid,
+        },
+    };
+    let concluded = match job.get("conclusion") {
+        V::Null => false,
+        v => match v.text() {
+            Some("") => false,
+            Some("success" | "skipped" | "neutral") => true,
+            _ => return JobDetail::Invalid,
+        },
+    };
+    if completed && concluded {
+        JobDetail::Accepted
+    } else {
+        JobDetail::Settling
+    }
+}
+
+/// True when a `completed/success` run's job list has not yet caught up and
+/// contains no unnamed or non-accepted job entries.
+pub(crate) fn jobs_settling(run: &V, sha: &str) -> bool {
+    let V::Arr(rows) = run.get("jobs") else {
+        return false;
+    };
+    if rows.is_empty() || !conclusion(run, sha).is_ok_and(|value| value == "success") {
+        return false;
+    }
+    let mut settling = false;
+    for job in rows {
+        match job_detail(job) {
+            JobDetail::Accepted => {}
+            JobDetail::Settling => settling = true,
+            JobDetail::Invalid => return false,
+        }
+    }
+    settling
+}
+
 /// Generic projects need no OMS job names, but their run and listed jobs must
 /// agree that execution actually finished successfully.
 pub(crate) fn successful_scope(run: &V, sha: &str) -> Result<&'static str> {
@@ -764,15 +818,10 @@ pub(crate) fn successful_scope(run: &V, sha: &str) -> Result<&'static str> {
     let jobs = run.get("jobs");
     require(
         matches!(jobs, V::Arr(rows) if !rows.is_empty())
-            && jobs.array().iter().all(|job| {
-                let name = job.get("name").text().unwrap_or("");
-                !name.is_empty()
-                    && (!job.has("status") || job.get("status").text() == Some("completed"))
-                    && matches!(
-                        job.get("conclusion").text(),
-                        Some("success" | "skipped" | "neutral")
-                    )
-            }),
+            && jobs
+                .array()
+                .iter()
+                .all(|job| job_detail(job) == JobDetail::Accepted),
         "CI detail contains incomplete or inconsistent jobs",
     )?;
     Ok(full_scope(run, sha).unwrap_or("unknown"))
@@ -1733,10 +1782,12 @@ mod tests {
 
     #[test]
     fn successful_scope_separates_terminal_job_evidence_from_oms_selection() {
-        assert_eq!(
-            successful_scope(&run(&[("project CI", "success")]), SHA).unwrap(),
-            "unknown"
-        );
+        let generic = run(&[("project CI", "success")]);
+        assert_eq!(successful_scope(&generic, SHA).unwrap(), "unknown");
+        assert!(!jobs_settling(&generic, SHA));
+        let neutral = run(&[("project CI", "neutral")]);
+        assert_eq!(successful_scope(&neutral, SHA).unwrap(), "unknown");
+        assert!(!jobs_settling(&neutral, SHA));
         assert_eq!(
             successful_scope(
                 &run(&[
@@ -1754,14 +1805,61 @@ mod tests {
             .iter()
             .map(|(name, conclusion)| (name.as_str(), *conclusion))
             .collect();
-        assert_eq!(successful_scope(&run(&full), SHA).unwrap(), "full");
+        let full_run = run(&full);
+        assert_eq!(successful_scope(&full_run, SHA).unwrap(), "full");
+        assert!(!jobs_settling(&full_run, SHA));
+
+        for settling in [
+            run(&[("project CI", "")]),
+            V::parse(
+                format!(
+                    r#"{{"headSha":"{SHA}","status":"completed","conclusion":"success","jobs":[{{"name":"lint","status":"completed","conclusion":"success"}},{{"name":"gate","status":"in_progress","conclusion":""}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+            V::parse(
+                format!(
+                    r#"{{"headSha":"{SHA}","status":"completed","conclusion":"success","jobs":[{{"name":"gate","status":"queued","conclusion":null}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+            V::parse(
+                format!(
+                    r#"{{"headSha":"{SHA}","status":"completed","conclusion":"success","jobs":[{{"name":"gate","status":"completed"}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        ] {
+            assert!(successful_scope(&settling, SHA).is_err());
+            assert!(jobs_settling(&settling, SHA));
+        }
+
         for bad in [
             run(&[]),
+            run(&[("", "")]),
             run(&[("project CI", "failure")]),
-            run(&[("project CI", "")]),
+            V::parse(
+                format!(
+                    r#"{{"headSha":"{SHA}","status":"completed","conclusion":"success","jobs":[{{"name":"lint","status":"in_progress","conclusion":""}},{{"name":"gate","status":"completed","conclusion":"failure"}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+            V::parse(
+                format!(
+                    r#"{{"headSha":"{SHA}","status":"completed","conclusion":"failure","jobs":[{{"name":"gate","status":"in_progress","conclusion":""}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
         ] {
             assert!(successful_scope(&bad, SHA).is_err());
+            assert!(!jobs_settling(&bad, SHA));
         }
+        assert!(!jobs_settling(&run(&[("project CI", "")]), "other"));
     }
     #[test]
     fn full_scope_accepts_pure_rust_runs_without_python() {
