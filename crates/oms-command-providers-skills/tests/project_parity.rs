@@ -1182,6 +1182,12 @@ fn desktop_marketplaces_package_the_same_project_workflow() {
     let load = |path: PathBuf| -> serde_json::Value {
         serde_json::from_slice(&fs::read(path).expect("read plugin JSON")).expect("plugin JSON")
     };
+    let release = fs::read_to_string(root.join("VERSION")).expect("read release version");
+    let version = release.trim();
+    let hooks = load(root.join("plugins/oh-my-setting/.codex-plugin/plugin.json"));
+    assert_eq!(hooks["version"], version);
+    let claude = load(root.join("plugins/claude-code/.claude-plugin/plugin.json"));
+    assert_eq!(claude["version"], version);
     let mut workflows = Vec::new();
     for (catalog, command) in [(root.clone(), "oms"), (root.join("plugins/oms-ssh"), "ssh")] {
         let market = load(catalog.join(".agents/plugins/marketplace.json"));
@@ -1198,6 +1204,7 @@ fn desktop_marketplaces_package_the_same_project_workflow() {
         assert!(package.starts_with(&catalog));
         let manifest = load(package.join("plugin.json"));
         assert_eq!(manifest["name"], "oms");
+        assert_eq!(manifest["version"], version);
         let setup = &manifest["extensions"]["com.openai"]["onboardingSkill"];
         assert!(package.join(setup.as_str().unwrap()).is_file());
         let servers = load(package.join("mcp.json"));
@@ -1209,10 +1216,7 @@ fn desktop_marketplaces_package_the_same_project_workflow() {
     assert_eq!(workflows[0], workflows[1]);
     let app = root.join("plugins/oms-app");
     let manifest = load(app.join("plugin.json"));
-    assert_eq!(
-        manifest["version"],
-        load(root.join("plugins/oms/plugin.json"))["version"]
-    );
+    assert_eq!(manifest["version"], version);
     let servers = load(app.join("mcp_config.json"));
     let server = &servers["mcpServers"]["oms-panel"];
     assert_eq!(servers["mcpServers"].as_object().unwrap().len(), 1);

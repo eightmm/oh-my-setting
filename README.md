@@ -68,6 +68,8 @@ oms uninstall    # Remove managed links and restore backed-up config files
 
 The goal of oh-my-setting is one project panel that follows you between agents. The Rust runtime keeps the project state (goal, plan, attempts, reviews, usage) and reads Git and GitHub status live, and every host draws its view from OMS instead of keeping its own copy. Agent apps receive it from `oms mcp-server` as an MCP App; the terminal panel and the Claude Code pane read OMS on the same machine. What each host shows and whether it can act differ, as the table lists.
 
+`oms --version` prints the release shared by the runtime, OMS Hooks, the local and SSH plugins, the generic MCP App package and the Claude Code pane. The panel resource suffix (for example, `v19`) identifies cached UI content. The installer manages OMS Hooks separately, so projects can use the panel without enabling hooks.
+
 | Where | What you get | How to connect |
 |---|---|---|
 | **Codex desktop, ChatGPT Work** | MCP App panel plus `@OMS`: choose a Main, give it a goal, follow its Leads and decide approvals from chat | The [`oms`](plugins/oms/plugin.json) plugin from the repository-root marketplace, entry `oms@oh-my-setting-local`. When OMS runs on another machine, use the marketplace at [`plugins/oms-ssh`](plugins/oms-ssh/), entry `oms@oms-ssh`, which reaches it through the `oms-runtime` OpenSSH host alias ([guide](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)) |

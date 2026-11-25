@@ -16,7 +16,7 @@
         "ForwardAgent=no",
         "--",
         "oms-runtime",
-        "exec env OMS_MCP_TOOL_PROFILE=chatgpt-panel OMS_PANEL_PROJECTS_FILE=\"$HOME/.config/oh-my-setting/desktop-projects.json\" \"$HOME/.local/bin/oms\" mcp-server"
+        "exec env OMS_MCP_TOOL_PROFILE=chatgpt-panel OMS_PANEL_PROJECTS_FILE=\"${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/desktop-projects.json\" \"$HOME/.local/bin/oms\" mcp-server"
       ]
     }
   }

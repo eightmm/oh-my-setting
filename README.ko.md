@@ -68,6 +68,8 @@ oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 
 oh-my-setting의 목표는 어느 에이전트에서 일하든 따라오는 하나의 프로젝트 패널입니다. Rust 런타임이 프로젝트 상태(목표, 계획, 시도, 리뷰, 사용량)를 관리하고 Git·GitHub 상태는 그때그때 읽으며, 모든 호스트는 따로 사본을 두지 않고 OMS에서 화면을 그립니다. 에이전트 앱은 `oms mcp-server`에서 MCP App으로 받고, 터미널 패널과 Claude Code pane은 같은 머신의 OMS를 직접 읽습니다. 호스트마다 보여 주는 범위와 조작 가능 여부는 아래 표처럼 다릅니다.
 
+`oms --version`으로 런타임, OMS Hooks, 로컬·SSH 플러그인, 범용 MCP App 패키지, Claude Code 패널의 공통 릴리스 번호를 확인할 수 있습니다. 패널 리소스 이름 끝의 `v19` 같은 표기는 화면 캐시를 구분합니다. OMS 설치기가 훅을 별도로 관리하므로 패널만 사용할 수도 있습니다.
+
 | 어디서 | 무엇을 볼 수 있나 | 연결 방법 |
 |---|---|---|
 | **Codex 데스크톱, ChatGPT Work** | MCP App 패널과 `@OMS`: 대화에서 Main 선택, 목표 전달, Lead 추적, 승인 결정 | 저장소 루트 마켓플레이스의 [`oms`](plugins/oms/plugin.json) 플러그인, 항목 `oms@oh-my-setting-local`. OMS가 다른 머신에서 돌면 [`plugins/oms-ssh`](plugins/oms-ssh/) 마켓플레이스의 `oms@oms-ssh` 항목을 쓰고, `oms-runtime` OpenSSH 호스트 별칭으로 연결합니다 ([안내](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)) |

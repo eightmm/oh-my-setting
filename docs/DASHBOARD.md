@@ -244,7 +244,7 @@ answers and evidence retain their original text.
 
 ### Tasks and results
 
-**Now** shows the project goal, pending decisions, active tasks and recorded results. **Work**, **Results** and **Relationships** open the same task detail by task ID. Owner groups show recorded assignments. Prerequisites appear separately, including cycles or references outside the retrieved page. **More** opens the map, chat, activity, metrics and Git views.
+**Now** shows the recorded goal and verification. **Work** shows tasks and their recorded owners. **Results** shows outcomes and verification evidence. **More** opens Relationships, the project map, chat, activity, metrics and Git. From Work, Results or Relationships, select a task to open its detail by ID. Prerequisites appear separately from ownership, including cycles or references outside the retrieved page.
 
 The read-only `oms_panel_work_items` tool projects the selected project’s plan and bound results. The detail version identifies a work record and its evidence. If that version changes during refresh, reopen the current version to review it. The panel distinguishes completed work, accepted results, failed or unrun verification, and missing evidence. The history link opens project-wide activity.
 
@@ -396,11 +396,10 @@ that owns the projects and provider sessions.
   and runs the server's `~/.local/bin/oms`. The desktop holds no OMS runtime
   or project checkout. [SSH package](../plugins/oms-ssh/oms/mcp.json).
 
-To register projects, put the project map at
-`~/.config/oh-my-setting/desktop-projects.json` **on the OMS host**, readable and
-writable by its owning account only, for example with file mode `0600`.
-The direct package also honors an
-absolute `XDG_CONFIG_HOME` for the config directory. Use absolute
+The default project map lives **on the OMS host** under its absolute
+`XDG_CONFIG_HOME`, or under `~/.config` when unset or empty, at
+`oh-my-setting/desktop-projects.json`. The packaged Codex SSH connection
+requires this file. Keep it private to its owner (mode `0600`). Use absolute
 physical paths to Git checkouts or adopted OMS projects that this desktop
 connection may manage. For example, this map offers two choices in the same
 plugin.
@@ -411,6 +410,13 @@ plugin.
   "engine": "/srv/projects/engine"
 }
 ```
+
+`oms_list_projects` reports the binding and the connection profile’s `readOnly`
+flag. A `catalog` offers registered aliases. A `pinned` connection or an
+authorized `cwd` already has a project and returns an empty alias list.
+`unbound` means the host has no project for this connection. An invalid map
+returns an error. A Codex control connection also requires the appropriate
+Room binding for actions on a conversation.
 
 Keep access to that map and SSH account restricted to the intended operators.
 Refresh OMS after changing the map to see the current choices. Each call on a
@@ -449,10 +455,12 @@ Capacity shows the recorded resource policy and its occupancy when configured.
 
 ## Claude Code pane
 
-Claude Code does not render MCP Apps HTML, so its view of this projection is a
-native pane drawn by a mod. `plugins/claude-code/README.md` describes the
-optional `oms-panel` plugin: `/oms-panel` runs `oms dashboard --json` for the
-session directory and draws schema 1 in four tabs. It follows the reading rules
-above, starts no other process and writes nothing. Its fixture tests run with
-`claude plugin test`. Rendering in a live session has not been verified yet,
-and the repository marketplace does not list the plugin.
+In Claude Code, select **oms-panel** from this repository’s **oh-my-setting** marketplace.
+User scope makes the command available across projects. In the current directory,
+`/oms-panel` opens the native **OMS** pane. **Now** shows the recorded goal, verification criteria, project task and
+open attempts. **Work** shows the plan and its recorded workers, **Results**
+shows acceptance criteria and reviews, and **Activity** holds recent operations
+and diagnostics. Keys 1–4 switch views, R refreshes and Esc closes the pane.
+The mod reads the schema-1 `oms dashboard --json` projection and keeps
+suggested actions as text. See the [Claude Code plugin guide](../plugins/claude-code/README.md)
+for loading and validation.

@@ -1,4 +1,4 @@
-# oms-panel: OMS pane for Claude Code
+# OMS for Claude Code
 
 Claude Code reads MCP tool results as text and does not render the MCP Apps
 HTML that the Codex and ChatGPT Work panels use. This plugin is the Claude Code
@@ -18,20 +18,26 @@ Requires Claude Code v2.1.287 or later and an oh-my-setting install that puts
 claude --plugin-dir plugins/claude-code
 ```
 
-At the Claude Code prompt, run `/oms-panel`. The pane opens beside the
-transcript in a wide fullscreen terminal and above the prompt otherwise.
+At the Claude Code prompt, run `/oms-panel` to open **OMS**. The pane opens on **Now**. Claude Code chooses its placement for the available terminal width.
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` `4` | Overview, Agents, Evidence, Attention |
+| `1` Now | Project goal, verification criteria, current task and open attempts |
+| `2` Work | Plan states, recent open attempts, delegated work and scope |
+| `3` Results | Acceptance criteria and recorded reviews |
+| `4` Activity | Recent outcomes, operations, diagnostics and suggested commands |
 | `r` | Read the projection again |
 | Esc | Close the pane |
+
+Open attempts include work waiting for review or blocked on a dependency.
 
 An open pane reads again every 15 seconds. A pane that is closed or no longer
 drawn stops reading by its next tick, and `/oms-panel` starts it again.
 
-The repository marketplace does not list this plugin yet. Registration follows
-the live check below.
+For use across projects, add the repository in Claude Code with
+`/plugin marketplace add eightmm/oh-my-setting`. In `/plugin` → **Discover**,
+select **oms-panel** from **oh-my-setting** and choose **user** scope.
+The separate **oms-skills** entry provides the optional skills.
 
 ## What it does and does not do
 
