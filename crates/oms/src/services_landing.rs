@@ -1644,12 +1644,15 @@ fn has_cargo_cachedir_tag(target: &Path, uid: u32) -> bool {
     buf.starts_with(CARGO_CACHEDIR_TAG)
 }
 
-fn scratch_worktree_dir(dir: &Path, suffix: &str, uid: u32) -> Option<PathBuf> {
+fn scratch_worktree_dir(dir: &Path, suffix: &str, uid: u32) -> Option<(String, PathBuf)> {
     let meta = std::fs::symlink_metadata(dir).ok()?;
     if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != uid {
         return None;
     }
-    let (_, fields) = read_marker(dir)?;
+    let (marker, fields) = read_marker(dir)?;
+    if owner_alive(&fields) != Ok(false) {
+        return None;
+    }
     let marked = PathBuf::from(fields.get("worktree")?);
     let leaf = marked.file_name().and_then(|n| n.to_str())?;
     if leaf != "wt" && leaf != format!("wt-{suffix}") {
@@ -1664,7 +1667,7 @@ fn scratch_worktree_dir(dir: &Path, suffix: &str, uid: u32) -> Option<PathBuf> {
     if worktree != expected || plain_dir(&marked).as_ref() != Some(&worktree) {
         return None;
     }
-    Some(worktree)
+    Some((marker, worktree))
 }
 
 fn eligible_cargo_target(worktree: &Path, uid: u32, now: std::time::SystemTime) -> Option<PathBuf> {
@@ -1736,7 +1739,7 @@ fn scratch_build_outputs(
         if removed_dirs.contains(&dir) {
             continue;
         }
-        let Some(worktree) = scratch_worktree_dir(&dir, suffix, uid) else {
+        let Some((marker, worktree)) = scratch_worktree_dir(&dir, suffix, uid) else {
             continue;
         };
         let now = std::time::SystemTime::now();
@@ -1747,10 +1750,10 @@ fn scratch_build_outputs(
             report.remove_build_output(&target);
             continue;
         }
-        // Recheck immediately before removal.
+        // Recheck immediately before removal: marker, dead owner, worktree and target.
         let rechecked = scratch_worktree_dir(&dir, suffix, uid)
-            .filter(|w| *w == worktree)
-            .and_then(|w| eligible_cargo_target(&w, uid, std::time::SystemTime::now()));
+            .filter(|(m, w)| *m == marker && *w == worktree)
+            .and_then(|(_, w)| eligible_cargo_target(&w, uid, std::time::SystemTime::now()));
         if rechecked.as_ref() != Some(&target) {
             continue;
         }
@@ -2173,28 +2176,34 @@ mod tests {
             let cargo_tag = b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n";
             let idle_age = BUILD_OUTPUT_IDLE_SECS + 3600;
 
-            // Eligible idle tagged targets across live owner, dirty kept worktree, and another repo.
+            // Live and unproven owners stay untouched; dead kept worktrees (same or other repo) reclaim idle tagged targets.
             let wt_live = make_scratch_worktree(&managed, &repo, "idlelive", live);
             std::fs::create_dir_all(wt_live.join(".oms")).unwrap();
             std::fs::write(wt_live.join(".oms/keep.txt"), "keep\n").unwrap();
             let t_live = populate_cargo_target(&wt_live, Some(cargo_tag), idle_age);
 
+            let wt_unproven = make_scratch_worktree(&managed, &repo, "idleunproven", 0);
+            let t_unproven = populate_cargo_target(&wt_unproven, Some(cargo_tag), idle_age);
+
             let wt_dirty = make_scratch_worktree(&managed, &repo, "idledirty", dead);
             std::fs::write(wt_dirty.join("a.txt"), "dirty\n").unwrap();
+            std::fs::create_dir_all(wt_dirty.join(".oms")).unwrap();
+            std::fs::write(wt_dirty.join(".oms/keep.txt"), "keep\n").unwrap();
             let t_dirty = populate_cargo_target(&wt_dirty, Some(cargo_tag), idle_age);
 
-            let wt_other = make_scratch_worktree(&managed, &other_repo, "idleother", live);
+            let wt_other = make_scratch_worktree(&managed, &other_repo, "idleother", dead);
             let t_other = populate_cargo_target(&wt_other, Some(cargo_tag), idle_age);
 
-            // An ineligible recent target stays untouched.
-            let wt_recent = make_scratch_worktree(&managed, &repo, "recent", live);
+            // An ineligible recent target on a dead kept worktree stays untouched.
+            let wt_recent = make_scratch_worktree(&managed, &repo, "recent", dead);
+            std::fs::write(wt_recent.join("a.txt"), "dirty\n").unwrap();
             let t_recent = populate_cargo_target(&wt_recent, Some(cargo_tag), 60);
 
             let off = AtomicBool::new(false);
             let dry = cleanup(root, &repo, false, &off).unwrap();
             let dry_text = text(&dry, "text");
-            assert_eq!(dry.get("removable").py(), "3", "{dry_text}");
-            for target in [&t_live, &t_dirty, &t_other] {
+            assert_eq!(dry.get("removable").py(), "2", "{dry_text}");
+            for target in [&t_dirty, &t_other] {
                 let expected = format!("would remove build output: {}", target.display());
                 assert!(
                     dry_text.lines().any(|l| l == expected),
@@ -2206,15 +2215,22 @@ mod tests {
                     target.display()
                 );
             }
+            for skipped in [&t_live, &t_unproven, &t_recent] {
+                assert!(
+                    !dry_text.contains(&skipped.display().to_string()),
+                    "unexpected dry-run listing for {}: {dry_text}",
+                    skipped.display()
+                );
+            }
             assert!(
-                !dry_text.contains(&t_recent.display().to_string()),
-                "unexpected listing for recent target: {dry_text}"
+                !dry_text.contains(&wt_live.display().to_string()),
+                "live scratch worktree must produce no dry-run report line: {dry_text}"
             );
 
             let applied = cleanup(root, &repo, true, &off).unwrap();
             let applied_text = text(&applied, "text");
-            assert_eq!(applied.get("removable").py(), "3", "{applied_text}");
-            for target in [&t_live, &t_dirty, &t_other] {
+            assert_eq!(applied.get("removable").py(), "2", "{applied_text}");
+            for target in [&t_dirty, &t_other] {
                 let expected = format!("removed build output: {}", target.display());
                 assert!(
                     applied_text.lines().any(|l| l == expected),
@@ -2222,7 +2238,18 @@ mod tests {
                 );
                 assert!(!target.exists(), "apply must remove {}", target.display());
             }
-            assert!(t_recent.is_dir(), "recent target must stay intact");
+            for kept in [&t_live, &t_unproven, &t_recent] {
+                assert!(kept.is_dir(), "{} must stay intact", kept.display());
+                assert!(
+                    !applied_text.contains(&kept.display().to_string()),
+                    "unexpected apply listing for {}: {applied_text}",
+                    kept.display()
+                );
+            }
+            assert!(
+                !applied_text.contains(&wt_live.display().to_string()),
+                "live scratch worktree must produce no apply report line: {applied_text}"
+            );
             assert_eq!(
                 std::fs::read_to_string(wt_live.join("a.txt")).unwrap(),
                 "a\n"
@@ -2234,6 +2261,10 @@ mod tests {
             assert_eq!(
                 std::fs::read_to_string(wt_dirty.join("a.txt")).unwrap(),
                 "dirty\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(wt_dirty.join(".oms/keep.txt")).unwrap(),
+                "keep\n"
             );
             assert_eq!(
                 std::fs::read_to_string(wt_other.join("a.txt")).unwrap(),

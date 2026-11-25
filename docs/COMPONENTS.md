@@ -451,11 +451,12 @@ on no branch, tag or remote ref, or it holds `.oms/plan/tasks.json`,
 scratch worktree at a referenced HEAD is removable. Worktrees holding other `.oms`
 records stay kept, and every kept item prints its reason.
 
-Across any user-owned `oh-my-setting-scratch.*` worktree under the managed root (live or
-dead owner, any repository, including kept worktrees), `oms cleanup` also classifies an
-idle top-level Cargo `target/` directory as regenerable build output when it is a real
-user-owned directory containing Cargo's `CACHEDIR.TAG` and none of `target/`, `target/*/`
-or `target/*/.fingerprint` was modified in the last 24 hours. Dry-run lists each match as
+Across user-owned `oh-my-setting-scratch.*` worktrees under the managed root (dead
+scratch worktrees only — proven dead owner, any repository, including kept worktrees;
+live or unproven owners are skipped), `oms cleanup` also classifies an idle top-level
+Cargo `target/` directory as regenerable build output when it is a real user-owned
+directory containing Cargo's `CACHEDIR.TAG` and none of `target/`, `target/*/` or
+`target/*/.fingerprint` was modified in the last 24 hours. Dry-run lists each match as
 `would remove build output` and `--apply` removes only `target/`, never the worktree
 itself, tracked files or `.oms/`.
 
