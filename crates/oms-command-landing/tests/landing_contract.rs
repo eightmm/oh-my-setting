@@ -2870,6 +2870,10 @@ fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                     iso.git_out(&a, &["rev-parse", "HEAD^{tree}"])
                 );
             } else if matches!(scenario, "target-moved" | "late-target") {
+                assert!(
+                    final_result.2.contains("merge it into the PR branch"),
+                    "{context}"
+                );
                 assert_eq!(target, independent);
                 assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/a"]), head);
             } else {
@@ -3159,7 +3163,7 @@ exec '{real_git}' "$@"
     let args = ["--gate", "true", "--ignore-siblings", "--no-update"];
     let r = iso.run_with_services("land", &repo, &args, &env);
     if squash_during_ci {
-        assert_refused(&r, "ref changed during CI");
+        assert_refused(&r, "target moved during CI");
     } else {
         assert_eq!(r.0, 0, "{r:?}");
     }
