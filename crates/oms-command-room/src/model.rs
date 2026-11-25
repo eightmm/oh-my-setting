@@ -45,6 +45,26 @@ pub fn identifier<'a>(value: &'a str, label: &str) -> Result<&'a str> {
     }
     Ok(value)
 }
+/// Read-only attribution of a lifecycle row. Only omitted tags can inherit a parent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptRoom<'a> {
+    Unspecified,
+    Named(&'a str),
+    Invalid,
+}
+
+impl<'a> AttemptRoom<'a> {
+    /// Adapters pass a present non-string tag as an empty (invalid) identifier.
+    pub fn from_tags(current: Option<&'a str>, legacy: Option<&'a str>) -> Self {
+        match (current, legacy) {
+            (None, None) => Self::Unspecified,
+            (Some(a), Some(b)) if a != b => Self::Invalid,
+            (Some(id), _) | (_, Some(id)) if identifier(id, "room").is_ok() => Self::Named(id),
+            _ => Self::Invalid,
+        }
+    }
+}
+
 pub fn hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value

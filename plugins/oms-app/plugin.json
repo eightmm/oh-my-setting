@@ -1,6 +1,6 @@
 {
   "name": "oms-panel",
-  "version": "0.8.4",
+  "version": "0.8.6",
   "description": "Open the OMS project dashboard and read project, GitHub, usage and Board status on a connected OMS host.",
   "displayName": "OMS",
   "suggestedPrompts": [

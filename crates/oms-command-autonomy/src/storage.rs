@@ -6,6 +6,156 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+#[cfg(test)]
+mod snapshot_race_tests {
+    use super::*;
+    use oms_command_plan::services::{GroupMembership, GroupResolver};
+    use std::cell::Cell;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Condvar;
+    use std::time::Duration;
+
+    static STATE: Mutex<(bool, bool)> = Mutex::new((false, false));
+    static WAKE: Condvar = Condvar::new();
+    thread_local! { static READER: Cell<u8> = const { Cell::new(0) }; }
+
+    fn timeout() -> Duration {
+        Duration::from_secs(
+            std::env::var("PLAN_READ_TEST_TIMEOUT")
+                .or_else(|_| std::env::var("OMS_TEST_CALL_TIMEOUT"))
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+        )
+    }
+
+    fn group(gid: u32) -> oms_command_plan::Result<GroupMembership> {
+        READER.with(|reader| match reader.get() {
+            1 => reader.set(2),
+            2 => {
+                reader.set(0);
+                let mut state = STATE.lock().unwrap();
+                state.0 = true;
+                WAKE.notify_all();
+                let (state, _) = WAKE.wait_timeout_while(state, timeout(), |s| !s.1).unwrap();
+                assert!(state.1, "publisher did not release reader");
+            }
+            _ => {}
+        });
+        let uid = rustix::process::getuid().as_raw();
+        Ok(GroupMembership {
+            gid,
+            explicit_member_uids: vec![uid],
+            primary_member_uids: vec![uid],
+        })
+    }
+    struct Host;
+    impl oms_command_plan::Services for Host {
+        fn group_membership_resolver(&self) -> Option<GroupResolver> {
+            Some(group)
+        }
+    }
+    impl Services for Host {}
+
+    #[test]
+    fn worker_plan_value_snapshot_is_guarded_against_publication() {
+        let ambient = |key: &std::ffi::OsStr| {
+            let key = key.to_string_lossy();
+            key.starts_with("OMS_") || key.starts_with("OH_MY_SETTING_")
+        };
+        if std::env::vars_os().any(|(key, _)| ambient(&key)) {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            if let Some(timeout) = std::env::var_os("OMS_TEST_CALL_TIMEOUT") {
+                child.env("PLAN_READ_TEST_TIMEOUT", timeout);
+            }
+            for (key, _) in std::env::vars_os().filter(|(key, _)| ambient(key)) {
+                child.env_remove(key);
+            }
+            let out = child.args(["--exact", "storage::snapshot_race_tests::worker_plan_value_snapshot_is_guarded_against_publication", "--nocapture"]).output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let path = std::env::temp_dir().join(value::random("oms-plan-read-").unwrap());
+        std::fs::create_dir(&path).unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let host = Host;
+        let stop = AtomicBool::new(false);
+        let command = |args: &[&str]| {
+            let words = args
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            let (code, _, err) = oms_command_plan::run_with_services(&words, &path, &stop, &host);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        };
+        command(&["init", "--goal", "race"]);
+        command(&[
+            "add",
+            "--id",
+            "t1",
+            "--title",
+            "t1",
+            "--allowed",
+            "a/",
+            "--verify",
+            "true",
+        ]);
+        for relative in ["", ".oms", ".oms/plan"] {
+            std::fs::set_permissions(path.join(relative), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        std::fs::set_permissions(path.join(ACTIVE), std::fs::Permissions::from_mode(0o660))
+            .unwrap();
+        let gates = Gates::default();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut ctx = Context::new(path.clone(), path.clone(), &host, &stop).unwrap();
+                ctx.gates = Some(&gates);
+                READER.with(|reader| reader.set(1));
+                ctx.plan_value()
+            });
+            let state = STATE.lock().unwrap();
+            let (state, _) = WAKE.wait_timeout_while(state, timeout(), |s| !s.0).unwrap();
+            assert!(state.0, "worker did not open Plan");
+            drop(state);
+            let lock = oms_lock::Lock::for_file(
+                &path.join(ACTIVE),
+                oms_lock::Settings::from_env().unwrap(),
+            )
+            .unwrap()
+            .try_acquire();
+            let guarded = matches!(lock, Err(oms_lock::Error::Busy));
+            drop(lock);
+            if guarded {
+                STATE.lock().unwrap().1 = true;
+                WAKE.notify_all();
+            }
+            command(&["claim", "--id", "t1", "--provider", "codex"]);
+            if !guarded {
+                STATE.lock().unwrap().1 = true;
+                WAKE.notify_all();
+            }
+            let read = reader.join().unwrap();
+            assert!(guarded, "worker Plan read did not hold writer lock");
+            assert!(read.is_ok());
+        });
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
 pub const MAX_FILE: usize = 1024 * 1024;
 pub const MAX_LEDGER: usize = 16 * 1024 * 1024;
 pub const ACTIVE: &str = ".oms/plan/tasks.json";
@@ -109,7 +259,13 @@ impl<'a> Context<'a> {
     }
     pub fn plan_value(&self) -> Result<Value> {
         let _gate = self.gates.map(Gates::plan);
-        value::from_plan(&self.plan()?.load()?.plan)
+        let plan = self.plan()?;
+        let snapshot = if self.gates.is_some() {
+            plan.load_with_locked_snapshot()?
+        } else {
+            plan.load()?
+        };
+        value::from_plan(&snapshot.plan)
     }
     pub fn git(&self, args: &[&str]) -> Result<String> {
         Ok(self.plan()?.git().text(args)?)

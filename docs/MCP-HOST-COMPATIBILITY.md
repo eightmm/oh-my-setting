@@ -148,7 +148,7 @@ Claude/AGY live rendering이나 control parity를 주장하지 않는다.
 
 | 기존 경로 | 재사용 및 변경 경계 |
 |---|---|
-| [Claude marketplace](../.claude-plugin/marketplace.json) | 현재 skills-only이며 local `oms`가 필요. MCP·hooks·pane 설치 완료와 구분 |
+| [Claude marketplace](../.claude-plugin/marketplace.json) | `oms-skills`와 `oms-panel`을 따로 선택할 수 있다. 네이티브 pane은 설치된 `oms`를 호출하며 현재 프로젝트에서 `/oms-panel`로 연다 |
 | [MCP integration writer](../crates/oms-command-lifecycle/src/integrations.rs) | Claude local stdio 등 기존 설정·소유권 재사용 |
 | [AGY bundle](../plugins/antigravity/plugin.json)와 [installer](../crates/oms-command-lifecycle/src/plugins.rs) | 기존 `mcp_config.json` 생성과 설치·제거 ownership 재사용 |
 | Runtime·panel-core·session adapters | 같은 projection, Main binding, generation과 기존 action writer 유지 |

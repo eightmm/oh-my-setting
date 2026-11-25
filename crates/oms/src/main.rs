@@ -1873,7 +1873,7 @@ fn main() {
     let args = match parsed {
         Ok(v) => v,
         Err(e) if e == "version requested" => {
-            write_stdout(b"0.7.0\n");
+            write_stdout(format!("{}\n", oms_runtime::CORE_VERSION).as_bytes());
             return;
         }
         Err(e) if e == "root help requested" => {

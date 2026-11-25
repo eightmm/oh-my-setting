@@ -12,7 +12,10 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v17.html";
+const URI: &str = "ui://oms/conversation-panel/v20.html";
+const V19: &str = "ui://oms/conversation-panel/v19.html";
+const V18: &str = "ui://oms/conversation-panel/v18.html";
+const V17: &str = "ui://oms/conversation-panel/v17.html";
 const V16: &str = "ui://oms/conversation-panel/v16.html";
 const V15: &str = "ui://oms/conversation-panel/v15.html";
 const V14: &str = "ui://oms/conversation-panel/v14.html";
@@ -64,6 +67,8 @@ const START: &str = "oms_start_main";
 const START_STATUS: &str = "oms_start_status";
 const APPROVALS: &str = "oms_list_approvals";
 const DECIDE: &str = "oms_decide_approval";
+const RECORD_ISSUE: &str = "oms_record_reviewed_issue";
+const ISSUE_STATUS: &str = "oms_reviewed_issue_status";
 const ASSIGN: &str = "oms_assign_provider";
 const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
@@ -182,6 +187,8 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | START_STATUS
                     | APPROVALS
                     | DECIDE
+                    | RECORD_ISSUE
+                    | ISSUE_STATUS
                     | ASSIGN
                     | ASSIGN_RESULT
             )
@@ -233,9 +240,34 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         false,
     );
     chat["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let mut issue_address = json!({"project":project,"room":ident,"owner":ident,"requestId":{"type":"string","format":"uuid"}});
+    issue_address["issue"] = json!({"type":"string","maxLength":151,"description":"Canonical owner/repo#N from the reviewed same-project issue."});
+    issue_address["sha256"] = json!({"type":"string","pattern":"^[0-9a-f]{64}$"});
+    let mut issue_status = make(
+        ISSUE_STATUS,
+        "Read a receipt for this conversation’s exact Main by its requestId, or look up the stable requestId by reviewed issue and sha256. This read never records a new receipt.",
+        issue_address.clone(),
+        &["room", "owner"],
+        false,
+    );
+    issue_status["inputSchema"]["oneOf"] = json!([
+        {"required":["requestId"],"not":{"anyOf":[{"required":["issue"]},{"required":["sha256"]}]}},
+        {"required":["issue","sha256"],"not":{"required":["requestId"]}}
+    ]);
+    let mut record_issue = make(
+        RECORD_ISSUE,
+        "Record the user-selected GitHub issue and reviewed SHA-256 for this conversation’s exact Main. First look up the requestId with oms_reviewed_issue_status for this exact issue and sha256. The first record reads GitHub. This action does not start work.",
+        issue_address,
+        &["room", "owner", "requestId", "issue", "sha256"],
+        true,
+    );
+    record_issue["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
+    record_issue["_meta"]["ui"]["visibility"] = json!(["app"]);
     let all = json!([
         opener,
         chat,
+        record_issue,
+        issue_status,
         make(
             USAGE,
             "Read recorded usage for recent OMS attempts and local provider quota windows.",
@@ -421,6 +453,30 @@ fn uuid(value: &str) -> bool {
             }
         })
 }
+fn github_slug(slug: &str) -> bool {
+    slug.split_once('/').is_some_and(|(owner, repo)| {
+        (1..=39).contains(&owner.len())
+            && owner.as_bytes()[0].is_ascii_alphanumeric()
+            && owner
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && (1..=100).contains(&repo.len())
+            && !matches!(repo, "." | "..")
+            && repo
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    })
+}
+
+fn canonical_issue(value: &str) -> bool {
+    value.split_once('#').is_some_and(|(slug, n)| {
+        github_slug(slug)
+            && (1..=10).contains(&n.len())
+            && !n.starts_with('0')
+            && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 fn alias(value: &str) -> bool {
     (1..=80).contains(&value.len())
         && value.as_bytes()[0].is_ascii_alphanumeric()
@@ -983,11 +1039,14 @@ impl Server<'_> {
                             | V14
                             | V15
                             | V16
+                            | V17
+                            | V18
+                            | V19
                     )
                 ) =>
             {
                 json!({"contents":[{
-                    "uri":params["uri"],"mimeType":MIME,"text":panel_html(),
+                    "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
                     "_meta":{"ui":{"preferredDisplayMode":"fullscreen","csp":{"connectDomains":[],"resourceDomains":[]}}}
                 }]})
             }
@@ -1033,6 +1092,8 @@ impl Server<'_> {
                         "repairOnly",
                     ],
                     ASSIGN_RESULT => &["project", "room", "requestId", "after"],
+                    RECORD_ISSUE => &["project", "room", "owner", "requestId", "issue", "sha256"],
+                    ISSUE_STATUS => &["project", "room", "owner", "requestId", "issue", "sha256"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
                     _ => return error(id, -32602, "unknown desktop tool"),
                 };
@@ -1303,18 +1364,6 @@ impl Server<'_> {
             .strip_prefix("https://github.com/")
             .and_then(|s| s.strip_suffix(&format!("/issues/{number}")))
             .unwrap_or("");
-        let valid_slug = slug.split_once('/').is_some_and(|(owner, repo)| {
-            (1..=39).contains(&owner.len())
-                && owner.as_bytes()[0].is_ascii_alphanumeric()
-                && owner
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                && (1..=100).contains(&repo.len())
-                && !matches!(repo, "." | "..")
-                && repo
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        });
         let revision = source["revision"].as_str().unwrap_or("");
         let sha = source["sha256"].as_str().unwrap_or("");
         if data["schema"] != 1
@@ -1322,7 +1371,7 @@ impl Server<'_> {
             || data["trusted"] != false
             || source["kind"] != "github-issue"
             || source["state"] != "open"
-            || !valid_slug
+            || !github_slug(slug)
             || revision.len() != 20
             || !revision.ends_with('Z')
             || chrono::DateTime::parse_from_rfc3339(revision).is_err()
@@ -1359,12 +1408,11 @@ impl Server<'_> {
             } else {
                 "unbound"
             };
-            let mut result =
-                json!({"projects":projects.into_keys().collect::<Vec<_>>(),"binding":binding});
-            if self.config.profile == ToolProfile::McpApp {
-                result["readOnly"] = json!(true);
-            }
-            return Ok(result);
+            return Ok(json!({
+                "projects": projects.into_keys().collect::<Vec<_>>(),
+                "binding": binding,
+                "readOnly": self.config.profile == ToolProfile::McpApp,
+            }));
         }
         if name == OPEN {
             if args.get("project").is_some() {
@@ -1399,6 +1447,9 @@ impl Server<'_> {
                 .ok_or("A lowercase UUID requestId is required.")?;
             Ok(format!("oms-app-{key}"))
         };
+        if matches!(name, RECORD_ISSUE | ISSUE_STATUS) {
+            return self.reviewed_issue(&repo, name, args, meta);
+        }
         if name == ASSIGN || name == ASSIGN_RESULT {
             return self.assignment(&repo, name, args, meta);
         }
@@ -1849,11 +1900,120 @@ impl Server<'_> {
         }
     }
 
+    fn reviewed_issue(
+        &self,
+        repo: &Path,
+        name: &str,
+        args: &Value,
+        meta: &Value,
+    ) -> PanelResult<Value> {
+        use std::os::unix::fs::MetadataExt;
+        if self.config.profile != ToolProfile::ChatGptPanel {
+            return Err("A bound desktop Main is required.".into());
+        }
+        let thread = meta["threadId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("Open this control from the Room owner's bound conversation.")?;
+        let consumer = crate::storage::hash(thread);
+        let id = |key: &str| {
+            args[key]
+                .as_str()
+                .filter(|s| crate::matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", s))
+        };
+        let room = id("room").ok_or("Invalid Room.")?;
+        let owner = id("owner").ok_or("Invalid Main participant.")?;
+        let request = args
+            .get("requestId")
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| uuid(s))
+                    .ok_or("A lowercase UUID requestId is required.")
+            })
+            .transpose()?;
+        let selected = args.get("issue").is_some() || args.get("sha256").is_some();
+        if (name == RECORD_ISSUE && (!selected || request.is_none()))
+            || (name == ISSUE_STATUS && selected == request.is_some())
+        {
+            return Err(
+                "Choose an exact receipt ID or a reviewed issue and SHA-256 for lookup.".into(),
+            );
+        }
+        let sha = |v: &Value| {
+            v.as_str().is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        };
+        let mut extra = vec![("--owner", owner)];
+        if selected {
+            let issue = args["issue"]
+                .as_str()
+                .filter(|s| canonical_issue(s))
+                .ok_or("Select an exact canonical GitHub issue.")?;
+            if !sha(&args["sha256"]) {
+                return Err("A reviewed SHA-256 is required.".into());
+            }
+            extra.extend([
+                ("--issue", issue),
+                ("--digest", args["sha256"].as_str().unwrap()),
+            ]);
+        }
+        let action = if name == RECORD_ISSUE {
+            "desktop-issue-record"
+        } else {
+            "desktop-issue-status"
+        };
+        let identity = || {
+            std::fs::metadata(repo)
+                .map(|m| (m.dev(), m.ino()))
+                .map_err(|_| BINDING.to_owned())
+        };
+        let before = identity()?;
+        let argv = Self::assignment_argv(action, repo, room, request, &consumer[..32], &extra);
+        let (data,_)=self.panel_exec(repo,argv,false).map_err(|_|"OMS could not confirm the reviewed issue receipt. Check its status with the reviewed issue and SHA-256 or the original request ID.")?;
+        if self.panel_repo(args)? != repo || identity()? != before {
+            return Err(BINDING.into());
+        }
+        let actual = data["requestId"]
+            .as_str()
+            .filter(|s| uuid(s))
+            .filter(|s| match request {
+                Some(expected) => expected == *s,
+                None => {
+                    s.as_bytes()[14] == b'8'
+                        && matches!(s.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
+                }
+            })
+            .ok_or("OMS returned an unrecognized reviewed issue receipt.")?;
+        let count = data.as_object().map(|v| v.keys().count());
+        if name == ISSUE_STATUS && count == Some(2) && data["status"] == "not_found" {
+            return Ok(json!({"status":"not_found","requestId":actual}));
+        }
+        if count != Some(8)
+            || data["schema"] != 1
+            || data["kind"] != "oms-reviewed-issue-receipt"
+            || data["status"] != "recorded"
+            || data["room"] != room
+            || data["participant"] != owner
+            || !data["issue"].as_str().is_some_and(canonical_issue)
+            || !sha(&data["sha256"])
+            || selected && (data["issue"] != args["issue"] || data["sha256"] != args["sha256"])
+        {
+            return Err("OMS returned an unrecognized reviewed issue receipt.".into());
+        }
+        Ok(
+            json!({"schema":1,"kind":"oms-reviewed-issue-receipt","status":"recorded","room":room,"participant":owner,
+            "requestId":actual,"issue":data["issue"],"sha256":data["sha256"]}),
+        )
+    }
+
     fn assignment_argv(
         action: &str,
         repo: &Path,
         room: &str,
-        request: &str,
+        request: Option<&str>,
         digest: &str,
         extra: &[(&str, &str)],
     ) -> Vec<OsString> {
@@ -1866,9 +2026,10 @@ impl Server<'_> {
             room.into(),
             "--conversation-digest".into(),
             digest.into(),
-            "--request".into(),
-            request.into(),
         ];
+        if let Some(id) = request {
+            argv.extend(["--request".into(), id.into()]);
+        }
         for (flag, value) in extra {
             argv.extend([OsString::from(*flag), OsString::from(*value)]);
         }
@@ -1941,7 +2102,14 @@ impl Server<'_> {
                 .ok_or("Invalid cursor.")?;
             let (data, _) = self.panel_exec(
                 repo,
-                Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[]),
+                Self::assignment_argv(
+                    "desktop-assign-status",
+                    repo,
+                    room,
+                    Some(request),
+                    &digest,
+                    &[],
+                ),
                 false,
             )?;
             if data["request"] == request && data["status"] == "not_found" {
@@ -2002,13 +2170,20 @@ impl Server<'_> {
         // A repair must remain unable to create an intent even if the Room
         // changed since the widget observed the unlinked operation.
         let argv = if repair {
-            Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[])
+            Self::assignment_argv(
+                "desktop-assign-status",
+                repo,
+                room,
+                Some(request),
+                &digest,
+                &[],
+            )
         } else {
             Self::assignment_argv(
                 "desktop-assign",
                 repo,
                 room,
-                request,
+                Some(request),
                 &digest,
                 &[
                     ("--provider", provider),
@@ -2073,7 +2248,7 @@ impl Server<'_> {
                 "desktop-assign-receipt",
                 repo,
                 room,
-                request,
+                Some(request),
                 &digest,
                 &[("--operation", &operation)],
             ),
@@ -2265,37 +2440,6 @@ impl Server<'_> {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         command_catalog(&stdout, offset)
     }
-}
-
-fn panel_html() -> &'static str {
-    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BODY.get_or_init(|| {
-        let source = include_str!("conversation-panel.html");
-        let (prefix, tail) = source.split_once("<script>\n").expect("panel script");
-        let (code, suffix) = tail.split_once("</script>").expect("panel script end");
-        let (before, tail) = code
-            .split_once("const catalogRows = `")
-            .expect("panel catalog");
-        let (catalog, after) = tail.split_once("`;").expect("panel catalog end");
-        let mut body = String::with_capacity(source.len());
-        body.push_str(prefix);
-        body.push_str("<script>\n");
-        // Keep the translations and all line breaks intact. Only the layout
-        // indentation of the surrounding JavaScript is redundant on the wire.
-        let append = |body: &mut String, js: &str| {
-            for line in js.split_inclusive('\n') {
-                body.push_str(line.trim_start_matches(' '));
-            }
-        };
-        append(&mut body, before);
-        body.push_str("const catalogRows = `");
-        body.push_str(catalog);
-        body.push_str("`;");
-        append(&mut body, after);
-        body.push_str("</script>");
-        body.push_str(suffix);
-        body
-    })
 }
 
 fn command_name(value: &str) -> bool {

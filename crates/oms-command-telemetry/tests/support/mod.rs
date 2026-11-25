@@ -6,18 +6,6 @@ use std::sync::atomic::AtomicBool;
 
 pub struct Temp(pub PathBuf);
 impl Temp {
-    pub fn private() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let root = Self::new();
-        for path in [
-            root.0.clone(),
-            root.0.join(".oms"),
-            root.0.join(".oms/artifacts"),
-        ] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        root
-    }
     pub fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -30,6 +18,11 @@ impl Temp {
             std::process::id()
         ));
         std::fs::create_dir_all(root.join(".oms/artifacts")).unwrap();
+        // The dispatch writer refuses group-writable state under any umask.
+        for path in [root.clone(), root.join(".oms"), root.join(".oms/artifacts")] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         Self(root)
     }
     pub fn write(&self, path: &str, bytes: impl AsRef<[u8]>) {

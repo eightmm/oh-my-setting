@@ -2213,7 +2213,7 @@ fn frontdoor_routes_navigation_and_native_commands_without_python() {
     let source = std::env::var_os("OMS_CONTRACT_REPO")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
-    for rel in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
+    for rel in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "VERSION"] {
         let src_file = source.join(rel);
         if src_file.is_file() {
             std::fs::copy(&src_file, f.0.join(rel)).unwrap();
@@ -2262,6 +2262,25 @@ fn frontdoor_routes_navigation_and_native_commands_without_python() {
     let nav_out = String::from_utf8_lossy(&nav.stdout);
     assert!(nav_out.contains("install-profile"));
     assert!(nav_out.contains("panel"));
+
+    let version = std::fs::read(source.join("VERSION")).unwrap();
+    exact(
+        f.command(&bin, &entry).arg("--version").output().unwrap(),
+        0,
+        &version,
+        b"",
+    );
+    for argv in [&["--version"][..], &["runtime", "--version"][..]] {
+        let out = f
+            .command(&bin, &f.binary())
+            .arg("--oms-frontdoor")
+            .arg(&entry)
+            .arg("--")
+            .args(argv)
+            .output()
+            .unwrap();
+        exact(out, 0, &version, b"");
+    }
 
     for argv in [
         vec!["room", "--help"],

@@ -565,6 +565,10 @@ impl<'a> Plan<'a> {
     pub fn load(&self) -> Result<Snapshot> {
         self.load_from_snapshot(self.read_snapshot()?)
     }
+    /// Load from a file snapshot captured under the canonical writer lock.
+    pub fn load_with_locked_snapshot(&self) -> Result<Snapshot> {
+        self.load_from_snapshot(self.read_locked_snapshot()?)
+    }
     fn read_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
         self.plan_storage()
             .snapshot(&self.context.plan_file, MAX_JSON, true)
@@ -1366,7 +1370,12 @@ impl<'a> Plan<'a> {
             return crate::acceptance::execute(self, req, None);
         }
         if req.read_only() {
-            return self.query(req, &mut self.load()?);
+            let mut snapshot = if req.action == EvidenceSnapshot {
+                self.load_with_locked_snapshot()?
+            } else {
+                self.load()?
+            };
+            return self.query(req, &mut snapshot);
         }
         self.locked(
             matches!(

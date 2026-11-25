@@ -16,7 +16,7 @@ const RUN_TIMEOUT_MS = 20_000
 const PANE_COLUMNS = 64
 
 // What the pane shows. All of it can be lost on a reload: the next refresh rebuilds it.
-let tab = 'overview'
+let tab = 'now'
 let snapshot = { status: 'empty' }
 let isRunning = false
 let timer = null
@@ -68,7 +68,7 @@ export function register(on) {
       // immediate: the pane can be opened while Claude is working
       await $.command.register({
         name: COMMAND,
-        description: 'Open the read-only OMS collaboration pane',
+        description: 'Open OMS to see current work and verified results',
         immediate: true,
       })
     } catch {
@@ -79,6 +79,7 @@ export function register(on) {
 
   // Runs when the person types /oms-panel
   on('command.run', { command: COMMAND }, async ($) => {
+    tab = 'now'
     await $.ui.open({ id: PANE, title: 'OMS', focus: true, closeOnEscape: true, columns: PANE_COLUMNS })
     wasDrawn = true
     // Read outside this event, so the command returns at once

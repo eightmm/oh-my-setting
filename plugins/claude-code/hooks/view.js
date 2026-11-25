@@ -14,10 +14,10 @@ const MAX_LINE = 2000
 const MAX_ROWS = 8
 
 export const TABS = [
-  { id: 'overview', label: 'Overview', hotkey: '1' },
-  { id: 'agents', label: 'Agents', hotkey: '2' },
-  { id: 'evidence', label: 'Evidence', hotkey: '3' },
-  { id: 'attention', label: 'Attention', hotkey: '4' },
+  { id: 'now', label: 'Now', hotkey: '1' },
+  { id: 'work', label: 'Work', hotkey: '2' },
+  { id: 'results', label: 'Results', hotkey: '3' },
+  { id: 'activity', label: 'Activity', hotkey: '4' },
 ]
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -91,13 +91,7 @@ export function headerLines(snapshot) {
   }
   const report = snapshot.report
   const repo = isObject(report.repo) ? report.repo : {}
-  const out = [
-    line(
-      'repo=' + shown(repo.name) + '  ' + shown(repo.branch) + '@' + shown(repo.head) +
-        '  snapshot=' + shown(report.generated_at),
-      'dim',
-    ),
-  ]
+  const out = [line(shown(repo.name) + ' · ' + shown(repo.branch), 'dim')]
   const sources = isObject(report.collection) ? report.collection.sources : null
   if (isObject(sources)) {
     for (const [source, status] of Object.entries(sources)) {
@@ -112,8 +106,11 @@ export function headerLines(snapshot) {
 
 function goalLine(report) {
   const goal = report.goal
-  if (!isObject(goal) || !goal.text) return line('goal: none recorded', 'dim')
-  return line('goal: ' + shown(goal.text) + ' (' + shown(goal.source) + ')')
+  if (!isObject(goal) || !goal.text) {
+    return goal === null && report.collection?.sources?.goal === 'ok'
+      ? line('Goal: none recorded', 'dim') : line('Goal: unavailable', 'warn')
+  }
+  return line('Goal: ' + shown(goal.text))
 }
 
 function scopeLine(report) {
@@ -130,11 +127,10 @@ function scopeLine(report) {
 
 function taskLine(report) {
   const task = report.task
-  if (!isObject(task) || task.healthy !== true) return line('task: UNAVAILABLE or invalid', 'warn')
-  if (task.present !== true) return line('task: none active', 'dim')
+  if (!isObject(task) || task.healthy !== true) return line('Project task: unavailable', 'warn')
+  if (task.present !== true) return line('Project task: none active', 'dim')
   return line(
-    'task: ' + shown(task.task_id) + ' status=' + shown(task.status) + ' verification=' + shown(task.verification) +
-      (task.stale === true ? '  STALE' : ''),
+    (task.stale === true ? 'Previous task: ' : 'Project task: ') + shown(task.task_id) + ' · ' + shown(task.status),
     task.stale === true ? 'warn' : undefined,
   )
 }
@@ -156,18 +152,18 @@ function attemptsLine(report) {
     return line('attempts: UNAVAILABLE (lifecycle stream invalid)', 'warn')
   }
   return line(
-    'attempts (OMS lifecycle): ' + shown(attempts.total) + ' total, ' + shown(attempts.active) + ' active  ' +
+    'attempts (OMS lifecycle): ' + shown(attempts.total) + ' total, ' + shown(attempts.active) + ' open  ' +
       counts(attempts.by_state),
   )
 }
 
 function acceptanceLine(report) {
   const acceptance = report.acceptance
-  if (!isObject(acceptance) || acceptance.available !== true) return line('acceptance: UNAVAILABLE', 'warn')
-  if (acceptance.total === 0) return line('acceptance: no criteria recorded; completion cannot be proven', 'warn')
+  if (!isObject(acceptance) || acceptance.available !== true) return line('Verification: unavailable', 'warn')
+  if (acceptance.total === 0) return line('Verification: no criteria recorded', 'warn')
   const verified = isObject(acceptance.counts) ? acceptance.counts.verified : null
   return line(
-    'acceptance: ' + shown(verified) + '/' + shown(acceptance.total) + ' verified  ' + counts(acceptance.counts),
+    'Verification: ' + shown(verified) + '/' + shown(acceptance.total) + ' criteria verified',
     acceptance.complete === true ? 'ok' : undefined,
   )
 }
@@ -192,17 +188,14 @@ function omitted(value) {
   return typeof value === 'number' && value > 0 ? [line('  … ' + value + ' more not shown', 'dim')] : []
 }
 
-function overview(report) {
+function now(report) {
+  const attempts = report.attempts
   return [
     goalLine(report),
-    scopeLine(report),
-    taskLine(report),
-    planLine(report),
-    attemptsLine(report),
     acceptanceLine(report),
-    attentionLine(report),
-    ...nextLines(report),
-    line('coverage: ' + shown(report.coverage), 'dim'),
+    taskLine(report),
+    attempts?.available === true
+      ? line('Open attempts: ' + shown(attempts.active)) : line('Open attempts: unavailable', 'warn'),
   ]
 }
 
@@ -219,16 +212,17 @@ function attemptRow(row, withUsage) {
   return line(text + ' ' + shown(row.updated_at))
 }
 
-function agents(report) {
-  const out = [attemptsLine(report)]
+function work(report) {
+  const out = [planLine(report), taskLine(report)]
+  if (report.task?.healthy === true && report.task.present === true) {
+    out.push(line('Task verification: ' + shown(report.task.verification)))
+  }
+  out.push(attemptsLine(report))
   const attempts = report.attempts
   if (isObject(attempts) && attempts.available === true) {
-    const active = list(attempts.active_recent).slice(0, MAX_ROWS)
-    out.push(line(active.length ? 'active now:' : 'active now: none', active.length ? undefined : 'dim'))
-    for (const row of active) out.push(attemptRow(row, false))
-    const recent = list(attempts.recent).slice(0, MAX_ROWS)
-    out.push(line(recent.length ? 'recent outcomes:' : 'recent outcomes: none recorded', recent.length ? undefined : 'dim'))
-    for (const row of recent) out.push(attemptRow(row, true))
+    const open = list(attempts.active_recent).slice(0, MAX_ROWS)
+    out.push(line(open.length ? 'Recent open attempts:' : 'Recent open attempts: none', open.length ? undefined : 'dim'))
+    for (const row of open) out.push(attemptRow(row, false))
   }
   if (report.delegations === null || report.delegations === undefined) {
     out.push(line('delegations: UNAVAILABLE', 'warn'))
@@ -237,15 +231,33 @@ function agents(report) {
     if (delegations.length === 0) out.push(line('delegations: none', 'dim'))
     for (const row of delegations) {
       if (!isObject(row)) continue
-      const live = row.live === true
+      const status = row.live === true ? 'live' : row.live === false ? 'ORPHAN (dead pid)' : 'unknown'
       out.push(
         line(
           'delegation: ' + shown(row.id) + ' ' + shown(row.provider) + ' role=' + shown(row.role) +
-            ' started=' + shown(row.started_at) + ' ' + (live ? 'live' : 'ORPHAN (dead pid)'),
-          live ? undefined : 'error',
+            ' started=' + shown(row.started_at) + ' ' + status,
+          row.live === false ? 'error' : undefined,
         ),
       )
     }
+  }
+  if (report.goal?.source) out.push(line('Goal source: ' + shown(report.goal.source), 'dim'))
+  out.push(scopeLine(report))
+  return out
+}
+
+function activity(report) {
+  const out = [
+    line('Snapshot: ' + shown(report.generated_at) + ' · HEAD ' + shown(report.repo?.head), 'dim'),
+    ...attention(report),
+  ]
+  const attempts = report.attempts
+  if (attempts?.available === true) {
+    const recent = list(attempts.recent).slice(0, MAX_ROWS)
+    out.push(line(recent.length ? 'recent outcomes:' : 'recent outcomes: none recorded', recent.length ? undefined : 'dim'))
+    for (const row of recent) out.push(attemptRow(row, true))
+  } else {
+    out.push(line('recent outcomes: unavailable', 'warn'))
   }
   const operations = report.operations
   if (!isObject(operations) || operations.available !== true) {
@@ -268,15 +280,17 @@ function agents(report) {
     }
     out.push(...omitted(operations.omitted))
   }
+  out.push(line('coverage: ' + shown(report.coverage), 'dim'))
   return out
 }
 
 const CRITERION_TONE = { verified: 'ok', failed: 'error', stale: 'warn', missing: 'warn', inconclusive: 'warn' }
 
-function evidence(report) {
+function results(report) {
   const out = [acceptanceLine(report)]
   const acceptance = report.acceptance
   if (isObject(acceptance) && acceptance.available === true) {
+    if (isObject(acceptance.counts)) out.push(line(counts(acceptance.counts), 'dim'))
     for (const row of list(acceptance.criteria).slice(0, MAX_ROWS)) {
       if (!isObject(row)) continue
       out.push(
@@ -323,10 +337,10 @@ function attention(report) {
   return out
 }
 
-const BODIES = { overview, agents, evidence, attention }
+const BODIES = { now, work, results, activity }
 
-// Lines for one tab. An unknown tab falls back to the overview.
+// Lines for one tab. An unknown tab falls back to Now.
 export function bodyLines(report, tab) {
   if (!isObject(report)) return []
-  return (BODIES[tab] ?? overview)(report)
+  return (BODIES[tab] ?? now)(report)
 }

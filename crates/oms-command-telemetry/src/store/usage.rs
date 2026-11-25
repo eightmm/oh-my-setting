@@ -1265,18 +1265,69 @@ fn begin_inner(
 
 /// Idempotent append of an absolute snapshot or an explicit revision correction.
 /// Out-of-order revisions remain auditable but cannot replace newer evidence.
+/// Physical admission reads this ledger while holding only dispatch, so every
+/// revision takes dispatch then receipts, the registration order. The caller
+/// must not already hold either lock. Both waits share the lock timeout.
 pub fn record(
     repo: &Path,
     receipt: &Receipt,
     interrupted: &AtomicBool,
+) -> Result<bool, super::dispatch::Error> {
+    let timeout = oms_lock::Settings::from_env()
+        .map_err(|error| super::dispatch::Error::new(StoreError::Lock(error), false))?
+        .timeout;
+    record_before(repo, receipt, interrupted, Instant::now() + timeout)
+}
+/// Like [`record`], with both lock waits bounded by one deadline.
+pub fn record_before(
+    repo: &Path,
+    receipt: &Receipt,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<bool, super::dispatch::Error> {
+    record_checked(repo, receipt, interrupted, deadline, || ())
+}
+/// Like [`record_before`], calling `publishing` at the publication point: after
+/// the replacement is synced, before both lock guards are rechecked and it is
+/// renamed into place. It must not modify the ledger or its temporary file. An
+/// idempotent replay never reaches it.
+pub fn record_checked(
+    repo: &Path,
+    receipt: &Receipt,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+    publishing: impl FnOnce(),
+) -> Result<bool, super::dispatch::Error> {
+    let initial = |error| super::dispatch::Error::new(error, false);
+    validate(receipt).map_err(initial)?;
+    before(interrupted, Some(deadline)).map_err(initial)?;
+    let dispatch = super::dispatch::Transaction::acquire(
+        repo,
+        deadline.saturating_duration_since(Instant::now()),
+        interrupted,
+    )
+    .map_err(|error| error.in_file(super::dispatch::LOCK))?;
+    append_revision(&dispatch, receipt, interrupted, deadline, publishing)
+        .map_err(|error| dispatch.error(error).in_file(RECEIPTS))
+}
+fn append_revision(
+    dispatch: &super::dispatch::Transaction<'_>,
+    receipt: &Receipt,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+    publishing: impl FnOnce(),
 ) -> Result<bool, StoreError> {
-    validate(receipt)?;
-    let root = Root::open(repo)?;
-    let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
-    let _guard = acquire(&target, interrupted)?;
+    let target = canonical_index(dispatch.repo(), Some(Path::new(RECEIPTS)), false, false)?;
+    let guard = acquire_before(&target, interrupted, Some(deadline))?;
+    let held = || {
+        dispatch.check()?;
+        guard.check().map_err(StoreError::Lock)
+    };
+    let root = Root::open(dispatch.repo())?;
+    held()?;
     let encoded = encode_receipt(receipt)?;
     let mut added = false;
-    mutate(&root, &target, false, None, interrupted, |old| {
+    let transform = |old: &[u8]| {
         let mut rows = receipts(old)?;
         if !rows
             .iter()
@@ -1292,9 +1343,23 @@ pub fn record(
         current(&rows)?;
         let mut new = old.to_vec();
         new.extend_from_slice(&encoded);
+        held()?;
         added = true;
         Ok(new)
-    })?;
+    };
+    let before_publish = || {
+        publishing();
+        held()
+    };
+    mutate_checked(
+        &root,
+        &target,
+        false,
+        None,
+        interrupted,
+        transform,
+        before_publish,
+    )?;
     Ok(added)
 }
 
