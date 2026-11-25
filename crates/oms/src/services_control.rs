@@ -2334,21 +2334,23 @@ fn collect_protected_dispatch_tokens(
     if let Some(raw) = read_bounded_regular(&tasks_path, 32 * 1024 * 1024)? {
         let root: Value = serde_json::from_slice(&raw)
             .map_err(|e| state_err(2, format!("malformed .oms/plan/tasks.json: {e}")))?;
-        let task_list: Vec<&Value> = match &root {
-            Value::Array(items) => items.iter().collect(),
+        // Object-form plans key each task by its ID; the key is protected too.
+        let task_list: Vec<(Option<&String>, &Value)> = match &root {
+            Value::Array(items) => items.iter().map(|t| (None, t)).collect(),
             Value::Object(map) => match map.get("tasks") {
-                Some(Value::Array(items)) => items.iter().collect(),
+                Some(Value::Array(items)) => items.iter().map(|t| (None, t)).collect(),
+                Some(Value::Object(entries)) => entries.iter().map(|(k, t)| (Some(k), t)).collect(),
                 Some(_) => {
                     return Err(state_err(
                         2,
-                        "malformed .oms/plan/tasks.json: tasks must be an array",
+                        "malformed .oms/plan/tasks.json: tasks must be an array or object",
                     ));
                 }
                 None => Vec::new(),
             },
             _ => return Err(state_err(2, "malformed .oms/plan/tasks.json")),
         };
-        for task in task_list {
+        for (key, task) in task_list {
             let Some(obj) = task.as_object() else {
                 return Err(state_err(
                     2,
@@ -2366,6 +2368,7 @@ fn collect_protected_dispatch_tokens(
             }
             if ACTIVE_STATES.contains(&state) {
                 collect_task_protected_tokens(task, &mut tokens);
+                tokens.extend(key.filter(|k| !k.is_empty()).cloned());
             }
         }
     }
@@ -2742,6 +2745,99 @@ mod gc_host_tests {
         assert!(!settled_mark.exists());
         assert!(active_log.exists());
         assert!(unsettled.exists());
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn gc_dispatch_logs_reads_object_and_array_plans_and_rejects_malformed() {
+        let repo = temp_repo("dispatch-schema3");
+        let logs_dir = repo.join(".oms/panel-state/dispatch-logs");
+        let plan_dir = repo.join(".oms/plan");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::create_dir_all(&plan_dir).unwrap();
+
+        let active_id_log = logs_dir.join("task-active.log");
+        let active_attempt_log = logs_dir.join("att-live-1.log");
+        let done_log = logs_dir.join("task-done.log");
+        for path in [&active_id_log, &active_attempt_log, &done_log] {
+            std::fs::write(path, b"log\n").unwrap();
+            age_file(path, 60);
+        }
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let host = ControlServices::new(&stopped, &repo).unwrap();
+
+        // Schema-3 object-form plan protects active task tokens and reclaims done task logs.
+        std::fs::write(
+            plan_dir.join("tasks.json"),
+            br#"{"schema":3,"plan_id":"plan_test_schema3","tasks":{"task-active":{"id":"task-active","state":"running","attempt_id":"att-live-1"},"task-done":{"id":"task-done","state":"done","attempt_id":"att-old-1"}}}"#,
+        )
+        .unwrap();
+        let dry = host.gc_dispatch_logs(&repo, 30, false).unwrap();
+        assert_eq!(
+            dry,
+            GcHookResult::Reclaimed(vec![(
+                "dispatch-logs".to_string(),
+                ".oms/panel-state/dispatch-logs/task-done.log".to_string(),
+            )])
+        );
+        let applied = host.gc_dispatch_logs(&repo, 30, true).unwrap();
+        assert_eq!(dry, applied);
+        assert!(!done_log.exists());
+        assert!(active_id_log.exists());
+        assert!(active_attempt_log.exists());
+
+        // Legacy top-level array form and object-with-tasks-array form continue to work.
+        std::fs::write(&done_log, b"log\n").unwrap();
+        age_file(&done_log, 60);
+        for legacy_plan in [
+            br#"[{"id":"task-active","state":"running","attempt_id":"att-live-1"},{"id":"task-done","state":"done"}]"#.as_slice(),
+            br#"{"schema":2,"tasks":[{"id":"task-active","state":"running","attempt_id":"att-live-1"},{"id":"task-done","state":"done"}]}"#.as_slice(),
+        ] {
+            std::fs::write(plan_dir.join("tasks.json"), legacy_plan).unwrap();
+            let dry_legacy = host.gc_dispatch_logs(&repo, 30, false).unwrap();
+            assert_eq!(
+                dry_legacy,
+                GcHookResult::Reclaimed(vec![(
+                    "dispatch-logs".to_string(),
+                    ".oms/panel-state/dispatch-logs/task-done.log".to_string(),
+                )])
+            );
+        }
+
+        // Schema-3 plan with a non-object task entry is rejected.
+        std::fs::write(
+            plan_dir.join("tasks.json"),
+            br#"{"schema":3,"plan_id":"plan_test_schema3","tasks":{"bad":"not-an-object"}}"#,
+        )
+        .unwrap();
+        let err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
+        assert_eq!(err.code, 2);
+
+        // A tasks field that is neither an array nor an object is rejected.
+        std::fs::write(
+            plan_dir.join("tasks.json"),
+            br#"{"schema":3,"plan_id":"plan_test_schema3","tasks":"bad"}"#,
+        )
+        .unwrap();
+        let err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
+        assert_eq!(err.code, 2);
+
+        // The plan engine ignores the stored schema, so object-form tasks read under any schema;
+        // an active entry without an inner id is still protected by its key.
+        std::fs::write(
+            plan_dir.join("tasks.json"),
+            br#"{"schema":2,"tasks":{"task-active":{"state":"running","attempt_id":"att-live-1"},"task-done":{"id":"task-done","state":"done"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            host.gc_dispatch_logs(&repo, 30, false).unwrap(),
+            GcHookResult::Reclaimed(vec![(
+                "dispatch-logs".to_string(),
+                ".oms/panel-state/dispatch-logs/task-done.log".to_string(),
+            )])
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }
