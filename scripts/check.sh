@@ -87,6 +87,9 @@ cleanup_check() {
   if declare -F oms_check_maintenance_end >/dev/null; then
     oms_check_maintenance_end || true
   fi
+  if declare -F oms_cargo_target_release >/dev/null; then
+    oms_cargo_target_release || true
+  fi
   rm -rf "$CHECK_RUNTIME"
   exit "$rc"
 }
@@ -236,9 +239,18 @@ if [ "$LIST_STAGES" != 1 ] && [ "$PRINT_AFFECTED_MODE" != 1 ]; then
   OMS_LOCK_DIR="$CHECK_ORIGINAL_LOCK_DIR" oms_check_maintenance_begin "$ROOT"
 fi
 
+# Every stage that builds or runs Cargo output holds the target for the rest of
+# this run; lanes and nested runs inherit it.
+hold_cargo_target() {
+  # shellcheck source=scripts/lib/cargo-target-lock.sh disable=SC1091
+  . "$ROOT/scripts/lib/cargo-target-lock.sh"
+  OMS_LOCK_DIR="$CHECK_ORIGINAL_LOCK_DIR" oms_cargo_target_hold "$ROOT" check || exit $?
+}
+
 if [ "$PARALLEL" = 1 ]; then
   [ "$MODE" = full ] || { echo "error: --parallel requires the complete gate" >&2; exit 2; }
   if [ "$LIST_STAGES" != 1 ]; then
+    hold_cargo_target
     ensure_native_payload
     # shellcheck source=scripts/lib/check-parallel.sh disable=SC1091
     . "$ROOT/scripts/lib/check-parallel.sh"
@@ -497,8 +509,10 @@ if [ "$RUN_AFFECTED" = 1 ]; then
   fi
 fi
 
-if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ] && [ "$MODE" != lint ]; then
-  ensure_native_payload
+# Lint-only still runs Cargo for the skill manifest and migration checks.
+if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ]; then
+  hold_cargo_target
+  [ "$MODE" = lint ] || ensure_native_payload
 fi
 
 if [ "$RUN_LINT" = 1 ]; then
