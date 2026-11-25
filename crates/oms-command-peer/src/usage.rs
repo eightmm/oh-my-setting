@@ -805,7 +805,13 @@ fn persist(repo: &Path, receipt: &Receipt) -> Result<()> {
     // Cancellation stops execution; it must not discard already observed spend.
     usage::record(repo, receipt, &AtomicBool::new(false))
         .map(|_| ())
-        .map_err(|e| Error::new(e.exit_code(), e.to_string()))
+        .map_err(|e| {
+            let message = match e.file() {
+                Some(file) => format!("{file}: {}", e.source),
+                None => e.source.to_string(),
+            };
+            Error::new(e.exit_code(), message)
+        })
 }
 
 #[cfg(test)]
