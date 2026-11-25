@@ -1225,17 +1225,57 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
                 &body_path.to_string_lossy(),
             ],
         )?;
-        if created.code != 0 {
-            return finish(
-                r.receipt,
-                row,
-                "failed",
-                "branch pushed; pull request creation failed",
-                c,
-            )
-            .map(Pass::Done);
-        }
+        // gh can exit non-zero after GitHub already created the PR, so a failed create is
+        // re-checked once with the same lookup before it is reported.
         pr = open_pr(r, &repo_arg)?;
+        if created.code != 0 && pr.is_none() {
+            let error = if crate::safe(&created.stderr).is_err() {
+                String::from("[redacted]")
+            } else {
+                let lossy = String::from_utf8_lossy(&created.stderr);
+                let mut cleaned = String::new();
+                let mut pending_space = false;
+                for ch in lossy.chars() {
+                    if matches!(ch, '\n' | '\r' | '\t') {
+                        pending_space = !cleaned.is_empty();
+                        continue;
+                    }
+                    if ch.is_control() {
+                        continue;
+                    }
+                    let needed = usize::from(pending_space) + ch.len_utf8();
+                    if cleaned.len() + needed > 500 {
+                        break;
+                    }
+                    if pending_space {
+                        cleaned.push(' ');
+                        pending_space = false;
+                    }
+                    cleaned.push(ch);
+                }
+                let cleaned = cleaned.trim().to_owned();
+                if crate::safe(cleaned.as_bytes()).is_ok() {
+                    cleaned
+                } else {
+                    String::from("[redacted]")
+                }
+            };
+            row.set(
+                "pr_create",
+                obj([
+                    ("rc", V::Num(created.code.to_string())),
+                    ("error", error.into()),
+                ]),
+            );
+            let message = format!(
+                "branch pushed; pull request creation failed (gh exit {}); see receipt pr_create",
+                created.code
+            );
+            return finish(r.receipt, row, "failed", &message, c).map(Pass::Done);
+        }
+    }
+    if let V::Obj(fields) = row {
+        fields.remove(b"pr_create".as_slice());
     }
     for _ in 0..5 {
         if pr
