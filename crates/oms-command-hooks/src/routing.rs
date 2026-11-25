@@ -1214,7 +1214,12 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         .unwrap_or(Value::Null);
     let ended = text(&card, "ended_at");
     // Seconds-resolution timestamps can repeat, so the head and exit code are part of the key.
-    let key = format!("{ended} {} {}", text(&card, "head"), card["exit"]);
+    let key = format!(
+        "{ended} {} {} {}",
+        text(&card, "head"),
+        text(&card, "state"),
+        card["exit"]
+    );
     if let Some(at) = epoch(ended)
         && ctx.snapshot.seconds() - at <= max
         && old["seen"]["land"] != key

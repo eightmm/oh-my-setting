@@ -233,27 +233,19 @@ fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<(
     storage::ensure_ignore(&root, c.interrupted)?;
     let row = c.relay_row.borrow();
     let row = row.as_ref().unwrap_or(&V::Null);
-    let git = Git::new(&repo, c.interrupted);
-    // The receipt records the head this run landed; HEAD may have moved since.
-    let sha = match string(row, "sha") {
-        s if s.is_empty() => git.text(&["rev-parse", "HEAD"]).unwrap_or_default(),
-        s => s,
-    }
-    .chars()
-    .take(12)
-    .collect::<String>();
-    if sha.len() < 7
-        || !sha
+    // Head and branch come only from the receipt row: live HEAD may have moved,
+    // so a run that failed before recording one names no commit.
+    let sha = string(row, "sha").chars().take(12).collect::<String>();
+    let sha = if sha.len() >= 7
+        && sha
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Ok(());
-    }
-    let branch = if string(row, "head_branch").is_empty() {
-        git.text(&["branch", "--show-current"]).unwrap_or_default()
+        sha
     } else {
-        string(row, "head_branch")
+        String::new()
     };
+    let branch = string(row, "head_branch");
     let branch = if branch.len() <= 200
         && branch
             .bytes()
@@ -289,7 +281,11 @@ fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<(
                         .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
             })
     });
-    let message = format!("land {sha} {state} (exit {code}); run oms land status");
+    let message = if sha.is_empty() {
+        format!("land {state} (exit {code}); run oms land status")
+    } else {
+        format!("land {sha} {state} (exit {code}); run oms land status")
+    };
     let card = obj([
         ("schema", 1usize.into()),
         ("ended_at", now().into()),
@@ -302,6 +298,7 @@ fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<(
         ("message", message.into()),
     ]);
     let path = Path::new(".oms/hooks/relay/land.json");
+    let _guard = storage::lock(&root.join(path), c.interrupted)?;
     let old = match std::fs::symlink_metadata(root.join(path)) {
         Ok(_) => Some(storage::read(&root, path, false)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1697,7 +1694,8 @@ fn pr_motivation(git: &Git<'_>, o: &Options, base: &str, head: &str) -> Result<S
 }
 
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
-    let run = o.action("").is_empty() && !o.has("check-manifest");
+    // A harness child is refused before it runs and must not touch the parent's relay.
+    let run = o.action("").is_empty() && !o.has("check-manifest") && !crate::child();
     let result = execute_inner(c, o);
     if run {
         let uninterrupted = AtomicBool::new(false);
