@@ -5894,3 +5894,160 @@ fn panel_capabilities_matches_native_oms_list_all_without_side_effects() {
     assert_eq!(data["omitted"], 0);
     assert!(!fixture.0.join(".oms").exists());
 }
+
+#[test]
+fn mcp_stdio_shutdown_wakes_without_stdin_eof() {
+    use nix::sys::signal::{Signal, kill};
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::{Child, ChildStdout, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct OwnedServer(Child);
+    impl Drop for OwnedServer {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    fn startup_reply(stdout: &mut BufReader<ChildStdout>, deadline: Instant, case: &str) -> Value {
+        use rustix::event::{PollFd, PollFlags, poll};
+        let mut line = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "{case}: startup reply timed out");
+            if stdout.buffer().is_empty() {
+                let mut fds = [PollFd::new(stdout.get_ref(), PollFlags::IN)];
+                match poll(&mut fds, Some(&left.try_into().unwrap())) {
+                    Ok(0) => panic!("{case}: startup reply timed out"),
+                    Err(rustix::io::Errno::INTR) => continue,
+                    result => result.unwrap(),
+                };
+            }
+            // Consume only bytes already available; a partial line must not
+            // leave the test stuck in a second blocking read.
+            let chunk = match stdout.fill_buf() {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result.unwrap(),
+            };
+            assert!(!chunk.is_empty(), "{case}: EOF before startup reply");
+            let newline = chunk.iter().position(|&b| b == b'\n');
+            let count = newline.map_or(chunk.len(), |i| i + 1);
+            assert!(
+                line.len() + count <= 65536,
+                "{case}: oversized startup reply"
+            );
+            line.extend_from_slice(&chunk[..count]);
+            stdout.consume(count);
+            if newline.is_some() {
+                return serde_json::from_slice(&line).unwrap();
+            }
+        }
+    }
+    let fixture = Fixture::new();
+    add_companions(&fixture, &["oms-mcp-peer-owner"]);
+    let bin = fixture.binary();
+    let revision = bin.parent().unwrap().file_name().unwrap();
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"0"}}});
+    let timeout = std::env::var("OMS_TEST_CALL_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    for (profile, signal, partial) in [
+        (None, Some(Signal::SIGTERM), false),
+        (None, Some(Signal::SIGINT), true),
+        (Some("mcp-app"), Some(Signal::SIGTERM), false),
+        (Some("mcp-app"), Some(Signal::SIGTERM), true),
+        (None, None, true),
+        (Some("mcp-app"), None, true),
+    ] {
+        let case = format!("{profile:?} {signal:?} partial={partial}");
+        let mut command = Command::new(&bin);
+        command
+            .arg("--oms-dispatch")
+            .arg(&fixture.0)
+            .arg(revision)
+            .args(["--", "mcp-server"])
+            .current_dir(&fixture.0)
+            .env("XDG_CONFIG_HOME", fixture.0.join("xdg"))
+            .env(
+                "OMS_PANEL_PROJECTS",
+                json!({"fixture": &fixture.0}).to_string(),
+            )
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+            .env_remove("OMS_STATE_REPO")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match profile {
+            Some(name) => command.env("OMS_MCP_TOOL_PROFILE", name),
+            None => command.env_remove("OMS_MCP_TOOL_PROFILE"),
+        };
+        let mut server = OwnedServer(command.spawn().unwrap());
+        let child = &mut server.0;
+        let stdin = child.stdin.as_mut().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        writeln!(stdin, "{initialize}").unwrap();
+        stdin.flush().unwrap();
+        let reply = startup_reply(
+            &mut stdout,
+            Instant::now() + Duration::from_secs(timeout),
+            &case,
+        );
+        assert_eq!(reply["id"], 1, "{case}: {reply}");
+        assert!(reply["result"]["serverInfo"].is_object(), "{case}: {reply}");
+        if partial {
+            // The same final JSON is discarded on a signal and processed on normal EOF.
+            write!(stdin, "{}", json!({"jsonrpc":"2.0","id":2,"method":"ping"})).unwrap();
+            stdin.flush().unwrap();
+        }
+        if let Some(signal) = signal {
+            if partial {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            // Keep stdin open so only the signal can wake the reader.
+            kill(nix::unistd::Pid::from_raw(child.id() as i32), signal).unwrap();
+        } else {
+            drop(child.stdin.take());
+        }
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                panic!("{case}: mcp-server stayed alive after shutdown");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut rest = Vec::new();
+        stdout.read_to_end(&mut rest).unwrap();
+        let mut stderr = Vec::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_end(&mut stderr)
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert_eq!(status.code(), Some(0), "{case}: {stderr}");
+        if signal.is_some() {
+            assert!(
+                rest.is_empty(),
+                "{case}: {}",
+                String::from_utf8_lossy(&rest)
+            );
+        } else {
+            let reply: Value = serde_json::from_slice(&rest).unwrap();
+            assert_eq!(reply, json!({"jsonrpc":"2.0","id":2,"result":{}}), "{case}");
+        }
+    }
+    assert!(!fixture.0.join(".oms").exists());
+}
