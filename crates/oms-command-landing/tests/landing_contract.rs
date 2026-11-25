@@ -2383,7 +2383,13 @@ case "$1 $2" in
     if [ -f '{state}.view' ]; then cat '{state}.view'
     else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
   "run view")
-    if [ -f "{state}.jobs$3" ]; then cat "{state}.jobs$3"
+    if [ -f "{state}.jobs$3" ]; then
+      IFS= read -rd '' text < "{state}.jobs$3"; printf '%s\n' "$text"
+      if [ -s "{state}.jobs$3.next" ]; then
+        IFS= read -rd '' next < "{state}.jobs$3.next"
+        printf '%s\n' "$next" > "{state}.jobs$3"
+        : > "{state}.jobs$3.next"
+      fi
     elif IFS= read -r oid < '{state}.ci-head'; then
       printf '{{"status":"completed","conclusion":"{ci}","headSha":"%s","jobs":[{{"name":"project tests","status":"completed","conclusion":"{ci}"}}]}}\n' "$oid"
     else exit 1; fi ;;
@@ -4290,7 +4296,7 @@ fn land_pr_installs_a_tree_equal_squash_and_defers_when_the_base_moved() {
     for moved in [false, true] {
         let iso = Isolated::new();
         let (repo, bare) = iso.with_github_remote("prsquash");
-        iso.commit_as(
+        let head = iso.commit_as(
             &repo,
             "scripts/check.sh",
             "exit 0\n",
@@ -4298,20 +4304,56 @@ fn land_pr_installs_a_tree_equal_squash_and_defers_when_the_base_moved() {
         );
         let (gh, log) = iso.fake_gh(&bare, "success");
         fs::write(iso.home.path().join("gh.pr.squash"), "").expect("squash flag");
+        let args = [
+            "--merge",
+            "--ci-wait",
+            "1",
+            "--gate",
+            "bash scripts/check.sh --parallel",
+            "--ignore-siblings",
+        ];
+        let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
         if moved {
             fs::write(iso.home.path().join("gh.pr.moved"), "").expect("moved flag");
+        } else {
+            let jobs = iso.home.path().join("gh.pr.jobs99");
+            let settling = format!(
+                r#"{{"status":"completed","conclusion":"success","headSha":"{head}","jobs":[{{"name":"lint","status":"completed","conclusion":"success"}},{{"name":"project tests","status":"in_progress","conclusion":""}}]}}"#
+            );
+            let settled = format!(
+                r#"{{"status":"completed","conclusion":"success","headSha":"{head}","jobs":[{{"name":"lint","status":"completed","conclusion":"success"}},{{"name":"project tests","status":"completed","conclusion":"success"}}]}}"#
+            );
+            fs::write(&jobs, &settling).expect("settling jobs");
+            let unmerged = iso.run_with_services("land", &repo, &args, &env);
+            assert_eq!(unmerged.0, 1, "{unmerged:?}");
+            assert!(
+                unmerged.1.contains(
+                    "CI detail unavailable: CI detail contains incomplete or inconsistent jobs; pull request left open"
+                ),
+                "{unmerged:?}"
+            );
+            let first_calls = fs::read_to_string(&log).expect("gh log");
+            assert!(
+                first_calls
+                    .lines()
+                    .filter(|l| l.starts_with("run view 99 "))
+                    .count()
+                    >= 2
+                    && !first_calls.contains("pr merge"),
+                "{first_calls}"
+            );
+            let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+            let failed = V::parse(status.as_bytes()).expect("status json");
+            assert_eq!(failed.get("state").text(), Some("failed"), "{status}");
+            assert_eq!(
+                failed.get("ci").get("conclusion").text(),
+                Some("unknown"),
+                "{status}"
+            );
+            fs::write(&jobs, &settling).expect("settling jobs");
+            fs::write(iso.home.path().join("gh.pr.jobs99.next"), &settled).expect("settled jobs");
         }
-        let r = iso.run_with_services(
-            "land",
-            &repo,
-            &[
-                "--merge",
-                "--gate",
-                "bash scripts/check.sh --parallel",
-                "--ignore-siblings",
-            ],
-            &[("OMS_GH_BIN", gh.to_str().unwrap())],
-        );
+        let r = iso.run_with_services("land", &repo, &args, &env);
         assert_eq!(r.0, 0, "{r:?}");
         let calls = fs::read_to_string(&log).expect("gh log");
         assert!(calls.contains("--squash --delete-branch"), "{calls}");
