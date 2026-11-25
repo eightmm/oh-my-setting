@@ -2099,14 +2099,8 @@ mod tests {
                 assert_eq!(receipt["route_snapshot"]["served_model"], Value::Null);
                 if mode == "policy" {
                     assert_eq!(receipt["route_snapshot"]["policy_schema"], 2);
-                    assert_eq!(
-                        receipt["route_snapshot"]["configured"]["model"],
-                        "claude-sonnet-5-5"
-                    );
-                    assert_eq!(
-                        receipt["route_snapshot"]["resolved"]["model"],
-                        "claude-sonnet-5-6"
-                    );
+                    assert_eq!(receipt["route_snapshot"]["configured"]["model"], "sonnet");
+                    assert_eq!(receipt["route_snapshot"]["resolved"]["model"], "sonnet");
                     assert!(receipt["route_snapshot"]["policy_sha256"].is_string());
                 } else {
                     assert_eq!(receipt["route_snapshot"]["policy_sha256"], Value::Null);
