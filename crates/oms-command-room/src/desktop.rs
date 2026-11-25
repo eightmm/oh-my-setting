@@ -148,6 +148,7 @@ impl Room<'_> {
                                 ("role", p["role"].clone()),
                                 ("provider", p["provider"].clone()),
                                 ("joined", p["joined"].clone()),
+                                ("parent", p["parent"].clone()),
                             ])
                         })
                         .collect::<Vec<_>>()

@@ -324,7 +324,13 @@ fn cross_host_project_reads() {
         let uri = &opener["_meta"]["ui"]["resourceUri"];
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
-        assert_eq!(html, include_str!("../src/conversation-panel.html"));
+        assert!(html.len() < 240 * 1024);
+        let template = include_str!("../src/conversation-panel.html");
+        assert!(
+            html.lines()
+                .map(str::trim_start)
+                .eq(template.lines().map(str::trim_start))
+        );
         assert!(html.contains("ui/request-display-mode"));
         assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
         assert_eq!(
@@ -1189,7 +1195,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v16.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v17.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -1204,7 +1210,16 @@ fn conversation_panel() {
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
     let html = current["text"].as_str().unwrap();
-    assert_eq!(html, include_str!("../src/conversation-panel.html"));
+    assert!(html.len() < 240 * 1024);
+    let template = include_str!("../src/conversation-panel.html");
+    assert!(
+        html.lines()
+            .map(str::trim_start)
+            .eq(template.lines().map(str::trim_start))
+    );
+    for marker in ["team-main-chat", "lead-children", "nativeMainUri"] {
+        assert!(html.contains(marker));
+    }
     assert!(html.contains("ui/request-display-mode"));
     assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
     assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
@@ -1224,6 +1239,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v13.html"),
         json!("ui://oms/conversation-panel/v14.html"),
         json!("ui://oms/conversation-panel/v15.html"),
+        json!("ui://oms/conversation-panel/v16.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

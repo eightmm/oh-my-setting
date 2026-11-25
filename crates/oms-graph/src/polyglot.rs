@@ -252,6 +252,263 @@ fn normalized_prefix(text: &str, max_chars: usize) -> (String, bool) {
     (value, false)
 }
 
+// Bound the lexical evidence for an inferred direct forwarding call.
+const FORWARD_HEADER_TOKENS: usize = 256;
+const FORWARD_BODY_TOKENS: usize = 64;
+
+struct RootFunction {
+    id: String,
+    keyword: usize,
+    open: usize,
+}
+
+fn code<'a>(ts: &[Token<'a>], index: usize) -> &'a str {
+    ts.get(index).filter(|t| !t.string).map_or("", |t| t.text)
+}
+
+fn rust_inert_attribute(ts: &[Token<'_>], open: usize) -> bool {
+    matches!(
+        code(ts, open + 1),
+        "allow" | "warn" | "deny" | "forbid" | "expect" | "doc" | "inline" | "must_use" | "cold"
+    ) && matches!(code(ts, open + 2), "(" | "=" | "]")
+}
+
+// Only visibility, qualifiers and attributes that cannot remove or rewrite an
+// item may precede an endpoint. Everything else, including `cfg`, is opaque.
+fn rust_unconditional_item(ts: &[Token<'_>], pairs: &[Option<usize>], keyword: usize) -> bool {
+    let mut start = keyword;
+    while start > 0 {
+        if ts[start - 1].string && start >= 2 && code(ts, start - 2) == "extern" {
+            start -= 2;
+            continue;
+        }
+        match code(ts, start - 1) {
+            "pub" | "async" | "unsafe" | "const" | "extern" => start -= 1,
+            ")" => match pairs[start - 1] {
+                Some(open) if open > 0 && code(ts, open - 1) == "pub" => start = open - 1,
+                _ => return false,
+            },
+            _ => break,
+        }
+    }
+    while start > 0 && code(ts, start - 1) == "]" {
+        let Some(open) = pairs[start - 1] else {
+            return false;
+        };
+        // The file scan already checked all root inner attributes.
+        if open >= 2 && code(ts, open - 1) == "!" && code(ts, open - 2) == "#" {
+            return true;
+        }
+        if open == 0 || code(ts, open - 1) != "#" || !rust_inert_attribute(ts, open) {
+            return false;
+        }
+        start = open - 1;
+    }
+    start == 0 || matches!(code(ts, start - 1), ";" | "}")
+}
+
+fn rust_simple_argument(argument: &Token<'_>) -> bool {
+    let keyword = matches!(
+        argument.text,
+        "_" | "as"
+            | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "static"
+            | "struct"
+            | "trait"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "yield"
+    );
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    argument.string || (!keyword && argument.text.bytes().all(word))
+}
+
+// Accept exactly `[return] callee(arguments) [;]`, where each argument is one
+// name or literal, optionally borrowed. Returns the callee token's index.
+fn rust_forwarded_callee(ts: &[Token<'_>], open: usize, close: usize) -> Option<usize> {
+    if close - open > FORWARD_BODY_TOKENS {
+        return None;
+    }
+    let mut first = open + 1;
+    let mut end = close;
+    if code(ts, first) == "return" {
+        first += 1;
+    }
+    if code(ts, end - 1) == ";" {
+        end -= 1;
+    }
+    if end < first + 3 || ts[first].string || code(ts, first + 1) != "(" || code(ts, end - 1) != ")"
+    {
+        return None;
+    }
+    let mut i = first + 2;
+    while i < end - 1 {
+        if code(ts, i) == "&" {
+            i += 1;
+            if code(ts, i) == "mut" {
+                i += 1;
+            }
+        }
+        if i >= end - 1 || !rust_simple_argument(&ts[i]) {
+            return None;
+        }
+        i += 1;
+        if i < end - 1 {
+            if code(ts, i) != "," {
+                return None;
+            }
+            i += 1;
+        }
+    }
+    Some(first)
+}
+
+// Count competing function spellings even in nested or opaque syntax. At the
+// root, known value declarations and explicit import leaves can also bind a
+// name. Imports do not establish which namespace an external item belongs to.
+fn rust_forwarding_calls(
+    path: &str,
+    digest: &str,
+    ts: &[Token<'_>],
+    pairs: &[Option<usize>],
+    at_root: &[bool],
+    constructors: &[&str],
+    functions: &[RootFunction],
+) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+    let mut declared = BTreeMap::new();
+    for name in constructors {
+        *declared.entry(*name).or_insert(0usize) += 1;
+    }
+    let mut in_use = false;
+    for (i, &root) in at_root.iter().enumerate() {
+        let word = code(ts, i);
+        if root
+            && word == "#"
+            && code(ts, i + 1) == "!"
+            && code(ts, i + 2) == "["
+            && !rust_inert_attribute(ts, i + 2)
+        {
+            return Vec::new();
+        }
+        if root && word == "use" && code(ts, i + 1) != "<" && (i == 0 || code(ts, i - 1) != "#") {
+            in_use = true;
+        }
+        if in_use {
+            if !word.is_ascii() {
+                // Rust normalizes identifiers to NFC. This lexer does not.
+                return Vec::new();
+            }
+            if matches!(code(ts, i + 1), "," | "}" | ";")
+                && word
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+                && !matches!(word, "self" | "_")
+            {
+                *declared.entry(word).or_insert(0usize) += 1;
+            }
+            if root && word == ";" {
+                in_use = false;
+            }
+            continue;
+        }
+        if word == "fn" || (root && matches!(word, "const" | "static" | "struct")) {
+            let mut name = i + 1 + usize::from(word == "static" && code(ts, i + 1) == "mut");
+            if code(ts, name) == "r" && code(ts, name + 1) == "#" {
+                name += 2;
+            }
+            let spelling = code(ts, name);
+            // A non-ASCII identifier may be one or multiple tokens here; do not
+            // compare its bytes to a root value name as if they were normalized.
+            if !spelling.is_ascii()
+                || ts.get(name + 1).is_some_and(|next| {
+                    !next.string
+                        && !next.text.is_ascii()
+                        && next.start == ts[name].start + spelling.len()
+                })
+            {
+                return Vec::new();
+            }
+            // Only tuple and unit structs contribute a value constructor.
+            if word != "struct" {
+                *declared.entry(spelling).or_insert(0usize) += 1;
+            }
+        }
+    }
+    let functions: Vec<_> = functions
+        .iter()
+        .filter(|f| {
+            declared.get(code(ts, f.keyword + 1)) == Some(&1)
+                && rust_unconditional_item(ts, pairs, f.keyword)
+        })
+        .collect();
+    let callees: BTreeMap<&str, &str> = functions
+        .iter()
+        .filter(|f| matches!(code(ts, f.keyword + 2), "(" | "<"))
+        .map(|f| (code(ts, f.keyword + 1), f.id.as_str()))
+        .collect();
+    let mut edges = Vec::new();
+    for caller in &functions {
+        let (keyword, open) = (caller.keyword, caller.open);
+        if open - keyword > FORWARD_HEADER_TOKENS || code(ts, keyword + 2) != "(" {
+            continue;
+        }
+        let (Some(parameters), Some(close)) = (pairs[keyword + 2], pairs[open]) else {
+            continue;
+        };
+        // A brace between the parameters and the body means the body boundary
+        // is not positively known.
+        if (parameters + 1..open).any(|i| code(ts, i) == "{") {
+            continue;
+        }
+        let Some(call) = rust_forwarded_callee(ts, open, close) else {
+            continue;
+        };
+        let name = ts[call].text;
+        let Some(target) = callees.get(name) else {
+            continue;
+        };
+        // Any header mention may bind the name (and a macro may bind it
+        // invisibly). This also excludes self-calls.
+        if (keyword..open).any(|i| {
+            let spelling = code(ts, i);
+            !spelling.is_ascii() || [name, "!"].contains(&spelling)
+        }) {
+            continue;
+        }
+        edges.push(json!({"source":caller.id,"target":target,"relation":"calls","confidence":"INFERRED","evidence":{"path":path,"source_digest":digest,"line":ts[call].line}}));
+    }
+    edges
+}
+
 fn rust_declarations(path: &str, text: &str, digest: &str, ts: &[Token<'_>]) -> GraphResult {
     use std::collections::BTreeMap;
     let file = format!("file:{path}");
@@ -262,7 +519,10 @@ fn rust_declarations(path: &str, text: &str, digest: &str, ts: &[Token<'_>]) -> 
     };
     let mut pairs = vec![None; ts.len()];
     let mut delimiters = Vec::new();
+    let mut at_root = vec![false; ts.len()];
+    let mut balanced = true;
     for (i, token) in ts.iter().enumerate().filter(|(_, t)| !t.string) {
+        at_root[i] = delimiters.is_empty();
         match token.text {
             "(" | "[" | "{" => delimiters.push(i),
             ")" | "]" | "}" => {
@@ -275,11 +535,16 @@ fn rust_declarations(path: &str, text: &str, digest: &str, ts: &[Token<'_>]) -> 
                     delimiters.pop();
                     pairs[start] = Some(i);
                     pairs[i] = Some(start);
+                } else {
+                    balanced = false;
                 }
             }
             _ => {}
         }
     }
+    balanced &= delimiters.is_empty();
+    let mut root_functions = Vec::new();
+    let mut constructors = Vec::new();
     // Retain the stack for correct exits, but cap rendered ancestry and labels so
     // deeply nested named scopes cannot produce quadratic-size graph output.
     let mut scopes: Vec<(usize, usize, String)> = vec![];
@@ -351,6 +616,9 @@ fn rust_declarations(path: &str, text: &str, digest: &str, ts: &[Token<'_>]) -> 
         let body = boundary
             .filter(|t| !t.string && t.text == "{")
             .map(|_| end_header);
+        if at_root[i] && token.text == "struct" && body.is_none() {
+            constructors.push(name_token.text);
+        }
         let (last, complete) = if let Some(open) = body {
             (
                 pairs[open].unwrap_or_else(|| ts.len().saturating_sub(1)),
@@ -435,8 +703,28 @@ fn rust_declarations(path: &str, text: &str, digest: &str, ts: &[Token<'_>]) -> 
         result.edges.push(json!({"source":file,"target":id,"relation":"contains","confidence":"EXTRACTED","evidence":{"path":path,"source_digest":digest,"line":token.line}}));
         if let Some(open) = body {
             opening.insert(open, (token.start, segment));
+            if token.text == "fn" && at_root[i] && complete {
+                root_functions.push(RootFunction {
+                    id,
+                    keyword: i,
+                    open,
+                });
+            }
         }
         skip_header = end_header;
+    }
+    // A mismatched delimiter anywhere makes every scope claim unreliable.
+    if balanced {
+        let calls = rust_forwarding_calls(
+            path,
+            digest,
+            ts,
+            &pairs,
+            &at_root,
+            &constructors,
+            &root_functions,
+        );
+        result.edges.extend(calls);
     }
     result
 }

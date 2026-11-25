@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const GRAPH_LIMIT: usize = 256 * 1024 * 1024;
 pub(super) const SCHEMA: u32 = 2;
-pub(super) const VERSION: u32 = 12;
+pub(super) const VERSION: u32 = 13;
 const EXCLUDES: &[&str] = &[
     ".git",
     ".oms",

@@ -76,6 +76,42 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
     collect_snapshot(ctx, host, None)
 }
 
+// Keep Room evidence out of the repository-wide recency window. A worker without
+// a Room field may still have an exact parent attempt within this Room.
+fn panel_room_attempts(rows: &[Value], room: &str) -> (Vec<Value>, usize) {
+    fn room_of(row: &Value) -> &str {
+        row.get("refs").text("panel_room_id")
+    }
+    let lead = |row: &Value| {
+        row.get("refs").text("panel_role") == "lead"
+            || row.text("tool") == "panel-native-assignment"
+    };
+    let leads: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter(|row| room_of(row) == room && lead(row))
+        .map(|row| row.text("attempt_id"))
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut scoped: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            let scope = room_of(row);
+            scope == room || (scope.is_empty() && leads.contains(row.text("parent_attempt_id")))
+        })
+        .collect();
+    scoped.sort_by(|a, b| {
+        let rank = |row: &Value| {
+            let root = row.text("tool") == "panel-main" || lead(row);
+            (row.get("terminal").truth(), !root)
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| b.text("updated_at").cmp(a.text("updated_at")))
+    });
+    let omitted = scoped.len().saturating_sub(24);
+    (scoped.into_iter().take(24).cloned().collect(), omitted)
+}
+
 fn collect_snapshot(
     ctx: &Context<'_>,
     host: &dyn HostServices,
@@ -147,8 +183,14 @@ fn collect_snapshot(
             false,
         ) && let Ok(binding) = room.conversation_main(consumer, panel_mains)
             && let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
-            && let Ok(binding) = json::parse(&encoded)
+            && let Ok(mut binding) = json::parse(&encoded)
         {
+            let room = binding.get("conversationMain").text("room");
+            if !room.is_empty() {
+                let (items, omitted) = panel_room_attempts(event_rows, room);
+                binding.set("attempts", Value::Array(items))?;
+                binding.set("attemptsOmitted", number(omitted))?;
+            }
             state.set("conversation", binding)?;
         }
     }
@@ -664,4 +706,27 @@ pub(crate) fn run(
         }
     }
     Ok((code, out, vec![]))
+}
+
+#[cfg(test)]
+mod panel_room_tests {
+    use super::*;
+
+    #[test]
+    fn attempt_window_keeps_the_room_and_only_explicit_unscoped_children() {
+        let events = json::parse(
+            br#"[
+            {"attempt_id":"child","parent_attempt_id":"lead"},
+            {"attempt_id":"foreign","parent_attempt_id":"lead","refs":{"panel_room_id":"outside"}},
+            {"attempt_id":"other","parent_attempt_id":"foreign"},
+            {"attempt_id":"lead","refs":{"panel_room_id":"work","panel_role":"lead"}},
+            {"attempt_id":"main","tool":"panel-main","refs":{"panel_room_id":"work"}}
+        ]"#,
+        )
+        .unwrap();
+        let (rows, omitted) = panel_room_attempts(events.array().unwrap(), "work");
+        let ids: Vec<_> = rows.iter().map(|row| row.text("attempt_id")).collect();
+        assert_eq!(ids, ["lead", "main", "child"]);
+        assert_eq!(omitted, 0);
+    }
 }
