@@ -244,6 +244,14 @@ impl CaptureIndex {
         Ok(None)
     }
     pub fn read_patch(&self, input: &Path, maximum: usize) -> Result<Vec<u8>> {
+        // Callers reopen the original path physically; `..` after a symlinked
+        // directory would resolve elsewhere than this lexical check.
+        if input
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("patch evidence leaves repository".into());
+        }
         let path = storage::absolute(&self.checkout.join(input))?;
         if path.parent() == Some(self.repo.join(".oms/landing-patches").as_path()) {
             let matching = self
@@ -1062,6 +1070,17 @@ mod tests {
                 .read_patch(Path::new(".oms/artifacts/delegate/link.patch"), 4096)
                 .unwrap_err()
                 .contains("unsafe or foreign repository input")
+        );
+
+        let pivot_target = root.mkdir("state/.oms/artifacts/delegate/subdir");
+        std::os::unix::fs::symlink(&pivot_target, delegate_dir.join("pivot")).unwrap();
+        fs::write(delegate_dir.join("p.patch"), patch_bytes).unwrap();
+        fs::write(pivot_target.parent().unwrap().join("p.patch"), patch_bytes).unwrap();
+        assert_eq!(
+            index
+                .read_patch(Path::new(".oms/artifacts/delegate/pivot/../p.patch"), 4096)
+                .unwrap_err(),
+            "patch evidence leaves repository"
         );
 
         let dir_link = checkout.join(".oms/artifacts/linked");
