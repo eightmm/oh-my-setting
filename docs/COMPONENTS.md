@@ -3470,9 +3470,12 @@ keep scheduled/manual runs separate from pushes; newer pushes supersede older
 pushes.
 
 CI is Linux-only. PR and main pushes select affected or full verification. Full
-runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)`, and the
-`native (ubuntu-latest, copy)` install lifecycle fixture. The stable `gate`
-checks the selected jobs and their planned skips.
+runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)` (format,
+Clippy, doctests, migration check), three parallel `rust tests (core|commands|rest)`
+shards, and the `native (ubuntu-latest, copy)` install lifecycle fixture. The
+`rest` shard excludes the packages the other two name, so a new package is
+always tested. Dependency builds are cached and saved only from `main`. The
+stable `gate` checks the selected jobs and their planned skips.
 [CI workflow](../.github/workflows/test.yml)
 
 macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
