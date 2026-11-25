@@ -2334,11 +2334,12 @@ fn collect_protected_dispatch_tokens(
     if let Some(raw) = read_bounded_regular(&tasks_path, 32 * 1024 * 1024)? {
         let root: Value = serde_json::from_slice(&raw)
             .map_err(|e| state_err(2, format!("malformed .oms/plan/tasks.json: {e}")))?;
-        let task_list: Vec<&Value> = match &root {
-            Value::Array(items) => items.iter().collect(),
+        // Object-form plans key each task by its ID; the key is protected too.
+        let task_list: Vec<(Option<&String>, &Value)> = match &root {
+            Value::Array(items) => items.iter().map(|t| (None, t)).collect(),
             Value::Object(map) => match map.get("tasks") {
-                Some(Value::Array(items)) => items.iter().collect(),
-                Some(Value::Object(entries)) => entries.values().collect(),
+                Some(Value::Array(items)) => items.iter().map(|t| (None, t)).collect(),
+                Some(Value::Object(entries)) => entries.iter().map(|(k, t)| (Some(k), t)).collect(),
                 Some(_) => {
                     return Err(state_err(
                         2,
@@ -2349,7 +2350,7 @@ fn collect_protected_dispatch_tokens(
             },
             _ => return Err(state_err(2, "malformed .oms/plan/tasks.json")),
         };
-        for task in task_list {
+        for (key, task) in task_list {
             let Some(obj) = task.as_object() else {
                 return Err(state_err(
                     2,
@@ -2367,6 +2368,7 @@ fn collect_protected_dispatch_tokens(
             }
             if ACTIVE_STATES.contains(&state) {
                 collect_task_protected_tokens(task, &mut tokens);
+                tokens.extend(key.filter(|k| !k.is_empty()).cloned());
             }
         }
     }
@@ -2822,10 +2824,11 @@ mod gc_host_tests {
         let err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(err.code, 2);
 
-        // The plan engine ignores the stored schema, so object-form tasks read under any schema.
+        // The plan engine ignores the stored schema, so object-form tasks read under any schema;
+        // an active entry without an inner id is still protected by its key.
         std::fs::write(
             plan_dir.join("tasks.json"),
-            br#"{"schema":2,"tasks":{"task-active":{"id":"task-active","state":"running","attempt_id":"att-live-1"},"task-done":{"id":"task-done","state":"done"}}}"#,
+            br#"{"schema":2,"tasks":{"task-active":{"state":"running","attempt_id":"att-live-1"},"task-done":{"id":"task-done","state":"done"}}}"#,
         )
         .unwrap();
         assert_eq!(
