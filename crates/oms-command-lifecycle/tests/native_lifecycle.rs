@@ -3019,7 +3019,18 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
             .unwrap()
             .clone()
     };
+    let provider_side = |row: &Value, reach: &str, gap: Value| {
+        assert_eq!(
+            row["provider_side"],
+            json!({"managed_callback":reach, "configuration_gap":gap})
+        );
+    };
     let baseline = report();
+    provider_side(
+        &diagnostic(&baseline),
+        "not_observed",
+        json!("plugin_not_declared"),
+    );
     let guards: Vec<_> = baseline["findings"]
         .as_array()
         .unwrap()
@@ -3069,11 +3080,30 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
         "not_probed"
     );
     assert_eq!(configured["trace"]["diagnosis"], "no_callback_evidence");
+    provider_side(&configured, "not_observed", json!("none_found"));
     write(&cache.join("hooks.json"), &json!({"hooks":{}}));
-    assert_eq!(
-        diagnostic(&report())["configuration"]["generated_hooks"],
-        "drifted"
+    let drifted = diagnostic(&report());
+    assert_eq!(drifted["configuration"]["generated_hooks"], "drifted");
+    provider_side(&drifted, "not_observed", json!("generated_hooks_drifted"));
+    fs::remove_file(cache.join("hooks.json")).unwrap();
+    provider_side(
+        &diagnostic(&report()),
+        "not_observed",
+        json!("generated_hooks_unavailable"),
     );
+    let enabled_config = fs::read(&config).unwrap();
+    for (content, gap) in [
+        (
+            "[plugins.\"oh-my-setting@oh-my-setting-local\"]\nenabled = false\n",
+            "plugin_declared_disabled",
+        ),
+        ("[", "plugin_configuration_unavailable"),
+    ] {
+        fs::write(&config, content).unwrap();
+        provider_side(&diagnostic(&report()), "not_observed", json!(gap));
+    }
+    fs::write(&config, enabled_config).unwrap();
+    write(&cache.join("hooks.json"), &json!({"hooks":{}}));
 
     let trace = source.join(".oms/hooks/codex-trace.jsonl");
     fs::DirBuilder::new()
@@ -3132,6 +3162,8 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     );
     assert_eq!(fs::read(&trace).unwrap(), raw.as_bytes());
     assert_eq!(observed["trace"]["status"], "read");
+    // Retained callbacks are never relabeled by the current configuration.
+    provider_side(&observed, "retained", Value::Null);
     assert_eq!(observed["trace"]["attempts"], 6);
     assert_eq!(
         observed["trace"]["counts"],
@@ -3149,10 +3181,13 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     assert!(!observed.to_string().contains("2026-11-23"));
     let text = String::from_utf8(success(call("doctor", &["--surfaces"], source, host))).unwrap();
     assert!(text.contains("turn-guard handler_internal_failure=1"));
+    assert!(text.contains("managed callback retained; diagnosis"));
     assert!(text.contains("retained evidence cannot prove current account/session delivery"));
     // Shared ancestors are allowed; unsafe local diagnostic storage is not.
     fs::set_permissions(&trace, fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    let unreadable = diagnostic(&report());
+    assert_eq!(unreadable["trace"]["status"], "unavailable");
+    provider_side(&unreadable, "unknown", Value::Null);
     fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
     let hardlink = trace.with_extension("copy");
     fs::hard_link(&trace, &hardlink).unwrap();
@@ -3281,6 +3316,9 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     assert_eq!(invalid["trace"]["diagnosis"], "incomplete_evidence");
     assert_eq!(invalid["trace"]["counts"]["returned"], 0);
     assert_eq!(invalid["trace"]["invalid_records"], 2);
+    // A torn ledger without any attributable row proves neither side.
+    fs::write(&trace, b"{").unwrap();
+    provider_side(&diagnostic(&report()), "unknown", Value::Null);
     fs::remove_file(&trace).unwrap();
     symlink(&settings, &trace).unwrap();
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");

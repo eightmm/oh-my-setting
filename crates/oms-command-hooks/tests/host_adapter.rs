@@ -1193,6 +1193,9 @@ fn codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output() 
         "private-conflict-marker",
         "private-argv-marker",
         "private-env-marker",
+        // Callback output text, from the failing Stop callback above.
+        "helper error",
+        "systemMessage",
         repo.to_str().unwrap(),
         &session_hash[..32],
     ] {
@@ -1248,15 +1251,18 @@ fn codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output() 
 
 #[test]
 fn codex_hook_trace_is_opt_in() {
-    if !clean_env_child(
-        "codex_hook_trace_is_opt_in",
-        &[("OMS_CODEX_HOOK_TRACE", "0")],
-    ) {
+    if std::env::var_os("OMS_TEST_CLEAN_CHILD").is_none() {
+        // Unset, off, and any value other than the exact opt-in.
+        for flag in [None, Some("0"), Some("true")] {
+            let env = flag.map(|value| ("OMS_CODEX_HOOK_TRACE", value));
+            clean_env_child("codex_hook_trace_is_opt_in", env.as_slice());
+        }
         return;
     }
     let tmp = TempDir::new("trace-disabled");
     let repo = git_repo(&tmp);
     fs::create_dir_all(repo.join(".oms")).unwrap();
+    strip_group_world_write(tmp.path());
     assert_eq!(
         run_hook(
             "harness-hook",
@@ -1269,7 +1275,7 @@ fn codex_hook_trace_is_opt_in() {
         (0, vec![], vec![]),
     );
     oms_command_hooks::trace_runtime_unavailable("harness-hook", &argv(&["telemetry-hook"]), &repo);
-    assert!(!repo.join(CODEX_TRACE).exists());
+    assert!(!repo.join(".oms/hooks").exists());
 }
 
 #[test]
@@ -1347,6 +1353,45 @@ fn codex_hook_trace_fails_open_for_busy_broad_and_linked_ledgers() {
         expected,
     );
     assert_eq!(fs::metadata(&path).unwrap().len(), limit);
+    // A row that would cross the limit is refused whole, not truncated into it.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(limit - 8)
+        .unwrap();
+    assert_eq!(
+        run_hook(
+            "harness-hook",
+            &argv(&["syntax-guard-hook"]),
+            input.as_bytes(),
+            &repo,
+            tmp.path(),
+            &stop
+        ),
+        expected,
+    );
+    assert_eq!(fs::metadata(&path).unwrap().len(), limit - 8);
+    // With room to spare the same callback appends and stays within the limit.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(limit - 4096)
+        .unwrap();
+    assert_eq!(
+        run_hook(
+            "harness-hook",
+            &argv(&["syntax-guard-hook"]),
+            input.as_bytes(),
+            &repo,
+            tmp.path(),
+            &stop
+        ),
+        expected,
+    );
+    let grown = fs::metadata(&path).unwrap().len();
+    assert!(grown > limit - 4096 && grown <= limit, "{grown}");
     fs::write(&path, b"untouched\n").unwrap();
     let outside = tmp.path().join("trace-target");
     fs::rename(&path, &outside).unwrap();
