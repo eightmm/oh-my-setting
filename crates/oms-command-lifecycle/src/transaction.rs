@@ -787,6 +787,10 @@ fn cleanup(j: &Journal) -> Result<()> {
     Ok(())
 }
 fn restore_link_mode(path: &Path, mode: u32) -> Result<()> {
+    // An untouched link may belong to another user, where chmod fails with EPERM.
+    if fs::symlink_metadata(path)?.mode() & 0o7777 == mode & 0o7777 {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     let mode = mode as u16;
     match rustix::fs::chmodat(
