@@ -2051,19 +2051,51 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
     }
     if let Some(scratch) = report.opt("managedScratch") {
         let mut scratch = scratch.clone();
-        let size = crate::json::encoded(&scratch).map_or(usize::MAX, |v| v.len());
+        let encoded_len = |v: &Value| crate::json::encoded(v).map_or(usize::MAX, |b| b.len());
         // Preserve the canonical window. A busy scratch registry cannot displace
-        // the existing Room, task, attempt or approval evidence.
-        if bytes.saturating_add(size) > 52_000 {
-            let attempts = scratch.get("attempts").array().map_or(0, |rows| rows.len());
-            let sources = scratch.get("sources").array().map_or(0, |rows| rows.len());
-            if attempts + sources > 0 {
-                let omitted = scratch.get("omittedAttempts").int().unwrap_or(0) as usize;
-                let _ = scratch.set("omittedAttempts", number(omitted + attempts));
-                let _ = scratch.set("omittedSources", number(sources));
+        // the existing Room, task, attempt or approval evidence. The observation
+        // ranks attempts live-first, so trimming from the tail keeps running ones.
+        if bytes.saturating_add(encoded_len(&scratch)) > 52_000 {
+            let mut saved_attempts = scratch.get("attempts").array().unwrap_or(&[]).to_vec();
+            let all_sources = scratch.get("sources").array().unwrap_or(&[]).to_vec();
+            let orig_attempts = saved_attempts.len();
+            let orig_sources = all_sources.len();
+            if orig_attempts + orig_sources > 0 {
+                let base_omitted = scratch
+                    .get("omittedAttempts")
+                    .int()
+                    .ok()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(0);
                 let _ = scratch.set("status", string("partial"));
-                let _ = scratch.set("sources", Value::Array(vec![]));
-                let _ = scratch.set("attempts", Value::Array(vec![]));
+                let mut kept_sources = all_sources;
+                while bytes.saturating_add(encoded_len(&scratch)) > 52_000 {
+                    if let Some(pos) = kept_sources.iter().rposition(|s| {
+                        let id = s.text("id");
+                        id.is_empty() || !saved_attempts.iter().any(|a| a.text("sourceId") == id)
+                    }) {
+                        kept_sources.remove(pos);
+                        let _ = scratch
+                            .set("omittedSources", number(orig_sources - kept_sources.len()));
+                        let _ = scratch.set("sources", Value::Array(kept_sources.clone()));
+                        continue;
+                    }
+                    if saved_attempts.pop().is_none() {
+                        break;
+                    }
+                    let dropped = orig_attempts - saved_attempts.len();
+                    let _ = scratch.set("omittedAttempts", number(base_omitted + dropped));
+                    let _ = scratch.set("attempts", Value::Array(saved_attempts.clone()));
+                    kept_sources.retain(|s| {
+                        let id = s.text("id");
+                        !id.is_empty() && saved_attempts.iter().any(|a| a.text("sourceId") == id)
+                    });
+                    if kept_sources.len() < orig_sources {
+                        let _ = scratch
+                            .set("omittedSources", number(orig_sources - kept_sources.len()));
+                    }
+                    let _ = scratch.set("sources", Value::Array(kept_sources.clone()));
+                }
             }
         }
         let _ = dashboard.set("managedScratch", scratch);
@@ -2985,6 +3017,93 @@ mod panel_snapshot_tests {
             assert_eq!(before.get(key), after.get(key), "{key}");
         }
         assert!(crate::json::encoded(&capped).unwrap().len() < 60_000);
+
+        // When canonical payload leaves bounded headroom below 52 KB, running scratch
+        // attempts (and their worktree source label) survive ahead of waiting/finished ones.
+        let mut dense = report.clone();
+        dense
+            .set(
+                "attention",
+                object([(
+                    "items",
+                    Value::Array(
+                        (0..8)
+                            .map(|i| {
+                                object([
+                                    ("code", string(format!("item-{i}"))),
+                                    ("summary", string("s".repeat(500))),
+                                    ("count", number(1)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                )]),
+            )
+            .unwrap();
+        let pad_sources: Vec<Value> = (0..18)
+            .map(|i| {
+                object([
+                    ("id", string(format!("src-{i:02}"))),
+                    ("label", string(format!("wt-{i:012x} (detached)"))),
+                    ("head", string("detached")),
+                    ("branch", Value::Null),
+                    ("status", string("ready")),
+                ])
+            })
+            .collect();
+        let mut scratch_attempts: Vec<Value> = (0..17)
+            .map(|i| {
+                object([
+                    ("id", string(format!("{:064x}", i + 1))),
+                    ("sourceId", string(format!("src-{i:02}"))),
+                    ("provider", string("codex")),
+                    ("tool", string("peer-review")),
+                    ("state", string(if i % 2 == 0 { "done" } else { "review" })),
+                    ("updatedAt", string("2026-11-25T10:00:00Z")),
+                    ("pad", string("p".repeat(2900))),
+                ])
+            })
+            .collect();
+        // The observation hands attempts over ranked live-first.
+        scratch_attempts.insert(
+            0,
+            object([
+                ("id", string("f".repeat(64))),
+                ("sourceId", string("src-17")),
+                ("provider", string("claude")),
+                ("tool", string("peer-delegate")),
+                ("state", string("working")),
+                ("updatedAt", string("2026-11-20T00:00:00Z")),
+                ("pad", string("p".repeat(2900))),
+            ]),
+        );
+        dense
+            .set(
+                "managedScratch",
+                object([
+                    ("status", string("ready")),
+                    ("sources", Value::Array(pad_sources)),
+                    ("attempts", Value::Array(scratch_attempts)),
+                    ("omittedAttempts", number(0)),
+                ]),
+            )
+            .unwrap();
+        let ranked_snap = panel_snapshot(&dense, &Value::Null);
+        let ranked_scratch = ranked_snap.get("dashboard").get("managedScratch");
+        assert_eq!(ranked_scratch.text("status"), "partial");
+        let kept_attempts = ranked_scratch.get("attempts").array().unwrap();
+        assert!(!kept_attempts.is_empty() && kept_attempts.len() < 18);
+        assert_eq!(kept_attempts[0].text("state"), "working");
+        assert_eq!(kept_attempts[0].text("sourceId"), "src-17");
+        assert!(
+            ranked_scratch
+                .get("sources")
+                .array()
+                .unwrap()
+                .iter()
+                .any(|s| s.text("id") == "src-17")
+        );
+        assert!(crate::json::encoded(&ranked_snap).unwrap().len() < 60_000);
     }
 
     #[test]

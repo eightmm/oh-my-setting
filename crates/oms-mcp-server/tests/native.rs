@@ -384,8 +384,17 @@ fn cross_host_project_reads() {
     let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
     // The transport duplicates compact payloads in text and structuredContent.
     // A dense snapshot still retains structured evidence within the wire budget.
-    let large = json!({"scope":"repository","goal":"g".repeat(2000),
-        "managedScratch":{"status":"partial","attempts":[]},
+    let scratch_obs = json!({
+        "status":"partial",
+        "reason":null,
+        "sources":[{"id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","label":"wt-0123456789ab (detached)","head":"detached","branch":null,"status":"ready"}],
+        "attempts":[{"id":"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210","sourceId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","provider":"codex","tool":"peer-delegate","state":"working","updatedAt":"2026-11-24T10:00:00Z"}],
+        "unverifiedCheckouts":1,
+        "unexaminedCheckouts":0,
+        "omittedAttempts":0
+    });
+    let large = json!({"scope":"repository","goal":"g".repeat(2000),"goalAvailability":"available",
+        "managedScratch":scratch_obs,
         "operations":(0..100).map(|n|json!({"id":n,"description":"d".repeat(410)})).collect::<Vec<_>>()});
     fixture_settings(
         &source,
@@ -396,6 +405,11 @@ fn cross_host_project_reads() {
         let result = bound.tool("oms_panel_snapshot", json!({"project":"fixture"}));
         assert_eq!(
             result["result"]["structuredContent"]["dashboard"], large,
+            "{profile}"
+        );
+        assert_eq!(
+            result["result"]["structuredContent"]["dashboard"]["managedScratch"]["attempts"][0]["state"],
+            "working",
             "{profile}"
         );
         assert!(result.to_string().len() < 60_000, "{profile}");

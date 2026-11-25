@@ -4307,6 +4307,19 @@ fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts()
     use std::{fs, path::Path, sync::atomic::AtomicBool};
 
     let host = Landing::new();
+    host.ok(&["agent-plan", "init", "--goal", "Live plan goal"]);
+    host.ok(&[
+        "agent-plan",
+        "add",
+        "--id",
+        "task-472",
+        "--title",
+        "Project scratch attempts",
+        "--verify",
+        "true",
+        "--allowed",
+        "a.txt",
+    ]);
     let add = || {
         host.ok(&[
             "scratch-worktree",
@@ -4333,7 +4346,58 @@ fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts()
     };
     record(&host.repo, "peer-ask");
     record(&scratch, "peer-review");
-    record(&other, "peer-delegate");
+    let mut working_step = new_event(
+        "same-local-id",
+        2usize.into(),
+        "attempt.state_changed",
+        obj([
+            ("from_state", "queued".into()),
+            ("to_state", "starting".into()),
+        ]),
+    )
+    .unwrap();
+    working_step.set("ts", "2025-01-01T00:00:01Z");
+    append_lifecycle(&scratch, working_step, &AtomicBool::new(false)).unwrap();
+    let mut working_live = new_event(
+        "same-local-id",
+        3usize.into(),
+        "attempt.state_changed",
+        obj([
+            ("from_state", "starting".into()),
+            ("to_state", "working".into()),
+        ]),
+    )
+    .unwrap();
+    working_live.set("ts", "2025-01-01T00:00:02Z");
+    append_lifecycle(&scratch, working_live, &AtomicBool::new(false)).unwrap();
+    for idx in 0..18 {
+        let aid = format!("finished-{idx}");
+        let mut created = new_event(
+            &aid,
+            1usize.into(),
+            "attempt.created",
+            obj([
+                ("to_state", "queued".into()),
+                ("provider", "codex".into()),
+                ("tool", "peer-delegate".into()),
+            ]),
+        )
+        .unwrap();
+        created.set("ts", "2026-06-01T00:00:00Z");
+        append_lifecycle(&other, created, &AtomicBool::new(false)).unwrap();
+        let mut finished = new_event(
+            &aid,
+            2usize.into(),
+            "attempt.state_changed",
+            obj([
+                ("from_state", "queued".into()),
+                ("to_state", "cancelled".into()),
+            ]),
+        )
+        .unwrap();
+        finished.set("ts", "2026-06-01T00:00:05Z");
+        append_lifecycle(&other, finished, &AtomicBool::new(false)).unwrap();
+    }
     let read = |args: &[&str]| {
         let (code, out, err) = host.oms(args);
         assert!(matches!(code, 0 | 1), "{err}");
@@ -4341,9 +4405,24 @@ fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts()
     };
     let dashboard = || read(&["dashboard", "--json", "--panel-snapshot"])["dashboard"].clone();
     let current = dashboard();
+    assert_eq!(current["goal"], "Live plan goal");
+    assert_eq!(current["goalAvailability"], "available");
     let scratch_only = &current["managedScratch"];
+    let sources = scratch_only["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2, "{scratch_only}");
+    assert!(
+        sources.iter().all(|s| {
+            s["label"]
+                .as_str()
+                .is_some_and(|l| l.starts_with("wt-") && l.ends_with(" (detached)"))
+        }),
+        "{scratch_only}"
+    );
     let attempts = scratch_only["attempts"].as_array().unwrap();
-    assert_eq!(attempts.len(), 2, "{scratch_only}");
+    assert_eq!(attempts.len(), 16, "{scratch_only}");
+    assert_eq!(scratch_only["omittedAttempts"], 3, "{scratch_only}");
+    assert_eq!(attempts[0]["tool"], "peer-review");
+    assert_eq!(attempts[0]["state"], "working");
     assert_ne!(attempts[0]["id"], attempts[1]["id"]);
     assert_ne!(attempts[0]["sourceId"], attempts[1]["sourceId"]);
     assert_eq!(current["commandStatus"]["total"], 1);
@@ -4355,13 +4434,20 @@ fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts()
             .to_string()
             .contains(&*host.f.0.to_string_lossy())
     );
-    assert_eq!(&read(&["state", "--json"])["managedScratch"], scratch_only);
-    assert_eq!(
-        &read(&["dashboard", "--json"])["managedScratch"],
-        scratch_only
-    );
+    let state_json = read(&["state", "--json"]);
+    assert_eq!(&state_json["managedScratch"], scratch_only);
+    assert_eq!(state_json["runtime"]["objective"]["text"], "Live plan goal");
+    assert_eq!(state_json["runtime"]["objective"]["source"], "plan");
+    let dash_json = read(&["dashboard", "--json"]);
+    assert_eq!(&dash_json["managedScratch"], scratch_only);
+    assert_eq!(dash_json["goal"]["text"], "Live plan goal");
     let text = host.oms(&["state"]).1;
-    assert!(text.contains("recorded queued at") && text.contains("peer-review"));
+    assert!(
+        text.contains("objective (plan): Live plan goal")
+            && text.contains("recorded working at")
+            && text.contains("peer-review"),
+        "{text}"
+    );
     let board = host.oms(&["panel", "--watch", "--count", "1"]);
     assert!(
         board.1.contains("Managed scratch records") && board.1.contains("peer-review"),
@@ -4383,6 +4469,11 @@ fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts()
             &data["dashboard"]["managedScratch"], scratch_only,
             "{profile}"
         );
+        assert_eq!(data["dashboard"]["goal"], "Live plan goal", "{profile}");
+        assert_eq!(
+            data["dashboard"]["goalAvailability"], "available",
+            "{profile}"
+        );
         assert_eq!(data["dashboard"]["active"], 1);
         assert!(bytes < 60_000, "{profile} {bytes}");
         println!("{profile} scratch snapshot: {bytes} wire bytes");
@@ -4392,8 +4483,15 @@ fn canonical_views_show_only_proven_scratch_records_outside_canonical_attempts()
     let changed = dashboard();
     let after = &changed["managedScratch"];
     assert_eq!(after["status"], "partial", "{after}");
-    assert_eq!(after["attempts"].as_array().unwrap().len(), 1);
-    assert_eq!(after["attempts"][0]["tool"], "peer-delegate");
+    assert_eq!(after["unverifiedCheckouts"], 1, "{after}");
+    assert!(
+        after["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["tool"] == "peer-delegate"),
+        "{after}"
+    );
     assert_eq!(changed["commandStatus"]["total"], 1);
     host.git(&["worktree", "remove", "--force", other.to_str().unwrap()]);
     assert!(

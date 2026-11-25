@@ -168,7 +168,11 @@ fn panel_room_attempts(rows: &[Value], room: &str) -> (Vec<Value>, usize) {
     scoped.sort_by(|a, b| {
         let rank = |row: &Value| {
             let root = row.text("tool") == "panel-main" || lead(row);
-            (row.get("terminal").truth(), !root)
+            (
+                row.get("terminal").truth(),
+                oms_command_operations::activity_rank(row.text("state")),
+                !root,
+            )
         };
         rank(a)
             .cmp(&rank(b))
@@ -291,9 +295,15 @@ fn collect_snapshot(
     let mut active_latest: Vec<_> = event_rows
         .iter()
         .filter(|r| !r.get("terminal").truth())
+        .rev()
         .cloned()
         .collect();
-    active_latest.sort_by(|a, b| a.text("updated_at").cmp(b.text("updated_at")));
+    active_latest.sort_by(|a, b| {
+        oms_command_operations::activity_rank(a.text("state"))
+            .cmp(&oms_command_operations::activity_rank(b.text("state")))
+            .then_with(|| b.text("updated_at").cmp(a.text("updated_at")))
+    });
+    active_latest.truncate(8);
     state.set(
         "agent_operations",
         object([
@@ -313,10 +323,7 @@ fn collect_snapshot(
                 "recent",
                 Value::Array(event_rows.iter().rev().take(8).rev().cloned().collect()),
             ),
-            (
-                "active_latest",
-                Value::Array(active_latest.into_iter().rev().take(8).collect()),
-            ),
+            ("active_latest", Value::Array(active_latest)),
         ]),
     )?;
     let approvals = decoded(oms_command_operations::run(
@@ -850,5 +857,34 @@ mod panel_room_tests {
             ["legacy", "lead", "main", "child", "legacy-child", "both"]
         );
         assert_eq!(omitted, 0);
+
+        let mut crowded: Vec<Value> = (0..24)
+            .map(|i| {
+                object([
+                    ("attempt_id", string(format!("review-{i:02}"))),
+                    ("state", string("review")),
+                    ("terminal", Value::Bool(false)),
+                    ("updated_at", string("2026-06-02T00:00:00Z")),
+                    (
+                        "refs",
+                        object([
+                            ("panel_room_id", string("work")),
+                            ("panel_role", string("lead")),
+                        ]),
+                    ),
+                ])
+            })
+            .collect();
+        crowded.push(object([
+            ("attempt_id", string("working-older")),
+            ("state", string("working")),
+            ("terminal", Value::Bool(false)),
+            ("updated_at", string("2025-01-01T00:00:00Z")),
+            ("refs", object([("panel_room_id", string("work"))])),
+        ]));
+        let (capped_rows, capped_omitted) = panel_room_attempts(&crowded, "work");
+        assert_eq!(capped_rows.len(), 24);
+        assert_eq!(capped_omitted, 1);
+        assert_eq!(capped_rows[0].text("attempt_id"), "working-older");
     }
 }

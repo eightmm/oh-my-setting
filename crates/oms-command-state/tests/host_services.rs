@@ -1590,6 +1590,33 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
         snapshot.get("runtime").get("objective").text("text"),
         "Live plan goal"
     );
+    let panel_snapshot_with = |host: &dyn HostServices| {
+        let flag = AtomicBool::new(false);
+        let (code, out, err) = run_with_host(
+            "dashboard",
+            &args(&[
+                "--repo",
+                &repo.path().to_string_lossy(),
+                "--json",
+                "--panel-snapshot",
+            ]),
+            repo.path(),
+            &flag,
+            &mut Dummy,
+            host,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        json::parse(&out).unwrap()
+    };
+    let dormant_panel = panel_snapshot_with(&host);
+    assert_eq!(
+        dormant_panel.get("dashboard").text("goal"),
+        "Live plan goal"
+    );
+    assert_eq!(
+        dormant_panel.get("dashboard").text("goalAvailability"),
+        "available"
+    );
     assert_eq!(snapshot.get("task").text("goal"), "Old 6-day handoff goal");
     assert!(snapshot.get("task").get("dormant").truth(), "{snapshot:?}");
     assert_eq!(
@@ -1666,6 +1693,12 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     assert_eq!(
         stale_json.get("runtime").get("objective").text("source"),
         "plan"
+    );
+    let stale_panel = panel_snapshot_with(&host);
+    assert_eq!(stale_panel.get("dashboard").text("goal"), "Live plan goal");
+    assert_eq!(
+        stale_panel.get("dashboard").text("goalAvailability"),
+        "available"
     );
     assert!(
         stale_json.get("task").get("stale").truth(),
@@ -1762,6 +1795,149 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     assert!(
         !fresh_rendered.contains("oms agent-task close --reason"),
         "{fresh_rendered}"
+    );
+    let fresh_panel = panel_snapshot_with(&host);
+    assert_eq!(
+        fresh_panel.get("dashboard").text("goal"),
+        "Fresh handoff goal"
+    );
+    assert_eq!(
+        fresh_panel.get("dashboard").text("goalAvailability"),
+        "available"
+    );
+
+    // Active attempts outrank newer review attempts in active_latest and activeAttempts,
+    // and HostServices::scratch_activity projects worktree-labeled scratch attempts into
+    // both `oms state` and `oms dashboard --json --panel-snapshot`.
+    {
+        use oms_command_operations::{new_event, value::obj};
+        let mut raw_events = Vec::new();
+        let mut push_ev = |mut ev: oms_command_operations::value::V, ts: &str| {
+            ev.set("ts", ts);
+            raw_events.extend_from_slice(&ev.json(false).unwrap());
+            raw_events.push(b'\n');
+        };
+        push_ev(
+            new_event(
+                "att-working-old",
+                1usize.into(),
+                "attempt.created",
+                obj([
+                    ("to_state", "queued".into()),
+                    ("provider", "codex".into()),
+                    ("tool", "peer-delegate".into()),
+                ]),
+            )
+            .unwrap(),
+            "2025-01-01T00:00:00Z",
+        );
+        for (seq, (from, to)) in [
+            (2usize, ("queued", "starting")),
+            (3usize, ("starting", "working")),
+        ] {
+            push_ev(
+                new_event(
+                    "att-working-old",
+                    seq.into(),
+                    "attempt.state_changed",
+                    obj([("from_state", from.into()), ("to_state", to.into())]),
+                )
+                .unwrap(),
+                &format!("2025-01-01T00:00:0{seq}Z"),
+            );
+        }
+        for n in 0..9usize {
+            let aid = format!("att-review-{n}");
+            push_ev(
+                new_event(
+                    &aid,
+                    1usize.into(),
+                    "attempt.created",
+                    obj([
+                        ("to_state", "queued".into()),
+                        ("provider", "claude".into()),
+                        ("tool", "peer-review".into()),
+                    ]),
+                )
+                .unwrap(),
+                "2026-06-01T00:00:00Z",
+            );
+            for (seq, (from, to)) in [
+                (2usize, ("queued", "starting")),
+                (3usize, ("starting", "working")),
+                (4usize, ("working", "review")),
+            ] {
+                push_ev(
+                    new_event(
+                        &aid,
+                        seq.into(),
+                        "attempt.state_changed",
+                        obj([("from_state", from.into()), ("to_state", to.into())]),
+                    )
+                    .unwrap(),
+                    &format!("2026-06-01T00:00:0{seq}Z"),
+                );
+            }
+        }
+        let events_path = repo.path().join(".oms/lifecycle/events.jsonl");
+        fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+        fs::write(&events_path, &raw_events).unwrap();
+    }
+    struct ScratchAndPlanHost(GroupPlan, json::Value);
+    impl HostServices for ScratchAndPlanHost {
+        fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+            &self.0
+        }
+        fn scratch_activity(&self, _: &Path, _: &AtomicBool) -> Option<json::Value> {
+            Some(self.1.clone())
+        }
+    }
+    let scratch_payload = json::parse(
+        br#"{"status":"ready","reason":null,"sources":[{"id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","label":"wt-0123456789ab (main)","head":"branch","branch":"main","status":"ready"}],"attempts":[{"id":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","sourceId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","provider":"codex","tool":"peer-delegate","state":"working","updatedAt":"2026-06-02T00:00:00Z"},{"id":"1111111111111111111111111111111111111111111111111111111111111111","sourceId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","provider":"claude","tool":"peer-review","state":"done","updatedAt":"2026-06-05T00:00:00Z"}],"unverifiedCheckouts":0,"unexaminedCheckouts":0,"omittedAttempts":0}"#,
+    )
+    .unwrap();
+    let scratch_host = ScratchAndPlanHost(GroupPlan, scratch_payload);
+    let state_with_scratch = state(repo.path(), &scratch_host);
+    let state_scratch = state_with_scratch.get("managedScratch");
+    let state_scratch_attempts = state_scratch.get("attempts").array().unwrap();
+    assert_eq!(state_scratch_attempts.len(), 2);
+    assert_eq!(state_scratch_attempts[0].text("state"), "working");
+    assert_eq!(state_scratch_attempts[1].text("state"), "done");
+    let active_latest = state_with_scratch
+        .get("agent_operations")
+        .get("active_latest")
+        .array()
+        .unwrap();
+    assert_eq!(active_latest.len(), 8);
+    assert_eq!(active_latest[0].text("attempt_id"), "att-working-old");
+    assert_eq!(active_latest[0].text("state"), "working");
+    let (_, state_text_out, _) = run_with_host(
+        "state",
+        &args(&["--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &flag,
+        &mut Dummy,
+        &scratch_host,
+    );
+    let state_text_str = String::from_utf8(state_text_out).unwrap();
+    assert!(
+        state_text_str.contains(
+            "wt-0123456789ab (main) · codex peer-delegate · recorded working at 2026-06-02T00:00:00Z"
+        ),
+        "{state_text_str}"
+    );
+    let panel_with_scratch = panel_snapshot_with(&scratch_host);
+    let dash = panel_with_scratch.get("dashboard");
+    assert_eq!(dash.get("managedScratch"), state_scratch);
+    assert_eq!(
+        dash.get("observation")
+            .get("sources")
+            .text("managedScratch"),
+        "ok"
+    );
+    assert_eq!(
+        dash.get("activeAttempts").array().unwrap()[0].text("id"),
+        "att-working-old"
     );
 }
 
