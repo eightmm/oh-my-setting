@@ -2285,6 +2285,31 @@ impl Isolated {
         strip_group_world_write(&repo);
         (repo, bare)
     }
+    fn use_canonical_github_transport(&self, repo: &Path, bare: &Path, public: &str) {
+        // Only transport goes to the isolated bare repo. Identity queries see
+        // the configured GitHub destination.
+        self.git(repo, &["remote", "set-url", "origin", public]);
+        let git = self.bin.join("git");
+        fs::remove_file(&git).unwrap();
+        fs::write(
+            &git,
+            format!(
+                r#"#!{bash}
+for a in "$@"; do
+    case "$a" in ls-remote|push|fetch)
+        exec '{real_git}' -c 'url.{bare}.insteadOf={public}' "$@";;
+    esac
+done
+exec '{real_git}' "$@"
+"#,
+                bash = which("bash").display(),
+                real_git = which("git").display(),
+                bare = bare.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fn commit_file(&self, repo: &Path, file: &str) -> String {
         self.commit_as(repo, file, &format!("{file}\n"), &[&format!("add {file}")])
     }
@@ -2373,6 +2398,474 @@ esac
         fs::write(&script, body).expect("fake gh");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("chmod");
         (script, log)
+    }
+}
+
+struct TargetMoveFixture {
+    iso: Isolated,
+    repo: PathBuf,
+    bare: PathBuf,
+    gh: PathBuf,
+    log: PathBuf,
+    head: String,
+    base: String,
+    tips: Vec<String>,
+}
+
+impl TargetMoveFixture {
+    fn new(moves: usize, conflict: bool) -> Self {
+        let iso = Isolated::new();
+        let (repo, bare) = iso.with_github_remote("moving");
+        let base = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+        let other = iso.home.path().join("target-writer");
+        iso.git(
+            &repo,
+            &[
+                "clone",
+                "-q",
+                bare.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        iso.git(&other, &["config", "user.name", "T"]);
+        iso.git(&other, &["config", "user.email", "t@example.invalid"]);
+        let target_file = if conflict { "a.txt" } else { "target.txt" };
+        let tips = (1..=moves)
+            .map(|i| {
+                iso.commit_as(
+                    &other,
+                    target_file,
+                    &format!("target {i}\n"),
+                    &["Advance target"],
+                )
+            })
+            .collect();
+        iso.git(
+            &other,
+            &["push", "-q", "origin", "HEAD:refs/heads/fixture-target"],
+        );
+        iso.git(&repo, &["checkout", "-qb", "feature"]);
+        let head = iso.commit_as(
+            &repo,
+            if conflict { "a.txt" } else { "feature.txt" },
+            "from the feature\n",
+            &["feat: fixture", "Explain the feature."],
+        );
+        iso.use_canonical_github_transport(&repo, &bare, "https://github.com/owner/moving.git");
+        let (gh, log) = iso.fake_gh(&bare, "success");
+        fs::write(iso.home.path().join("gh.pr.squash"), "").unwrap();
+        let hook = repo.join(".git/hooks/pre-merge-commit");
+        fs::write(
+            &hook,
+            format!(
+                "#!{}\n[ \"$OMS_LAND_ACTIVE\" = 1 ] || exit 1\nprintf 'merge hook ran\\n' >> \"$HOME/merge-hooks\"\n",
+                which("bash").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            iso,
+            repo,
+            bare,
+            gh,
+            log,
+            head,
+            base,
+            tips,
+        }
+    }
+
+    fn advance_target(&self) {
+        self.iso.git(
+            &self.bare,
+            &["update-ref", "refs/heads/main", &self.tips[0]],
+        );
+    }
+
+    fn advance_during_ci(&self, first_sample: usize) {
+        fs::write(
+            self.iso.home.path().join("target-tips"),
+            format!("{}\n", self.tips.join("\n")),
+        )
+        .unwrap();
+        let script = fs::read_to_string(&self.gh).unwrap().replace(
+            "\"run list\")",
+            &format!(
+                r#""run list")
+    sample=0
+    if [ -f "$HOME/ci-sample" ]; then IFS= read -r sample < "$HOME/ci-sample"; fi
+    sample=$((sample + 1))
+    printf '%s\n' "$sample" > "$HOME/ci-sample"
+    readarray -t tips < "$HOME/target-tips"
+    if (( sample >= {first_sample} && sample < {first_sample} + ${{#tips[@]}} )); then
+      git --git-dir='{bare}' update-ref refs/heads/main "${{tips[sample - {first_sample}]}}" || exit 1
+    fi"#,
+                bare = self.bare.display()
+            ),
+        );
+        fs::write(&self.gh, script).unwrap();
+    }
+
+    fn land(&self, extra: &[&str]) -> (i32, String, String) {
+        let mut args = vec![
+            "--pr",
+            "--gate",
+            r#"git rev-parse HEAD refs/remotes/origin/main >> "$HOME/land-gates""#,
+            "--ignore-siblings",
+            "--no-update",
+            "--ci-wait",
+            "2",
+        ];
+        args.extend(extra);
+        self.iso.run_with_services(
+            "land",
+            &self.repo,
+            &args,
+            &[
+                ("OMS_GH_BIN", self.gh.to_str().unwrap()),
+                ("OMS_LOCK_TIMEOUT", "2"),
+            ],
+        )
+    }
+
+    fn receipt(&self, head: &str) -> V {
+        let directory = fs::read_dir(self.iso.home.path().join(".local/state/oh-my-setting/land"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let path = fs::read_dir(directory)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|path| {
+                path.extension().is_some_and(|ext| ext == "json")
+                    && path
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with(head)
+            })
+            .expect("receipt for head");
+        V::parse(&fs::read(path).unwrap()).unwrap()
+    }
+
+    fn checkout_head(&self) -> String {
+        self.iso.git_out(&self.repo, &["rev-parse", "HEAD"])
+    }
+
+    fn assert_parents(&self, merge: &str, first: &str, second: &str) {
+        assert_eq!(
+            self.iso
+                .git_out(&self.repo, &["rev-list", "--parents", "-1", merge]),
+            format!("{merge} {first} {second}")
+        );
+    }
+
+    fn assert_gates(&self, expected: &[&str]) {
+        let log = fs::read_to_string(self.iso.home.path().join("land-gates")).unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), expected);
+    }
+
+    fn assert_ci_and_merge(&self, expected: &[&str], merged: Option<&str>) {
+        let calls = fs::read_to_string(&self.log).unwrap();
+        let ci_heads = calls
+            .lines()
+            .filter(|l| l.starts_with("run list "))
+            .map(|l| {
+                l.split_once(" --commit ")
+                    .unwrap()
+                    .1
+                    .split_ascii_whitespace()
+                    .next()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ci_heads, expected, "{calls}");
+        let merges: Vec<_> = calls
+            .lines()
+            .filter(|l| l.starts_with("pr merge "))
+            .collect();
+        if let Some(head) = merged {
+            assert_eq!(merges.len(), 1, "{calls}");
+            assert!(
+                merges[0].ends_with(&format!("--match-head-commit {head}")),
+                "{calls}"
+            );
+            assert_eq!(
+                self.iso.git_out(&self.bare, &["rev-parse", "main^{tree}"]),
+                self.iso
+                    .git_out(&self.repo, &["rev-parse", &format!("{head}^{{tree}}")])
+            );
+        } else {
+            assert!(merges.is_empty(), "{calls}");
+        }
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|l| l.starts_with("pr create "))
+                .count(),
+            1,
+            "{calls}"
+        );
+    }
+}
+
+#[test]
+fn target_moved_during_ci_gates_and_merges_the_successor() {
+    let f = TargetMoveFixture::new(1, false);
+    // Move the target in the final CI sample, after the writer reacquires its lock.
+    f.advance_during_ci(2);
+    let result = f.land(&["--merge"]);
+    assert_eq!(result.0, 0, "{result:?}");
+    let head = f.checkout_head();
+    let tip = &f.tips[0];
+    f.assert_parents(&head, &f.head, tip);
+    f.assert_gates(&[&f.head, &f.base, &head, tip]);
+    f.assert_ci_and_merge(&[&f.head, &f.head, &head, &head], Some(&head));
+    assert_eq!(
+        fs::read_to_string(f.iso.home.path().join("merge-hooks")).unwrap(),
+        "merge hook ran\n"
+    );
+    assert!(
+        result.1.starts_with(&format!(
+            "land: target moved; merged {tip} into feature as {head} (update 1 of 2)\n"
+        )),
+        "{result:?}"
+    );
+    assert!(result.1.contains("merged PR #7"), "{result:?}");
+
+    let old = f.receipt(&f.head);
+    let new = f.receipt(&head);
+    assert_eq!(old.get("state").text(), Some("superseded"));
+    assert_eq!(new.get("state").text(), Some("passed"));
+    let stamp = old.get("request").text().unwrap();
+    let successor = new.get("request");
+    assert_eq!(old.get("successor_request"), successor);
+    let evidence = new.get("target_update");
+    assert_eq!(old.get("superseding_update"), evidence);
+    assert_eq!(evidence.get("commit").text(), Some(head.as_str()));
+    assert_eq!(
+        evidence.get("parents").array(),
+        [f.head.clone().into(), tip.clone().into()]
+    );
+    assert_eq!(evidence.get("predecessor_request").text(), Some(stamp));
+    let request = ["--reviewed-head", &f.head, "--request", stamp, "--json"];
+    let waited = f
+        .iso
+        .run("land", &f.repo, &[&["wait"][..], &request].concat());
+    assert_eq!(waited.0, 0, "{waited:?}");
+    let observed = V::parse(waited.1.as_bytes()).unwrap();
+    assert_eq!(observed.get("event").text(), Some("terminal"));
+    assert_eq!(observed.get("receipt_state").text(), Some("superseded"));
+    assert_eq!(observed.get("successor_request"), successor);
+    let reconciled = f
+        .iso
+        .run("land", &f.repo, &[&["reconcile"][..], &request].concat());
+    assert_eq!(reconciled.0, 1, "{reconciled:?}");
+    let observed = V::parse(reconciled.1.as_bytes()).unwrap();
+    assert_eq!(observed.get("verdict").text(), Some("superseded"));
+    assert_eq!(observed.get("successor_request"), successor);
+    f.iso.git(&f.repo, &["checkout", "-q", "--detach", &f.head]);
+    let status = f.iso.run("land", &f.repo, &["status"]);
+    assert_eq!(status.0, 1, "{status:?}");
+    assert!(
+        status.1.contains("superseded") && status.1.contains(successor.text().unwrap()),
+        "{status:?}"
+    );
+}
+
+#[test]
+fn target_moved_before_push_updates_before_the_only_ci_round() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    let result = f.land(&["--merge"]);
+    assert_eq!(result.0, 0, "{result:?}");
+    let head = f.checkout_head();
+    let tip = &f.tips[0];
+    f.assert_parents(&head, &f.head, tip);
+    f.assert_gates(&[&head, tip]);
+    f.assert_ci_and_merge(&[&head, &head], Some(&head));
+    let calls = fs::read_to_string(&f.log).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|line| line.starts_with("pr create ") && line.contains("--title feat: fixture")),
+        "{calls}"
+    );
+    let old = f.receipt(&f.head);
+    assert_eq!(old.get("state").text(), Some("superseded"));
+    assert_eq!(old.get("gate").get("rc").text(), Some("pending"));
+    assert_eq!(
+        old.get("successor_request"),
+        f.receipt(&head).get("request")
+    );
+}
+
+#[test]
+fn target_update_after_publish_only_merges_successor() {
+    let f = TargetMoveFixture::new(1, false);
+    let published = f.land(&[]);
+    assert_eq!(published.0, 0, "{published:?}");
+    let old = f.receipt(&f.head);
+    assert_eq!(old.get("state").text(), Some("awaiting-merge"));
+    assert_eq!(old.get("merge").get("state").text(), Some("not-requested"));
+    f.advance_target();
+    let result = f.land(&["--merge"]);
+    assert_eq!(result.0, 0, "{result:?}");
+    let head = f.checkout_head();
+    let tip = &f.tips[0];
+    f.assert_parents(&head, &f.head, tip);
+    f.assert_gates(&[&f.head, &f.base, &head, tip]);
+    f.assert_ci_and_merge(&[&f.head, &head, &head], Some(&head));
+    let old = f.receipt(&f.head);
+    let successor = f.receipt(&head);
+    assert_eq!(old.get("state").text(), Some("superseded"));
+    assert_eq!(old.get("successor_request"), successor.get("request"));
+    assert_eq!(successor.get("state").text(), Some("passed"));
+}
+
+#[test]
+fn target_update_preserves_completed_receipt() {
+    let f = TargetMoveFixture::new(1, false);
+    let first = f.land(&["--merge"]);
+    assert_eq!(first.0, 0, "{first:?}");
+    let receipt = f.receipt(&f.head);
+    let calls = fs::read(&f.log).unwrap();
+    let retry = f.land(&["--merge"]);
+    assert_ne!(retry.0, 0, "{retry:?}");
+    assert_eq!(f.checkout_head(), f.head);
+    assert_eq!(f.receipt(&f.head), receipt);
+    assert_eq!(fs::read(&f.log).unwrap(), calls);
+}
+
+#[test]
+fn target_update_refuses_ignored_collision() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    fs::write(f.repo.join(".git/info/exclude"), "target.txt\n").unwrap();
+    fs::write(f.repo.join("target.txt"), "local data\n").unwrap();
+    let result = f.land(&["--merge"]);
+    assert_ne!(result.0, 0, "{result:?}");
+    assert_eq!(f.checkout_head(), f.head);
+    assert_eq!(
+        fs::read(f.repo.join("target.txt")).unwrap(),
+        b"local data\n"
+    );
+    assert!(!f.log.exists());
+}
+
+#[test]
+fn target_update_on_target_branch_requires_explicit_head_branch() {
+    let f = TargetMoveFixture::new(1, false);
+    f.iso.git(&f.repo, &["checkout", "-q", "-B", "main"]);
+    f.advance_target();
+    let result = f.land(&["--merge"]);
+    assert_ne!(result.0, 0, "{result:?}");
+    assert_eq!(f.checkout_head(), f.head);
+    assert!(!f.log.exists());
+}
+
+#[test]
+fn target_moved_with_conflicts_aborts_and_restores_the_checkout() {
+    let f = TargetMoveFixture::new(1, true);
+    f.advance_target();
+    let tree = f.iso.git_out(&f.repo, &["write-tree"]);
+    let index = f.repo.join(".git/index");
+    let index_before = fs::read(&index).unwrap();
+    let file = f.repo.join("a.txt");
+    let file_before = fs::read(&file).unwrap();
+    let result = f.land(&["--merge"]);
+    assert_refused(
+        &result,
+        "remote target is not an ancestor. Fetch the target",
+    );
+    assert!(
+        !result.2.contains("rollback could not be verified"),
+        "{result:?}"
+    );
+    assert_eq!(f.checkout_head(), f.head);
+    assert_eq!(fs::read(&index).unwrap(), index_before);
+    assert_eq!(f.iso.git_out(&f.repo, &["write-tree"]), tree);
+    assert_eq!(fs::read(&file).unwrap(), file_before);
+    let merge_head = f.repo.join(".git/MERGE_HEAD");
+    assert!(!merge_head.exists());
+    assert!(!f.log.exists());
+    assert!(!f.iso.home.path().join("land-gates").exists());
+
+    let leftover = f
+        .iso
+        .command(&f.repo)
+        .args(["merge", "--no-ff", &f.tips[0]])
+        .output()
+        .unwrap();
+    assert!(!leftover.status.success());
+    let saved = fs::read(&merge_head).unwrap();
+    let result = f.land(&["--merge"]);
+    assert_refused(&result, "run git merge --abort");
+    assert_eq!(fs::read(merge_head).unwrap(), saved);
+}
+
+#[test]
+fn target_moved_three_times_stops_after_two_updates() {
+    let f = TargetMoveFixture::new(3, false);
+    f.advance_during_ci(1);
+    let result = f.land(&["--merge", "--merge-method", "merge"]);
+    assert_eq!(result.0, 2, "{result:?}");
+    assert!(
+        result
+            .2
+            .contains("target moved during CI; final observation withheld")
+            && result.2.contains("target kept moving"),
+        "{result:?}"
+    );
+    let head = f.checkout_head();
+    let first = f.iso.git_out(&f.repo, &["rev-parse", "HEAD^1"]);
+    f.assert_parents(&first, &f.head, &f.tips[0]);
+    f.assert_parents(&head, &first, &f.tips[1]);
+    f.assert_gates(&[&f.head, &f.base, &first, &f.tips[0], &head, &f.tips[1]]);
+    f.assert_ci_and_merge(&[&f.head, &first, &head], None);
+    assert_eq!(
+        result.1.matches("land: target moved; merged ").count(),
+        2,
+        "{result:?}"
+    );
+    assert!(result.1.contains("(update 2 of 2)"), "{result:?}");
+    assert_eq!(
+        f.iso.git_out(&f.bare, &["rev-parse", "refs/heads/main"]),
+        f.tips[2]
+    );
+    let original = f.receipt(&f.head);
+    let middle = f.receipt(&first);
+    let last = f.receipt(&head);
+    assert_eq!(original.get("state").text(), Some("superseded"));
+    assert_eq!(original.get("successor_request"), middle.get("request"));
+    assert_eq!(middle.get("state").text(), Some("superseded"));
+    assert_eq!(middle.get("successor_request"), last.get("request"));
+    assert_ne!(last.get("state").text(), Some("passed"));
+    assert!(!last.has("successor_request"));
+}
+
+#[test]
+fn target_moved_keeps_rebase_and_publish_only_refusals() {
+    for options in [&[][..], &["--merge", "--merge-method", "rebase"]] {
+        let f = TargetMoveFixture::new(1, false);
+        f.advance_during_ci(1);
+        let result = f.land(options);
+        assert_eq!(
+            result,
+            (2, String::new(), "error: target moved during CI; final observation withheld. Fetch the target, merge it into the PR branch and rerun land with the same head branch so CI checks the combined tree\n".into())
+        );
+        f.assert_ci_and_merge(&[&f.head], None);
+        assert_eq!(f.checkout_head(), f.head);
+        let result = f.land(options);
+        assert_eq!(
+            result,
+            (2, String::new(), "error: remote target is not an ancestor. Fetch the target and merge it into your PR branch, then rerun land with the same head branch.\n".into())
+        );
+        assert_eq!(f.receipt(&f.head).get("state").text(), Some("running"));
     }
 }
 
@@ -3143,30 +3636,8 @@ fn check_read_only_reconciliation(squash_during_ci: bool) {
     let head = iso.commit_as(&repo, "feat.txt", "feat\n", &["feat: recover", "Reason."]);
     let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
     let (gh, log) = iso.fake_gh(&bare, "success");
-    // Only transport goes to the isolated bare repo. Identity queries observe
-    // the actual configured GitHub destination for issuance and reconciliation.
     let public = "https://github.com/owner/recon.git";
-    iso.git(&repo, &["remote", "set-url", "origin", public]);
-    let git = iso.bin.join("git");
-    fs::remove_file(&git).unwrap();
-    fs::write(
-        &git,
-        format!(
-            r#"#!{bash}
-for a in "$@"; do
-    case "$a" in ls-remote|push|fetch)
-        exec '{real_git}' -c 'url.{bare}.insteadOf={public}' "$@";;
-    esac
-done
-exec '{real_git}' "$@"
-"#,
-            bash = which("bash").display(),
-            real_git = which("git").display(),
-            bare = bare.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    iso.use_canonical_github_transport(&repo, &bare, public);
     std::os::unix::fs::symlink(which("cat"), iso.bin.join("cat")).unwrap();
     let fake = fs::read_to_string(&gh)
         .unwrap()

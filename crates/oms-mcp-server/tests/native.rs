@@ -1664,7 +1664,7 @@ fn conversation_panel() {
         &c.tool("oms_panel_project_graph", json!({})),
         "not a valid OMS or Git repository",
     );
-    let expected_main = json!({"source":"room-session","provider":"codex","participant":"owner","room":"r","state":"joined","incomplete":false});
+    let expected_main = json!({"source":"room-session","provider":"codex","harness":"pi","participant":"owner","room":"r","state":"joined","incomplete":false});
     fixture_settings(
         &source,
         json!({"stdout":snapshot.to_string(),"binding":{"conversationBinding":"matched","conversationMain":expected_main}}),
@@ -1711,6 +1711,28 @@ fn conversation_panel() {
                 json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
             );
         }
+    }
+    for (field, value) in [
+        ("harness", "foreign"),
+        ("provider", "claude"),
+        ("source", "other"),
+        ("state", "left"),
+        ("participant", ""),
+        ("room", "../other"),
+    ] {
+        let mut forged = expected_main.clone();
+        forged[field] = json!(value);
+        fixture_settings(
+            &source,
+            json!({"stdout":snapshot.to_string(),"binding":{"conversationBinding":"matched","conversationMain":forged}}),
+        );
+        let result = c.call(
+            "tools/call",
+            json!({"name":"oms_panel_snapshot","arguments":{},"_meta":{"threadId":thread}}),
+        );
+        let report = payload(&result);
+        assert!(report["dashboard"]["conversationMain"]["harness"].is_null());
+        assert_eq!(report["dashboard"]["degraded"], true);
     }
     fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     let partial = c.call(
@@ -1912,6 +1934,156 @@ fn panel_command_catalog() {
             Client::new(&source, &repo, full, false, false).tool(name, json!({}))["error"]["code"],
             -32602
         );
+    }
+    // Both desktop profiles read the same bounded rows via their own project binding.
+    let legacy = json!({"harness":"pi","owner":"codex","transport":"CodexGateway","installed":false,
+        "dependencies":"pi, codex, oms","dependenciesPresent":false,"resumePolicy":"unsupported",
+        "accountSelection":false,"auth":null,"version":null,"observedAt":10});
+    let mut current = legacy.clone();
+    current["managedOutgoingSwap"] = json!("unsupported");
+    current["swapEvidence"] = json!("no-managed-outgoing-adapter");
+    current["configuredMainPermissions"] = json!("full");
+    current["fullModeOption"] = json!("unsupported");
+    current["resumeRefusalCode"] = json!("binding_unverified");
+    for (client, args) in [
+        (
+            &mut desktop,
+            json!({"view":"connections","project":"approved"}),
+        ),
+        (
+            &mut generic,
+            json!({"view":"connections","project":"approved"}),
+        ),
+    ] {
+        let mut read = |row: &Value| {
+            let page = json!({"view":"connections","page":1,"columns":[{"key":"harness","label":"하네스"}],"rows":[row],"status":"ready"});
+            fixture_settings(&source, json!({"stdout":page.to_string()}));
+            client.tool("oms_panel_tui_view", args.clone())
+        };
+        let old = read(&legacy);
+        good(&old);
+        let old = payload(&old);
+        for k in [
+            "resumeRefusalCode",
+            "managedOutgoingSwap",
+            "swapEvidence",
+            "configuredMainPermissions",
+            "fullModeOption",
+        ] {
+            assert_eq!(old["rows"][0][k], "unknown");
+            assert!(
+                old["columns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|column| column["key"] == k)
+            );
+        }
+        let evidence_keys = [
+            "managedOutgoingSwap",
+            "swapEvidence",
+            "configuredMainPermissions",
+            "fullModeOption",
+        ];
+        for omitted in 1..(1 << evidence_keys.len()) {
+            let mut partial = current.clone();
+            let mut expected = current.clone();
+            for (index, key) in evidence_keys.iter().enumerate() {
+                if omitted & (1 << index) != 0 {
+                    partial.as_object_mut().unwrap().remove(*key);
+                    expected[*key] = json!("unknown");
+                }
+            }
+            let response = read(&partial);
+            good(&response);
+            assert_eq!(payload(&response)["rows"][0], expected);
+        }
+        for (key, wrong) in [
+            ("managedOutgoingSwap", json!("ready")),
+            ("swapEvidence", json!("invalid")),
+            ("configuredMainPermissions", json!(null)),
+            ("fullModeOption", json!(true)),
+        ] {
+            let mut partial = legacy.clone();
+            partial[key] = wrong;
+            bad(&read(&partial), "unrecognized Connections evidence");
+        }
+        let mut previous = current.clone();
+        previous
+            .as_object_mut()
+            .unwrap()
+            .remove("resumeRefusalCode");
+        let previous = payload(&read(&previous));
+        assert_eq!(previous["rows"][0]["resumeRefusalCode"], "unknown");
+        assert_eq!(previous["rows"][0]["fullModeOption"], "unsupported");
+
+        let ok = read(&current);
+        assert_eq!(payload(&ok)["rows"][0], current);
+        assert_eq!(ok["result"]["structuredContent"]["rows"][0], current);
+        for (key, wrong) in [
+            ("owner", json!("pi")),
+            ("harness", json!("other")),
+            ("transport", json!("native")),
+            ("fullModeOption", json!("supported")),
+            ("resumeRefusalCode", json!("not_applicable")),
+            ("resumeRefusalCode", json!(null)),
+            ("swapEvidence", json!("requires-verified-idle-pane-exit")),
+            ("managedOutgoingSwap", json!("ready")),
+            ("configuredMainPermissions", json!(["full"])),
+            ("foreignPolicy", json!("fixture-private-command")),
+        ] {
+            let mut row = current.clone();
+            row[key] = wrong;
+            let denied = read(&row);
+            bad(&denied, "unrecognized Connections evidence");
+            assert!(!denied.to_string().contains("fixture-private-command"));
+        }
+        let mut partial = legacy.clone();
+        partial["managedOutgoingSwap"] = json!("supported");
+        bad(&read(&partial), "unrecognized Connections evidence");
+        let mut claude = current.clone();
+        for (key, value) in [
+            ("harness", "claude"),
+            ("owner", "claude"),
+            ("transport", "native"),
+            ("dependencies", "claude"),
+            ("resumePolicy", "requires verified session"),
+            ("resumeRefusalCode", "not_applicable"),
+            ("fullModeOption", "supported"),
+        ] {
+            claude[key] = json!(value);
+        }
+        claude["accountSelection"] = json!(true);
+        for (swap, evidence) in [
+            ("supported", "assisted-exit-linux-proc-available"),
+            ("unsupported", "assisted-exit-linux-proc-unavailable"),
+        ] {
+            claude["managedOutgoingSwap"] = json!(swap);
+            claude["swapEvidence"] = json!(evidence);
+            assert_eq!(payload(&read(&claude))["rows"][0], claude);
+        }
+        let mut agy = current.clone();
+        agy["owner"] = json!("antigravity");
+        agy["transport"] = json!("native");
+        agy["dependencies"] = json!("agy");
+        agy["fullModeOption"] = json!("supported");
+        for alias in ["agy", "antigravity"] {
+            agy["harness"] = json!(alias);
+            assert_eq!(payload(&read(&agy))["rows"][0], agy);
+        }
+        let page = json!({"view":"connections","page":1,"columns":[{"key":"swapEvidence","label":"교체 계약 및 호스트 조건"}],"rows":[current],"status":"ready"});
+        for k in ["foreign", "columns", "status"] {
+            let mut bad_page = page.clone();
+            bad_page[k] = match k {
+                "columns" => json!([{"key":"swapEvidence","label":"fixture private label"}]),
+                "status" => json!("unavailable"),
+                _ => json!("fixture private label"),
+            };
+            fixture_settings(&source, json!({"stdout":bad_page.to_string()}));
+            let denied = client.tool("oms_panel_tui_view", args.clone());
+            bad(&denied, "unrecognized Connections evidence");
+            assert!(!denied.to_string().contains("fixture private label"));
+        }
     }
     std::fs::remove_file(map).unwrap();
 
