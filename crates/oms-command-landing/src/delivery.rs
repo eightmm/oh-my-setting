@@ -2201,6 +2201,14 @@ fn execute_pass(
     if moved_before_gate.is_some() {
         row.set("head_branch", head_branch.as_str());
     }
+    // A moved target defers the save to update_target; until then only the
+    // receipt already on disk, validated above, may name the card's head.
+    if moved_before_gate.is_none() {
+        save(&receipt, &row, c.interrupted)?;
+    }
+    if moved_before_gate.is_none() || !previous.is_empty() {
+        *c.relay_receipt.borrow_mut() = Some(receipt.clone());
+    }
     if moved_before_gate.is_some()
         && row.get("state").text() == Some("awaiting-merge")
         && row.get("pr_number").integer(true)
@@ -2218,12 +2226,6 @@ fn execute_pass(
             pr.get("state").text() == Some("OPEN"),
             "PR is not open; use land reconcile",
         )?;
-    }
-    if moved_before_gate.is_none() {
-        save(&receipt, &row, c.interrupted)?;
-    }
-    if moved_before_gate.is_none() {
-        *c.relay_receipt.borrow_mut() = Some(receipt.clone());
     }
     let ctx = Run {
         c,
