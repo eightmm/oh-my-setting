@@ -309,7 +309,7 @@ pub(crate) fn admit(
     let snapshot = git.snapshot()?;
     let state = c.state(repo)?;
     storage::ensure_ignore(&state, c.interrupted)?;
-    let index = CaptureIndex::load(&state)?;
+    let index = CaptureIndex::load_checkout(&state, repo)?;
     let mut path = input.to_owned();
     let mut bytes = capture_bytes(&index, &path)?;
     require(!bytes.is_empty(), "patch is empty")?;
@@ -893,8 +893,8 @@ fn executable(name: &str) -> bool {
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     require(o.words.is_empty(), "unexpected patch-admit argument")?;
     let repo = c.repo(o)?;
-    let path = o
-        .path("patch", c.cwd)
+    let path = c
+        .patch_path(o, &repo)?
         .ok_or_else(|| Error::new(2, "--patch is required"))?;
     let report = o.path("report", c.cwd);
     let result = admit(
