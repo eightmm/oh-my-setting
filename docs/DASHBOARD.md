@@ -168,7 +168,15 @@ MCP tool call. OMS checks whether that thread is enrolled as the Codex owner
 of an open Room in the selected repository. A matching Room identifies the
 Main for this chat. Opening or refreshing the panel only reads existing
 membership. To continue an enrolled Main, give it work in the current chat.
-It can use a Lead from the same provider. An explicitly requested new managed
+The overview groups Main, Lead and worker attempts for the enrolled Room.
+A worker row is nested when the recorded parent attempt or Room participant
+connects it to that Lead. Partial collection is shown as partial. **Main chat**
+opens the original Codex conversation when the host advertises link support
+and the Room confirms the current user conversation as the owner. Use that
+conversation's normal composer to send messages and see replies. Otherwise
+the panel can show the permitted Room history.
+
+The Main can use a Lead from the same provider. An explicitly requested new managed
 Main gets a separate Room and launch receipt. Project-wide attempt and acceptance counts retain
 their repository scope. If OMS cannot establish a single match, the panel
 leaves this conversation’s Main unconfirmed.

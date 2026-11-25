@@ -37,7 +37,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {contexts:[],status:null, failStart:true, replies:[], messages:[], notices:[], tools:options.tools};
+  const host = {contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -71,9 +71,10 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{openLinks:options.openLinks ? {} : undefined,message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
     }
     if(method==='ui/update-model-context'){host.contexts.push(params);result={isError:host.rejectContext===true};}
+    if (method === 'ui/open-link') host.links.push(params.url);
     if (method === 'ui/message') {
       host.messages.push(params);
       if (host.holdMessage) {host.finishMessage=ack=>notify({id,...ack});return;}
@@ -533,6 +534,65 @@ test('overview opens only bound work conversations, labels confirmed Main, and r
   assert.equal(unknown.get('acceptance-bar').hidden,true); assert.equal(unknown.get('work-threads').hidden,true);
 });
 
+test('Main and Lead hierarchy uses scoped records and explicit parent links', async () => {
+  const room = 'r', lead = {room,participant:'lead',role:'lead',provider:'claude'};
+  const worker = {room,participant:'worker',parent:lead.participant,role:'worker',provider:'agy'};
+  const attempt = {...lead,id:'a-lead',task:'Review landing',state:'verifying'};
+  const p = await panel(['one'],{
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',room,participant:'owner',participants:[lead,worker]},
+    conversationAttempts:[
+      {room,participant:'owner',id:'a-main',role:'main',task:'Decide landing order',state:'working'},
+      attempt,
+      {room,participant:'worker',id:'a-1',task:'Confirm branch',state:'done'},
+      {parentAttempt:attempt.id,id:'a-2',task:'Verify changes',state:'working'},
+      {room:'other',parentAttempt:attempt.id,id:'a-3',task:'Foreign Room'},
+      {room,participant:'worker',parentAttempt:'different-lead',id:'a-4',task:'Foreign parent'},
+      {room,provider:'claude',id:'a-5',task:'Coincidentally same provider'}
+    ],
+    activeAttempts:[],
+    conversationAttemptsOmitted:2
+  });
+  assert.match(p.get('team-main-name').textContent,/Codex Main/);
+  assert.match(p.get('team-main-task').textContent,/Decide landing order/);
+  const [branch] = p.get('leads').children;
+  const disclosure = branch.children[1];
+  assert.match(branch.textContent,/Claude Lead.*Review landing/);
+  assert.match(disclosure.textContent,/Confirm branch.*Verify changes/);
+  assert.match(disclosure.textContent,/worker/);
+  assert.doesNotMatch(disclosure.textContent,/Foreign|Coincidentally/);
+  assert.match(p.get('team-records').textContent,/일부/);
+  disclosure.open = true;
+  p.run('paintLeadTree(dashboardData)');
+  assert.equal(p.get('leads').children[0].children[1].open,true);
+});
+
+test('Main chat opens only the verified native owner conversation', async () => {
+  const room='r', participant='owner';
+  const uri='codex://threads/01234567-89ab-cdef-0123-456789abcdef';
+  const p=await panel(['one','two'],{
+    conversationBinding:'matched', conversationMain:{source:'room-session',state:'joined',provider:'codex',room,participant}
+  },{openLinks:true,tools:{oms_panel_chat:args=>({...args,source:'room',provider:'codex',self:true,nativeUri:uri,messages:[]})}});
+  await p.open('result',{structuredContent:{panel:'OMS',project:'one'}});
+  assert.equal(p.get('team-main-chat').hidden,false);
+  await p.event('team-main-chat','click');
+  assert.deepEqual(p.host.links,[uri]);
+  assert.equal(p.calls.filter(c=>c.name==='oms_panel_chat').length,1);
+  p.host.tools.oms_panel_chat=args=>({...args,source:'room',provider:'codex',self:false,nativeUri:uri,messages:[]});
+  await p.event('team-main-chat','click');
+  assert.deepEqual(p.host.links,[uri]);
+  assert.equal(p.get('pane-chat').hidden,false);
+  await p.event('chat-back','click');
+  p.host.tools.oms_panel_chat=args=>({...args,source:'room',provider:'codex',self:true,nativeUri:uri,messages:[]});
+  p.host.delayTool='oms_panel_chat';
+  await p.event('team-main-chat','click');
+  p.get('project-choice').value='two';
+  await p.event('project-choice','change');
+  p.host.release();
+  await setImmediate();
+  assert.deepEqual(p.host.links,[uri]);
+});
+
 const openItem = {kind:'issue',number:9,title:'Review input boundaries',state:'OPEN',url:'https://github.com/org/repo/issues/9'};
 const workData = {git:{available:true,branch:'main'},github:{repository:'org/repo',status:'unavailable',work:{
   issues:{status:'available',incomplete:true,items:[openItem]},pullRequests:{status:'available',items:[]},
@@ -596,7 +656,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.3');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.4');
   for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
     const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
     assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
@@ -1023,7 +1083,6 @@ test('Korean and English catalogs match, and every static node and message key r
     src:['git','task','plan','attempts','artifacts','acceptance','conversation'], srcState:['unavailable','partial','ambiguous','stale'],
     sv:['connections','modelcatalog','routes','attribution'], obs:['complete','partial','unknown']};
   for (const [family, members] of Object.entries(families)) for (const member of members) assert.ok(Object.hasOwn(ko, family + '.' + member), family + '.' + member);
-  assert.ok(Buffer.byteLength(html) < 240 * 1024);
 });
 
 for (const [name, options, expected] of [

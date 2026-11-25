@@ -1491,13 +1491,15 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
         .saturating_add(nonneg(
             dashboard.get("conversationMain").get("participantsOmitted"),
         ))
+        .saturating_add(nonneg(dashboard.get("conversationAttemptsOmitted")))
         .saturating_add(attempts_omitted)
         .saturating_add(active_omitted)
         .saturating_add(scratch.map_or(0, |s| nonneg(s.get("omittedAttempts"))));
     let trimmed = attempts_trimmed
         .saturating_add(nonneg(dashboard.get("operationsTrimmed")))
         .saturating_add(nonneg(dashboard.get("attentionTrimmed")))
-        .saturating_add(active_trimmed);
+        .saturating_add(active_trimmed)
+        .saturating_add(nonneg(dashboard.get("conversationAttemptsTrimmed")));
     let conversation_incomplete = dashboard.get("conversationMain").get("incomplete").truth();
     // Bounds apply to each source window. A recent and an active row can refer to the same attempt.
     for (name, bounded) in [
@@ -1637,6 +1639,7 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             ("reason", label(row.get("reason_code"), 96)),
             ("room", label(refs.get("panel_room_id"), 128)),
             ("task", label(row.get("task_id"), 192)),
+            ("parentAttempt", label(row.get("parent_attempt_id"), 128)),
             ("state", label(row.get("state"), 64)),
             ("updated", label(row.get("updated_at"), 64)),
         ])
@@ -1797,11 +1800,29 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             ]),
         ),
     ]);
+    if conversation.text("conversationBinding") == "matched"
+        && conversation.opt("attempts").is_some()
+    {
+        let _ = dashboard.set(
+            "conversationAttempts",
+            rows(conversation.get("attempts"), 24, attempt),
+        );
+        let _ = dashboard.set(
+            "conversationAttemptsOmitted",
+            count(conversation.get("attemptsOmitted")),
+        );
+    }
     // Allocate headroom for MCP framing and escaped multibyte labels. Trim
     // complete rows only, keeping the goal and exact conversation identity.
     let mut bytes = crate::json::encoded(&dashboard).map_or(usize::MAX, |v| v.len());
     if bytes > 52_000 {
-        for key in ["attempts", "operations", "attention", "activeAttempts"] {
+        for key in [
+            "attempts",
+            "operations",
+            "attention",
+            "activeAttempts",
+            "conversationAttempts",
+        ] {
             if bytes <= 52_000 {
                 break;
             }

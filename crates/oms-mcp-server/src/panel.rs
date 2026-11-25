@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v16.html";
+const URI: &str = "ui://oms/conversation-panel/v17.html";
+const V16: &str = "ui://oms/conversation-panel/v16.html";
 const V15: &str = "ui://oms/conversation-panel/v15.html";
 const V14: &str = "ui://oms/conversation-panel/v14.html";
 const V13: &str = "ui://oms/conversation-panel/v13.html";
@@ -720,11 +721,12 @@ impl Server<'_> {
                             | V13
                             | V14
                             | V15
+                            | V16
                     )
                 ) =>
             {
                 json!({"contents":[{
-                    "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
+                    "uri":params["uri"],"mimeType":MIME,"text":panel_html(),
                     "_meta":{"ui":{"preferredDisplayMode":"fullscreen","csp":{"connectDomains":[],"resourceDomains":[]}}}
                 }]})
             }
@@ -1974,6 +1976,37 @@ impl Server<'_> {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         command_catalog(&stdout, offset)
     }
+}
+
+fn panel_html() -> &'static str {
+    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        let source = include_str!("conversation-panel.html");
+        let (prefix, tail) = source.split_once("<script>\n").expect("panel script");
+        let (code, suffix) = tail.split_once("</script>").expect("panel script end");
+        let (before, tail) = code
+            .split_once("const catalogRows = `")
+            .expect("panel catalog");
+        let (catalog, after) = tail.split_once("`;").expect("panel catalog end");
+        let mut body = String::with_capacity(source.len());
+        body.push_str(prefix);
+        body.push_str("<script>\n");
+        // Keep the translations and all line breaks intact. Only the layout
+        // indentation of the surrounding JavaScript is redundant on the wire.
+        let append = |body: &mut String, js: &str| {
+            for line in js.split_inclusive('\n') {
+                body.push_str(line.trim_start_matches(' '));
+            }
+        };
+        append(&mut body, before);
+        body.push_str("const catalogRows = `");
+        body.push_str(catalog);
+        body.push_str("`;");
+        append(&mut body, after);
+        body.push_str("</script>");
+        body.push_str(suffix);
+        body
+    })
 }
 
 fn command_name(value: &str) -> bool {
