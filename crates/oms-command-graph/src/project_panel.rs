@@ -29,7 +29,11 @@ const MAX_TREE_ENTRIES: usize = 30_000;
 
 const MAX_GIT_STDOUT_BYTES: usize = 4 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
+// Raw ceiling for the encoded index. The streaming reader below keeps only a
+// tracked, field-bounded projection, so this is not the retained size.
+const MAX_INDEX_BYTES: usize = 24 * 1024 * 1024;
+const MAX_INDEX_NODES: usize = 30_000;
+const MAX_INDEX_EDGES: usize = 75_000;
 const MAX_RESPONSE_BYTES: usize = 52_000;
 
 const EXCLUDED_DIRS: &[&str] = &[
@@ -312,6 +316,9 @@ enum IndexAttempt {
     Invalid(&'static str),
 }
 
+#[path = "project_panel_decoder.rs"]
+mod decoder;
+
 fn try_read_indexed(repo: &Path, tracked: &[String], cancel: &AtomicBool) -> Result<IndexAttempt> {
     let state = repo.join(".oms/project-graph");
     if no_symlinks(&state).is_err() {
@@ -339,13 +346,35 @@ fn try_read_indexed(repo: &Path, tracked: &[String], cancel: &AtomicBool) -> Res
             "project graph index exceeds the read-only panel size budget",
         ));
     }
-    let mut raw_graph = match read_json(&graph_path, MAX_INDEX_BYTES) {
-        Ok(Some(v)) if v.is_object() => v,
-        _ => {
+    let parent = graph_path.parent().expect("graph path has a parent");
+    let bytes = match open_store(parent)
+        .ok()
+        .and_then(|store| {
+            store
+                .optional(Path::new("graph.json"), MAX_INDEX_BYTES)
+                .ok()
+        })
+        .flatten()
+    {
+        Some(bytes) => bytes,
+        None => {
             return Ok(IndexAttempt::Invalid(
                 "project graph index is unreadable or malformed",
             ));
         }
+    };
+    check(cancel)?;
+    let parsed = if bytes.len() <= decoder::LEGACY_BYTES {
+        serde_json::from_slice(&bytes).map_err(|_| decoder::MALFORMED)
+    } else {
+        decoder::large_index(&bytes, cancel)
+    };
+    drop(bytes);
+    check(cancel)?;
+    let mut raw_graph = match parsed {
+        Ok(graph) if graph.is_object() => graph,
+        Ok(_) => return Ok(IndexAttempt::Invalid(decoder::MALFORMED)),
+        Err(reason) => return Ok(IndexAttempt::Invalid(reason)),
     };
     let revision = s(&raw_graph, "revision").to_owned();
     if raw_graph["schema"] != build::SCHEMA
@@ -358,7 +387,9 @@ fn try_read_indexed(repo: &Path, tracked: &[String], cancel: &AtomicBool) -> Res
             "project graph index schema is incompatible",
         ));
     }
-    if array(&raw_graph, "nodes").len() > 30_000 || array(&raw_graph, "edges").len() > 75_000 {
+    if array(&raw_graph, "nodes").len() > MAX_INDEX_NODES
+        || array(&raw_graph, "edges").len() > MAX_INDEX_EDGES
+    {
         return Ok(IndexAttempt::Invalid(
             "Cached graph exceeds the panel read budget.",
         ));
