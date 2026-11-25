@@ -170,8 +170,8 @@ fn panel_room_attempts(rows: &[Value], room: &str) -> (Vec<Value>, usize) {
             let root = row.text("tool") == "panel-main" || lead(row);
             (
                 row.get("terminal").truth(),
-                !root,
                 oms_command_operations::activity_rank(row.text("state")),
+                !root,
             )
         };
         rank(a)
@@ -865,7 +865,13 @@ mod panel_room_tests {
                     ("state", string("review")),
                     ("terminal", Value::Bool(false)),
                     ("updated_at", string("2026-06-02T00:00:00Z")),
-                    ("refs", object([("panel_room_id", string("work"))])),
+                    (
+                        "refs",
+                        object([
+                            ("panel_room_id", string("work")),
+                            ("panel_role", string("lead")),
+                        ]),
+                    ),
                 ])
             })
             .collect();
