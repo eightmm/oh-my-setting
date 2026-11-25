@@ -2364,7 +2364,14 @@ case "$1 $2" in
       tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
       printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s","baseRefName":"%s","headRefName":"%s","isCrossRepository":false}}]\n' "$tip" "$base" "$head"
     else echo '[]'; fi ;;
-  "pr create") : > '{state}'; IFS= read -rd '' text < "$body"; printf '%s' "$text" > '{state}.body'; echo https://example.invalid/pull/7 ;;
+  "pr create")
+    if [ -f '{state}.create-err' ]; then
+      IFS= read -rd '' err < '{state}.create-err'; printf '%b' "$err" >&2
+      if [ ! -f '{state}.create-succeeds' ]; then exit 1; fi
+    fi
+    : > '{state}'; IFS= read -rd '' text < "$body"; printf '%s' "$text" > '{state}.body'
+    if [ -f '{state}.create-err' ]; then exit 1; fi
+    echo https://example.invalid/pull/7 ;;
   "pr merge")
     if [ -f '{state}.moved' ]; then
       git --git-dir='{bare}' update-ref refs/heads/main "$(squash 'refs/heads/main^{{tree}}')"
@@ -3440,6 +3447,69 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
         "a pull request needs a motivation: pass --why TEXT or write a commit body",
     );
     let args = [&args[..], &["--why", "fixture"]].concat();
+    let create_err = iso.home.path().join("gh.pr.create-err");
+    fs::write(
+        &create_err,
+        format!(
+            "\\x1b[31mGraphQL: pull request create failed\\x1b[0m\\n{}\n",
+            "detail ".repeat(90)
+        ),
+    )
+    .unwrap();
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 1, "{r:?}");
+    assert!(
+        r.1.contains(
+            "branch pushed; pull request creation failed (gh exit 1); see receipt pr_create"
+        ),
+        "{r:?}"
+    );
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    let row = V::parse(status.as_bytes()).expect("status json");
+    assert_eq!(row.get("state").text(), Some("failed"), "{status}");
+    assert_eq!(
+        row.get("pr_create").get("rc"),
+        &V::Num("1".into()),
+        "{status}"
+    );
+    assert_eq!(row.get("pr_create").get("rc").py(), "1", "{status}");
+    let pr_err = row
+        .get("pr_create")
+        .get("error")
+        .text()
+        .expect("pr_create.error");
+    assert!(
+        pr_err.starts_with("[31mGraphQL: pull request create failed[0m detail"),
+        "{pr_err}"
+    );
+    assert!(
+        !pr_err.is_empty() && pr_err.len() <= 500 && !pr_err.chars().any(char::is_control),
+        "{pr_err}"
+    );
+    let create_calls = fs::read_to_string(&log).expect("gh log");
+    assert_eq!(
+        create_calls
+            .lines()
+            .filter(|l| l.starts_with("pr list "))
+            .count(),
+        2,
+        "{create_calls}"
+    );
+    fs::write(
+        &create_err,
+        format!("auth={}67890abcdef1234567890\n", concat!("gh", "p_12345")),
+    )
+    .unwrap();
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 1, "{r:?}");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    let row = V::parse(status.as_bytes()).expect("status json");
+    assert_eq!(
+        row.get("pr_create").get("error").text(),
+        Some("[redacted]"),
+        "{status}"
+    );
+    fs::remove_file(&create_err).unwrap();
     let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
     assert!(r.1.contains("CI failure"), "{r:?}");
@@ -3554,14 +3624,24 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
     );
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
     iso.git(&bare, &["update-ref", "-d", "refs/heads/feat"]);
+    let create_err = iso.home.path().join("gh.pr.create-err");
+    let create_succeeds = iso.home.path().join("gh.pr.create-succeeds");
+    fs::write(&create_err, "post-create timeout\n").unwrap();
+    fs::write(&create_succeeds, "").unwrap();
     let r = iso.run_with_services(
         "land",
         &repo,
         &[&args[..], &["--ci-wait", "0"]].concat(),
         &env,
     );
+    fs::remove_file(&create_err).unwrap();
+    fs::remove_file(&create_succeeds).unwrap();
     assert_eq!(r.0, 0, "{r:?}");
     assert!(r.1.contains("CI skipped; not merged"), "{r:?}");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    let row = V::parse(status.as_bytes()).expect("status json");
+    assert_eq!(row.get("pr_number"), &7usize.into(), "{status}");
+    assert!(!row.has("pr_create"), "{status}");
     let calls = fs::read_to_string(&log).expect("gh log");
     assert!(
         calls.contains("pr create --repo")
