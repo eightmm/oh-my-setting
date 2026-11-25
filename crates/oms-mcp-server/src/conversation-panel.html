@@ -47,7 +47,13 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #header-main{margin-top:.65rem}
 #leads-section{padding-top:1.15rem}
 .lead-children{margin-top:.45rem;display:grid}
-.person{width:100%;background:none;text-align:start;border:0;border-top:1px solid var(--line);border-radius:0;padding:.72rem .05rem;cursor:default}
+.lead-slot{border-top:1px solid var(--line);padding:.65rem .05rem}
+.slot-heading{display:flex;align-items:center;gap:.6rem}
+.slot-heading:only-child .avatar{background:transparent;border:1px solid var(--line);color:var(--soft)}
+.slot-heading h3{font-size:.92rem;flex:1}
+.lead-slot .person{padding:.4rem 0 .15rem 2.8rem}
+.lead-slot .state{max-width:44%}
+.person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:.72rem .05rem;cursor:default}
 button.person{cursor:pointer}
 .person .body{display:grid;flex:1;gap:.12rem;min-width:0}
 .person strong{font-size:.92rem;overflow-wrap:anywhere}
@@ -88,7 +94,7 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 <p id="goal" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p></section>
 <section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="openChat" hidden>대화 열기</button></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
-<section id="leads-section" aria-labelledby="leads-heading" hidden><h2 id="leads-heading">Leads</h2><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
+<section id="leads-section" aria-labelledby="leads-heading"><h2 id="leads-heading">Leads</h2><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
 <p id="outcome" hidden></p>
 </div>
@@ -158,6 +164,8 @@ const messages = {
   "older": ["이전 메시지", "Earlier messages"],
   "openApp": ["호스트 대화에서 OMS를 열어주세요.", "Open OMS in the host conversation."],
   "openChat": ["대화 열기", "Open conversation"],
+  "waitingAssignment": ["배정 대기", "Waiting for assignment"],
+  "unknownAssignment": ["배정 미확인", "Assignment unknown"],
   "partialLeads": ["조회된 담당 기록이 일부입니다.", "Only part of the assignment history is available."],
   "progress": ["계획 작업 {total}개 중 {verified}개 검증 완료", "{verified} of {total} planned tasks verified"],
   "projChanged": ["프로젝트가 변경되었습니다.", "The project changed."],
@@ -634,12 +642,50 @@ function verifiedLeads(main,d) {
   const priority=({attempt})=>['blocked','waiting_for_input','waiting_approval'].includes(attempt.state)?0:
     ['working','running','verifying','review'].includes(attempt.state)?1:2;
   leads.sort((a,b)=>priority(a)-priority(b));
-  return {leads,ownerRun:ownerRecords[0],partial:main.incomplete || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
+  const source=d.observation?.sources?.attempts;
+  return {leads,ownerRun:ownerRecords[0],partial:(source!=null && source!=='ok') || main.incomplete!==false || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
     (scoped?d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0:!Array.isArray(d.activeAttempts)||d.activeAttemptsTrimmed>0 || d.active!==active.length)};
 }
 function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
   element.textContent=Object.hasOwn(names,provider)?providerName(provider).slice(0,1):'–';
+}
+function leadEntry({attempt,member},inSlot) {
+  const entry=node(member?'button':'article','','person');
+  const label=typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
+  const identity=()=>label?label+' · '+assignmentLabel(attempt):assignmentLabel(attempt);
+  const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
+  const body=node('span','','body');
+  if(inSlot && attempt.role==='lead'){
+    if(member)body.append(node('span',()=>assignmentLabel(attempt)+' · ','sr-only'));
+    body.append(node('strong',label || title || 'Lead'));
+    if(label && title)body.append(node('small',title));
+  }else{
+    body.append(node('strong',identity));
+    if(title)body.append(node('small',title));
+  }
+  entry.append(body,node('span',()=>(attempt.state==='blocked'?'! ':'')+stateLabel(attempt.state),'state'));
+  if(member){
+    entry.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
+    entry.append(node('span',message('openChat'),'sr-only'));
+    entry.addEventListener('click',()=>openConversation(member,identity,entry));
+  }
+  return entry;
+}
+function renderLeadSlots(leads,complete) {
+  const list=el('leads');list.replaceChildren();
+  const providerOf=record=>record.attempt.provider==='antigravity'?'agy':record.attempt.provider;
+  for(const provider of providers) {
+    const entries=leads.filter(r=>providerOf(r)===provider);
+    const slot=node('section','','lead-slot'), heading=node('div','','slot-heading');
+    const avatar=node('span','','avatar');paintAvatar(avatar,provider);avatar.setAttribute('aria-hidden','true');
+    heading.append(avatar,node('h3',names[provider]+' Lead'));
+    if(!entries.length)heading.append(node('span',message(complete?'waitingAssignment':'unknownAssignment'),'state'));
+    slot.append(heading);
+    for(const entry of entries)slot.append(leadEntry(entry,true));
+    list.append(slot);
+  }
+  for(const entry of leads)if(!providers.includes(providerOf(entry)))list.append(leadEntry(entry,false));
 }
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
@@ -663,23 +709,9 @@ function render(d) {
   const {leads,partial,ownerRun}=main?verifiedLeads(main,d):{leads:[],partial:false};
   put('main-status',()=>main ? [ownerRun?.state?stateLabel(ownerRun.state):t('joined'),ownerRun?.taskTitle].filter(Boolean).join(' · ') :
     owner?stateLabel(owner.state):t(readOnly?'noRecordedMain':'noJoinedMain'));
-  rows=leads;const list=el('leads');list.replaceChildren();el('leads-section').hidden=!main || (!leads.length && !partial);
+  rows=leads;
+  renderLeadSlots(leads,Boolean(main) && !partial);
   put('lead-note',()=>partial?t('partialLeads'):'');
-  for(const {attempt,member} of leads) {
-    const button=node(member?'button':'article','','person');
-    const avatar=node('span','','avatar');paintAvatar(avatar,attempt.provider);avatar.setAttribute('aria-hidden','true');
-    const label=typeof member?.label==='string' && member.label.trim() && member.label!==member.participant ? member.label.trim() : '';
-    const identity=()=>label?label+' · '+assignmentLabel(attempt):assignmentLabel(attempt);
-    const body=node('span','','body');body.append(node('strong',identity));
-    if(typeof attempt.taskTitle==='string' && attempt.taskTitle.trim()) body.append(node('small',attempt.taskTitle));
-    button.append(avatar,body,node('span',()=>(attempt.state==='blocked'?'! ':'')+stateLabel(attempt.state),'state'));
-    if(member){
-      button.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');button.append(arrow);
-      button.append(node('span',message('openChat'),'sr-only'));
-      button.addEventListener('click',()=>openConversation(member,identity,button));
-    }
-    list.append(button);
-  }
   if(selectedChat && !canChat(selectedChat)){el('conversation').close();clearChat();}
   if(reviewedIssue && !sameIssue(reviewedIssue))resetIssue();
   const criteria=d.acceptance, complete=criteria?.available===true && criteria.complete===true && Number.isSafeInteger(criteria.total) &&

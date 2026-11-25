@@ -456,22 +456,26 @@ test('the first screen shows proven participants and only requests registry, sna
   assert.equal(p.host.initialize.appInfo.version,readFileSync(new URL('../../../VERSION',import.meta.url),'utf8').trim());
   assert.equal(p.get('main-name').textContent,'Codex Main');
   assert.match(p.get('main-status').textContent,/Working · Coordinate edits/);
-  assert.equal(p.get('leads-section').hidden,false);
   const cards=p.get('leads').children;
-  assert.deepEqual(cards.map(c=>c.tagName),['button','article']);
-  assert.match(cards[0].textContent,/Claude Lead.*Check indexing.*Blocked.*Open conversation/);
-  assert.match(cards[1].textContent,/Codex assignment/);
+  assert.deepEqual(cards.map(c=>c.tagName),['section','section','section']);
+  assert.deepEqual(cards.map(slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.tagName==='h3').textContent),['Codex Lead','Claude Lead','AGY Lead']);
+  assert.match(cards[2].textContent,/Waiting for assignment/);
+  assert.equal(cards[0].children[2].tagName,'article');
+  assert.match(cards[0].children[2].textContent,/Codex assignment.*Verifying/);
+  assert.equal(cards[1].children[2].tagName,'button');
+  assert.match(cards[1].children[2].textContent,/Claude Lead.*Check indexing.*Blocked.*Open conversation/);
   assert.doesNotMatch(p.get('leads').textContent,/opaque|Foreign task|lead-one/);
   assert.equal(p.get('approval-card').hidden,true);
   assert.equal(p.get('outcome').hidden,true);
-  await choose(p,'ko');assert.match(cards[0].textContent,/차단됨.*대화 열기/);
+  await choose(p,'ko');assert.match(cards[1].textContent,/차단됨.*대화 열기/);assert.match(cards[2].textContent,/배정 대기/);
   assert.ok(!html.includes('role="tablist"'));
   for(const tool of ['oms_panel_project_graph','oms_panel_work_items','oms_panel_usage','oms_panel_capabilities','oms_panel_tui_view'])
     assert.ok(!script.includes(tool),tool);
   const generic=await panel([],dashboard,{locale:'en',readOnly:true});
   assert.deepEqual(generic.calls.map(c=>c.name),startup.slice(0,2));
   assert.equal(generic.get('new-goal').hidden,true);assert.equal(generic.get('header-main').hidden,true);
-  assert.equal(generic.get('leads-section').hidden,true);
+  assert.equal(generic.get('leads').children.length,3);
+  assert.ok(generic.get('leads').children.every(slot=>slot.textContent.endsWith('Assignment unknown') && slot.children.length===2));
 });
 test('Main identity and conversation use the recorded harness without treating the dispatch owner as the harness',async()=>{
   const d={...dashboard,conversationMain:{...main,harness:'pi'}};
@@ -497,15 +501,43 @@ test('the team respects parent, provider, terminal membership and partial visibi
     {...lead,participant:'other',provider:'agy'}],participantsOmitted:1},conversationAttempts:
     ['lead-one','left','other'].map(participant=>({room:main.room,participant,id:participant,role:'lead',provider:'claude',state:'running'}))};
   const p=await panel(['one'],d,{locale:'en'});
-  assert.equal(p.get('leads').children.length,0);assert.match(p.get('lead-note').textContent,/part of/);
+  assert.equal(p.get('leads').children.length,3);
+  assert.ok(p.get('leads').children.every(slot=>slot.textContent.endsWith('Assignment unknown')));assert.match(p.get('lead-note').textContent,/part of/);
   assert.match(p.get('main-status').textContent,/Joined this room/);
-  d.conversationMain.participantsOmitted=0;await p.event('refresh','click');assert.equal(p.get('leads-section').hidden,true);
+  d.conversationMain.participantsOmitted=0;await p.event('refresh','click');
+  assert.ok(p.get('leads').children.every(slot=>slot.textContent.endsWith('Waiting for assignment')));
+  assert.equal(p.get('lead-note').textContent,'');
+});
+test('fixed roles keep distinct conversations together and leave unknown or unbound assignments passive',async()=>{
+  const second={...lead,participant:'lead-two',label:'Documentation'};
+  const agy={...lead,participant:'lead-three',provider:'agy'};
+  const d={...dashboard,conversationMain:{...main,participants:[lead,second,agy],incomplete:true},conversationAttempts:[
+    ...dashboard.conversationAttempts,
+    {room:main.room,id:'l2',participant:second.participant,role:'lead',provider:'claude',state:'working',taskTitle:'Write the guide'},
+    {room:main.room,id:'l3',participant:agy.participant,role:'lead',provider:'antigravity',state:'review'}]};
+  const p=await panel(['one'],d,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:[]})}});
+  const slots=p.get('leads').children;
+  assert.equal(slots.length,3);
+  const buttons=slots[1].children.filter(e=>e.tagName==='button');
+  assert.equal(buttons.length,2);assert.match(buttons[1].textContent,/Documentation.*Write the guide/);
+  assert.match(slots[2].textContent,/AGY Lead.*In review/);assert.match(p.get('lead-note').textContent,/part of/);
+  for(const [i,button] of buttons.entries()){
+    button.dispatchEvent(new Event('click'));await setImmediate();
+    assert.equal(p.calls.at(-1).args.participant,[lead,second][i].participant);
+    await p.event('chat-back','click');assert.ok(button.focused);
+  }
+  const unconfirmed=await panel(['one'],{conversationBinding:'unconfirmed',activeAttempts:d.conversationAttempts},{locale:'ko'});
+  assert.deepEqual(unconfirmed.calls.map(c=>c.name),startup);
+  assert.ok(unconfirmed.get('leads').children.every(slot=>slot.textContent.endsWith('배정 미확인') && slot.children.length===2));
+  const unbound=await panel([],{}, {tools:{oms_list_projects:()=>({binding:'unbound',projects:[]})}});
+  assert.equal(unbound.get('view').hidden,true);assert.equal(unbound.get('leads').children.length,0);
+  assert.deepEqual(unbound.calls.map(c=>c.name),['oms_list_projects']);
 });
 test('scoped transcript paginates only on demand and erases private data after switching projects',async()=>{
   const p=await panel(['one','two'],dashboard,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:
     [{seq:a.before==null?3:1,text:a.before==null?'Latest message':'Prior message'}],nextBefore:a.before==null?3:null})}});
   await p.open('input',{arguments:{project:'one'}});
-  p.get('leads').children[0].dispatchEvent(new Event('click'));await setImmediate();
+  p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   assert.equal(p.get('chat-messages').textContent,'Latest message');
   assert.deepEqual({...p.calls.at(-1).args},{room:'room-a',participant:'lead-one',project:'one'});
   await p.event('chat-older','click');assert.equal(p.get('chat-messages').textContent,'Prior messageLatest message');
