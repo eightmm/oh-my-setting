@@ -1673,6 +1673,17 @@ fn conversation_panel() {
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
     assert_eq!(uri, "ui://oms/conversation-panel/v21.html");
+    // Codex uses the stdio transport configuration to decide whether to reuse a running server.
+    for package in [
+        include_str!("../../../plugins/oms/mcp.json"),
+        include_str!("../../../plugins/oms-ssh/oms/mcp.json"),
+    ] {
+        let manifest: Value = serde_json::from_str(package).unwrap();
+        let revision = manifest["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"]
+            .as_str()
+            .unwrap();
+        assert_eq!(uri, &format!("ui://oms/conversation-panel/{revision}.html"));
+    }
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -3634,10 +3645,18 @@ fn peer_reading() {
         .replace('\n', "\r\n");
     let path = dir.join("answers/codex-근거.md");
     std::fs::write(&path, &original).unwrap();
+    let foreign = repo.join("unrelated.md");
+    std::fs::write(&foreign, "## Output\nforeign text\n## Exit\n0\n").unwrap();
+    let linked = dir.join("answers/advisory.md");
+    std::os::unix::fs::symlink(&foreign, &linked).unwrap();
     std::fs::write(
         dir.join("run.log"),
         format!(
-            "artifact: {}\n{}thread: latest\n",
+            "{}\n{}\n{}\n{}\nartifact: {}\n{}thread: latest\n",
+            path.display(),
+            foreign.display(),
+            linked.display(),
+            dir.join("answers/../answers/codex-근거.md").display(),
             path.display(),
             "noise\n".repeat(100000)
         ),
@@ -3647,6 +3666,7 @@ fn peer_reading() {
     good(&result);
     let p = payload(&result);
     assert_eq!(p["thread"], "latest");
+    assert_eq!(p["artifacts"], json!([path]));
     assert_eq!(p["answer_truncated"], true);
     assert!(p["answer"].as_str().unwrap().contains("TAIL"));
     assert!(!p["answer"].as_str().unwrap().contains("MIDDLE EVIDENCE"));
@@ -3778,6 +3798,20 @@ fn peer_reading() {
         std::fs::write(&legacy, bytes).unwrap();
         good(&c.tool("oms_peer_result", json!({"operation":op})));
     }
+    // Bare paths grant no new legacy read authority, even inside answers/.
+    std::fs::write(
+        dir.join("run.log"),
+        format!("{}\n{}\n", legacy.display(), path.display()),
+    )
+    .unwrap();
+    let untrusted = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert_eq!(untrusted["artifacts"], json!([]));
+    assert_eq!(untrusted["answer"], "");
+    std::fs::write(
+        dir.join("run.log"),
+        format!("artifact: {}\n", legacy.display()),
+    )
+    .unwrap();
     let framing = "## Output\n\n## Exit\n0\n";
     let edge = format!(
         "## Output\n{}\n## Exit\n0\n",
@@ -5056,8 +5090,19 @@ fn fake_oms() {
         }
         let artifact = out.join("fixture.md");
         std::fs::write(&artifact, "## Output\nfixture answer\n## Exit\n0\n").unwrap();
-        println!("artifact: {}", artifact.display());
-        println!("thread: fixture-thread");
+        if cfg["leadRoom"] == true {
+            // Normal native peer-ask stdout prints the seat path before its response.
+            let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]
+                .to_str()
+                .unwrap();
+            println!(
+                "{}\n\n{provider}:\nfixture console text\npeer-ask: 1/1 target(s) answered, 1 independent model family(ies)",
+                artifact.display()
+            );
+        } else {
+            println!("artifact: {}", artifact.display());
+            println!("thread: fixture-thread");
+        }
         return;
     }
     if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "thread") {

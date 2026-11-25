@@ -190,7 +190,11 @@ fn tail(dir: &Path) -> String {
     })();
     result.unwrap_or_default()
 }
-fn references(dir: &Path, caller_cwd: &Path) -> (Vec<String>, String) {
+fn references(
+    dir: &Path,
+    caller_cwd: &Path,
+    owned_answers: Option<&Path>,
+) -> (Vec<String>, String) {
     // Scan the entire log but bound each retained line; history is not tail-capped.
     let result = (|| -> io::Result<(Vec<String>, String)> {
         let repo = dir
@@ -221,7 +225,7 @@ fn references(dir: &Path, caller_cwd: &Path) -> (Vec<String>, String) {
             let buf = reader.fill_buf()?;
             if buf.is_empty() {
                 if !line.is_empty() && !over {
-                    reference_line(&line, &mut paths, &mut thread, caller_cwd);
+                    reference_line(&line, &mut paths, &mut thread, caller_cwd, owned_answers);
                 }
                 break;
             }
@@ -239,7 +243,7 @@ fn references(dir: &Path, caller_cwd: &Path) -> (Vec<String>, String) {
             reader.consume(n);
             if ended {
                 if !over {
-                    reference_line(&line, &mut paths, &mut thread, caller_cwd);
+                    reference_line(&line, &mut paths, &mut thread, caller_cwd, owned_answers);
                 }
                 line.clear();
                 over = false;
@@ -249,7 +253,13 @@ fn references(dir: &Path, caller_cwd: &Path) -> (Vec<String>, String) {
     })();
     result.unwrap_or_default()
 }
-fn reference_line(line: &[u8], paths: &mut Vec<String>, thread: &mut String, caller_cwd: &Path) {
+fn reference_line(
+    line: &[u8],
+    paths: &mut Vec<String>,
+    thread: &mut String,
+    caller_cwd: &Path,
+    owned_answers: Option<&Path>,
+) {
     let s = String::from_utf8_lossy(line);
     let s = s.trim_end_matches(['\r', '\n']);
     let p = if let Some(p) = s.strip_prefix("artifact: ") {
@@ -267,7 +277,18 @@ fn reference_line(line: &[u8], paths: &mut Vec<String>, thread: &mut String, cal
     {
         s.split_once(" -> ").map(|(_, p)| p)
     } else {
-        None
+        // Native peer-ask prints a bare path beside untrusted provider prose.
+        // Only the exact direct child spelling is a hint. owned_answer opens it
+        // again through the scoped no-follow, single-link reader before use.
+        owned_answers.and_then(|dir| {
+            use std::os::unix::fs::MetadataExt;
+            let name = s.strip_prefix(dir.to_str()?)?.strip_prefix('/')?;
+            (crate::answer_name(name)
+                && Path::new(s)
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.is_file() && m.nlink() == 1))
+            .then_some(s)
+        })
     };
     if let Some(p) = p.filter(|p| !p.is_empty() && !p.starts_with(char::is_whitespace)) {
         let p = p.trim_matches(crate::whitespace);
@@ -752,7 +773,7 @@ impl Server<'_> {
             if let Some(title) = meta["title"].as_text().filter(|s| !s.is_empty()) {
                 row["title"] = json!(title.prefix(160));
             }
-            let (_, thread) = references(&dir, &self.caller_cwd);
+            let (_, thread) = references(&dir, &self.caller_cwd, None);
             let thread = if thread.is_empty() {
                 meta["thread"].as_text().cloned().unwrap_or_default()
             } else {
@@ -886,7 +907,8 @@ impl Server<'_> {
                 Err(out.into())
             };
         }
-        let (artifacts, thread) = references(&dir, &self.caller_cwd);
+        let answers = owned.then(|| dir.join("answers"));
+        let (artifacts, thread) = references(&dir, &self.caller_cwd, answers.as_deref());
         let per = OUTPUT_LIMIT.saturating_sub(2 * artifacts.len().saturating_sub(1))
             / artifacts.len().max(1);
         let mut sections = Vec::<String>::new();

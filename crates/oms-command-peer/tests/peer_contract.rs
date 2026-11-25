@@ -1336,6 +1336,20 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 )
                 .unwrap();
                 assert_eq!(rows.len(), expected_calls);
+                if mixed {
+                    // MCP discovers the last round's native seat artifacts from
+                    // these complete bare path lines, independently of answer prose.
+                    let stdout = std::str::from_utf8(&output.1).unwrap();
+                    for row in &rows[rows.len() - 3..] {
+                        let artifact = repo.0.join(row.get("artifact").text().unwrap());
+                        assert!(artifact.is_file());
+                        assert!(
+                            stdout
+                                .lines()
+                                .any(|line| Path::new(line).as_os_str() == artifact.as_os_str())
+                        );
+                    }
+                }
                 if close_thread {
                     assert!(output.1.is_empty());
                     assert_eq!(rows[0].get("provider").text(), Some("antigravity"));
