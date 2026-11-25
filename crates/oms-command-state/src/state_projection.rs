@@ -3075,7 +3075,7 @@ mod panel_snapshot_tests {
             let mut changed = plan.clone();
             changed["tasks"]["work"][key] = json!(value);
             let pin = if fresh {
-                json::sha(&serde_json::to_vec(&changed).unwrap())
+                json::sha(serde_json::to_vec(&changed).unwrap())
             } else {
                 digest.clone()
             };
