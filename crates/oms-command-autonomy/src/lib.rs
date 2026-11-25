@@ -30,6 +30,7 @@ pub mod verify;
 
 use cli::Args;
 pub use conflicts::{CombinedOutcome, verify_combined};
+pub use github::check_reviewed_project_issue;
 pub use oms_command_plan::{completion, decision, retirement};
 pub use oms_command_task::{
     consumers as task_consumers, observe as verify_observe, packet as handoff_packet,

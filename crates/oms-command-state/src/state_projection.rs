@@ -161,6 +161,124 @@ fn plan_updated_at(plan: &Value, plan_path: &Path) -> Option<String> {
     )
 }
 
+/// Join only current Room assignments to the same Plan bytes validated by status.
+fn conversation_task_titles(state: &Value, raw: &[u8], plan: &Value) -> Option<Value> {
+    let conversation = state.get("conversation");
+    let main = conversation.get("conversationMain");
+    let room = main.text("room");
+    let owner = main.text("participant");
+    let status = state.get("plan");
+    let plan_id = plan.text("plan_id");
+    if conversation.text("conversationBinding") != "matched"
+        || main.text("state") != "joined"
+        || main.text("provider").is_empty()
+        || room.is_empty()
+        || owner.is_empty()
+        || plan_id.is_empty()
+        || !matches!(status.get("healthy"), Value::Bool(true))
+    {
+        return None;
+    }
+    let rows = conversation.get("attempts").array().ok()?;
+    let members = main.get("participants").array().ok()?;
+    let mut owners = rows.iter().filter(|row| {
+        let refs = row.get("refs");
+        let id = row.text("attempt_id");
+        row.text("tool") == "panel-main"
+            && !id.is_empty()
+            && matches!(row.get("terminal"), Value::Bool(false))
+            && row.text("provider") == main.text("provider")
+            && attempt_room(row) == AttemptRoom::Named(room)
+            && refs.text("panel_role") == "main"
+            && refs
+                .opt("panel_room_participant")
+                .map_or(id, |v| v.str().unwrap_or(""))
+                == owner
+    });
+    let main_attempt = owners.next()?;
+    let main_id = main_attempt.text("attempt_id");
+    if owners.next().is_some() {
+        return None;
+    }
+    let mut titles = json::empty();
+    for row in rows {
+        let refs = row.get("refs");
+        let id = row.text("attempt_id");
+        let task_id = row.text("task_id");
+        let task = plan.get("tasks").get(task_id);
+        let lease = refs.text("lease_id");
+        if id.is_empty()
+            || task_id.is_empty()
+            || task.text("id") != task_id
+            || refs.text("plan_id") != plan_id
+            || lease.is_empty()
+            || task.text("lease_id") != lease
+            || attempt_room(row) != AttemptRoom::Named(room)
+            || [row.text("state"), task.text("state")]
+                .iter()
+                .any(|s| matches!(*s, "cancelled" | "canceled"))
+        {
+            continue;
+        }
+        let participant = if std::ptr::eq(row, main_attempt) {
+            owner
+        } else {
+            let participant = if row.text("tool") == "panel-native-assignment" {
+                if row.text("provider") != "codex"
+                    || refs.text("native_assignment_schema") != "1"
+                    || refs
+                        .opt("panel_room_participant")
+                        .is_some_and(|v| v.str().ok() != Some(id))
+                    || refs
+                        .opt("panel_role")
+                        .is_some_and(|v| v.str().ok() != Some("lead"))
+                {
+                    continue;
+                }
+                id
+            } else if refs.text("panel_role") == "lead" {
+                refs.text("panel_room_participant")
+            } else {
+                continue;
+            };
+            if participant.is_empty()
+                || participant == owner
+                || row.text("parent_attempt_id") != main_id
+                || !members.iter().any(|m| {
+                    m.text("room") == room
+                        && m.text("parent") == owner
+                        && m.text("participant") == participant
+                        && m.text("provider") == row.text("provider")
+                        && matches!(m.get("joined"), Value::Bool(true))
+                        && matches!(m.text("role"), "worker" | "lead")
+                })
+            {
+                continue;
+            }
+            participant
+        };
+        let title = task.text("title");
+        if ![owner, participant].contains(&task.text("claimed_by_participant"))
+            || title.len() > 640
+            || title.trim().is_empty()
+            || title == task_id
+            || title.chars().count() > 160
+            || title.chars().any(|c| {
+                c.is_control() || matches!(c, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            })
+            || !oms_command_room::outbound_clean(title.as_bytes()).unwrap_or(false)
+            || !json::encoded(task.get("title"))
+                .ok()
+                .is_some_and(|b| oms_command_room::outbound_clean(&b).unwrap_or(false))
+        {
+            continue;
+        }
+        titles.set(id, string(title)).ok()?;
+    }
+    (!titles.object().ok()?.is_empty() && status.text("plan_sha256") == json::sha(raw))
+        .then_some(titles)
+}
+
 pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Value) -> Result<()> {
     let task_text = storage::read(
         &ctx.repo,
@@ -226,11 +344,23 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
         string(next.join(" ").chars().take(200).collect::<String>()),
     )?;
     state.set("task", task)?;
-    let plan = file(ctx, ".oms/plan/tasks.json");
+    let plan_path = Path::new(".oms/plan/tasks.json");
     let mut projected = state.get("plan").clone();
-    if let Ok(plan) = &plan {
+    if let Ok(raw) = storage::read(&ctx.repo, plan_path, storage::MAX_FILE, true)
+        && let Ok(plan) = if raw.is_empty() {
+            Ok(json::empty())
+        } else {
+            json::parse(&raw)
+        }
+    {
+        if let Some(titles) = conversation_task_titles(state, &raw, &plan)
+            && let Some(mut conversation) = state.remove("conversation")
+        {
+            conversation.set("taskTitles", titles)?;
+            state.set("conversation", conversation)?;
+        }
         projected.set("goal", plan.get("goal").clone())?;
-        if let Some(updated_at) = plan_updated_at(plan, &ctx.repo.join(".oms/plan/tasks.json")) {
+        if let Some(updated_at) = plan_updated_at(&plan, &ctx.repo.join(plan_path)) {
             projected.set("updated_at", string(updated_at))?;
         }
     }
@@ -1156,6 +1286,14 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
     let plan = state.get("plan");
     let goal = runtime.get("objective").text("text");
     let source = runtime.get("objective").text("source");
+    let goal_source_ok = runtime.get("objective").get("text").str().is_ok()
+        && matches!(
+            (goal.is_empty(), source),
+            (true, "none") | (false, "task" | "plan" | "project")
+        )
+        && ["task", "plan", "project", "runtime"]
+            .iter()
+            .all(|key| matches!(state.get(key).get("healthy"), Value::Bool(true)));
     let mut projected_plan = plan.clone();
     projected_plan.set(
         "stale_claims",
@@ -1310,6 +1448,10 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
                     "sources",
                     object([
                         ("state", string(if ok { "ok" } else { "degraded" })),
+                        (
+                            "goal",
+                            string(if goal_source_ok { "ok" } else { "degraded" }),
+                        ),
                         (
                             "artifacts",
                             string(if bad == 0 {
@@ -1605,6 +1747,11 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
     ])
 }
 
+fn goal_confirmed_absent(report: &Value) -> bool {
+    report.opt("goal") == Some(&Value::Null)
+        && report.get("collection").get("sources").text("goal") == "ok"
+}
+
 /// Compact public columns before command capture. Omit oversized strings whole
 /// so that the MCP outbound scanner never receives a credential prefix.
 fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) -> Value {
@@ -1628,6 +1775,7 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
     }
     fn attempt(row: &Value) -> Value {
         let refs = row.get("refs");
+        let scope = attempt_room(row);
         let provider = if row.text("tool") == "panel-main" && !refs.text("panel_harness").is_empty()
         {
             refs.get("panel_harness")
@@ -1645,9 +1793,22 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             ),
             ("created", label(row.get("created_at"), 64)),
             ("reason", label(row.get("reason_code"), 96)),
-            ("room", label(refs.get("panel_room_id"), 128)),
+            (
+                "room",
+                match scope {
+                    AttemptRoom::Named(room) => string(room),
+                    _ => Value::Null,
+                },
+            ),
             ("task", label(row.get("task_id"), 192)),
-            ("parentAttempt", label(row.get("parent_attempt_id"), 128)),
+            (
+                "parentAttempt",
+                if scope == AttemptRoom::Invalid {
+                    Value::Null
+                } else {
+                    label(row.get("parent_attempt_id"), 128)
+                },
+            ),
             ("state", label(row.get("state"), 64)),
             ("updated", label(row.get("updated_at"), 64)),
         ])
@@ -1655,21 +1816,25 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
     let attempts = report.get("attempts");
     let active = attempts.get("active_recent");
     let mail = report.get("attention").get("room_mail");
-    let current_room = if mail.get("bound").truth() && mail.get("healthy").truth() {
-        label(mail.get("room_id"), 128)
+    let bound_room = mail.get("bound").truth() && mail.get("healthy").truth();
+    let current_room = if bound_room {
+        oms_command_room::identifier(mail.text("room_id"), "room").ok()
     } else {
-        Value::Null
+        None
     };
     let window = active.array().unwrap_or(&[]);
     let mut candidates = window.iter().filter(|r| {
         r.text("tool") == "panel-main"
-            && (current_room == Value::Null || r.get("refs").get("panel_room_id") == &current_room)
+            && (!bound_room
+                || matches!(attempt_room(r),
+                AttemptRoom::Named(room) if current_room == Some(room)))
     });
     let first = candidates.next();
     // A partial repository-wide window cannot establish uniqueness.
-    let main = first.filter(|_| {
-        candidates.next().is_none()
-            && (current_room != Value::Null
+    let main = first.filter(|row| {
+        attempt_room(row) != AttemptRoom::Invalid
+            && candidates.next().is_none()
+            && (current_room.is_some()
                 || attempts.get("active").int().ok() == Some(window.len() as i128))
     });
     let goal_text = |v: &Value| {
@@ -1680,6 +1845,13 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             .unwrap_or(Value::Null)
     };
     let goal = goal_text(report.get("goal").get("text"));
+    let goal_availability = if goal != Value::Null {
+        "available"
+    } else if goal_confirmed_absent(report) {
+        "absent"
+    } else {
+        "unavailable"
+    };
     let plan = report.get("plan");
     let acceptance = report.get("acceptance");
     let operations = report.get("operations");
@@ -1698,6 +1870,24 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             Value::Null
         }
     };
+    let plan_progress = match (
+        plan.get("task_count").int(),
+        plan.get("verified_count").int(),
+        plan.get("cancelled_count").int(),
+    ) {
+        (Ok(tasks), Ok(verified), Ok(cancelled))
+            if matches!(plan.get("healthy"), Value::Bool(true))
+                && tasks < (1_i128 << 53)
+                && (0..=tasks).contains(&cancelled)
+                && (0..=tasks - cancelled).contains(&verified) =>
+        {
+            object([
+                ("total", number(tasks - cancelled)),
+                ("verified", number(verified)),
+            ])
+        }
+        _ => Value::Null,
+    };
     let mut dashboard = object([
         ("scope", string("repository")),
         ("git", report.get("git").clone()),
@@ -1712,11 +1902,15 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
                 .cloned()
                 .unwrap_or_else(|| string("unconfirmed")),
         ),
-        ("currentRoom", current_room),
+        (
+            "currentRoom",
+            current_room.map(string).unwrap_or(Value::Null),
+        ),
         ("project", label(report.get("repo").get("name"), 255)),
         ("branch", label(report.get("repo").get("branch"), 255)),
         ("updated", label(report.get("generated_at"), 64)),
         ("goal", goal),
+        ("goalAvailability", string(goal_availability)),
         (
             "degraded",
             Value::Bool(!report.get("collection").get("ok").truth()),
@@ -1730,6 +1924,7 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
                 Value::Null
             },
         ),
+        ("planProgress", plan_progress),
         ("tasks", plan_count("task_count")),
         ("tasksVerified", plan_count("verified_count")),
         ("taskStatus", label(report.get("task").get("status"), 96)),
@@ -1813,7 +2008,13 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
     {
         let _ = dashboard.set(
             "conversationAttempts",
-            rows(conversation.get("attempts"), 24, attempt),
+            rows(conversation.get("attempts"), 24, |row| {
+                let mut item = attempt(row);
+                if let Some(title) = conversation.get("taskTitles").opt(row.text("attempt_id")) {
+                    let _ = item.set("taskTitle", title.clone());
+                }
+                item
+            }),
         );
         let _ = dashboard.set(
             "conversationAttemptsOmitted",
@@ -2002,10 +2203,12 @@ fn dashboard_text(report: &Value) -> Result<String> {
     let goal = report.get("goal");
     lines.push(format!(
         "goal: {}",
-        if goal.truth() {
+        if !goal.text("text").is_empty() {
             format!("{} ({})", goal.text("text"), goal.text("source"))
-        } else {
+        } else if goal_confirmed_absent(report) {
             "none recorded".into()
+        } else {
+            "unavailable".into()
         }
     ));
     let scope = report.get("scope");
@@ -2652,7 +2855,7 @@ mod panel_snapshot_tests {
     fn compact_snapshot_binds_room_and_omits_private_or_unbounded_source_columns() {
         let mut report = crate::json::parse(br#"{"kind":"oms-dashboard","schema":1,
             "attempts":{"available":true,"active":1,"active_recent":[{"attempt_id":"main-1","tool":"panel-main","provider":"codex","state":"working","refs":{"panel_harness":"pi","panel_role":"main","panel_room_id":"room-a","panel_label":"Launch note"}}],
-            "recent":[{"attempt_id":"historical","tool":"panel-native-assignment","state":"done","refs":{"panel_role":"lead","panel_room_id":"older"}}]},
+            "recent":[{"attempt_id":"historical","tool":"panel-native-assignment","state":"done","refs":{"panel_role":"lead","panel_room":"older"}},{"attempt_id":"bad","parent_attempt_id":"main-1","refs":{"panel_room_id":"room-a","panel_room":"outside"}}]},
             "attention":{"items":[{"code":"stale-plan-claims","summary":"Check results","command":"private command"}],"room_mail":{"bound":true,"healthy":true,"room_id":"room-b"}},
             "acceptance":{"available":true,"total":3,"counts":{"verified":1},"complete":false},
             "reviews":{"passed":2,"failed":1,"unknown":0},
@@ -2666,7 +2869,7 @@ mod panel_snapshot_tests {
                     ("healthy", Value::Bool(true)),
                     ("task_count", number(3)),
                     ("verified_count", number(1)),
-                    ("cancelled_count", number(2)),
+                    ("cancelled_count", number(1)),
                 ]),
             )
             .unwrap();
@@ -2677,7 +2880,16 @@ mod panel_snapshot_tests {
         assert_eq!(d.text("currentRoom"), "room-b");
         assert_eq!(d.get("main"), &Value::Null);
         assert_eq!(d.get("goal"), &Value::Null);
-        assert_eq!(d.get("attempts").array().unwrap()[0].text("role"), "lead");
+        assert_eq!(d.text("goalAvailability"), "unavailable");
+        assert_eq!(
+            d.get("planProgress"),
+            &object([("total", number(2)), ("verified", number(1))])
+        );
+        let recent = d.get("attempts").array().unwrap();
+        assert_eq!(recent[0].text("role"), "lead");
+        assert_eq!(recent[0].text("room"), "older");
+        assert_eq!(recent[1].get("room"), &Value::Null);
+        assert_eq!(recent[1].get("parentAttempt"), &Value::Null);
         let active = d.get("activeAttempts").array().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].text("room"), "room-a");
@@ -2710,6 +2922,11 @@ mod panel_snapshot_tests {
         report.set("goal", Value::Null).unwrap();
         let unbound = panel_snapshot(&report, &Value::Null);
         assert_eq!(unbound.get("dashboard").get("goal"), &Value::Null);
+        assert_eq!(
+            unbound.get("dashboard").text("goalAvailability"),
+            "unavailable"
+        );
+        assert_eq!(unbound.get("dashboard").get("planProgress"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("tasksVerified"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("tasks"), &Value::Null);
         assert_eq!(unbound.get("dashboard").get("currentRoom"), &Value::Null);
@@ -2730,6 +2947,10 @@ mod panel_snapshot_tests {
         let ambiguous = panel_snapshot(&report, &Value::Null);
         assert_eq!(ambiguous.get("dashboard").get("main"), &Value::Null);
         assert_eq!(ambiguous.get("dashboard").text("goal"), goal);
+        assert_eq!(
+            ambiguous.get("dashboard").text("goalAvailability"),
+            "available"
+        );
         let before = ambiguous.get("dashboard");
         report
             .set(
@@ -2764,6 +2985,192 @@ mod panel_snapshot_tests {
             assert_eq!(before.get(key), after.get(key), "{key}");
         }
         assert!(crate::json::encoded(&capped).unwrap().len() < 60_000);
+    }
+
+    #[test]
+    fn conversation_task_titles_require_the_current_plan_lease_and_room_hierarchy() {
+        use serde_json::json;
+        let title = "승인 화면 간소화";
+        let task = json!({"id":"work","title":title,"state":"claimed","lease_id":"l1","claimed_by_participant":"owner"});
+        let plan = json!({"plan_id":"current","tasks":{"work":task}});
+        let member = json!({"room":"here","participant":"assignment","parent":"owner","role":"worker","joined":true,"provider":"codex"});
+        let refs =
+            json!({"panel_role":"main","panel_room_id":"here","plan_id":"current","lease_id":"l1"});
+        let main = json!({"attempt_id":"owner","tool":"panel-main","provider":"codex","terminal":false,"task_id":"work","refs":refs});
+        let assigned = json!({"attempt_id":"assignment","tool":"panel-native-assignment","provider":"codex","parent_attempt_id":"owner","task_id":"work",
+            "refs":{"native_assignment_schema":"1","panel_room_id":"here","plan_id":"current","lease_id":"l1"}});
+        let joined = json!({"state":"joined","provider":"codex","participant":"owner","room":"here","participants":[member]});
+        let state = json!({"plan":{"healthy":true},"conversation":{"conversationBinding":"matched","conversationMain":joined,"attempts":[main,assigned]}});
+        let raw = serde_json::to_vec(&plan).unwrap();
+        let digest = json::sha(&raw);
+        let snapshot = |mut state: serde_json::Value, plan: &serde_json::Value, pinned: &str| {
+            state["plan"]["plan_sha256"] = json!(pinned);
+            let state = json::parse(&serde_json::to_vec(&state).unwrap()).unwrap();
+            let raw = serde_json::to_vec(plan).unwrap();
+            let mut conversation = state.get("conversation").clone();
+            if let Some(titles) =
+                conversation_task_titles(&state, &raw, &json::parse(&raw).unwrap())
+            {
+                conversation.set("taskTitles", titles).unwrap();
+            }
+            panel_snapshot(&Value::Null, &conversation)
+        };
+        let ok = snapshot(state.clone(), &plan, &digest);
+        let dashboard = ok.get("dashboard");
+        for row in dashboard.get("conversationAttempts").array().unwrap() {
+            assert_eq!(row.text("task"), "work");
+            assert_eq!(row.text("taskTitle"), title);
+        }
+        assert!(dashboard.opt("taskTitles").is_none());
+        let mut explicit_lead = state.clone();
+        let lead = &mut explicit_lead["conversation"]["attempts"][1];
+        lead["tool"] = json!("peer-delegate");
+        lead["refs"]["panel_role"] = json!("lead");
+        lead["refs"]["panel_room_participant"] = json!("assignment");
+        let explicit = snapshot(explicit_lead, &plan, &digest);
+        assert_eq!(
+            explicit
+                .get("dashboard")
+                .get("conversationAttempts")
+                .array()
+                .unwrap()[1]
+                .text("taskTitle"),
+            title
+        );
+        let tainted = concat!("/ho", "me/example/private");
+        for (field, value) in [
+            ("/refs/plan_id", "previous"),
+            ("/refs/lease_id", "previous"),
+            ("/refs/panel_room_id", "elsewhere"),
+            ("/task_id", "missing"),
+            ("/parent_attempt_id", "other"),
+            ("/attempt_id", "unknown-member"),
+            ("/provider", "other"),
+            ("/state", "cancelled"),
+            ("/refs/panel_role", "reviewer"),
+        ] {
+            let mut different = state.clone();
+            let assignment = &mut different["conversation"]["attempts"][1];
+            if let Some(key) = field.strip_prefix("/refs/") {
+                assignment["refs"][key] = json!(value);
+            } else {
+                assignment[&field[1..]] = json!(value);
+            }
+            let got = snapshot(different, &plan, &digest);
+            let rows = got
+                .get("dashboard")
+                .get("conversationAttempts")
+                .array()
+                .unwrap();
+            assert_eq!(rows[0].text("taskTitle"), title);
+            assert!(rows[1].opt("taskTitle").is_none(), "{field}");
+        }
+        for (key, value, fresh) in [
+            ("title", "다른 계획", false),
+            ("state", "cancelled", true),
+            ("claimed_by_participant", "other", true),
+            ("title", "private\ntext", true),
+            ("title", tainted, true),
+        ] {
+            let mut changed = plan.clone();
+            changed["tasks"]["work"][key] = json!(value);
+            let pin = if fresh {
+                json::sha(serde_json::to_vec(&changed).unwrap())
+            } else {
+                digest.clone()
+            };
+            let got = snapshot(state.clone(), &changed, &pin);
+            for row in got
+                .get("dashboard")
+                .get("conversationAttempts")
+                .array()
+                .unwrap()
+            {
+                assert!(row.opt("taskTitle").is_none(), "{key}");
+                assert_eq!(row.text("task"), "work");
+            }
+        }
+    }
+
+    #[test]
+    fn active_main_requires_unambiguous_room_tags_when_mail_is_bound() {
+        let mut report = json::parse(
+            br#"{"attention":{"room_mail":{"bound":true,"healthy":true,"room_id":"work"}}}"#,
+        )
+        .unwrap();
+        for (refs, matches) in [
+            (object([("panel_room", string("work"))]), true),
+            (
+                object([
+                    ("panel_room_id", string("work")),
+                    ("panel_room", string("other")),
+                ]),
+                false,
+            ),
+            (
+                object([
+                    ("panel_room_id", string("work")),
+                    ("panel_room", Value::Null),
+                ]),
+                false,
+            ),
+        ] {
+            report
+                .set(
+                    "attempts",
+                    object([
+                        ("available", Value::Bool(true)),
+                        ("active", number(1)),
+                        (
+                            "active_recent",
+                            Value::Array(vec![object([
+                                ("tool", string("panel-main")),
+                                ("attempt_id", string("main")),
+                                ("refs", refs),
+                            ])]),
+                        ),
+                    ]),
+                )
+                .unwrap();
+            let snapshot = panel_snapshot(&report, &Value::Null);
+            let main = snapshot.get("dashboard").get("main");
+            assert_eq!(main.text("room") == "work", matches);
+            assert_eq!(main == &Value::Null, !matches);
+        }
+    }
+
+    #[test]
+    fn omitted_goal_or_inconsistent_plan_does_not_establish_progress() {
+        let mut report = json::parse(
+            br#"{"goal":null,"collection":{"sources":{"goal":"ok"}},
+            "plan":{"healthy":true,"task_count":3,"verified_count":1}}"#,
+        )
+        .unwrap();
+        for cancelled in [
+            None,
+            Some(number(-1)),
+            Some(number(3)),
+            Some(number(4)),
+            Some(string("1")),
+        ] {
+            if let Some(value) = cancelled {
+                let mut plan = report.get("plan").clone();
+                plan.set("cancelled_count", value).unwrap();
+                report.set("plan", plan).unwrap();
+            }
+            let snapshot = panel_snapshot(&report, &Value::Null);
+            let dashboard = snapshot.get("dashboard");
+            assert_eq!(dashboard.text("goalAvailability"), "absent");
+            assert_eq!(dashboard.get("planProgress"), &Value::Null);
+            assert!(dashboard.get("tasks").is_int(3));
+        }
+        report.set("goal", json::empty()).unwrap();
+        assert_eq!(
+            panel_snapshot(&report, &Value::Null)
+                .get("dashboard")
+                .text("goalAvailability"),
+            "unavailable"
+        );
     }
 
     #[test]

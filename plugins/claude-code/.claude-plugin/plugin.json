@@ -1,6 +1,6 @@
 {
   "name": "oms-panel",
-  "version": "0.1.0",
-  "description": "Read-only OMS collaboration pane for Claude Code. It draws the oms dashboard projection beside the transcript and needs an oh-my-setting install that provides the oms command.",
+  "version": "0.8.6",
+  "description": "Open OMS with /oms-panel to see the current goal, work, results and activity. Reads the project through the installed oms command.",
   "author": { "name": "eightmm" }
 }
