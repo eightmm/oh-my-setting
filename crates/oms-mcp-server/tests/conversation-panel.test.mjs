@@ -271,7 +271,7 @@ test('active Lead cards, past executions and repository verification use their o
   const p = await panel(['one'], {
     scope:'repository', currentRoom:'room-two', active:3,
     main:{provider:'pi', room:'room-two'},
-    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'room-one', participant:'chat-owner', incomplete:true},
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', harness:'codex', room:'room-one', participant:'chat-owner', incomplete:true},
     activeAttempts:[
       {provider:'claude', role:'lead', task:'live-task', room:'room-one', state:'working'},
       {provider:'agy', role:'lead', task:'unrelated', room:'room-two', state:'working'},
@@ -314,7 +314,7 @@ test('unbound partial snapshots leave unseen activity and absent verification un
 
 test('a reserved launch and an incomplete Lead sample cannot confirm a different chat identity', async () => {
   const p = await panel(['one'], {active:9, activeAttempts:[],
-    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'conversation-room', participant:'owner'}});
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', harness:'codex', room:'conversation-room', participant:'owner'}});
   assert.match(p.get('leads').textContent, /Lead를 확인하지 못했습니다/);
   p.host.status = 'reserved';
   p.get('launch').elements.main.value = 'claude';
@@ -504,7 +504,7 @@ test('a compact snapshot reports only positive omissions and keeps empty samples
 test('overview opens only bound work conversations, labels confirmed Main, and routes measured progress to the plan', async () => {
   const member={room:'r',participant:'native-lead',provider:'claude',role:'worker'};
   const p=await panel(['one'],{conversationBinding:'matched',
-    conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner',participants:[member]},
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',harness:'codex',room:'r',participant:'owner',participants:[member]},
     activeAttempts:[{...member,task:'Test changes',state:'verifying'},{...member,room:'another',task:'Wrong room'}],
     attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}}, {message:true,compose:true});
   p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]}),oms_panel_tui_view:args=>({...args,status:'ready',columns:[],rows:[]})};
@@ -540,7 +540,7 @@ test('Main and Lead hierarchy uses scoped records and explicit parent links', as
   const attempt = {...lead,id:'a-lead',task:'Review landing',state:'verifying'};
   const p = await panel(['one'],{
     conversationBinding:'matched',
-    conversationMain:{source:'room-session',state:'joined',provider:'codex',room,participant:'owner',participants:[lead,worker]},
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',harness:'codex',room,participant:'owner',participants:[lead,worker]},
     conversationAttempts:[
       {room,participant:'owner',id:'a-main',role:'main',task:'Decide landing order',state:'working'},
       attempt,
@@ -597,7 +597,7 @@ const openItem = {kind:'issue',number:9,title:'Review input boundaries',state:'O
 const workData = {git:{available:true,branch:'main'},github:{repository:'org/repo',status:'unavailable',work:{
   issues:{status:'available',incomplete:true,items:[openItem]},pullRequests:{status:'available',items:[]},
   projects:{status:'available',items:[{number:2,title:'Release',state:'OPEN',items:[openItem]}]}}}};
-const matchedMain={source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner'};
+const matchedMain={source:'room-session',state:'joined',provider:'codex',harness:'codex',room:'r',participant:'owner'};
 async function pickIssue(p) {
   p.host.tools={oms_panel_git_status:()=>workData};
   await p.event('tab-git','click');
@@ -737,9 +737,10 @@ test('GitHub Projects permission copy requires a typed scope error; other reposi
 
 test('connection settings separate host facts, runtime policy, and draft-only harness choice', async () => {
   const p = await panel(['one'], {}, {host:'Claude Desktop',version:'2.4.1',mode:'inline',readOnly:true});
-  const columns = ['harness','installed','auth','transport','resumePolicy'].map(key => ({key,label:key}));
+  const columns = ['harness','installed','auth','transport','resumePolicy','resumeRefusalCode'].map(key => ({key,label:key}));
   const data = {view:'connections',page:1,columns,status:'ready',rows:[
-    {harness:'pi',installed:false,auth:null,transport:'CodexGateway',resumePolicy:'unsupported'},
+    {harness:'pi',owner:'codex',installed:false,auth:null,transport:'CodexGateway',resumePolicy:'unsupported',resumeRefusalCode:'binding_unverified'},
+    {harness:'codex',installed:true,resumeRefusalCode:'not_applicable'},
     {harness:'claude',installed:true,auth:'required',dependenciesPresent:true}
   ]};
   p.host.tools = {oms_panel_tui_view:() => data};
@@ -764,6 +765,29 @@ test('connection settings separate host facts, runtime policy, and draft-only ha
   await q.event('connection-draft','click');
   assert.equal(q.get('launch').elements.main.value,'claude'); assert.equal(q.get('launcher').open,true);
   assert.equal([...p.calls,...q.calls].some(c => c.name === 'oms_start_main'),false);
+});
+
+test('Connections and the Main header distinguish Pi from its Codex dispatch owner', async () => {
+  for (const harness of ['pi', null]) {
+    const p = await panel(['one'], {
+      conversationBinding:'matched', conversationMain:{...matchedMain,harness}
+    });
+    p.host.tools = {oms_panel_tui_view:() => ({
+      view:'connections',page:1,status:'ready',columns:[{key:'resumeRefusalCode',label:'재개 거절 코드'}],
+      rows:[{harness:'codex',resumeRefusalCode:'not_applicable'}, {harness:'pi',resumeRefusalCode:'binding_unverified'}]
+    })};
+    assert.match(p.get('header-main').textContent,harness ? /Pi Main$/ : /디스패치 Codex$/);
+    p.get('source-details').open = true;
+    await p.event('source-details','toggle');
+    assert.match(p.get('connection-rows').textContent,/현재 세션 미확인/);
+    p.get('connection-harness').value = 'pi';
+    await p.event('connection-harness','change');
+    assert.match(p.get('connection-rows').textContent,/binding_unverified/);
+    assert.match(p.get('connection-rows').textContent,harness ? /Main 멤버십 확인/ : /현재 세션 미확인/);
+    p.get('language-choice').value = 'en';
+    await p.event('language-choice','change');
+    assert.match(p.get('connection-rows').textContent,/Resume refusal code.*Session binding unverified/);
+  }
 });
 
 test('settings page, permission failure and project change discard prior catalog facts', async () => {

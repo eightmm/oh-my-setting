@@ -40,6 +40,27 @@ enum MainTransport {
     CodexGateway,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MainResumeRefusal {
+    AgySessionBinding,
+    PiSessionBinding,
+}
+
+impl MainResumeRefusal {
+    const CODE: &'static str = "binding_unverified";
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::AgySessionBinding => {
+                "Agy resume needs a verified native session binding; start a fresh Agy main"
+            }
+            Self::PiSessionBinding => {
+                "Pi resume needs a verified Pi session binding; start a new Pi main"
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct MainCapability {
     harness: &'static str,
@@ -48,7 +69,7 @@ struct MainCapability {
     transport: MainTransport,
     requires: &'static [&'static str],
     full_permissions: Option<&'static str>,
-    resume_refusal: Option<&'static str>,
+    resume_refusal: Option<MainResumeRefusal>,
 }
 
 const MAIN_CAPABILITIES: &[MainCapability] = &[
@@ -77,9 +98,7 @@ const MAIN_CAPABILITIES: &[MainCapability] = &[
         transport: MainTransport::Native(NativePrompt::AntigravityInteractive),
         requires: &["agy"],
         full_permissions: Some("--dangerously-skip-permissions"),
-        resume_refusal: Some(
-            "Agy resume needs a verified native session binding; start a fresh Agy main",
-        ),
+        resume_refusal: Some(MainResumeRefusal::AgySessionBinding),
     },
     MainCapability {
         harness: "pi",
@@ -88,7 +107,7 @@ const MAIN_CAPABILITIES: &[MainCapability] = &[
         transport: MainTransport::CodexGateway,
         requires: &["pi", "codex", "oms"],
         full_permissions: None,
-        resume_refusal: Some("Pi resume needs a verified Pi session binding; start a new Pi main"),
+        resume_refusal: Some(MainResumeRefusal::PiSessionBinding),
     },
 ];
 
@@ -121,8 +140,8 @@ impl MainCapability {
     }
 
     fn require_resume(&self, resume: bool) -> Result<()> {
-        if resume && let Some(reason) = self.resume_refusal {
-            return Err(Error::new(reason));
+        if resume && let Some(refusal) = self.resume_refusal {
+            return Err(Error::new(refusal.message()));
         }
         Ok(())
     }
@@ -146,8 +165,18 @@ fn main_capability(harness: &str) -> Option<&'static MainCapability> {
         .find(|entry| entry.harness == harness)
 }
 
-/// Registry policy and executable presence only. Neither establishes login or a session.
+/// Observe registry and host policy without opening a provider session.
 pub(super) fn desktop_connections() -> Vec<Value> {
+    connection_rows(
+        claude_assisted_exit_available(),
+        MainPermissions::from_env().ok(),
+    )
+}
+
+fn connection_rows(
+    claude_exit_available: bool,
+    permissions: Option<MainPermissions>,
+) -> Vec<Value> {
     MAIN_CAPABILITIES
         .iter()
         .map(|cap| {
@@ -160,11 +189,28 @@ pub(super) fn desktop_connections() -> Vec<Value> {
             } else {
                 "requires verified session"
             };
+            let swap = check_outgoing_swap_on_host(Some(cap.harness), claude_exit_available).is_ok();
+            let swap_evidence = match cap.harness {
+                "codex" => "requires-verified-idle-pane-exit",
+                "claude" if swap => "assisted-exit-linux-proc-available",
+                "claude" => "assisted-exit-linux-proc-unavailable",
+                _ => "no-managed-outgoing-adapter",
+            };
             json!({
                 "harness": cap.harness, "owner": cap.owner, "transport": transport,
                 "installed": which_exists(cap.harness),
                 "dependencies": cap.requires.join(", "), "dependenciesPresent": cap.installed(),
-                "resumePolicy": resume, "accountSelection": cap.supports_account(),
+                "resumePolicy": resume,
+                "resumeRefusalCode": if cap.resume_refusal.is_some() {
+                    MainResumeRefusal::CODE
+                } else {
+                    "not_applicable"
+                },
+                "accountSelection": cap.supports_account(),
+                "managedOutgoingSwap": if swap { "supported" } else { "unsupported" },
+                "swapEvidence": swap_evidence,
+                "configuredMainPermissions": permissions.map_or("unknown", MainPermissions::as_str),
+                "fullModeOption": if cap.full_permissions.is_some() { "supported" } else { "unsupported" },
             })
         })
         .collect()
@@ -325,6 +371,24 @@ pub fn dry_run_plan(
         .transpose()?;
     let split = wants_split(options);
     let policy = load_policy(source)?;
+    if options.has("resume")
+        && let Some(entry) = capability
+        && let Some(refusal) = entry.resume_refusal
+    {
+        let (code, _, stderr) = crate::failure(Error::new(refusal.message()));
+        let result = json!({
+            "schema": 1,
+            "kind": "oms-panel-action-result",
+            "action": "resume",
+            "outcome": "refused",
+            "code": MainResumeRefusal::CODE,
+            "capabilityState": "unsupported",
+            "harness": entry.harness,
+            "dispatchOwner": entry.owner,
+            "executes": false,
+        });
+        return Ok((code, json(&result)?, stderr));
+    }
     let main = capability
         .map(|entry| MainAdmission::plan(entry, &policy, options))
         .transpose()?;
@@ -6148,12 +6212,112 @@ pub(crate) mod native_lifecycle_contract {
     }
 
     #[test]
+    fn main_resume_dry_run_reports_the_same_refusal_as_admission() {
+        let repo = TempRepo::new();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let stop = AtomicBool::new(false);
+        for (input, harness, owner) in [
+            ("agy", "agy", "antigravity"),
+            ("antigravity", "agy", "antigravity"),
+            ("pi", "pi", "codex"),
+        ] {
+            let args = crate::commands::strings(&[
+                "--launch",
+                input,
+                "--resume",
+                "fixture-session",
+                "--dry-run",
+            ]);
+            let options = crate::cli::Options::parse(&args).unwrap();
+            let (code, stdout, stderr) =
+                super::dry_run_plan(&repo.0, &source, &options, &PickerServices(None), &stop)
+                    .unwrap();
+            let refusal = super::required_main_capability(input)
+                .unwrap()
+                .require_resume(true)
+                .unwrap_err();
+            assert_eq!(code, refusal.code);
+            assert!(
+                String::from_utf8(stderr)
+                    .unwrap()
+                    .contains(&refusal.message)
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&stdout).unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "kind": "oms-panel-action-result",
+                    "action": "resume",
+                    "outcome": "refused",
+                    "code": "binding_unverified",
+                    "capabilityState": "unsupported",
+                    "harness": harness,
+                    "dispatchOwner": owner,
+                    "executes": false,
+                })
+            );
+        }
+        for harness in ["codex", "claude"] {
+            assert!(
+                super::required_main_capability(harness)
+                    .unwrap()
+                    .require_resume(true)
+                    .is_ok()
+            );
+        }
+        assert!(!repo.0.join(".oms").exists());
+    }
+
+    #[test]
     fn main_swap_claude_requires_host_process_verification() {
         use super::{CLAUDE_ASSISTED_EXIT_UNAVAILABLE, check_outgoing_swap_on_host};
 
         for available in [true, false] {
             assert!(check_outgoing_swap_on_host(Some("codex"), available).is_ok());
             assert!(check_outgoing_swap_on_host(Some("agy"), available).is_err());
+        }
+        for available in [false, true] {
+            for (input, normalized) in
+                [("full", "full"), ("native", "native"), ("other", "unknown")]
+            {
+                let rows = super::connection_rows(
+                    available,
+                    super::MainPermissions::parse(Some(input)).ok(),
+                );
+                assert_eq!(rows.len(), 4);
+                for row in rows {
+                    let harness = row["harness"].as_str().unwrap();
+                    let supported = check_outgoing_swap_on_host(Some(harness), available).is_ok();
+                    assert_eq!(
+                        row["managedOutgoingSwap"],
+                        if supported {
+                            "supported"
+                        } else {
+                            "unsupported"
+                        }
+                    );
+                    assert_eq!(row["configuredMainPermissions"], normalized);
+                    assert_eq!(
+                        row["fullModeOption"],
+                        if harness == "pi" {
+                            "unsupported"
+                        } else {
+                            "supported"
+                        }
+                    );
+                    assert_eq!(
+                        row["swapEvidence"],
+                        match harness {
+                            "codex" => "requires-verified-idle-pane-exit",
+                            "claude" if available => "assisted-exit-linux-proc-available",
+                            "claude" => "assisted-exit-linux-proc-unavailable",
+                            "agy" | "pi" => "no-managed-outgoing-adapter",
+                            _ => panic!("unexpected harness"),
+                        }
+                    );
+                    assert!(!row.to_string().contains("--"));
+                }
+            }
         }
         assert!(check_outgoing_swap_on_host(Some("claude"), true).is_ok());
         assert_eq!(

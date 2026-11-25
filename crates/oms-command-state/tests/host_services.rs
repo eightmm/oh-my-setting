@@ -1182,6 +1182,201 @@ fn inbox_warns_on_recent_failure_repeat_without_command_text() {
 }
 
 #[test]
+fn conversation_snapshot_binds_exact_native_harness_without_changing_owner() {
+    use oms_command_operations::{append_lifecycle, new_event, value::obj};
+    use sha2::{Digest, Sha256};
+    let repo = TempRepo::new();
+    let stop = AtomicBool::new(false);
+    let room = oms_command_room::Room::open(
+        repo.path(),
+        Default::default(),
+        &oms_command_room::LocalServices,
+        &stop,
+        true,
+        false,
+    )
+    .unwrap();
+    let join = |id: &str, member: &str, provider: &str| {
+        room.create(Some(id), "fixture", None, None, None).unwrap();
+        let mut j = oms_command_room::Join::new(member, provider);
+        j.native_session = Some(id.to_owned());
+        room.join(id, j).unwrap();
+        format!("{:x}", Sha256::digest(id.as_bytes()))[..32].to_owned()
+    };
+    let main = |digest: &str| {
+        let (_, out, err) = view(
+            "dashboard",
+            repo.path(),
+            &[
+                "--json",
+                "--panel-snapshot",
+                "--conversation-digest",
+                digest,
+            ],
+        );
+        let doc = json::parse(out.as_bytes()).unwrap_or_else(|_| panic!("dashboard failed: {err}"));
+        doc.get("dashboard").get("conversationMain").clone()
+    };
+    let event = |id: &str, room: &str, provider: &str, with: &[(&str, &str)]| {
+        let mut refs = obj([
+            ("panel_role", "main".into()),
+            ("panel_owner", "codex".into()),
+            ("panel_room_id", room.into()),
+        ]);
+        for (key, val) in with {
+            refs.set(key, *val);
+        }
+        let row = new_event(
+            id,
+            1usize.into(),
+            "attempt.created",
+            obj([
+                ("to_state", "queued".into()),
+                ("provider", provider.into()),
+                ("tool", "panel-main".into()),
+                ("refs", refs),
+            ]),
+        )
+        .unwrap();
+        append_lifecycle(repo.path(), row, &stop).unwrap();
+    };
+    let digest = join("room-target", "owner", "codex");
+    assert!(matches!(main(&digest).get("harness"), json::Value::Null));
+    event(
+        "foreign",
+        "room-other",
+        "codex",
+        &[
+            ("panel_harness", "codex"),
+            ("panel_room_participant", "owner"),
+        ],
+    );
+    assert!(matches!(main(&digest).get("harness"), json::Value::Null));
+    event(
+        "owner",
+        "room-target",
+        "codex",
+        &[("panel_harness", "pi"), ("panel_session_digest", &digest)],
+    );
+    let pi = main(&digest);
+    assert_eq!((pi.text("provider"), pi.text("harness")), ("codex", "pi"));
+    assert!(matches!(main(&"0".repeat(32)), json::Value::Null));
+    event(
+        "swap",
+        "room-target",
+        "codex",
+        &[
+            ("panel_harness", "codex"),
+            ("panel_room_participant", "owner"),
+        ],
+    );
+    assert!(matches!(main(&digest).get("harness"), json::Value::Null));
+    let cancel = new_event(
+        "swap",
+        2usize.into(),
+        "attempt.state_changed",
+        obj([
+            ("from_state", "queued".into()),
+            ("to_state", "cancelled".into()),
+        ]),
+    )
+    .unwrap();
+    append_lifecycle(repo.path(), cancel, &stop).unwrap();
+    assert!(matches!(main(&digest), json::Value::Null));
+    for (id, provider, refs, expected) in [
+        (
+            "bound-swap",
+            "codex",
+            vec![
+                ("panel_harness", "codex"),
+                ("panel_room_participant", "member"),
+            ],
+            Some("codex"),
+        ),
+        (
+            "wrong-provider",
+            "claude",
+            vec![
+                ("panel_harness", "codex"),
+                ("panel_room_participant", "member"),
+            ],
+            None,
+        ),
+        (
+            "foreign-owner",
+            "codex",
+            vec![
+                ("panel_harness", "pi"),
+                ("panel_owner", "claude"),
+                ("panel_room_participant", "member"),
+            ],
+            None,
+        ),
+        (
+            "foreign-chat",
+            "codex",
+            vec![
+                ("panel_harness", "pi"),
+                ("panel_session_digest", "incorrect"),
+                ("panel_room_participant", "member"),
+            ],
+            None,
+        ),
+        (
+            "wrong-member",
+            "codex",
+            vec![("panel_harness", "pi"), ("panel_room_participant", "other")],
+            None,
+        ),
+        (
+            "missing-harness",
+            "codex",
+            vec![("panel_room_participant", "member")],
+            None,
+        ),
+        (
+            "foreign-harness",
+            "codex",
+            vec![
+                ("panel_harness", "agy"),
+                ("panel_room_participant", "member"),
+            ],
+            None,
+        ),
+        (
+            "wrong-role",
+            "codex",
+            vec![
+                ("panel_harness", "pi"),
+                ("panel_room_participant", "member"),
+                ("panel_role", "lead"),
+            ],
+            None,
+        ),
+    ] {
+        let digest = join(id, "member", "codex");
+        event(id, id, provider, &refs);
+        let result = main(&digest);
+        assert_eq!(result.text("provider"), "codex", "{id}");
+        assert_eq!(result.get("harness").str().ok(), expected, "{id}");
+    }
+    for (provider, harness) in [("claude", "claude"), ("antigravity", "agy")] {
+        let digest = join(provider, "member", provider);
+        event(
+            provider,
+            provider,
+            provider,
+            &[
+                ("panel_harness", harness),
+                ("panel_owner", provider),
+                ("panel_room_participant", "member"),
+            ],
+        );
+        assert!(matches!(main(&digest), json::Value::Null));
+    }
+}
+
+#[test]
 fn dashboard_and_panel_snapshot_share_observation_revision_across_cli_json_and_foreign_scopes() {
     let repo_a = TempRepo::new();
     let repo_b = TempRepo::new();

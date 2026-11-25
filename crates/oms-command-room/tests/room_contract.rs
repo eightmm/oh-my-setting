@@ -375,6 +375,10 @@ fn room_lifecycle_and_cursor() {
         assert_eq!(linked["conversationMain"].text("room"), "room-fixture");
         assert_eq!(linked["conversationMain"].text("participant"), "owner");
         assert_eq!(linked["conversationMain"].text("state"), "joined");
+        assert_eq!(
+            linked["conversationMain"].get("harness"),
+            Some(&Value::Null)
+        );
         assert_eq!(fs::read(&log).unwrap(), before);
         assert!(chat(&"0".repeat(32), &[])["conversationMain"].is_null());
         let mut terminated = history[16].clone();
