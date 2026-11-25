@@ -8,13 +8,15 @@ use std::{
     ffi::OsString,
     fs,
     os::unix::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, PermissionsExt, symlink},
     },
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+thread_local! { static LINK_CRASH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 const SKILL_FILE: &str = "SKILL.md";
 const HIDDEN_SKILL_FILE: &str = ".oms-hidden-SKILL.md";
 
@@ -33,6 +35,10 @@ struct Change {
     hidden_old_skill: bool,
     #[serde(default)]
     hidden_new_skill: bool,
+    #[serde(default)]
+    old_link: Option<Vec<u8>>,
+    #[serde(default)]
+    old_link_mode: Option<u32>,
 }
 impl Change {
     fn identity(&self, path: &Path, allow_hidden_skill: bool) -> Result<Option<String>> {
@@ -103,7 +109,7 @@ impl Transaction {
         })
     }
     pub fn link(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace(target, |p| {
+        self.replace_mode(target, false, false, Some(source.to_owned()), |p| {
             symlink(source, p)?;
             Ok(false)
         })
@@ -125,7 +131,7 @@ impl Transaction {
         files: &[(&str, &[u8], u32)],
         create_only: bool,
     ) -> Result<()> {
-        self.replace_mode(target, false, create_only, |p| {
+        self.replace_mode(target, false, create_only, None, |p| {
             fs::create_dir(p)?;
             fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
             let hide = !files.iter().any(|(name, _, _)| *name == HIDDEN_SKILL_FILE);
@@ -151,13 +157,14 @@ impl Transaction {
         target: &Path,
         prepare: impl FnOnce(&Path) -> Result<bool>,
     ) -> Result<()> {
-        self.replace_mode(target, false, false, prepare)
+        self.replace_mode(target, false, false, None, prepare)
     }
     fn replace_mode(
         &mut self,
         target: &Path,
         external: bool,
         create_only: bool,
+        link_source: Option<PathBuf>,
         prepare: impl FnOnce(&Path) -> Result<bool>,
     ) -> Result<()> {
         let identify = |p: &Path, allow_hidden: bool| {
@@ -182,14 +189,26 @@ impl Transaction {
         if create_only && old.is_some() {
             return r::fail("refusing to replace an existing lifecycle target");
         }
+        let (old_link, old_link_mode) = read_old_link(&target)?;
         let hidden_old_skill = if old.is_some() {
             can_hide_skill(&target)?
         } else {
             false
         };
-        let hidden_new_skill = prepare(&staged)?;
-        let new = identify(&staged, hidden_new_skill)?;
-        self.journal.changes.push(Change {
+        // A staged link would expose its skill before the journal records it, so link
+        // sources are staged only after save.
+        let deferred = link_source.is_some();
+        let (hidden_new_skill, new) = if deferred {
+            let probe = self.path.with_file_name(format!("link-probe-{suffix}"));
+            symlink(link_source.as_ref().unwrap(), &probe)?;
+            let result = identify(&probe, false);
+            fs::remove_file(&probe)?;
+            (false, result?)
+        } else {
+            let hidden = prepare(&staged)?;
+            (hidden, identify(&staged, hidden)?)
+        };
+        let candidate = Change {
             target,
             staged,
             undo,
@@ -199,18 +218,41 @@ impl Transaction {
             parent_identity: None,
             hidden_old_skill,
             hidden_new_skill,
-        });
+            old_link,
+            old_link_mode,
+        };
+        if let Err(error) = validate_change(&candidate) {
+            if !deferred {
+                remove(&candidate.staged)?;
+            }
+            return Err(error);
+        }
+        self.journal.changes.push(candidate);
         self.save()?;
         let change = self.journal.changes.last().unwrap();
         if change.identity(&change.target, false)? != change.old {
             return r::fail("target changed while staging lifecycle mutation");
         }
-        if change.old.is_some() {
+        if deferred {
+            #[cfg(test)]
+            if LINK_CRASH.with(|point| point.get() == 1) {
+                return r::fail("test interruption before staging");
+            }
+            symlink(link_source.as_ref().unwrap(), &change.staged)?;
+            #[cfg(test)]
+            if LINK_CRASH.with(|point| point.get() == 2) {
+                return r::fail("test interruption after staging");
+            }
+        }
+        if change.old.is_some() && change.old_link.is_none() {
             fs::rename(&change.target, &change.undo)?;
             if change.hidden_old_skill {
                 hide_skill(&change.undo)?;
             }
             r::sync_dir(change.target.parent().unwrap())?;
+        }
+        if change.old_link.is_some() && fs::symlink_metadata(&change.staged)?.is_dir() {
+            fs::remove_file(&change.target)?;
         }
         fs::rename(&change.staged, &change.target)?;
         if change.hidden_new_skill {
@@ -235,13 +277,14 @@ impl Transaction {
         if old.is_none() {
             return Ok(());
         }
+        let (old_link, old_link_mode) = read_old_link(&target)?;
         let hidden_old_skill = can_hide_skill(&target)?;
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
         if r::exists(&undo) {
             return r::fail("transaction undo name already exists");
         }
-        self.journal.changes.push(Change {
+        let candidate = Change {
             staged: undo.with_extension("stage"),
             undo,
             target,
@@ -251,13 +294,21 @@ impl Transaction {
             parent_identity: None,
             hidden_old_skill,
             hidden_new_skill: false,
-        });
+            old_link,
+            old_link_mode,
+        };
+        validate_change(&candidate)?;
+        self.journal.changes.push(candidate);
         self.save()?;
         let change = self.journal.changes.last().unwrap();
         if change.identity(&change.target, false)? != change.old {
             return r::fail("target changed before removal");
         }
-        fs::rename(&change.target, &change.undo)?;
+        if change.old_link.is_some() {
+            fs::remove_file(&change.target)?;
+        } else {
+            fs::rename(&change.target, &change.undo)?;
+        }
         if change.hidden_old_skill {
             hide_skill(&change.undo)?;
         }
@@ -372,6 +423,8 @@ impl Transaction {
             parent_identity: Some((m.dev(), m.ino())),
             hidden_old_skill: false,
             hidden_new_skill: false,
+            old_link: None,
+            old_link_mode: None,
         });
         self.save()?;
         check()?;
@@ -451,6 +504,8 @@ impl Transaction {
             parent_identity: Some((m.dev(), m.ino())),
             hidden_old_skill: false,
             hidden_new_skill: false,
+            old_link: None,
+            old_link_mode: None,
         });
         self.save()?;
         inspect()?;
@@ -472,7 +527,12 @@ impl Transaction {
     /// Snapshot provider-owned files before letting its CLI rewrite them. A kill
     /// before sealing retains the undo copy and refuses uncertain recovery.
     pub fn publish_external(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace_mode(target, true, false, |p| {
+        let link_source = if fs::symlink_metadata(source)?.file_type().is_symlink() {
+            Some(fs::read_link(source)?)
+        } else {
+            None
+        };
+        self.replace_mode(target, true, false, link_source, |p| {
             external_copy(source, p, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))
         })
     }
@@ -488,12 +548,13 @@ impl Transaction {
                 return r::fail("external snapshot name already exists");
             }
             let old = external_identity(&target)?;
+            let (old_link, old_link_mode) = read_old_link(&target)?;
             let hidden_old_skill = if old.is_some() {
                 can_hide_skill(&target)?
             } else {
                 false
             };
-            self.journal.changes.push(Change {
+            let candidate = Change {
                 target: target.clone(),
                 staged,
                 undo: undo.clone(),
@@ -503,9 +564,18 @@ impl Transaction {
                 parent_identity: None,
                 hidden_old_skill,
                 hidden_new_skill: false,
-            });
+                old_link,
+                old_link_mode,
+            };
+            validate_change(&candidate)?;
+            self.journal.changes.push(candidate);
             self.save()?;
-            if old.is_some() {
+            if self.journal.changes.last().unwrap().old_link.is_some()
+                && external_identity(&target)? != old
+            {
+                return r::fail("provider state changed during snapshot");
+            }
+            if old.is_some() && self.journal.changes.last().unwrap().old_link.is_none() {
                 let hid = external_copy(&target, &undo, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))?;
                 if hid != hidden_old_skill
                     || external_identity_with_hidden(&undo, hidden_old_skill)? != old
@@ -560,39 +630,65 @@ impl Drop for Transaction {
 }
 fn validate(j: &Journal) -> Result<()> {
     for c in &j.changes {
-        if let Some((dev, ino)) = c.parent_identity {
-            let m = fs::symlink_metadata(
-                c.target
-                    .parent()
-                    .ok_or_else(|| r::Error(2, "invalid bound target".into()))?,
-            )?;
-            if !m.is_dir() || m.file_type().is_symlink() || m.dev() != dev || m.ino() != ino {
-                return r::fail("account parent moved; recovery journal retained");
-            }
+        validate_change(c)?;
+    }
+    Ok(())
+}
+fn validate_change(c: &Change) -> Result<()> {
+    if let Some((dev, ino)) = c.parent_identity {
+        let m = fs::symlink_metadata(
+            c.target
+                .parent()
+                .ok_or_else(|| r::Error(2, "invalid bound target".into()))?,
+        )?;
+        if !m.is_dir() || m.file_type().is_symlink() || m.dev() != dev || m.ino() != ino {
+            return r::fail("account parent moved; recovery journal retained");
         }
-        let parent = c
-            .target
-            .parent()
-            .ok_or_else(|| r::Error(2, "invalid journal target".into()))?;
-        if !c.target.is_absolute()
-            || c.target.file_name().is_none()
-            || c.staged.parent() != Some(parent)
-            || c.undo.parent() != Some(parent)
-            || !c
-                .staged
-                .file_name()
-                .unwrap_or_default()
-                .as_bytes()
-                .starts_with(b".oms-")
-            || !c
-                .undo
-                .file_name()
-                .unwrap_or_default()
-                .as_bytes()
-                .starts_with(b".oms-undo-")
+    }
+    let parent = c
+        .target
+        .parent()
+        .ok_or_else(|| r::Error(2, "invalid journal target".into()))?;
+    if let Some(link) = &c.old_link {
+        let mut hash = Sha256::new();
+        if c.external {
+            let mode = c
+                .old_link_mode
+                .ok_or_else(|| r::Error(2, "invalid journal link mode".into()))?;
+            hash.update(mode.to_le_bytes());
+            hash.update(b"link");
+        } else {
+            hash.update(b"link\0");
+        }
+        hash.update(link);
+        if c.old.as_deref() != Some(format!("{:x}", hash.finalize()).as_str())
+            || link.is_empty()
+            || link.contains(&0)
+            || c.hidden_old_skill
         {
-            return r::fail("unsafe lifecycle recovery paths");
+            return r::fail("invalid lifecycle journal link");
         }
+    } else if c.old_link_mode.is_some() {
+        return r::fail("invalid lifecycle journal link mode");
+    }
+    if !c.target.is_absolute()
+        || c.target.file_name().is_none()
+        || c.staged.parent() != Some(parent)
+        || c.undo.parent() != Some(parent)
+        || !c
+            .staged
+            .file_name()
+            .unwrap_or_default()
+            .as_bytes()
+            .starts_with(b".oms-")
+        || !c
+            .undo
+            .file_name()
+            .unwrap_or_default()
+            .as_bytes()
+            .starts_with(b".oms-undo-")
+    {
+        return r::fail("unsafe lifecycle recovery paths");
     }
     Ok(())
 }
@@ -606,7 +702,12 @@ fn rollback(j: &Journal) -> Result<()> {
             current_old.clone()
         };
         let undo = c.identity(&c.undo, c.hidden_old_skill)?;
-        if c.external && current_old == c.old && undo == c.old && undo.is_some() {
+        if c.external
+            && c.old_link.is_none()
+            && current_old == c.old
+            && undo == c.old
+            && undo.is_some()
+        {
             remove(&c.undo)?;
             if r::exists(&c.staged) {
                 return r::fail("unexpected external staging during rollback");
@@ -614,7 +715,36 @@ fn rollback(j: &Journal) -> Result<()> {
             r::sync_dir(c.target.parent().unwrap())?;
             continue;
         }
-        if undo.is_some() {
+        if r::exists(&c.staged) {
+            if c.identity(&c.staged, c.hidden_new_skill)? != c.new {
+                return r::fail("staging content changed; recovery journal retained");
+            }
+            remove(&c.staged)?;
+        }
+        if let Some(link) = &c.old_link {
+            if undo.is_some() {
+                return r::fail("unexpected lifecycle undo content");
+            }
+            let is_old_link = || {
+                fs::symlink_metadata(&c.target).is_ok_and(|m| m.file_type().is_symlink())
+                    && fs::read_link(&c.target).is_ok_and(|p| p.as_os_str().as_bytes() == link)
+            };
+            if !is_old_link() {
+                if current_new.is_some() && current_new != c.new {
+                    return r::fail("rollback conflict; lifecycle recovery journal retained");
+                }
+                remove(&c.target)?;
+                symlink(OsString::from_vec(link.clone()), &c.target)?;
+            }
+            // Mode is restored on every pass so a resumed recovery finishes it, and is
+            // best effort: a recreated link may not carry the mode where lchmod is absent.
+            if let Some(mode) = c.old_link_mode {
+                restore_link_mode(&c.target, mode)?;
+            }
+            if !is_old_link() {
+                return r::fail("restored link changed; recovery journal retained");
+            }
+        } else if undo.is_some() {
             if undo != c.old || (current_new.is_some() && current_new != c.new) {
                 return r::fail("rollback conflict; lifecycle recovery journal retained");
             }
@@ -631,12 +761,6 @@ fn rollback(j: &Journal) -> Result<()> {
         } else if current_old != c.old {
             return r::fail("previous lifecycle target missing; recovery journal retained");
         }
-        if r::exists(&c.staged) {
-            if c.identity(&c.staged, c.hidden_new_skill)? != c.new {
-                return r::fail("staging content changed; recovery journal retained");
-            }
-            remove(&c.staged)?;
-        }
         r::sync_dir(c.target.parent().unwrap())?;
     }
     for effect in j.effects.iter().rev() {
@@ -647,6 +771,9 @@ fn rollback(j: &Journal) -> Result<()> {
 fn cleanup(j: &Journal) -> Result<()> {
     for c in &j.changes {
         if r::exists(&c.undo) {
+            if c.old_link.is_some() {
+                return r::fail("unexpected lifecycle undo content");
+            }
             if c.identity(&c.undo, c.hidden_old_skill)? != c.old {
                 return r::fail("undo content changed; recovery journal retained");
             }
@@ -659,6 +786,46 @@ fn cleanup(j: &Journal) -> Result<()> {
     }
     Ok(())
 }
+fn restore_link_mode(path: &Path, mode: u32) -> Result<()> {
+    // An untouched link may belong to another user, where chmod fails with EPERM.
+    if fs::symlink_metadata(path)?.mode() & 0o7777 == mode & 0o7777 {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    let mode = mode as u16;
+    match rustix::fs::chmodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::Mode::from_raw_mode(mode & 0o7777),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(()) => Ok(()),
+        // NOTSUP and OPNOTSUPP are one value on Linux but differ on macOS.
+        Err(e)
+            if [
+                rustix::io::Errno::OPNOTSUPP,
+                rustix::io::Errno::NOTSUP,
+                rustix::io::Errno::NOSYS,
+            ]
+            .contains(&e) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
+}
+fn read_old_link(path: &Path) -> Result<(Option<Vec<u8>>, Option<u32>)> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Ok((
+            Some(fs::read_link(path)?.as_os_str().as_bytes().to_vec()),
+            Some(m.mode()),
+        )),
+        Ok(_) => Ok((None, None)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn can_hide_skill(dir: &Path) -> Result<bool> {
     let m = match fs::symlink_metadata(dir) {
         Ok(m) => m,
@@ -1152,6 +1319,96 @@ mod tests {
         );
         assert!(!target.join(HIDDEN_SKILL_FILE).exists());
         assert_eq!(identity(&target).unwrap(), old_id);
+    }
+
+    #[test]
+    fn symlink_skill_rollback_and_recovery_do_not_expose_undo() {
+        let (root, paths) = fixture("symlink-skill-recovery");
+        let skills = root.0.join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        let old = root.0.join("old");
+        let new = root.0.join("new");
+        write_skill_dir(&old, "old");
+        write_skill_dir(&new, "new");
+        let target = skills.join("oms-demo");
+        let old_text = PathBuf::from("../old");
+        symlink(&old_text, &target).unwrap();
+
+        for point in [1, 2] {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            LINK_CRASH.with(|hook| hook.set(point));
+            assert!(tx.link(&target, &new).is_err());
+            LINK_CRASH.with(|hook| hook.set(0));
+            if point == 1 {
+                assert!(siblings_with_skill_md(&skills).is_empty());
+            } else {
+                assert_eq!(siblings_with_skill_md(&skills).len(), 1);
+            }
+            tx.complete = true;
+            drop(tx);
+            Transaction::begin(&paths).unwrap().commit().unwrap();
+            assert_eq!(fs::read_link(&target).unwrap(), old_text);
+            assert!(siblings_with_skill_md(&skills).is_empty());
+        }
+        let fresh = skills.join("oms-fresh");
+        for point in [1, 2] {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            LINK_CRASH.with(|hook| hook.set(point));
+            assert!(tx.link(&fresh, &new).is_err());
+            LINK_CRASH.with(|hook| hook.set(0));
+            assert_eq!(
+                siblings_with_skill_md(&skills).len(),
+                usize::from(point == 2)
+            );
+            tx.complete = true;
+            drop(tx);
+            Transaction::begin(&paths).unwrap().commit().unwrap();
+            assert!(!r::exists(&fresh));
+            assert!(siblings_with_skill_md(&skills).is_empty());
+        }
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.link(&target, &new).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(fs::read_link(&target).unwrap(), new);
+            assert!(siblings_with_skill_md(&skills).is_empty());
+            fs::remove_file(&target).unwrap();
+            symlink(&old_text, &target).unwrap();
+        }
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.link(&target, &new).unwrap();
+            assert!(siblings_with_skill_md(&skills).is_empty());
+            assert_eq!(fs::read_link(&target).unwrap(), new);
+        }
+        assert_eq!(fs::read_link(&target).unwrap(), old_text);
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.remove(&target).unwrap();
+            assert!(siblings_with_skill_md(&skills).is_empty());
+            assert!(!r::exists(&target));
+            // Leave the saved journal in place to simulate interruption before commit.
+            tx.complete = true;
+        }
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert_eq!(fs::read_link(&target).unwrap(), old_text);
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.link(&target, &new).unwrap();
+            tx.complete = true;
+        }
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert_eq!(fs::read_link(&target).unwrap(), old_text);
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let start = tx.prepare_external(std::slice::from_ref(&target)).unwrap();
+            assert!(siblings_with_skill_md(&skills).is_empty());
+            fs::remove_file(&target).unwrap();
+            symlink(&new, &target).unwrap();
+            tx.finish_external(start).unwrap();
+        }
+        assert_eq!(fs::read_link(&target).unwrap(), old_text);
+        assert!(siblings_with_skill_md(&skills).is_empty());
     }
 
     #[test]
