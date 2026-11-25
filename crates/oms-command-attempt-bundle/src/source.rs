@@ -144,7 +144,7 @@ pub(crate) fn root(path: &Path, cwd: &Path) -> Result<Root, String> {
         .map_err(|_| format!("repository path does not exist: {}", path.display()))?;
     let repo = physical
         .ancestors()
-        .find(|p| p.join(".git").exists())
+        .find(|p| oms_safe_fs::has_git_marker(p))
         .unwrap_or(&physical);
     Root::open(repo).map_err(|_| "cannot open repository".into())
 }

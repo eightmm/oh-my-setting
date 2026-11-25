@@ -200,7 +200,7 @@ fn rm_rule(args: &[String], base: Option<&Path>) -> Option<Verdict> {
             &p
         };
         if let Some(top) = root(base, base)
-            && top.join(".git").exists()
+            && oms_safe_fs::has_git_marker(&top)
         {
             if p == top {
                 return Some(Verdict::new(
@@ -388,7 +388,7 @@ fn git_rule(sub: &str, rest: &[String], base: Option<&Path>, land_active: bool) 
         let all = paths.contains(&":/")
             || paths.contains(&".")
                 && base.is_some_and(|b| {
-                    root(b, b).is_some_and(|r| r.join(".git").exists() && physical(b) == r)
+                    root(b, b).is_some_and(|r| oms_safe_fs::has_git_marker(&r) && physical(b) == r)
                 });
         if all {
             return Some(Verdict::new(
@@ -1150,7 +1150,9 @@ pub fn git_move(raw: &[u8], ctx: &Context<'_>) -> Output {
         let Some(top) = base.as_deref().and_then(|b| root(b, ctx.cwd)) else {
             continue;
         };
-        if !fs::symlink_metadata(top.join(".git")).is_ok_and(|m| m.is_dir()) {
+        if !oms_safe_fs::has_git_marker(&top)
+            || !fs::symlink_metadata(top.join(".git")).is_ok_and(|m| m.is_dir())
+        {
             continue;
         }
         if let Some(state) = env_path("OMS_STATE_REPO")
@@ -1201,7 +1203,7 @@ fn git_checkout(path: &Path) -> Option<(PathBuf, PathBuf)> {
     let path = main_write_physical(path);
     let top = path
         .ancestors()
-        .find(|a| fs::symlink_metadata(a.join(".git")).is_ok())?
+        .find(|a| oms_safe_fs::has_git_marker(a))?
         .to_path_buf();
     let dot = top.join(".git");
     if fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {

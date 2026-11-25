@@ -316,10 +316,7 @@ fn trace(paths: &Paths, expected: &Value, services: &dyn Services) -> Value {
         .and_then(|cwd| {
             let repo = cwd
                 .ancestors()
-                .find(|path| {
-                    fs::symlink_metadata(path.join(".git"))
-                        .is_ok_and(|meta| meta.is_file() || meta.is_dir())
-                })
+                .find(|path| oms_safe_fs::has_git_marker(path))
                 .unwrap_or(&cwd);
             read_trace(repo, |gid| {
                 let uid = rustix::process::getuid().as_raw();

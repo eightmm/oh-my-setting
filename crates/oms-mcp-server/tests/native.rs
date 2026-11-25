@@ -1671,6 +1671,7 @@ fn desktop_assignment() {
 }
 fn conversation_panel() {
     let t = Temp::new();
+    std::fs::create_dir(t.0.join(".git")).unwrap();
     let source = t.source();
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());

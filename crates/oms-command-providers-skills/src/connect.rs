@@ -1104,7 +1104,7 @@ fn home_placement(path: &Path, main: Option<&Path>) -> Result<()> {
         return Err(error("account home must differ from the main home"));
     }
     for ancestor in path.ancestors() {
-        if ancestor.join(".git").exists()
+        if oms_safe_fs::has_git_marker(ancestor)
             || (ancestor.join("HEAD").is_file()
                 && ancestor.join("objects").is_dir()
                 && ancestor.join("refs").is_dir())

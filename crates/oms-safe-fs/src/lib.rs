@@ -779,6 +779,23 @@ pub fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String
     Some((canon_source.to_string_lossy().into_owned(), rev.to_owned()))
 }
 
+/// Whether `dir` carries a `.git` repository marker. Any `.git` entry counts,
+/// as Git discovery and fail-closed callers expect, except a real directory
+/// without `HEAD`: sandboxes leave such empty mount points in shared roots.
+pub fn has_git_marker(dir: &Path) -> bool {
+    let dot = dir.join(".git");
+    match std::fs::symlink_metadata(&dot) {
+        // Only a proven absence of HEAD clears the marker; an unreadable
+        // `.git` still marks a repository for fail-closed callers.
+        Ok(meta) if meta.is_dir() => !matches!(
+            dot.join("HEAD").symlink_metadata(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        ),
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1554,5 +1571,46 @@ mod tests {
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(result, Err(CaptureReadError::Unreadable));
         }
+    }
+
+    #[test]
+    fn has_git_marker_checks_gitfile_and_head_entry() {
+        let f = Fixture::new();
+        assert!(!has_git_marker(&f.0));
+
+        let empty = f.0.join("empty");
+        std::fs::create_dir_all(empty.join(".git")).unwrap();
+        assert!(!has_git_marker(&empty));
+
+        let headless = f.0.join("headless");
+        std::fs::create_dir_all(headless.join(".git/objects")).unwrap();
+        assert!(!has_git_marker(&headless));
+
+        let with_head = f.0.join("with-head");
+        std::fs::create_dir_all(with_head.join(".git")).unwrap();
+        std::fs::write(with_head.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        assert!(has_git_marker(&with_head));
+
+        let symlink_head = f.0.join("symlink-head");
+        std::fs::create_dir_all(symlink_head.join(".git")).unwrap();
+        symlink("refs/heads/main", symlink_head.join(".git/HEAD")).unwrap();
+        assert!(has_git_marker(&symlink_head));
+
+        let gitfile = f.0.join("gitfile");
+        std::fs::create_dir(&gitfile).unwrap();
+        std::fs::write(gitfile.join(".git"), b"gitdir: ../with-head/.git\n").unwrap();
+        assert!(has_git_marker(&gitfile));
+
+        let linked = f.0.join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        symlink(with_head.join(".git"), linked.join(".git")).unwrap();
+        assert!(has_git_marker(&linked));
+
+        use std::os::unix::fs::PermissionsExt;
+        let sealed = with_head.join(".git");
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = has_git_marker(&with_head);
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(unreadable);
     }
 }
