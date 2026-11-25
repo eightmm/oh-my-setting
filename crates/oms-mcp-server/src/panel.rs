@@ -695,7 +695,7 @@ fn valid_issue_cache(cache: &Value) -> bool {
         obj.keys().count() == 3
             && ["state", "freshness", "reason"]
                 .iter()
-                .all(|k| obj.contains_key(*k))
+                .all(|k| obj.contains_key(k))
     }) && match cache["freshness"].as_str() {
         Some("fresh" | "stale") => {
             matches!(cache["state"].as_str(), Some("open" | "closed")) && cache["reason"].is_null()
@@ -741,61 +741,6 @@ fn valid_pr_candidate(candidate: &Value) -> bool {
             ),
             (Some("merged"), Some("completed-external")) | (Some("closed"), Some("superseded"))
         )
-}
-
-#[cfg(test)]
-mod work_items_tests {
-    use super::*;
-
-    #[test]
-    fn mcp_work_snapshot_keeps_expired_and_fenced_plan_states_distinct() {
-        let task = |id, state, expired| {
-            json!({
-                "id":id,"title":"Fixture task","state":state,"claimExpired":expired,
-                "owner":null,"depends":[],"issue":null,"result":null,"verification":null,
-                "revision":null
-            })
-        };
-        let mut review = task("review", "review", false);
-        review["issue"] = json!("example-org/example-repo#19");
-        review["issueCache"] =
-            json!({"state":null,"freshness":"unavailable","reason":"no matching cache entry"});
-        review["prReviewCandidate"] = json!({
-            "reference":"example-org/example-repo#19","state":"merged","freshness":"fresh",
-            "disposition":"completed-external"
-        });
-        let snapshot = json!({
-            "schema":1,"omitted":0,"availability":"ready","items":[
-                task("expired", "stale", true),
-                task("live", "running", false),
-                task("unproven", "claimed", false),
-                review
-            ]
-        });
-        assert!(valid_work_items_receipt(&snapshot));
-        let rendered = response(Ok(snapshot.clone()));
-        assert_eq!(rendered["isError"], false);
-        assert_eq!(rendered["structuredContent"], snapshot);
-
-        let change_item = |index, edit: fn(&mut Value)| {
-            let mut inconsistent = snapshot.clone();
-            let Value::Array(items) = &mut inconsistent["items"] else {
-                unreachable!();
-            };
-            edit(&mut items[index]);
-            inconsistent
-        };
-        let inconsistent = change_item(2, |item| item["state"] = json!("stale"));
-        assert!(!valid_work_items_receipt(&inconsistent));
-        let inconsistent = change_item(3, |item| {
-            item["issueCache"].as_object_mut().unwrap().remove("reason");
-        });
-        assert!(!valid_work_items_receipt(&inconsistent));
-        let inconsistent = change_item(3, |item| {
-            item["prReviewCandidate"]["disposition"] = json!("superseded");
-        });
-        assert!(!valid_work_items_receipt(&inconsistent));
-    }
 }
 
 fn valid_graph_node_id(value: &str) -> bool {
@@ -2409,4 +2354,59 @@ fn command_catalog(stdout: &str, offset: usize) -> PanelResult<Value> {
         page["nextOffset"] = json!(offset + count);
     }
     Ok(page)
+}
+
+#[cfg(test)]
+mod work_items_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_work_snapshot_keeps_expired_and_fenced_plan_states_distinct() {
+        let task = |id, state, expired| {
+            json!({
+                "id":id,"title":"Fixture task","state":state,"claimExpired":expired,
+                "owner":null,"depends":[],"issue":null,"result":null,"verification":null,
+                "revision":null
+            })
+        };
+        let mut review = task("review", "review", false);
+        review["issue"] = json!("example-org/example-repo#19");
+        review["issueCache"] =
+            json!({"state":null,"freshness":"unavailable","reason":"no matching cache entry"});
+        review["prReviewCandidate"] = json!({
+            "reference":"example-org/example-repo#19","state":"merged","freshness":"fresh",
+            "disposition":"completed-external"
+        });
+        let snapshot = json!({
+            "schema":1,"omitted":0,"availability":"ready","items":[
+                task("expired", "stale", true),
+                task("live", "running", false),
+                task("unproven", "claimed", false),
+                review
+            ]
+        });
+        assert!(valid_work_items_receipt(&snapshot));
+        let rendered = response(Ok(snapshot.clone()));
+        assert_eq!(rendered["isError"], false);
+        assert_eq!(rendered["structuredContent"], snapshot);
+
+        let change_item = |index, edit: fn(&mut Value)| {
+            let mut inconsistent = snapshot.clone();
+            let Value::Array(items) = &mut inconsistent["items"] else {
+                unreachable!();
+            };
+            edit(&mut items[index]);
+            inconsistent
+        };
+        let inconsistent = change_item(2, |item| item["state"] = json!("stale"));
+        assert!(!valid_work_items_receipt(&inconsistent));
+        let inconsistent = change_item(3, |item| {
+            item["issueCache"].as_object_mut().unwrap().remove("reason");
+        });
+        assert!(!valid_work_items_receipt(&inconsistent));
+        let inconsistent = change_item(3, |item| {
+            item["prReviewCandidate"]["disposition"] = json!("superseded");
+        });
+        assert!(!valid_work_items_receipt(&inconsistent));
+    }
 }
