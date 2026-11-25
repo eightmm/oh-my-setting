@@ -2336,33 +2336,16 @@ fn collect_protected_dispatch_tokens(
             .map_err(|e| state_err(2, format!("malformed .oms/plan/tasks.json: {e}")))?;
         let task_list: Vec<&Value> = match &root {
             Value::Array(items) => items.iter().collect(),
-            Value::Object(map) => match map.get("schema") {
-                Some(schema) if schema.as_u64() == Some(3) => match map.get("tasks") {
-                    Some(Value::Object(entries)) => entries.values().collect(),
-                    Some(_) => {
-                        return Err(state_err(
-                            2,
-                            "malformed .oms/plan/tasks.json: schema 3 tasks must be an object",
-                        ));
-                    }
-                    None => Vec::new(),
-                },
-                Some(schema) if !matches!(schema.as_u64(), Some(1 | 2)) => {
+            Value::Object(map) => match map.get("tasks") {
+                Some(Value::Array(items)) => items.iter().collect(),
+                Some(Value::Object(entries)) => entries.values().collect(),
+                Some(_) => {
                     return Err(state_err(
                         2,
-                        format!("malformed .oms/plan/tasks.json: unknown schema {schema}"),
+                        "malformed .oms/plan/tasks.json: tasks must be an array or object",
                     ));
                 }
-                _ => match map.get("tasks") {
-                    Some(Value::Array(items)) => items.iter().collect(),
-                    Some(_) => {
-                        return Err(state_err(
-                            2,
-                            "malformed .oms/plan/tasks.json: tasks must be an array",
-                        ));
-                    }
-                    None => Vec::new(),
-                },
+                None => Vec::new(),
             },
             _ => return Err(state_err(2, "malformed .oms/plan/tasks.json")),
         };
@@ -2765,7 +2748,7 @@ mod gc_host_tests {
     }
 
     #[test]
-    fn gc_dispatch_logs_reads_schema_3_plans_preserves_array_forms_and_rejects_malformed() {
+    fn gc_dispatch_logs_reads_object_and_array_plans_and_rejects_malformed() {
         let repo = temp_repo("dispatch-schema3");
         let logs_dir = repo.join(".oms/panel-state/dispatch-logs");
         let plan_dir = repo.join(".oms/plan");
@@ -2830,19 +2813,28 @@ mod gc_host_tests {
         let err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(err.code, 2);
 
-        // Schema-3 plan with non-object tasks field is rejected.
+        // A tasks field that is neither an array nor an object is rejected.
         std::fs::write(
             plan_dir.join("tasks.json"),
-            br#"{"schema":3,"plan_id":"plan_test_schema3","tasks":[]}"#,
+            br#"{"schema":3,"plan_id":"plan_test_schema3","tasks":"bad"}"#,
         )
         .unwrap();
         let err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(err.code, 2);
 
-        // Unknown schema is rejected.
-        std::fs::write(plan_dir.join("tasks.json"), br#"{"schema":99,"tasks":{}}"#).unwrap();
-        let err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
-        assert_eq!(err.code, 2);
+        // The plan engine ignores the stored schema, so object-form tasks read under any schema.
+        std::fs::write(
+            plan_dir.join("tasks.json"),
+            br#"{"schema":2,"tasks":{"task-active":{"id":"task-active","state":"running"},"task-done":{"id":"task-done","state":"done"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            host.gc_dispatch_logs(&repo, 30, false).unwrap(),
+            GcHookResult::Reclaimed(vec![(
+                "dispatch-logs".to_string(),
+                ".oms/panel-state/dispatch-logs/task-done.log".to_string(),
+            )])
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }
