@@ -1271,12 +1271,59 @@ pub fn record(
     interrupted: &AtomicBool,
 ) -> Result<bool, StoreError> {
     validate(receipt)?;
-    let root = Root::open(repo)?;
     let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
     let _guard = acquire(&target, interrupted)?;
+    record_locked(repo, &target, receipt, interrupted, || Ok(()))
+}
+
+/// Settles a physical call registered under the dispatch writer. Physical
+/// admission reads this ledger while holding only dispatch, so settlement takes
+/// dispatch then receipts, the registration order, and waits as long as the
+/// standalone writer's lock timeout.
+pub fn record_physical(
+    repo: &Path,
+    receipt: &Receipt,
+    interrupted: &AtomicBool,
+) -> Result<bool, StoreError> {
+    let timeout = oms_lock::Settings::from_env()
+        .map_err(StoreError::Lock)?
+        .timeout;
+    record_physical_before(repo, receipt, interrupted, Instant::now() + timeout)
+}
+/// Like [`record_physical`], with both lock waits bounded by one deadline.
+pub fn record_physical_before(
+    repo: &Path,
+    receipt: &Receipt,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<bool, StoreError> {
+    validate(receipt)?;
+    before(interrupted, Some(deadline))?;
+    let dispatch = super::dispatch::Transaction::acquire(
+        repo,
+        deadline.saturating_duration_since(Instant::now()),
+        interrupted,
+    )
+    .map_err(|error| error.source)?;
+    let target = canonical_index(dispatch.repo(), Some(Path::new(RECEIPTS)), false, false)?;
+    let guard = acquire_before(&target, interrupted, Some(deadline))?;
+    record_locked(dispatch.repo(), &target, receipt, interrupted, || {
+        dispatch.check()?;
+        guard.check().map_err(StoreError::Lock)
+    })
+}
+fn record_locked(
+    repo: &Path,
+    target: &Path,
+    receipt: &Receipt,
+    interrupted: &AtomicBool,
+    held: impl Fn() -> Result<(), StoreError>,
+) -> Result<bool, StoreError> {
+    let root = Root::open(repo)?;
+    held()?;
     let encoded = encode_receipt(receipt)?;
     let mut added = false;
-    mutate(&root, &target, false, None, interrupted, |old| {
+    mutate(&root, target, false, None, interrupted, |old| {
         let mut rows = receipts(old)?;
         if !rows
             .iter()
@@ -1292,6 +1339,7 @@ pub fn record(
         current(&rows)?;
         let mut new = old.to_vec();
         new.extend_from_slice(&encoded);
+        held()?;
         added = true;
         Ok(new)
     })?;

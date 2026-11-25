@@ -753,10 +753,7 @@ fn transaction<'a>(
     stop: &'a AtomicBool,
     deadline: Instant,
 ) -> Result<dispatch::Transaction<'a>, dispatch::Error> {
-    before(stop, Some(deadline)).map_err(|source| dispatch::Error {
-        source,
-        publication_uncertain: false,
-    })?;
+    before(stop, Some(deadline)).map_err(|source| dispatch::Error::new(source, false))?;
     dispatch::Transaction::acquire(
         repo,
         deadline.saturating_duration_since(Instant::now()),
@@ -800,7 +797,7 @@ pub fn activate(
         .check()
         .map_err(|e| tx.error(StoreError::Lock(e)))?;
     let physical = physical::load(tx.repo(), stop).map_err(|e| tx.error(e))?;
-    let usage = usage::load(tx.repo()).map_err(|e| tx.error(e))?;
+    let usage = usage::load(tx.repo()).map_err(|e| tx.error(e).in_file(usage::RECEIPTS))?;
     require(
         matches!(&registry["calls"], V::Object(calls) if calls.is_empty())
             && physical.is_empty()
@@ -1221,7 +1218,7 @@ pub fn reconcile_checked(
     validate_receipts(
         &registry,
         &intents,
-        &usage::load(tx.repo()).map_err(|e| tx.error(e))?,
+        &usage::load(tx.repo()).map_err(|e| tx.error(e).in_file(usage::RECEIPTS))?,
     )
     .map_err(|e| tx.error(e))?;
     let history = V::Object(
@@ -1392,7 +1389,7 @@ pub fn fence(
     )
     .map_err(|e| tx.error(e))?;
     let intents = physical::intents(&registry["physical"]).map_err(|e| tx.error(e))?;
-    let receipts = usage::load(tx.repo()).map_err(|e| tx.error(e))?;
+    let receipts = usage::load(tx.repo()).map_err(|e| tx.error(e).in_file(usage::RECEIPTS))?;
     validate_receipts(&registry, &intents, &receipts).map_err(|e| tx.error(e))?;
     require(
         intents

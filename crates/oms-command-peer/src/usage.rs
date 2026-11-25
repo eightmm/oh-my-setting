@@ -803,9 +803,9 @@ pub(crate) fn finish_unobserved(
 }
 fn persist(repo: &Path, receipt: &Receipt) -> Result<()> {
     // Cancellation stops execution; it must not discard already observed spend.
-    usage::record(repo, receipt, &AtomicBool::new(false))
+    usage::record_physical(repo, receipt, &AtomicBool::new(false))
         .map(|_| ())
-        .map_err(|e| Error::new(e.exit_code(), e.to_string()))
+        .map_err(|e| Error::new(e.exit_code(), format!("{}: {e}", usage::RECEIPTS)))
 }
 
 #[cfg(test)]

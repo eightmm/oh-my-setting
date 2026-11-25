@@ -22,15 +22,34 @@ pub struct Error {
     pub source: StoreError,
     /// A preceding payload write or this failing mutation may already be visible.
     pub publication_uncertain: bool,
+    /// Repository-relative file whose step failed, when one is attributable.
+    pub(super) file: Option<&'static str>,
 }
 impl Error {
+    pub(super) fn new(source: StoreError, publication_uncertain: bool) -> Self {
+        Self {
+            source,
+            publication_uncertain,
+            file: None,
+        }
+    }
     pub fn exit_code(&self) -> i32 {
         self.source.exit_code()
+    }
+    pub fn file(&self) -> Option<&'static str> {
+        self.file
+    }
+    pub(super) fn in_file(mut self, file: &'static str) -> Self {
+        self.file = Some(file);
+        self
     }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "dispatch reservation: {}", self.source)
+        match self.file {
+            Some(file) => write!(f, "dispatch reservation: {file}: {}", self.source),
+            None => write!(f, "dispatch reservation: {}", self.source),
+        }
     }
 }
 impl std::error::Error for Error {}
@@ -44,10 +63,8 @@ pub struct Transaction<'a> {
 }
 impl<'a> Transaction<'a> {
     pub fn acquire(repo: &Path, timeout: Duration, interrupted: &'a AtomicBool) -> Result<Self> {
-        let settings = Settings::from_env().map_err(|error| Error {
-            source: StoreError::Lock(error),
-            publication_uncertain: false,
-        })?;
+        let settings =
+            Settings::from_env().map_err(|error| Error::new(StoreError::Lock(error), false))?;
         Self::with_settings(repo, settings, timeout, interrupted)
     }
     pub fn with_settings(
@@ -81,10 +98,7 @@ impl<'a> Transaction<'a> {
             };
             Ok((root, guard))
         };
-        let (root, guard) = prepare().map_err(|source| Error {
-            source,
-            publication_uncertain: false,
-        })?;
+        let (root, guard) = prepare().map_err(|source| Error::new(source, false))?;
         Ok(Self {
             root,
             guard,
@@ -100,12 +114,9 @@ impl<'a> Transaction<'a> {
         if visible {
             self.published.set(true);
         }
-        Error {
-            source,
-            publication_uncertain: self.published.get() || visible,
-        }
+        Error::new(source, self.published.get() || visible)
     }
-    fn check(&self) -> std::result::Result<(), StoreError> {
+    pub(super) fn check(&self) -> std::result::Result<(), StoreError> {
         cancelled(self.interrupted)?;
         self.guard.check().map_err(StoreError::Lock)
     }
@@ -121,7 +132,7 @@ impl<'a> Transaction<'a> {
             self.check()?;
             Ok(bytes.map(|state| state.raw))
         };
-        read().map_err(|source| self.error(source))
+        read().map_err(|source| self.error(source).in_file(REGISTRY))
     }
     pub fn replace(&self, expected: Option<&[u8]>, candidate: &[u8]) -> Result<()> {
         validate_registry(candidate, false).map_err(|source| self.error(source))?;
@@ -139,6 +150,7 @@ impl<'a> Transaction<'a> {
                 Ok(candidate.to_vec())
             },
         )
+        .map_err(|error| error.in_file(REGISTRY))
     }
     /// Immutable launch/process evidence retains the legacy public schema.
     pub fn artifact(&self, member: &str, phase: &str, body: &[u8]) -> Result<PathBuf> {

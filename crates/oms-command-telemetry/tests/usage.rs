@@ -560,6 +560,34 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
         std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
         before
     );
+    // Admission reads the ledger under dispatch alone; settlement waits for it.
+    let terminal = observe(receipt, 1, 7, Cost::Unpriced);
+    let ledger = root.0.join(usage::RECEIPTS);
+    let pending = std::fs::read(&ledger).unwrap();
+    let admission = dispatch::Transaction::acquire(&root.0, Duration::from_secs(1), &stop).unwrap();
+    assert_eq!(
+        usage::record_physical_before(
+            &root.0,
+            &terminal,
+            &stop,
+            Instant::now() + Duration::from_millis(70),
+        ),
+        Err(oms_command_telemetry::store::StoreError::Lock(
+            oms_lock::Error::Busy
+        ))
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), pending);
+    drop(admission);
+    assert!(usage::record_physical_before(&root.0, &terminal, &stop, deadline()).unwrap());
+    let settled = std::fs::read(&ledger).unwrap();
+    assert_eq!(&settled[..pending.len()], &pending[..]);
+    assert!(!usage::record_physical_before(&root.0, &terminal, &stop, deadline()).unwrap());
+    assert_eq!(std::fs::read(&ledger).unwrap(), settled);
+    assert_eq!(usage::load(&root.0).unwrap().calls[0].receipt, terminal);
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        before
+    );
     assert!(
         physical::begin(&root.0, request, None, false, &stop, deadline()).is_err(),
         "changed access cannot reuse the same physical identity"
@@ -594,6 +622,12 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
     assert!(
         failed.publication_uncertain,
         "the intent survives refused pending registration"
+    );
+    assert_eq!(failed.file(), Some(usage::RECEIPTS));
+    assert!(
+        failed
+            .to_string()
+            .starts_with(&format!("dispatch reservation: {}: ", usage::RECEIPTS))
     );
     assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
     let pending = physical::load(&root.0, &stop)
