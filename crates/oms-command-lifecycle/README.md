@@ -118,8 +118,15 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   trace. Missing evidence cannot distinguish tracing availability from callback
   delivery or provider loading; retained receipts have no account/session binding
   and cannot prove current-session startup. Raw records, payloads, nonces, and
-  timestamps are omitted from the diagnostic. Missing Claude settings still
-  produce the remaining diagnostic rows.
+  timestamps are omitted from the diagnostic. The separate `provider_side`
+  field reports `managed_callback` as `retained`, `not_observed` (missing or
+  empty trace) or `unknown` (unreadable or unattributable evidence). Only
+  `not_observed` carries a `configuration_gap`: `plugin_declared_disabled`,
+  `plugin_not_declared`, `plugin_configuration_unavailable`,
+  `generated_hooks_drifted`, `generated_hooks_unavailable` or `none_found`.
+  These cover only the plugin declaration and generated hooks, not the hook
+  launcher. Neither a gap nor `none_found` proves a provider failure. Missing
+  Claude settings still produce the remaining diagnostic rows.
 - Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
   native. Optional external adapters must actually satisfy profile requirements;
   their absence is accepted only by explicit allow-missing policy.
