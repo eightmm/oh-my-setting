@@ -1902,8 +1902,23 @@ mod tests {
             return;
         }
         let tmp = TempDir::new("resume-stale");
+        fs::create_dir(tmp.0.join(".git")).expect("mkdir stray ancestor .git");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
+        assert_eq!(
+            root(&repo, &repo),
+            Some(repo.canonicalize().expect("canonical repo"))
+        );
+        let outer = tmp.0.join("outer");
+        fs::create_dir_all(outer.join(".git")).expect("mkdir outer .git");
+        fs::write(outer.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write outer HEAD");
+        let leaf = outer.join("stray/work");
+        fs::create_dir_all(outer.join("stray/.git")).expect("mkdir inner stray .git");
+        fs::create_dir_all(&leaf).expect("mkdir leaf");
+        assert_eq!(
+            root(&leaf, &leaf),
+            Some(outer.canonicalize().expect("canonical outer"))
+        );
         let six_days_ago = rfc3339_secs_ago(6 * 86400 + 60);
         let original = write_packet(
             &repo,

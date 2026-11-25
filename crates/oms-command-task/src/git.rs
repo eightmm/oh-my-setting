@@ -58,14 +58,18 @@ fn checked(repo: &Path, args: &[&str], interrupted: &AtomicBool) -> Result<Vec<u
 }
 fn repository_hint(path: &Path) -> bool {
     path.ancestors().any(|parent| {
+        if oms_safe_fs::has_git_marker(parent) {
+            return true;
+        }
         let marker = parent.join(".git");
         match fs::symlink_metadata(&marker) {
-            // An empty directory is also used as a non-repository discovery
-            // barrier by disposable OMS fixtures. It contains no Git state.
-            Ok(meta) if meta.is_dir() => {
-                fs::read_dir(marker).map_or(true, |mut entries| entries.next().is_some())
-            }
-            Ok(_) => true,
+            // An empty or HEAD-less directory is not a repository marker
+            // (including sandbox mount points and disposable OMS barriers).
+            Ok(meta) if meta.is_dir() => !matches!(
+                marker.join("HEAD").symlink_metadata(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            ),
+            Ok(meta) => !meta.is_file(),
             Err(e) => e.kind() != std::io::ErrorKind::NotFound,
         }
     }) || std::env::var_os("GIT_DIR").is_some()

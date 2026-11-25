@@ -923,7 +923,18 @@ fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
 fn checkout(dir: &Path) -> PanelResult<bool> {
     for marker in [".oms", ".git"] {
         match dir.join(marker).symlink_metadata() {
-            Ok(m) if m.is_dir() || (marker == ".git" && m.is_file()) => return Ok(true),
+            Ok(m) if marker == ".oms" && m.is_dir() => return Ok(true),
+            Ok(m) if marker == ".git" && (m.is_dir() || m.is_file()) => {
+                if oms_safe_fs::has_git_marker(dir) {
+                    return Ok(true);
+                }
+                if m.is_dir() {
+                    match dir.join(".git/HEAD").symlink_metadata() {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                        _ => return Err(BINDING.into()),
+                    }
+                }
+            }
             Ok(_) => return Err(BINDING.into()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(_) => return Err(BINDING.into()),

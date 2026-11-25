@@ -44,7 +44,7 @@ pub fn root(ctx: &Context<'_>, cwd: &Path) -> Result<PathBuf> {
                     .symlink_metadata()
                     .is_ok_and(|m| m.permissions().mode() & 0o1000 != 0)
         })
-        .any(|p| p.join(".git").symlink_metadata().is_ok())
+        .any(oms_safe_fs::has_git_marker)
     {
         return Err(Error::usage(
             "cannot resolve existing Git repository; state is unknown",
@@ -256,11 +256,7 @@ fn options(args: &[OsString], ctx: &Context<'_>) -> Result<Options> {
 fn git_state(ctx: &Context<'_>) -> Result<(String, usize, String)> {
     let repo = process::git(ctx, &["rev-parse", "--git-dir"], 65536)?;
     if repo.code != 0 {
-        if ctx
-            .cwd
-            .ancestors()
-            .any(|p| p.join(".git").symlink_metadata().is_ok())
-        {
+        if ctx.cwd.ancestors().any(oms_safe_fs::has_git_marker) {
             return Err(Error::usage("Git state unavailable"));
         }
         return Ok(("none".into(), 0, String::new()));

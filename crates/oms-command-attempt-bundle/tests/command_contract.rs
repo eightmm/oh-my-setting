@@ -48,6 +48,7 @@ impl Fixture {
         ));
         fs::create_dir(&path).unwrap();
         fs::create_dir(path.join(".git")).unwrap();
+        fs::write(path.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         fs::create_dir_all(path.join(".oms/lifecycle")).unwrap();
         fs::create_dir_all(path.join(".oms/artifacts")).unwrap();
         for (name, bytes) in [
