@@ -502,8 +502,20 @@ fn artifact_resolution_projection_preserves_invalid_row_accounting() {
         ("schema", changed("schema", json!(true)), 1, 0, 1),
         ("provider", changed("provider", Value::Null), 1, 0, 1),
         ("foreign", changed("operation_id", json!("other")), 1, 0, 1),
-        ("invalid-target", vec![bad_target, resolver.clone()], 2, 0, 1),
-        ("out-of-order", vec![resolver.clone(), target.clone()], 1, 0, 1),
+        (
+            "invalid-target",
+            vec![bad_target, resolver.clone()],
+            2,
+            0,
+            1,
+        ),
+        (
+            "out-of-order",
+            vec![resolver.clone(), target.clone()],
+            1,
+            0,
+            1,
+        ),
         (
             "duplicate-target",
             vec![target.clone(), resolver.clone(), target.clone()],
@@ -533,7 +545,10 @@ fn artifact_resolution_projection_preserves_invalid_row_accounting() {
         ),
     ];
     for (name, rows, invalid, resolved, unresolved) in cases {
-        let bytes = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        let bytes = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
         fs::write(&path, &bytes).unwrap();
         let snapshot = state(repo.path(), &CustomHost { plan: GroupPlan });
         let artifacts = snapshot.get("artifacts");

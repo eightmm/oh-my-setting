@@ -162,8 +162,10 @@ pub(crate) fn resolved(rows: &[V]) -> BTreeSet<Vec<u8>> {
         })
         .collect::<Vec<_>>();
     project(&views, |target, resolver| {
-        equal(&rows[target]["operation_id"], &rows[resolver]["operation_id"])
-            && equal(&rows[target]["artifact_id"], &rows[resolver]["artifact_id"])
+        equal(
+            &rows[target]["operation_id"],
+            &rows[resolver]["operation_id"],
+        ) && equal(&rows[target]["artifact_id"], &rows[resolver]["artifact_id"])
     })
     .resolved_event_ids
     .into_iter()

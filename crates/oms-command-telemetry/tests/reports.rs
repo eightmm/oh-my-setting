@@ -42,7 +42,10 @@ fn resolution_reports_reject_malformed_foreign_and_ambiguous_relations() {
         ),
         (
             "wrong-parent",
-            pair(resolver.replace(r#""parent_event_id":"failed""#, r#""parent_event_id":"other""#)),
+            pair(resolver.replace(
+                r#""parent_event_id":"failed""#,
+                r#""parent_event_id":"other""#,
+            )),
             0,
             1,
         ),
@@ -71,7 +74,11 @@ fn resolution_reports_reject_malformed_foreign_and_ambiguous_relations() {
         ),
         (
             "distinct-resolvers",
-            vec![target.into(), resolver.into(), resolver.replace("settled", "settled-again")],
+            vec![
+                target.into(),
+                resolver.into(),
+                resolver.replace("settled", "settled-again"),
+            ],
             1,
             0,
         ),

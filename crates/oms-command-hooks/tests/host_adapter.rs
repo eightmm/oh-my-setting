@@ -738,7 +738,10 @@ fn precompact_handoff_keeps_dissent_until_valid_resolution() {
         ),
     ];
     for (name, rows, open) in cases {
-        let bytes = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        let bytes = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
         let index = repo.join(".oms/artifacts/index.jsonl");
         fs::write(&index, &bytes).unwrap();
         let result = hook(
@@ -754,7 +757,11 @@ fn precompact_handoff_keeps_dissent_until_valid_resolution() {
             .collect::<Vec<_>>();
         assert_eq!(captures.len(), 1, "{name}");
         let capture = fs::read_to_string(&captures[0]).unwrap();
-        assert_eq!(capture.contains("## Open dissents"), open, "{name}: {capture}");
+        assert_eq!(
+            capture.contains("## Open dissents"),
+            open,
+            "{name}: {capture}"
+        );
         if open {
             assert!(capture.contains("event: split"), "{name}: {capture}");
         }
