@@ -113,10 +113,14 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
           rustc +1.99.1 --version
           cargo +1.99.1 --version
+      - name: restore Rust dependency cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
         run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
-      - name: Rust workspace checks and tests
+      - name: Rust workspace checks
         timeout-minutes: 30
         run: |
           set -euo pipefail
@@ -159,9 +163,51 @@ jobs:
 
           run_phase fmt cargo +1.99.1 fmt --manifest-path Cargo.toml --all -- --check
           run_phase clippy cargo +1.99.1 clippy --manifest-path Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
-          run_phase all-targets cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline
           run_phase doctests cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
           run_phase migrate cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+
+  # cargo test runs test binaries one after another; the workspace suite took
+  # about 10 minutes in one job. Shards run in parallel; the rest shard excludes
+  # the listed packages, so a new package is always tested.
+  rust_tests:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.rust == 'true' || needs.affected_plan.outputs.mode == 'full'
+    name: rust tests (${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, commands, rest]
+    env:
+      SHARD: ${{ matrix.shard }}
+      SHARD_CORE: oms oms-migrate oms-graph-shell
+      SHARD_COMMANDS: oms-command-memory oms-command-landing oms-command-panel oms-command-peer oms-mcp-server
+    steps:
+      - uses: actions/checkout@v7
+      - name: install pinned Rust toolchain
+        timeout-minutes: 5
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: restore Rust dependency cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.shard }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
+      - name: Rust tests
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          args=()
+          case "$SHARD" in
+            core) for p in $SHARD_CORE; do args+=(-p "$p"); done ;;
+            commands) for p in $SHARD_COMMANDS; do args+=(-p "$p"); done ;;
+            rest) args=(--workspace); for p in $SHARD_CORE $SHARD_COMMANDS; do args+=(--exclude "$p"); done ;;
+            *) echo "unknown Rust test shard: $SHARD" >&2; exit 2 ;;
+          esac
+          cargo +1.99.1 test --manifest-path Cargo.toml "${args[@]}" --all-targets --locked --offline
 
   focused:
     needs: affected_plan
@@ -173,6 +219,12 @@ jobs:
       - name: install pinned Rust toolchain
         timeout-minutes: 5
         run: rustup toolchain install 1.99.1 --profile minimal
+      - name: restore native release build cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: native-release
+          workspaces: ". -> target/lifecycle-build"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
         run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
@@ -194,6 +246,12 @@ jobs:
       - name: install pinned Rust toolchain
         timeout-minutes: 5
         run: rustup toolchain install 1.99.1 --profile minimal
+      - name: restore native release build cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: native-release
+          workspaces: ". -> target/lifecycle-build"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
         run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
@@ -234,7 +292,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [affected_plan, lint, rust, focused, install_e2e, affected_verify]
+    needs: [affected_plan, lint, rust, rust_tests, focused, install_e2e, affected_verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -247,6 +305,7 @@ jobs:
           AFFECTED_RUST: ${{ needs.affected_plan.outputs.rust }}
           LINT_RESULT: ${{ needs.lint.result }}
           RUST_RESULT: ${{ needs.rust.result }}
+          RUST_TESTS_RESULT: ${{ needs.rust_tests.result }}
           FOCUSED_RESULT: ${{ needs.focused.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           AFFECTED_VERIFY_RESULT: ${{ needs.affected_verify.result }}
@@ -257,6 +316,7 @@ jobs:
             full)
               [ "$LINT_RESULT" = success ] || status=1
               [ "$RUST_RESULT" = success ] || status=1
+              [ "$RUST_TESTS_RESULT" = success ] || status=1
               [ "$FOCUSED_RESULT" = success ] || status=1
               [ "$INSTALL_E2E_RESULT" = success ] || status=1
               [ "$AFFECTED_VERIFY_RESULT" = skipped ] || status=1
@@ -272,13 +332,15 @@ jobs:
               fi
               if [ "$AFFECTED_RUST" = true ]; then
                 [ "$RUST_RESULT" = success ] || status=1
+                [ "$RUST_TESTS_RESULT" = success ] || status=1
               else
                 [ "$RUST_RESULT" = skipped ] || status=1
+                [ "$RUST_TESTS_RESULT" = skipped ] || status=1
               fi
               ;;
             *) status=1 ;;
           esac
           [ "$status" -eq 0 ] || {
-            echo "gate failed: mode=$AFFECTED_MODE plan=$AFFECTED_PLAN_RESULT lint=$LINT_RESULT rust=$RUST_RESULT focused=$FOCUSED_RESULT e2e=$INSTALL_E2E_RESULT verify=$AFFECTED_VERIFY_RESULT" >&2
+            echo "gate failed: mode=$AFFECTED_MODE plan=$AFFECTED_PLAN_RESULT lint=$LINT_RESULT rust=$RUST_RESULT rust_tests=$RUST_TESTS_RESULT focused=$FOCUSED_RESULT e2e=$INSTALL_E2E_RESULT verify=$AFFECTED_VERIFY_RESULT" >&2
           }
           exit "$status"

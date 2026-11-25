@@ -193,6 +193,88 @@ fn validate(
     }
     Ok((repo, worktree))
 }
+const HYGIENE_STAMP: &str = ".oms-scratch-hygiene.stamp";
+const HYGIENE_INTERVAL_SECS: u64 = 3600;
+
+fn claim_hygiene_slot(base: &Path, now: u64) -> bool {
+    let Ok(root) = storage::root(base) else {
+        return false;
+    };
+    let options = oms_safe_fs::MutationOptions {
+        read: oms_safe_fs::ByteReadOptions {
+            missing_ok: true,
+            max_bytes: 64,
+        },
+        create_parent: false,
+        max_output: 64,
+        ..oms_safe_fs::MutationOptions::default()
+    };
+    root.atomic_mutate(
+        Path::new(HYGIENE_STAMP),
+        options,
+        |current| -> std::result::Result<Vec<u8>, ()> {
+            let last = std::str::from_utf8(current)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            if let Some(last) = last
+                && now.saturating_sub(last) < HYGIENE_INTERVAL_SECS
+            {
+                return Err(());
+            }
+            Ok(format!("{now}\n").into_bytes())
+        },
+    )
+    .is_ok()
+}
+
+fn spawn_background_cleanup(exe: &Path, repo: &Path) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new(exe)
+        .args(["cleanup", "--apply"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(drop)
+}
+
+fn hygiene_pass_with(
+    is_child: bool,
+    interrupted: &std::sync::atomic::AtomicBool,
+    base: &Path,
+    repo: &Path,
+    now: u64,
+    spawn: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Vec<u8> {
+    if is_child || interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+        return Vec::new();
+    }
+    if !claim_hygiene_slot(base, now) {
+        return Vec::new();
+    }
+    if spawn(repo).is_ok() {
+        b"scratch-worktree: background cleanup started\n".to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+fn hygiene_pass(c: &Context<'_>, base: &Path, repo: &Path) -> Vec<u8> {
+    hygiene_pass_with(
+        crate::child(),
+        c.interrupted,
+        base,
+        repo,
+        crate::timestamp(),
+        |repo| {
+            let exe = std::env::current_exe()?;
+            spawn_background_cleanup(&exe, repo)
+        },
+    )
+}
+
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     parent()?;
     let action = o.action("");
@@ -256,7 +338,13 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             }
             return Err(e);
         }
-        return Ok(Output::text(format!("{}\n", worktree.display())));
+        drop(_registry);
+        let stderr = hygiene_pass(c, &base, &repo);
+        return Ok(Output {
+            code: 0,
+            stdout: format!("{}\n", worktree.display()).into_bytes(),
+            stderr,
+        });
     }
     if !base.exists() {
         return if action == "list" {
@@ -481,4 +569,103 @@ pub(crate) fn branch_sweep(c: &Context<'_>, repo: &Path) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn claim_hygiene_slot_rate_limits_within_hour() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let stamp = base.path.join(HYGIENE_STAMP);
+        assert!(claim_hygiene_slot(&base.path, 10_000));
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "10000\n");
+        assert!(!claim_hygiene_slot(
+            &base.path,
+            10_000 + HYGIENE_INTERVAL_SECS - 1
+        ));
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "10000\n");
+        let next = 10_000 + HYGIENE_INTERVAL_SECS;
+        assert!(claim_hygiene_slot(&base.path, next));
+        assert_eq!(
+            std::fs::read_to_string(&stamp).unwrap(),
+            format!("{next}\n")
+        );
+    }
+
+    #[test]
+    fn hygiene_pass_rate_limits_and_reports_background_start() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let repo = base.path.join("repo");
+        let flag = AtomicBool::new(false);
+        let mut calls = 0usize;
+
+        let err = hygiene_pass_with(false, &flag, &base.path, &repo, 10_000, |r| {
+            assert_eq!(r, repo);
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(err, b"scratch-worktree: background cleanup started\n");
+        assert_eq!(calls, 1);
+
+        let err = hygiene_pass_with(false, &flag, &base.path, &repo, 10_060, |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(err.is_empty());
+        assert_eq!(calls, 1);
+
+        let err = hygiene_pass_with(
+            false,
+            &flag,
+            &base.path,
+            &repo,
+            10_000 + HYGIENE_INTERVAL_SECS,
+            |_| {
+                calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(err, b"scratch-worktree: background cleanup started\n");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn hygiene_pass_skips_harness_child_and_interrupted() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let flag = AtomicBool::new(false);
+        let mut calls = 0usize;
+
+        let err = hygiene_pass_with(true, &flag, &base.path, &base.path, 10_000, |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(err.is_empty());
+        assert_eq!(calls, 0);
+        assert!(!base.path.join(HYGIENE_STAMP).exists());
+
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = hygiene_pass_with(false, &flag, &base.path, &base.path, 10_000, |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(err.is_empty());
+        assert_eq!(calls, 0);
+        assert!(!base.path.join(HYGIENE_STAMP).exists());
+    }
+
+    #[test]
+    fn hygiene_pass_ignores_spawn_failure() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let flag = AtomicBool::new(false);
+        let missing = base.path.join("missing-oms");
+
+        let err = hygiene_pass_with(false, &flag, &base.path, &base.path, 10_000, |repo| {
+            spawn_background_cleanup(&missing, repo)
+        });
+        assert!(err.is_empty());
+        assert!(base.path.join(HYGIENE_STAMP).is_file());
+    }
 }
