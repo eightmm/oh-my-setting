@@ -205,6 +205,15 @@ impl Mock {
         let task: Value = serde_json::from_slice(&shown.stdout).unwrap();
         task["lease_id"].as_str().unwrap().to_owned()
     }
+    fn ready_selection(&self, repo: &Path) -> String {
+        let stop = AtomicBool::new(false);
+        let req = Request::new(Action::Ready).flag("json");
+        let context = Context::from_environment_at(&req, repo, repo, None).unwrap();
+        let plan = Plan::open(context, self, &stop).unwrap();
+        let ready = plan.execute_with_stable_reads(&req).unwrap();
+        assert_eq!(ready.code, 0, "cannot list ready tasks");
+        String::from_utf8(ready.stdout).unwrap()
+    }
     fn wait_for(&self, predicate: impl Fn(&[String]) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut started = self.started.lock().unwrap();
@@ -505,17 +514,12 @@ fn overlapping_scopes_never_run_together() {
 }
 
 #[test]
-fn delegate_lease_read_cannot_race_controller_publication() {
-    if scrubbed_child("delegate_lease_read_cannot_race_controller_publication") {
+fn plan_reads_cannot_race_controller_publication() {
+    if scrubbed_child("plan_reads_cannot_race_controller_publication") {
         return;
     }
-    let repo = fixture(&[("o2", "src/lib.rs"), ("o3", "docs/")]);
-    let race = Arc::new(ReviewRace::default());
-    let mock = Mock {
-        review_race: Some(race.clone()),
-        ..Mock::default()
-    };
-    mock.plan(&repo.0, &["claim", "--id", "o3", "--provider", "codex"]);
+    let repo = fixture(&[("o2", "src/lib.rs"), ("o3", "docs/"), ("o4", "tests/")]);
+    Mock::default().plan(&repo.0, &["claim", "--id", "o3", "--provider", "codex"]);
     let expected = state(&repo, "o3")["lease_id"].as_str().unwrap().to_owned();
     assert!(!expected.is_empty());
     for relative in ["", ".oms", ".oms/plan"] {
@@ -523,34 +527,47 @@ fn delegate_lease_read_cannot_race_controller_publication() {
     }
     fs::set_permissions(repo.0.join(ACTIVE), fs::Permissions::from_mode(0o660)).unwrap();
 
-    std::thread::scope(|scope| {
-        let reader = scope.spawn(|| {
-            RACE_READER.with(|reader| reader.replace(Some((race.clone(), false))));
-            mock.delegate_lease(&repo.0, "o3")
+    // The delegate's lease read and the controller's parallel Ready selection
+    // each snapshot the Plan under its writer guard.
+    for (claim, ready) in [("o2", false), ("o4", true)] {
+        let race = Arc::new(ReviewRace::default());
+        let mock = Mock {
+            review_race: Some(race.clone()),
+            ..Mock::default()
+        };
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                RACE_READER.with(|reader| reader.replace(Some((race.clone(), false))));
+                if ready {
+                    mock.ready_selection(&repo.0)
+                } else {
+                    mock.delegate_lease(&repo.0, "o3")
+                }
+            });
+            let guarded = race.reader_holds_lock(&repo.0);
+            if guarded {
+                race.resume_reader();
+            }
+            // The controller does not share the mock delegate's command mutex.
+            let (code, _, err) =
+                mock.plan_command(&repo.0, &["claim", "--id", claim, "--provider", "codex"]);
+            if !guarded {
+                race.resume_reader();
+            }
+            assert_eq!(code, 0, "{claim} claim: {}", String::from_utf8_lossy(&err));
+            let read = reader.join().unwrap();
+            assert!(
+                guarded,
+                "{claim}: the Plan read must hold the canonical Plan lock"
+            );
+            if ready {
+                assert!(read.contains(&format!("\"{claim}\"")), "{read}");
+            } else {
+                assert_eq!(read, expected);
+            }
         });
-        let guarded = race.reader_holds_lock(&repo.0);
-        if guarded {
-            race.resume_reader();
-        }
-        // The controller does not share the mock delegate's command mutex.
-        let (code, _, err) =
-            mock.plan_command(&repo.0, &["claim", "--id", "o2", "--provider", "codex"]);
-        if !guarded {
-            race.resume_reader();
-        }
-        assert_eq!(
-            code,
-            0,
-            "controller claim: {}",
-            String::from_utf8_lossy(&err)
-        );
-        assert_eq!(reader.join().unwrap(), expected);
-        assert!(
-            guarded,
-            "mock delegate read must hold the canonical Plan lock"
-        );
-    });
-    assert_eq!(state(&repo, "o2")["state"], "claimed");
+        assert_eq!(state(&repo, claim)["state"], "claimed");
+    }
 }
 
 #[test]

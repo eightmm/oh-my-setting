@@ -572,12 +572,28 @@ impl<'a> Plan<'a> {
     /// Read the task against a stable Plan file while a sibling may publish
     /// Review. Hold the writer's guard only for the bounded file snapshot.
     pub fn show_task_with_locked_snapshot(&self, id: &str) -> Result<Response> {
-        let req = Request::new(Action::Show).with("id", id);
+        self.execute_with_stable_reads(&Request::new(Action::Show).with("id", id))
+    }
+    /// Execute `req`, answering a plain read-only query from a snapshot taken
+    /// under the writer's guard so a sibling process publishing the Plan
+    /// cannot tear the read. Other requests run as `execute` does.
+    pub fn execute_with_stable_reads(&self, req: &Request) -> Result<Response> {
+        use Action::*;
+        if !req.read_only()
+            || matches!(
+                req.action,
+                TeamShow | TeamList | ContractList | ContractShow | LintVerify
+            )
+            || req.repo.is_some()
+            || req.file.is_some()
+        {
+            return self.execute(req);
+        }
         req.validate()?;
-        self.query(
-            &req,
-            &mut self.load_from_snapshot(self.read_locked_snapshot()?)?,
-        )
+        self.query(req, &mut self.load_with_locked_snapshot()?)
+    }
+    pub fn load_with_locked_snapshot(&self) -> Result<Snapshot> {
+        self.load_from_snapshot(self.read_locked_snapshot()?)
     }
     /// Snapshot the Plan under its writer guard while a sibling publishes Review.
     fn read_locked_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {

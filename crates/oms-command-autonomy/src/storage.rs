@@ -90,7 +90,14 @@ impl<'a> Context<'a> {
     pub fn action(&self, req: &Request) -> Result<crate::Output> {
         checkpoint(self.interrupted)?;
         let _gate = self.gates.map(Gates::plan);
-        let out = self.plan()?.execute(req)?;
+        // Parallel siblings publish from other processes; the in-process gate
+        // cannot order their writes against these reads.
+        let plan = self.plan()?;
+        let out = if self.gates.is_some() {
+            plan.execute_with_stable_reads(req)?
+        } else {
+            plan.execute(req)?
+        };
         Ok(crate::Output {
             code: out.code,
             stdout: out.stdout,
@@ -99,7 +106,13 @@ impl<'a> Context<'a> {
     }
     pub fn plan_value(&self) -> Result<Value> {
         let _gate = self.gates.map(Gates::plan);
-        value::from_plan(&self.plan()?.load()?.plan)
+        let plan = self.plan()?;
+        let snapshot = if self.gates.is_some() {
+            plan.load_with_locked_snapshot()?
+        } else {
+            plan.load()?
+        };
+        value::from_plan(&snapshot.plan)
     }
     pub fn git(&self, args: &[&str]) -> Result<String> {
         Ok(self.plan()?.git().text(args)?)
