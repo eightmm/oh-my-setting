@@ -1721,9 +1721,24 @@ fn tail(r: &Run<'_>, output: &mut Output) -> Result<()> {
         sync_options
             .values
             .insert("target".into(), vec![target.into()]);
-        let synced = sync(c, &sync_options)?;
-        output.stdout.extend(synced.stdout);
-        output.stderr.extend(synced.stderr);
+        // The publication already happened, so a deferred or refused sync is
+        // reported beside the passed land instead of failing it.
+        match sync(c, &sync_options) {
+            Ok(synced) => {
+                output.stdout.extend(synced.stdout);
+                output.stderr.extend(synced.stderr);
+            }
+            Err(error) => {
+                let state = if error.code == 75 {
+                    "deferred"
+                } else {
+                    "refused"
+                };
+                output
+                    .stderr
+                    .extend(format!("land: sync {state}: {error}\n").bytes());
+            }
+        }
     }
     Ok(())
 }
@@ -1747,7 +1762,9 @@ pub(crate) fn sync(c: &Context<'_>, o: &Options) -> Result<Output> {
     let _sync = storage::lock(&repo.join(".oms/locks/canonical-sync"), c.interrupted)?;
     git.safe()?;
     git.run(&["symbolic-ref", "--quiet", "HEAD"])?;
-    git.clean()?;
+    // Untracked files from other tools do not block a fast-forward; `merge
+    // --ff-only` still refuses one that the target would overwrite.
+    git.tracked_clean()?;
     let before = git.snapshot()?;
     let reference = format!("refs/remotes/{remote}/{target}");
     git.run(&[
@@ -1763,7 +1780,7 @@ pub(crate) fn sync(c: &Context<'_>, o: &Options) -> Result<Output> {
         git.succeeds(&["merge-base", "--is-ancestor", "HEAD", &reference])?,
         "shared checkout is ahead or diverged; sync refused",
     )?;
-    git.clean()?;
+    git.tracked_clean()?;
     require(
         git.snapshot()? == before,
         "shared checkout changed during fetch",

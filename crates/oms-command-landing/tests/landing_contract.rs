@@ -2438,11 +2438,44 @@ fn check_publish_then_merge(flock: bool) {
     ] {
         assert!(status.contains(needle), "{needle}: {status}");
     }
-    // --merge (any method) resumes the same receipt and merges after exact-SHA CI
-    let merge = ["--merge", "--merge-method", "merge"];
+    // --merge (any method) resumes the same receipt and merges after exact-SHA CI.
+    // A shared checkout with a tracked edit is not synced; the land still passes
+    // and reports the refusal.
+    let shared = iso.home.path().join("shared");
+    iso.git(
+        iso.home.path(),
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            shared.to_str().unwrap(),
+        ],
+    );
+    let tracked = iso.git_out(&shared, &["ls-files"]);
+    let tracked = shared.join(tracked.lines().next().expect("tracked file"));
+    let original = fs::read(&tracked).unwrap();
+    fs::write(&tracked, b"local edit\n").unwrap();
+    fs::write(shared.join("untracked-note"), b"other tool\n").unwrap();
+    let mut merge = vec!["--merge", "--merge-method", "merge"];
+    if !flock {
+        merge.extend(["--sync-shared", shared.to_str().unwrap()]);
+    }
     let r = iso.run_with_services("land", &repo, &[&args[..], &merge].concat(), &env);
     assert_eq!(r.0, 0, "{r:?}");
     assert!(r.1.contains("merged PR #7 (merge)"), "{r:?}");
+    if !flock {
+        assert!(
+            r.2.contains("land: sync refused: tracked worktree"),
+            "{r:?}"
+        );
+        // Untracked files alone do not block the fast-forward.
+        fs::write(&tracked, original).unwrap();
+        iso.git(&repo, &["push", "-q", "origin", "HEAD:main"]);
+        let synced = iso.run_with_services("sync-shared", &shared, &[], &[]);
+        assert_eq!(synced.0, 0, "{synced:?}");
+        assert_eq!(iso.git_out(&shared, &["rev-parse", "HEAD"]), head);
+        assert!(shared.join("untracked-note").exists());
+    }
     let calls = fs::read_to_string(log).expect("gh log");
     let ci = calls
         .rfind(&format!("--commit {head} --event pull_request"))
