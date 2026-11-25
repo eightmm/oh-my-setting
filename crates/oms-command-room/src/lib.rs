@@ -29,6 +29,7 @@ mod core;
 mod cursor;
 mod desktop;
 pub use desktop::ConversationPanelAttempt;
+mod issue_handoff;
 mod model;
 mod relay;
 mod services;

@@ -95,6 +95,14 @@ impl Directory {
         }
         Ok(())
     }
+    pub fn optional_child(&self, name: &OsStr) -> Result<Option<Self>> {
+        self.check()?;
+        match fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => self.child(name, false).map(Some),
+            Err(Errno::NOENT) => Ok(None),
+            Err(e) => Err(io(e)),
+        }
+    }
     pub fn child(&self, name: &OsStr, create: bool) -> Result<Self> {
         self.check()?;
         if create {

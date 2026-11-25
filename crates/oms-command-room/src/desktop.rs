@@ -431,17 +431,34 @@ impl Room<'_> {
     /// connection's bound conversation only. A worker or participant session
     /// never qualifies.
     fn assignment_owner(&self, id: &str, consumer: &str, request: &str) -> Result<Value> {
-        identifier(id, "room")?;
-        if self.session.child
-            || self.session.participant.is_some()
-            || !hex(consumer, 32)
-            || !request_uuid(request)
-        {
-            return Err(Error::new(
-                "assignment needs a bound app conversation and a request UUID",
-            ));
-        }
+        self.check_desktop_identity(id, consumer, request)?;
         let operations = self.operations()?;
+        self.assignment_owner_with(id, consumer, operations.as_ref())
+    }
+    pub(super) fn check_desktop_identity(
+        &self,
+        id: &str,
+        consumer: &str,
+        request: &str,
+    ) -> Result<()> {
+        if !request_uuid(request) {
+            return Err(Error::new("assignment needs a request UUID"));
+        }
+        self.check_desktop_consumer(id, consumer)
+    }
+    pub(super) fn check_desktop_consumer(&self, id: &str, consumer: &str) -> Result<()> {
+        identifier(id, "room")?;
+        if self.session.child || self.session.participant.is_some() || !hex(consumer, 32) {
+            return Err(Error::new("assignment needs a bound app conversation"));
+        }
+        Ok(())
+    }
+    pub(super) fn assignment_owner_with(
+        &self,
+        id: &str,
+        consumer: &str,
+        operations: &dyn crate::OperationsRead,
+    ) -> Result<Value> {
         let attempts = || {
             operations
                 .attempts()

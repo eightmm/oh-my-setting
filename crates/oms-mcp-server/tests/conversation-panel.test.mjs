@@ -27,6 +27,18 @@ class Element extends EventTarget {
   replaceChildren(...children) { this.children = children; }
   querySelectorAll() { return []; }
   setCustomValidity() {}
+  reportValidity() {}
+}
+
+// Script-created nodes keep their tag and become reachable by id once the script names them.
+function createdElement(tag, registry) {
+  const element = new Element();
+  element.tagName = tag;
+  Object.defineProperty(element, 'id', {set(id) {
+    assert.ok(!registry.has(id), 'duplicate id ' + id);
+    registry.set(id, element);
+  }});
+  return element;
 }
 
 async function panel(projects, dashboard = {}, options = {}) {
@@ -37,7 +49,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools};
+  const host = {modes:[],contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -71,7 +83,13 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{openLinks:options.openLinks ? {} : undefined,message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,availableDisplayModes:options.modes,locale:options.locale},hostCapabilities:{openLinks:options.openLinks ? {} : undefined,message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
+    }
+    if (method === 'ui/request-display-mode') {
+      host.modes.push(params.mode);
+      if (options.denyMode) { queueMicrotask(() => notify({id,error:{code:-32000,message:'denied'}})); return; }
+      if (options.holdMode) { host.releaseMode=()=>notify({id,result:{mode:params.mode}}); return; }
+      result = {mode:params.mode};
     }
     if(method==='ui/update-model-context'){host.contexts.push(params);result={isError:host.rejectContext===true};}
     if (method === 'ui/open-link') host.links.push(params.url);
@@ -107,9 +125,9 @@ async function panel(projects, dashboard = {}, options = {}) {
     node.initialText = inner;
     return node;
   });
-  const document = {getElementById:get, createElement:() => new Element(), title:'',
+  const document = {getElementById:get, createElement:tag => createdElement(tag, elements), title:'',
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
-  class Option extends Element { constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
+  class Option extends Element { tagName = 'option'; constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
   const context = createContext({window, document, Option, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
     ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
@@ -168,6 +186,75 @@ test('Main launch uses all selected Lead preferences only when the user submits'
   const request=p.calls.find(c=>c.name==='oms_start_main').args;
   assert.equal(request.main,'claude');
   assert.equal(request.goal,'Requested provider Leads: Codex, Claude, AGY. Check the release.');
+});
+
+for (const edit of ['none','whitespace','brief','leads','main']) {
+  test('recorded status reconciles the original launch with Lead preferences after ' + edit + ' edit', async () => {
+    const p = await panel(['one']);
+    const brief = p.get('brief'), lead = p.get('lead-claude');
+    brief.value = 'Review the change'; lead.checked = true;
+    await p.event('launch', 'submit');
+    const starts = () => p.calls.filter(c => c.name === 'oms_start_main');
+    assert.equal(starts().length,1);
+    assert.equal(starts()[0].args.goal,'Requested provider Leads: Claude. Review the change');
+    assert.equal(brief.value,'Review the change', 'unconfirmed write preserves its input');
+    if (edit === 'whitespace') brief.value = '  Review the change  ';
+    if (edit === 'brief') brief.value = 'A different draft';
+    if (edit === 'leads') lead.checked = false;
+    if (edit === 'main') p.get('launch').elements.main.value = 'pi';
+    const draft = brief.value;
+    p.host.status = 'recorded';
+    await p.event('refresh','click');
+    assert.equal(p.calls.filter(c=>c.name==='oms_start_status').at(-1).args.requestId,starts()[0].args.requestId);
+    assert.match(p.get('receipt').textContent,/recorded-attempt/);
+    assert.equal(brief.value,['none','whitespace'].includes(edit) ? '' : draft);
+    if (['none','whitespace'].includes(edit)) await p.event('launch', 'submit');
+    assert.equal(starts().length,1);
+  });
+}
+
+for (const status of ['recorded','reserved','unknown','not_found']) {
+  test('a distinct submission reconciles the original ' + status + ' request before replacing it', async () => {
+    const p = await ambiguousStart();
+    const starts = () => p.calls.filter(c => c.name === 'oms_start_main');
+    const old = starts()[0].args.requestId;
+    const brief = p.get('brief'); brief.value = 'A different assignment';
+    p.host.status = status;
+    const mark = p.calls.length;
+    await p.event('launch','submit');
+    assert.equal(p.calls.slice(mark)[0].name,'oms_start_status');
+    assert.equal(p.calls.slice(mark)[0].args.requestId,old);
+    assert.equal(starts().length,1);
+    assert.equal(brief.value,'A different assignment');
+    if (status === 'not_found') {
+      // Changing the proposed replacement needs a fresh confirmation of that draft.
+      brief.value = 'Another replacement'; await p.event('launch','submit');
+      assert.equal(starts().length,1);
+      // A subsequent ambiguous check must disarm the earlier replacement.
+      p.host.status='unknown'; await p.event('launch','submit');
+      assert.equal(starts().length,1);
+      p.host.status='not_found'; await p.event('launch','submit');
+      assert.equal(starts().length,1);
+    }
+    p.host.failStart = false;
+    await p.event('launch','submit');
+    const allowed = ['recorded','not_found'].includes(status);
+    assert.equal(starts().length, allowed ? 2 : 1);
+    if (allowed) assert.notEqual(starts().at(-1).args.requestId, old);
+    else assert.equal(p.run('retryStart.requestId'), old);
+  });
+}
+
+test('returning to the original unreserved request keeps its UUID', async () => {
+  const p = await ambiguousStart();
+  const starts = () => p.calls.filter(c=>c.name === 'oms_start_main');
+  const original = starts()[0].args;
+  p.host.status = 'not_found';
+  p.get('brief').value='Changed'; await p.event('launch','submit');
+  assert.equal(starts().length,1);
+  p.get('brief').value=original.goal; p.host.failStart=false;
+  await p.event('launch','submit');
+  assert.deepEqual(starts().map(c=>c.args.requestId),[original.requestId,original.requestId]);
 });
 
 test('automatic reserved receipt clears the initial launch error style', async () => {
@@ -544,6 +631,9 @@ test('Main and Lead hierarchy uses scoped records and explicit parent links', as
     conversationAttempts:[
       {room,participant:'owner',id:'a-main',role:'main',task:'Decide landing order',state:'working'},
       attempt,
+      {...lead,id:'a-old',task:'Earlier review',state:'done'},
+      {parentAttempt:'a-old',id:'a-history',task:'t2',state:'done'},
+      {room:'other',parentAttempt:'a-old',id:'a-other',task:'Foreign history'},
       {room,participant:'worker',id:'a-1',task:'Confirm branch',state:'done'},
       {parentAttempt:attempt.id,id:'a-2',task:'Verify changes',state:'working'},
       {room:'other',parentAttempt:attempt.id,id:'a-3',task:'Foreign Room'},
@@ -552,7 +642,7 @@ test('Main and Lead hierarchy uses scoped records and explicit parent links', as
     ],
     activeAttempts:[],
     conversationAttemptsOmitted:2
-  });
+  }, {tools:{oms_panel_work_items:workFixture}});
   assert.match(p.get('team-main-name').textContent,/Codex Main/);
   assert.match(p.get('team-main-task').textContent,/Decide landing order/);
   const [branch] = p.get('leads').children;
@@ -560,11 +650,21 @@ test('Main and Lead hierarchy uses scoped records and explicit parent links', as
   assert.match(branch.textContent,/Claude Lead.*Review landing/);
   assert.match(disclosure.textContent,/Confirm branch.*Verify changes/);
   assert.match(disclosure.textContent,/worker/);
+  assert.equal(p.get('leads').children.length,1);
+  const group = () => p.get('leads').children[0].children[1];
+  const historicTask = () => group().children.find(section => section.className === 'lead-children')
+    .children.find(row => row.tagName === 'button' && row.textContent.includes('t2'));
+  assert.ok(historicTask());
   assert.doesNotMatch(disclosure.textContent,/Foreign|Coincidentally/);
   assert.match(p.get('team-records').textContent,/일부/);
   disclosure.open = true;
   p.run('paintLeadTree(dashboardData)');
-  assert.equal(p.get('leads').children[0].children[1].open,true);
+  assert.equal(group().open,true);
+  historicTask().dispatchEvent(new Event('click'));
+  assert.equal(p.run('selectedTask.id'),'t2');
+  await p.event('task-back','click');
+  assert.equal(group().open,true);
+  assert.equal(historicTask().focused,1);
 });
 
 test('Main chat opens only the verified native owner conversation', async () => {
@@ -639,6 +739,109 @@ test('explicit open issue review shows fixed localized evidence separately from 
   assert.equal(evidence.textContent,''); assert.equal(p.host.messages.length,0);
   assert.deepEqual([...new Set(p.calls.map(c=>c.name))].sort(),['oms_list_projects','oms_panel_git_status','oms_panel_project_graph','oms_panel_snapshot','oms_panel_work_items']);
 });
+const issueVersion = {kind:'github-issue',state:'open',reference:'https://github.com/Org/Repo/issues/9',
+  revision:'2026-11-24T09:00:00Z',sha256:'a'.repeat(64),bytes:30};
+const issueMain = {conversationBinding:'matched',conversationMain:{...matchedMain,incomplete:true}};
+const recordTool = 'oms_record_reviewed_issue', statusTool = 'oms_reviewed_issue_status';
+const receipt = a => ({schema:1,kind:'oms-reviewed-issue-receipt',status:'recorded',room:a.room,participant:a.owner,
+  requestId:a.requestId,issue:'Org/Repo#9',sha256:issueVersion.sha256});
+const selectionId = '4d6acd01-bd18-8567-bf69-ea05fb048b27';
+const absentIssue = () => ({status:'not_found',requestId:selectionId});
+async function selectReviewedIssue(p, lookup=absentIssue, version=issueVersion) {
+  await pickIssue(p);
+  p.host.tools.oms_panel_git_status = a => a.issuePreview ? {issuePreview:version} : workData;
+  p.host.tools[statusTool] = lookup;
+  await p.event('issue-review','click');
+}
+test('only an explicit native Issue receipt records the reviewed version, separate from a bilingual draft',async()=>{
+  const p=await panel(['one'],issueMain,{context:true});
+  await selectReviewedIssue(p);
+  const b=p.get('issue-record'), evidence=p.get('issue-evidence'), draft=p.get('git-goal');
+  draft.value='editable brief';await p.event('git-goal','input');
+  assert.equal(b.hidden,false);assert.match(b.textContent,/작업방에 기록/);
+  assert.equal(p.calls.some(c=>c.name===recordTool),false);
+  p.host.tools[recordTool]=receipt;
+  await choose(p,'en');assert.match(b.textContent,/Record this issue version/);
+  await p.event('issue-record','click');
+  const writes=p.calls.filter(c=>c.name===recordTool), a=writes[0].args;
+  assert.deepEqual({...a},{project:'one',room:'r',owner:'owner',requestId:a.requestId,issue:'Org/Repo#9',sha256:issueVersion.sha256});
+  assert.match(a.requestId,/^[a-f0-9-]{36}$/);assert.match(evidence.textContent,/Recorded in Room/);
+  assert.ok(evidence.textContent.includes(a.requestId));assert.equal(draft.value,'editable brief');
+  assert.equal(p.host.contexts.at(-1).structuredContent.requestId,a.requestId);
+  await choose(p,'ko');assert.match(evidence.textContent,/작업방에 기록됨/);
+  await p.event('issue-record','click');assert.equal(p.calls.filter(c=>c.name===recordTool).length,1);
+  assert.equal(p.host.messages.length,0);assert.equal(p.calls.some(c=>c.name==='oms_start_main'),false);
+});
+test('uncertain Issue handoff checks the original UUID before explicit retry and rejects foreign receipts',async()=>{
+  const p=await panel(['one'],issueMain);
+  await selectReviewedIssue(p);
+  let n=0;
+  p.host.tools[recordTool]=a=>{if (!n++) throw Error('lost reply');return receipt(a);};
+  p.host.tools[statusTool]=a=>({...receipt(a),room:'other'});
+  await p.event('issue-record','click');
+  const a=p.calls.at(-1).args;
+  await p.event('issue-record','click');assert.equal(p.calls.at(-1).name,statusTool);
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',room:a.room,owner:a.owner,requestId:a.requestId});
+  assert.match(p.get('issue-evidence').textContent,/기록 여부 미확인/);
+  p.host.tools[statusTool]=()=>({status:'not_found',requestId:'mismatch'});
+  await p.event('issue-record','click');assert.match(p.get('issue-evidence').textContent,/미확인/);
+  p.host.tools[statusTool]=r=>({requestId:r.requestId,status:'not_found'});
+  await p.event('issue-record','click');assert.match(p.get('issue-record').textContent,/다시 기록/);
+  await p.event('issue-record','click');assert.deepEqual({...p.calls.at(-1).args},{...a});
+  assert.match(p.get('issue-evidence').textContent,/작업방에 기록됨/);
+});
+test('Issue handoff disappears on a context switch and generic or unbound hosts never write',async()=>{
+  for (const [d,opts] of [[issueMain,{readOnly:true}],[{},{ }]]) {
+    const p=await panel(['one'],d,opts);await selectReviewedIssue(p);
+    assert.ok(p.get('issue-evidence').textContent.includes(issueVersion.sha256));
+    assert.equal(p.get('issue-record').hidden,true);await p.event('issue-record','click');
+    assert.equal(p.calls.some(c=>[recordTool,statusTool].includes(c.name)),false);
+  }
+  const p=await panel(['one','two'],issueMain,{context:true});
+  p.get('project-choice').value='one';await p.event('project-choice','change');await selectReviewedIssue(p);
+  let reads=0;p.host.tools[recordTool]=receipt;p.host.tools[statusTool]=a=>{reads++;return receipt({...a,requestId:selectionId});};
+  p.host.delayTool=recordTool;await p.event('issue-record','click');const release=p.host.release, first=p.calls.at(-1).args;
+  await p.event('tab-overview','click');release();await setImmediate();
+  assert.equal(p.get('issue-evidence').textContent,'');assert.equal(p.host.contexts.some(c=>c.structuredContent?.requestId),false);
+  await p.event('tab-git','click');await p.event('issue-review','click');
+  assert.equal(reads,1);assert.equal(p.host.contexts.at(-1).structuredContent.requestId,first.requestId);
+  await p.event('issue-review','click');p.host.delayTool='oms_panel_git_status';await p.event('issue-review','click');const late=p.host.release;
+  await p.open('input',{arguments:{project:'two'}});late();await setImmediate();
+  assert.equal(p.get('issue-record').hidden,true);assert.equal(p.get('issue-evidence').textContent,'');
+  assert.equal(p.calls.filter(c=>c.name===recordTool).length,1);
+});
+test('a fresh panel recovers an acknowledged or lost Issue receipt from the exact selection without storage', async()=>{
+  for (const lost of [false,true]) {
+    let stored, writes=0;
+    const lookup=a=>{
+      assert.equal(a.requestId,undefined);
+      if (a.sha256!==issueVersion.sha256) return {status:'not_found',requestId:'4d6acd01-bd18-8567-bf69-ea05fb048b28'};
+      return stored ?? absentIssue();
+    };
+    const options={context:true,storage:deniedStorage()};
+    const first=await panel(['one'],issueMain,options);
+    await selectReviewedIssue(first,lookup);
+    first.host.tools[recordTool]=a=>{
+      writes++; stored=receipt(a);
+      if (lost) throw Error('ack lost');
+      return stored;
+    };
+    await first.event('issue-record','click');
+    const fresh=await panel(['one'],issueMain,options);
+    await selectReviewedIssue(fresh,lookup);
+    await choose(fresh,'en');
+    assert.match(fresh.get('issue-evidence').textContent,/Recorded in Room/);
+    assert.equal(fresh.get('issue-record').disabled,true);
+    assert.deepEqual({...fresh.host.contexts.at(-1).structuredContent},
+      {project:'one',room:'r',owner:'owner',requestId:selectionId,kind:stored.kind,status:'recorded'});
+    await fresh.event('issue-record','click');
+    assert.equal(fresh.calls.some(c=>c.name===recordTool),false);
+    assert.equal(fresh.host.messages.length,0);assert.equal(writes,1);
+    await selectReviewedIssue(fresh,lookup,{...issueVersion,sha256:'b'.repeat(64)});
+    assert.match(fresh.get('issue-record').textContent,/Record this issue version/);
+    assert.ok(!fresh.get('issue-evidence').textContent.includes(selectionId));
+  }
+});
 test('Git issue is an editable Lead request, and only an explicit send posts it to a matched Main', async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   await pickIssue(p);
@@ -656,7 +859,7 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.4');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.5');
   for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
     const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
     assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
@@ -733,6 +936,38 @@ test('GitHub Projects permission copy requires a typed scope error; other reposi
   assert.match(p.get('git-catalog-status').textContent,/read:project/);
   p.get('git-kind').value='issues'; await p.event('git-kind','change');
   assert.match(p.get('git-catalog').textContent,/Review input boundaries/);
+});
+
+test('display mode follows host support, user choice and teardown independently of OMS writes', async()=>{
+  const modes=['inline','pip','fullscreen'];
+  const p=await panel(['one'],{}, {mode:'inline',modes});
+  assert.deepEqual(p.host.modes,['fullscreen']);
+  const button=p.get('display-mode');
+  assert.equal(button.hidden,false);assert.match(button.textContent,/대화로 돌아가기/);
+  await p.event('display-mode','click');assert.deepEqual(p.host.modes,['fullscreen','inline']);
+  await choose(p,'en');assert.equal(button.textContent,'Expand');
+  p.notify({method:'ui/notifications/host-context-changed',params:{availableDisplayModes:['inline','pip']}});
+  await p.event('display-mode','click');assert.equal(p.host.modes.at(-1),'pip');
+  for (const options of [{mode:'inline'}, {mode:'inline',modes:['inline','unknown']}, {mode:'fullscreen',modes}]) {
+    const plain=await panel(['one'],{},options);
+    assert.deepEqual(plain.host.modes,[]);
+    assert.equal(plain.get('display-mode').hidden,options.mode==='inline');
+  }
+  const denied=await panel(['one'],{},{mode:'inline',modes,denyMode:true});
+  assert.deepEqual(denied.host.modes,['fullscreen']);
+  assert.equal(denied.get('view').hidden,false);
+  assert.equal(denied.get('display-mode').disabled,false);
+  assert.match(denied.get('connection-host').textContent,/inline/);
+  const closing=await panel(['one'],{},{mode:'inline',modes:['inline','pip'],holdMode:true});
+  assert.deepEqual(closing.host.modes,['pip']);assert.equal(closing.get('display-mode').disabled,true);
+  closing.notify({method:'ui/resource-teardown',id:'close-display',params:{}});
+  closing.host.releaseMode();await setImmediate();
+  await closing.event('display-mode','click');
+  assert.equal(closing.get('display-mode').disabled,true);assert.deepEqual(closing.host.modes,['pip']);
+  for (const opened of [p,denied,closing]) {
+    assert.ok(opened.calls.every(c=>['oms_list_projects','oms_panel_snapshot','oms_list_approvals','oms_panel_project_graph','oms_panel_work_items'].includes(c.name)));
+    assert.equal(opened.host.messages.length,0);
+  }
 });
 
 test('connection settings separate host facts, runtime policy, and draft-only harness choice', async () => {
@@ -1056,9 +1291,15 @@ const focusCount = p => [...p.elements.values()].reduce((sum, element) => sum + 
 test('Korean and English catalogs match, and every static node and message key resolves', async () => {
   const p = await panel(['one']);
   const ko = p.run('MSG.ko'), en = p.run('MSG.en');
-  const catalog = p.run('catalogRows').split('\n').map(line => line.split('\t'));
-  assert.ok(catalog.every(row => (row.length === 2 || row.length === 3) && row[0] && row.at(-1)), 'one key and one or two language columns per row');
-  assert.equal(new Set(catalog.map(row => row[0])).size, catalog.length, 'translation keys are unique');
+  const keys = [];
+  let prefix = '';
+  for (const line of p.run('catalogRows').split('\n')) {
+    if (/^\[[\w.]+\]$/.test(line)) { prefix = line.slice(1,-1) + '.'; continue; }
+    const row = line.split('\t');
+    assert.ok([2,3].includes(row.length) && row.every(Boolean), 'name and translated text');
+    keys.push(prefix + row[0]);
+  }
+  assert.equal(new Set(keys).size, keys.length, 'translation keys are unique');
   assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
   for (const key of Object.keys(ko)) {
     const holders = [...ko[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort(), english = [...en[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort();
@@ -1511,8 +1752,83 @@ test('primary and secondary tablists each rove with arrows and every v10 view st
   await p.event('tab-project', 'click'); assert.equal(p.get('more-views').open, true);
   await press(p, 'tab-project', 'ArrowRight'); assert.equal(p.run('currentTab'), 'chat');
   for (const tab of ['project', 'chat', 'activity', 'usage', 'git']) { await p.event('tab-' + tab, 'click'); assert.equal(p.get('pane-' + tab).hidden, false); }
+  // A list keeps its keyboard stop even when the selection lives in the other list.
+  await p.event('tab-project', 'click');
+  assert.equal(p.get('tab-overview').tabIndex, 0); assert.equal(p.get('tab-overview').getAttribute('aria-selected'), 'false');
   await p.event('tab-overview', 'click');
   assert.equal(p.get('tab-overview').tabIndex, 0); assert.equal(p.get('tab-project').tabIndex, 0);
+  await p.event('tab-work', 'click'); await click(p, 'work:t1');
+  for (const [from, key, to] of [['overview','ArrowLeft','history'], ['history','ArrowRight','overview'], ['overview','End','history'], ['history','Home','overview']]) {
+    const focused = p.get('task-tab-' + to).focused ?? 0;
+    await press(p, 'task-tab-' + from, key);
+    assert.equal(p.get('task-tab-' + to).focused, focused + 1);
+    for (const name of ['overview','changes','verification','history']) {
+      assert.equal(p.get('task-tab-' + name).getAttribute('aria-selected'), String(name === to));
+      assert.equal(p.get('task-tab-' + name).tabIndex, name === to ? 0 : -1);
+    }
+  }
+});
+
+test('generated tabs and fixed selects keep their semantics, values, groups and labels in both languages', async () => {
+  const p = await panel(['one']);
+  // [id, controls, selected, initial tabindex, Korean, English], in document order.
+  const tablists = {
+    'tabs-primary':[['tab-overview','pane-overview',true,null,'지금','Now'], ['tab-work','pane-work',false,'-1','작업','Work'],
+      ['tab-results','pane-results',false,'-1','결과','Results'], ['tab-relations','pane-relations',false,'-1','관계도','Relationships']],
+    'tabs-secondary':[['tab-project','pane-project',false,null,'프로젝트 지도','Project map'], ['tab-chat','pane-chat',false,'-1','대화','Chat'],
+      ['tab-activity','pane-activity',false,'-1','활동','Activity'], ['tab-usage','pane-usage',false,'-1','지표','Metrics'],
+      ['tab-git','pane-git',false,'-1','Git · PR','Git · PR']],
+    'task-tabs':[['task-tab-overview','task-body',true,null,'요약','Summary'], ['task-tab-changes','task-body',false,'-1','변경','Changes'],
+      ['task-tab-verification','task-body',false,'-1','검증','Verification'], ['task-tab-history','task-body',false,'-1','이력','History']],
+  };
+  const group = (ko, en, options) => ({ko, en, options});
+  const selects = {
+    'tui-view':[['','보기 선택','Choose a view'],
+      group('런타임','Runtime',[['overview','개요','Overview'], ['health','건강 상태','Health'], ['providers','공급자','Providers'],
+        ['metrics','지표','Metrics'], ['capacity','용량','Capacity'], ['log','로그','Log']]),
+      group('협업','Collaboration',[['teams','팀','Teams'], ['sessions','세션','Sessions'], ['plan','계획','Plan'],
+        ['attention','확인할 항목','Attention'], ['results','결과','Results'], ['debate','토론','Debate']]),
+      group('실행','Execution',[['routes','경로','Routes'], ['workspaces','워크스페이스','Workspaces'], ['jobs','작업','Jobs'], ['past','지난 실행','Past runs']])],
+    'git-provider':[['','Main이 Lead 선택','Main chooses the Lead'], ['codex','Codex Lead'], ['claude','Claude Lead'], ['agy','AGY Lead']],
+    'git-kind':[['checkout','체크아웃 PR · 검사','Checkout PRs · checks'], ['issues','저장소 이슈','Repository issues'],
+      ['pullRequests','저장소 PR','Repository PRs'], ['projects','GitHub Projects']],
+    'connection-view':[['connections','하네스와 준비 상태','Harnesses and readiness'], ['modelcatalog','모델·강도 카탈로그','Model and effort catalog'],
+      ['routes','예상 라우팅 · 계정','Expected routing · accounts'], ['attribution','실행 응답 근거','Execution response evidence']],
+    'connection-harness':[['codex','Codex'], ['claude','Claude'], ['agy','AGY'], ['pi','Pi']],
+  };
+  const check = language => {
+    for (const [list, rows] of Object.entries(tablists)) {
+      const buttons = p.get(list).children;
+      assert.equal(buttons.length, rows.length, list);
+      for (const [index, [id, controls, selected, stop, ko, en]] of rows.entries()) {
+        const button = buttons[index];
+        assert.equal(button, p.get(id)); assert.equal(button.tagName, 'button');
+        assert.deepEqual(['role','aria-controls','aria-selected','tabindex'].map(name => button.getAttribute(name)),
+          ['tab', controls, String(selected), stop], id);
+        assert.equal(button.textContent, language === 'ko' ? ko : en, id);
+      }
+    }
+    const compare = (nodes, rows) => {
+      assert.equal(nodes.length, rows.length);
+      for (const [index, row] of rows.entries()) {
+        const node = nodes[index];
+        if (Array.isArray(row)) {
+          const [value, ko, en = ko] = row;
+          assert.deepEqual([node.tagName, node.value, node.textContent], ['option', value, language === 'ko' ? ko : en]);
+        } else {
+          assert.equal(node.tagName, 'optgroup'); assert.equal(node.getAttribute('label'), row[language]);
+          compare(node.children, row.options);
+        }
+      }
+    };
+    for (const [id, rows] of Object.entries(selects)) compare(p.get(id).children, rows);
+  };
+  check('ko');
+  // The stub has no native selection. Only the existing project reset assigns a value, and it names a real option;
+  // the untouched selects keep their native first-option default and the callers' empty-value fallbacks.
+  for (const id of Object.keys(selects)) assert.equal(p.get(id).value, id === 'git-kind' ? selects[id][0][0] : '', id);
+  await choose(p, 'en'); check('en');
+  await choose(p, 'ko'); check('ko');
 });
 
 const styleCss = html.match(/<style>([\s\S]+?)<\/style>/)[1];
@@ -1531,7 +1847,7 @@ test('overview leads with decisions, goal and work before the roster and folded 
   assert.ok(positions.every(pos => pos >= 0), 'all overview sections exist');
   for (let i = 1; i < positions.length; i++) assert.ok(positions[i - 1] < positions[i], `${order[i - 1]} before ${order[i]}`);
   assert.match(overview, /<details class="card" id="latest-results">/);
-  assert.match(overview, /<button id="team-open" type="button" data-i18n="tab.chat" hidden>/);
+  assert.match(overview, /<button id="team-open" type="button" class="link-action" data-i18n="tab.chat" hidden>/);
   // No double-nested <details> inside #pane-overview.
   let depth = 0, maxDepth = 0;
   for (const [, close] of overview.matchAll(/<(\/?)details\b/g)) {
@@ -2041,7 +2357,13 @@ test('every ko/en catalog key is referenced by markup, script, or an explicit dy
     'obs.': new Set(['complete','partial','unknown']),
     'src.': new Set(['git','task','plan','attempts','artifacts','acceptance','conversation']),
     'srcState.': new Set(['unavailable','partial','ambiguous','stale']),
-    'ev.': new Set(p.run('evidenceKeys'))
+    'ev.': new Set(p.run('evidenceKeys')),
+    // Keys composed by buildControls().
+    'tab.': new Set(p.run('tabs')),
+    'task.': new Set(p.run('detailSections')),
+    'tui.': new Set(['runtime','collab','run', ...p.get('tui-view').children.flatMap(node => node.children.filter(child => child.tagName === 'option').map(child => child.value))]),
+    'gitKind.': new Set(p.get('git-kind').children.map(node => node.value)),
+    'cv.': new Set(p.run('settingViews'))
   };
 
   const unreferenced = [];
