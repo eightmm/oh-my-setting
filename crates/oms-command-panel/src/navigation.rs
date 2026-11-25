@@ -51,6 +51,7 @@ pub enum Action {
     Chats,
     Controls,
     SwitchMain,
+    Login,
     Provider(usize),
 }
 /// Stable call identity matching `watch::call_identity`.
@@ -143,6 +144,7 @@ impl Navigation {
             Key::Char('h') => return Action::Chats,
             Key::Char('j') => return Action::Controls,
             Key::Char('s') => return Action::SwitchMain,
+            Key::Char('L') => return Action::Login,
             Key::Char('1') => return Action::Provider(0),
             Key::Char('2') => return Action::Provider(1),
             Key::Char('3') => return Action::Provider(2),
@@ -338,6 +340,7 @@ mod tests {
             (Key::Char('h'), Action::Chats),
             (Key::Char('j'), Action::Controls),
             (Key::Char('s'), Action::SwitchMain),
+            (Key::Char('L'), Action::Login),
             (Key::Char('u'), Action::Refresh),
             (Key::Char('U'), Action::Quota),
             (Key::Char('9'), Action::Refresh),

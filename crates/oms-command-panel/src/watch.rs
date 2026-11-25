@@ -968,6 +968,21 @@ fn run_with_source_writer(
                             }
                             break;
                         }
+                        navigation::Action::Login => {
+                            let session_hint = board
+                                .as_ref()
+                                .and_then(|board| board.scope.as_ref())
+                                .and_then(|scope| scope.main.as_ref())
+                                .map(|main| main.session.as_str());
+                            nav.notice = Some(open_login_window(
+                                repo,
+                                source,
+                                session_hint,
+                                target.caller.as_deref(),
+                                services,
+                                interrupted,
+                            ));
+                        }
                         navigation::Action::Controls => {
                             let mut counts = Vec::new();
                             let mut first_error = None;
@@ -2889,13 +2904,108 @@ fn allow_board_action(
         | Action::ReadAll
         | Action::Results
         | Action::SwitchMain => row_authority,
-        Action::None | Action::Quit | Action::Refresh | Action::Controls => true,
+        Action::None | Action::Quit | Action::Refresh | Action::Controls | Action::Login => true,
     };
     if allowed {
         action
     } else {
         deny_row_action(nav);
         Action::None
+    }
+}
+
+const LOGIN_FALLBACK_COMMAND: &str = "oms connect-services --login-menu";
+
+fn login_command_argv_for(
+    source: &Path,
+    entry: Option<&crate::executable::Entry>,
+) -> Option<Vec<std::ffi::OsString>> {
+    let mut cmd: Vec<std::ffi::OsString> = crate::native_panel::entry_prefix_for(source, entry?)
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    cmd.extend(commands::strings(&["connect-services", "--login-menu"]));
+    Some(cmd)
+}
+
+fn login_tmux_session(
+    repo: &Path,
+    session_hint: Option<&str>,
+    caller_pane: Option<&str>,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+) -> Option<String> {
+    // The panel's own session first: the Main may run detached where the user cannot see a new window.
+    let own = caller_pane
+        .filter(|id| commands::valid_target(id, '%'))
+        .and_then(|pane| {
+            oms_panel_core::terminals::tmux(
+                services,
+                repo,
+                &commands::strings(&["display-message", "-p", "-t", pane, "#{session_id}"]),
+                interrupted,
+            )
+            .ok()
+        })
+        .filter(|session| commands::valid_target(session, '$'));
+    own.or_else(|| {
+        session_hint
+            .filter(|id| commands::valid_target(id, '$'))
+            .map(str::to_owned)
+    })
+}
+
+fn open_login_window(
+    repo: &Path,
+    source: &Path,
+    session_hint: Option<&str>,
+    caller_pane: Option<&str>,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+) -> String {
+    if let Err(err) = crate::parent_only() {
+        return err.message;
+    }
+    open_login_window_with_entry(
+        repo,
+        source,
+        crate::executable::resolve(source).as_ref(),
+        session_hint,
+        caller_pane,
+        services,
+        interrupted,
+    )
+}
+
+fn open_login_window_with_entry(
+    repo: &Path,
+    source: &Path,
+    entry: Option<&crate::executable::Entry>,
+    session_hint: Option<&str>,
+    caller_pane: Option<&str>,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+) -> String {
+    let Some(login_argv) = login_command_argv_for(source, entry) else {
+        return format!("Run: {LOGIN_FALLBACK_COMMAND} (oms unavailable)");
+    };
+    let Some(session) = login_tmux_session(repo, session_hint, caller_pane, services, interrupted)
+    else {
+        return format!("Run: {LOGIN_FALLBACK_COMMAND} (no tmux session)");
+    };
+    let mut argv = commands::strings(&[
+        "new-window",
+        "-t",
+        &format!("{session}:"),
+        "-n",
+        "login",
+        "-c",
+    ]);
+    argv.push(repo.as_os_str().into());
+    argv.extend(login_argv);
+    match oms_panel_core::terminals::tmux(services, repo, &argv, interrupted) {
+        Ok(_) => "Sign-in window opened".into(),
+        Err(err) => format!("Run: {LOGIN_FALLBACK_COMMAND} (tmux: {})", err.message),
     }
 }
 
@@ -7730,6 +7840,7 @@ mod tests {
         for action in [
             navigation::Action::Quit,
             navigation::Action::Refresh,
+            navigation::Action::Login,
             navigation::Action::None,
         ] {
             assert_eq!(allow_board_action(&mut nav, action, false, false), action);
@@ -12302,5 +12413,282 @@ fi
         assert!(!unread_for(&read, "message", "msg-q1"));
         assert!(!unread_for(&read, "task", "t-held"));
         assert!(!unread_for(&read, "call", "w-fail"));
+    }
+
+    #[test]
+    fn open_login_window_uses_tmux_argv_or_reports_fallback() {
+        use crate::{Error, Result, Services, commands};
+        use oms_panel_core::{
+            NativeCommand,
+            services::{CommandOutput, ExecutionRequest, PeerExecutor},
+        };
+        use std::path::Path;
+        use std::sync::atomic::AtomicBool;
+        struct LoginTmux {
+            calls: std::sync::Mutex<Vec<Vec<std::ffi::OsString>>>,
+            session_reply: Option<&'static str>,
+            fail_new_window: bool,
+        }
+        impl PeerExecutor for LoginTmux {
+            fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                self.calls.lock().unwrap().push(request.argv.clone());
+                if request.argv.get(1).and_then(|v| v.to_str()) == Some("display-message") {
+                    return match self.session_reply {
+                        Some(id) => Ok(CommandOutput {
+                            stdout: format!("{id}\n").into_bytes(),
+                            cleanup_complete: true,
+                            output_complete: true,
+                            ..Default::default()
+                        }),
+                        None => Err(Error::new("no tmux client")),
+                    };
+                }
+                if self.fail_new_window {
+                    return Err(Error::new("tmux failed"));
+                }
+                Ok(CommandOutput {
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+        impl Services for LoginTmux {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                _: &[std::ffi::OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                panic!("unexpected native command {command:?}")
+            }
+        }
+
+        let stop = AtomicBool::new(false);
+        let repo = Path::new("repo-fixture");
+        let source = Path::new("");
+        const CHILD_ENV: &str = "OMS_TEST_LOGIN_WINDOW_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let tmux = LoginTmux {
+                calls: std::sync::Mutex::new(Vec::new()),
+                session_reply: Some("$7"),
+                fail_new_window: false,
+            };
+            let notice =
+                super::open_login_window(repo, source, Some("$3"), Some("%5"), &tmux, &stop);
+            assert_eq!(notice, "panel mutations require the owning parent");
+            assert!(
+                tmux.calls.lock().unwrap().is_empty(),
+                "harness child must not invoke tmux"
+            );
+            return;
+        }
+        let bin_entry = crate::executable::Entry {
+            path: std::path::PathBuf::from("oms-fixture-bin"),
+            script: false,
+        };
+        let script_entry = crate::executable::Entry {
+            path: std::path::PathBuf::from("scripts/oms"),
+            script: true,
+        };
+
+        // Direct session hint spawns `tmux new-window -t $3: -n login -c <repo> <oms...> connect-services --login-menu`.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: None,
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            Some("$3"),
+            None,
+            &tmux,
+            &stop,
+        );
+        assert_eq!(notice, "Sign-in window opened");
+        let calls = tmux.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let argv: Vec<String> = calls[0]
+            .iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            [
+                "tmux",
+                "new-window",
+                "-t",
+                "$3:",
+                "-n",
+                "login",
+                "-c",
+                "repo-fixture",
+                "oms-fixture-bin",
+                "connect-services",
+                "--login-menu"
+            ]
+        );
+
+        // Script entry reuses native_panel::entry_prefix_for (prepends `bash`).
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: None,
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&script_entry),
+            Some("$3"),
+            None,
+            &tmux,
+            &stop,
+        );
+        assert_eq!(notice, "Sign-in window opened");
+        let calls = tmux.calls.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            commands::strings(&[
+                "tmux",
+                "new-window",
+                "-t",
+                "$3:",
+                "-n",
+                "login",
+                "-c",
+                "repo-fixture",
+                "bash",
+                "scripts/oms",
+                "connect-services",
+                "--login-menu",
+            ])
+        );
+
+        // Falls back to querying session from TMUX_PANE when no session hint is given.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: Some("$7"),
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            None,
+            Some("%5"),
+            &tmux,
+            &stop,
+        );
+        assert_eq!(notice, "Sign-in window opened");
+        let calls = tmux.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            commands::strings(&["tmux", "display-message", "-p", "-t", "%5", "#{session_id}"])
+        );
+        assert_eq!(calls[1][3], "$7:");
+        drop(calls);
+
+        // The panel's own session wins over the Board Main's session, which may be detached.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: Some("$7"),
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            Some("$3"),
+            Some("%5"),
+            &tmux,
+            &stop,
+        );
+        assert_eq!(notice, "Sign-in window opened");
+        assert_eq!(tmux.calls.lock().unwrap()[1][3], "$7:");
+
+        // Unavailable executable does not open a window and reports the fallback command first.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: Some("$7"),
+            fail_new_window: false,
+        };
+        let notice =
+            super::open_login_window_with_entry(repo, source, None, Some("$3"), None, &tmux, &stop);
+        assert!(
+            notice.starts_with("Run: oms connect-services --login-menu"),
+            "{notice}"
+        );
+        assert!(tmux.calls.lock().unwrap().is_empty());
+
+        // Without any tmux session, returns fallback notice naming the command first.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: None,
+            fail_new_window: false,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            None,
+            None,
+            &tmux,
+            &stop,
+        );
+        assert!(
+            notice.starts_with("Run: oms connect-services --login-menu"),
+            "{notice}"
+        );
+        assert!(tmux.calls.lock().unwrap().is_empty());
+
+        // When tmux new-window fails, puts the command first so it survives a 40-column wrap.
+        let tmux = LoginTmux {
+            calls: std::sync::Mutex::new(Vec::new()),
+            session_reply: None,
+            fail_new_window: true,
+        };
+        let notice = super::open_login_window_with_entry(
+            repo,
+            source,
+            Some(&bin_entry),
+            Some("$3"),
+            None,
+            &tmux,
+            &stop,
+        );
+        assert_eq!(
+            notice,
+            "Run: oms connect-services --login-menu (tmux: tmux failed)"
+        );
+
+        // Harness-child markers refuse open_login_window before touching tmux.
+        let exe = std::env::current_exe().unwrap();
+        for (key, val) in [
+            ("OMS_HARNESS_CHILD", "1"),
+            ("OMS_HARNESS_DELEGATE_DEPTH", "1"),
+        ] {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "watch::tests::open_login_window_uses_tmux_argv_or_reports_fallback",
+                    "--nocapture",
+                ])
+                .env_remove("OMS_HARNESS_CHILD")
+                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                .env(key, val)
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{key}={val}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }
