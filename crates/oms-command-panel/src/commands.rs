@@ -327,17 +327,13 @@ impl Session {
                 if ident != entry.ident {
                     return None;
                 }
-                let modified = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs_f64());
                 let header = rollout_header(&entry.rollout, (ident, size), &consumer)?;
-                let (model, tokens) = metrics::codex_turn_observations(&entry.rollout, &consumer)?;
+                let (model, tokens, tokens_at) =
+                    metrics::codex_turn_observations(&entry.rollout, &consumer)?;
                 (stamp == oms_panel_core::cache::stamp(&entry.rollout))
-                    .then_some((header, size, modified, model, tokens))
+                    .then_some((header, size, tokens_at, model, tokens))
             })();
-            let Some((header, size, modified, model, tokens)) = checked else {
+            let Some((header, size, tokens_at, model, tokens)) = checked else {
                 *saved = None;
                 return None;
             };
@@ -355,7 +351,7 @@ impl Session {
             if let Some(tokens) = tokens {
                 entry.tokens = Some(tokens);
                 entry.tokens_retained = false;
-                entry.tokens_observed_at = modified;
+                entry.tokens_observed_at = tokens_at;
             } else if entry.header.as_ref() == Some(&header) && size > entry.read_size {
                 entry.tokens_retained = entry.tokens.is_some();
                 entry.tokens_observed_at = None;

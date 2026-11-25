@@ -28,6 +28,8 @@ pub struct PeerOperationRecord {
     pub started_at: String,
     pub updated_at: String,
     pub observed_updated_at: Option<String>,
+    /// When the owner published its exit status; `None` unless the run is done.
+    pub finished_at: Option<String>,
     pub age_seconds: Option<i64>,
     pub targets: Vec<String>,
     pub worktree: Option<String>,
@@ -359,9 +361,6 @@ pub fn list_peer_operations(
     sort_operation_names(&mut names);
     let mut records = Vec::new();
     for name in names.into_iter().take(MAX_OPEN_CANDIDATES) {
-        if records.len() >= cap {
-            break;
-        }
         let Ok(sub_fd) = rfs::openat(&run_root_fd, name.as_str(), dir_flags, Mode::empty()) else {
             continue;
         };
@@ -394,6 +393,14 @@ pub fn list_peer_operations(
         let (op_status, exit) = status_for_owner(&dir, uid);
         let cancelled = op_status == "done" && valid_cancel_observed_owned(&dir, &name, uid);
         let observed_updated_at = observed_updated_in_dir(&sub_file, uid);
+        let finished_at = (op_status == "done")
+            .then(|| regular_entry_modified(&sub_file, "status", uid))
+            .flatten()
+            .map(|t| {
+                DateTime::<Utc>::from(t)
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string()
+            });
         let updated_at = observed_updated_at
             .clone()
             .unwrap_or_else(|| started_at.clone());
@@ -442,6 +449,7 @@ pub fn list_peer_operations(
             started_at,
             updated_at,
             observed_updated_at,
+            finished_at,
             age_seconds,
             targets,
             worktree,
@@ -450,6 +458,9 @@ pub fn list_peer_operations(
             attempt_id,
         });
     }
+    // Running records outrank newer finished ones, so a live run is never cut by the cap.
+    records.sort_by_key(|r| r.status != "running");
+    records.truncate(cap);
     records
 }
 
@@ -558,6 +569,40 @@ mod tests {
         assert_eq!(many[1].operation, cancelled_id);
         assert_eq!(many[1].status, "done");
         assert!(many[1].cancelled);
+        assert!(many[0].finished_at.is_none());
+        assert!(many[1].finished_at.is_some());
+
+        // A running operation behind newer finished ones still survives a small cap.
+        for idx in 0..4u32 {
+            let done = repo
+                .0
+                .join(RUN_ROOT)
+                .join(format!("consult-20261124T00000{idx}Z-{idx:08x}"));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&done)
+                .unwrap();
+            std::fs::write(done.join("status"), "0\n").unwrap();
+        }
+        let old_running = repo
+            .0
+            .join(RUN_ROOT)
+            .join("peer-delegate-20261001T000000Z-99887766");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&old_running)
+            .unwrap();
+        std::fs::write(old_running.join("pid"), format!("{}\n", std::process::id())).unwrap();
+        let capped = list_peer_operations(&repo.0, 3, SystemTime::now());
+        assert_eq!(capped.len(), 3);
+        assert!(capped[..2].iter().all(|r| r.status == "running"));
+        assert!(
+            capped
+                .iter()
+                .any(|r| r.operation == "peer-delegate-20261001T000000Z-99887766")
+        );
     }
 
     #[test]

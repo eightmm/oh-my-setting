@@ -164,7 +164,7 @@ fn peer_operation_row(
             _ => None,
         }
     } else {
-        let end_epoch = rec.observed_updated_at.as_deref().and_then(parse_epoch);
+        let end_epoch = rec.finished_at.as_deref().and_then(parse_epoch);
         match (started_epoch, end_epoch) {
             (Some(s), Some(e)) if s > 0 && e >= s => Some((e - s) as u64),
             _ => None,
