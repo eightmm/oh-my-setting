@@ -401,7 +401,11 @@ pub(crate) fn completed_landing(
     expected: Option<&oms_command_plan::ReviewFence>,
 ) -> Result<Value> {
     let plan = ctx.plan()?;
-    let snapshot = plan.load()?;
+    let snapshot = if ctx.gates.is_some() {
+        plan.load_with_locked_snapshot()?
+    } else {
+        plan.load()?
+    };
     let rows = plan.patch_landing_rows()?;
     let ledger = LandingLedger::new(&rows);
     let row = completed_landing_from_snapshot(ctx, &plan, &snapshot, &ledger, id, expected)?;
