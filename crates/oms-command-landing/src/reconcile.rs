@@ -32,6 +32,21 @@ pub(super) fn matches_checkout(row: &V, head: &str, stamp: &str, repo_digest: &s
         && row.get("repo").text() == Some(repo_digest)
 }
 
+pub(super) fn successor_request(row: &V) -> Option<&str> {
+    let successor = row.get("successor_request").text()?;
+    let update = row.get("superseding_update");
+    let commit = update.get("commit").text()?;
+    let parents = update.get("parents").array();
+    (row.get("state").text() == Some("superseded")
+        && (hex(commit, 40) || hex(commit, 64))
+        && row.get("sha").text() != Some(commit)
+        && matches_request(commit, successor)
+        && update.get("predecessor_request") == row.get("request")
+        && matches!(parents, [head, tip] if head == row.get("sha")
+            && tip.text().is_some_and(|tip| hex(tip, commit.len()))))
+    .then_some(successor)
+}
+
 const ALLOWED: [&str; 6] = [
     "repo",
     "remote",
@@ -100,7 +115,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     git.run(&["check-ref-format", &format!("refs/heads/{target}")])?;
     let observed = observe(c, o, &git, &repo, head, remote, target)?;
     let (mut row, code) = match observed {
-        Ok(row) => (row, 0),
+        Ok(row) => {
+            let code = i32::from(row.get("verdict").text() == Some("superseded"));
+            (row, code)
+        }
         Err(r) => (
             obj([
                 ("verdict", r.verdict.into()),
@@ -116,11 +134,15 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let mut out = if o.has("json") {
         Output::json(&row)?
     } else {
-        Output::text(format!(
+        let mut text = format!(
             "land reconcile: {} ({})\n  reviewed head: {head}\n",
             string(&row, "verdict"),
             string(&row, "reason")
-        ))
+        );
+        if let Some(successor) = row.get("successor_request").text() {
+            text.push_str(&format!("  successor request: {successor}\n"));
+        }
+        Output::text(text)
     };
     out.code = code;
     Ok(out)
@@ -203,6 +225,7 @@ fn observe(
     let row = tri!(c, V::parse(&raw), R, "receipt-invalid");
     let gate = row.get("gate").get("command").text().unwrap_or_default();
     let head_branch = string(&row, "head_branch");
+    let superseded = row.get("state").text() == Some("superseded");
     // The target can move while a publish-only writer is observing CI. Its
     // immutable pre-CI checkpoint then remains running with no final outcome.
     // The same PR, recorded push/base, merged tree and full CI proofs below
@@ -223,14 +246,15 @@ fn observe(
         ) && string(&row, "remote") == remote
             && string(&row, "target") == target
             && string(&row, "mode") == "pr"
-            && row.get("gate").get("rc") == &0usize.into()
-            && (published_running
-                || matches!(row.get("state").text(), Some("awaiting-merge" | "passed")))
-            && row.get("push").get("rc") == &0usize.into()
-            && row.get("push").get("head_branch").text() == Some(head_branch.as_str())
-            && crate::helpers::recorded_base(&row).ok().flatten().is_some()
-            && row.get("gate").get("scope").text()
-                == Some(if full_gate { "full" } else { "unknown" })
+            && (superseded
+                || (row.get("gate").get("rc") == &0usize.into()
+                    && (published_running
+                        || matches!(row.get("state").text(), Some("awaiting-merge" | "passed")))
+                    && row.get("push").get("rc") == &0usize.into()
+                    && row.get("push").get("head_branch").text() == Some(head_branch.as_str())
+                    && crate::helpers::recorded_base(&row).ok().flatten().is_some()
+                    && row.get("gate").get("scope").text()
+                        == Some(if full_gate { "full" } else { "unknown" })))
             && !gate.trim().is_empty()
             && gate.len() <= 4096
             && crate::safe(gate.as_bytes()).is_ok(),
@@ -246,24 +270,44 @@ fn observe(
         R,
         "receipt-head-branch-invalid"
     );
+    let parts = [
+        destination.trim(),
+        remote,
+        target,
+        gate,
+        "pr",
+        &head_branch,
+        "",
+    ];
     let expected = tri!(
         c,
-        delivery::request_stamp(
-            head,
-            &[
-                destination.trim(),
-                remote,
-                target,
-                gate,
-                "pr",
-                &head_branch,
-                ""
-            ],
-        ),
+        delivery::request_stamp(head, &parts),
         R,
         "receipt-identity-mismatch"
     );
     need!(expected == stamp, R, "request-identity-mismatch");
+    if superseded {
+        let successor = tri!(
+            c,
+            successor_request(&row).ok_or(()),
+            R,
+            "receipt-successor-invalid"
+        );
+        let commit = string(row.get("superseding_update"), "commit");
+        let expected = tri!(
+            c,
+            delivery::request_stamp(&commit, &parts),
+            R,
+            "receipt-successor-invalid"
+        );
+        need!(successor == expected, R, "receipt-successor-invalid");
+        return Ok(Ok(obj([
+            ("verdict", "superseded".into()),
+            ("reason", "target-updated".into()),
+            ("reviewed_head", head.into()),
+            ("successor_request", successor.into()),
+        ])));
+    }
     let pr_url = string(&row, "pr_url");
     need!(
         row.get("pr_number").integer(true) && !pr_url.is_empty(),

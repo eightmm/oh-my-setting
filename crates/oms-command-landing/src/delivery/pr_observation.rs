@@ -1,7 +1,7 @@
 //! While a pull-request landing (publish-only or `--merge`) reads CI, keep both
 //! a verifiable request owner and the receipt lock taken by older writers
 //! before they can gate or publish.
-use super::{Run, open_pr, save};
+use super::{Run, TargetMoved, open_pr, save};
 use crate::{Error, Result, V, check, ci, digest, reconcile, require, storage};
 use std::time::Instant;
 
@@ -20,6 +20,12 @@ pub(super) struct Checkpoint {
     holder: V,
     owner: oms_lock::Guard,
     legacy_receipt: oms_lock::Guard,
+}
+
+pub(super) struct Reentry {
+    pub(super) guard: oms_lock::Guard,
+    pub(super) receipt: Vec<u8>,
+    pub(super) moved: Option<TargetMoved>,
 }
 
 impl Checkpoint {
@@ -103,12 +109,7 @@ impl Checkpoint {
         Ok(())
     }
 
-    pub(super) fn reenter(
-        self,
-        r: &Run<'_>,
-        original_pr: &V,
-        base: &str,
-    ) -> Result<(oms_lock::Guard, Vec<u8>)> {
+    pub(super) fn reenter(self, r: &Run<'_>, original_pr: &V, base: &str) -> Result<Reentry> {
         let root = oms_safe_fs::Root::open_private_workspace(r.directory, |_| false)
             .map_err(|_| Error::new(2, "landing store changed during CI"))?;
         let settings = oms_lock::Settings::from_env().map_err(lock_error)?;
@@ -147,15 +148,23 @@ impl Checkpoint {
                 == Some(&self.receipt),
             "PR receipt changed during CI; final observation withheld",
         )?;
-        validate_destination(r, original_pr, base)?;
+        let moved = validate_destination(r, original_pr, base)?;
         guard.check().map_err(lock_error)?;
-        Ok((guard, self.receipt))
+        Ok(Reentry {
+            guard,
+            receipt: self.receipt,
+            moved,
+        })
     }
 }
 
 // Remote source and base are observed separately. Only the source OID has
 // a server-side precondition on GitHub's eventual merge request.
-pub(super) fn validate_destination(r: &Run<'_>, original_pr: &V, base: &str) -> Result<()> {
+pub(super) fn validate_destination(
+    r: &Run<'_>,
+    original_pr: &V,
+    base: &str,
+) -> Result<Option<TargetMoved>> {
     r.git.transport_safe()?;
     require(
         r.git
@@ -174,9 +183,9 @@ pub(super) fn validate_destination(r: &Run<'_>, original_pr: &V, base: &str) -> 
             == Some(&r.snapshot.head),
         "reviewed PR head changed during CI; final observation withheld",
     )?;
-    require(
-        crate::review::remote_tip(r.git, r.destination, r.target)?.as_deref() == Some(base),
+    Ok(TargetMoved::observe(
+        crate::review::remote_tip(r.git, r.destination, r.target)?,
+        base,
         "target moved during CI; final observation withheld. Fetch the target, merge it into the PR branch and rerun land with the same head branch so CI checks the combined tree",
-    )?;
-    Ok(())
+    ))
 }

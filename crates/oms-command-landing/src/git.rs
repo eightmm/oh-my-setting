@@ -238,7 +238,6 @@ impl<'a> Git<'a> {
         } else {
             self.repo.join(index_path)
         };
-        let index = crate::storage::read_external(&index_path, false)?;
         let mut tracked = self.run(&["ls-files", "--stage", "-z"])?;
         let paths = self.run(&["ls-files", "-z"])?;
         use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
@@ -287,6 +286,8 @@ impl<'a> Git<'a> {
             "HEAD",
             "--",
         ])?;
+        // Git diff can refresh index stat entries, so capture its bytes last.
+        let index = crate::storage::read_external(&index_path, false)?;
         Ok(Snapshot {
             head,
             tree,
