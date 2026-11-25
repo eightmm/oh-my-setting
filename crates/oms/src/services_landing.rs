@@ -1017,21 +1017,6 @@ const RESIDUE_KINDS: &[(&str, &str)] = &[
 const CARGO_CACHEDIR_TAG: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 const BUILD_OUTPUT_IDLE_SECS: u64 = 24 * 60 * 60;
 
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
 struct Report {
     lines: String,
     removable: usize,
@@ -1051,17 +1036,16 @@ impl Report {
             path.display()
         );
     }
-    fn remove_build_output(&mut self, path: &Path, bytes: u64) {
+    fn remove_build_output(&mut self, path: &Path) {
         self.removable += 1;
         self.lines += &format!(
-            "{}: {} ({})\n",
+            "{}: {}\n",
             if self.apply {
                 "removed build output"
             } else {
                 "would remove build output"
             },
-            path.display(),
-            format_bytes(bytes)
+            path.display()
         );
     }
     fn keep(&mut self, path: &Path, reason: &str) {
@@ -1722,31 +1706,6 @@ fn eligible_cargo_target(worktree: &Path, uid: u32, now: std::time::SystemTime) 
     Some(target)
 }
 
-fn dir_bytes(root: &Path, interrupted: &AtomicBool) -> Result<u64> {
-    let mut total = 0u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        interrupt(interrupted)?;
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else if meta.is_file() {
-                total = total.saturating_add(meta.len());
-            }
-        }
-    }
-    Ok(total)
-}
-
 fn scratch_build_outputs(
     removed_dirs: &std::collections::BTreeSet<PathBuf>,
     report: &mut Report,
@@ -1784,9 +1743,8 @@ fn scratch_build_outputs(
         let Some(target) = eligible_cargo_target(&worktree, uid, now) else {
             continue;
         };
-        let bytes = dir_bytes(&target, interrupted)?;
         if !report.apply {
-            report.remove_build_output(&target, bytes);
+            report.remove_build_output(&target);
             continue;
         }
         // Recheck immediately before removal.
@@ -1797,7 +1755,7 @@ fn scratch_build_outputs(
             continue;
         }
         match std::fs::remove_dir_all(&target) {
-            Ok(()) => report.remove_build_output(&target, bytes),
+            Ok(()) => report.remove_build_output(&target),
             Err(_) => report.keep(&target, "build output could not be removed"),
         }
     }
@@ -2215,7 +2173,7 @@ mod tests {
             let cargo_tag = b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n";
             let idle_age = BUILD_OUTPUT_IDLE_SECS + 3600;
 
-            // 1. Idle tagged targets across live owner, kept dirty worktree, and another repo.
+            // Eligible idle tagged targets across live owner, dirty kept worktree, and another repo.
             let wt_live = make_scratch_worktree(&managed, &repo, "idlelive", live);
             std::fs::create_dir_all(wt_live.join(".oms")).unwrap();
             std::fs::write(wt_live.join(".oms/keep.txt"), "keep\n").unwrap();
@@ -2228,59 +2186,19 @@ mod tests {
             let wt_other = make_scratch_worktree(&managed, &other_repo, "idleother", live);
             let t_other = populate_cargo_target(&wt_other, Some(cargo_tag), idle_age);
 
-            // 2. Recent targets: recent root, recent subdir, recent .fingerprint.
-            let wt_recent_root = make_scratch_worktree(&managed, &repo, "recroot", live);
-            let t_recent_root = populate_cargo_target(&wt_recent_root, Some(cargo_tag), idle_age);
-            set_mtime_secs_ago(&t_recent_root, 60);
-
-            let wt_recent_sub = make_scratch_worktree(&managed, &repo, "recsub", live);
-            let t_recent_sub = populate_cargo_target(&wt_recent_sub, Some(cargo_tag), idle_age);
-            set_mtime_secs_ago(&t_recent_sub.join("debug"), 60);
-            set_mtime_secs_ago(&t_recent_sub, idle_age);
-
-            let wt_recent_fp = make_scratch_worktree(&managed, &repo, "recfp", live);
-            let t_recent_fp = populate_cargo_target(&wt_recent_fp, Some(cargo_tag), idle_age);
-            set_mtime_secs_ago(&t_recent_fp.join("debug/.fingerprint"), 60);
-            set_mtime_secs_ago(&t_recent_fp.join("debug"), idle_age);
-            set_mtime_secs_ago(&t_recent_fp, idle_age);
-
-            // 3. Untagged and invalid/symlinked CACHEDIR.TAG targets.
-            let wt_untagged = make_scratch_worktree(&managed, &repo, "untagged", live);
-            let t_untagged = populate_cargo_target(&wt_untagged, None, idle_age);
-
-            let wt_bad_tag = make_scratch_worktree(&managed, &repo, "badtag", live);
-            let t_bad_tag = populate_cargo_target(&wt_bad_tag, Some(b"not a tag\n"), idle_age);
-
-            let wt_sym_tag = make_scratch_worktree(&managed, &repo, "symtag", live);
-            let external_tag = root.join("external-tag");
-            std::fs::write(&external_tag, cargo_tag).unwrap();
-            let t_sym_tag = populate_cargo_target(&wt_sym_tag, None, idle_age);
-            std::os::unix::fs::symlink(&external_tag, t_sym_tag.join("CACHEDIR.TAG")).unwrap();
-            set_mtime_secs_ago(&t_sym_tag, idle_age);
-
-            // 4. Symlinked target/ pointing to an external idle tagged directory.
-            let wt_symlink = make_scratch_worktree(&managed, &repo, "symlink", live);
-            let external_target = root.join("external-target");
-            std::fs::create_dir_all(external_target.join("debug/.fingerprint")).unwrap();
-            std::fs::write(external_target.join("CACHEDIR.TAG"), cargo_tag).unwrap();
-            set_mtime_secs_ago(&external_target.join("debug/.fingerprint"), idle_age);
-            set_mtime_secs_ago(&external_target.join("debug"), idle_age);
-            set_mtime_secs_ago(&external_target, idle_age);
-            let t_symlink = wt_symlink.join("target");
-            std::os::unix::fs::symlink(&external_target, &t_symlink).unwrap();
+            // An ineligible recent target stays untouched.
+            let wt_recent = make_scratch_worktree(&managed, &repo, "recent", live);
+            let t_recent = populate_cargo_target(&wt_recent, Some(cargo_tag), 60);
 
             let off = AtomicBool::new(false);
             let dry = cleanup(root, &repo, false, &off).unwrap();
             let dry_text = text(&dry, "text");
             assert_eq!(dry.get("removable").py(), "3", "{dry_text}");
             for target in [&t_live, &t_dirty, &t_other] {
-                let prefix = format!("would remove build output: {} (", target.display());
+                let expected = format!("would remove build output: {}", target.display());
                 assert!(
-                    dry_text
-                        .lines()
-                        .any(|l| l.starts_with(&prefix) && l.ends_with(" KiB)")),
-                    "expected dry-run line for {}: {dry_text}",
-                    target.display()
+                    dry_text.lines().any(|l| l == expected),
+                    "expected dry-run line `{expected}`: {dry_text}"
                 );
                 assert!(
                     target.is_dir(),
@@ -2288,35 +2206,23 @@ mod tests {
                     target.display()
                 );
             }
-            for kept_target in [
-                &t_recent_root,
-                &t_recent_sub,
-                &t_recent_fp,
-                &t_untagged,
-                &t_bad_tag,
-                &t_sym_tag,
-                &t_symlink,
-            ] {
-                assert!(
-                    !dry_text.contains(&kept_target.display().to_string()),
-                    "unexpected listing for {}: {dry_text}",
-                    kept_target.display()
-                );
-            }
+            assert!(
+                !dry_text.contains(&t_recent.display().to_string()),
+                "unexpected listing for recent target: {dry_text}"
+            );
 
             let applied = cleanup(root, &repo, true, &off).unwrap();
             let applied_text = text(&applied, "text");
             assert_eq!(applied.get("removable").py(), "3", "{applied_text}");
             for target in [&t_live, &t_dirty, &t_other] {
-                let prefix = format!("removed build output: {} (", target.display());
+                let expected = format!("removed build output: {}", target.display());
                 assert!(
-                    applied_text.lines().any(|l| l.starts_with(&prefix)),
-                    "expected apply line for {}: {applied_text}",
-                    target.display()
+                    applied_text.lines().any(|l| l == expected),
+                    "expected apply line `{expected}`: {applied_text}"
                 );
                 assert!(!target.exists(), "apply must remove {}", target.display());
             }
-            // Worktrees, tracked files, dirty edits and .oms/ remain untouched.
+            assert!(t_recent.is_dir(), "recent target must stay intact");
             assert_eq!(
                 std::fs::read_to_string(wt_live.join("a.txt")).unwrap(),
                 "a\n"
@@ -2332,29 +2238,6 @@ mod tests {
             assert_eq!(
                 std::fs::read_to_string(wt_other.join("a.txt")).unwrap(),
                 "a\n"
-            );
-
-            // Recent, untagged, bad-tag, symlink-tag and symlinked target/ all stay intact.
-            for kept_target in [
-                &t_recent_root,
-                &t_recent_sub,
-                &t_recent_fp,
-                &t_untagged,
-                &t_bad_tag,
-                &t_sym_tag,
-            ] {
-                assert!(kept_target.is_dir(), "must keep {}", kept_target.display());
-            }
-            assert!(
-                std::fs::symlink_metadata(&t_symlink)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink(),
-                "symlinked target/ must stay intact"
-            );
-            assert!(
-                external_target.join("CACHEDIR.TAG").is_file(),
-                "symlink destination must stay intact"
             );
             return;
         }
@@ -2886,5 +2769,81 @@ mod tests {
     #[test]
     fn cleanup_reclaims_only_idle_tagged_scratch_build_outputs() {
         isolated("cleanup-build-output");
+    }
+
+    #[test]
+    fn cargo_cachedir_tag_and_eligibility_checks() {
+        struct CleanDir(PathBuf);
+        impl Drop for CleanDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let raw = std::env::temp_dir().join(format!(
+            "oms-cargo-target-ut-{}-{}",
+            std::process::id(),
+            oms_command_plan::storage::random_hex(6).unwrap()
+        ));
+        std::fs::create_dir_all(&raw).unwrap();
+        let root = CleanDir(std::fs::canonicalize(&raw).unwrap());
+        let uid = users::get_current_uid();
+        let now = std::time::SystemTime::now();
+        let idle = BUILD_OUTPUT_IDLE_SECS + 3600;
+        let cargo_tag = b"Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n";
+
+        // Valid idle tagged target is eligible.
+        let wt_ok = root.0.join("ok");
+        let t_ok = populate_cargo_target(&wt_ok, Some(cargo_tag), idle);
+        assert!(has_cargo_cachedir_tag(&t_ok, uid));
+        assert_eq!(eligible_cargo_target(&wt_ok, uid, now), Some(t_ok));
+
+        // Recent root, recent subdir, and recent .fingerprint are ineligible.
+        let wt_rec_root = root.0.join("rec-root");
+        let t_rec_root = populate_cargo_target(&wt_rec_root, Some(cargo_tag), idle);
+        set_mtime_secs_ago(&t_rec_root, 60);
+        assert_eq!(eligible_cargo_target(&wt_rec_root, uid, now), None);
+
+        let wt_rec_sub = root.0.join("rec-sub");
+        let t_rec_sub = populate_cargo_target(&wt_rec_sub, Some(cargo_tag), idle);
+        set_mtime_secs_ago(&t_rec_sub.join("debug"), 60);
+        set_mtime_secs_ago(&t_rec_sub, idle);
+        assert_eq!(eligible_cargo_target(&wt_rec_sub, uid, now), None);
+
+        let wt_rec_fp = root.0.join("rec-fp");
+        let t_rec_fp = populate_cargo_target(&wt_rec_fp, Some(cargo_tag), idle);
+        set_mtime_secs_ago(&t_rec_fp.join("debug/.fingerprint"), 60);
+        set_mtime_secs_ago(&t_rec_fp.join("debug"), idle);
+        set_mtime_secs_ago(&t_rec_fp, idle);
+        assert_eq!(eligible_cargo_target(&wt_rec_fp, uid, now), None);
+
+        // Missing, invalid, and symlinked CACHEDIR.TAG are rejected.
+        let wt_untagged = root.0.join("untagged");
+        let t_untagged = populate_cargo_target(&wt_untagged, None, idle);
+        assert!(!has_cargo_cachedir_tag(&t_untagged, uid));
+        assert_eq!(eligible_cargo_target(&wt_untagged, uid, now), None);
+
+        let wt_bad = root.0.join("bad-tag");
+        let t_bad = populate_cargo_target(&wt_bad, Some(b"not a tag\n"), idle);
+        assert!(!has_cargo_cachedir_tag(&t_bad, uid));
+        assert_eq!(eligible_cargo_target(&wt_bad, uid, now), None);
+
+        let wt_sym_tag = root.0.join("sym-tag");
+        let external_tag = root.0.join("external-tag");
+        std::fs::write(&external_tag, cargo_tag).unwrap();
+        let t_sym_tag = populate_cargo_target(&wt_sym_tag, None, idle);
+        std::os::unix::fs::symlink(&external_tag, t_sym_tag.join("CACHEDIR.TAG")).unwrap();
+        set_mtime_secs_ago(&t_sym_tag, idle);
+        assert!(!has_cargo_cachedir_tag(&t_sym_tag, uid));
+        assert_eq!(eligible_cargo_target(&wt_sym_tag, uid, now), None);
+
+        // Symlinked target/ directory is rejected.
+        let wt_sym_dir = root.0.join("sym-dir");
+        std::fs::create_dir_all(&wt_sym_dir).unwrap();
+        let ext = root.0.join("external");
+        let ext_target = populate_cargo_target(&ext, Some(cargo_tag), idle);
+        let sym_target = wt_sym_dir.join("target");
+        std::os::unix::fs::symlink(&ext_target, &sym_target).unwrap();
+        assert!(!has_cargo_cachedir_tag(&sym_target, uid));
+        assert_eq!(eligible_cargo_target(&wt_sym_dir, uid, now), None);
     }
 }

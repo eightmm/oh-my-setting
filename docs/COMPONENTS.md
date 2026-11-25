@@ -79,7 +79,7 @@ explains overlapping entrypoints.
 | `github` | Show GitHub project mode and cached issue/PR state; refresh, adopt merged PRs, post one evidence comment. | `oms github` | [Verification and release](#verification-and-release) |
 | `change-guard` | Warn about concurrent agent edits. | `oms change-guard` | [Delegating writes](#delegating-writes) |
 | `checkpoint` | Save a reversible snapshot of tracked Git state. | `oms checkpoint` | [Delegating writes](#delegating-writes) |
-| `scratch-worktree` | Manage scratch worktrees around active workers, with rate-limited best-effort hygiene on `add`. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
+| `scratch-worktree` | Manage scratch worktrees around active workers, with rate-limited background hygiene on `add`. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
 
 ## State and memory
 
@@ -435,10 +435,11 @@ After the final scan it relies on the dead worktree remaining quiescent until re
 In a dead, otherwise settled delegate worktree, eligible ignored-tree content is
 discarded, including hand edits: names and markers do not establish reproducible bytes.
 The delegate's deliverable is its preserved patch; ignored content was never part of it.
-`oms cleanup --apply` has no background daemon or tick caller; `oms scratch-worktree add`
-runs one best-effort hygiene pass for the same repository after creating the worktree
-(rate-limited to at most once per hour per managed root via an atomic stamp file, skipped
-for harness children, reporting at most one summary line on stderr when items are removed).
+`oms cleanup --apply` has no persistent daemon or tick caller; `oms scratch-worktree add`
+starts one best-effort `oms cleanup --apply` pass in the background for the same
+repository after creating the worktree (rate-limited to at most once per hour per managed
+root via an atomic stamp file, skipped for harness children, printing at most one notice
+line on stderr when started and returning immediately).
 Non-ignored files still need preservation, and dry-run lines name any regenerable tree
 classes in settled delegates.
 
@@ -455,8 +456,8 @@ dead owner, any repository, including kept worktrees), `oms cleanup` also classi
 idle top-level Cargo `target/` directory as regenerable build output when it is a real
 user-owned directory containing Cargo's `CACHEDIR.TAG` and none of `target/`, `target/*/`
 or `target/*/.fingerprint` was modified in the last 24 hours. Dry-run lists each match as
-`would remove build output` with its size and `--apply` removes only `target/`, never the
-worktree itself, tracked files or `.oms/`.
+`would remove build output` and `--apply` removes only `target/`, never the worktree
+itself, tracked files or `.oms/`.
 
 </details>
 

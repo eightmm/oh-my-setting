@@ -227,25 +227,52 @@ fn claim_hygiene_slot(base: &Path, now: u64) -> bool {
     .is_ok()
 }
 
-fn hygiene_pass(c: &Context<'_>, base: &Path, repo: &Path) -> Vec<u8> {
-    if crate::child() || c.interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+fn spawn_background_cleanup(exe: &Path, repo: &Path) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new(exe)
+        .args(["cleanup", "--apply"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(drop)
+}
+
+fn hygiene_pass_with(
+    is_child: bool,
+    interrupted: &std::sync::atomic::AtomicBool,
+    base: &Path,
+    repo: &Path,
+    now: u64,
+    spawn: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Vec<u8> {
+    if is_child || interrupted.load(std::sync::atomic::Ordering::Relaxed) {
         return Vec::new();
     }
-    if !claim_hygiene_slot(base, crate::timestamp()) {
+    if !claim_hygiene_slot(base, now) {
         return Vec::new();
     }
-    let Ok(report) = c.services.cleanup(repo, true, c.interrupted) else {
-        return Vec::new();
-    };
-    let removed = match report.get("removable") {
-        crate::V::Num(n) => n.parse::<usize>().unwrap_or(0),
-        _ => 0,
-    };
-    if removed > 0 {
-        format!("scratch-worktree: cleaned {removed} item(s)\n").into_bytes()
+    if spawn(repo).is_ok() {
+        b"scratch-worktree: background cleanup started\n".to_vec()
     } else {
         Vec::new()
     }
+}
+
+fn hygiene_pass(c: &Context<'_>, base: &Path, repo: &Path) -> Vec<u8> {
+    hygiene_pass_with(
+        crate::child(),
+        c.interrupted,
+        base,
+        repo,
+        crate::timestamp(),
+        |repo| {
+            let exe = std::env::current_exe()?;
+            spawn_background_cleanup(&exe, repo)
+        },
+    )
 }
 
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
@@ -547,247 +574,98 @@ pub(crate) fn branch_sweep(c: &Context<'_>, repo: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Services, obj, run_with_services};
-    use std::ffi::OsString;
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicBool;
 
-    const CASE: &str = "OMS_WORKTREE_UT_CASE";
-    const ROOT: &str = "OMS_WORKTREE_UT_ROOT";
-
-    struct CountingCleanup {
-        calls: AtomicUsize,
-        removable: usize,
-        fail: Option<i32>,
-    }
-    impl Services for CountingCleanup {
-        fn cleanup(&self, _repo: &Path, apply: bool, interrupted: &AtomicBool) -> Result<crate::V> {
-            assert!(apply, "automatic hygiene pass must run cleanup with apply");
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if let Some(code) = self.fail {
-                if code == 130 {
-                    interrupted.store(true, Ordering::SeqCst);
-                }
-                return Err(Error::new(code, "simulated hygiene failure"));
-            }
-            Ok(obj([
-                ("text", "".into()),
-                ("removable", self.removable.into()),
-                ("kept", 0usize.into()),
-            ]))
-        }
-    }
-
-    fn git_ok(repo: &Path, args: &[&str]) {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
+    #[test]
+    fn claim_hygiene_slot_rate_limits_within_hour() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let stamp = base.path.join(HYGIENE_STAMP);
+        assert!(claim_hygiene_slot(&base.path, 10_000));
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "10000\n");
+        assert!(!claim_hygiene_slot(
+            &base.path,
+            10_000 + HYGIENE_INTERVAL_SECS - 1
+        ));
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "10000\n");
+        let next = 10_000 + HYGIENE_INTERVAL_SECS;
+        assert!(claim_hygiene_slot(&base.path, next));
+        assert_eq!(
+            std::fs::read_to_string(&stamp).unwrap(),
+            format!("{next}\n")
         );
     }
 
-    fn setup_repo(root: &Path) -> (PathBuf, PathBuf) {
-        let repo = root.join("repo");
-        let managed = root.join("managed");
-        std::fs::create_dir_all(&repo).unwrap();
-        std::fs::create_dir_all(&managed).unwrap();
-        git_ok(&repo, &["init", "-q"]);
-        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
-        git_ok(&repo, &["add", "a.txt"]);
-        git_ok(&repo, &["commit", "-qm", "init"]);
-        (
-            std::fs::canonicalize(repo).unwrap(),
-            std::fs::canonicalize(managed).unwrap(),
-        )
-    }
-
-    fn run_isolated(case: &str, extra_env: &[(&str, &str)]) {
-        let root =
-            std::env::temp_dir().join(format!("oms-wt-hygiene-ut-{}-{case}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("home")).unwrap();
-        let root = std::fs::canonicalize(root).unwrap();
-        std::fs::write(
-            root.join("gitconfig"),
-            "[user]\n\tname = t\n\temail = t@example.invalid\n",
-        )
-        .unwrap();
-        let mut cmd = Command::new(std::env::current_exe().unwrap());
-        cmd.args([
-            "worktree::tests::isolated_entry",
-            "--exact",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", root.join("home"))
-        .env("TMPDIR", &root)
-        .env("OMS_DELEGATE_WORKTREE_ROOT", root.join("managed"))
-        .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("OMS_HARNESS_CHILD", "0")
-        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
-        .env(CASE, case)
-        .env(ROOT, &root);
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
-        let out = cmd.output().unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
-            "{case}: {}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn add_args() -> Vec<OsString> {
-        let ppid = rustix::process::getppid()
-            .map(|p| p.as_raw_nonzero().get().to_string())
-            .unwrap();
-        vec!["add".into(), "--owner-pid".into(), OsString::from(ppid)]
-    }
-
-    fn run_case(case: &str, root: &Path) {
-        let (repo, managed) = setup_repo(root);
+    #[test]
+    fn hygiene_pass_rate_limits_and_reports_background_start() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let repo = base.path.join("repo");
         let flag = AtomicBool::new(false);
-        match case {
-            "rate-limit" => {
-                let services = CountingCleanup {
-                    calls: AtomicUsize::new(0),
-                    removable: 2,
-                    fail: None,
-                };
-                let args = add_args();
-                let (code, out, err) =
-                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &services);
-                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-                let wt1 = PathBuf::from(String::from_utf8_lossy(&out).trim());
-                assert!(wt1.join("a.txt").is_file(), "worktree 1 must exist");
-                assert_eq!(String::from_utf8_lossy(&out).lines().count(), 1);
-                assert_eq!(
-                    String::from_utf8_lossy(&err),
-                    "scratch-worktree: cleaned 2 item(s)\n"
-                );
-                assert_eq!(services.calls.load(Ordering::SeqCst), 1);
-                let stamp = managed.join(HYGIENE_STAMP);
-                assert!(stamp.is_file(), "stamp file must be created");
+        let mut calls = 0usize;
 
-                // Second add within the hour is suppressed by the stamp.
-                let (code, out, err) =
-                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &services);
-                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-                let wt2 = PathBuf::from(String::from_utf8_lossy(&out).trim());
-                assert!(wt2.join("a.txt").is_file(), "worktree 2 must exist");
-                assert!(err.is_empty(), "suppressed pass must emit no stderr");
-                assert_eq!(
-                    services.calls.load(Ordering::SeqCst),
-                    1,
-                    "rate-limit stamp must suppress second pass within the hour"
-                );
+        let err = hygiene_pass_with(false, &flag, &base.path, &repo, 10_000, |r| {
+            assert_eq!(r, repo);
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(err, b"scratch-worktree: background cleanup started\n");
+        assert_eq!(calls, 1);
 
-                // Backdating the stamp past one hour allows a new pass; zero removals emit no stderr.
-                let expired = crate::timestamp().saturating_sub(HYGIENE_INTERVAL_SECS + 10);
-                std::fs::write(&stamp, format!("{expired}\n")).unwrap();
-                let quiet = CountingCleanup {
-                    calls: AtomicUsize::new(0),
-                    removable: 0,
-                    fail: None,
-                };
-                let (code, out, err) =
-                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &quiet);
-                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-                assert!(PathBuf::from(String::from_utf8_lossy(&out).trim()).is_dir());
-                assert!(err.is_empty(), "zero removals must emit no stderr");
-                assert_eq!(quiet.calls.load(Ordering::SeqCst), 1);
-            }
-            "failure-tolerant" => {
-                let failing = CountingCleanup {
-                    calls: AtomicUsize::new(0),
-                    removable: 0,
-                    fail: Some(2),
-                };
-                let args = add_args();
-                let (code, out, err) =
-                    run_with_services("scratch-worktree", &args, &repo, &repo, &flag, &failing);
-                assert_eq!(code, 0, "hygiene failure must not fail add");
-                let wt1 = PathBuf::from(String::from_utf8_lossy(&out).trim());
-                assert!(wt1.join("a.txt").is_file(), "worktree 1 must exist");
-                assert!(err.is_empty(), "hygiene failure must not pollute stderr");
-                assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
+        let err = hygiene_pass_with(false, &flag, &base.path, &repo, 10_060, |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(err.is_empty());
+        assert_eq!(calls, 1);
 
-                // Remove stamp so interruption test also invokes cleanup.
-                let _ = std::fs::remove_file(managed.join(HYGIENE_STAMP));
-                let interrupting = CountingCleanup {
-                    calls: AtomicUsize::new(0),
-                    removable: 0,
-                    fail: Some(130),
-                };
-                let (code, out, err) = run_with_services(
-                    "scratch-worktree",
-                    &args,
-                    &repo,
-                    &repo,
-                    &flag,
-                    &interrupting,
-                );
-                assert_eq!(code, 0, "hygiene interruption must not fail add");
-                let wt2 = PathBuf::from(String::from_utf8_lossy(&out).trim());
-                assert!(wt2.join("a.txt").is_file(), "worktree 2 must exist");
-                assert!(err.is_empty());
-                assert_eq!(interrupting.calls.load(Ordering::SeqCst), 1);
-            }
-            "harness-child-skips" => {
-                let services = CountingCleanup {
-                    calls: AtomicUsize::new(0),
-                    removable: 1,
-                    fail: None,
-                };
-                let context = Context {
-                    cwd: &repo,
-                    source: &repo,
-                    interrupted: &flag,
-                    services: &services,
-                };
-                let err = hygiene_pass(&context, &managed, &repo);
-                assert!(err.is_empty());
-                assert_eq!(services.calls.load(Ordering::SeqCst), 0);
-                assert!(!managed.join(HYGIENE_STAMP).exists());
-            }
-            other => panic!("unknown case {other}"),
-        }
+        let err = hygiene_pass_with(
+            false,
+            &flag,
+            &base.path,
+            &repo,
+            10_000 + HYGIENE_INTERVAL_SECS,
+            |_| {
+                calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(err, b"scratch-worktree: background cleanup started\n");
+        assert_eq!(calls, 2);
     }
 
     #[test]
-    #[ignore = "re-executed by isolated worktree hygiene cases"]
-    fn isolated_entry() {
-        let (Some(case), Some(root)) = (std::env::var_os(CASE), std::env::var_os(ROOT)) else {
-            return;
-        };
-        run_case(&case.to_string_lossy(), Path::new(&root));
+    fn hygiene_pass_skips_harness_child_and_interrupted() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let flag = AtomicBool::new(false);
+        let mut calls = 0usize;
+
+        let err = hygiene_pass_with(true, &flag, &base.path, &base.path, 10_000, |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(err.is_empty());
+        assert_eq!(calls, 0);
+        assert!(!base.path.join(HYGIENE_STAMP).exists());
+
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = hygiene_pass_with(false, &flag, &base.path, &base.path, 10_000, |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(err.is_empty());
+        assert_eq!(calls, 0);
+        assert!(!base.path.join(HYGIENE_STAMP).exists());
     }
 
     #[test]
-    fn scratch_hygiene_rate_limit_suppresses_second_pass_within_hour() {
-        run_isolated("rate-limit", &[]);
-    }
+    fn hygiene_pass_ignores_spawn_failure() {
+        let base = storage::Temp::new("oms-wt-hygiene-ut").unwrap();
+        let flag = AtomicBool::new(false);
+        let missing = base.path.join("missing-oms");
 
-    #[test]
-    fn scratch_hygiene_failure_and_interruption_leave_add_successful() {
-        run_isolated("failure-tolerant", &[]);
-    }
-
-    #[test]
-    fn scratch_hygiene_skips_for_harness_child() {
-        run_isolated("harness-child-skips", &[("OMS_HARNESS_CHILD", "1")]);
+        let err = hygiene_pass_with(false, &flag, &base.path, &base.path, 10_000, |repo| {
+            spawn_background_cleanup(&missing, repo)
+        });
+        assert!(err.is_empty());
+        assert!(base.path.join(HYGIENE_STAMP).is_file());
     }
 }
