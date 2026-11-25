@@ -1943,11 +1943,11 @@ fn write_login_stubs(root: &Path) {
         s
     };
     let codex_script = format!(
-        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\ndir=\"${{CODEX_HOME:-$HOME/.codex}}\"\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'codex-status|%s|%s|%s\\n' \"$*\" \"${{CODEX_HOME-UNSET}}\" \"$leaked\" >> \"$log\"\n  if [ -e \"$HOME/status-code\" ]; then\n    read code < \"$HOME/status-code\"\n    exit \"$code\"\n  fi\n  [ -e \"$dir/ok\" ]\n  exit $?\nfi\nprintf 'codex-login|%s|%s|%s\\n' \"$*\" \"${{CODEX_HOME-UNSET}}\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CODEX_OUT\\n'\nprintf 'STUB_CODEX_ERR\\n' >&2\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  : > \"$dir/ok\"\nfi\nexit 0\n",
+        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\ndir=\"${{CODEX_HOME:-$HOME/.codex}}\"\ncwd=\"$(pwd -P)\"\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'codex-status|%s|%s|%s|%s\\n' \"$*\" \"${{CODEX_HOME-UNSET}}\" \"$leaked\" \"$cwd\" >> \"$log\"\n  if [ -e \"$HOME/status-code\" ]; then\n    read code < \"$HOME/status-code\"\n    exit \"$code\"\n  fi\n  [ -e \"$dir/ok\" ]\n  exit $?\nfi\nprintf 'codex-login|%s|%s|%s|%s\\n' \"$*\" \"${{CODEX_HOME-UNSET}}\" \"$leaked\" \"$cwd\" >> \"$log\"\nprintf 'STUB_CODEX_OUT\\n'\nprintf 'STUB_CODEX_ERR\\n' >&2\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  : > \"$dir/ok\"\nfi\nexit 0\n",
         check_vars(&codex_overrides)
     );
     let claude_script = format!(
-        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\ndir=\"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'claude-status|%s|%s|%s\\n' \"$*\" \"${{CLAUDE_CONFIG_DIR-UNSET}}\" \"$leaked\" >> \"$log\"\n  if [ -e \"$HOME/status-code\" ]; then\n    read code < \"$HOME/status-code\"\n    exit \"$code\"\n  fi\n  [ -e \"$dir/ok\" ]\n  exit $?\nfi\nprintf 'claude-login|%s|%s|%s\\n' \"$*\" \"${{CLAUDE_CONFIG_DIR-UNSET}}\" \"$leaked\" >> \"$log\"\nprintf 'STUB_CLAUDE_OUT\\n'\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  : > \"$dir/ok\"\nfi\nexit 0\n",
+        "#!/bin/sh\n{}log=\"$HOME/login-trace.log\"\ndir=\"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"\ncwd=\"$(pwd -P)\"\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'claude-status|%s|%s|%s|%s\\n' \"$*\" \"${{CLAUDE_CONFIG_DIR-UNSET}}\" \"$leaked\" \"$cwd\" >> \"$log\"\n  if [ -e \"$HOME/status-code\" ]; then\n    read code < \"$HOME/status-code\"\n    exit \"$code\"\n  fi\n  [ -e \"$dir/ok\" ]\n  exit $?\nfi\nprintf 'claude-login|%s|%s|%s|%s\\n' \"$*\" \"${{CLAUDE_CONFIG_DIR-UNSET}}\" \"$leaked\" \"$cwd\" >> \"$log\"\nprintf 'STUB_CLAUDE_OUT\\n'\nif [ ! -e \"$HOME/skip-ok\" ]; then\n  : > \"$dir/ok\"\nfi\nexit 0\n",
         check_vars(&claude_overrides)
     );
     let agy_script = "#!/bin/sh\nlog=\"$HOME/login-trace.log\"\nprintf 'agy-login|%s|%s|%s|%s\\n' \"$#\" \"$*\" \"${CODEX_HOME-UNSET}\" \"${CLAUDE_CONFIG_DIR-UNSET}\" >> \"$log\"\nprintf 'STUB_AGY_OUT\\n'\nexit 0\n";
@@ -2058,36 +2058,46 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             let lines: Vec<&str> = trace.lines().collect();
             let codex_work = codex_main.join("accounts/work");
             let claude_work = claude_main.join("accounts/work");
-            // Default home leaves CODEX_HOME / CLAUDE_CONFIG_DIR unset when ambient is unset.
-            assert!(lines.contains(&"codex-login|login|UNSET|"), "{trace}");
+            let cwd = root.display();
+            // Default home leaves CODEX_HOME / CLAUDE_CONFIG_DIR unset when ambient is unset,
+            // and both sign-in and status check run in the same current_dir.
             assert!(
-                lines.contains(&"codex-status|login status|UNSET|"),
+                lines.contains(&format!("codex-login|login|UNSET||{cwd}").as_str()),
                 "{trace}"
             );
             assert!(
-                lines.contains(&format!("codex-login|login|{}|", codex_work.display()).as_str()),
-                "{trace}"
-            );
-            assert!(
-                lines.contains(
-                    &format!("codex-status|login status|{}|", codex_work.display()).as_str()
-                ),
-                "{trace}"
-            );
-            assert!(lines.contains(&"claude-login|auth login|UNSET|"), "{trace}");
-            assert!(
-                lines.contains(&"claude-status|auth status|UNSET|"),
+                lines.contains(&format!("codex-status|login status|UNSET||{cwd}").as_str()),
                 "{trace}"
             );
             assert!(
                 lines.contains(
-                    &format!("claude-login|auth login|{}|", claude_work.display()).as_str()
+                    &format!("codex-login|login|{}||{cwd}", codex_work.display()).as_str()
                 ),
                 "{trace}"
             );
             assert!(
                 lines.contains(
-                    &format!("claude-status|auth status|{}|", claude_work.display()).as_str()
+                    &format!("codex-status|login status|{}||{cwd}", codex_work.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(&format!("claude-login|auth login|UNSET||{cwd}").as_str()),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(&format!("claude-status|auth status|UNSET||{cwd}").as_str()),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(
+                    &format!("claude-login|auth login|{}||{cwd}", claude_work.display()).as_str()
+                ),
+                "{trace}"
+            );
+            assert!(
+                lines.contains(
+                    &format!("claude-status|auth status|{}||{cwd}", claude_work.display()).as_str()
                 ),
                 "{trace}"
             );
@@ -2123,48 +2133,62 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             let ambient_trace = fs::read_to_string(root.join("home/login-trace.log")).unwrap();
             let ambient_lines: Vec<&str> = ambient_trace.lines().collect();
             assert!(
-                ambient_lines
-                    .contains(&format!("codex-login|login|{}|", ambient_codex.display()).as_str()),
-                "{ambient_trace}"
-            );
-            assert!(
                 ambient_lines.contains(
-                    &format!("codex-status|login status|{}|", ambient_codex.display()).as_str()
-                ),
-                "{ambient_trace}"
-            );
-            assert!(
-                ambient_lines
-                    .contains(&format!("codex-login|login|{}|", codex_work.display()).as_str()),
-                "{ambient_trace}"
-            );
-            assert!(
-                ambient_lines.contains(
-                    &format!("codex-status|login status|{}|", codex_work.display()).as_str()
+                    &format!("codex-login|login|{}||{cwd}", ambient_codex.display()).as_str()
                 ),
                 "{ambient_trace}"
             );
             assert!(
                 ambient_lines.contains(
-                    &format!("claude-login|auth login|{}|", ambient_claude.display()).as_str()
+                    &format!(
+                        "codex-status|login status|{}||{cwd}",
+                        ambient_codex.display()
+                    )
+                    .as_str()
                 ),
                 "{ambient_trace}"
             );
             assert!(
                 ambient_lines.contains(
-                    &format!("claude-status|auth status|{}|", ambient_claude.display()).as_str()
+                    &format!("codex-login|login|{}||{cwd}", codex_work.display()).as_str()
                 ),
                 "{ambient_trace}"
             );
             assert!(
                 ambient_lines.contains(
-                    &format!("claude-login|auth login|{}|", claude_work.display()).as_str()
+                    &format!("codex-status|login status|{}||{cwd}", codex_work.display()).as_str()
                 ),
                 "{ambient_trace}"
             );
             assert!(
                 ambient_lines.contains(
-                    &format!("claude-status|auth status|{}|", claude_work.display()).as_str()
+                    &format!(
+                        "claude-login|auth login|{}||{cwd}",
+                        ambient_claude.display()
+                    )
+                    .as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!(
+                        "claude-status|auth status|{}||{cwd}",
+                        ambient_claude.display()
+                    )
+                    .as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("claude-login|auth login|{}||{cwd}", claude_work.display()).as_str()
+                ),
+                "{ambient_trace}"
+            );
+            assert!(
+                ambient_lines.contains(
+                    &format!("claude-status|auth status|{}||{cwd}", claude_work.display()).as_str()
                 ),
                 "{ambient_trace}"
             );
@@ -2206,6 +2230,89 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
 
             // Login never writes new state files or modifies registries.
             assert_eq!(snapshot(&config(root)), cfg_before);
+
+            // Restore stubs to test registry security checks (symlinked homes and cross-registry claims).
+            write_login_stubs(root);
+            let shared_path = config(root).join("provider-accounts.json");
+            let claude_path = config(root).join("provider-accounts.claude.json");
+            let saved_shared = fs::read(&shared_path).unwrap();
+            let saved_claude = fs::read(&claude_path).unwrap();
+
+            // 1. Symlinked registered home (and symlink under an unsafe parent) are refused for direct login.
+            let real_target = root.join("sym-target");
+            mk(&real_target).unwrap();
+            private(&real_target, 0o700);
+            let direct_link = root.join("codex-sym-home");
+            symlink(&real_target, &direct_link).unwrap();
+            let unsafe_parent = root.join("unsafe-parent");
+            mk(&unsafe_parent).unwrap();
+            fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o777)).unwrap();
+            let unsafe_target = root.join("unsafe-sym-target");
+            mk(&unsafe_target).unwrap();
+            private(&unsafe_target, 0o700);
+            let unsafe_link = unsafe_parent.join("codex-link");
+            symlink(&unsafe_target, &unsafe_link).unwrap();
+
+            let mut tampered = rj(&shared_path);
+            tampered["providers"]["codex"]["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "sym", "home": direct_link}));
+            tampered["providers"]["codex"]["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "unsafesym", "home": unsafe_link}));
+            fs::write(&shared_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+            refused(root, &["--login", "codex:sym"], "account home");
+            refused(
+                root,
+                &["--login", "codex:unsafesym"],
+                "unsafe account ancestor",
+            );
+
+            // 2. Codex :ID whose home is also claimed in provider-accounts.claude.json is refused
+            //    both when providers.claude is absent from the shared registry and when it is present.
+            let clash_home = root.join("clash-home");
+            mk(&clash_home).unwrap();
+            private(&clash_home, 0o700);
+            let mut claude_doc: Value = serde_json::from_slice(&saved_claude).unwrap();
+            claude_doc["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "sharedclaim", "home": clash_home}));
+            fs::write(&claude_path, serde_json::to_vec(&claude_doc).unwrap()).unwrap();
+
+            let mut shared_no_claude: Value = serde_json::from_slice(&saved_shared).unwrap();
+            shared_no_claude["providers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("claude");
+            shared_no_claude["providers"]["codex"]["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "clash", "home": clash_home}));
+            fs::write(&shared_path, serde_json::to_vec(&shared_no_claude).unwrap()).unwrap();
+            refused(
+                root,
+                &["--login", "codex:clash"],
+                "duplicate provider account id or canonical home",
+            );
+
+            let mut shared_with_claude: Value = serde_json::from_slice(&saved_shared).unwrap();
+            shared_with_claude["providers"]["codex"]["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "clash", "home": clash_home}));
+            fs::write(
+                &shared_path,
+                serde_json::to_vec(&shared_with_claude).unwrap(),
+            )
+            .unwrap();
+            refused(
+                root,
+                &["--login", "codex:clash"],
+                "duplicate provider account id or canonical home",
+            );
         },
     );
 }

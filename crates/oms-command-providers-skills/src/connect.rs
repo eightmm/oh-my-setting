@@ -396,6 +396,23 @@ fn validate_claude_registry(
     for row in accounts {
         validate_account_row(row, false).map_err(|_| error("invalid Claude registry"))?;
     }
+    let other_shared_homes = if shared["providers"].get("claude").is_none() {
+        None
+    } else {
+        let mut other = std::collections::BTreeSet::new();
+        for (owner, settings) in shared["providers"].as_object().into_iter().flatten() {
+            if owner == "claude" {
+                continue;
+            }
+            for row in settings["accounts"].as_array().into_iter().flatten() {
+                if let Some(h) = row["home"].as_str() {
+                    other.insert(physical(Path::new(h))?);
+                }
+            }
+        }
+        Some(other)
+    };
+    let foreign_shared_homes = other_shared_homes.as_ref().unwrap_or(shared_homes);
     let mut ids = std::collections::BTreeSet::new();
     let mut homes = std::collections::BTreeSet::new();
     homes.insert(default_claude.to_owned());
@@ -405,14 +422,11 @@ fn validate_claude_registry(
         if !ids.insert(rid.to_owned()) || !homes.insert(rhome.clone()) {
             return Err(error("duplicate provider account id or canonical home"));
         }
-        if shared["providers"].get("claude").is_none() && shared_homes.contains(&rhome) {
+        if foreign_shared_homes.contains(&rhome) {
             return Err(error("duplicate provider account id or canonical home"));
         }
     }
-    if !accounts.is_empty()
-        && shared["providers"].get("claude").is_none()
-        && shared_homes.contains(default_claude)
-    {
+    if !accounts.is_empty() && foreign_shared_homes.contains(default_claude) {
         return Err(error("duplicate provider account id or canonical home"));
     }
     Ok(())
@@ -1982,6 +1996,28 @@ fn parse_login_spec(raw: &str) -> Result<LoginTarget> {
         )),
     }
 }
+fn validate_login_home(path: &Path) -> Result<()> {
+    if path.as_os_str().as_encoded_bytes().ends_with(b"/")
+        || path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(error(
+            "account home must be a clean absolute path without trailing slash, `.` or `..`",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| error("invalid home parent"))?;
+    private_parents(parent)?;
+    let _directory = open_home(path, None)?;
+    let resolved = path.canonicalize()?;
+    if let Some(resolved_parent) = resolved.parent() {
+        private_parents(resolved_parent)?;
+    }
+    Ok(())
+}
 fn registered_provider_accounts(provider: &str) -> Result<Vec<(String, PathBuf)>> {
     if !["codex", "claude"].contains(&provider) {
         return Ok(Vec::new());
@@ -1995,32 +2031,35 @@ fn registered_provider_accounts(provider: &str) -> Result<Vec<(String, PathBuf)>
         json(&raw)?
     };
     let shared_homes = validate_shared_registry(&shared)?;
+    let claude_registry = config.join("provider-accounts.claude.json");
+    let claude_raw = optional(&claude_registry)?;
+    let claude_state = if claude_raw.is_empty() {
+        None
+    } else {
+        let default_claude = physical(&home()?.join(".claude"))?;
+        let claude_doc = json(&claude_raw)?;
+        validate_claude_registry(&claude_doc, &default_claude, &shared, &shared_homes)?;
+        Some((default_claude, claude_doc))
+    };
     if let Some(entries) = shared["providers"][provider]["accounts"].as_array() {
         let mut out = Vec::with_capacity(entries.len());
         for row in entries {
             let (id, home_str) = validate_account_row(row, true)?;
-            out.push((id.to_owned(), physical(Path::new(home_str))?));
+            out.push((id.to_owned(), PathBuf::from(home_str)));
         }
         return Ok(out);
     }
-    if provider == "claude" {
-        let claude_registry = config.join("provider-accounts.claude.json");
-        let claude_raw = optional(&claude_registry)?;
-        if !claude_raw.is_empty() {
-            let default_claude = physical(&home()?.join(".claude"))?;
-            let claude_doc = json(&claude_raw)?;
-            validate_claude_registry(&claude_doc, &default_claude, &shared, &shared_homes)?;
-            if let Some(entries) = claude_doc["accounts"].as_array()
-                && !entries.is_empty()
-            {
-                let mut out = vec![("default".to_owned(), default_claude)];
-                for row in entries {
-                    let (id, home_str) = validate_account_row(row, false)?;
-                    out.push((id.to_owned(), physical(Path::new(home_str))?));
-                }
-                return Ok(out);
-            }
+    if provider == "claude"
+        && let Some((default_claude, claude_doc)) = claude_state
+        && let Some(entries) = claude_doc["accounts"].as_array()
+        && !entries.is_empty()
+    {
+        let mut out = vec![("default".to_owned(), default_claude)];
+        for row in entries {
+            let (id, home_str) = validate_account_row(row, false)?;
+            out.push((id.to_owned(), PathBuf::from(home_str)));
         }
+        return Ok(out);
     }
     Ok(Vec::new())
 }
@@ -2085,7 +2124,7 @@ fn resolve_login_entry(target: &LoginTarget) -> Result<LoginEntry> {
                         home_env: None,
                     })
                 } else {
-                    private_home(&path)?;
+                    validate_login_home(&path)?;
                     Ok(LoginEntry {
                         provider: target.provider.clone(),
                         account_id: Some(id.clone()),
@@ -2126,7 +2165,7 @@ fn run_login_entry(entry: &LoginEntry, ctx: &Context<'_>) -> Result<(i32, String
     if entry.account_id.is_some()
         && let Some((_, home_path)) = &entry.home_env
     {
-        private_home(home_path)?;
+        validate_login_home(home_path)?;
     }
     if !installed(binary) {
         return Err(error(format!("{binary} is not installed or not on PATH")));
@@ -2225,7 +2264,7 @@ fn build_login_menu_with(
             let status = if !installed_bin {
                 format!("{binary} not installed")
             } else if let Some(path) = home_path.as_deref()
-                && private_home(path).is_err()
+                && validate_login_home(path).is_err()
             {
                 LoginStatus::Unknown("unsafe or missing home".to_owned()).label()
             } else {
@@ -2291,8 +2330,19 @@ fn wait_for_enter() {
     let _ = std::io::stdin().lock().read_line(&mut line);
 }
 fn login_menu(ctx: &Context<'_>) -> Result<Output> {
+    login_menu_with_terminals(
+        ctx,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )
+}
+fn login_menu_with_terminals(
+    ctx: &Context<'_>,
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> Result<Output> {
     use std::io::{BufRead, Write};
-    if !std::io::stdin().is_terminal() {
+    if !stdin_is_tty || !stdout_is_tty {
         return Err(error("--login-menu requires an interactive terminal"));
     }
     let items = match build_login_menu(ctx) {
@@ -2384,7 +2434,7 @@ fn login_status_with_timeout(
         _ => return Ok(LoginStatus::Unknown("unsupported provider".to_owned())),
     };
     let mut command = Command::new(binary);
-    command.args(args).stdin(Stdio::null());
+    command.args(args).current_dir(ctx.cwd).stdin(Stdio::null());
     if let Some(path) = home {
         command.env(env, path);
     }
@@ -3598,14 +3648,30 @@ mod tests {
         );
         assert_eq!(pre_interrupted.exit_code(), LOGIN_UNKNOWN_CODE);
 
-        // Menu rows: default home passes None (no env override), unsafe or missing registered
-        // homes report "unknown: unsafe or missing home" without probing status, and unknown
-        // status results surface directly in the menu.
+        // Menu rows: default home passes None (no env override), unsafe, missing, or symlinked
+        // registered homes report "unknown: unsafe or missing home" without probing status, and
+        // unknown status results surface directly in the menu.
         let fx = Fixture::new("login-menu");
         let good_home = fx.home("good", false);
         let unsafe_home = fx.home("unsafe", false);
         mode(&unsafe_home, 0o777);
         let missing_home = fx.0.join("missing");
+        let sym_home = fx.0.join("sym-home");
+        std::os::unix::fs::symlink(&good_home, &sym_home).unwrap();
+        let unsafe_parent = fx.0.join("unsafe-parent");
+        fs::create_dir(&unsafe_parent).unwrap();
+        mode(&unsafe_parent, 0o777);
+        let unsafe_parent_sym = unsafe_parent.join("link-home");
+        std::os::unix::fs::symlink(&good_home, &unsafe_parent_sym).unwrap();
+        let trailing_slash_sym = PathBuf::from(format!("{}/", sym_home.display()));
+
+        assert!(validate_login_home(&good_home).is_ok());
+        refused(validate_login_home(&sym_home), "account home");
+        refused(
+            validate_login_home(&unsafe_parent_sym),
+            "unsafe account ancestor",
+        );
+        refused(validate_login_home(&trailing_slash_sym), "trailing slash");
 
         let mut probed: Vec<(String, Option<PathBuf>)> = Vec::new();
         let items = build_login_menu_with(
@@ -3614,10 +3680,13 @@ mod tests {
                     ("default".into(), fx.0.join("unused-default")),
                     ("work".into(), good_home.clone()),
                     ("bad".into(), unsafe_home.clone()),
+                    ("sym".into(), sym_home.clone()),
+                    ("unsafesym".into(), unsafe_parent_sym.clone()),
                 ]),
                 "claude" => Ok(vec![
                     ("default".into(), fx.0.join("unused-claude-default")),
                     ("gone".into(), missing_home.clone()),
+                    ("slashsym".into(), trailing_slash_sym.clone()),
                 ]),
                 _ => Ok(Vec::new()),
             },
@@ -3634,7 +3703,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), 9);
         assert_eq!(items[0].entry.account_id, None);
         assert_eq!(items[0].entry.home_env, None);
         assert_eq!(items[0].status, "signed in");
@@ -3646,13 +3715,19 @@ mod tests {
         assert_eq!(items[1].status, "unknown: status check timed out");
         assert_eq!(items[2].entry.account_id.as_deref(), Some("bad"));
         assert_eq!(items[2].status, "unknown: unsafe or missing home");
-        assert_eq!(items[3].entry.account_id, None);
-        assert_eq!(items[3].entry.home_env, None);
-        assert_eq!(items[3].status, "not signed in");
-        assert_eq!(items[4].entry.account_id.as_deref(), Some("gone"));
+        assert_eq!(items[3].entry.account_id.as_deref(), Some("sym"));
+        assert_eq!(items[3].status, "unknown: unsafe or missing home");
+        assert_eq!(items[4].entry.account_id.as_deref(), Some("unsafesym"));
         assert_eq!(items[4].status, "unknown: unsafe or missing home");
-        assert_eq!(items[5].entry.provider, "antigravity");
-        assert_eq!(items[5].status, "sign-in not verifiable");
+        assert_eq!(items[5].entry.account_id, None);
+        assert_eq!(items[5].entry.home_env, None);
+        assert_eq!(items[5].status, "not signed in");
+        assert_eq!(items[6].entry.account_id.as_deref(), Some("gone"));
+        assert_eq!(items[6].status, "unknown: unsafe or missing home");
+        assert_eq!(items[7].entry.account_id.as_deref(), Some("slashsym"));
+        assert_eq!(items[7].status, "unknown: unsafe or missing home");
+        assert_eq!(items[8].entry.provider, "antigravity");
+        assert_eq!(items[8].status, "sign-in not verifiable");
 
         assert_eq!(
             probed,
@@ -3662,5 +3737,18 @@ mod tests {
                 ("claude".into(), None),
             ]
         );
+
+        // --login-menu requires both stdin and stdout to be terminals.
+        let ctx = Context {
+            cwd: &fx.0,
+            source: &fx.0,
+            interrupted: &clear,
+        };
+        for (stdin_tty, stdout_tty) in [(true, false), (false, true), (false, false)] {
+            refused(
+                login_menu_with_terminals(&ctx, stdin_tty, stdout_tty),
+                "interactive terminal",
+            );
+        }
     }
 }

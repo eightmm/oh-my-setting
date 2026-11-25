@@ -2963,6 +2963,9 @@ fn open_login_window(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> String {
+    if let Err(err) = crate::parent_only() {
+        return err.message;
+    }
     open_login_window_with_entry(
         repo,
         source,
@@ -12465,6 +12468,22 @@ fi
         let stop = AtomicBool::new(false);
         let repo = Path::new("repo-fixture");
         let source = Path::new("");
+        const CHILD_ENV: &str = "OMS_TEST_LOGIN_WINDOW_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let tmux = LoginTmux {
+                calls: std::sync::Mutex::new(Vec::new()),
+                session_reply: Some("$7"),
+                fail_new_window: false,
+            };
+            let notice =
+                super::open_login_window(repo, source, Some("$3"), Some("%5"), &tmux, &stop);
+            assert_eq!(notice, "panel mutations require the owning parent");
+            assert!(
+                tmux.calls.lock().unwrap().is_empty(),
+                "harness child must not invoke tmux"
+            );
+            return;
+        }
         let bin_entry = crate::executable::Entry {
             path: std::path::PathBuf::from("oms-fixture-bin"),
             script: false,
@@ -12645,5 +12664,31 @@ fi
             notice,
             "Run: oms connect-services --login-menu (tmux: tmux failed)"
         );
+
+        // Harness-child markers refuse open_login_window before touching tmux.
+        let exe = std::env::current_exe().unwrap();
+        for (key, val) in [
+            ("OMS_HARNESS_CHILD", "1"),
+            ("OMS_HARNESS_DELEGATE_DEPTH", "1"),
+        ] {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "watch::tests::open_login_window_uses_tmux_argv_or_reports_fallback",
+                    "--nocapture",
+                ])
+                .env_remove("OMS_HARNESS_CHILD")
+                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                .env(key, val)
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{key}={val}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }
