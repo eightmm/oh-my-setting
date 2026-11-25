@@ -96,8 +96,13 @@ impl Selected<'_> {
             matches!(mode, "pr" | "direct" | "local-merge")
                 && (state == "running"
                     || row.get("finished_at").text().is_some_and(|s| !s.is_empty()))
-                && matches!(state, "running" | "awaiting-merge" | "passed" | "failed")
-                && (state != "awaiting-merge" || pr_recorded),
+                && matches!(
+                    state,
+                    "running" | "awaiting-merge" | "passed" | "failed" | "superseded"
+                )
+                && (state != "awaiting-merge" || pr_recorded)
+                && (state != "superseded"
+                    || (mode == "pr" && reconcile::successor_request(&row).is_some())),
             "unrecognized local receipt outcome",
         )?;
         let phase = if pr_recorded {
@@ -114,14 +119,15 @@ impl Selected<'_> {
         // A retry can replace its live process without changing the visible phase.
         // Only a digest of the revision contributes to the request-scoped cursor.
         let revision = format!("{}:{}", digest(&bytes), holder.unwrap_or_default());
-        Ok((
-            obj([
-                ("activity", activity.into()),
-                ("receipt_state", state.into()),
-                ("phase", phase.into()),
-            ]),
-            revision,
-        ))
+        let mut observation = obj([
+            ("activity", activity.into()),
+            ("receipt_state", state.into()),
+            ("phase", phase.into()),
+        ]);
+        if let Some(successor) = reconcile::successor_request(&row) {
+            observation.set("successor_request", successor);
+        }
+        Ok((observation, revision))
     }
 }
 
@@ -143,8 +149,8 @@ fn wait(
             digest(format!("{prefix}{revision}:{activity}").as_bytes())
         );
         let held = row.get("activity").text() == Some("held");
-        let terminal = row.get("receipt_state").text() != Some("running");
-        let event = if terminal && !held {
+        let state = row.get("receipt_state").text();
+        let event = if state == Some("superseded") || (state != Some("running") && !held) {
             "terminal"
         } else if !held {
             "holder-unconfirmed"
@@ -233,14 +239,18 @@ pub(super) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     if o.has("json") {
         Output::json(&result)
     } else {
-        Ok(Output::text(format!(
+        let mut text = format!(
             "land wait: {} ({}, {}, {})\ncursor: {}\n",
             result.get("event").py(),
             result.get("receipt_state").py(),
             result.get("phase").py(),
             result.get("activity").py(),
             result.get("cursor").py()
-        )))
+        );
+        if let Some(successor) = result.get("successor_request").text() {
+            text.push_str(&format!("successor request: {successor}\n"));
+        }
+        Ok(Output::text(text))
     }
 }
 
