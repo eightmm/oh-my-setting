@@ -9,6 +9,7 @@
 use crate::cli::Options;
 use crate::commands::{self, Session};
 use crate::{Error, Output, Result, Services, rows, text};
+use oms_command_peer::native_model;
 use oms_panel_core::{
     NativeCommand, Store, Value, health, jobs, metrics, results, state, teams, workspaces,
 };
@@ -870,7 +871,8 @@ fn project_catalog(
         if catalog.is_empty() && provider["catalog_probe"] != "ok" {
             incomplete = true;
         }
-        let is_antigravity = provider["provider"].as_str() == Some("antigravity");
+        let provider_name = provider["provider"].as_str().unwrap_or_default();
+        let is_antigravity = provider_name == "antigravity";
         let mut selector_to_base = BTreeMap::<&str, &str>::new();
         let mut base_selectors = BTreeMap::<&str, Vec<&str>>::new();
         if is_antigravity
@@ -928,17 +930,24 @@ fn project_catalog(
                     let routable = provider["routable"]
                         .as_array()
                         .map(|values| values.contains(model));
-                    (name, Value::Null, routable)
+                    let efforts = if native_model::fixed_effort_model(provider_name, name).is_some()
+                    {
+                        json!("fixed")
+                    } else {
+                        Value::Null
+                    };
+                    (name, efforts, routable)
                 }
             } else {
                 let routable = provider["routable"]
                     .as_array()
                     .map(|values| values.contains(model));
-                (
-                    name,
-                    effort_label(&provider["model_effort_scales"][name]),
-                    routable,
-                )
+                let efforts = if native_model::fixed_effort_model(provider_name, name).is_some() {
+                    json!("fixed")
+                } else {
+                    effort_label(&provider["model_effort_scales"][name])
+                };
+                (name, efforts, routable)
             };
             entries.push(row_map(vec![
                 ("provider", opt_nonempty_str(&provider, "provider", 48)),
@@ -2742,12 +2751,12 @@ mod tests {
         assert!(unmapped["efforts"].is_null());
         assert_eq!(unmapped["routable"], false);
 
-        // Fixed-effort models stay one row each with no efforts.
+        // Fixed-effort models stay one row each and show `fixed` rather than unknown (`null`).
         let orch = by_model("antigravity", "gemini-pro-orchestrator");
-        assert!(orch["efforts"].is_null());
+        assert_eq!(orch["efforts"], "fixed");
         assert_eq!(orch["routable"], true);
         let argon = by_model("antigravity", "gemini-pro-orchestrator-argon");
-        assert!(argon["efforts"].is_null());
+        assert_eq!(argon["efforts"], "fixed");
         assert_eq!(argon["routable"], true);
 
         // Grouped base model with no routable selectors has routable = false.
