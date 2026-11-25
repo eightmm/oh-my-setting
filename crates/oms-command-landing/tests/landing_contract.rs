@@ -4320,25 +4320,31 @@ fn land_local_merge_runs_gate_before_the_hooked_merge() {
 }
 
 #[test]
+fn land_does_not_create_relay_in_unadopted_repo() {
+    let iso = Isolated::new();
+    let (repo, _) = iso.with_remote("unadopted-relay");
+    iso.commit_file(&repo, "next.txt");
+    let result = iso.run_with_services(
+        "land",
+        &repo,
+        &["--gate", "exit 1", "--ignore-siblings", "--ci-wait", "0"],
+        &[],
+    );
+    assert_eq!(result.0, 1, "{result:?}");
+    assert!(!repo.join(".oms").exists());
+}
+
+#[test]
 fn land_direct_still_gates_then_pushes_the_target() {
     let iso = Isolated::new();
     let (repo, bare) = iso.with_remote("direct");
     let head = iso.commit_file(&repo, "next.txt");
+    fs::create_dir(repo.join(".oms")).unwrap();
     let args = ["--gate", "exit 1", "--ignore-siblings", "--ci-wait", "0"];
     let failed = iso.run_with_services("land", &repo, &args, &[]);
     assert_eq!(failed.0, 1, "{failed:?}");
-    let relay = repo.join(".oms/hooks/relay");
-    let cards = || {
-        fs::read_dir(&relay)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("land-"))
-            .map(|e| e.path())
-            .collect::<Vec<_>>()
-    };
-    let failed_cards = cards();
-    assert_eq!(failed_cards.len(), 1);
-    let failed_card = fs::read(&failed_cards[0]).unwrap();
+    let card = repo.join(".oms/hooks/relay/land.json");
+    let failed_card = fs::read(&card).unwrap();
     assert!(failed_card.len() < 4096);
     assert_eq!(
         V::parse(&failed_card).unwrap().get("state").text(),
@@ -4348,13 +4354,7 @@ fn land_direct_still_gates_then_pushes_the_target() {
     let args = ["--gate", "true", "--ignore-siblings", "--ci-wait", "0"];
     let pushed = iso.run_with_services("land", &repo, &args, &[]);
     assert_eq!(pushed.0, 0, "{pushed:?}");
-    let passed_cards = cards();
-    assert_eq!(passed_cards.len(), 2);
-    let passed_card = passed_cards
-        .iter()
-        .find(|p| !failed_cards.contains(p))
-        .unwrap();
-    let passed_card = fs::read(passed_card).unwrap();
+    let passed_card = fs::read(&card).unwrap();
     assert!(passed_card.len() < 4096);
     assert_eq!(
         V::parse(&passed_card).unwrap().get("state").text(),

@@ -224,7 +224,10 @@ fn relay_card(c: &Context<'_>, row: &V, state: &str) -> Result<()> {
         .as_ref()
         .ok_or_else(|| Error::new(2, "relay repository unavailable"))?;
     let root = c.state(repo)?;
-    let dir = root.join(".oms/hooks/relay");
+    if !std::fs::symlink_metadata(root.join(".oms")).is_ok_and(|m| m.file_type().is_dir()) {
+        return Ok(());
+    }
+    storage::ensure_ignore(&root, c.interrupted)?;
     let sha = string(row, "sha").chars().take(7).collect::<String>();
     let branch = if string(row, "head_branch").is_empty() {
         Git::new(repo, c.interrupted)
@@ -249,11 +252,32 @@ fn relay_card(c: &Context<'_>, row: &V, state: &str) -> Result<()> {
             .map(|r| r.bytes)
             .unwrap_or_else(|| b"[withheld]".to_vec());
         let mut value = String::from_utf8_lossy(&bytes).into_owned();
-        if let Some(home) = std::env::var_os("HOME").filter(|h| h != "/") {
-            value = value.replace(home.to_string_lossy().as_ref(), "~");
+        if let Some(home) = std::env::var("HOME")
+            .ok()
+            .filter(|h| h.starts_with('/') && !h.trim_end_matches('/').is_empty())
+        {
+            let home = home.trim_end_matches('/');
+            let mut result = String::new();
+            let mut rest = value.as_str();
+            while let Some(pos) = rest.find(home) {
+                let (before, suffix) = rest.split_at(pos);
+                let after = &suffix[home.len()..];
+                let start_boundary = before
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_alphanumeric() && !matches!(c, '/' | '_' | '-' | '.'));
+                if start_boundary && (after.is_empty() || after.starts_with('/')) {
+                    result.push_str(before);
+                    result.push('~');
+                } else {
+                    result.push_str(before);
+                    result.push_str(&suffix[..home.len()]);
+                }
+                rest = after;
+            }
+            result.push_str(rest);
+            value = result;
         }
-        let re = regex::Regex::new(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+").expect("constant regex");
-        let value = re.replace_all(&value, "~");
         let value = value
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -297,41 +321,13 @@ fn relay_card(c: &Context<'_>, row: &V, state: &str) -> Result<()> {
         ("pr_url", url.into()),
         ("message", outcome.into()),
     ]);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let name = format!("land-{stamp:032x}-{:08x}.json", std::process::id());
-    storage::replace(
-        &root,
-        &PathBuf::from(".oms/hooks/relay").join(&name),
-        None,
-        &card.json(false)?,
-    )?;
-    if std::fs::canonicalize(&dir)? != root.join(".oms/hooks/relay") {
-        return Ok(());
-    }
-    let mut cards = std::fs::read_dir(&dir)?
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            name.strip_prefix("land-")
-                .and_then(|s| s.strip_suffix(".json"))
-                .is_some_and(|s| {
-                    s.len() == 41
-                        && s.as_bytes()[32] == b'-'
-                        && s.bytes()
-                            .enumerate()
-                            .all(|(i, b)| i == 32 || b.is_ascii_hexdigit())
-                })
-                .then_some((name, e.path()))
-        })
-        .collect::<Vec<_>>();
-    cards.sort_by(|a, b| a.0.cmp(&b.0));
-    let remove = cards.len().saturating_sub(20);
-    for (_, path) in cards.into_iter().take(remove) {
-        let _ = std::fs::remove_file(path);
-    }
+    let path = Path::new(".oms/hooks/relay/land.json");
+    let old = match std::fs::symlink_metadata(root.join(path)) {
+        Ok(_) => Some(storage::read(&root, path, false)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    storage::replace(&root, path, old.as_deref(), &card.json(false)?)?;
     Ok(())
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
