@@ -5999,8 +5999,14 @@ pub(crate) fn run_managed_plan(
             ("OMS_STATE_REPO".into(), repo.as_os_str().into()),
             ("OMS_ROOM_REPO".into(), repo.as_os_str().into()),
             ("OMS_ROOM_ID".into(), room.clone().into()),
-            ("OMS_ROOM_PARTICIPANT".into(), panel.participant.clone().into()),
-            ("OMS_PANEL_MAIN_ATTEMPT".into(), panel.attempt.clone().into()),
+            (
+                "OMS_ROOM_PARTICIPANT".into(),
+                panel.participant.clone().into(),
+            ),
+            (
+                "OMS_PANEL_MAIN_ATTEMPT".into(),
+                panel.attempt.clone().into(),
+            ),
             ("OMS_PANEL_OWNER".into(), panel.owner.clone().into()),
         ];
         request
@@ -6078,7 +6084,11 @@ pub(crate) fn run_managed_plan(
     if options.has("dry-run") {
         value["status"] = "preview".into();
         value["command"] = json!("plan-run");
-        value["argv"] = json!(argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>());
+        value["argv"] = json!(
+            argv.iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+        );
         return if options.has("json") {
             Ok((0, json(&value)?, vec![]))
         } else {

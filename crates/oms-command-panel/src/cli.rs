@@ -148,8 +148,7 @@ pub struct Options {
 }
 impl Options {
     pub(crate) fn managed_plan_task(&self) -> bool {
-        self.has("task-id")
-            && matches!(self.get("orchestrator"), Some("claude" | "antigravity"))
+        self.has("task-id") && matches!(self.get("orchestrator"), Some("claude" | "antigravity"))
     }
 
     pub(crate) fn selects_main(&self) -> bool {

@@ -780,7 +780,11 @@ fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
     };
     let selected = snapshot();
     assert_eq!(pinned(selected["task_sha256"].as_str().unwrap(), true).0, 0);
-    assert_eq!(snapshot(), selected, "dry-run preserves the exact ready task");
+    assert_eq!(
+        snapshot(),
+        selected,
+        "dry-run preserves the exact ready task"
+    );
     assert_ne!(pinned(&"0".repeat(64), false).0, 0);
     assert_eq!(snapshot(), selected, "wrong digest cannot claim or reclaim");
     mock.plan(
@@ -806,7 +810,15 @@ fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
     assert_eq!(snapshot(), changed);
     mock.plan(
         &repo.0,
-        &["claim", "--id", "fresh", "--provider", "codex", "--ttl", "0"],
+        &[
+            "claim",
+            "--id",
+            "fresh",
+            "--provider",
+            "codex",
+            "--ttl",
+            "0",
+        ],
     );
     let claimed = snapshot();
     let before = fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap();
