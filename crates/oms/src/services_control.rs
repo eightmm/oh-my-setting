@@ -4252,7 +4252,8 @@ mod tests {
                 ok.fallback.as_str(),
                 ok.effort.as_str()
             ),
-            ("antigravity", "explicit", "m-1", "m-0", "high")
+            // Antigravity routes resolve to the exact selector for the effort.
+            ("antigravity", "explicit", "m-1-high", "m-0", "high")
         );
         assert_eq!(
             route(serde_json::json!({"provider": "codex", "model": "m"}))
