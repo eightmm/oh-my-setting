@@ -234,7 +234,13 @@ impl Lock {
         protocol::acquire(self, None, true)
     }
     pub fn acquire(&self, cancellation: Option<&Cancellation>) -> Result<Guard, Error> {
-        protocol::acquire(self, cancellation, false)
+        self.acquire_with_cancel(|| cancellation.is_some_and(Cancellation::is_cancelled))
+    }
+    /// Borrows caller cancellation state for acquisition only; no watcher is spawned.
+    /// The predicate must be quick and remain true once cancellation is requested.
+    /// It uses the same checkpoints and deadline as `acquire`, and cannot release a guard.
+    pub fn acquire_with_cancel(&self, cancelled: impl Fn() -> bool + Sync) -> Result<Guard, Error> {
+        protocol::acquire(self, Some(&cancelled), false)
     }
     /// Callback status is preserved; panic unwinding drops the guard.
     pub fn with_lock<T>(
@@ -257,9 +263,9 @@ fn sleep_interval(elapsed: Duration, remaining: Duration, max: Duration) -> Dura
     Duration::from_secs(seconds).min(remaining).min(max)
 }
 
-fn wait_until(end: Instant, cancellation: Option<&Cancellation>) -> Result<(), Error> {
+fn wait_until(end: Instant, cancellation: Option<&(dyn Fn() -> bool + Sync)>) -> Result<(), Error> {
     loop {
-        if cancellation.is_some_and(Cancellation::is_cancelled) {
+        if cancellation.is_some_and(|cancelled| cancelled()) {
             return Err(Error::Cancelled);
         }
         let Some(left) = end.checked_duration_since(Instant::now()) else {

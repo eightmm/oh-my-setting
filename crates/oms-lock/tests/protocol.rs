@@ -7,7 +7,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 fn write_private(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
@@ -376,6 +376,20 @@ fn moved_root_and_flock_links_refuse_without_foreign_writes() {
 fn timeout_and_cancellation_keep_live_authority() {
     let f = Fixture::new();
     for mode in [Mode::Mkdir, Mode::Flock] {
+        let cancelled = AtomicBool::new(true);
+        let untouched = Lock::at_path(
+            f.0.join("uncreated").join("cancelled.lock"),
+            f.settings(mode),
+        )
+        .unwrap();
+        assert_eq!(
+            untouched
+                .acquire_with_cancel(|| cancelled.load(Ordering::Acquire))
+                .unwrap_err(),
+            Error::Cancelled
+        );
+        assert!(!untouched.path().parent().unwrap().exists());
+
         let lock = f.lock(mode);
         let guard = lock.try_acquire().unwrap();
         let cancelled = Cancellation::default();
@@ -396,8 +410,24 @@ fn timeout_and_cancellation_keep_live_authority() {
             cancellation.cancel();
             assert_eq!(waiter.join().unwrap().unwrap_err(), Error::Cancelled);
         });
+        let interrupted = AtomicBool::new(false);
+        let observed = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                lock.acquire_with_cancel(|| {
+                    let cancelled = interrupted.load(Ordering::Acquire);
+                    observed.store(true, Ordering::Release);
+                    cancelled
+                })
+            });
+            wait_for(|| observed.load(Ordering::Acquire));
+            interrupted.store(true, Ordering::Release);
+            assert_eq!(waiter.join().unwrap().unwrap_err(), Error::Cancelled);
+        });
         guard.check().unwrap();
+        assert_eq!(lock.try_acquire().unwrap_err(), Error::Busy);
         guard.release().unwrap();
+        lock.acquire_with_cancel(|| false).unwrap().release().unwrap();
         if mode == Mode::Flock {
             fs::remove_file(lock.path()).unwrap();
         }
