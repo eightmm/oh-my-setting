@@ -207,7 +207,9 @@ impl Mock {
     }
     fn ready_selection(&self, repo: &Path) -> String {
         let stop = AtomicBool::new(false);
-        let req = Request::new(Action::Ready).flag("json");
+        // A matching --repo still reads under the guard.
+        let mut req = Request::new(Action::Ready).flag("json");
+        req.repo = Some(repo.to_owned());
         let context = Context::from_environment_at(&req, repo, repo, None).unwrap();
         let plan = Plan::open(context, self, &stop).unwrap();
         let ready = plan.execute_with_stable_reads(&req).unwrap();

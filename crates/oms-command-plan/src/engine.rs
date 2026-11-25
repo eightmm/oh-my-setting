@@ -579,17 +579,15 @@ impl<'a> Plan<'a> {
     /// cannot tear the read. Other requests run as `execute` does.
     pub fn execute_with_stable_reads(&self, req: &Request) -> Result<Response> {
         use Action::*;
-        if !req.read_only()
-            || matches!(
-                req.action,
-                TeamShow | TeamList | ContractList | ContractShow | LintVerify
-            )
-            || req.repo.is_some()
-            || req.file.is_some()
-        {
+        // Contract reads already hold the guard; lint reads no Plan file.
+        if !req.read_only() || matches!(req.action, ContractList | ContractShow | LintVerify) {
             return self.execute(req);
         }
         req.validate()?;
+        self.check_target(req)?;
+        if matches!(req.action, TeamShow | TeamList) {
+            return self.locked(false, None, || crate::team::execute(self, req));
+        }
         self.query(req, &mut self.load_with_locked_snapshot()?)
     }
     pub fn load_with_locked_snapshot(&self) -> Result<Snapshot> {
@@ -1227,6 +1225,25 @@ impl<'a> Plan<'a> {
         Ok(view)
     }
 
+    fn check_target(&self, req: &Request) -> Result<()> {
+        use crate::cli::{physical_dir, physical_leaf, worktree_root};
+        let cwd = &self.context.cwd;
+        require(
+            req.repo.as_ref().is_none_or(|r| {
+                worktree_root(&physical_dir(cwd, r.as_os_str()), self.interrupted)
+                    .is_ok_and(|p| p == self.context.execution_repo)
+            }),
+            "request repository differs from context",
+        )?;
+        if let Some(file) = &req.file {
+            require(
+                physical_leaf(cwd, file.as_os_str()) == self.context.plan_file,
+                "request plan file differs from context",
+            )?;
+        }
+        Ok(())
+    }
+
     fn execute_inner(
         &self,
         req: &Request,
@@ -1235,23 +1252,7 @@ impl<'a> Plan<'a> {
     ) -> Result<Response> {
         use Action::*;
         req.validate()?;
-        {
-            use crate::cli::{physical_dir, physical_leaf, worktree_root};
-            let cwd = &self.context.cwd;
-            require(
-                req.repo.as_ref().is_none_or(|r| {
-                    worktree_root(&physical_dir(cwd, r.as_os_str()), self.interrupted)
-                        .is_ok_and(|p| p == self.context.execution_repo)
-                }),
-                "request repository differs from context",
-            )?;
-            if let Some(file) = &req.file {
-                require(
-                    physical_leaf(cwd, file.as_os_str()) == self.context.plan_file,
-                    "request plan file differs from context",
-                )?;
-            }
-        }
+        self.check_target(req)?;
         if matches!(req.action, TeamRegister | TeamShow | TeamList | TeamCancel) {
             if req.read_only() {
                 return crate::team::execute(self, req);
