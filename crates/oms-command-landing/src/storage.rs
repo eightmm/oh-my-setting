@@ -59,12 +59,14 @@ pub(crate) fn read_external(path: &Path, missing: bool) -> Result<Vec<u8>> {
         .map_err(|_| Error::new(2, "invalid state path"))?;
     read(&physical, relative, missing)
 }
-pub(crate) fn lock(path: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard> {
-    crate::check(interrupted)?;
+pub(crate) fn file_lock(path: &Path) -> Result<oms_lock::Lock> {
     let settings =
         oms_lock::Settings::from_env().map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
-    let lock = oms_lock::Lock::for_file(path, settings)
-        .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+    oms_lock::Lock::for_file(path, settings).map_err(|e| Error::new(e.exit_code(), e.to_string()))
+}
+pub(crate) fn lock(path: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard> {
+    crate::check(interrupted)?;
+    let lock = file_lock(path)?;
     crate::check(interrupted)?;
     match lock.try_acquire() {
         Ok(g) => return Ok(g),
