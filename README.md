@@ -9,7 +9,7 @@
 
 <p align="center"><a href="README.ko.md">한국어</a></p>
 
-**oh-my-setting (`oms`)** is a native Rust multi-agent harness that lets **Codex**, **Claude Code**, and **Antigravity** share project rules, task plans, isolated worker worktrees, independent review gates, and verified landings. One **OMS panel** shows that work wherever you run it: in the terminal, and as an MCP App side panel beside the chat in Codex, ChatGPT Work, Claude Desktop and the Antigravity App.
+**oh-my-setting (`oms`)** is a native Rust multi-agent harness that lets **Codex**, **Claude Code**, and **Antigravity** share project rules, task plans, isolated worker worktrees, independent review gates, and verified landings. One **OMS panel** shows that work wherever you run it: in the terminal, and as an MCP App inside the Codex desktop app, ChatGPT Work, Claude Desktop and the Antigravity App.
 
 ---
 
@@ -17,7 +17,7 @@
 
 | Task | OMS tools and behavior | Guide |
 |---|---|---|
-| **Run a project from the panel** | `oms` opens the panel in the terminal; the same panel opens beside the chat in agent apps ([One panel, every host](#one-panel-every-host)). Pick an installed Codex, Claude Code, Antigravity (Agy), or gateway-backed Pi Main. In a managed tmux panel, OMS can open native provider leads in the background and reconnect to a live Main. Board and Detail show weekly quota, token usage, and activity when provider or OMS records support them. | [Terminal panel](docs/TERMINAL-PANEL.md) |
+| **Run a project from the panel** | `oms` opens the panel in the terminal; in the Codex desktop app and ChatGPT Work, `@OMS` drives the same Main from chat, and other agent apps show a read-only view ([One panel, every host](#one-panel-every-host)). In the terminal, pick an installed Codex, Claude Code, Antigravity (Agy), or gateway-backed Pi Main. In a managed tmux panel, OMS can open native provider leads in the background and reconnect to a live Main. Board and Detail show weekly quota, token usage, and activity when provider or OMS records support them. | [Terminal panel](docs/TERMINAL-PANEL.md) |
 | **Delegate and route work** | The Overall Main manages: it assigns scoped work, reviews evidence and decides acceptance without editing the repository itself. Provider leads run one assignment each and coordinate supported native workers. `oms peer-delegate` isolates builder changes. Inspect role profiles with `oms agent-role` and quota-aware routing with `oms panel --routes`. Use `oms connect-services` to register distinct Codex, Claude, and Pi account homes for routing. Sign in to Codex, Claude Code, or Antigravity from the panel with `L`, or with `oms connect-services --login PROVIDER`; this uses the default account home. | [Main policy](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [Routing](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [Accounts](docs/TERMINAL-PANEL.md#provider-accounts) |
 | **Get independent advice and review** | `oms consult` asks one peer. `oms peer-ask --debate` compares provider responses. `oms peer-review` requests independent diff review. The Overall Main integrates review findings and decides acceptance. | [Peer collaboration](docs/COMPONENTS.md#asking-other-agents) |
 | **Capture project intent and find affected code** | `oms init` sets up project policy. `PROJECT.md` records the agreed scope, decisions, and verification. `oms graph project` finds symbols, dependencies, and affected paths, and `oms runtime context` builds bounded context for a task. | [Project context](docs/PROJECT-CONTEXT.md) · [Graph guide](docs/GRAPH-ENGINEERING.md#project-graph) |
@@ -44,7 +44,7 @@ In a Git repository, run `oms` to open the terminal panel. You can also open Cod
 
 OMS runs as a native Rust CLI at `~/.local/bin/oms`. The core commands require no system Python setup. The default `core` install provisions one coding-agent provider, and the managed panel uses tmux. [Installation guide](docs/INSTALL.md)
 
-In an agent app, open the OMS panel beside the chat instead: see [One panel, every host](#one-panel-every-host).
+Agent apps can show the same OMS panel; see [One panel, every host](#one-panel-every-host).
 
 <details>
 <summary>What the installer configures</summary>
@@ -66,16 +66,16 @@ oms uninstall    # Remove managed links and restore backed-up config files
 
 ## One panel, every host
 
-The goal of oh-my-setting is one project panel that follows you between agents. The Rust runtime collects the project state once: goal, Main, Leads and their work, attempts, reviews, Git and GitHub, usage. Each host draws the same view. Agent apps receive it from `oms mcp-server` as an MCP App beside the chat; hosts without MCP Apps get a native view of the same data.
+The goal of oh-my-setting is one project panel that follows you between agents. The Rust runtime keeps the project state (goal, plan, attempts, reviews and the related Git, GitHub and usage records), and every host draws its view from those OMS records instead of keeping its own copy. Agent apps receive it from `oms mcp-server` as an MCP App; the terminal panel and the Claude Code pane read OMS on the same machine. What each host shows and whether it can act differ, as the table lists.
 
 | Where | What you get | How to connect |
 |---|---|---|
-| **Codex desktop, ChatGPT Work** | MCP App panel plus `@OMS`: choose a Main, give it a goal, follow its Leads and decide approvals from chat | [`oms`](plugins/oms/plugin.json) plugin from the repository marketplace (`oms@oh-my-setting-local`), or [`plugins/oms-ssh`](plugins/oms-ssh/oms/plugin.json) when the project runs on another host ([guide](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)) |
-| **Claude Desktop, Antigravity App 2.34+** | Read-only MCP App panel (projects, Board, Git and GitHub, usage, command catalog) inline, expanded or as a side panel where the host allows | [`oms-panel`](plugins/oms-app/) from [`mcp_config.json`](plugins/oms-app/mcp_config.json); Antigravity installs the plugin directory ([guide](docs/DASHBOARD.md#claude-and-antigravity)) |
-| **Terminal** | Full Board with Main selection and switching, provider overview, quota and the results reader; manages tmux sessions | `oms` ([terminal panel](docs/TERMINAL-PANEL.md)) |
-| **Claude Code** | Read-only pane beside the transcript, `/oms-panel` (preview) | `claude --plugin-dir plugins/claude-code` ([README](plugins/claude-code/README.md)) |
+| **Codex desktop, ChatGPT Work** | MCP App panel plus `@OMS`: choose a Main, give it a goal, follow its Leads and decide approvals from chat | The [`oms`](plugins/oms/plugin.json) plugin from the repository-root marketplace, entry `oms@oh-my-setting-local`. When OMS runs on another machine, use the marketplace at [`plugins/oms-ssh`](plugins/oms-ssh/), entry `oms@oms-ssh`, which reaches it through the `oms-runtime` OpenSSH host alias ([guide](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)) |
+| **Claude Desktop, Antigravity App 2.34+** | Read-only MCP App panel (projects, Board, Git and GitHub, usage, command catalog); the host shows it inline or expanded, and as a side panel only where the host and account allow it | Claude Desktop: add the `oms-panel` entry from [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json). Antigravity App: install the [`plugins/oms-app`](plugins/oms-app/) plugin directory. The checked-in entry connects through the `oms-runtime` OpenSSH host alias ([guide](docs/DASHBOARD.md#claude-and-antigravity)) |
+| **Terminal** | Board with Main selection and switching, provider overview, quota and the results reader; manages tmux sessions | `oms` ([terminal panel](docs/TERMINAL-PANEL.md)) |
+| **Claude Code v2.1.287+** | Read-only `oms-panel` pane beside the transcript, drawn from `oms dashboard --json`; `/oms-panel` | Preview, not in the marketplace yet: `claude --plugin-dir plugins/claude-code` ([README](plugins/claude-code/README.md)) |
 
-The installer also wires each provider into the shared harness, so you don't install these separately. Codex gets the [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) plugin (skill routing, pre-compaction handoff, turn guards). Antigravity gets its [`oh-my-setting`](plugins/antigravity/plugin.json) plugin (harness state over MCP). Claude Code loads the skills directly. The optional [`oms-skills`](.claude-plugin/marketplace.json) bundle exists only for Claude Code setups that load skills from plugins ([note](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
+Separately from the panel, the installer wires each provider into the shared harness: Codex gets the [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) plugin (skill routing, pre-compaction handoff, turn guards), the Antigravity CLI and IDE get their [`oh-my-setting`](plugins/antigravity/plugin.json) plugin (harness state over MCP), and Claude Code gets the skills, hooks and MCP server registered directly. [`oms-skills`](.claude-plugin/marketplace.json) is an optional, manually installed Claude Code plugin with the same skills for setups that load skills only from plugins; it needs an OMS install and is not needed with a normal install, where the skills would be listed twice ([note](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
 
 ### In the terminal
 
@@ -87,6 +87,7 @@ OMS verifies a running Main, Enter selects **Continue current Main**;
 With a verified managed Codex Main, press `s` on the Board, pick a target such
 as AGY and press `Y`; from an AGY, Claude or Pi Main, exit it and choose the
 next harness at startup. [Main switching](docs/TERMINAL-PANEL.md#swap-the-main)
+
 **Direct work** lists calls Main assigned itself (Enter opens the result),
 **Needs you** links items that wait for input, and `w` shows reported weekly
 quota; missing readings stay unknown. `oms panel --watch` opens a standalone
