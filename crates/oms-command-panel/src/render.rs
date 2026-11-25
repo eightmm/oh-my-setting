@@ -1570,23 +1570,61 @@ fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Valu
             .and_then(|_| row["usage"]["duration_ms"].as_f64()),"refs":refs})
 }
 
-fn panel_main_has_live_pane_activity(report: &Value, call: &Value, attempt_id: &str) -> bool {
+fn main_token_observation_is_live(
+    report: &Value,
+    call: &Value,
+    board_main: &Value,
+    attempt_id: &str,
+) -> bool {
+    use oms_panel_core::metrics::{READING_FRESH_SECONDS, stamp};
+
+    if report["collection"]["pending"] == true {
+        return false;
+    }
+    let obs = &report["main_token_observation"];
+    if obs["attempt"] != attempt_id
+        || obs["source"].as_str() != Some("rollout")
+        || !obs["total"].as_u64().is_some_and(|t| t > 0)
+    {
+        return false;
+    }
+    let room_id = text(&report["room"], "id");
+    if !obs["room"].is_null() && !room_id.is_empty() && obs["room"] != room_id {
+        return false;
+    }
+    let participant = text(call, "participant");
+    if !obs["participant"].is_null() && !participant.is_empty() && obs["participant"] != participant
+    {
+        return false;
+    }
+    let Some(now) = stamp(&report["generated_at"]).filter(|t| t.is_finite() && *t >= 0.0) else {
+        return false;
+    };
+    let Some(observed_at) = stamp(&obs["observed_at"])
+        .or_else(|| stamp(&obs["updated_at"]))
+        .or_else(|| stamp(&obs["ts"]))
+        .filter(|t| t.is_finite() && (0.0..=now).contains(t))
+    else {
+        return false;
+    };
+    if now - observed_at > READING_FRESH_SECONDS {
+        return false;
+    }
+    let idle_at = stamp(&board_main["idle_at"])
+        .or_else(|| stamp(&call["updated_at"]))
+        .or_else(|| stamp(&call["created_at"]));
+    if board_main["hook_state"] == "idle" && idle_at.is_none() {
+        return false;
+    }
+    idle_at.is_none_or(|idle| observed_at > idle)
+}
+
+fn panel_main_has_live_pane_activity(report: &Value, call: &Value) -> bool {
     if report["collection"]["pending"] == true {
         return false;
     }
     let participant = text(call, "participant");
     let provider = text(call, "provider");
-    if report["main_token_observation"]["attempt"] == attempt_id
-        && matches!(
-            report["main_token_observation"]["source"].as_str(),
-            Some("rollout" | "rollout-last")
-        )
-        && report["main_token_observation"]["total"]
-            .as_u64()
-            .is_some_and(|t| t > 0)
-    {
-        return true;
-    }
     let observed = &report["provider_activity"][provider];
     if observed == "working" || observed["state"] == "working" {
         return true;
@@ -1614,8 +1652,10 @@ fn apply_board_projection(report: &Value, all: &mut Vec<Value>) {
         let explicit_idle_hook = board_main["hook_state"] == "idle";
         for call in all.iter_mut() {
             if call["role"] == "main" && text(call, "attempt") == idle_attempt {
-                if !explicit_idle_hook
-                    && panel_main_has_live_pane_activity(report, call, idle_attempt)
+                let fresh_tokens =
+                    main_token_observation_is_live(report, call, board_main, idle_attempt);
+                if fresh_tokens
+                    || (!explicit_idle_hook && panel_main_has_live_pane_activity(report, call))
                 {
                     continue;
                 }
@@ -1632,6 +1672,15 @@ fn apply_board_projection(report: &Value, all: &mut Vec<Value>) {
         }
     }
     for row in rows(&board["activity"]) {
+        let op = text(row, "operation");
+        if !op.is_empty() {
+            let prefix = format!(".oms/artifacts/mcp/{op}/");
+            all.retain(|call| {
+                call["joined"].is_boolean()
+                    || (text(&call["refs"], "mcp_operation") != op
+                        && !text(&call["refs"], "artifact").starts_with(&prefix))
+            });
+        }
         let aid = text(row, "attempt_id");
         let worktree = text(row, "worktree");
         let provider = text(row, "provider");
@@ -16871,5 +16920,125 @@ mod tests {
         let live_rows = visible(&live_pane_report, &navigation::Navigation::default());
         assert_eq!(live_rows[0]["role"], "main");
         assert_eq!(live_rows[0]["state"], "working");
+
+        // 4. Retained historical or stale token totals never override an idle Main;
+        // only a fresh rollout observation newer than the idle evidence marks Main working.
+        let report_now = oms_panel_core::metrics::stamp(&with_idle.report["generated_at"]).unwrap();
+        for stale_obs in [
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout-last",
+                "observed_at": report_now - 2.0,
+            }),
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout",
+            }),
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout",
+                "observed_at": (started_epoch - 10) as f64,
+            }),
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout",
+                "observed_at": report_now - oms_panel_core::metrics::READING_FRESH_SECONDS - 5.0,
+            }),
+        ] {
+            let mut candidate = with_idle.report.clone();
+            candidate["board"]["main"]["idle_at"] = json!(report_now - 700.0);
+            if stale_obs["observed_at"].as_f64() == Some((started_epoch - 10) as f64) {
+                candidate["board"]["main"]["idle_at"] = json!(started_epoch as f64);
+            }
+            candidate["main_token_observation"] = stale_obs.clone();
+            let rows = visible(&candidate, &navigation::Navigation::default());
+            assert_eq!(
+                rows[0]["state"], "idle",
+                "unexpected working override for {stale_obs}"
+            );
+        }
+
+        let mut fresh_token_report = with_idle.report.clone();
+        fresh_token_report["main_token_observation"] = json!({
+            "room": "room-idle",
+            "participant": "att_idle_panel",
+            "attempt": "att_idle_panel",
+            "total": 85_000u64,
+            "source": "rollout",
+            "observed_at": report_now - 5.0,
+        });
+        let fresh_rows = visible(&fresh_token_report, &navigation::Navigation::default());
+        assert_eq!(fresh_rows[0]["state"], "working");
+
+        // 5. Unroomed MCP consultation with downstream lifecycle attempt renders once.
+        let consult_op = format!("consult-{compact}-9988aabb");
+        let consult_dir = fixture
+            .0
+            .join(oms_command_operations::peer_operations::RUN_ROOT)
+            .join(&consult_op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&consult_dir)
+            .unwrap();
+        std::fs::write(consult_dir.join("prompt.txt"), "Single row check\n").unwrap();
+        std::fs::write(consult_dir.join("pid"), format!("{}\n", std::process::id())).unwrap();
+        std::fs::write(
+            consult_dir.join("meta.json"),
+            json!({
+                "operation": consult_op,
+                "kind": "consult",
+                "targets": ["claude"],
+                "started_at": started_iso,
+                "title": "Single row check"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let consult_attempt = json!({
+            "attempt_id": "att_mcp_consult_dup",
+            "tool": "consult",
+            "provider": "claude",
+            "state": "working",
+            "terminal": false,
+            "created_at": started_iso,
+            "updated_at": started_iso,
+            "refs": {
+                "mcp_operation": consult_op,
+                "artifact": format!(".oms/artifacts/mcp/{consult_op}/answers/claude-call.md"),
+                "panel_role": "advisor"
+            }
+        });
+        let dedup_snap = oms_panel_core::state::snapshot(
+            &fixture.0,
+            None,
+            &FixtureServices {
+                attempts: json!([consult_attempt]),
+                room: json!({}),
+            },
+            &stop,
+        )
+        .unwrap();
+        let dedup_visible = visible(&dedup_snap.report, &navigation::Navigation::default());
+        assert_eq!(
+            dedup_visible
+                .iter()
+                .filter(|r| r["tool"] == "consult")
+                .count(),
+            1,
+            "{dedup_visible:?}"
+        );
     }
 }

@@ -9,9 +9,11 @@ use crate::scratch_activity::ScratchPeerRun;
 use crate::state::{LIVE_STATES, main_participant};
 use crate::value::{array, text};
 use crate::{Store, Value};
-use oms_command_operations::peer_operations::{PeerOperationRecord, list_peer_operations};
+use oms_command_operations::peer_operations::{
+    PeerOperationRecord, is_mcp_operation_id, list_peer_operations,
+};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -152,13 +154,21 @@ fn peer_operation_row(
         .and_then(safe_worktree_name)
         .unwrap_or_else(|| default_worktree.to_owned());
     let started_epoch = parse_epoch(&rec.started_at);
-    let elapsed_secs = match (started_epoch, rec.age_seconds) {
-        (Some(ts), Some(0)) if ts > 0 && ts <= now_epoch && now_epoch > ts => {
-            Some((now_epoch - ts) as u64)
+    let elapsed_secs = if rec.status == "running" {
+        match (started_epoch, rec.age_seconds) {
+            (Some(ts), Some(0)) if ts > 0 && ts <= now_epoch && now_epoch > ts => {
+                Some((now_epoch - ts) as u64)
+            }
+            (_, Some(age)) if age >= 0 => Some(age as u64),
+            (Some(ts), _) if ts > 0 && ts <= now_epoch => Some((now_epoch - ts) as u64),
+            _ => None,
         }
-        (_, Some(age)) if age >= 0 => Some(age as u64),
-        (Some(ts), _) if ts > 0 && ts <= now_epoch => Some((now_epoch - ts) as u64),
-        _ => None,
+    } else {
+        let end_epoch = rec.observed_updated_at.as_deref().and_then(parse_epoch);
+        match (started_epoch, end_epoch) {
+            (Some(s), Some(e)) if s > 0 && e >= s => Some((e - s) as u64),
+            _ => None,
+        }
     };
     let elapsed = elapsed_secs.map(format_elapsed).unwrap_or_default();
     let title = rec.title.clone().unwrap_or_default();
@@ -357,29 +367,52 @@ fn read_hook_activity_state(
     room_id: &str,
     participant: &str,
     attempt_id: &str,
-) -> Option<String> {
+) -> (Option<String>, Option<f64>) {
     if participant.is_empty() || attempt_id.is_empty() || crate::identifier(participant).is_err() {
-        return None;
+        return (None, None);
     }
-    let row = store
+    let Some(row) = store
         .json(
             Path::new(&format!(".oms/hooks/panel-activity/{participant}.json")),
             HOOK_ACTIVITY_LIMIT,
             true,
         )
         .ok()
-        .flatten()?;
+        .flatten()
+    else {
+        return (None, None);
+    };
     if row["attempt"].as_str() != Some(attempt_id) {
-        return None;
+        return (None, None);
     }
     let row_room = text(&row, "room");
     if !room_id.is_empty() && !row_room.is_empty() && row_room != room_id {
-        return None;
+        return (None, None);
     }
-    row["state"]
+    let state = row["state"]
         .as_str()
         .filter(|s| matches!(*s, "idle" | "busy" | "waiting"))
-        .map(str::to_owned)
+        .map(str::to_owned);
+    let updated = state
+        .is_some()
+        .then(|| {
+            crate::metrics::stamp(&row["updated_at"])
+                .or_else(|| crate::metrics::stamp(&row["since"]))
+        })
+        .flatten();
+    (state, updated)
+}
+
+fn attempt_mcp_operation(attempt: &Value) -> Option<String> {
+    let refs = &attempt["refs"];
+    let explicit = text(refs, "mcp_operation");
+    if is_mcp_operation_id(&explicit) {
+        return Some(explicit);
+    }
+    let artifact = text(refs, "artifact");
+    let rest = artifact.strip_prefix(".oms/artifacts/mcp/")?;
+    let op = rest.split('/').next()?;
+    is_mcp_operation_id(op).then(|| op.to_owned())
 }
 
 fn detect_external_hook_caller(
@@ -640,7 +673,8 @@ fn project_main(
     let provider = normalize_provider(&raw_provider);
     let provider_name = provider_display_name(provider);
     let raw_state = text(main_row, "state");
-    let hook_state = read_hook_activity_state(store, &room_id, participant, &attempt_id);
+    let (hook_state, hook_updated_at) =
+        read_hook_activity_state(store, &room_id, participant, &attempt_id);
     let has_children =
         has_live_bound_room_children(room, attempts, room_attempts, &attempt_id, participant);
     let label = [
@@ -663,6 +697,14 @@ fn project_main(
             || (hook_state.is_none() && unrecorded_task && !has_tokens && !has_task_id));
 
     if panel_main_idle {
+        let idle_at = if hook_state.as_deref() == Some("idle") {
+            hook_updated_at
+        } else {
+            parse_epoch(&text(main_row, "updated_at"))
+                .or_else(|| parse_epoch(&text(main_row, "created_at")))
+                .filter(|&ts| ts > 0)
+                .map(|ts| ts as f64)
+        };
         if external_work_active {
             let ext_caller = recorded_caller
                 .or_else(|| detect_external_hook_caller(repo, Some(provider), now_epoch));
@@ -687,6 +729,7 @@ fn project_main(
                 "panel_main_provider": provider,
                 "panel_main_attempt": attempt_id,
                 "hook_state": hook_state,
+                "idle_at": idle_at,
                 "external_work_active": true,
                 "external_running_count": external_running_count,
                 "summary": summary,
@@ -699,6 +742,7 @@ fn project_main(
                 "panel_main_provider": provider,
                 "panel_main_attempt": attempt_id,
                 "hook_state": hook_state,
+                "idle_at": idle_at,
                 "external_work_active": false,
                 "external_running_count": 0,
                 "summary": format!("Panel Main ({provider_name}) idle"),
@@ -770,6 +814,7 @@ pub(crate) fn project_with_scratch(
     let default_worktree = repo_worktree_label(repo);
     let mcp_ops = list_peer_operations(repo, MAX_ACTIVITY_ROWS, now_sys);
     let mut seen_attempts = BTreeSet::new();
+    let mut mcp_index_by_op = BTreeMap::new();
     let mut activity = Vec::new();
 
     for rec in &mcp_ops {
@@ -778,6 +823,8 @@ pub(crate) fn project_with_scratch(
         {
             seen_attempts.insert(aid.clone());
         }
+        let idx = activity.len();
+        mcp_index_by_op.insert(rec.operation.clone(), idx);
         activity.push(peer_operation_row(
             rec,
             &default_worktree,
@@ -798,7 +845,58 @@ pub(crate) fn project_with_scratch(
         };
         for attempt in rows {
             let aid = text(attempt, "attempt_id");
-            if aid.is_empty() || !seen_attempts.insert(aid) {
+            if aid.is_empty() {
+                continue;
+            }
+            if let Some(mcp_op) = attempt_mcp_operation(attempt)
+                && let Some(&idx) = mcp_index_by_op.get(&mcp_op)
+            {
+                seen_attempts.insert(aid.clone());
+                let refs = &attempt["refs"];
+                let rooms = [text(refs, "panel_room_id"), text(refs, "panel_room")];
+                let foreign_room =
+                    !room_id.is_empty() && rooms.iter().any(|r| !r.is_empty() && *r != room_id);
+                if !foreign_room {
+                    let row = &mut activity[idx];
+                    if text(row, "attempt_id").is_empty() {
+                        row["attempt_id"] = json!(aid);
+                    }
+                    let raw_provider = text(attempt, "provider");
+                    if row["provider"] == "unknown" && !raw_provider.is_empty() {
+                        let normalized = normalize_provider(&raw_provider);
+                        row["provider"] = json!(normalized);
+                        row["targets"] = json!([normalized]);
+                    }
+                    if text(row, "model").is_empty() {
+                        let model = text(refs, "panel_model");
+                        if !model.is_empty() {
+                            row["model"] = json!(model);
+                        }
+                    }
+                    let parent_attempt = text(attempt, "parent_attempt_id");
+                    let bound_to_panel = (!panel_main_attempt.is_empty()
+                        && parent_attempt == panel_main_attempt)
+                        || (!room_id.is_empty() && rooms.contains(&room_id))
+                        || (room_id.is_empty() && rooms.iter().any(|r| !r.is_empty()));
+                    if bound_to_panel {
+                        row["origin"] = json!("panel");
+                    }
+                    if row["caller"].is_null()
+                        && let Some(caller) = [
+                            text(refs, "caller_provider"),
+                            text(refs, "main_provider"),
+                            text(refs, "panel_owner"),
+                        ]
+                        .into_iter()
+                        .find(|s| !s.is_empty())
+                        .and_then(|s| safe_worktree_name(&s))
+                    {
+                        row["caller"] = json!(caller);
+                    }
+                }
+                continue;
+            }
+            if !seen_attempts.insert(aid) {
                 continue;
             }
             if let Some(row) = lifecycle_attempt_row(
@@ -1212,5 +1310,205 @@ mod tests {
                 .iter()
                 .any(|r| r["worktree"] == "wt-panel-owned" && r["origin"] == "panel")
         );
+    }
+
+    #[test]
+    fn mcp_consultation_deduplicates_with_downstream_lifecycle_attempts() {
+        let repo = TempRepo::new("mcp-consult-dedup");
+        let now_sys = SystemTime::now();
+        let now_epoch = now_sys.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let started_epoch = now_epoch.saturating_sub(25);
+        let started_iso = chrono::DateTime::<chrono::Utc>::from_timestamp(started_epoch, 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let compact = chrono::DateTime::<chrono::Utc>::from_timestamp(started_epoch, 0)
+            .unwrap()
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string();
+        let op = format!("consult-{compact}-aabbccdd");
+        let run_dir = repo.0.join(RUN_ROOT).join(&op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&run_dir)
+            .unwrap();
+        std::fs::write(run_dir.join("prompt.txt"), "Check architecture\n").unwrap();
+        std::fs::write(run_dir.join("pid"), format!("{}\n", std::process::id())).unwrap();
+        // Matches oms-mcp-server/src/peer.rs: meta.json records no attempt_id.
+        std::fs::write(
+            run_dir.join("meta.json"),
+            json!({
+                "operation": op,
+                "kind": "consult",
+                "targets": [],
+                "started_at": started_iso,
+                "answer_storage": "operation",
+                "cancellation_supported": true,
+                "title": "Check architecture"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let downstream_attempt = json!({
+            "attempt_id": "att_consult_seat1",
+            "tool": "consult",
+            "provider": "claude",
+            "state": "working",
+            "terminal": false,
+            "created_at": started_iso,
+            "updated_at": started_iso,
+            "refs": {
+                "mcp_operation": op,
+                "artifact": format!(".oms/artifacts/mcp/{op}/answers/claude-call-1.md"),
+                "panel_role": "advisor",
+                "panel_model": "claude-sonnet-4-6",
+                "panel_label": "consult (claude)"
+            }
+        });
+        let store = Store::open(&repo.0).unwrap();
+        let board = project_with_scratch(
+            &repo.0,
+            &json!({}),
+            &json!({"active": [downstream_attempt], "recent": []}),
+            &serde_json::Map::new(),
+            &store,
+            &[],
+            now_epoch,
+            now_sys,
+        );
+        let activity = board["activity"].as_array().unwrap();
+        assert_eq!(activity.len(), 1, "{activity:?}");
+        assert_eq!(activity[0]["id"], format!("mcp:{op}"));
+        assert_eq!(activity[0]["attempt_id"], "att_consult_seat1");
+        assert_eq!(activity[0]["provider"], "claude");
+        assert_eq!(activity[0]["model"], "claude-sonnet-4-6");
+        assert_eq!(board["main"]["external_running_count"], 1);
+    }
+
+    #[test]
+    fn finished_peer_operations_freeze_elapsed_time_and_omit_unknown_span() {
+        use rustix::fs::{self as rfs, AtFlags, Timespec, Timestamps, utimensat};
+
+        let repo = TempRepo::new("finished-elapsed");
+        let start_epoch = 1_764_072_000i64;
+        let finish_epoch = start_epoch + 42;
+        let started_iso = chrono::DateTime::<chrono::Utc>::from_timestamp(start_epoch, 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let op = "advise-20251125T120000Z-1122aabb";
+        let run_dir = repo.0.join(RUN_ROOT).join(op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&run_dir)
+            .unwrap();
+        std::fs::write(run_dir.join("prompt.txt"), "Advise\n").unwrap();
+        std::fs::write(
+            run_dir.join("meta.json"),
+            json!({
+                "operation": op,
+                "kind": "advise",
+                "targets": ["claude"],
+                "started_at": started_iso,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let status_path = run_dir.join("status");
+        std::fs::write(&status_path, "0\n").unwrap();
+        let start_ts = Timespec {
+            tv_sec: start_epoch as _,
+            tv_nsec: 0,
+        };
+        let finish_ts = Timespec {
+            tv_sec: finish_epoch as _,
+            tv_nsec: 0,
+        };
+        utimensat(
+            rfs::CWD,
+            run_dir.join("prompt.txt"),
+            &Timestamps {
+                last_access: start_ts,
+                last_modification: start_ts,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        utimensat(
+            rfs::CWD,
+            &status_path,
+            &Timestamps {
+                last_access: finish_ts,
+                last_modification: finish_ts,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+
+        // Second terminal record where finish < start so duration cannot be determined.
+        let unmeasurable = "consult-20251125T115900Z-ccddeeff";
+        let bad_dir = repo.0.join(RUN_ROOT).join(unmeasurable);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&bad_dir)
+            .unwrap();
+        std::fs::write(
+            bad_dir.join("meta.json"),
+            json!({
+                "operation": unmeasurable,
+                "kind": "consult",
+                "targets": ["codex"],
+                "started_at": started_iso,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(bad_dir.join("status"), "0\n").unwrap();
+        let before_start_ts = Timespec {
+            tv_sec: (start_epoch - 10) as _,
+            tv_nsec: 0,
+        };
+        utimensat(
+            rfs::CWD,
+            bad_dir.join("status"),
+            &Timestamps {
+                last_access: before_start_ts,
+                last_modification: before_start_ts,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+
+        let store = Store::open(&repo.0).unwrap();
+        for later in [start_epoch + 300, start_epoch + 3600] {
+            let later_sys = UNIX_EPOCH + std::time::Duration::from_secs(later as u64);
+            let board = project_with_scratch(
+                &repo.0,
+                &json!({}),
+                &json!({"active": [], "recent": []}),
+                &serde_json::Map::new(),
+                &store,
+                &[],
+                later,
+                later_sys,
+            );
+            let rows = board["activity"].as_array().unwrap();
+            let done_row = rows.iter().find(|r| r["operation"] == op).unwrap();
+            assert_eq!(done_row["state"], "done");
+            assert_eq!(done_row["elapsed_seconds"], 42);
+            assert_eq!(done_row["elapsed"], "42s");
+
+            let unknown_row = rows
+                .iter()
+                .find(|r| r["operation"] == unmeasurable)
+                .unwrap();
+            assert_eq!(unknown_row["state"], "done");
+            assert!(unknown_row["elapsed_seconds"].is_null(), "{unknown_row}");
+            assert_eq!(unknown_row["elapsed"], "");
+        }
     }
 }

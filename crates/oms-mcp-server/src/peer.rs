@@ -87,7 +87,7 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     }
     Ok(values)
 }
-pub(super) use oms_command_operations::peer_operations::{age, status};
+pub(super) use oms_command_operations::peer_operations::{age, status, updated_stamp};
 
 fn tail(dir: &Path) -> String {
     let result = (|| -> io::Result<String> {
@@ -813,7 +813,9 @@ impl Server<'_> {
             (state, code) = status(&dir);
         }
         cancellation(&dir, state, &mut payload);
-        if let Some(n) = age(&dir).filter(|_| dir.join("prompt.txt").is_file()) {
+        if let Some(n) = age(&dir).filter(|_| {
+            std::fs::symlink_metadata(dir.join("prompt.txt")).is_ok_and(|m| m.file_type().is_file())
+        }) {
             payload["elapsed_seconds"] = json!(n);
         }
         payload["status"] = json!(state);
@@ -955,12 +957,7 @@ impl Server<'_> {
                     inferred.into()
                 }
             });
-        let updated = ["status", "cancel-request.json", "run.log"]
-            .iter()
-            .filter_map(|s| dir.join(s).metadata().ok()?.modified().ok())
-            .max()
-            .map(|time| crate::value::Text::from(storage::iso(time)))
-            .unwrap_or_else(|| created.clone());
+        let updated = crate::value::Text::from(updated_stamp(dir, created.as_str().unwrap_or("")));
         let mut value = json!({"resultType":"complete","taskId":id,"createdAt":created,"lastUpdatedAt":updated,"ttlMs":null,"pollIntervalMs":5000});
         let (state, code) = status(dir);
         if state == "done" && storage::valid_receipt(dir, "cancel-observed") {

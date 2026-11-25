@@ -3,12 +3,13 @@
 use crate::value::V;
 use chrono::{DateTime, Utc};
 use oms_safe_fs::{Policy, Root};
-use rustix::fs::{self as rfs, Mode, OFlags};
+use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags};
 use rustix::process::{Pid, getuid, test_kill_process};
+use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const RUN_ROOT: &str = ".oms/artifacts/mcp";
 pub const META_LIMIT: usize = 256 * 1024;
@@ -26,6 +27,7 @@ pub struct PeerOperationRecord {
     pub exit: Option<i64>,
     pub started_at: String,
     pub updated_at: String,
+    pub observed_updated_at: Option<String>,
     pub age_seconds: Option<i64>,
     pub targets: Vec<String>,
     pub worktree: Option<String>,
@@ -96,10 +98,11 @@ pub fn sort_operation_names(entries: &mut [String]) {
     entries.sort_by(|a, b| sort_stamp(b).cmp(sort_stamp(a)).then_with(|| b.cmp(a)));
 }
 
-pub fn read_repo_file(
+fn read_repo_file_owned(
     repo: &Path,
     label: &str,
     limit: usize,
+    owner: u32,
 ) -> std::result::Result<Vec<u8>, String> {
     Root::open(repo)
         .and_then(|r| {
@@ -108,7 +111,7 @@ pub fn read_repo_file(
                 limit,
                 Policy {
                     single_link: true,
-                    owner: None,
+                    owner: Some(owner),
                     max_components: Some(64),
                 },
             )
@@ -118,7 +121,20 @@ pub fn read_repo_file(
         })
 }
 
-pub fn read_run(dir: &Path, name: &str, limit: usize) -> std::result::Result<Vec<u8>, String> {
+pub fn read_repo_file(
+    repo: &Path,
+    label: &str,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    read_repo_file_owned(repo, label, limit, getuid().as_raw())
+}
+
+fn read_run_owned(
+    dir: &Path,
+    name: &str,
+    limit: usize,
+    owner: u32,
+) -> std::result::Result<Vec<u8>, String> {
     let repo = dir
         .ancestors()
         .nth(4)
@@ -127,13 +143,22 @@ pub fn read_run(dir: &Path, name: &str, limit: usize) -> std::result::Result<Vec
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or("error: invalid operation")?;
-    read_repo_file(repo, &format!("{RUN_ROOT}/{op}/{name}"), limit)
+    read_repo_file_owned(repo, &format!("{RUN_ROOT}/{op}/{name}"), limit, owner)
+}
+
+pub fn read_run(dir: &Path, name: &str, limit: usize) -> std::result::Result<Vec<u8>, String> {
+    read_run_owned(dir, name, limit, getuid().as_raw())
 }
 
 pub fn status(dir: &Path) -> (&'static str, Option<i64>) {
-    status_with(
+    status_for_owner(dir, getuid().as_raw())
+}
+
+fn status_for_owner(dir: &Path, owner: u32) -> (&'static str, Option<i64>) {
+    status_with_owner(
         dir,
-        || read_run(dir, "status", STATUS_LIMIT),
+        owner,
+        || read_run_owned(dir, "status", STATUS_LIMIT, owner),
         |pid| test_kill_process(pid) == Err(rustix::io::Errno::SRCH),
     )
 }
@@ -143,11 +168,27 @@ pub fn status_with(
     read_status: impl Fn() -> std::result::Result<Vec<u8>, String>,
     owner_gone: impl FnOnce(Pid) -> bool,
 ) -> (&'static str, Option<i64>) {
+    status_with_owner(dir, getuid().as_raw(), read_status, owner_gone)
+}
+
+fn status_with_owner(
+    dir: &Path,
+    owner: u32,
+    read_status: impl Fn() -> std::result::Result<Vec<u8>, String>,
+    owner_gone: impl FnOnce(Pid) -> bool,
+) -> (&'static str, Option<i64>) {
     let terminal_exit = || {
         let read = match read_status() {
             // The owner can publish the status between the secure read and
             // this presence check. Confirm the bytes before treating it as invalid.
-            Err(_) if dir.join("status").symlink_metadata().is_ok() => read_status(),
+            Err(_)
+                if dir
+                    .join("status")
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.uid() == owner) =>
+            {
+                read_status()
+            }
             Err(_) => return None,
             result => result,
         };
@@ -161,7 +202,7 @@ pub fn status_with(
     if let Some(exit) = terminal_exit() {
         return ("done", Some(exit));
     }
-    let pid = read_run(dir, "pid", STATUS_LIMIT)
+    let pid = read_run_owned(dir, "pid", STATUS_LIMIT, owner)
         .ok()
         .and_then(|b| {
             String::from_utf8_lossy(&b)
@@ -178,18 +219,51 @@ pub fn status_with(
     ("running", None)
 }
 
+fn stat_modified(stat: &rfs::Stat) -> Option<SystemTime> {
+    let secs = u64::try_from(stat.st_mtime).ok()?;
+    let nsecs = u32::try_from(stat.st_mtime_nsec)
+        .unwrap_or(0)
+        .min(999_999_999);
+    UNIX_EPOCH.checked_add(Duration::new(secs, nsecs))
+}
+
+fn regular_entry_modified(dir_fd: impl AsFd, name: &str, uid: u32) -> Option<SystemTime> {
+    let stat = rfs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+    (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile && stat.st_uid == uid)
+        .then(|| stat_modified(&stat))
+        .flatten()
+}
+
+fn open_owned_dir(dir: &Path, uid: u32) -> Option<std::fs::File> {
+    let flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let file: std::fs::File = rfs::open(dir, flags, Mode::empty()).ok()?.into();
+    let stat = rfs::fstat(&file).ok()?;
+    (FileType::from_raw_mode(stat.st_mode) == FileType::Directory && stat.st_uid == uid)
+        .then_some(file)
+}
+
+fn age_in_dir(dir_fd: impl AsFd, uid: u32, now: SystemTime) -> Option<i64> {
+    let modified = regular_entry_modified(&dir_fd, "prompt.txt", uid).or_else(|| {
+        let stat = rfs::fstat(&dir_fd).ok()?;
+        (FileType::from_raw_mode(stat.st_mode) == FileType::Directory && stat.st_uid == uid)
+            .then(|| stat_modified(&stat))
+            .flatten()
+    })?;
+    Some(match now.duration_since(modified) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    })
+}
+
 pub fn age(dir: &Path) -> Option<i64> {
     age_at(dir, SystemTime::now())
 }
 
 pub fn age_at(dir: &Path, now: SystemTime) -> Option<i64> {
-    [dir.join("prompt.txt"), dir.to_owned()]
-        .iter()
-        .find_map(|p| p.metadata().ok()?.modified().ok())
-        .map(|t| match now.duration_since(t) {
-            Ok(d) => d.as_secs() as i64,
-            Err(e) => -(e.duration().as_secs() as i64),
-        })
+    let uid = getuid().as_raw();
+    let dir_fd = open_owned_dir(dir, uid)?;
+    age_in_dir(&dir_fd, uid, now)
 }
 
 fn open_verified_dir(repo: &Path, relative: &str) -> Option<std::fs::File> {
@@ -224,8 +298,8 @@ fn safe_token(raw: &str, max_len: usize) -> Option<String> {
     .then(|| trimmed.to_owned())
 }
 
-fn valid_cancel_observed(dir: &Path, op: &str) -> bool {
-    read_run(dir, "cancel-observed.json", STATUS_LIMIT)
+fn valid_cancel_observed_owned(dir: &Path, op: &str, owner: u32) -> bool {
+    read_run_owned(dir, "cancel-observed.json", STATUS_LIMIT, owner)
         .ok()
         .and_then(|bytes| V::parse_with_depth(&bytes, 16).ok())
         .is_some_and(|v| {
@@ -236,16 +310,22 @@ fn valid_cancel_observed(dir: &Path, op: &str) -> bool {
         })
 }
 
-fn updated_stamp(dir: &Path, fallback: &str) -> String {
+fn observed_updated_in_dir(dir_fd: impl AsFd, uid: u32) -> Option<String> {
     ["status", "cancel-request.json", "run.log"]
         .iter()
-        .filter_map(|name| dir.join(name).metadata().ok()?.modified().ok())
+        .filter_map(|name| regular_entry_modified(&dir_fd, name, uid))
         .max()
         .map(|t| {
             DateTime::<Utc>::from(t)
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string()
         })
+}
+
+pub fn updated_stamp(dir: &Path, fallback: &str) -> String {
+    let uid = getuid().as_raw();
+    open_owned_dir(dir, uid)
+        .and_then(|fd| observed_updated_in_dir(&fd, uid))
         .unwrap_or_else(|| fallback.to_owned())
 }
 
@@ -311,10 +391,13 @@ pub fn list_peer_operations(
             .filter(|s| !s.is_empty() && s.len() <= 64)
             .map(str::to_owned)
             .unwrap_or(fallback_started);
-        let (op_status, exit) = status(&dir);
-        let cancelled = op_status == "done" && valid_cancel_observed(&dir, &name);
-        let updated_at = updated_stamp(&dir, &started_at);
-        let age_seconds = age_at(&dir, now);
+        let (op_status, exit) = status_for_owner(&dir, uid);
+        let cancelled = op_status == "done" && valid_cancel_observed_owned(&dir, &name, uid);
+        let observed_updated_at = observed_updated_in_dir(&sub_file, uid);
+        let updated_at = observed_updated_at
+            .clone()
+            .unwrap_or_else(|| started_at.clone());
+        let age_seconds = age_in_dir(&sub_file, uid, now);
         let mut targets = meta
             .get("targets")
             .array()
@@ -358,6 +441,7 @@ pub fn list_peer_operations(
             exit,
             started_at,
             updated_at,
+            observed_updated_at,
             age_seconds,
             targets,
             worktree,
@@ -474,5 +558,149 @@ mod tests {
         assert_eq!(many[1].operation, cancelled_id);
         assert_eq!(many[1].status, "done");
         assert!(many[1].cancelled);
+    }
+
+    #[test]
+    fn rejects_record_files_owned_by_another_uid() {
+        let repo = TempDir::new("owner-uid");
+        let op = "consult-20261125T121000Z-abcdef01";
+        let run_dir = repo.0.join(RUN_ROOT).join(op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&run_dir)
+            .unwrap();
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = exited.id();
+        let _ = exited.wait();
+        std::fs::write(run_dir.join("meta.json"), r#"{"title":"foreign"}"#).unwrap();
+        std::fs::write(run_dir.join("pid"), format!("{gone_pid}\n")).unwrap();
+        std::fs::write(run_dir.join("status"), "0\n").unwrap();
+        std::fs::write(
+            run_dir.join("cancel-observed.json"),
+            format!(r#"{{"schema":1,"task_id":"{op}","kind":"mcp-task-cancel-observed"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("cancel-request.json"),
+            format!(r#"{{"schema":1,"task_id":"{op}","kind":"mcp-task-cancel-request"}}"#),
+        )
+        .unwrap();
+
+        let current_uid = getuid().as_raw();
+        let other_uid = current_uid.wrapping_add(1);
+        for name in [
+            "meta.json",
+            "pid",
+            "status",
+            "cancel-observed.json",
+            "cancel-request.json",
+        ] {
+            assert!(read_run(&run_dir, name, META_LIMIT).is_ok(), "{name}");
+            assert!(
+                read_run_owned(&run_dir, name, META_LIMIT, other_uid).is_err(),
+                "expected foreign owner rejection for {name}"
+            );
+        }
+        assert_eq!(status_for_owner(&run_dir, current_uid), ("done", Some(0)));
+        assert_eq!(status_for_owner(&run_dir, other_uid), ("running", None));
+        assert!(valid_cancel_observed_owned(&run_dir, op, current_uid));
+        assert!(!valid_cancel_observed_owned(&run_dir, op, other_uid));
+    }
+
+    #[test]
+    fn timestamps_do_not_follow_symlinks_and_ignore_non_regular_entries() {
+        use rustix::fs::{Timespec, Timestamps, utimensat};
+        use std::os::unix::fs::symlink;
+
+        let repo = TempDir::new("nofollow-stamps");
+        let outside = repo.0.join("outside.txt");
+        std::fs::write(&outside, "outside\n").unwrap();
+        let old_epoch = 1_700_000_000i64;
+        let old_ts = Timespec {
+            tv_sec: old_epoch as _,
+            tv_nsec: 0,
+        };
+        utimensat(
+            rfs::CWD,
+            &outside,
+            &Timestamps {
+                last_access: old_ts,
+                last_modification: old_ts,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+
+        let op = "consult-20261125T121500Z-12345678";
+        let run_dir = repo.0.join(RUN_ROOT).join(op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&run_dir)
+            .unwrap();
+        symlink(&outside, run_dir.join("prompt.txt")).unwrap();
+        symlink(&outside, run_dir.join("cancel-request.json")).unwrap();
+        symlink(&outside, run_dir.join("run.log")).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(run_dir.join("status"))
+            .unwrap();
+
+        let now = SystemTime::now();
+        let computed_age = age_at(&run_dir, now).expect("directory mtime fallback");
+        assert!(
+            computed_age < 60,
+            "prompt.txt symlink target mtime must not be followed: {computed_age}"
+        );
+        std::fs::remove_file(run_dir.join("prompt.txt")).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(run_dir.join("prompt.txt"))
+            .unwrap();
+        utimensat(
+            rfs::CWD,
+            run_dir.join("prompt.txt"),
+            &Timestamps {
+                last_access: old_ts,
+                last_modification: old_ts,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        assert!(
+            age_at(&run_dir, now).unwrap() < 60,
+            "non-regular prompt.txt directory entry must be ignored"
+        );
+
+        let fallback = "2026-11-25T12:15:00Z";
+        assert_eq!(updated_stamp(&run_dir, fallback), fallback);
+        let rows = list_peer_operations(&repo.0, 20, now);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].observed_updated_at, None);
+        assert_eq!(rows[0].updated_at, fallback);
+
+        std::fs::remove_file(run_dir.join("run.log")).unwrap();
+        std::fs::write(run_dir.join("run.log"), "regular log\n").unwrap();
+        let reg_epoch = 1_764_073_000i64;
+        let reg_ts = Timespec {
+            tv_sec: reg_epoch as _,
+            tv_nsec: 0,
+        };
+        utimensat(
+            rfs::CWD,
+            run_dir.join("run.log"),
+            &Timestamps {
+                last_access: reg_ts,
+                last_modification: reg_ts,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        let expected_iso = DateTime::<Utc>::from_timestamp(reg_epoch, 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        assert_eq!(updated_stamp(&run_dir, fallback), expected_iso);
     }
 }
