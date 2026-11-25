@@ -5,6 +5,7 @@ compile_error!("OMS panel supports Linux, WSL2 and macOS");
 
 mod acceptance;
 pub mod activity;
+pub mod board;
 pub mod cache;
 mod control;
 pub mod dispatch;

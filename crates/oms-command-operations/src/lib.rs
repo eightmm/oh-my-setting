@@ -9,6 +9,7 @@ mod help;
 mod incremental;
 pub mod lock;
 pub mod observation;
+pub mod peer_operations;
 pub mod projection;
 pub mod storage;
 pub mod value;
@@ -230,6 +231,21 @@ pub const NONTERMINAL_STATES: &[&str] = &[
     "review",
     "blocked",
 ];
+/// States in which a peer run is actively executing, as opposed to waiting or finished.
+pub const ACTIVE_STATES: &[&str] = &["queued", "starting", "working", "running", "verifying"];
+
+/// Order for capped activity lists: active work, then waiting or stalled, then finished.
+/// Every cap that can drop rows sorts by this first, so newer waiting or finished rows
+/// never push out an older active one.
+pub fn activity_rank(state: &str) -> u8 {
+    if ACTIVE_STATES.contains(&state) {
+        0
+    } else if TERMINAL_STATES.contains(&state) {
+        2
+    } else {
+        1
+    }
+}
 pub fn parse_ts(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     projection::stamp(&V::from(raw))
         .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))

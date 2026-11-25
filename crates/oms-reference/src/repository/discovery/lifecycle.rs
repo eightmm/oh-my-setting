@@ -335,9 +335,15 @@ impl Resolver {
         if interrupted.load(Ordering::Acquire) {
             return Err(Interrupted);
         }
-        report
-            .attempts
-            .sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+        // Active attempts precede waiting and finished ones so newer rows in review or
+        // done never push a still-running attempt out of the display window.
+        let rank = |a: &ObservedAttempt| oms_command_operations::activity_rank(&a.state);
+        report.attempts.sort_unstable_by(|a, b| {
+            rank(a)
+                .cmp(&rank(b))
+                .then(b.updated_at.cmp(&a.updated_at))
+                .then(a.id.cmp(&b.id))
+        });
         report.omitted_attempts = report.attempts.len().saturating_sub(DISPLAY_ROWS);
         report.attempts.truncate(DISPLAY_ROWS);
         Ok(report)
@@ -585,6 +591,50 @@ mod tests {
             (DISPLAY_ROWS, 2)
         );
         assert_eq!(report.attempts[0].source_id, report.sources[1].id);
+    }
+    #[test]
+    fn older_live_attempt_survives_newer_finished_ones() {
+        let f = Fixture::new("display-live");
+        let repo = f.repo("project");
+        let wt = f.scratch(&repo, "one");
+        fs::create_dir_all(repo.join(".oms/lifecycle")).unwrap();
+        let mut out = fs::File::create(repo.join(LEDGER)).unwrap();
+        // Newer attempts either finished (cancelled) or returned and wait in review; neither
+        // may push the older active attempt out of the window.
+        for n in 0..=DISPLAY_ROWS {
+            let id = format!("finished-{n}");
+            let path: &[&str] = if n % 2 == 0 {
+                &["queued", "cancelled"]
+            } else {
+                &["queued", "starting", "working", "review"]
+            };
+            out.write_all(
+                &row(&id, "peer-review", "2026-01-01T00:00:00Z")
+                    .json(false)
+                    .unwrap(),
+            )
+            .unwrap();
+            out.write_all(b"\n").unwrap();
+            for (seq, step) in path.windows(2).enumerate() {
+                let mut event = new_event(
+                    &id,
+                    (seq + 2).into(),
+                    "attempt.state_changed",
+                    obj([("from_state", step[0].into()), ("to_state", step[1].into())]),
+                )
+                .unwrap();
+                event.set("ts", format!("2026-01-01T00:00:0{}Z", seq + 1));
+                out.write_all(&event.json(false).unwrap()).unwrap();
+                out.write_all(b"\n").unwrap();
+            }
+        }
+        drop(out);
+        append(&wt, row("live", "peer-delegate", "2025-01-01T00:00:00Z"));
+        let report = observe(&f, &repo);
+        assert_eq!(report.attempts.len(), DISPLAY_ROWS);
+        assert_eq!(report.attempts[0].state, "queued");
+        assert_eq!(report.attempts[0].source_id, report.sources[1].id);
+        assert_eq!(report.attempts[1].state, "review");
     }
     #[test]
     fn usable_ledger_outranks_newer_empty_or_oversized_sources_and_still_requires_proof() {

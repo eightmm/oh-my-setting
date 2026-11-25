@@ -190,11 +190,13 @@ struct MainModel {
     read_size: u64,
     tokens: Option<u64>,
     tokens_retained: bool,
+    tokens_observed_at: Option<f64>,
 }
 
 struct MainObservation {
     model: Option<Value>,
     tokens: Option<Value>,
+    tokens_observed_at: Option<f64>,
 }
 
 fn rollout_ident(meta: &std::fs::Metadata) -> Option<((u64, u64), u64)> {
@@ -313,23 +315,25 @@ impl Session {
                 read_size: 0,
                 tokens: None,
                 tokens_retained: false,
+                tokens_observed_at: None,
             });
         }
         let entry = saved.as_mut()?;
         let stamp = oms_panel_core::cache::stamp(&entry.rollout);
         if entry.stamp != stamp {
             let checked = (|| {
-                let (ident, size) =
-                    rollout_ident(&std::fs::symlink_metadata(&entry.rollout).ok()?)?;
+                let meta = std::fs::symlink_metadata(&entry.rollout).ok()?;
+                let (ident, size) = rollout_ident(&meta)?;
                 if ident != entry.ident {
                     return None;
                 }
                 let header = rollout_header(&entry.rollout, (ident, size), &consumer)?;
-                let (model, tokens) = metrics::codex_turn_observations(&entry.rollout, &consumer)?;
+                let (model, tokens, tokens_at) =
+                    metrics::codex_turn_observations(&entry.rollout, &consumer)?;
                 (stamp == oms_panel_core::cache::stamp(&entry.rollout))
-                    .then_some((header, size, model, tokens))
+                    .then_some((header, size, tokens_at, model, tokens))
             })();
-            let Some((header, size, model, tokens)) = checked else {
+            let Some((header, size, tokens_at, model, tokens)) = checked else {
                 *saved = None;
                 return None;
             };
@@ -347,11 +351,14 @@ impl Session {
             if let Some(tokens) = tokens {
                 entry.tokens = Some(tokens);
                 entry.tokens_retained = false;
+                entry.tokens_observed_at = tokens_at;
             } else if entry.header.as_ref() == Some(&header) && size > entry.read_size {
                 entry.tokens_retained = entry.tokens.is_some();
+                entry.tokens_observed_at = None;
             } else {
                 entry.tokens = None;
                 entry.tokens_retained = false;
+                entry.tokens_observed_at = None;
             }
             entry.header = Some(header);
             entry.read_size = size;
@@ -368,6 +375,9 @@ impl Session {
                     "total":tokens,"source":source(entry.tokens_retained)
                 })
             }),
+            tokens_observed_at: (!entry.tokens_retained)
+                .then_some(entry.tokens_observed_at)
+                .flatten(),
         })
     }
     fn main_target(report: &Value) -> Option<(String, String, String, String)> {
@@ -618,7 +628,10 @@ pub(crate) fn snapshot_for(
         if let Some(model) = observation.model {
             snapshot.report["main_model_observation"] = model;
         }
-        if let Some(tokens) = observation.tokens {
+        if let Some(mut tokens) = observation.tokens {
+            if let Some(at) = observation.tokens_observed_at {
+                tokens["observed_at"] = json!(at);
+            }
             snapshot.report["main_token_observation"] = tokens;
         }
     }

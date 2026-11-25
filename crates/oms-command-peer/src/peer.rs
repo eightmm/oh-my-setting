@@ -742,6 +742,34 @@ fn call_route(
     Ok(route)
 }
 
+fn mcp_operation_id(repo: &Path, dir: &Path) -> Option<String> {
+    if let Ok(rest) = dir.strip_prefix(oms_command_operations::peer_operations::RUN_ROOT) {
+        let mut parts = rest.components();
+        if let Some(std::path::Component::Normal(op)) = parts.next()
+            && matches!(parts.next(), None | Some(std::path::Component::Normal(_)))
+            && parts.next().is_none()
+            && let Some(op_str) = op.to_str()
+            && oms_command_operations::peer_operations::is_mcp_operation_id(op_str)
+        {
+            return Some(op_str.to_owned());
+        }
+    }
+    let cancel_dir = std::env::var_os("OMS_PEER_CANCEL_DIR").map(PathBuf::from)?;
+    let rel = cancel_dir.strip_prefix(repo).ok()?;
+    let mut parts = rel
+        .strip_prefix(oms_command_operations::peer_operations::RUN_ROOT)
+        .ok()?
+        .components();
+    let std::path::Component::Normal(op) = parts.next()? else {
+        return None;
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    let op_str = op.to_str()?;
+    oms_command_operations::peer_operations::is_mcp_operation_id(op_str).then(|| op_str.to_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     tool: &str,
@@ -892,6 +920,9 @@ fn call_routed(
     let workdir = private.as_ref().map_or(repo, |tree| tree.path.as_path());
     let live_attempt = if repo.join(".oms").is_dir() && tool != "_synthesis" {
         let mut refs = obj([("artifact", artifact.to_string_lossy().into_owned().into())]);
+        if let Some(mcp_op) = mcp_operation_id(repo, dir) {
+            refs.set("mcp_operation", mcp_op);
+        }
         dispatch.peer_refs(&mut refs, &route, tool);
         let req = oms_command_operations::StartRequest {
             provider: route.provider.clone(),
@@ -1748,4 +1779,37 @@ fn agree(seats: &[Seat]) -> bool {
         })
         .collect::<Vec<_>>();
     keys.first().is_some_and(Option::is_some) && keys.windows(2).all(|p| p[0] == p[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_operation_id;
+    use std::path::Path;
+
+    #[test]
+    fn mcp_operation_id_links_downstream_consultation_artifact_dirs() {
+        let repo = Path::new("/tmp/oms-mcp-op-repo");
+        assert_eq!(
+            mcp_operation_id(
+                repo,
+                Path::new(".oms/artifacts/mcp/consult-20261125T120000Z-aabbccdd/answers")
+            ),
+            Some("consult-20261125T120000Z-aabbccdd".to_owned())
+        );
+        assert_eq!(
+            mcp_operation_id(
+                repo,
+                Path::new(".oms/artifacts/mcp/ask-20261125T120000Z-11223344/answers")
+            ),
+            Some("ask-20261125T120000Z-11223344".to_owned())
+        );
+        assert_eq!(
+            mcp_operation_id(repo, Path::new(".oms/artifacts/consult")),
+            None
+        );
+        assert_eq!(
+            mcp_operation_id(repo, Path::new(".oms/artifacts/mcp/not_an_mcp_id/answers")),
+            None
+        );
+    }
 }

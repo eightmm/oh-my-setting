@@ -635,15 +635,37 @@ fn snapshot_inner(
             }
         }
     }
+    let now_sys = std::time::SystemTime::now();
+    let now_epoch = now_sys
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let generated_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now_epoch, 0)
+        .map(|v| v.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default();
+    let (managed_scratch, scratch_peers) =
+        crate::scratch_activity::observe_with_peer_runs(repo, stop);
+    let attempt_lists = serde_json::json!({"active": active, "recent": recent});
+    let board = crate::board::project_with_scratch(
+        repo,
+        &room,
+        &attempt_lists,
+        &room_attempts,
+        &store,
+        &scratch_peers,
+        now_epoch,
+        now_sys,
+    );
     let report = serde_json::json!({
         "schema": 1,
-        "generated_at": crate::now(),
+        "generated_at": generated_at,
         "room": room,
         "plan": plan,
-        "attempts": {"active": active, "recent": recent},
+        "attempts": attempt_lists,
         "room_attempts": room_attempts,
         "room_dispatches": room_dispatches,
-        "managedScratch": crate::scratch_activity::observe(repo, stop),
+        "managedScratch": managed_scratch,
+        "board": board,
         "collection": {"ok": true},
         "capacity_stale": false
     });

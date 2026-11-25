@@ -31,6 +31,7 @@ pub struct ObservedAttempt {
     pub provider: Option<&'static str>,
     pub tool: Option<&'static str>,
     pub state: String,
+    pub created_at: String,
     pub updated_at: String,
 }
 
@@ -43,6 +44,9 @@ fn display(source: &str, value: V) -> Result<ObservedAttempt, ProjectionIssue> {
     let timestamp = projection::stamp(value.get("updated_at"))
         .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
         .ok_or(ProjectionIssue::Invalid)?;
+    let created = projection::stamp(value.get("created_at"))
+        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+        .unwrap_or(timestamp);
     let known = |field: &str, values: &'static [&'static str]| {
         let raw = value.get(field).text()?;
         values.iter().copied().find(|v| *v == raw)
@@ -73,6 +77,7 @@ fn display(source: &str, value: V) -> Result<ObservedAttempt, ProjectionIssue> {
             .filter(|state| projection::state(state))
             .ok_or(ProjectionIssue::Invalid)?
             .to_owned(),
+        created_at: created.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         updated_at: timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     })
 }

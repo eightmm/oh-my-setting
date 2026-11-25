@@ -1170,7 +1170,7 @@ pub fn codex_turn_model(path: &std::path::Path, consumer: &str) -> Option<String
 pub fn codex_turn_observations(
     path: &std::path::Path,
     consumer: &str,
-) -> Option<(Option<String>, Option<u64>)> {
+) -> Option<(Option<String>, Option<u64>, Option<f64>)> {
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::fs::MetadataExt;
     const MODEL_TAIL: u64 = 1024 * 1024;
@@ -1211,10 +1211,12 @@ pub fn codex_turn_observations(
         .zip(last)
         .and_then(|(start, end)| tail.get(start..end))
     else {
-        return Some((None, None));
+        return Some((None, None, None));
     };
     let mut model = None;
     let mut total_tokens = None;
+    // The usage record's own time; file mtime moves with any later append.
+    let mut tokens_at = None;
     for line in complete.rsplit(|&b| b == b'\n') {
         let is_turn = model.is_none() && line.windows(14).any(|s| s == b"\"turn_context\"");
         let is_usage =
@@ -1243,12 +1245,16 @@ pub fn codex_turn_observations(
             && row["payload"]["session_id"].as_str() == Some(id)
         {
             total_tokens = row["payload"]["thread_token_usage"]["total_tokens"].as_u64();
+            tokens_at = row["timestamp"]
+                .as_str()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.timestamp_millis() as f64 / 1000.0);
         }
         if model.is_some() && total_tokens.is_some() {
             break;
         }
     }
-    Some((model, total_tokens))
+    Some((model, total_tokens, tokens_at))
 }
 
 fn read_rate_limits(

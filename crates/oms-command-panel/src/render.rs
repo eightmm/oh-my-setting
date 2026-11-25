@@ -568,6 +568,8 @@ fn state_badge(state: &str) -> (String, &'static str) {
         "failed" | "guard_stop" | "orphaned" => ("[× failed]".into(), SGR_CORAL_BOLD),
         "timed_out" => ("[◷ timeout]".into(), SGR_CORAL_BOLD),
         "blocked" => ("[! blocked]".into(), SGR_AMBER_BOLD),
+        "stalled" => ("[! stalled]".into(), SGR_AMBER_BOLD),
+        "idle" => ("[· idle]".into(), SGR_MUTED),
         "waiting_input" | "waiting_approval" => ("[! wait]".into(), SGR_AMBER_BOLD),
         "" => ("[· -]".into(), SGR_MUTED),
         other => (format!("[· {}]", clean(other, 14)), SGR_MUTED),
@@ -1568,8 +1570,198 @@ fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Valu
             .and_then(|_| row["usage"]["duration_ms"].as_f64()),"refs":refs})
 }
 
+fn main_token_observation_is_live(
+    report: &Value,
+    call: &Value,
+    board_main: &Value,
+    attempt_id: &str,
+) -> bool {
+    use oms_panel_core::metrics::{READING_FRESH_SECONDS, stamp};
+
+    if report["collection"]["pending"] == true {
+        return false;
+    }
+    let obs = &report["main_token_observation"];
+    if obs["attempt"] != attempt_id
+        || obs["source"].as_str() != Some("rollout")
+        || !obs["total"].as_u64().is_some_and(|t| t > 0)
+    {
+        return false;
+    }
+    let room_id = text(&report["room"], "id");
+    if !obs["room"].is_null() && !room_id.is_empty() && obs["room"] != room_id {
+        return false;
+    }
+    let participant = text(call, "participant");
+    if !obs["participant"].is_null() && !participant.is_empty() && obs["participant"] != participant
+    {
+        return false;
+    }
+    let Some(now) = stamp(&report["generated_at"]).filter(|t| t.is_finite() && *t >= 0.0) else {
+        return false;
+    };
+    let Some(observed_at) = stamp(&obs["observed_at"])
+        .or_else(|| stamp(&obs["updated_at"]))
+        .or_else(|| stamp(&obs["ts"]))
+        .filter(|t| t.is_finite() && (0.0..=now).contains(t))
+    else {
+        return false;
+    };
+    if now - observed_at > READING_FRESH_SECONDS {
+        return false;
+    }
+    let idle_at = stamp(&board_main["idle_at"])
+        .or_else(|| stamp(&call["updated_at"]))
+        .or_else(|| stamp(&call["created_at"]));
+    if board_main["hook_state"] == "idle" && idle_at.is_none() {
+        return false;
+    }
+    idle_at.is_none_or(|idle| observed_at > idle)
+}
+
+/// `provider_activity` describes separate Lead panes, never the panel Main, so only native
+/// children bound to this Main's participant count as its live activity.
+fn panel_main_has_live_children(report: &Value, call: &Value) -> bool {
+    if report["collection"]["pending"] == true {
+        return false;
+    }
+    let participant = text(call, "participant");
+    rows(&report["native_children"]).iter().any(|child| {
+        !participant.is_empty()
+            && text(child, "parent") == participant
+            && (oms_panel_core::state::LIVE_STATES.contains(&text(child, "state"))
+                || child["seen_at"].is_u64()
+                || child["codex_recent_creation"].is_object())
+    })
+}
+
+fn apply_board_projection(report: &Value, all: &mut Vec<Value>) {
+    if report["collection"]["ok"] != true || report["capacity_stale"] == true {
+        return;
+    }
+    let board = &report["board"];
+    if !board.is_object() {
+        return;
+    }
+    let board_main = &board["main"];
+    let idle_attempt = text(board_main, "panel_main_attempt");
+    if board_main["panel_main_state"] == "idle" && !idle_attempt.is_empty() {
+        let explicit_idle_hook = board_main["hook_state"] == "idle";
+        for call in all.iter_mut() {
+            if call["role"] == "main" && text(call, "attempt") == idle_attempt {
+                let fresh_tokens =
+                    main_token_observation_is_live(report, call, board_main, idle_attempt);
+                if fresh_tokens
+                    || (!explicit_idle_hook && panel_main_has_live_children(report, call))
+                {
+                    continue;
+                }
+                call["state"] = json!("idle");
+                call["board_idle_main"] = json!(true);
+                if text(call, "title") == oms_panel_core::board::UNRECORDED_NATIVE_TASK {
+                    call["title"] = json!(if board_main["external_work_active"] == true {
+                        "Idle · active work from external Main"
+                    } else {
+                        "Idle · task not recorded"
+                    });
+                }
+            }
+        }
+    }
+    for row in rows(&board["activity"]) {
+        let op = text(row, "operation");
+        if !op.is_empty() {
+            let prefix = format!(".oms/artifacts/mcp/{op}/");
+            all.retain(|call| {
+                call["joined"].is_boolean()
+                    || (text(&call["refs"], "mcp_operation") != op
+                        && !text(&call["refs"], "artifact").starts_with(&prefix))
+            });
+        }
+        let aid = text(row, "attempt_id");
+        let worktree = text(row, "worktree");
+        let provider = text(row, "provider");
+        let tool = text(row, "tool");
+        let raw_role = text(row, "role");
+        let state = text(row, "state");
+        let elapsed = text(row, "elapsed");
+        let raw_title = text(row, "title");
+        let task_summary = if raw_title.is_empty() || raw_title == tool {
+            format!("{provider} {tool}")
+        } else {
+            format!("{provider} {tool} · {raw_title}")
+        };
+        if !aid.is_empty()
+            && let Some(existing) = all.iter_mut().find(|call| text(call, "attempt") == aid)
+        {
+            if existing["joined"].is_boolean() {
+                if !worktree.is_empty() && text(existing, "worktree").is_empty() {
+                    existing["worktree"] = json!(worktree);
+                }
+            } else if !worktree.is_empty() {
+                existing["worktree"] = json!(worktree);
+                existing["alias"] = json!(worktree);
+                existing["display_role"] = json!(if raw_role.is_empty() {
+                    "worker"
+                } else {
+                    raw_role
+                });
+                existing["refs"]["panel_alias"] = json!(worktree);
+                existing["title"] = json!(task_summary);
+            }
+            if known_elapsed(existing).is_empty() && !elapsed.is_empty() {
+                existing["board_elapsed"] = json!(elapsed);
+            }
+            continue;
+        }
+        let base_role = match raw_role {
+            "reviewer" => "reviewer",
+            "advisor" => "advisor",
+            _ => "worker",
+        };
+        let display_role = if raw_role.is_empty() {
+            base_role
+        } else {
+            raw_role
+        };
+        let row_id = text(row, "id");
+        let participant = if row_id.is_empty() {
+            format!("peer:{provider}:{worktree}:{tool}")
+        } else {
+            format!("peer:{row_id}")
+        };
+        all.push(json!({
+            "participant": participant,
+            "attempt": "",
+            "tool": tool,
+            "task_id": "",
+            "role": base_role,
+            "display_role": display_role,
+            "provider": provider,
+            "model": text(row, "model"),
+            "observed_model": text(row, "model"),
+            "purpose": "",
+            "alias": worktree,
+            "worktree": worktree,
+            "title": task_summary,
+            "parent": "",
+            "state": state,
+            "updated_at": row["updated_at"],
+            "created_at": row["started_at"],
+            "started_at": row["started_at"],
+            "board_elapsed": if elapsed.is_empty() { "—" } else { elapsed },
+            "board_activity_only": true,
+            "refs": {
+                "panel_alias": worktree,
+                "worktree": worktree,
+            }
+        }));
+    }
+}
+
 pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
     let mut all = calls(report);
+    apply_board_projection(report, &mut all);
     let main_id = overall_main(&report["room"], &all).map(|call| {
         (
             text(call, "participant").to_owned(),
@@ -1617,7 +1809,9 @@ fn room_main_id(room: &Value) -> &str {
 
 /// The Board's pinned Overall Main, not an earlier or competing main-role row.
 pub(crate) fn pinned_main(report: &Value) -> Option<Value> {
-    overall_main(&report["room"], &calls(report)).cloned()
+    let mut all = calls(report);
+    apply_board_projection(report, &mut all);
+    overall_main(&report["room"], &all).cloned()
 }
 
 pub(crate) fn is_overall_main(report: &Value, call: &Value) -> bool {
@@ -1642,8 +1836,10 @@ fn overall_main<'a>(room: &Value, calls: &'a [Value]) -> Option<&'a Value> {
             .find(|call| call["participant"] == id)
             .or_else(|| mains.find(|call| call["attempt"] == id));
     }
-    let mut active =
-        mains.filter(|call| oms_panel_core::state::LIVE_STATES.contains(&text(call, "state")));
+    let mut active = mains.filter(|call| {
+        oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
+            || call["board_idle_main"] == true
+    });
     active.next().filter(|_| active.next().is_none())
 }
 
@@ -1665,7 +1861,8 @@ fn direct_work<'a>(
         || main["participant"] != owner
         || main["joined"] != true
         || main_attempt.is_empty()
-        || !oms_panel_core::state::LIVE_STATES.contains(&text(main, "state"))
+        || (!oms_panel_core::state::LIVE_STATES.contains(&text(main, "state"))
+            && main["board_idle_main"] != true)
         || attempt["attempt_id"] != main_attempt
         || attempt["tool"] != "panel-main"
         || attempt["terminal"] != false
@@ -2846,7 +3043,11 @@ fn frame_with_capacity(
         columns
     };
     let mut all = calls(report);
+    apply_board_projection(report, &mut all);
     let attention = attention::items(report, read);
+    let board_main = (report["collection"]["ok"] == true && report["capacity_stale"] != true)
+        .then(|| &report["board"]["main"])
+        .filter(|m| m.is_object());
     let main_id = overall_main(&report["room"], &all).map(|call| {
         (
             text(call, "participant").to_owned(),
@@ -2913,6 +3114,7 @@ fn frame_with_capacity(
         render_main_section(
             plan.as_ref(),
             pinned,
+            board_main,
             main_selected,
             columns,
             cards,
@@ -4686,6 +4888,9 @@ fn project_agy_roster_match(call: &Value, roster_child: &Value) -> Value {
 }
 
 fn register_call(hits: &mut BTreeMap<usize, (String, String)>, row: usize, call: &Value) {
+    if call["board_activity_only"] == true {
+        return;
+    }
     let participant = text(call, "participant");
     if !participant.is_empty() {
         hits.insert(
@@ -5410,7 +5615,17 @@ fn checkout_line(
                 .then(|| valid_checkout_label(proof))
                 .flatten()
         }
-        .unwrap_or_else(|| "Checkout unknown".to_owned())
+        .unwrap_or_else(|| {
+            if main["board_idle_main"] == true
+                && report["board"]["main"]["external_work_active"] == true
+            {
+                let summary = text(&report["board"]["main"], "summary");
+                if !summary.is_empty() {
+                    return summary.to_owned();
+                }
+            }
+            "Checkout unknown".to_owned()
+        })
     } else {
         "Checkout unknown".to_owned()
     };
@@ -5455,6 +5670,7 @@ struct MainSection {
 fn render_main_section(
     plan: Option<&PlanProgress>,
     main: Option<&Value>,
+    board_main: Option<&Value>,
     selected: bool,
     columns: usize,
     use_cards: bool,
@@ -5463,7 +5679,9 @@ fn render_main_section(
     compact_goal: bool,
     goal_first: bool,
 ) -> MainSection {
-    if main.is_none() && plan.is_none() {
+    let external_only =
+        main.is_none() && board_main.is_some_and(|m| m["external_work_active"] == true);
+    if main.is_none() && plan.is_none() && !external_only {
         return MainSection::default();
     }
     let model = main
@@ -5481,7 +5699,20 @@ fn render_main_section(
     let provider = main
         .map(|call| provider_label(text(call, "provider")))
         .unwrap_or("");
-    let state = main.map(|call| text(call, "state")).unwrap_or("");
+    let state_owned: String;
+    let state = if let Some(call) = main {
+        let s = text(call, "state");
+        if s == "idle" && board_main.is_some_and(|m| m["external_work_active"] == true) {
+            state_owned = "idle · external".to_owned();
+            state_owned.as_str()
+        } else {
+            s
+        }
+    } else if external_only {
+        "external"
+    } else {
+        ""
+    };
     let mut goal = plan.map_or_else(Vec::new, |plan| {
         render_goal(
             plan,
@@ -5527,8 +5758,18 @@ fn render_main_section(
         switch_cols = cols;
         out.push(top);
     }
+    let external_summary = board_main.map(|m| text(m, "summary")).unwrap_or("");
     let identity = if main.is_none() {
-        "No active Main".to_owned()
+        if external_only {
+            let active = board_main.map(|m| text(m, "active_main")).unwrap_or("");
+            if !active.is_empty() && active != "external" {
+                format!("External Main ({})", provider_label(active))
+            } else {
+                "External Main".to_owned()
+            }
+        } else {
+            "No active Main".to_owned()
+        }
     } else if use_cards {
         [provider, model.as_str()]
             .into_iter()
@@ -5549,21 +5790,38 @@ fn render_main_section(
     };
     let marker = if selected { "▸ " } else { "  " };
     let inner = columns - if use_cards { 4 } else { 0 };
-    let mut right = main.map_or_else(Vec::new, |call| {
-        let identity_width = width(&identity);
-        let identity_reserve = if !use_cards && columns < 28 {
-            // Keep "Main" and a model hint beside the complete compact total.
-            identity_width.min(10)
-        } else {
-            identity_width.min(18)
-        };
-        token_span(
-            call,
-            left_budget(inner, width(marker) + identity_reserve),
-            columns,
-            use_cards,
-        )
-    });
+    let mut right = main.map_or_else(
+        || {
+            if external_only
+                && let Some(count) = board_main.and_then(|m| m["external_running_count"].as_u64())
+                && count > 0
+                && columns >= 48
+            {
+                vec![Span::raw(
+                    format!("{count} peer active"),
+                    inner / 3,
+                    Some(SGR_CYAN),
+                )]
+            } else {
+                Vec::new()
+            }
+        },
+        |call| {
+            let identity_width = width(&identity);
+            let identity_reserve = if !use_cards && columns < 28 {
+                // Keep "Main" and a model hint beside the complete compact total.
+                identity_width.min(10)
+            } else {
+                identity_width.min(18)
+            };
+            token_span(
+                call,
+                left_budget(inner, width(marker) + identity_reserve),
+                columns,
+                use_cards,
+            )
+        },
+    );
     if !use_cards
         && !state.is_empty()
         && width(marker) + width(&identity) + width(state) + spans_width(&right) + 3 <= inner
@@ -5580,14 +5838,19 @@ fn render_main_section(
     if !identity.is_empty() {
         left.push(Span::raw(identity, columns, Some(SGR_AMBER_BOLD)));
     }
-    if let Some(call) = main
-        && let title = text(call, "title")
-        && !title.is_empty()
-    {
+    if let Some(call) = main {
+        let title = text(call, "title");
+        if !title.is_empty() {
+            if left.len() > 1 {
+                left.push(Span::literal(" · ", Some(SGR_MUTED)));
+            }
+            left.push(Span::raw(title, columns, Some(SGR_TEXT)));
+        }
+    } else if external_only && !external_summary.is_empty() {
         if left.len() > 1 {
             left.push(Span::literal(" · ", Some(SGR_MUTED)));
         }
-        left.push(Span::raw(title, columns, Some(SGR_TEXT)));
+        left.push(Span::raw(external_summary, columns, Some(SGR_TEXT)));
     }
     out.push(card_row_lr(
         left,
@@ -16416,6 +16679,370 @@ mod tests {
                 &attention::items(&contradictory, &BTreeMap::new()),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn board_projects_external_peer_delegate_activity_and_honest_main_summary() {
+        use oms_panel_core::services::{
+            CommandOutput, ExecutionRequest, NativeCommand, PeerExecutor, Services,
+        };
+        use std::ffi::OsString;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        struct TempFixture(std::path::PathBuf);
+        impl TempFixture {
+            fn new(label: &str) -> Self {
+                let id = SEQ.fetch_add(1, Ordering::Relaxed);
+                let dir = std::env::temp_dir().join(format!(
+                    "oms-panel-ext-main-{label}-{}-{id}",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .recursive(true)
+                    .create(&dir)
+                    .unwrap();
+                Self(std::fs::canonicalize(&dir).unwrap_or(dir))
+            }
+        }
+        impl Drop for TempFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        struct FixtureServices {
+            attempts: Value,
+            room: Value,
+        }
+        impl PeerExecutor for FixtureServices {
+            fn execute(
+                &self,
+                _: &ExecutionRequest,
+                _: &AtomicBool,
+            ) -> oms_panel_core::Result<CommandOutput> {
+                Err(oms_panel_core::Error::new("unexpected subprocess"))
+            }
+        }
+        impl Services for FixtureServices {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &std::path::Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> oms_panel_core::Result<CommandOutput> {
+                let value = match command {
+                    NativeCommand::Events => &self.attempts,
+                    NativeCommand::Room => &self.room,
+                    _ => return Err(oms_panel_core::Error::new("unexpected command")),
+                };
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(value).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+
+        let fixture = TempFixture::new("peer-delegate-no-room");
+        let stop = AtomicBool::new(false);
+        let now_epoch = oms_panel_core::timestamp() as i64;
+        let started_epoch = now_epoch.saturating_sub(37);
+        let started_iso = chrono::DateTime::<chrono::Utc>::from_timestamp(started_epoch, 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let compact = chrono::DateTime::<chrono::Utc>::from_timestamp(started_epoch, 0)
+            .unwrap()
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string();
+        let op = format!("peer-delegate-{compact}-feedface");
+        let run_dir = fixture
+            .0
+            .join(oms_command_operations::peer_operations::RUN_ROOT)
+            .join(&op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&run_dir)
+            .unwrap();
+        std::fs::write(run_dir.join("prompt.txt"), "Run peer-delegate check\n").unwrap();
+        std::fs::write(run_dir.join("pid"), format!("{}\n", std::process::id())).unwrap();
+        std::fs::write(
+            run_dir.join("meta.json"),
+            json!({
+                "operation": op,
+                "kind": "peer-delegate",
+                "targets": ["codex"],
+                "worktree": "wt-465-check",
+                "started_at": started_iso,
+                "title": "Show external peer work"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // 1. No Room, no panel Main: running peer-delegate appears as Activity row
+        // with provider, worktree, state and elapsed time, and Main summary reports external Main.
+        let no_room = oms_panel_core::state::snapshot(
+            &fixture.0,
+            None,
+            &FixtureServices {
+                attempts: json!([]),
+                room: json!({}),
+            },
+            &stop,
+        )
+        .unwrap();
+        let rendered = frame(
+            &no_room.report,
+            &navigation::Navigation::default(),
+            116,
+            24,
+            &BTreeMap::new(),
+        )
+        .join("\n");
+        let elapsed = text(&no_room.report["board"]["activity"][0], "elapsed");
+        assert!(!elapsed.is_empty(), "{rendered}");
+        assert!(rendered.contains("Overall Main"), "{rendered}");
+        assert!(
+            rendered.contains("No panel Main · work from external Main"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Codex · Activity"), "{rendered}");
+        assert!(rendered.contains("wt-465-check"), "{rendered}");
+        assert!(rendered.contains("codex peer-delegate"), "{rendered}");
+        assert!(rendered.contains("[⟳ run]"), "{rendered}");
+        assert!(rendered.contains(elapsed), "{rendered}");
+        assert!(
+            !rendered.contains(oms_panel_core::board::UNRECORDED_NATIVE_TASK),
+            "{rendered}"
+        );
+
+        // 2. Idle Codex panel Main ("Native task not recorded", no checkout) while external
+        // peer-delegate / peer-review run: panel Main is shown idle, never as working.
+        let idle_main = json!({
+            "attempt_id": "att_idle_panel",
+            "tool": "panel-main",
+            "provider": "codex",
+            "state": "working",
+            "terminal": false,
+            "created_at": started_iso,
+            "updated_at": started_iso,
+            "refs": {
+                "panel_role": "main",
+                "panel_room_id": "room-idle",
+                "panel_label": oms_panel_core::board::UNRECORDED_NATIVE_TASK
+            }
+        });
+        let external_review = json!({
+            "attempt_id": "att_ext_review",
+            "tool": "peer-review",
+            "provider": "claude",
+            "state": "working",
+            "terminal": false,
+            "created_at": started_iso,
+            "updated_at": started_iso,
+            "refs": {
+                "worktree": "wt-465-gate",
+                "panel_label": "peer-review (claude)"
+            }
+        });
+        let with_idle = oms_panel_core::state::snapshot(
+            &fixture.0,
+            Some("room-idle"),
+            &FixtureServices {
+                attempts: json!([idle_main, external_review]),
+                room: json!({
+                    "id": "room-idle",
+                    "closed": false,
+                    "owner": "att_idle_panel",
+                    "main": "att_idle_panel",
+                    "participants": [{
+                        "participant": "att_idle_panel",
+                        "attempt": "att_idle_panel",
+                        "role": "main",
+                        "provider": "codex",
+                        "state": "working",
+                        "joined": true
+                    }]
+                }),
+            },
+            &stop,
+        )
+        .unwrap();
+        let idle_board = frame(
+            &with_idle.report,
+            &navigation::Navigation::default(),
+            116,
+            28,
+            &BTreeMap::new(),
+        )
+        .join("\n");
+        assert!(idle_board.contains("idle · external"), "{idle_board}");
+        assert!(
+            idle_board.contains("Panel Main (Codex) idle · work from external Main"),
+            "{idle_board}"
+        );
+        assert!(
+            !idle_board.contains(oms_panel_core::board::UNRECORDED_NATIVE_TASK),
+            "{idle_board}"
+        );
+        assert!(!idle_board.contains("Checkout unknown"), "{idle_board}");
+        assert!(idle_board.contains("wt-465-check"), "{idle_board}");
+        assert!(idle_board.contains("wt-465-gate"), "{idle_board}");
+        let visible_rows = visible(&with_idle.report, &navigation::Navigation::default());
+        assert_eq!(visible_rows[0]["role"], "main");
+        assert_eq!(visible_rows[0]["state"], "idle");
+        assert!(is_overall_main(&with_idle.report, &visible_rows[0]));
+        assert_eq!(
+            pinned_main(&with_idle.report).map(|m| m["state"].clone()),
+            Some(json!("idle"))
+        );
+        let summary = main_summary(&visible_rows[0]);
+        assert!(
+            summary.iter().any(|(k, v)| *k == "State" && v == "idle"),
+            "{summary:?}"
+        );
+
+        // 3. A busy separate Lead pane of the same provider is not Main activity, but a live
+        // native child bound to the Main keeps it working.
+        let mut lead_busy = with_idle.report.clone();
+        lead_busy["provider_activity"] = json!({"codex": "working"});
+        let lead_rows = visible(&lead_busy, &navigation::Navigation::default());
+        assert_eq!(lead_rows[0]["role"], "main");
+        assert_eq!(lead_rows[0]["state"], "idle");
+        let mut live_pane_report = with_idle.report.clone();
+        live_pane_report["native_children"] =
+            json!([{"participant": "child-1", "parent": "att_idle_panel", "state": "working"}]);
+        let live_rows = visible(&live_pane_report, &navigation::Navigation::default());
+        assert_eq!(live_rows[0]["role"], "main");
+        assert_eq!(live_rows[0]["state"], "working");
+
+        // 4. Retained historical or stale token totals never override an idle Main;
+        // only a fresh rollout observation newer than the idle evidence marks Main working.
+        let report_now = oms_panel_core::metrics::stamp(&with_idle.report["generated_at"]).unwrap();
+        for stale_obs in [
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout-last",
+                "observed_at": report_now - 2.0,
+            }),
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout",
+            }),
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout",
+                "observed_at": (started_epoch - 10) as f64,
+            }),
+            json!({
+                "room": "room-idle",
+                "participant": "att_idle_panel",
+                "attempt": "att_idle_panel",
+                "total": 85_000u64,
+                "source": "rollout",
+                "observed_at": report_now - oms_panel_core::metrics::READING_FRESH_SECONDS - 5.0,
+            }),
+        ] {
+            let mut candidate = with_idle.report.clone();
+            candidate["board"]["main"]["idle_at"] = json!(report_now - 700.0);
+            if stale_obs["observed_at"].as_f64() == Some((started_epoch - 10) as f64) {
+                candidate["board"]["main"]["idle_at"] = json!(started_epoch as f64);
+            }
+            candidate["main_token_observation"] = stale_obs.clone();
+            let rows = visible(&candidate, &navigation::Navigation::default());
+            assert_eq!(
+                rows[0]["state"], "idle",
+                "unexpected working override for {stale_obs}"
+            );
+        }
+
+        let mut fresh_token_report = with_idle.report.clone();
+        fresh_token_report["main_token_observation"] = json!({
+            "room": "room-idle",
+            "participant": "att_idle_panel",
+            "attempt": "att_idle_panel",
+            "total": 85_000u64,
+            "source": "rollout",
+            "observed_at": report_now - 5.0,
+        });
+        let fresh_rows = visible(&fresh_token_report, &navigation::Navigation::default());
+        assert_eq!(fresh_rows[0]["state"], "working");
+
+        // 5. Unroomed MCP consultation with downstream lifecycle attempt renders once.
+        let consult_op = format!("consult-{compact}-9988aabb");
+        let consult_dir = fixture
+            .0
+            .join(oms_command_operations::peer_operations::RUN_ROOT)
+            .join(&consult_op);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&consult_dir)
+            .unwrap();
+        std::fs::write(consult_dir.join("prompt.txt"), "Single row check\n").unwrap();
+        std::fs::write(consult_dir.join("pid"), format!("{}\n", std::process::id())).unwrap();
+        std::fs::write(
+            consult_dir.join("meta.json"),
+            json!({
+                "operation": consult_op,
+                "kind": "consult",
+                "targets": ["claude"],
+                "started_at": started_iso,
+                "title": "Single row check"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let consult_attempt = json!({
+            "attempt_id": "att_mcp_consult_dup",
+            "tool": "consult",
+            "provider": "claude",
+            "state": "working",
+            "terminal": false,
+            "created_at": started_iso,
+            "updated_at": started_iso,
+            "refs": {
+                "mcp_operation": consult_op,
+                "artifact": format!(".oms/artifacts/mcp/{consult_op}/answers/claude-call.md"),
+                "panel_role": "advisor"
+            }
+        });
+        let dedup_snap = oms_panel_core::state::snapshot(
+            &fixture.0,
+            None,
+            &FixtureServices {
+                attempts: json!([consult_attempt]),
+                room: json!({}),
+            },
+            &stop,
+        )
+        .unwrap();
+        let dedup_visible = visible(&dedup_snap.report, &navigation::Navigation::default());
+        assert_eq!(
+            dedup_visible
+                .iter()
+                .filter(|r| r["tool"] == "consult")
+                .count(),
+            1,
+            "{dedup_visible:?}"
         );
     }
 }

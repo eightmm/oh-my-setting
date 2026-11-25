@@ -116,6 +116,20 @@ impl Store {
             decode(&bytes, maximum).map(Some)
         }
     }
+    /// Reads a single-link file owned by the current user; a missing file is `None`.
+    pub fn json_owned(&self, relative: &Path, maximum: usize) -> Result<Option<Value>> {
+        path(relative)?;
+        let policy = oms_safe_fs::Policy {
+            single_link: true,
+            owner: Some(rustix::process::getuid().as_raw()),
+            max_components: None,
+        };
+        match self.root.read_path(relative, maximum, policy) {
+            Ok(bytes) => decode(&bytes, maximum).map(Some),
+            Err(oms_safe_fs::Error::Missing) => Ok(None),
+            Err(e) => Err(Error::new(format!("panel read refused: {e:?}"))),
+        }
+    }
     /// Direct flock shares the Python panel lock, independent of the shell lock selector.
     pub fn transaction(&self, name: &str, timeout: Duration) -> Result<Transaction<'_>> {
         identifier(name)?;
