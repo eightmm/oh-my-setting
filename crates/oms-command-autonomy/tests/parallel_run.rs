@@ -28,6 +28,9 @@ fn scrubbed_child(name: &str) -> bool {
         return false;
     }
     let mut command = Command::new(std::env::current_exe().unwrap());
+    if let Some(timeout) = std::env::var_os("OMS_TEST_CALL_TIMEOUT") {
+        command.env("PARALLEL_TEST_CALL_TIMEOUT", timeout);
+    }
     for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
         command.env_remove(key);
     }
@@ -81,6 +84,16 @@ fn group(gid: u32) -> oms_command_plan::Result<GroupMembership> {
     })
 }
 
+fn call_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("PARALLEL_TEST_CALL_TIMEOUT")
+            .or_else(|_| std::env::var("OMS_TEST_CALL_TIMEOUT"))
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(120),
+    )
+}
+
 #[derive(Default)]
 struct ReviewRace {
     state: Mutex<ReviewRaceState>,
@@ -100,7 +113,7 @@ impl ReviewRace {
         self.wake.notify_all();
         let (state, _) = self
             .wake
-            .wait_timeout_while(state, Duration::from_secs(20), |s| !s.resume_reader)
+            .wait_timeout_while(state, call_timeout(), |s| !s.resume_reader)
             .unwrap();
         assert!(
             state.resume_reader,
@@ -112,7 +125,7 @@ impl ReviewRace {
         let state = self.state.lock().unwrap();
         let (state, _) = self
             .wake
-            .wait_timeout_while(state, Duration::from_secs(20), |s| !s.reader_open)
+            .wait_timeout_while(state, call_timeout(), |s| !s.reader_open)
             .unwrap();
         assert!(state.reader_open, "reader never opened the Plan");
         drop(state);
@@ -133,13 +146,33 @@ impl ReviewRace {
     }
 }
 
+#[derive(Default)]
+struct SelectionRace {
+    armed: AtomicBool,
+    race: Arc<ReviewRace>,
+}
+
 thread_local! {
+    static SELECTION_READER: RefCell<Option<(Arc<SelectionRace>, bool)>> = const { RefCell::new(None) };
     static RACE_READER: RefCell<Option<(Arc<ReviewRace>, bool)>> = const { RefCell::new(None) };
 }
 
 fn group_with_review_race(gid: u32) -> oms_command_plan::Result<GroupMembership> {
     // Only the Plan file is group-writable. Its second group proof occurs
     // after the Plan reader has opened the file and sampled its inode.
+    SELECTION_READER.with(|reader| {
+        let mut reader = reader.borrow_mut();
+        if let Some((race, seen)) = reader.as_mut()
+            && race.armed.load(Ordering::SeqCst)
+        {
+            if *seen {
+                let race = reader.take().unwrap().0;
+                race.race.reader_opened();
+            } else {
+                *seen = true;
+            }
+        }
+    });
     let opened = RACE_READER.with(|reader| {
         let mut reader = reader.borrow_mut();
         match reader.as_mut() {
@@ -172,14 +205,17 @@ struct Mock {
     live: AtomicUsize,
     plan: Mutex<()>,
     review_race: Option<Arc<ReviewRace>>,
+    selection_race: Option<Arc<SelectionRace>>,
 }
 impl oms_command_plan::Services for Mock {
     fn group_membership_resolver(&self) -> Option<GroupResolver> {
-        Some(if self.review_race.is_some() {
-            group_with_review_race
-        } else {
-            group
-        })
+        Some(
+            if self.review_race.is_some() || self.selection_race.is_some() {
+                group_with_review_race
+            } else {
+                group
+            },
+        )
     }
 }
 impl Mock {
@@ -206,7 +242,7 @@ impl Mock {
         task["lease_id"].as_str().unwrap().to_owned()
     }
     fn wait_for(&self, predicate: impl Fn(&[String]) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + call_timeout();
         let mut started = self.started.lock().unwrap();
         while !predicate(&started) {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -335,7 +371,21 @@ impl Mock {
                 free_lock = Some(race);
             }
         }
+        if let Some(race) = &self.selection_race
+            && id == "r2"
+        {
+            if race.race.reader_holds_lock(&call.cwd) {
+                race.race.resume_reader();
+            } else {
+                free_lock = Some(&race.race);
+            }
+        }
         self.review(call, &plan, &issued, &running.unwrap());
+        if let Some(race) = &self.selection_race
+            && id == "r1"
+        {
+            race.armed.store(true, Ordering::SeqCst);
+        }
         if let Some(race) = free_lock {
             race.resume_reader();
         }
@@ -561,10 +611,17 @@ fn review_backlog_stops_claims_drains_in_flight_and_exits_three() {
     let repo = fixture(&[("r1", "a/"), ("r2", "b/"), ("r3", "c/")]);
     // Both writers start before either can reach review, so the backlog limit
     // is first observed only after the first review lands.
+    for relative in ["", ".oms", ".oms/plan"] {
+        fs::set_permissions(repo.0.join(relative), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(repo.0.join(ACTIVE), fs::Permissions::from_mode(0o660)).unwrap();
+    let race = Arc::new(SelectionRace::default());
     let mock = Mock {
         rendezvous: 2,
+        selection_race: Some(race.clone()),
         ..Mock::default()
     };
+    SELECTION_READER.with(|reader| reader.replace(Some((race, false))));
     let (code, out, err) = run(
         &repo,
         &mock,

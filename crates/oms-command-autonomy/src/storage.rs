@@ -97,6 +97,16 @@ impl<'a> Context<'a> {
             stderr: out.stderr,
         })
     }
+    pub fn ready_snapshot(&self) -> Result<crate::Output> {
+        checkpoint(self.interrupted)?;
+        let _gate = self.gates.map(Gates::plan);
+        let out = self.plan()?.ready_with_locked_snapshot()?;
+        Ok(crate::Output {
+            code: out.code,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
     pub fn plan_value(&self) -> Result<Value> {
         let _gate = self.gates.map(Gates::plan);
         value::from_plan(&self.plan()?.load()?.plan)
