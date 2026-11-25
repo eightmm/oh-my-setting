@@ -282,19 +282,6 @@ enum ResolvedEffort<'a> {
     None,
 }
 
-fn is_agy_suffixed_selector(model: &str) -> bool {
-    model
-        .rsplit_once('-')
-        .is_some_and(|(base, suffix)| !base.is_empty() && native_model::EFFORTS.contains(&suffix))
-}
-
-fn agy_base_model(model: &str) -> &str {
-    model
-        .rsplit_once('-')
-        .filter(|(base, suffix)| !base.is_empty() && native_model::EFFORTS.contains(suffix))
-        .map_or(model, |(base, _)| base)
-}
-
 pub(crate) fn resolve_route_model(
     evidence: Option<&ProviderEvidence>,
     provider: &str,
@@ -313,7 +300,7 @@ pub(crate) fn resolve_route_model(
             .cloned()
             .ok_or("model_effort_unavailable");
     }
-    if is_agy_suffixed_selector(model) {
+    if native_model::is_agy_suffixed_selector(model) {
         return Ok(model.to_owned());
     }
     Err("catalog_selector_unknown")
@@ -907,12 +894,12 @@ pub fn routable_route_model(
         .collect();
     let mut candidates: Vec<_> = families.iter().filter(|(_, f)| f.0 == family).collect();
     if provider == "antigravity" {
-        if !is_agy_suffixed_selector(configured) {
+        if !native_model::is_agy_suffixed_selector(configured) {
             let base_families: Vec<(&str, (String, Vec<u64>))> = catalog
                 .iter()
                 .filter(|v| native_model::fixed_effort_model(provider, v).is_none())
                 .filter_map(|v| {
-                    let base = agy_base_model(v);
+                    let base = native_model::agy_base_model(v);
                     route_family(provider, base).map(|f| (base, f))
                 })
                 .collect();
@@ -1249,7 +1236,7 @@ fn allocate_ranked(
         if inputs.requested_model.is_none() {
             if c.provider == "antigravity"
                 && native_model::fixed_effort_model(&c.provider, &c.model).is_none()
-                && !is_agy_suffixed_selector(&c.model)
+                && !native_model::is_agy_suffixed_selector(&c.model)
                 && inputs
                     .provider_evidence
                     .get(&c.provider)

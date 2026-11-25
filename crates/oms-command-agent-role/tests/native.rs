@@ -1540,3 +1540,47 @@ fn agy_catalog_row_parses_selector_base_effort_and_label() {
         assert_eq!(agy_catalog_selector(invalid), None, "{invalid}");
     }
 }
+
+#[test]
+fn agy_selector_derives_base_plus_effort_and_preserves_fixed_and_suffixed() {
+    use oms_command_agent_role::native_model::{
+        agy_base_model, agy_selector, is_agy_suffixed_selector,
+    };
+
+    assert_eq!(
+        agy_selector("gemini-4-carbon", "high"),
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        agy_selector("gemini-4-neon", "xhigh"),
+        "gemini-4-neon-xhigh"
+    );
+    assert_eq!(
+        agy_selector("gemini-4-carbon-high", "high"),
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        agy_selector("gemini-4-carbon-high", "low"),
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        agy_selector("gemini-pro-orchestrator", ""),
+        "gemini-pro-orchestrator"
+    );
+    assert_eq!(
+        agy_selector("gemini-pro-orchestrator", "high"),
+        "gemini-pro-orchestrator"
+    );
+    assert_eq!(
+        agy_selector("gemini-pro-orchestrator-argon", "high"),
+        "gemini-pro-orchestrator-argon"
+    );
+    assert_eq!(agy_selector("gemini-4-carbon", ""), "gemini-4-carbon");
+    assert_eq!(agy_selector("gemini-4-carbon", "auto"), "gemini-4-carbon");
+    assert_eq!(agy_selector("provider-default", "high"), "provider-default");
+    assert!(is_agy_suffixed_selector("gemini-4-carbon-high"));
+    assert!(!is_agy_suffixed_selector("gemini-4-carbon"));
+    assert!(!is_agy_suffixed_selector("-high"));
+    assert_eq!(agy_base_model("gemini-4-carbon-high"), "gemini-4-carbon");
+    assert_eq!(agy_base_model("gemini-4-carbon"), "gemini-4-carbon");
+}

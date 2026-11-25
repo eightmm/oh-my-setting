@@ -335,6 +335,15 @@ fn route_with_source(
     if !target.account.is_empty() && isolated(&target.provider).is_none() {
         return fail("provider account isolation is unproved");
     }
+    if target.provider == "antigravity" && selected != "provider-default" {
+        selected = crate::native_model::agy_selector(&selected, &resolved);
+        model_name(&selected)?;
+        if let Some(catalog) = antigravity_catalog()
+            && !catalog.contains(&selected)
+        {
+            return fail("model_effort_unavailable");
+        }
+    }
     Ok(Route {
         provider: target.provider.clone(),
         model: selected,
@@ -344,6 +353,27 @@ fn route_with_source(
         account_pinned: !target.account.is_empty(),
         public_research: false,
     })
+}
+
+fn antigravity_catalog() -> Option<BTreeSet<String>> {
+    let dir = nonempty_env("OMS_CAPABILITY_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            nonempty_env("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| nonempty_env("HOME").map(|home| PathBuf::from(home).join(".cache")))
+                .map(|cache| cache.join("oh-my-setting/capabilities"))
+        })?;
+    let bytes = storage::read(&dir, Path::new("antigravity.models"), true)
+        .ok()
+        .filter(|b| !b.is_empty() && b.len() <= 4 * 1024 * 1024)?;
+    let raw = String::from_utf8_lossy(&bytes);
+    let selectors: BTreeSet<String> = raw
+        .lines()
+        .filter_map(crate::native_model::agy_catalog_selector)
+        .map(str::to_owned)
+        .collect();
+    (!selectors.is_empty()).then_some(selectors)
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SeatHealth {
@@ -4381,62 +4411,128 @@ mod bridge_route_tests {
     }
     #[test]
     fn route_uses_policy_and_target() {
-        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        let route = resolve_route(source, "agy", "custom", "high", "worker").unwrap();
-        assert_eq!(route.provider, "antigravity");
-        assert_eq!(route.model, "custom");
-        assert!(route.explicit);
-        let automatic = resolve_route(source, "codex", "", "auto", "worker").unwrap();
-        assert!(!automatic.model.is_empty());
-        assert!(!automatic.explicit);
-        for effort in ["xhigh", "max"] {
-            let claude =
-                resolve_route(source, "claude", "claude-opus-5-5", effort, "worker").unwrap();
-            assert_eq!(claude.effort, effort);
-            assert_eq!(claude.model, "claude-opus-5-5");
-            assert!(claude.explicit);
-        }
-        for model in crate::native_model::AGY_FIXED_EFFORT_MODELS {
-            let fixed = resolve_route(source, "agy", model, "", "worker").unwrap();
-            assert!(fixed.effort.is_empty());
-            let command = transport(&fixed, b"inspect", source, false, 30).unwrap();
-            assert!(!command.argv.iter().any(|arg| arg == "--effort"));
-            assert_eq!(command.selected_effort, None);
-            assert!(resolve_route(source, "agy", model, "high", "worker").is_err());
-            let seat = format!("agy:effort=auto:model={model}");
-            let override_route = resolve_route(source, &seat, "", "high", "worker").unwrap();
-            assert_eq!(override_route.model, model);
-            assert!(override_route.effort.is_empty());
-            assert!(resolve_route(source, &seat, "", "bad", "worker").is_err());
-            assert!(resolve_route(source, &seat, "other", "high", "worker").is_err());
-            let mut invalid = fixed;
-            invalid.effort = "high".into();
-            assert!(transport(&invalid, b"inspect", source, false, 30).is_err());
-        }
-        for model in ["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"] {
-            let route = resolve_route(source, "agy", model, "xhigh", "worker").unwrap();
-            let command = transport(&route, b"inspect", source, false, 30).unwrap();
-            assert_eq!(command.selected_effort.as_deref(), Some("xhigh"));
-            assert!(resolve_route(source, "agy", model, "max", "worker").is_err());
-        }
-        assert_eq!(
-            crate::native_model::effort_support("fixture-provider", "unknown-model", "high", None),
-            crate::native_model::EffortSupport::Unknown
-        );
-        let pinned = resolve_route(
-            source,
-            "codex:account=work",
-            "gpt-6.2-sol",
-            "ultra",
-            "worker",
-        )
-        .unwrap();
-        assert_eq!(pinned.effort, "ultra");
-        assert_eq!(pinned.account, "work");
-        assert!(pinned.account_pinned);
-        assert!(resolve_route(source, "claude", "claude-opus-5-5", "ultra", "worker").is_err());
-        assert!(resolve_route(source, "", "", "", "worker").is_err());
-        assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
+        isolated_transport("route_uses_policy_and_target", "normal", |_, _| {
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let tier_agy = resolve_route(source, "agy", "", "", "reviewer").unwrap();
+            assert_eq!(tier_agy.provider, "antigravity");
+            assert_eq!(tier_agy.model, "gemini-4-carbon-high");
+            assert_eq!(tier_agy.effort, "high");
+            assert!(!tier_agy.explicit);
+            let tier_agy_override = resolve_route(source, "agy", "", "medium", "reviewer").unwrap();
+            assert_eq!(tier_agy_override.model, "gemini-4-carbon-medium");
+            assert_eq!(tier_agy_override.effort, "medium");
+            let route = resolve_route(source, "agy", "custom", "high", "worker").unwrap();
+            assert_eq!(route.provider, "antigravity");
+            assert_eq!(route.model, "custom-high");
+            assert!(route.explicit);
+            let default_agy = resolve_route(source, "agy", "", "high", "worker").unwrap();
+            assert_eq!(default_agy.model, "provider-default");
+            assert_eq!(default_agy.effort, "high");
+            let automatic = resolve_route(source, "codex", "", "auto", "worker").unwrap();
+            assert_eq!(automatic.model, "gpt-6.1-terra");
+            assert_eq!(automatic.effort, "medium");
+            assert!(!automatic.explicit);
+            let claude_tier = resolve_route(source, "claude", "", "auto", "reviewer").unwrap();
+            assert_eq!(claude_tier.model, "opus");
+            assert_eq!(claude_tier.effort, "high");
+            assert!(!claude_tier.explicit);
+            for effort in ["xhigh", "max"] {
+                let claude =
+                    resolve_route(source, "claude", "claude-opus-5-5", effort, "worker").unwrap();
+                assert_eq!(claude.effort, effort);
+                assert_eq!(claude.model, "claude-opus-5-5");
+                assert!(claude.explicit);
+            }
+            for model in crate::native_model::AGY_FIXED_EFFORT_MODELS {
+                let fixed = resolve_route(source, "agy", model, "", "worker").unwrap();
+                assert_eq!(fixed.model, model);
+                assert!(fixed.effort.is_empty());
+                let command = transport(&fixed, b"inspect", source, false, 30).unwrap();
+                assert!(!command.argv.iter().any(|arg| arg == "--effort"));
+                assert_eq!(command.selected_effort, None);
+                assert!(resolve_route(source, "agy", model, "high", "worker").is_err());
+                let seat = format!("agy:effort=auto:model={model}");
+                let override_route = resolve_route(source, &seat, "", "high", "worker").unwrap();
+                assert_eq!(override_route.model, model);
+                assert!(override_route.effort.is_empty());
+                assert!(resolve_route(source, &seat, "", "bad", "worker").is_err());
+                assert!(resolve_route(source, &seat, "other", "high", "worker").is_err());
+                let mut invalid = fixed;
+                invalid.effort = "high".into();
+                assert!(transport(&invalid, b"inspect", source, false, 30).is_err());
+            }
+            for model in ["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"] {
+                let route = resolve_route(source, "agy", model, "xhigh", "worker").unwrap();
+                assert_eq!(route.model, model);
+                let command = transport(&route, b"inspect", source, false, 30).unwrap();
+                assert_eq!(command.selected_effort.as_deref(), Some("xhigh"));
+                assert!(resolve_route(source, "agy", model, "max", "worker").is_err());
+            }
+            assert_eq!(
+                crate::native_model::effort_support(
+                    "fixture-provider",
+                    "unknown-model",
+                    "high",
+                    None,
+                ),
+                crate::native_model::EffortSupport::Unknown
+            );
+            let pinned = resolve_route(
+                source,
+                "codex:account=work",
+                "gpt-6.2-sol",
+                "ultra",
+                "worker",
+            )
+            .unwrap();
+            assert_eq!(pinned.effort, "ultra");
+            assert_eq!(pinned.account, "work");
+            assert!(pinned.account_pinned);
+            assert!(resolve_route(source, "claude", "claude-opus-5-5", "ultra", "worker").is_err());
+            assert!(resolve_route(source, "", "", "", "worker").is_err());
+            assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
+
+            // With a cached Antigravity catalog present, the derived selector must be listed.
+            let cache_dir = home.join(".cache/oh-my-setting/capabilities");
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("antigravity.models"),
+                "gemini-4-carbon-low\tGemini 4 Carbon (Low)\n\
+                 gemini-4-carbon-high\tGemini 4 Carbon (High)\n\
+                 gemini-pro-orchestrator\tOrchestrator (Carbon)\n",
+            )
+            .unwrap();
+            let listed = resolve_route(source, "agy", "", "", "reviewer").unwrap();
+            assert_eq!(listed.model, "gemini-4-carbon-high");
+            let listed_explicit =
+                resolve_route(source, "agy", "gemini-4-carbon-high", "high", "worker").unwrap();
+            assert_eq!(listed_explicit.model, "gemini-4-carbon-high");
+            let listed_fixed =
+                resolve_route(source, "agy", "gemini-pro-orchestrator", "", "worker").unwrap();
+            assert_eq!(listed_fixed.model, "gemini-pro-orchestrator");
+            let missing_tier = resolve_route(source, "agy", "", "medium", "reviewer").unwrap_err();
+            assert_eq!(missing_tier.message, "model_effort_unavailable");
+            let missing_explicit =
+                resolve_route(source, "agy", "gemini-4-carbon", "xhigh", "worker").unwrap_err();
+            assert_eq!(missing_explicit.message, "model_effort_unavailable");
+            let missing_suffixed =
+                resolve_route(source, "agy", "gemini-4-neon-xhigh", "xhigh", "worker").unwrap_err();
+            assert_eq!(missing_suffixed.message, "model_effort_unavailable");
+            // Codex and Claude routes are unaffected by the Antigravity catalog.
+            assert_eq!(
+                resolve_route(source, "codex", "", "auto", "worker")
+                    .unwrap()
+                    .model,
+                "gpt-6.1-terra"
+            );
+            assert_eq!(
+                resolve_route(source, "claude", "", "auto", "reviewer")
+                    .unwrap()
+                    .model,
+                "opus"
+            );
+        });
     }
 
     fn seat(id: &str, used: Option<f64>, running: usize) -> Account {
