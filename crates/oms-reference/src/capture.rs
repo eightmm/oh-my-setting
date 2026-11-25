@@ -20,14 +20,19 @@ const ROOTS: &[&str] = &[".oms/task", ".oms/tasks", ".oms/plan", ".oms/artifacts
 /// the ledger. A changed journal requires a new command snapshot.
 pub struct CaptureIndex {
     pub(crate) repo: PathBuf,
+    pub(crate) checkout: PathBuf,
     pub(crate) rows: Vec<V>,
     pub(crate) reservations: Vec<V>,
     namespace: Namespace,
+    checkout_namespace: Namespace,
     journal: Option<Metadata>,
 }
 impl CaptureIndex {
     pub fn repository(&self) -> &Path {
         &self.repo
+    }
+    pub fn checkout(&self) -> &Path {
+        &self.checkout
     }
     pub fn rows(&self) -> &[V] {
         &self.rows
@@ -104,18 +109,32 @@ impl CaptureIndex {
             }
             reservations.push(item.clone());
         }
+        let checkout = repo.clone();
+        let checkout_namespace = Namespace::snapshot(&checkout, &checkout.join(".namespace"))?;
         let result = Self {
             repo,
+            checkout,
             rows,
             reservations,
             namespace,
+            checkout_namespace,
             journal,
         };
         result.check()?;
         Ok(result)
     }
+    pub fn load_checkout(repo: &Path, checkout: &Path) -> Result<Self> {
+        let checkout = fs::canonicalize(checkout).map_err(|e| e.to_string())?;
+        let checkout_namespace = Namespace::snapshot(&checkout, &checkout.join(".namespace"))?;
+        let mut index = Self::load(repo)?;
+        index.checkout = checkout;
+        index.checkout_namespace = checkout_namespace;
+        index.check()?;
+        Ok(index)
+    }
     pub fn check(&self) -> Result<()> {
         self.namespace.check()?;
+        self.checkout_namespace.check()?;
         match (&self.journal, fs::symlink_metadata(self.repo.join(JOURNAL))) {
             (Some(before), Ok(after)) if storage::generation(before, &after) => Ok(()),
             (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -225,48 +244,47 @@ impl CaptureIndex {
         Ok(None)
     }
     pub fn read_patch(&self, input: &Path, maximum: usize) -> Result<Vec<u8>> {
-        let path = storage::absolute(&self.repo.join(input))?;
-        let relative = path
-            .strip_prefix(&self.repo)
-            .map_err(|_| "patch evidence leaves repository")?;
-        if path.parent() != Some(self.repo.join(".oms/landing-patches").as_path()) {
-            return storage::read_repo(&self.repo, relative, maximum, false);
-        }
-        let namespace = Namespace::snapshot(&self.repo, &path)?;
-        let named = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        let matching = self
-            .reservations
-            .iter()
-            .filter(|v| {
-                path.file_name().and_then(|v| v.to_str())
-                    == Some(&format!("{}.patch", v.get("landing_id").py()))
-            })
-            .collect::<Vec<_>>();
-        if matching.is_empty() {
-            let raw = storage::read_repo(&self.repo, relative, maximum, false)?;
-            self.check()?;
-            return Ok(raw);
-        }
-        let mut candidates = Vec::new();
-        for item in matching {
-            let certificate = self.certificate(item)?;
-            let object = certificate.value.get("objects").get("publication");
-            if object.get("path") == &path_value(&path) {
-                candidates.push((item, certificate));
+        let path = storage::absolute(&self.checkout.join(input))?;
+        if path.parent() == Some(self.repo.join(".oms/landing-patches").as_path()) {
+            let matching = self
+                .reservations
+                .iter()
+                .filter(|v| {
+                    path.file_name().and_then(|v| v.to_str())
+                        == Some(&format!("{}.patch", v.get("landing_id").py()))
+                })
+                .collect::<Vec<_>>();
+            if !matching.is_empty() {
+                let namespace = Namespace::snapshot(&self.repo, &path)?;
+                let named = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                let mut candidates = Vec::new();
+                for item in matching {
+                    let certificate = self.certificate(item)?;
+                    let object = certificate.value.get("objects").get("publication");
+                    if object.get("path") == &path_value(&path) {
+                        candidates.push((item, certificate));
+                    }
+                }
+                if candidates.len() != 1 {
+                    return Err("unique native publication ownership unavailable".into());
+                }
+                let (item, certificate) = &candidates[0];
+                let object = certificate.value.get("objects").get("publication");
+                let raw = object_bytes(item, object, 2)?;
+                if raw.len() > maximum || storage::identity(&named) != *object.get("identity") {
+                    return Err("landing publication replaced or oversized".into());
+                }
+                named_object(&path, object)?;
+                certificate.check()?;
+                namespace.check()?;
+                self.check()?;
+                return Ok(raw);
             }
         }
-        if candidates.len() != 1 {
-            return Err("unique native publication ownership unavailable".into());
-        }
-        let (item, certificate) = &candidates[0];
-        let object = certificate.value.get("objects").get("publication");
-        let raw = object_bytes(item, object, 2)?;
-        if raw.len() > maximum || storage::identity(&named) != *object.get("identity") {
-            return Err("landing publication replaced or oversized".into());
-        }
-        named_object(&path, object)?;
-        certificate.check()?;
-        namespace.check()?;
+        let relative = path
+            .strip_prefix(&self.checkout)
+            .map_err(|_| "patch evidence leaves repository")?;
+        let raw = storage::read_repo(&self.checkout, relative, maximum, false)?;
         self.check()?;
         Ok(raw)
     }
@@ -928,4 +946,206 @@ pub(crate) fn owned_created<'a>(
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|v| v == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs::DirBuilder,
+        io::ErrorKind,
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+    };
+
+    struct TestRoot(PathBuf);
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            let tmp = fs::canonicalize(std::env::temp_dir()).unwrap();
+            let path = (0u32..)
+                .find_map(|i| {
+                    let candidate =
+                        tmp.join(format!("oms-capture-{name}-{}-{i}", std::process::id()));
+                    match DirBuilder::new().mode(0o700).create(&candidate) {
+                        Ok(()) => Some(candidate),
+                        Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                        Err(e) => panic!("create test root: {e}"),
+                    }
+                })
+                .unwrap();
+            Self(path)
+        }
+        fn mkdir(&self, rel: &str) -> PathBuf {
+            let mut dir = self.0.clone();
+            for part in Path::new(rel).components() {
+                dir.push(part);
+                if !dir.exists() {
+                    DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                }
+            }
+            dir
+        }
+    }
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn checkout_scoped_read_patch_accepts_worktree_artifacts_and_preserves_boundaries() {
+        let root = TestRoot::new("checkout-read-patch");
+        let state = root.mkdir("state");
+        let checkout = root.mkdir("scratch/wt");
+        let delegate_dir = root.mkdir("scratch/wt/.oms/artifacts/delegate");
+        let patch_bytes =
+            b"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n one\n+two\n";
+        let checkout_patch = delegate_dir.join("worker.patch");
+        fs::write(&checkout_patch, patch_bytes).unwrap();
+        fs::set_permissions(&checkout_patch, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let state_only = CaptureIndex::load(&state).unwrap();
+        assert_eq!(state_only.repository(), state.as_path());
+        assert_eq!(state_only.checkout(), state.as_path());
+        assert_eq!(
+            state_only.read_patch(&checkout_patch, 4096).unwrap_err(),
+            "patch evidence leaves repository"
+        );
+
+        let index = CaptureIndex::load_checkout(&state, &checkout).unwrap();
+        assert_eq!(index.repository(), state.as_path());
+        assert_eq!(index.checkout(), checkout.as_path());
+        assert_eq!(
+            index
+                .read_patch(Path::new(".oms/artifacts/delegate/worker.patch"), 4096)
+                .unwrap(),
+            patch_bytes
+        );
+        assert_eq!(
+            index.read_patch(&checkout_patch, 4096).unwrap(),
+            patch_bytes
+        );
+        assert!(
+            index
+                .read_patch(Path::new(".oms/artifacts/delegate/worker.patch"), 8)
+                .is_err()
+        );
+
+        let outside = root.mkdir("outside").join("escape.patch");
+        fs::write(&outside, patch_bytes).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        let state_delegate = root
+            .mkdir("state/.oms/artifacts/delegate")
+            .join("main.patch");
+        fs::write(&state_delegate, patch_bytes).unwrap();
+        fs::set_permissions(&state_delegate, fs::Permissions::from_mode(0o600)).unwrap();
+        let unreserved_landing = root.mkdir("state/.oms/landing-patches").join("plain.patch");
+        fs::write(&unreserved_landing, patch_bytes).unwrap();
+        fs::set_permissions(&unreserved_landing, fs::Permissions::from_mode(0o600)).unwrap();
+
+        for escaped in [
+            Path::new("../escape.patch"),
+            outside.as_path(),
+            state_delegate.as_path(),
+            unreserved_landing.as_path(),
+        ] {
+            assert_eq!(
+                index.read_patch(escaped, 4096).unwrap_err(),
+                "patch evidence leaves repository",
+                "{escaped:?}"
+            );
+        }
+
+        let file_link = delegate_dir.join("link.patch");
+        std::os::unix::fs::symlink(&outside, &file_link).unwrap();
+        assert!(
+            index
+                .read_patch(Path::new(".oms/artifacts/delegate/link.patch"), 4096)
+                .unwrap_err()
+                .contains("unsafe or foreign repository input")
+        );
+
+        let dir_link = checkout.join(".oms/artifacts/linked");
+        std::os::unix::fs::symlink(outside.parent().unwrap(), &dir_link).unwrap();
+        assert!(
+            index
+                .read_patch(Path::new(".oms/artifacts/linked/escape.patch"), 4096)
+                .unwrap_err()
+                .contains("unsafe or foreign reference namespace")
+        );
+
+        // Certified state-repo landing-patches reservation logic remains unchanged.
+        let generation = "0123456789abcdef0123456789abcdef";
+        let landing = "land-20261126T000000Z-0123456789abcdef";
+        let cap_dir = root.mkdir(&format!("oms-landing-capture-{generation}"));
+        let sha = digest(patch_bytes);
+        let item = obj([
+            ("version", 1usize.into()),
+            ("generation", generation.into()),
+            ("landing_id", landing.into()),
+            ("namespace", digest(state.as_os_str().as_bytes()).into()),
+            ("directory", path_value(&cap_dir)),
+            ("bytes", V::Num((2 * patch_bytes.len()).to_string())),
+            ("sha256", sha.into()),
+        ]);
+        storage::ensure_parent(&state, Path::new(JOURNAL)).unwrap();
+        let mut mutable = CaptureIndex::load(&state).unwrap();
+        mutable
+            .append_event("capture-reserved", &item, obj([]))
+            .unwrap();
+        let dir_info = storage::private_directory(&cap_dir).unwrap();
+        let cap_file = cap_dir.join(format!("{landing}.patch"));
+        let cap_info = storage::create_private(
+            &cap_dir,
+            Path::new(&format!("{landing}.patch")),
+            patch_bytes,
+        )
+        .unwrap();
+        storage::link(&cap_file, &cap_dir, Path::new("capture.anchor"), &cap_info).unwrap();
+        let pub_anchor = cap_dir.join("publication.anchor");
+        let pub_info =
+            storage::create_private(&cap_dir, Path::new("publication.anchor"), patch_bytes)
+                .unwrap();
+        let published = state
+            .join(".oms/landing-patches")
+            .join(format!("{landing}.patch"));
+        let pub_rel = Path::new(".oms/landing-patches").join(format!("{landing}.patch"));
+        storage::link(&pub_anchor, &state, &pub_rel, &pub_info).unwrap();
+        let cert = obj([
+            ("reservation", item),
+            ("directory", storage::identity(&dir_info)),
+            (
+                "objects",
+                obj([
+                    (
+                        "capture",
+                        obj([
+                            ("identity", storage::identity(&cap_info)),
+                            ("size", patch_bytes.len().into()),
+                            ("path", path_value(&cap_file)),
+                            ("anchor", path_value(&cap_dir.join("capture.anchor"))),
+                        ]),
+                    ),
+                    (
+                        "publication",
+                        obj([
+                            ("identity", storage::identity(&pub_info)),
+                            ("size", patch_bytes.len().into()),
+                            ("path", path_value(&published)),
+                            ("anchor", path_value(&pub_anchor)),
+                        ]),
+                    ),
+                ]),
+            ),
+            ("terminal", V::Null),
+        ]);
+        storage::create_private(&cap_dir, Path::new("owner.json"), &encoded(&cert).unwrap())
+            .unwrap();
+
+        let reserved = CaptureIndex::load_checkout(&state, &checkout).unwrap();
+        assert_eq!(
+            reserved.indexed_bytes(&published).unwrap().as_deref(),
+            Some(patch_bytes.as_slice())
+        );
+        assert!(reserved.read_patch(&published, 4).is_err());
+    }
 }

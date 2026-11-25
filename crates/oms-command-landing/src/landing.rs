@@ -61,8 +61,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     } else {
         None
     };
-    let source = o
-        .path("patch", c.cwd)
+    let source = c
+        .patch_path(o, &repo)?
         .or_else(|| {
             plan.as_ref()
                 .and_then(|p| p.get("patch").text())
@@ -75,7 +75,12 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                 "--patch is required unless the plan task has a stored patch",
             )
         })?;
-    let raw = admission::capture_bytes(&CaptureIndex::load(&state)?, &source)?;
+    let source_index = if o.has("patch") {
+        CaptureIndex::load_checkout(&state, &repo)?
+    } else {
+        CaptureIndex::load(&state)?
+    };
+    let raw = admission::capture_bytes(&source_index, &source)?;
     let sha = digest(&raw);
     if let Some(plan) = &plan {
         require(

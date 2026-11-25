@@ -2870,17 +2870,21 @@ fn peer_dry_runs_and_ml_context() {
                     .any(|v| v.text() == Some("*.py"))
             );
         }
-        for (option, message) in [
-            ("--apply", "patch-admission"),
-            ("--plan-task", "plan lease"),
+        for (values, message) in [
+            (vec!["--apply"], "unknown option: --apply"),
+            (
+                vec!["--resume-session", "s1"],
+                "unknown option: --resume-session",
+            ),
+            (vec!["--plan-task", "T1"], "plan lease"),
         ] {
-            let mut values = vec![option];
-            if option == "--plan-task" {
-                values.push("T1");
-            }
             let output = run(&repo, &repo.0, "peer-delegate", &values);
             assert_eq!(output.0, 2);
-            assert!(String::from_utf8_lossy(&output.2).contains(message));
+            assert!(
+                String::from_utf8_lossy(&output.2).contains(message),
+                "{values:?}: {}",
+                String::from_utf8_lossy(&output.2)
+            );
         }
     });
 }
@@ -5384,10 +5388,19 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
             assert!(row.get("artifact_sha256").text().is_some_and(is_hex64));
             assert!(row.get("patch_sha256").text().is_some_and(is_hex64));
             assert_eq!(row.get("verify_exit").py(), "0");
+            let rel_patch = row.get("patch").text().unwrap();
+            assert!(!fs::read(repo.0.join(rel_patch)).unwrap().is_empty());
+            let expected_next = format!(
+                "next: oms patch-land --repo {} --patch {rel_patch} (or oms patch-admit --repo {} --patch {rel_patch})",
+                repo.0.display(),
+                repo.0.display(),
+            );
             assert!(
-                !fs::read(repo.0.join(row.get("patch").text().unwrap()))
-                    .unwrap()
-                    .is_empty()
+                String::from_utf8_lossy(&out.1)
+                    .lines()
+                    .any(|line| line == expected_next),
+                "missing next-step output:\n{}",
+                String::from_utf8_lossy(&out.1)
             );
 
             // Advisory enrollment uses the same metadata boundary while retaining
@@ -7566,6 +7579,282 @@ fn delegate_attaches_active_task_packet_only_for_matching_task_or_explicit_flag(
             assert!(
                 help_text.contains("when --task-id matches the active task's id"),
                 "help text should describe task binding default:\n{help_text}"
+            );
+        },
+    );
+}
+
+#[test]
+fn peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_requires_clean_patch() {
+    account_isolated(
+        "peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_requires_clean_patch",
+        &[],
+        |home| {
+            let repo = account_repo();
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let help = run_with_source("peer-delegate", &args(&["--help"]), &repo.0, source, &STOP);
+            assert_eq!(help.0, 0);
+            let help_text = String::from_utf8_lossy(&help.1);
+            for removed in ["--apply", "--resume-session", "--observe-plan-binding"] {
+                assert!(
+                    !help_text.contains(removed),
+                    "removed flag still in help: {removed}"
+                );
+            }
+            assert!(
+                help_text.contains("oms patch-admit / oms patch-land"),
+                "help text should name patch-admit / patch-land:\n{help_text}"
+            );
+
+            let brief_path = repo.0.join("brief.md");
+            fs::write(
+                &brief_path,
+                "Goal: update tracked.txt\nScope: tracked.txt\nOutput: return patch\nDone when: check passes\n",
+            )
+            .unwrap();
+            let review_path = repo.0.join("review.md");
+            fs::write(&review_path, "Reviewer note: check tracked.txt.\n").unwrap();
+            let pack_path = repo.0.join("pack.json");
+            fs::write(
+                &pack_path,
+                format!("{{\"pack_digest\":\"{}\",\"files\":[]}}", "a".repeat(64)),
+            )
+            .unwrap();
+
+            let options_block = help_text
+                .split_once("\nOptions:\n")
+                .and_then(|(_, rest)| rest.split_once("\nEnvironment:\n"))
+                .map(|(opts, _)| opts)
+                .expect("Options section");
+            let mut documented = Vec::new();
+            for line in options_block.lines() {
+                let Some(header) = line.strip_prefix("  ") else {
+                    continue;
+                };
+                if !header.starts_with('-') {
+                    continue;
+                }
+                let spec = header.split("  ").next().unwrap().trim();
+                if spec == "-h, --help" {
+                    documented.push(("-h".to_owned(), false));
+                    documented.push(("--help".to_owned(), false));
+                    continue;
+                }
+                let tokens: Vec<&str> = spec.split_whitespace().collect();
+                let mut idx = 0;
+                while idx < tokens.len() {
+                    let tok = tokens[idx];
+                    if !tok.starts_with("--") {
+                        break;
+                    }
+                    let takes_value = tokens.get(idx + 1).is_some_and(|next| {
+                        !next.starts_with('-') && next.bytes().all(|b| b.is_ascii_uppercase())
+                    });
+                    documented.push((tok.to_owned(), takes_value));
+                    idx += if takes_value { 2 } else { 1 };
+                }
+            }
+            assert!(documented.len() >= 40);
+
+            for (opt, takes_value) in &documented {
+                if matches!(opt.as_str(), "-h" | "--help") {
+                    let out = run_with_source(
+                        "peer-delegate",
+                        &args(&[opt.as_str()]),
+                        &repo.0,
+                        source,
+                        &STOP,
+                    );
+                    assert_eq!(out.0, 0, "{opt}");
+                    continue;
+                }
+                if matches!(
+                    opt.as_str(),
+                    "--plan-task" | "--plan-binding" | "--terminalize-resumed-repair"
+                ) {
+                    // Exercised end-to-end with a live Plan adapter in plan_delegation;
+                    // verify parser acceptance here (no unknown-option refusal).
+                    let probe: Vec<&str> = if *takes_value {
+                        vec![opt.as_str(), "probe"]
+                    } else {
+                        vec![opt.as_str()]
+                    };
+                    let out =
+                        run_with_source("peer-delegate", &args(&probe), &repo.0, source, &STOP);
+                    let err = String::from_utf8_lossy(&out.2);
+                    assert!(
+                        !err.contains("unknown option"),
+                        "{opt} rejected by parser: {err}"
+                    );
+                    continue;
+                }
+
+                let mut call: Vec<String> = vec![
+                    "--repo".into(),
+                    repo.0.to_str().unwrap().into(),
+                    "--to".into(),
+                    "claude".into(),
+                    "--account".into(),
+                    "work".into(),
+                    "--model".into(),
+                    "fixture".into(),
+                    "--dry-run".into(),
+                    "--no-verify".into(),
+                    "--no-memory".into(),
+                    "--no-task".into(),
+                    "--no-ml-context".into(),
+                ];
+                match opt.as_str() {
+                    "--repo" | "--to" | "--account" | "--model" | "--dry-run" | "--no-verify"
+                    | "--no-memory" | "--no-task" | "--no-ml-context" => {}
+                    "--prompt" => {
+                        call.extend([
+                            "--prompt".into(),
+                            "Goal: update tracked.txt\nScope: tracked.txt\nOutput: return patch\nDone when: check passes\n".into(),
+                        ]);
+                    }
+                    "--brief-file" => {
+                        call.extend(["--brief-file".into(), brief_path.to_str().unwrap().into()]);
+                    }
+                    "--role" => {
+                        call.extend(["--role".into(), "implementation-worker".into()]);
+                    }
+                    "--review-artifact" => {
+                        call.extend([
+                            "--review-artifact".into(),
+                            review_path.to_str().unwrap().into(),
+                        ]);
+                    }
+                    "--workload" => {
+                        call.extend(["--workload".into(), "routine".into()]);
+                    }
+                    "--max-turns" => {
+                        call.extend(["--max-turns".into(), "5".into()]);
+                    }
+                    "--idle-timeout" => {
+                        call.extend(["--idle-timeout".into(), "60".into()]);
+                    }
+                    "--fallback-model" => {
+                        call.extend(["--fallback-model".into(), "other".into()]);
+                    }
+                    "--reasoning-effort" => {
+                        call.extend(["--reasoning-effort".into(), "low".into()]);
+                    }
+                    "--verify" => {
+                        call.retain(|a| a != "--no-verify");
+                        call.extend(["--verify".into(), "true".into()]);
+                    }
+                    "--repair" => {
+                        call.extend(["--repair".into(), "1".into()]);
+                    }
+                    "--memory" => {
+                        call.retain(|a| a != "--no-memory");
+                        call.push("--memory".into());
+                    }
+                    "--task" => {
+                        call.retain(|a| a != "--no-task");
+                        call.push("--task".into());
+                    }
+                    "--ml-context" => {
+                        call.retain(|a| a != "--no-ml-context");
+                        call.push("--ml-context".into());
+                    }
+                    "--thread" => {
+                        call.extend(["--thread".into(), "t1".into()]);
+                    }
+                    "--task-id" => {
+                        call.extend(["--task-id".into(), "t1".into()]);
+                    }
+                    "--artifact-dir" => {
+                        call.extend(["--artifact-dir".into(), ".oms/artifacts/custom".into()]);
+                    }
+                    "--print-timeout" => {
+                        call.extend(["--print-timeout".into(), "5m".into()]);
+                    }
+                    "--context-pack" => {
+                        call.extend(["--context-pack".into(), pack_path.to_str().unwrap().into()]);
+                    }
+                    _ if !*takes_value => {
+                        call.push(opt.clone());
+                    }
+                    other => panic!("unhandled valued option in peer-delegate --help: {other}"),
+                }
+                if !call.iter().any(|a| a == "--prompt" || a == "--brief-file") {
+                    call.push(
+                        "Goal: update tracked.txt\nScope: tracked.txt\nOutput: return patch\nDone when: check passes\n"
+                            .into(),
+                    );
+                }
+                let argv: Vec<OsString> = call.iter().map(OsString::from).collect();
+                let out = run_with_source("peer-delegate", &argv, &repo.0, source, &STOP);
+                assert_eq!(
+                    out.0,
+                    0,
+                    "documented option {opt} refused:\n{}\n{}",
+                    String::from_utf8_lossy(&out.1),
+                    String::from_utf8_lossy(&out.2)
+                );
+                assert!(
+                    !String::from_utf8_lossy(&out.1).contains("next: oms patch-land"),
+                    "dry-run must not emit patch-land hint"
+                );
+            }
+
+            // Failed verification writes the rejected diff for inspection, not a patch-land next step.
+            fs::write(
+                home.join("bin/claude"),
+                "#!/bin/sh\nprintf 'edited\\n' >> README.md\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n",
+            )
+            .unwrap();
+            let write_delegate = |verify: &str| {
+                run_with_source(
+                    "peer-delegate",
+                    &args(&[
+                        "--repo",
+                        repo.0.to_str().unwrap(),
+                        "--to",
+                        "claude",
+                        "--account",
+                        "work",
+                        "--model",
+                        "fixture",
+                        "--no-task",
+                        "--no-memory",
+                        "--no-ml-context",
+                        "--verify",
+                        verify,
+                        "Update README",
+                    ]),
+                    &repo.0,
+                    source,
+                    &STOP,
+                )
+            };
+            let failed = write_delegate("false");
+            assert_eq!(failed.0, 1, "{}", message(&failed));
+            assert!(
+                !String::from_utf8_lossy(&failed.1).contains("next: oms patch-land"),
+                "failed delegation must not suggest landing:\n{}",
+                String::from_utf8_lossy(&failed.1)
+            );
+
+            let ok = write_delegate("true");
+            assert_eq!(ok.0, 0, "{}", message(&ok));
+            let stdout = String::from_utf8_lossy(&ok.1);
+            let lines: Vec<&str> = stdout.lines().collect();
+            assert_eq!(lines.len(), 3, "{stdout}");
+            let patch_rel = Path::new(lines[1])
+                .strip_prefix(&repo.0)
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!(
+                lines[2],
+                format!(
+                    "next: oms patch-land --repo {} --patch {patch_rel} (or oms patch-admit --repo {} --patch {patch_rel})",
+                    repo.0.display(),
+                    repo.0.display()
+                )
             );
         },
     );

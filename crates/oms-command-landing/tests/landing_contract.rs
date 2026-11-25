@@ -960,6 +960,167 @@ fn patch_admit_runs_locally_without_services() {
     assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
 }
 
+#[test]
+fn scratch_worktree_delegate_patch_admits_and_lands_while_escapes_refuse() {
+    let iso = Isolated::new();
+    let repo = iso.repo("scratch-patch");
+    fs::write(repo.join(".git/info/exclude"), ".oms/\n").unwrap();
+    let patch_name = real_patch(&iso, &repo);
+    let patch_bytes = fs::read(repo.join(patch_name)).unwrap();
+    fs::remove_file(repo.join(patch_name)).unwrap();
+
+    let pid = std::process::id().to_string();
+    let (code, out, err) = iso.run("scratch-worktree", &repo, &["add", "--owner-pid", &pid]);
+    assert_eq!(code, 0, "{err}");
+    let worktree = PathBuf::from(out.trim()).canonicalize().unwrap();
+    assert_ne!(worktree, repo);
+
+    let rel_patch = ".oms/artifacts/delegate/codex-delegate-test.patch";
+    let wt_patch = worktree.join(rel_patch);
+    fs::create_dir_all(wt_patch.parent().unwrap()).unwrap();
+    fs::write(&wt_patch, &patch_bytes).unwrap();
+    strip_group_world_write(&worktree);
+
+    let outside_dir = iso.home.path().join("outside-patch");
+    fs::create_dir_all(&outside_dir).unwrap();
+    let outside_patch = outside_dir.join("escape.patch");
+    fs::write(&outside_patch, &patch_bytes).unwrap();
+    let main_patch = repo.join(".oms/artifacts/delegate/main-only.patch");
+    fs::create_dir_all(main_patch.parent().unwrap()).unwrap();
+    fs::write(&main_patch, &patch_bytes).unwrap();
+    strip_group_world_write(&outside_dir);
+    strip_group_world_write(&repo);
+
+    let log = iso.tmp.join("scratch-services.log");
+    let log_env = [("OMS_CT_LOG", log.to_str().unwrap())];
+    let wt_str = worktree.to_str().unwrap();
+    for bad in [
+        "../outside.patch",
+        outside_patch.to_str().unwrap(),
+        main_patch.to_str().unwrap(),
+    ] {
+        assert_refused(
+            &iso.run("patch-admit", &repo, &["--repo", wt_str, "--patch", bad]),
+            "patch evidence leaves repository",
+        );
+        assert_refused(
+            &iso.run_env(
+                "patch-land",
+                &repo,
+                &["--repo", wt_str, "--patch", bad],
+                &log_env,
+            ),
+            "patch evidence leaves repository",
+        );
+    }
+
+    let link_patch = worktree.join(".oms/artifacts/delegate/link.patch");
+    std::os::unix::fs::symlink(&outside_patch, &link_patch).unwrap();
+    for rejected in [
+        iso.run(
+            "patch-admit",
+            &repo,
+            &[
+                "--repo",
+                wt_str,
+                "--patch",
+                ".oms/artifacts/delegate/link.patch",
+            ],
+        ),
+        iso.run_env(
+            "patch-land",
+            &repo,
+            &[
+                "--repo",
+                wt_str,
+                "--patch",
+                ".oms/artifacts/delegate/link.patch",
+            ],
+            &log_env,
+        ),
+    ] {
+        assert_refused(&rejected, "unsafe or foreign repository input");
+    }
+    fs::remove_file(&link_patch).unwrap();
+
+    let link_dir = worktree.join(".oms/artifacts/linked");
+    std::os::unix::fs::symlink(&outside_dir, &link_dir).unwrap();
+    for rejected in [
+        iso.run(
+            "patch-admit",
+            &repo,
+            &[
+                "--repo",
+                wt_str,
+                "--patch",
+                ".oms/artifacts/linked/escape.patch",
+            ],
+        ),
+        iso.run_env(
+            "patch-land",
+            &repo,
+            &[
+                "--repo",
+                wt_str,
+                "--patch",
+                ".oms/artifacts/linked/escape.patch",
+            ],
+            &log_env,
+        ),
+    ] {
+        assert_refused(&rejected, "unsafe or foreign reference namespace");
+    }
+    fs::remove_file(&link_dir).unwrap();
+
+    // Admit works both via `--repo W --patch <rel>` from main repo and from cwd=W.
+    let (code, out, err) = iso.run(
+        "patch-admit",
+        &repo,
+        &["--repo", wt_str, "--patch", rel_patch],
+    );
+    assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
+    let (code, out, err) = iso.run("patch-admit", &worktree, &["--patch", rel_patch]);
+    assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
+    assert_eq!(fs::read_to_string(worktree.join("a.txt")).unwrap(), "one\n");
+    assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");
+
+    // Land from main repo onto scratch worktree W using the exact next-step form.
+    let (code, out, err) = iso.run_env(
+        "patch-land",
+        &repo,
+        &["--repo", wt_str, "--patch", rel_patch],
+        &log_env,
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.starts_with("patch-land: applied "), "{out}");
+    assert_eq!(
+        fs::read_to_string(worktree.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");
+
+    let landings = fs::read_to_string(repo.join(".oms/landings.jsonl")).unwrap();
+    let rows: Vec<V> = landings
+        .lines()
+        .map(|l| V::parse(l.as_bytes()).unwrap())
+        .collect();
+    let intent = rows
+        .iter()
+        .find(|r| r.get("event").text() == Some("intent"))
+        .expect("landing intent recorded in canonical state repo");
+    assert_eq!(intent.get("worktree").text(), Some(wt_str));
+    let frozen = PathBuf::from(intent.get("patch").py());
+    assert!(
+        frozen.starts_with(repo.join(".oms/landing-patches")),
+        "{frozen:?}"
+    );
+    assert!(frozen.is_file());
+    assert!(
+        rows.iter()
+            .any(|r| r.get("event").text() == Some("complete"))
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn patch_admit_timeout_stops_before_verification_and_publication() {
