@@ -12,7 +12,11 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v17.html";
+const URI: &str = "ui://oms/conversation-panel/v21.html";
+const V20: &str = "ui://oms/conversation-panel/v20.html";
+const V19: &str = "ui://oms/conversation-panel/v19.html";
+const V18: &str = "ui://oms/conversation-panel/v18.html";
+const V17: &str = "ui://oms/conversation-panel/v17.html";
 const V16: &str = "ui://oms/conversation-panel/v16.html";
 const V15: &str = "ui://oms/conversation-panel/v15.html";
 const V14: &str = "ui://oms/conversation-panel/v14.html";
@@ -64,6 +68,12 @@ const START: &str = "oms_start_main";
 const START_STATUS: &str = "oms_start_status";
 const APPROVALS: &str = "oms_list_approvals";
 const DECIDE: &str = "oms_decide_approval";
+const RECORD_ISSUE: &str = "oms_record_reviewed_issue";
+const ISSUE_STATUS: &str = "oms_reviewed_issue_status";
+const OPEN_LEADS: &str = "oms_open_lead_conversations";
+const LEAD_STATUS: &str = "oms_lead_conversation_status";
+const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
+const LEAD_PROMPT: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
 const ASSIGN: &str = "oms_assign_provider";
 const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
@@ -152,6 +162,7 @@ fn assignment_directory(
         || proof["thread"] != op
         || proof["kind"] != "ask"
         || proof["panel_assignment"] != binding
+        || (data["purpose"] == "provider-lead" && proof["answer_storage"] != "operation")
         || proof["targets"] != json!([data["provider"]])
     {
         return if recovering {
@@ -182,8 +193,12 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | START_STATUS
                     | APPROVALS
                     | DECIDE
+                    | RECORD_ISSUE
+                    | ISSUE_STATUS
                     | ASSIGN
                     | ASSIGN_RESULT
+                    | OPEN_LEADS
+                    | LEAD_STATUS
             )
         )
 }
@@ -208,10 +223,12 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     };
     let project = json!({"type":"string","description":"Exact alias from oms_list_projects when the host has a project map."});
     let scope = json!({"project":project});
+    let mut open_scope = scope.clone();
+    open_scope["leadConversations"] = json!({"type":"boolean","description":"Explicit intent to open provider Lead conversations. Opening the panel itself only displays it."});
     let mut opener = make(
         OPEN,
         "Open the OMS panel (expands beside or over the conversation when the host allows it).",
-        scope.clone(),
+        open_scope,
         &[],
         false,
     );
@@ -233,9 +250,50 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         false,
     );
     chat["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let mut issue_address = json!({"project":project,"room":ident,"owner":ident,"requestId":{"type":"string","format":"uuid"}});
+    issue_address["issue"] = json!({"type":"string","maxLength":151,"description":"Canonical owner/repo#N from the reviewed same-project issue."});
+    issue_address["sha256"] = json!({"type":"string","pattern":"^[0-9a-f]{64}$"});
+    let mut issue_status = make(
+        ISSUE_STATUS,
+        "Read a receipt for this conversation’s exact Main by its requestId, or look up the stable requestId by reviewed issue and sha256. This read never records a new receipt.",
+        issue_address.clone(),
+        &["room", "owner"],
+        false,
+    );
+    issue_status["inputSchema"]["oneOf"] = json!([
+        {"required":["requestId"],"not":{"anyOf":[{"required":["issue"]},{"required":["sha256"]}]}},
+        {"required":["issue","sha256"],"not":{"required":["requestId"]}}
+    ]);
+    let mut record_issue = make(
+        RECORD_ISSUE,
+        "Record the user-selected GitHub issue and reviewed SHA-256 for this conversation’s exact Main. First look up the requestId with oms_reviewed_issue_status for this exact issue and sha256. The first record reads GitHub. This action does not start work.",
+        issue_address,
+        &["room", "owner", "requestId", "issue", "sha256"],
+        true,
+    );
+    record_issue["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
+    record_issue["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let mut open_leads = make(
+        OPEN_LEADS,
+        "Open one bounded OMS readiness conversation for each Codex, Claude and AGY Lead in this chat's verified Room. Reopening reuses the same requests.",
+        json!({"project":project,"room":ident,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"Optional previously observed physical project key; refuses if the binding changed."}}),
+        &["room"],
+        true,
+    );
+    open_leads["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
     let all = json!([
         opener,
         chat,
+        record_issue,
+        issue_status,
+        open_leads,
+        make(
+            LEAD_STATUS,
+            "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
+            json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS}}),
+            &["room"],
+            false
+        ),
         make(
             USAGE,
             "Read recorded usage for recent OMS attempts and local provider quota windows.",
@@ -421,6 +479,30 @@ fn uuid(value: &str) -> bool {
             }
         })
 }
+fn github_slug(slug: &str) -> bool {
+    slug.split_once('/').is_some_and(|(owner, repo)| {
+        (1..=39).contains(&owner.len())
+            && owner.as_bytes()[0].is_ascii_alphanumeric()
+            && owner
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && (1..=100).contains(&repo.len())
+            && !matches!(repo, "." | "..")
+            && repo
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    })
+}
+
+fn canonical_issue(value: &str) -> bool {
+    value.split_once('#').is_some_and(|(slug, n)| {
+        github_slug(slug)
+            && (1..=10).contains(&n.len())
+            && !n.starts_with('0')
+            && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 fn alias(value: &str) -> bool {
     (1..=80).contains(&value.len())
         && value.as_bytes()[0].is_ascii_alphanumeric()
@@ -642,6 +724,7 @@ fn valid_work_items_receipt(data: &Value) -> bool {
             || v.as_str()
                 .is_some_and(|s| s.chars().count() <= max && !s.chars().any(char::is_control))
     };
+    let optional = ["claimExpired", "issueCache", "prReviewCandidate"];
     data.as_object().is_some_and(|obj| obj.keys().count() == 4)
         && data["schema"] == 1
         && data["omitted"].as_i64().is_some_and(|n| n >= 0)
@@ -653,13 +736,27 @@ fn valid_work_items_receipt(data: &Value) -> bool {
             items.len() <= 64
                 && items.iter().all(|row| {
                     row.as_object().is_some_and(|obj| {
-                        obj.keys().count() == keys.len() && keys.iter().all(|k| obj.contains_key(k))
+                        keys.iter().all(|k| obj.contains_key(k))
+                            && obj.keys().all(|k| {
+                                k.as_str()
+                                    .is_some_and(|k| keys.contains(&k) || optional.contains(&k))
+                            })
                     }) && row["id"].as_str().is_some_and(id)
                         && nullable(&row["title"], 160)
                         && nullable(&row["issue"], 140)
                         && nullable(&row["state"], 32)
                         && nullable(&row["result"], 32)
                         && nullable(&row["verification"], 32)
+                        && match row.get("claimExpired") {
+                            Some(expired) => expired.as_bool() == Some(row["state"] == "stale"),
+                            None => row["state"] != "stale",
+                        }
+                        && row.get("issueCache").is_none_or(|cache| {
+                            row["issue"].is_string() && valid_issue_cache(cache)
+                        })
+                        && row.get("prReviewCandidate").is_none_or(|candidate| {
+                            row["state"] == "review" && valid_pr_candidate(candidate)
+                        })
                         && (row["owner"].is_null() || row["owner"].as_str().is_some_and(id))
                         && (row["revision"].is_null()
                             || row["revision"].as_str().is_some_and(|s| {
@@ -674,6 +771,60 @@ fn valid_work_items_receipt(data: &Value) -> bool {
                 })
         })
 }
+
+fn valid_issue_cache(cache: &Value) -> bool {
+    cache.as_object().is_some_and(|obj| {
+        obj.keys().count() == 3
+            && ["state", "freshness", "reason"]
+                .iter()
+                .all(|k| obj.contains_key(k))
+    }) && match cache["freshness"].as_str() {
+        Some("fresh" | "stale") => {
+            matches!(cache["state"].as_str(), Some("open" | "closed")) && cache["reason"].is_null()
+        }
+        Some("unavailable") => {
+            cache["state"].is_null()
+                && matches!(
+                    cache["reason"].as_str(),
+                    Some("cache missing" | "cache unreadable" | "no matching cache entry")
+                )
+        }
+        _ => false,
+    }
+}
+
+fn valid_pr_candidate(candidate: &Value) -> bool {
+    let reference = candidate["reference"]
+        .as_str()
+        .and_then(|s| s.split_once('#'))
+        .is_some_and(|(slug, n)| {
+            let segment = |s: &str| {
+                !matches!(s, "" | "." | "..")
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            };
+            slug.len() <= 128
+                && slug
+                    .split_once('/')
+                    .is_some_and(|(o, r)| segment(o) && segment(r))
+                && (1..=10).contains(&n.len())
+                && !n.starts_with('0')
+                && n.bytes().all(|b| b.is_ascii_digit())
+        });
+    candidate
+        .as_object()
+        .is_some_and(|obj| obj.keys().count() == 4)
+        && reference
+        && matches!(candidate["freshness"].as_str(), Some("fresh" | "stale"))
+        && matches!(
+            (
+                candidate["state"].as_str(),
+                candidate["disposition"].as_str()
+            ),
+            (Some("merged"), Some("completed-external")) | (Some("closed"), Some("superseded"))
+        )
+}
+
 fn valid_graph_node_id(value: &str) -> bool {
     if value == "dir:." {
         return true;
@@ -914,11 +1065,15 @@ impl Server<'_> {
                             | V14
                             | V15
                             | V16
+                            | V17
+                            | V18
+                            | V19
+                            | V20
                     )
                 ) =>
             {
                 json!({"contents":[{
-                    "uri":params["uri"],"mimeType":MIME,"text":panel_html(),
+                    "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
                     "_meta":{"ui":{"preferredDisplayMode":"fullscreen","csp":{"connectDomains":[],"resourceDomains":[]}}}
                 }]})
             }
@@ -930,7 +1085,10 @@ impl Server<'_> {
                 }
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
-                    OPEN | APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
+                    OPEN => &["project", "leadConversations"],
+                    OPEN_LEADS => &["project", "room", "projectKey"],
+                    LEAD_STATUS => &["project", "room", "provider"],
+                    APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
                         "issuePreview",
@@ -964,6 +1122,8 @@ impl Server<'_> {
                         "repairOnly",
                     ],
                     ASSIGN_RESULT => &["project", "room", "requestId", "after"],
+                    RECORD_ISSUE => &["project", "room", "owner", "requestId", "issue", "sha256"],
+                    ISSUE_STATUS => &["project", "room", "owner", "requestId", "issue", "sha256"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
                     _ => return error(id, -32602, "unknown desktop tool"),
                 };
@@ -986,7 +1146,29 @@ impl Server<'_> {
                 if name == GRAPH {
                     return self.graph_reply(id, params, result);
                 }
-                if name == ASSIGN_RESULT {
+                if name == LEAD_STATUS {
+                    match result {
+                        Ok(mut data) => {
+                            let private = data
+                                .as_object_mut()
+                                .and_then(|o| o.remove("leadConversation"));
+                            let mut result = response(Ok(data));
+                            if let Some(private) = private {
+                                if crate::output::outbound(
+                                    private.to_string().as_bytes(),
+                                    &Value::Null,
+                                )
+                                .is_err()
+                                {
+                                    return reply(id,response(Err("OMS withheld the Lead conversation during its outbound scan.".into())));
+                                }
+                                result["_meta"]["leadConversation"] = private;
+                            }
+                            result
+                        }
+                        Err(e) => response(Err(e)),
+                    }
+                } else if name == ASSIGN_RESULT {
                     match result {
                         Ok(data)
                             if crate::output::outbound(
@@ -1234,18 +1416,6 @@ impl Server<'_> {
             .strip_prefix("https://github.com/")
             .and_then(|s| s.strip_suffix(&format!("/issues/{number}")))
             .unwrap_or("");
-        let valid_slug = slug.split_once('/').is_some_and(|(owner, repo)| {
-            (1..=39).contains(&owner.len())
-                && owner.as_bytes()[0].is_ascii_alphanumeric()
-                && owner
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                && (1..=100).contains(&repo.len())
-                && !matches!(repo, "." | "..")
-                && repo
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        });
         let revision = source["revision"].as_str().unwrap_or("");
         let sha = source["sha256"].as_str().unwrap_or("");
         if data["schema"] != 1
@@ -1253,7 +1423,7 @@ impl Server<'_> {
             || data["trusted"] != false
             || source["kind"] != "github-issue"
             || source["state"] != "open"
-            || !valid_slug
+            || !github_slug(slug)
             || revision.len() != 20
             || !revision.ends_with('Z')
             || chrono::DateTime::parse_from_rfc3339(revision).is_err()
@@ -1290,18 +1460,25 @@ impl Server<'_> {
             } else {
                 "unbound"
             };
-            let mut result =
-                json!({"projects":projects.into_keys().collect::<Vec<_>>(),"binding":binding});
-            if self.config.profile == ToolProfile::McpApp {
-                result["readOnly"] = json!(true);
-            }
-            return Ok(result);
+            return Ok(json!({
+                "projects": projects.into_keys().collect::<Vec<_>>(),
+                "binding": binding,
+                "readOnly": self.config.profile == ToolProfile::McpApp,
+            }));
         }
         if name == OPEN {
             if args.get("project").is_some() {
                 self.panel_repo(args)?;
             }
             let mut result = json!({"panel":"OMS","project":args["project"]});
+            if let Some(flag) = args.get("leadConversations") {
+                let requested = flag
+                    .as_bool()
+                    .ok_or("leadConversations must be a boolean.")?;
+                if requested {
+                    result["leadConversations"] = json!(true);
+                }
+            }
             if self.config.profile == ToolProfile::McpApp {
                 result["readOnly"] = json!(true);
             }
@@ -1330,6 +1507,12 @@ impl Server<'_> {
                 .ok_or("A lowercase UUID requestId is required.")?;
             Ok(format!("oms-app-{key}"))
         };
+        if matches!(name, OPEN_LEADS | LEAD_STATUS) {
+            return self.lead_conversations(&repo, name, args, meta);
+        }
+        if matches!(name, RECORD_ISSUE | ISSUE_STATUS) {
+            return self.reviewed_issue(&repo, name, args, meta);
+        }
         if name == ASSIGN || name == ASSIGN_RESULT {
             return self.assignment(&repo, name, args, meta);
         }
@@ -1780,11 +1963,120 @@ impl Server<'_> {
         }
     }
 
+    fn reviewed_issue(
+        &self,
+        repo: &Path,
+        name: &str,
+        args: &Value,
+        meta: &Value,
+    ) -> PanelResult<Value> {
+        use std::os::unix::fs::MetadataExt;
+        if self.config.profile != ToolProfile::ChatGptPanel {
+            return Err("A bound desktop Main is required.".into());
+        }
+        let thread = meta["threadId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("Open this control from the Room owner's bound conversation.")?;
+        let consumer = crate::storage::hash(thread);
+        let id = |key: &str| {
+            args[key]
+                .as_str()
+                .filter(|s| crate::matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", s))
+        };
+        let room = id("room").ok_or("Invalid Room.")?;
+        let owner = id("owner").ok_or("Invalid Main participant.")?;
+        let request = args
+            .get("requestId")
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| uuid(s))
+                    .ok_or("A lowercase UUID requestId is required.")
+            })
+            .transpose()?;
+        let selected = args.get("issue").is_some() || args.get("sha256").is_some();
+        if (name == RECORD_ISSUE && (!selected || request.is_none()))
+            || (name == ISSUE_STATUS && selected == request.is_some())
+        {
+            return Err(
+                "Choose an exact receipt ID or a reviewed issue and SHA-256 for lookup.".into(),
+            );
+        }
+        let sha = |v: &Value| {
+            v.as_str().is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        };
+        let mut extra = vec![("--owner", owner)];
+        if selected {
+            let issue = args["issue"]
+                .as_str()
+                .filter(|s| canonical_issue(s))
+                .ok_or("Select an exact canonical GitHub issue.")?;
+            if !sha(&args["sha256"]) {
+                return Err("A reviewed SHA-256 is required.".into());
+            }
+            extra.extend([
+                ("--issue", issue),
+                ("--digest", args["sha256"].as_str().unwrap()),
+            ]);
+        }
+        let action = if name == RECORD_ISSUE {
+            "desktop-issue-record"
+        } else {
+            "desktop-issue-status"
+        };
+        let identity = || {
+            std::fs::metadata(repo)
+                .map(|m| (m.dev(), m.ino()))
+                .map_err(|_| BINDING.to_owned())
+        };
+        let before = identity()?;
+        let argv = Self::assignment_argv(action, repo, room, request, &consumer[..32], &extra);
+        let (data,_)=self.panel_exec(repo,argv,false).map_err(|_|"OMS could not confirm the reviewed issue receipt. Check its status with the reviewed issue and SHA-256 or the original request ID.")?;
+        if self.panel_repo(args)? != repo || identity()? != before {
+            return Err(BINDING.into());
+        }
+        let actual = data["requestId"]
+            .as_str()
+            .filter(|s| uuid(s))
+            .filter(|s| match request {
+                Some(expected) => expected == *s,
+                None => {
+                    s.as_bytes()[14] == b'8'
+                        && matches!(s.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
+                }
+            })
+            .ok_or("OMS returned an unrecognized reviewed issue receipt.")?;
+        let count = data.as_object().map(|v| v.keys().count());
+        if name == ISSUE_STATUS && count == Some(2) && data["status"] == "not_found" {
+            return Ok(json!({"status":"not_found","requestId":actual}));
+        }
+        if count != Some(8)
+            || data["schema"] != 1
+            || data["kind"] != "oms-reviewed-issue-receipt"
+            || data["status"] != "recorded"
+            || data["room"] != room
+            || data["participant"] != owner
+            || !data["issue"].as_str().is_some_and(canonical_issue)
+            || !sha(&data["sha256"])
+            || selected && (data["issue"] != args["issue"] || data["sha256"] != args["sha256"])
+        {
+            return Err("OMS returned an unrecognized reviewed issue receipt.".into());
+        }
+        Ok(
+            json!({"schema":1,"kind":"oms-reviewed-issue-receipt","status":"recorded","room":room,"participant":owner,
+            "requestId":actual,"issue":data["issue"],"sha256":data["sha256"]}),
+        )
+    }
+
     fn assignment_argv(
         action: &str,
         repo: &Path,
         room: &str,
-        request: &str,
+        request: Option<&str>,
         digest: &str,
         extra: &[(&str, &str)],
     ) -> Vec<OsString> {
@@ -1797,14 +2089,302 @@ impl Server<'_> {
             room.into(),
             "--conversation-digest".into(),
             digest.into(),
-            "--request".into(),
-            request.into(),
         ];
+        if let Some(id) = request {
+            argv.extend(["--request".into(), id.into()]);
+        }
         for (flag, value) in extra {
             argv.extend([OsString::from(*flag), OsString::from(*value)]);
         }
         argv.push("--json".into());
         argv
+    }
+
+    fn lead_conversations(
+        &self,
+        repo: &Path,
+        name: &str,
+        args: &Value,
+        meta: &Value,
+    ) -> PanelResult<Value> {
+        let thread = meta["threadId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("Open this control from the Room owner's bound conversation.")?;
+        let room = args["room"]
+            .as_str()
+            .filter(|v| crate::matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", v))
+            .ok_or("Invalid Room.")?;
+        let selected = args
+            .get("provider")
+            .map(|v| {
+                v.as_str()
+                    .filter(|p| LEAD_PROVIDERS.contains(p))
+                    .ok_or("Unsupported Lead provider.")
+            })
+            .transpose()?;
+        let digest = crate::storage::hash(thread);
+        let project_key = || -> PanelResult<String> {
+            if self.panel_repo(args)? != repo {
+                return Err(BINDING.into());
+            }
+            let stat = fs::symlink_metadata(repo).map_err(|_| BINDING.to_owned())?;
+            if !stat.is_dir() {
+                return Err(BINDING.into());
+            }
+            let mut identity = b"oms-lead-project-v1\0".to_vec();
+            identity.extend_from_slice(repo.as_os_str().as_encoded_bytes());
+            identity.extend_from_slice(&stat.dev().to_be_bytes());
+            identity.extend_from_slice(&stat.ino().to_be_bytes());
+            Ok(crate::storage::hash(identity))
+        };
+        let key = project_key()?;
+        if args
+            .get("projectKey")
+            .is_some_and(|v| v.as_str() != Some(key.as_str()))
+        {
+            return Err("The selected project changed. Reopen the panel for that project.".into());
+        }
+        let bound = || {
+            if project_key()? == key {
+                Ok(())
+            } else {
+                Err(BINDING.to_owned())
+            }
+        };
+        let mut rows = Vec::new();
+        let mut private = None;
+        let mut has_authority = false;
+        for provider in LEAD_PROVIDERS
+            .into_iter()
+            .filter(|p| selected.is_none_or(|s| s == *p))
+        {
+            bound()?;
+            let run = |action, request: Option<&str>, extra: &[(&str, &str)]| {
+                bound()?;
+                let argv = Self::assignment_argv(action, repo, room, request, &digest[..32], extra);
+                self.panel_exec(repo, argv, false).map(|(data, _)| data)
+            };
+            let provider_arg = [("--provider", provider)];
+            let mut row =
+                json!({"provider":provider,"requestId":Value::Null,"status":"unavailable"});
+            // The Room store resolves the address against the live Main and its current
+            // enrollment. The app cannot choose a different request, participant or peer.
+            let Ok(prior) = run("desktop-lead-status", None, &provider_arg) else {
+                rows.push(row);
+                continue;
+            };
+            let Some(request) = prior["request"].as_str().filter(|id| {
+                uuid(id)
+                    && id.as_bytes()[14] == b'8'
+                    && matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
+            }) else {
+                rows.push(row);
+                continue;
+            };
+            let canonical = if provider == "agy" {
+                "antigravity"
+            } else {
+                provider
+            };
+            let valid = |data: &Value| {
+                data["request"] == request
+                    && data["room"] == room
+                    && data["participant"] == format!("ask-{request}")
+                    && data["provider"] == canonical
+                    && data["purpose"] == "provider-lead"
+                    && data["role"] == "worker"
+                    && data["readOnly"] == true
+                    && data["task"] == LEAD_PROMPT
+                    && ((data["status"] == "assigned"
+                        && data["thread"].is_null()
+                        && data["operation"].is_null())
+                        || (data["status"] == "started"
+                            && data["operation"].as_str().is_some_and(crate::operation)
+                            && data["operation"] == data["thread"]))
+            };
+            if prior["status"] != "not_found" && !valid(&prior) {
+                rows.push(row);
+                continue;
+            }
+            has_authority = true;
+            row["requestId"] = json!(request);
+            let resolve = || -> PanelResult<(&'static str, Value)> {
+                let write = name == OPEN_LEADS;
+                let data = if write && prior["status"] == "not_found" {
+                    run("desktop-lead-open", Some(request), &provider_arg)?
+                } else {
+                    prior.clone()
+                };
+                if !write && data["status"] == "not_found" {
+                    return Ok(("not_started", Value::Null));
+                }
+                if !valid(&data) {
+                    return Err("Invalid Lead reservation.".into());
+                }
+                let binding =
+                    crate::storage::hash(json!([&digest[..32], room, request]).to_string());
+                let operation =
+                    assignment_address(&data, &binding).ok_or("Missing Lead operation address.")?;
+                if data["status"] == "started" && data["operation"] != operation {
+                    return Err("Invalid Lead operation.".into());
+                }
+                let mut linked = data["status"] == "started";
+                if !linked && write {
+                    // A stale reservation may recover its existing operation, never start it again.
+                    if prior["status"] == "not_found" && data["fresh"] == true {
+                        let proof = run("desktop-lead-status", Some(request), &provider_arg)?;
+                        if !valid(&proof)
+                            || proof["assignedAt"] != data["assignedAt"]
+                            || proof["status"] != "assigned"
+                        {
+                            return Err("Lead ownership or reservation changed.".into());
+                        }
+                        bound()?;
+                        if !self.start_assignment_peer(
+                            repo,
+                            provider,
+                            LEAD_PROMPT,
+                            &operation,
+                            &binding,
+                            true,
+                        )? {
+                            return Ok(("unconfirmed", Value::Null));
+                        }
+                    } else if assignment_directory(repo, &data, &operation, &binding, true)?
+                        .is_none()
+                    {
+                        return Ok(("unconfirmed", Value::Null));
+                    }
+                    let receipt = run(
+                        "desktop-assign-receipt",
+                        Some(request),
+                        &[("--operation", operation.as_str())],
+                    )?;
+                    linked = valid(&receipt)
+                        && receipt["assignedAt"] == data["assignedAt"]
+                        && receipt["operation"] == operation;
+                }
+                if !linked {
+                    return Ok(("unconfirmed", Value::Null));
+                }
+                let Some(dir) = assignment_directory(repo, &data, &operation, &binding, true)?
+                else {
+                    return Ok(("unconfirmed", Value::Null));
+                };
+                let (state, exit) = crate::peer::status(&dir);
+                if state == "running" {
+                    return Ok(("starting", Value::Null));
+                }
+                if state != "done" || exit != Some(0) {
+                    return Ok(("unavailable", Value::Null));
+                }
+                // The supervisor exit alone cannot attest a provider response. Inspect
+                // its own single-seat answer, keeping every byte out of model content.
+                let proof = self
+                    .peer_result(&json!({"repo":repo,"operation":operation}))
+                    .ok()
+                    .and_then(|r| r.as_str().and_then(|s| crate::value::from_str(s).ok()));
+                let Some(answer) = proof
+                    .as_ref()
+                    .filter(|p| {
+                        p["operation"] == operation
+                            && p["exit"] == 0
+                            && p["answer_details"]
+                                .as_array()
+                                .is_some_and(|d| d.len() == 1 && d[0]["exit"] == "0")
+                    })
+                    .and_then(|p| p["answer"].as_str())
+                    .filter(|text| !text.trim().is_empty())
+                else {
+                    return Ok(("unconfirmed", Value::Null));
+                };
+                let mut transcript = Value::Null;
+                if selected.is_some() {
+                    transcript = self.provider_thread(repo, &operation, canonical, "");
+                    if transcript["turns"].as_array().is_none_or(Vec::is_empty)
+                        || transcript.to_string().len() > crate::OUTPUT_LIMIT / 2
+                    {
+                        transcript = json!({"turns":[{"role":canonical,"text":answer.chars().take(4000).collect::<String>(),"at":Value::Null}],"cursor":Value::Null,"hasMore":false});
+                    }
+                }
+                let live = run("desktop-lead-status", Some(request), &provider_arg)?;
+                if !valid(&live)
+                    || live["operation"] != operation
+                    || live["assignedAt"] != data["assignedAt"]
+                {
+                    return Err("Lead receipt changed.".into());
+                }
+                // An operation can outlive its OMS thread. The native thread reader
+                // validates the log's exact ID and closed marker. A live thread
+                // created by start_bound_peer has its opening collaboration note.
+                bound()?;
+                let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+                let witness = self.command(
+                    &[
+                        "thread",
+                        "--repo",
+                        path,
+                        "--id",
+                        operation.as_str(),
+                        "context",
+                        "--require-open",
+                        "--notes-only",
+                        "--turns",
+                        "1",
+                        "--max-bytes",
+                        "256",
+                    ],
+                    repo,
+                    Duration::from_secs(5),
+                )?;
+                if witness.code != 0 || witness.stdout.is_empty() {
+                    return Ok(("unconfirmed", Value::Null));
+                }
+                Ok(("ready", transcript))
+            };
+            let (status, transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
+            row["status"] = json!(status);
+            if selected.is_some() {
+                private = Some(
+                    json!({"room":room,"provider":provider,"requestId":request,"status":status,"transcript":transcript}),
+                );
+            }
+            rows.push(row);
+        }
+        bound()?;
+        if !has_authority {
+            return Err("OMS could not verify the current Main in the selected Room.".into());
+        }
+        let mut result = json!({"room":room,"projectKey":key,"leads":rows});
+        if let Some(private) = private {
+            result["leadConversation"] = private;
+        }
+        Ok(result)
+    }
+
+    fn start_assignment_peer(
+        &self,
+        repo: &Path,
+        provider: &str,
+        task: &str,
+        operation: &str,
+        binding: &str,
+        preserve_current: bool,
+    ) -> PanelResult<bool> {
+        let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+        Ok(self
+            .start_bound_peer(
+                &json!({"repo":path,"kind":"ask","prompt":task,"providers":provider,
+            "debate_rounds":0,"include_memory":false,"include_task":false}),
+                Some((operation, binding)),
+                preserve_current,
+            )
+            .ok()
+            .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
+            .is_some_and(|v| {
+                v["started"] == true && v["operation"] == operation && v["thread"] == operation
+            }))
     }
 
     /// Provider assignment for the Room owned by this exact bound conversation.
@@ -1872,7 +2452,14 @@ impl Server<'_> {
                 .ok_or("Invalid cursor.")?;
             let (data, _) = self.panel_exec(
                 repo,
-                Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[]),
+                Self::assignment_argv(
+                    "desktop-assign-status",
+                    repo,
+                    room,
+                    Some(request),
+                    &digest,
+                    &[],
+                ),
                 false,
             )?;
             if data["request"] == request && data["status"] == "not_found" {
@@ -1933,13 +2520,20 @@ impl Server<'_> {
         // A repair must remain unable to create an intent even if the Room
         // changed since the widget observed the unlinked operation.
         let argv = if repair {
-            Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[])
+            Self::assignment_argv(
+                "desktop-assign-status",
+                repo,
+                room,
+                Some(request),
+                &digest,
+                &[],
+            )
         } else {
             Self::assignment_argv(
                 "desktop-assign",
                 repo,
                 room,
-                request,
+                Some(request),
                 &digest,
                 &[
                     ("--provider", provider),
@@ -1978,19 +2572,7 @@ impl Server<'_> {
             return Ok(unconfirmed(&data));
         };
         if !repair && data["fresh"] == true {
-            let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
-            let started = self
-                .start_bound_peer(
-                    &json!({"repo":path,"kind":"ask","prompt":task,"providers":provider,
-                    "debate_rounds":0,"include_memory":false,"include_task":false}),
-                    Some((&operation, &binding)),
-                )
-                .ok()
-                .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
-                .is_some_and(|v| {
-                    v["started"] == true && v["operation"] == operation && v["thread"] == operation
-                });
-            if !started {
+            if !self.start_assignment_peer(repo, provider, task, &operation, &binding, false)? {
                 return Ok(unconfirmed(&data));
             }
         } else if (!repair && data["fresh"] != false)
@@ -2004,7 +2586,7 @@ impl Server<'_> {
                 "desktop-assign-receipt",
                 repo,
                 room,
-                request,
+                Some(request),
                 &digest,
                 &[("--operation", &operation)],
             ),
@@ -2198,37 +2780,6 @@ impl Server<'_> {
     }
 }
 
-fn panel_html() -> &'static str {
-    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BODY.get_or_init(|| {
-        let source = include_str!("conversation-panel.html");
-        let (prefix, tail) = source.split_once("<script>\n").expect("panel script");
-        let (code, suffix) = tail.split_once("</script>").expect("panel script end");
-        let (before, tail) = code
-            .split_once("const catalogRows = `")
-            .expect("panel catalog");
-        let (catalog, after) = tail.split_once("`;").expect("panel catalog end");
-        let mut body = String::with_capacity(source.len());
-        body.push_str(prefix);
-        body.push_str("<script>\n");
-        // Keep the translations and all line breaks intact. Only the layout
-        // indentation of the surrounding JavaScript is redundant on the wire.
-        let append = |body: &mut String, js: &str| {
-            for line in js.split_inclusive('\n') {
-                body.push_str(line.trim_start_matches(' '));
-            }
-        };
-        append(&mut body, before);
-        body.push_str("const catalogRows = `");
-        body.push_str(catalog);
-        body.push_str("`;");
-        append(&mut body, after);
-        body.push_str("</script>");
-        body.push_str(suffix);
-        body
-    })
-}
-
 fn command_name(value: &str) -> bool {
     (1..=64).contains(&value.len())
         && value.as_bytes()[0].is_ascii_lowercase()
@@ -2285,4 +2836,59 @@ fn command_catalog(stdout: &str, offset: usize) -> PanelResult<Value> {
         page["nextOffset"] = json!(offset + count);
     }
     Ok(page)
+}
+
+#[cfg(test)]
+mod work_items_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_work_snapshot_keeps_expired_and_fenced_plan_states_distinct() {
+        let task = |id, state, expired| {
+            json!({
+                "id":id,"title":"Fixture task","state":state,"claimExpired":expired,
+                "owner":null,"depends":[],"issue":null,"result":null,"verification":null,
+                "revision":null
+            })
+        };
+        let mut review = task("review", "review", false);
+        review["issue"] = json!("example-org/example-repo#19");
+        review["issueCache"] =
+            json!({"state":null,"freshness":"unavailable","reason":"no matching cache entry"});
+        review["prReviewCandidate"] = json!({
+            "reference":"example-org/example-repo#19","state":"merged","freshness":"fresh",
+            "disposition":"completed-external"
+        });
+        let snapshot = json!({
+            "schema":1,"omitted":0,"availability":"ready","items":[
+                task("expired", "stale", true),
+                task("live", "running", false),
+                task("unproven", "claimed", false),
+                review
+            ]
+        });
+        assert!(valid_work_items_receipt(&snapshot));
+        let rendered = response(Ok(snapshot.clone()));
+        assert_eq!(rendered["isError"], false);
+        assert_eq!(rendered["structuredContent"], snapshot);
+
+        let change_item = |index, edit: fn(&mut Value)| {
+            let mut inconsistent = snapshot.clone();
+            let Value::Array(items) = &mut inconsistent["items"] else {
+                unreachable!();
+            };
+            edit(&mut items[index]);
+            inconsistent
+        };
+        let inconsistent = change_item(2, |item| item["state"] = json!("stale"));
+        assert!(!valid_work_items_receipt(&inconsistent));
+        let inconsistent = change_item(3, |item| {
+            item["issueCache"].as_object_mut().unwrap().remove("reason");
+        });
+        assert!(!valid_work_items_receipt(&inconsistent));
+        let inconsistent = change_item(3, |item| {
+            item["prReviewCandidate"]["disposition"] = json!("superseded");
+        });
+        assert!(!valid_work_items_receipt(&inconsistent));
+    }
 }

@@ -410,8 +410,8 @@ pub struct Snapshot {
     pub(crate) registry: Value,
     pub(crate) markers: Option<Vec<Value>>,
     pub(crate) settled: BTreeSet<String>,
-    /// Lazily read local GitHub snapshot cache bytes; empty when absent.
-    pub(crate) github_cache: Option<Vec<u8>>,
+    pub(crate) github_cache: Option<std::result::Result<Vec<u8>, &'static str>>,
+    pub(crate) github_origin: std::cell::OnceCell<Option<oms_github::Slug>>,
 }
 impl Snapshot {
     pub fn tasks(&self) -> Result<&[(Vec<u8>, Value)]> {
@@ -565,6 +565,10 @@ impl<'a> Plan<'a> {
     pub fn load(&self) -> Result<Snapshot> {
         self.load_from_snapshot(self.read_snapshot()?)
     }
+    /// Load from a file snapshot captured under the canonical writer lock.
+    pub fn load_with_locked_snapshot(&self) -> Result<Snapshot> {
+        self.load_from_snapshot(self.read_locked_snapshot()?)
+    }
     fn read_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
         self.plan_storage()
             .snapshot(&self.context.plan_file, MAX_JSON, true)
@@ -639,6 +643,7 @@ impl<'a> Plan<'a> {
             markers: None,
             settled: BTreeSet::new(),
             github_cache: None,
+            github_origin: std::cell::OnceCell::new(),
         };
         let tasks = s.ordered()?;
         for task in tasks {
@@ -1365,7 +1370,12 @@ impl<'a> Plan<'a> {
             return crate::acceptance::execute(self, req, None);
         }
         if req.read_only() {
-            return self.query(req, &mut self.load()?);
+            let mut snapshot = if req.action == EvidenceSnapshot {
+                self.load_with_locked_snapshot()?
+            } else {
+                self.load()?
+            };
+            return self.query(req, &mut snapshot);
         }
         self.locked(
             matches!(

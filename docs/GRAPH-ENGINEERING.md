@@ -393,7 +393,7 @@ returns a flat dict with these keys (missing keys are absent, not `None`):
 | `git.head`, `git.branch`, `git.dirty` | str, str, bool |
 | `plan.present`, `plan.all_done`, `plan.has_unfinished`, `plan.contract.satisfied` | bool |
 | `plan.actionable` | list of task ids |
-| `plan.task.<id>.state` | lifecycle string |
+| `plan.task.<id>.state` | lifecycle string. Expired leases retain their `claimed` or `running` state in graph predicates and set `.claim_expired`. |
 | `plan.task.<id>.patch_present`, `.artifact_present`, `.lease_present`, `.claim_expired` | bool |
 | `plan.task.<id>.repair_count` | int |
 | `plan.task.<id>.reason` | str |

@@ -2014,13 +2014,21 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
         let plan_file = repo.join(".oms/plan/tasks.json");
         let original = fs::read(&plan_file).unwrap();
         let show = read(Action::Show, &[("id", "a")]);
-        assert_eq!(show.text("state"), state);
+        assert_eq!(show.text("state"), "stale");
+        assert_eq!(show.text("stored_state"), state);
         assert_eq!(show.get("claim_expired"), &json::Value::Bool(true));
         assert_eq!(show.get("claim_age_s"), &json::number(7908));
         let list = read(Action::List, &[("json", "1")]);
+        let listed_task = &list.get("tasks").array().unwrap()[0];
+        assert_eq!(listed_task.text("state"), "stale");
+        assert_eq!(listed_task.get("claim_expired"), &json::Value::Bool(true));
         assert_eq!(
-            list.get("tasks").array().unwrap()[0].get("claim_expired"),
-            &json::Value::Bool(true)
+            read(Action::List, &[("json", "1"), ("state", "stale")])
+                .get("tasks")
+                .array()
+                .unwrap()
+                .len(),
+            1
         );
         assert!(
             String::from_utf8(query(Action::List, &[]).stdout)
@@ -2029,8 +2037,10 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
         );
         let status = read(Action::Status, &[("json", "1")]);
         assert_eq!(status.get("stale").array().unwrap()[0].text("id"), "a");
+        assert_eq!(status.get("by_state").get("stale"), &json::number(1));
+        assert!(status.get("by_state").opt(state).is_none());
         let brief = String::from_utf8(query(Action::Brief, &[("id", "a")]).stdout).unwrap();
-        assert!(brief.contains("EXPIRED"));
+        assert!(brief.contains("state: stale [claim EXPIRED"));
         assert_eq!(brief.contains("; claimable"), state == "claimed");
         let ready = read(Action::Ready, &[("json", "1")]);
         assert_eq!(
@@ -2048,35 +2058,54 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
                     .unwrap()
                     .contains("reclaimed 0")
             );
-            fs::create_dir_all(repo.join(".oms/delegations")).unwrap();
+        }
+        fs::create_dir_all(repo.join(".oms/delegations")).unwrap();
+        let marker_file = repo.join(".oms/delegations/worker.json");
+        for (pid, lease_id, protected) in [
+            (std::process::id(), expected.get("lease_id").clone(), true),
+            (0, expected.get("lease_id").clone(), true),
+            (
+                std::process::id(),
+                json::string(format!("lease_{}", "3".repeat(32))),
+                false,
+            ),
+        ] {
             let marker = json::object([
                 ("schema", json::number(1)),
-                ("id", json::string("live")),
-                ("pid", json::number(std::process::id())),
+                ("id", json::string("worker")),
+                ("pid", json::number(pid)),
                 ("task_id", json::string("a")),
-                ("lease_id", expected.get("lease_id").clone()),
+                ("lease_id", lease_id),
             ]);
-            fs::write(
-                repo.join(".oms/delegations/live.json"),
-                json::canonical(&marker).unwrap(),
-            )
-            .unwrap();
-            expired.verify_panel_review_lease(&expected).unwrap();
-            assert!(
-                String::from_utf8(query(Action::Reclaim, &[("include-running", "1")]).stdout)
-                    .unwrap()
-                    .contains("reclaimed 0")
+            fs::write(&marker_file, json::canonical(&marker).unwrap()).unwrap();
+            assert_eq!(
+                expired.verify_panel_review_lease(&expected).is_ok(),
+                protected
             );
-            let live = read(Action::Show, &[("id", "a")]);
-            assert_eq!(live.get("claim_expired"), &json::Value::Bool(false));
-            assert!(
-                read(Action::Status, &[("json", "1")])
-                    .get("stale")
-                    .array()
-                    .unwrap()
-                    .is_empty()
+            let projected_state = if protected { state } else { "stale" };
+            let shown = read(Action::Show, &[("id", "a")]);
+            assert_eq!(shown.text("state"), projected_state);
+            assert_eq!(shown.get("claim_expired"), &json::Value::Bool(!protected));
+            let listed = read(Action::List, &[("json", "1")]);
+            assert_eq!(
+                listed.get("tasks").array().unwrap()[0].text("state"),
+                projected_state
             );
+            let status = read(Action::Status, &[("json", "1")]);
+            assert_eq!(
+                status.get("by_state").get(projected_state),
+                &json::number(1)
+            );
+            assert_eq!(status.get("stale").array().unwrap().is_empty(), protected);
+            if protected {
+                assert!(
+                    String::from_utf8(query(Action::Reclaim, &[("include-running", "1")]).stdout)
+                        .unwrap()
+                        .contains("reclaimed 0")
+                );
+            }
         }
+        fs::remove_file(marker_file).unwrap();
         assert_eq!(fs::read(&plan_file).unwrap(), original);
         expected
             .set(
@@ -3911,6 +3940,7 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
     let unavailable = task(&r, "i1");
     let cache = unavailable.get("issue_cache");
     assert_eq!(cache.text("freshness"), "unavailable");
+    assert_eq!(cache.text("reason"), "cache missing");
     assert!(
         cache.get("state") == &json::Value::Null && cache.get("captured_at") == &json::Value::Null
     );
@@ -3925,13 +3955,24 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
             now - age
         )
     };
-    fs::create_dir_all(r.join(".oms/github")).unwrap();
+    let cache_file = r.join(".oms/github/cache.jsonl");
+    fs::create_dir_all(&cache_file).unwrap();
+    assert_eq!(
+        task(&r, "i1").get("issue_cache").text("reason"),
+        "cache unreadable"
+    );
+    fs::remove_dir(&cache_file).unwrap();
+    let pull_row = |n, state, age, ttl| {
+        row(n, state, age, ttl, "A pull").replace(r#""kind":"issue""#, r#""kind":"pull""#)
+    };
     fs::write(
-        r.join(".oms/github/cache.jsonl"),
+        cache_file,
         [
             row(7, "open", 10, 3600, "Remote title"),
             row(8, "closed", 7200, 60, "Old"),
-            row(9, "merged", 10, 3600, "A pull").replace(r#""kind":"issue""#, r#""kind":"pull""#),
+            pull_row(9, "merged", 10, 3600),
+            pull_row(10, "open", 10, 3600),
+            pull_row(12, "closed", 7200, 60),
         ]
         .join("\n"),
     )
@@ -3954,6 +3995,7 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
     );
     // #9 has only a kind=pull row: never shown as issue state.
     let pull = task(&r, "i3").get("issue_cache").clone();
+    assert_eq!(pull.text("reason"), "no matching cache entry");
     assert!(
         ["state", "captured_at", "title"]
             .iter()
@@ -3965,7 +4007,9 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
         "{listed}"
     );
     assert!(
-        listed.contains(&format!("issue {REPO}#9 (unknown, unavailable)")),
+        listed.contains(&format!(
+            "issue {REPO}#9 (unknown, unavailable: no matching cache entry)"
+        )),
         "{listed}"
     );
     assert!(!listed.contains("Remote title"), "{listed}");
@@ -3983,6 +4027,55 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
         rows.iter()
             .all(|t| t.opt("issue_cache").is_some() == t.opt("issue").is_some())
     );
+
+    // Review candidates are observations. The underlying task state and
+    // evidence digests stay on the original review.
+    fs::create_dir_all(r.join(".oms/artifacts")).unwrap();
+    let artifact = ".oms/artifacts/review.txt";
+    fs::write(r.join(artifact), "review fixture").unwrap();
+    for id in ["i1", "i2", "i3", "i4"] {
+        assert_eq!(at(&r, &["claim", "--id", id, "--provider", "codex"]).0, 0);
+        assert_eq!(at(&r, &["review", "--id", id, "--artifact", artifact]).0, 0);
+    }
+    let mut stored = json::parse(&plan(&r)).unwrap();
+    let mut tasks = stored.get("tasks").clone();
+    let mut pinned = tasks.get("i1").clone();
+    pinned
+        .set("pr", json::string(format!("{REPO}#12")))
+        .unwrap();
+    tasks.set("i1", pinned).unwrap();
+    stored.set("tasks", tasks).unwrap();
+    let original = json::canonical(&stored).unwrap();
+    fs::write(r.join(".oms/plan/tasks.json"), &original).unwrap();
+    for (id, n, state, disposition, freshness) in [
+        ("i1", 12, "closed", "superseded", "stale"),
+        ("i3", 9, "merged", "completed-external", "fresh"),
+    ] {
+        let shown = task(&r, id);
+        assert_eq!(shown.text("state"), "review");
+        let candidate = shown.get("pr_review_candidate");
+        assert_eq!(candidate.text("reference"), format!("{REPO}#{n}"));
+        assert_eq!(candidate.text("state"), state);
+        assert_eq!(candidate.text("disposition"), disposition);
+        assert_eq!(candidate.text("freshness"), freshness);
+        let (_, review, _) = at(&r, &["evidence-snapshot", "--id", id]);
+        let review = json::parse(review.as_bytes()).unwrap();
+        assert!(review.opt("pr_review_candidate").is_none());
+        assert_eq!(review.text("task_sha256"), shown.text("task_sha256"));
+    }
+    for id in ["i2", "i4"] {
+        assert!(task(&r, id).opt("pr_review_candidate").is_none());
+    }
+    let (_, listed, _) = at(&r, &["list"]);
+    assert!(listed.contains(&format!(
+        "PR {REPO}#9 merged (fresh); completed-external candidate"
+    )));
+    let (_, status, _) = at(&r, &["status", "--json"]);
+    let status = json::parse(status.as_bytes()).unwrap();
+    assert_eq!(status.get("pr_review_candidates").array().unwrap().len(), 2);
+    assert_eq!(status.get("by_state").get("review"), &json::number(4));
+    assert_eq!(status.get("closed_count"), &json::number(0));
+    assert_eq!(plan(&r), original);
 
     // link: idempotent, conflicting refs need --reason, active tasks refuse.
     let (c, _, e) = at(&r, &["link", "--task", "plain", "--issue", "11"]);

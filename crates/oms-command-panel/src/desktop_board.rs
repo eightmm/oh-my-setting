@@ -240,6 +240,12 @@ fn columns_for(view: DesktopView) -> Vec<Column> {
             col("contractStale", "계약 만료"),
             col("verified", "완료 검증"),
             col("reason", "사유"),
+            col("issueFreshness", "이슈 캐시 상태"),
+            col("issueCacheReason", "이슈 캐시 사유"),
+            col("pullRequest", "연결된 PR"),
+            col("pullState", "PR 상태"),
+            col("pullFreshness", "PR 캐시 상태"),
+            col("reviewCandidate", "검토 후보"),
         ],
         DesktopView::Attention => vec![
             col("kind", "유형"),
@@ -1235,6 +1241,30 @@ fn project_plan(
             ("contractStale", opt_bool(task, "contract_stale")),
             ("verified", opt_bool(task, "completion_verified")),
             ("reason", opt_str(task, "reason", MAX_TEXT_CHARS)),
+            (
+                "issueFreshness",
+                opt_str(&task["issue_cache"], "freshness", 16),
+            ),
+            (
+                "issueCacheReason",
+                opt_str(&task["issue_cache"], "reason", 64),
+            ),
+            (
+                "pullRequest",
+                opt_str(&task["pr_review_candidate"], "reference", 140),
+            ),
+            (
+                "pullState",
+                opt_str(&task["pr_review_candidate"], "state", 16),
+            ),
+            (
+                "pullFreshness",
+                opt_str(&task["pr_review_candidate"], "freshness", 16),
+            ),
+            (
+                "reviewCandidate",
+                opt_str(&task["pr_review_candidate"], "disposition", 32),
+            ),
         ]));
     }
     Ok(paginate(DesktopView::Plan, page, out, true, false))
@@ -1718,8 +1748,8 @@ fn valid_work_item_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
-fn work_issue(task: &Value) -> Value {
-    let Some((slug, number)) = task["issue"].as_str().and_then(|s| s.split_once('#')) else {
+fn work_github_reference(reference: &Value) -> Value {
+    let Some((slug, number)) = reference.as_str().and_then(|s| s.split_once('#')) else {
         return Value::Null;
     };
     let segment = |s: &str| {
@@ -1738,7 +1768,7 @@ fn work_issue(task: &Value) -> Value {
         && !number.is_empty()
         && number.bytes().all(|b| b.is_ascii_digit())
     {
-        task["issue"].clone()
+        reference.clone()
     } else {
         Value::Null
     }
@@ -1856,6 +1886,7 @@ pub(crate) fn work_items(
                 "ready"
                     | "claimed"
                     | "running"
+                    | "stale"
                     | "review"
                     | "landing"
                     | "blocked"
@@ -1874,7 +1905,7 @@ pub(crate) fn work_items(
                         .is_some_and(|dep| dep != id && ids.get(dep) == Some(&1))
                 })
         });
-        let issue = work_issue(task);
+        let issue = work_github_reference(&task["issue"]);
         let task_hash = task["task_sha256"]
             .as_str()
             .filter(|s| oms_command_plan::json::hex(s, 64));
@@ -1921,8 +1952,29 @@ pub(crate) fn work_items(
             )
         });
         partial |= revision.is_none();
-        let item = json!({"id":id,"title":title,"owner":owner,"state":state,"depends":depends,"issue":issue,
+        let mut item = json!({"id":id,"title":title,"owner":owner,"state":state,"depends":depends,"issue":issue,
             "result":result["outcome"],"verification":verification,"revision":revision});
+        if let Some(expired) = task["claim_expired"].as_bool() {
+            item["claimExpired"] = json!(expired);
+        }
+        let cache = &task["issue_cache"];
+        if !item["issue"].is_null() && cache.is_object() {
+            item["issueCache"] = json!({
+                "state": opt_str(cache, "state", 16),
+                "freshness": opt_str(cache, "freshness", 16),
+                "reason": opt_str(cache, "reason", 64),
+            });
+        }
+        let pull = &task["pr_review_candidate"];
+        let reference = work_github_reference(&pull["reference"]);
+        if state == Some("review") && !reference.is_null() {
+            item["prReviewCandidate"] = json!({
+                "reference": reference,
+                "state": opt_str(pull, "state", 16),
+                "freshness": opt_str(pull, "freshness", 16),
+                "disposition": opt_str(pull, "disposition", 32),
+            });
+        }
         let encoded = item.to_string();
         size += encoded.len() + json!(encoded).to_string().len() + 4;
         if size > WORK_ITEM_HOST_BUDGET {

@@ -2213,7 +2213,7 @@ fn frontdoor_routes_navigation_and_native_commands_without_python() {
     let source = std::env::var_os("OMS_CONTRACT_REPO")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
-    for rel in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
+    for rel in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "VERSION"] {
         let src_file = source.join(rel);
         if src_file.is_file() {
             std::fs::copy(&src_file, f.0.join(rel)).unwrap();
@@ -2262,6 +2262,25 @@ fn frontdoor_routes_navigation_and_native_commands_without_python() {
     let nav_out = String::from_utf8_lossy(&nav.stdout);
     assert!(nav_out.contains("install-profile"));
     assert!(nav_out.contains("panel"));
+
+    let version = std::fs::read(source.join("VERSION")).unwrap();
+    exact(
+        f.command(&bin, &entry).arg("--version").output().unwrap(),
+        0,
+        &version,
+        b"",
+    );
+    for argv in [&["--version"][..], &["runtime", "--version"][..]] {
+        let out = f
+            .command(&bin, &f.binary())
+            .arg("--oms-frontdoor")
+            .arg(&entry)
+            .arg("--")
+            .args(argv)
+            .output()
+            .unwrap();
+        exact(out, 0, &version, b"");
+    }
 
     for argv in [
         vec!["room", "--help"],
@@ -5685,6 +5704,64 @@ fn fixture_panel_tool(
         reply["result"]["structuredContent"].clone(),
         out.stdout.len(),
     )
+}
+
+#[test]
+fn mcp_dashboard_exposes_native_plan_stale_attention() {
+    use serde_json::{Value, json};
+    use std::fs;
+
+    let host = Landing::new();
+    let lease = format!("lease_{}", "1".repeat(32));
+    let plan = json!({"plan_id":format!("plan_{}", "2".repeat(32)), "tasks":{
+        "expired":{"id":"expired","title":"Expired task","state":"claimed","depends":[],
+            "claimed_at":"2000-01-01T00:00:00Z","ttl":"1","lease_id":lease},
+    }})
+    .to_string();
+    let plan_file = host.repo.join(".oms/plan/tasks.json");
+    fs::create_dir_all(plan_file.parent().unwrap()).unwrap();
+    fs::write(&plan_file, &plan).unwrap();
+    add_companions(&host.f, &["oms-mcp-peer-owner"]);
+    let binary = host.f.binary();
+    let snapshot = || {
+        let mut command = Command::new(&binary);
+        host.env(&mut command);
+        command
+            .arg("--oms-dispatch")
+            .arg(&host.f.0)
+            .arg(binary.parent().unwrap().file_name().unwrap())
+            .arg("--")
+            .current_dir(&host.repo);
+        fixture_panel_tool(command, "mcp-app", &host.repo, "oms_panel_snapshot").0["dashboard"]
+            .clone()
+    };
+    let dashboard = snapshot();
+    assert_eq!(
+        dashboard["observation"]["sources"]["plan"], "stale",
+        "{dashboard}"
+    );
+    let stale_alert = |dashboard: &Value| {
+        dashboard["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["code"] == "stale-plan-claims")
+            .map(|row| row["count"].clone())
+    };
+    assert_eq!(stale_alert(&dashboard), Some(json!(1)));
+
+    let marker = host.repo.join(".oms/delegations/writer.json");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(
+        marker,
+        json!({
+            "schema":1,"id":"writer","task_id":"expired","lease_id":lease,"pid":std::process::id()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(stale_alert(&snapshot()), None);
+    assert_eq!(fs::read_to_string(plan_file).unwrap(), plan);
 }
 
 #[test]

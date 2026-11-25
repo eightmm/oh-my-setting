@@ -39,6 +39,20 @@ pub fn task_view(
     }
     Ok(value)
 }
+
+fn task_lifecycle_state(task: &Value) -> &str {
+    let state = st(task, "state");
+    let stored = st(task, "stored_state");
+    if state == "stale"
+        && task.get("claim_expired") == &Value::Bool(true)
+        && matches!(stored, "claimed" | "running")
+    {
+        stored
+    } else {
+        state
+    }
+}
+
 pub fn facts(
     repo: &Path,
     cancel: &AtomicBool,
@@ -102,7 +116,7 @@ pub fn facts(
                 ));
             }
             let prefix = format!("plan.task.{id}.");
-            result.set(&(prefix.clone() + "state"), st(task, "state"));
+            result.set(&(prefix.clone() + "state"), task_lifecycle_state(task));
             for (field, key) in [
                 ("patch", "patch_present"),
                 ("artifact", "artifact_present"),
@@ -365,7 +379,7 @@ fn build_invocation(
     Ok(("plan-run", command))
 }
 fn claimed_outcome(node: &Value, task: &Value, facts: &Value) -> &'static str {
-    let state = st(task, "state");
+    let state = task_lifecycle_state(task);
     let land = st(node, "mode") == "land";
 
     (if state == "blocked" {
@@ -963,7 +977,7 @@ pub fn run_with_host(
                     match plan(repo, Action::Show, &task, cancel, services) {
                         Err(error) if error.code == 130 => return Err(error),
                         Ok((0, task_view)) => {
-                            let task_state = st(&task_view, "state");
+                            let task_state = task_lifecycle_state(&task_view);
                             if ["claimed", "running"].contains(&task_state)
                                 && !task_view.get("claim_expired").truth()
                             {

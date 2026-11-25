@@ -1,4 +1,4 @@
-Usage: thread.sh new     [--id ID] [--topic TEXT] [--live] [--repo PATH]
+Usage: thread.sh new     [--id ID] [--topic TEXT] [--live [--no-current]] [--repo PATH]
        thread.sh append  [--id ID] --role ROLE (--text TEXT | --text-file F)
                                [--provider P] [--model M] [--artifact PATH]
        thread.sh context [--id ID] [--max-bytes N] [--turns N] [--notes-only] [--require-open]
@@ -50,6 +50,8 @@ Options:
   --turns N       Context turn limit (default: 12).
   --all           list: include closed threads.
   --live          new: opt this conversation into existing prompt/edit hooks.
+  --no-current    new --live --id ID: create a fresh background thread and
+                  preserve the current foreground thread.
   --notes-only    context: human/coordinator notes and decisions, not answers
                   or provider failure notes; useful between council rounds.
   --require-open  context: reject a closed thread before another model call.

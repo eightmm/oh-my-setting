@@ -35,7 +35,7 @@ OMS를 활용해 OMS를 발전시키는 개발 방향과, 실제로 추가할 �
 | [Harness Skill](../custom-skills/oms-agent-harness/SKILL.md) | 상태·협업·문맥·복구·검증의 진입점을 구분하며, 알려진 로컬 범위에는 직접 검색을 허용 | 실제 세션의 Skill 선택률·성과 |
 | [Skill hint caller](../crates/oms-command-hooks/src/routing.rs) | `OMS_SKILL_HINTS`가 `1`일 때 활성 Skill·필요 실행 파일·trigger를 검사해 최대 두 개의 추천을 출력 | 추천이 실제로 읽혔거나 실행됐다는 증거 |
 | [Plugin hook manifest](../plugins/oh-my-setting/hooks.json) | `UserPromptSubmit`, `SessionStart` 등 callback 선언이 존재 | 현재 설치·host·계정에서 callback이 호출된다는 증거 |
-| [Claude marketplace](../.claude-plugin/marketplace.json) | 별도 `oms` 설치가 필요한 skills-only 구성; hooks·MCP·panel을 포함하지 않는다고 명시 | 다른 plugin bundle이나 host의 동일한 설치 동작 |
+| [Claude marketplace](../.claude-plugin/marketplace.json) | 기존 `oms`를 사용하는 `oms-skills` 또는 Claude Code 네이티브 패널 `oms-panel`을 별도로 선택 | 다른 plugin bundle이나 host의 동일한 설치 동작 |
 | [Autonomy 계약](../custom-skills/oms-agent-harness/references/autonomy-loop.md) | 제한된 목표, 검토한 proposal, 기존 실행·복구·검증과 종료 조건을 정의 | 모든 provider 조합에서의 live 실행·복구 성공 |
 | [GitHub workflow](wiki/GitHub-Workflow.md) | Issue → OMS Plan → 검증된 PR → merge evidence의 기존 책임 구분 | Projects v2 후보 조회·자동 동기화의 구현 완료 |
 

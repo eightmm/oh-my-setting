@@ -774,6 +774,364 @@ fn desktop_assignment_rechecks_partial_membership_with_a_bounded_complete_invent
 }
 
 #[test]
+fn reviewed_issue_receipts_belong_to_one_main_and_never_dispatch() {
+    isolated(
+        "reviewed_issue_receipts_belong_to_one_main_and_never_dispatch",
+        || {
+            use sha2::{Digest, Sha256};
+            use std::sync::{Mutex, atomic::AtomicUsize};
+            type Swap = (u8, Box<dyn FnOnce() + Send>);
+            struct Issued<'a> {
+                repo: &'a Repo,
+                reads: AtomicUsize,
+                open: AtomicBool,
+                terminal: AtomicBool,
+                during: Mutex<Option<Box<dyn FnOnce() + Send + 'a>>>,
+                before_receipt: &'a Mutex<Option<Swap>>,
+                ended: Vec<oms_command_room::Attempt>,
+            }
+            struct IssueOperations<'a, 'b> {
+                service: &'a Issued<'b>,
+                checks: std::cell::Cell<u8>,
+            }
+            impl oms_command_room::OperationsRead for IssueOperations<'_, '_> {
+                fn attempts(&self) -> &[oms_command_room::Attempt] {
+                    if self.service.terminal.load(Ordering::SeqCst) {
+                        &self.service.ended
+                    } else {
+                        &[]
+                    }
+                }
+                fn check(&self) -> oms_command_room::Result<()> {
+                    let count = self.checks.get() + 1;
+                    self.checks.set(count);
+                    let mut hook = self.service.before_receipt.lock().unwrap();
+                    if hook.as_ref().is_some_and(|(when, _)| *when == count) {
+                        hook.take().unwrap().1();
+                    }
+                    Ok(())
+                }
+            }
+            impl Services for Issued<'_> {
+                fn state_repository(&self, p: &Path) -> oms_command_room::Result<PathBuf> {
+                    LocalServices.state_repository(p)
+                }
+                fn canonical_provider(&self, p: &str) -> oms_command_room::Result<String> {
+                    LocalServices.canonical_provider(p)
+                }
+                fn operations<'a>(
+                    &'a self,
+                    _: &Path,
+                ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>>
+                {
+                    Ok(Box::new(IssueOperations {
+                        service: self,
+                        checks: 0.into(),
+                    }))
+                }
+                fn check_reviewed_issue(
+                    &self,
+                    checkout: &Path,
+                    state: &Path,
+                    issue: &str,
+                    pin: Option<&str>,
+                ) -> oms_command_room::Result<()> {
+                    assert_eq!(checkout, self.repo.0);
+                    assert_eq!(state, self.repo.0);
+                    if pin.is_some() {
+                        self.reads.fetch_add(1, Ordering::SeqCst);
+                        if let Some(f) = self.during.lock().unwrap().take() {
+                            f();
+                        }
+                        if !self.open.load(Ordering::SeqCst)
+                            || !["a".repeat(64), "b".repeat(64), "c".repeat(64)]
+                                .iter()
+                                .any(|p| Some(p.as_str()) == pin)
+                        {
+                            return Err(oms_command_room::Error::new("source closed or changed"));
+                        }
+                    }
+                    if issue != "example-org/project#7" {
+                        return Err(oms_command_room::Error::new("foreign issue"));
+                    }
+                    Ok(())
+                }
+            }
+            let repo = Repo::new();
+            let thread = "01900000-0000-7000-8000-0000000000aa";
+            let digest = format!("{:x}", Sha256::digest(thread.as_bytes()))[..32].to_owned();
+            let sha = "a".repeat(64);
+            let reference = "example-org/project#7";
+            let join = |room| {
+                success(run(&repo, &["new", "--id", room, "--participant", "owner"]));
+                success(run(
+                    &repo,
+                    &[
+                        "join",
+                        "--id",
+                        room,
+                        "--participant",
+                        "owner",
+                        "--provider",
+                        "codex",
+                        "--role",
+                        "main",
+                        "--native-session",
+                        thread,
+                    ],
+                ));
+            };
+            join("issue-room");
+            let ended = oms_command_room::Attempt {
+                attempt_id: "stopped".into(),
+                tool: "panel-main".into(),
+                provider: "codex".into(),
+                state: "failed".into(),
+                terminal: true,
+                reason_code: None,
+                created_at: String::new(),
+                refs: oms_command_room::value::obj([
+                    ("panel_room_id", "issue-room".into()),
+                    ("panel_room_participant", "owner".into()),
+                ]),
+            };
+            let before_receipt = Mutex::new(None);
+            let svc = Issued {
+                repo: &repo,
+                reads: 0.into(),
+                open: false.into(),
+                terminal: false.into(),
+                during: Mutex::new(None),
+                before_receipt: &before_receipt,
+                ended: vec![ended],
+            };
+            let call =
+                |request: &str, owner: &str, consumer: &str, source: Option<(&str, &str)>| {
+                    let mut argv = vec![
+                        if source.is_some() {
+                            "desktop-issue-record"
+                        } else {
+                            "desktop-issue-status"
+                        },
+                        "--id",
+                        "issue-room",
+                        "--owner",
+                        owner,
+                        "--conversation-digest",
+                        consumer,
+                        "--request",
+                        request,
+                    ];
+                    if let Some((reference, pin)) = source {
+                        argv.extend(["--issue", reference, "--digest", pin]);
+                    }
+                    run_with_services(&args(&argv), &repo.0, &STOP, &svc)
+                };
+            let lookup = |pin: &str| {
+                success(run_with_services(
+                    &args(&[
+                        "desktop-issue-status",
+                        "--id",
+                        "issue-room",
+                        "--owner",
+                        "owner",
+                        "--conversation-digest",
+                        &digest,
+                        "--issue",
+                        reference,
+                        "--digest",
+                        pin,
+                    ]),
+                    &repo.0,
+                    &STOP,
+                    &svc,
+                ))
+            };
+            let first = lookup(&sha);
+            let req = first.text("requestId");
+            assert_eq!(first.text("status"), "not_found");
+            assert_eq!(lookup(&sha), first);
+            assert_ne!(lookup(&"b".repeat(64)).text("requestId"), req);
+            assert_ne!(
+                call(
+                    "4d6acd01-bd18-4567-bf69-ea05fb048b27",
+                    "owner",
+                    &digest,
+                    Some((reference, &sha))
+                )
+                .0,
+                0
+            );
+            let record = || call(req, "owner", &digest, Some((reference, &sha)));
+            let status = || call(req, "owner", &digest, None);
+            let room_log = repo.0.join(".oms/threads/issue-room.jsonl");
+            let before = fs::read(&room_log).unwrap();
+            assert_eq!(success(status()).text("status"), "not_found");
+            assert_ne!(call(req, "another", &digest, Some((reference, &sha))).0, 0);
+            assert_ne!(
+                call(req, "owner", &"f".repeat(32), Some((reference, &sha))).0,
+                0
+            );
+            assert_eq!(svc.reads.load(Ordering::SeqCst), 0);
+            assert_ne!(record().0, 0);
+            assert_eq!(success(status()).text("status"), "not_found");
+            svc.open.store(true, Ordering::SeqCst);
+            let delivered = success(record());
+            assert_eq!(delivered.text("status"), "recorded");
+            assert_eq!(delivered.text("sha256"), sha);
+            assert_eq!(delivered.text("issue"), reference);
+            assert!(delivered.get("binding").is_none() && delivered.get("body").is_none());
+            assert_eq!(lookup(&sha), delivered);
+            // A historical receipt can still be addressed and replayed by its original UUID.
+            let legacy = "4d6acd01-bd18-4567-bf69-ea05fb048b28";
+            let receipts = repo.0.join(".oms/reviewed-issue-receipts");
+            // Replace only the named receipt directory while its original fd stays live.
+            let detached = receipts.with_file_name("detached-receipts");
+            let swap = || {
+                let receipts = receipts.clone();
+                let detached = detached.clone();
+                Box::new(move || {
+                    fs::rename(&receipts, detached).unwrap();
+                    fs::create_dir(&receipts).unwrap();
+                    fs::set_permissions(
+                        &receipts,
+                        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+                    )
+                    .unwrap();
+                })
+            };
+            let restore = || {
+                fs::remove_dir(&receipts).unwrap();
+                fs::rename(&detached, &receipts).unwrap();
+            };
+            *svc.before_receipt.lock().unwrap() = Some((2, swap()));
+            assert_ne!(
+                status().0,
+                0,
+                "returned a receipt from a detached directory"
+            );
+            assert_eq!(success(status()).text("status"), "not_found");
+            restore();
+            let next_pin = "c".repeat(64);
+            let next = lookup(&next_pin);
+            let next_id = next.text("requestId");
+            let before_write = swap();
+            let hook = &before_receipt;
+            *svc.during.lock().unwrap() = Some(Box::new(move || {
+                *hook.lock().unwrap() = Some((2, before_write));
+            }));
+            assert_ne!(
+                call(next_id, "owner", &digest, Some((reference, &next_pin))).0,
+                0,
+                "acknowledged a write to a detached directory"
+            );
+            assert_eq!(lookup(&next_pin).text("status"), "not_found");
+            restore();
+            assert_eq!(lookup(&next_pin).text("status"), "not_found");
+            assert_eq!(success(status()), delivered);
+            // A change after the rename has an uncertain outcome until the exact
+            // receipt is read again under its original directory generation.
+            let after_write = swap();
+            *svc.during.lock().unwrap() = Some(Box::new(move || {
+                *hook.lock().unwrap() = Some((3, after_write));
+            }));
+            assert_ne!(
+                call(next_id, "owner", &digest, Some((reference, &next_pin))).0,
+                0,
+                "confirmed a receipt after its published path was replaced"
+            );
+            assert_eq!(lookup(&next_pin).text("status"), "not_found");
+            restore();
+            assert_eq!(lookup(&next_pin).text("status"), "recorded");
+            let old = receipts.join(format!("{legacy}.json"));
+            let original = receipts.join(format!("{req}.json"));
+            fs::copy(&original, &old).unwrap();
+            let mut historical =
+                oms_command_room::value::parse(&fs::read(&original).unwrap(), 2048).unwrap();
+            historical.remove("boundAddress");
+            historical.set("requestId", legacy);
+            fs::write(
+                &old,
+                oms_command_room::value::encode(&historical, false, true).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                success(call(legacy, "owner", &digest, None)).text("requestId"),
+                legacy
+            );
+            assert_eq!(
+                success(call(legacy, "owner", &digest, Some((reference, &sha)))).text("status"),
+                "recorded"
+            );
+            let reads = svc.reads.load(Ordering::SeqCst);
+            svc.open.store(false, Ordering::SeqCst);
+            assert_eq!(success(status()), delivered);
+            assert_eq!(success(record()), delivered);
+            assert_ne!(
+                call(req, "owner", &digest, Some((reference, &"b".repeat(64)))).0,
+                0
+            );
+            assert_ne!(
+                call(req, "owner", &digest, Some(("example-org/project#8", &sha))).0,
+                0
+            );
+            assert_eq!(svc.reads.load(Ordering::SeqCst), reads);
+            assert_eq!(fs::read(&room_log).unwrap(), before);
+            assert!(!repo.0.join(".oms/plan").exists());
+            // The alias, Room log and receipt directory survive replacing the checkout itself.
+            let staging = Repo::new();
+            let original_root = staging.0.join("original");
+            fs::rename(&repo.0, &original_root).unwrap();
+            fs::create_dir(&repo.0).unwrap();
+            for entry in [".git", ".oms"] {
+                fs::rename(original_root.join(entry), repo.0.join(entry)).unwrap();
+            }
+            let replaced = lookup(&sha);
+            assert_eq!(replaced.text("status"), "not_found");
+            assert_ne!(replaced.text("requestId"), req);
+            assert_ne!(status().0, 0);
+            assert_ne!(record().0, 0);
+            for entry in [".git", ".oms"] {
+                fs::rename(repo.0.join(entry), original_root.join(entry)).unwrap();
+            }
+            fs::remove_dir_all(&repo.0).unwrap();
+            fs::rename(original_root, &repo.0).unwrap();
+            assert_eq!(lookup(&sha), delivered);
+            svc.terminal.store(true, Ordering::SeqCst);
+            assert_ne!(status().0, 0);
+            svc.terminal.store(false, Ordering::SeqCst);
+            join("duplicate-owner");
+            assert_ne!(status().0, 0);
+            success(run(
+                &repo,
+                &["close", "--id", "duplicate-owner", "--participant", "owner"],
+            ));
+            assert_eq!(success(status()), delivered);
+            svc.open.store(true, Ordering::SeqCst);
+            let next = lookup(&"b".repeat(64));
+            let later = next.text("requestId");
+            *svc.during.lock().unwrap() = Some(Box::new(|| {
+                success(run(
+                    &repo,
+                    &["close", "--id", "issue-room", "--participant", "owner"],
+                ));
+            }));
+            assert_ne!(
+                call(later, "owner", &digest, Some((reference, &"b".repeat(64)))).0,
+                0
+            );
+            assert!(
+                !repo
+                    .0
+                    .join(format!(".oms/reviewed-issue-receipts/{later}.json"))
+                    .exists()
+            );
+            assert_ne!(status().0, 0);
+        },
+    );
+}
+
+#[test]
 fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
     isolated(
         "desktop_assignment_is_owner_proofed_idempotent_and_unforgeable",
@@ -905,7 +1263,7 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                     ]),
                     &repo.0,
                     &STOP,
-                    &FixtureServices(&[terminal])
+                    &FixtureServices(std::slice::from_ref(&terminal))
                 )
                 .0,
                 2
@@ -995,6 +1353,115 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                 "assignment is readable through the Room reader"
             );
             assert_eq!(chat.text("provider"), "claude");
+            assert!(again["purpose"].is_null());
+
+            let lead = |action, digest: &str, provider: &str, extra: &[&str]| {
+                let mut v = vec![
+                    action,
+                    "--id",
+                    "ask-room",
+                    "--conversation-digest",
+                    digest,
+                    "--provider",
+                    provider,
+                ];
+                v.extend_from_slice(extra);
+                run(&repo, &v)
+            };
+            let before = fs::read(&log).unwrap();
+            for (d, p, extra) in [
+                (other.as_str(), "claude", vec![]),
+                (digest.as_str(), "pi", vec![]),
+                (digest.as_str(), "codex", vec!["--label", "claim"]),
+                (digest.as_str(), "codex", vec!["--text", "inspect"]),
+                (digest.as_str(), "codex", vec!["--request", req]),
+            ] {
+                assert_ne!(lead("desktop-lead-open", d, p, &extra).0, 0);
+            }
+            assert_eq!(fs::read(&log).unwrap(), before);
+            let closed_main = run_with_services(
+                &args(&[
+                    "desktop-lead-open",
+                    "--id",
+                    "ask-room",
+                    "--conversation-digest",
+                    &digest,
+                    "--provider",
+                    "codex",
+                ]),
+                &repo.0,
+                &STOP,
+                &FixtureServices(std::slice::from_ref(&terminal)),
+            );
+            assert_ne!(closed_main.0, 0);
+            assert_eq!(fs::read(&log).unwrap(), before);
+            let mut requests = std::collections::BTreeSet::new();
+            for (provider, canonical, title) in [
+                ("codex", "codex", "Codex Lead"),
+                ("claude", "claude", "Claude Lead"),
+                ("agy", "antigravity", "AGY Lead"),
+            ] {
+                let before = fs::read(&log).unwrap();
+                let empty = success(lead("desktop-lead-status", &digest, provider, &[]));
+                let request = empty.text("request");
+                assert_eq!(empty.text("status"), "not_found");
+                assert_eq!(fs::read(&log).unwrap(), before);
+                assert!(requests.insert(request.to_owned()));
+                let open = || {
+                    success(lead(
+                        "desktop-lead-open",
+                        &digest,
+                        provider,
+                        &["--request", request],
+                    ))
+                };
+                let (first, second) = std::thread::scope(|scope| {
+                    let other = scope.spawn(open);
+                    (open(), other.join().unwrap())
+                });
+                assert_ne!(first.flag("fresh"), second.flag("fresh"));
+                assert_eq!(first.text("role"), "worker");
+                assert_eq!(first.text("purpose"), "provider-lead");
+                assert_eq!(first.text("title"), title);
+                assert_eq!(first.text("provider"), canonical);
+                assert_eq!(first.text("participant"), format!("ask-{request}"));
+                assert_eq!(first.text("status"), "assigned");
+                assert!(first["thread"].is_null() && first.flag("readOnly"));
+                let op = format!("fixture-{canonical}");
+                let linked = success(run(
+                    &repo,
+                    &[
+                        "desktop-assign-receipt",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        &digest,
+                        "--request",
+                        request,
+                        "--operation",
+                        &op,
+                    ],
+                ));
+                assert_eq!(linked.text("thread"), op);
+                let bytes = fs::read(&log).unwrap();
+                let recovered = success(lead("desktop-lead-status", &digest, canonical, &[]));
+                assert_eq!(recovered, linked);
+                assert!(!open().flag("fresh"));
+                let prior = success(run(
+                    &repo,
+                    &[
+                        "desktop-assign-status",
+                        "--id",
+                        "ask-room",
+                        "--conversation-digest",
+                        &digest,
+                        "--request",
+                        request,
+                    ],
+                ));
+                assert_eq!(prior, recovered);
+                assert_eq!(fs::read(&log).unwrap(), bytes);
+            }
         },
     );
 }

@@ -2845,15 +2845,14 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     fs::remove_dir(source.join("rules")).unwrap();
 }
 
-fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
+fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServices, cache: &Path) {
     let home = root.join("home");
     let receipt = root.join("config/oh-my-setting/install.json");
     assert!(!receipt.exists());
     let settings = home.join(".claude/settings.json");
     let claude = home.join(".claude.json");
     let codex = home.join(".codex/config.toml");
-    let cache =
-        home.join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/1.0.0/hooks.json");
+    let cache = cache.join("hooks.json");
     let state = root.join("codex-state");
     let files = [&settings, &claude, &codex, &cache, &state];
     let before = files.map(|p| fs::read(p).ok());
@@ -2991,7 +2990,13 @@ fn run_fixture_cron(root: &Path) -> String {
     fs::read_to_string(root.join("scheduled-environment")).unwrap()
 }
 
-fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks: &[u8]) {
+fn doctor_hook_evidence(
+    source: &Path,
+    root: &Path,
+    host: &NativeServices,
+    cache: &Path,
+    hooks: &[u8],
+) {
     let home = root.join("home");
     let config = home.join(".codex/config.toml");
     let settings = home.join(".claude/settings.json");
@@ -3019,7 +3024,18 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
             .unwrap()
             .clone()
     };
+    let provider_side = |row: &Value, reach: &str, gap: Value| {
+        assert_eq!(
+            row["provider_side"],
+            json!({"managed_callback":reach, "configuration_gap":gap})
+        );
+    };
     let baseline = report();
+    provider_side(
+        &diagnostic(&baseline),
+        "not_observed",
+        json!("plugin_not_declared"),
+    );
     let guards: Vec<_> = baseline["findings"]
         .as_array()
         .unwrap()
@@ -3046,8 +3062,7 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
         diagnostic(&baseline)["configuration"]["plugin_configuration"],
         "not_declared"
     );
-    let cache = home.join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/1.0.0");
-    fs::create_dir_all(&cache).unwrap();
+    fs::create_dir_all(cache).unwrap();
     fs::write(cache.join("hooks.json"), hooks).unwrap();
     fs::write(
         &config,
@@ -3069,11 +3084,30 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
         "not_probed"
     );
     assert_eq!(configured["trace"]["diagnosis"], "no_callback_evidence");
+    provider_side(&configured, "not_observed", json!("none_found"));
     write(&cache.join("hooks.json"), &json!({"hooks":{}}));
-    assert_eq!(
-        diagnostic(&report())["configuration"]["generated_hooks"],
-        "drifted"
+    let drifted = diagnostic(&report());
+    assert_eq!(drifted["configuration"]["generated_hooks"], "drifted");
+    provider_side(&drifted, "not_observed", json!("generated_hooks_drifted"));
+    fs::remove_file(cache.join("hooks.json")).unwrap();
+    provider_side(
+        &diagnostic(&report()),
+        "not_observed",
+        json!("generated_hooks_unavailable"),
     );
+    let enabled_config = fs::read(&config).unwrap();
+    for (content, gap) in [
+        (
+            "[plugins.\"oh-my-setting@oh-my-setting-local\"]\nenabled = false\n",
+            "plugin_declared_disabled",
+        ),
+        ("[", "plugin_configuration_unavailable"),
+    ] {
+        fs::write(&config, content).unwrap();
+        provider_side(&diagnostic(&report()), "not_observed", json!(gap));
+    }
+    fs::write(&config, enabled_config).unwrap();
+    write(&cache.join("hooks.json"), &json!({"hooks":{}}));
 
     let trace = source.join(".oms/hooks/codex-trace.jsonl");
     fs::DirBuilder::new()
@@ -3132,6 +3166,8 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     );
     assert_eq!(fs::read(&trace).unwrap(), raw.as_bytes());
     assert_eq!(observed["trace"]["status"], "read");
+    // Retained callbacks are never relabeled by the current configuration.
+    provider_side(&observed, "retained", Value::Null);
     assert_eq!(observed["trace"]["attempts"], 6);
     assert_eq!(
         observed["trace"]["counts"],
@@ -3149,10 +3185,13 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     assert!(!observed.to_string().contains("2026-11-23"));
     let text = String::from_utf8(success(call("doctor", &["--surfaces"], source, host))).unwrap();
     assert!(text.contains("turn-guard handler_internal_failure=1"));
+    assert!(text.contains("managed callback retained; diagnosis"));
     assert!(text.contains("retained evidence cannot prove current account/session delivery"));
     // Shared ancestors are allowed; unsafe local diagnostic storage is not.
     fs::set_permissions(&trace, fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    let unreadable = diagnostic(&report());
+    assert_eq!(unreadable["trace"]["status"], "unavailable");
+    provider_side(&unreadable, "unknown", Value::Null);
     fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
     let hardlink = trace.with_extension("copy");
     fs::hard_link(&trace, &hardlink).unwrap();
@@ -3281,6 +3320,9 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     assert_eq!(invalid["trace"]["diagnosis"], "incomplete_evidence");
     assert_eq!(invalid["trace"]["counts"]["returned"], 0);
     assert_eq!(invalid["trace"]["invalid_records"], 2);
+    // A torn ledger without any attributable row proves neither side.
+    fs::write(&trace, b"{").unwrap();
+    provider_side(&diagnostic(&report()), "unknown", Value::Null);
     fs::remove_file(&trace).unwrap();
     symlink(&settings, &trace).unwrap();
     assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
@@ -3382,11 +3424,17 @@ state="$OMS_LIFECYCLE_FIXTURE/codex-state"
 now=here
 [ -e "$state" ] && read now < "$state"
 case "$*" in
-  'plugin remove '*) echo gone > "$state" ;;
+  'plugin remove oh-my-setting@oh-my-setting-local')
+    if [ -e "$OMS_LIFECYCLE_FIXTURE/fail-hook-remove" ]; then
+      IFS= read -r hooks_file < "$OMS_LIFECYCLE_FIXTURE/fail-hook-remove" || exit 2
+      printf 'partially removed' > "$hooks_file"
+      exit 9
+    fi
+    echo gone > "$state" ;;
   'plugin marketplace remove '*)
     [ ! -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ] || exit 2
     echo gone > "$state" ;;
-  'plugin add '*|'plugin marketplace add '*) echo here > "$state" ;;
+  'plugin add oh-my-setting@oh-my-setting-local'|'plugin marketplace add '*) echo here > "$state" ;;
   'plugin list --json')
     if [ -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ]; then
       sibling='{"pluginId":"oms@oh-my-setting-local","installed":true}'
@@ -3395,6 +3443,7 @@ case "$*" in
       printf '{"installed":[%s%s]}\n' "$hooks" "$sibling"
     elif [ "$now" = gone ]; then printf '%s\n' '{"installed":[]}'
     else printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'; fi ;;
+  'plugin remove '*|'plugin add '*) exit 2 ;;
   'plugin marketplace list') { [ "$now" = gone ] && [ ! -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ]; } || printf 'oh-my-setting-local %s/source\n' "$OMS_LIFECYCLE_FIXTURE" ;;
 esac
 "##).unwrap();
@@ -3540,7 +3589,9 @@ esac
             .status
             .success()
     );
-    fs::write(source.join("VERSION"), "1.0.0\n").unwrap();
+    let prior_release = "0.7.0";
+    let version_file = source.join("VERSION");
+    fs::write(&version_file, prior_release).unwrap();
     fs::create_dir(source.join("rules")).unwrap();
     fs::write(source.join("rules/global-AGENTS.md"), "managed rules\n").unwrap();
     write(&source.join("skills.manifest.json"), &json!({"skills":[]}));
@@ -3548,21 +3599,60 @@ esac
         &source.join(".agents/plugins/marketplace.json"),
         &json!({"name":"oh-my-setting-local"}),
     );
-    write(
-        &source.join("plugins/oh-my-setting/.codex-plugin/plugin.json"),
-        &json!({"name":"oh-my-setting","version":"1.0.0","hooks":"./hooks.json"}),
-    );
+    let manifest = source.join("plugins/oh-my-setting/.codex-plugin/plugin.json");
+    let mut hook_plugin: Value = serde_json::from_str(include_str!(
+        "../../../plugins/oh-my-setting/.codex-plugin/plugin.json"
+    ))
+    .unwrap();
+    let release = include_str!("../../../VERSION").trim();
+    assert_eq!(hook_plugin["version"], release);
+    hook_plugin["version"] = json!(prior_release);
+    write(&manifest, &hook_plugin);
     let template = source.join("plugins/oh-my-setting/hooks.json");
     write(
         &template,
         &json!({"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" skill-router","timeout":5}]}]}}),
     );
     success(call("install-codex-plugin", &[], &source, &host));
-    let cache = home.join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/1.0.0");
+    let market = home.join(".codex/plugins/cache/oh-my-setting-local");
+    let hook_cache = market.join("oh-my-setting");
+    let old_hooks = hook_cache.join(prior_release).join("hooks.json");
+    let old_payload = fs::read(&old_hooks).unwrap();
+    let cache = hook_cache.join(release);
+    assert!(!cache.exists());
+    let sibling = root.join("market-sibling");
+    fs::write(&sibling, "").unwrap();
+    let panel = include_bytes!("../../../plugins/oms/plugin.json");
+    let panel_plugin: Value = serde_json::from_slice(panel).unwrap();
+    let panel_manifest = market
+        .join("oms")
+        .join(panel_plugin["version"].as_str().unwrap())
+        .join("plugin.json");
+    fs::create_dir_all(panel_manifest.parent().unwrap()).unwrap();
+    fs::write(&panel_manifest, panel).unwrap();
+    fs::write(version_file, release).unwrap();
+    hook_plugin["version"] = json!(release);
+    write(&manifest, &hook_plugin);
+    fs::write(&old_hooks, b"modified by user").unwrap();
+    assert_ne!(call("install-codex-plugin", &[], &source, &host).0, 0);
+    assert_eq!(fs::read(&old_hooks).unwrap(), b"modified by user");
+    assert!(!cache.exists());
+    fs::write(&old_hooks, &old_payload).unwrap();
+    // A provider can change an owned file before returning a failure.
+    let fail_remove = root.join("fail-hook-remove");
+    fs::write(&fail_remove, format!("{}\n", old_hooks.display())).unwrap();
+    assert_eq!(call("install-codex-plugin", &[], &source, &host).0, 9);
+    assert_eq!(fs::read(&old_hooks).unwrap(), old_payload);
+    assert!(!cache.exists());
+    assert_eq!(fs::read(&panel_manifest).unwrap(), panel);
+    fs::remove_file(fail_remove).unwrap();
+    success(call("install-codex-plugin", &[], &source, &host));
+    assert_eq!(read(&cache.join(".codex-plugin/plugin.json")), hook_plugin);
+    assert_eq!(fs::read(&panel_manifest).unwrap(), panel);
     native_only(&read(&cache.join("hooks.json")));
     assert!(!cache.join("scripts").exists());
     let payload = fs::read(cache.join("hooks.json")).unwrap();
-    doctor_integration_diagnostics(&source, &root, &host);
+    doctor_integration_diagnostics(&source, &root, &host, &cache);
     success(call("install-codex-plugin", &[], &source, &host));
     assert_eq!(fs::read(cache.join("hooks.json")).unwrap(), payload);
     // The native inventory does not read the legacy executable template.
@@ -3594,9 +3684,8 @@ esac
             .unwrap()
             .contains("\"git-branch\", \"current-dir\"]")
     );
-    let sibling = root.join("market-sibling");
-    fs::write(&sibling, "").unwrap();
     success(call("install-codex-plugin", &["--remove"], &source, &host));
+    assert_eq!(fs::read(&panel_manifest).unwrap(), panel);
     fs::remove_file(sibling).unwrap();
     assert!(
         !fs::read_to_string(&codex_config)
@@ -3703,7 +3792,7 @@ esac
     )))
     .unwrap();
     assert!(!report.to_string().contains("missing or drifted"));
-    doctor_hook_evidence(&source, &root, &host, &payload);
+    doctor_hook_evidence(&source, &root, &host, &cache, &payload);
     success(call("install-claude-hooks", &["--remove"], &source, &host));
     let removed = read(&settings);
     assert!(removed.to_string().contains("custom-hook"));

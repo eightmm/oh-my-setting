@@ -39,6 +39,8 @@ Options:
   --thread ID          Publish each completed answer to a shared thread (create
                        if absent). Later rounds share a bounded notes snapshot.
                        Providers receive bounded prior thread context initially.
+  --no-current         Append to an existing explicit --thread without selecting
+                       it as the repository foreground thread.
   --deliberation       Require evidence, alternatives, counterargument and checks
                        from every seat; task JSON alone is not a deliberation.
                        Requires --debate; implies --require-complete.

@@ -4,7 +4,7 @@
     "name": "eightmm"
   },
   "metadata": {
-    "description": "The oh-my-setting (OMS) skills as a Claude Code plugin, for setups that only load skills from plugins. The skills call the oms command, so they need an oh-my-setting install; this manifest installs nothing by itself and the OMS installer does not register it."
+    "description": "Optional Claude Code plugins for OMS skills and a read-only project pane. Both use the installed oms command."
   },
   "plugins": [
     {
@@ -23,6 +23,11 @@
         "./oms-careful",
         "./oms-panel-orchestrator"
       ]
+    },
+    {
+      "name": "oms-panel",
+      "source": "./plugins/claude-code",
+      "description": "Open a read-only OMS pane for the current Claude Code project with /oms-panel. Requires oms on PATH."
     }
   ]
 }

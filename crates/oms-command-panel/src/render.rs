@@ -600,6 +600,11 @@ fn call_badge(call: &Value) -> (String, &'static str) {
         return match (kind, text(call, "attention_class")) {
             ("message", "needs") => ("[? question]".to_owned(), SGR_GOLD_BOLD),
             ("message", _) => ("[· mail]".to_owned(), SGR_CYAN),
+            ("task", "decide") => ("[? review]".to_owned(), SGR_GOLD_BOLD),
+            ("task", "info") => ("[· plan]".to_owned(), SGR_CYAN),
+            ("task", "stale") if call["state"] == "stale" => {
+                ("[! stale]".to_owned(), SGR_AMBER_BOLD)
+            }
             ("task", _) => ("[! held]".to_owned(), SGR_AMBER_BOLD),
             _ => state_badge(text(call, "state")),
         };
@@ -657,7 +662,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
         );
     for row in attempt_rows {
         let aid = text(row, "attempt_id");
-        if attempt_foreign_to_room(room_id, &row["refs"]) {
+        if attempt_foreign_to_room(room_id, row) {
             if !aid.is_empty() {
                 by_attempt.remove(aid);
                 by_participant.retain(|_, existing| text(existing, "attempt_id") != aid);
@@ -673,7 +678,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
         }
         let pid = text(&row["refs"], "panel_room_participant");
         if !pid.is_empty()
-            && (room_id.is_empty() || event_room_matches(room_id, &row["refs"]))
+            && (room_id.is_empty() || event_room_matches(room_id, row))
             && by_participant
                 .get(pid)
                 .is_none_or(|existing| prefer_attempt(row, existing))
@@ -695,7 +700,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
         // attempts bound to one participant cannot prove an implicit join.
         for &row in by_attempt.values() {
             let participant = text(&row["refs"], "panel_room_participant");
-            if !participant.is_empty() && event_room_matches(room_id, &row["refs"]) {
+            if !participant.is_empty() && event_room_matches(room_id, row) {
                 room_member_attempts
                     .entry(participant)
                     .and_modify(|entry| *entry = None)
@@ -919,8 +924,8 @@ pub fn calls(report: &Value) -> Vec<Value> {
             continue;
         }
         if !room_id.is_empty()
-            && (attempt_foreign_to_room(room_id, &attempt["refs"])
-                || (!event_room_matches(room_id, &attempt["refs"]) && has_participants))
+            && (attempt_foreign_to_room(room_id, attempt)
+                || (!event_room_matches(room_id, attempt) && has_participants))
         {
             continue;
         }
@@ -1058,16 +1063,29 @@ fn stale_lifecycle(report: &Value, row: &Value) -> bool {
     oms_panel_core::release::heartbeat_fresh(&evidence, now).is_ok_and(|fresh| !fresh)
 }
 
-fn event_room_matches(room: &str, refs: &Value) -> bool {
-    let rooms = [text(refs, "panel_room_id"), text(refs, "panel_room")];
-    !room.is_empty() && rooms.contains(&room) && rooms.iter().all(|id| id.is_empty() || *id == room)
+fn attempt_room(row: &Value) -> oms_command_room::AttemptRoom<'_> {
+    use oms_command_room::AttemptRoom;
+    let Some(refs) = row.get("refs") else {
+        return AttemptRoom::Unspecified;
+    };
+    if !refs.is_object() {
+        return AttemptRoom::Invalid;
+    }
+    let tag = |key: &str| refs.get(key).map(|v| v.as_str().unwrap_or(""));
+    AttemptRoom::from_tags(tag("panel_room_id"), tag("panel_room"))
 }
 
-fn attempt_foreign_to_room(room_id: &str, refs: &Value) -> bool {
-    !room_id.is_empty()
-        && [text(refs, "panel_room_id"), text(refs, "panel_room")]
-            .into_iter()
-            .any(|id| !id.is_empty() && id != room_id)
+fn event_room_matches(room: &str, row: &Value) -> bool {
+    attempt_room(row) == oms_command_room::AttemptRoom::Named(room)
+}
+
+fn attempt_foreign_to_room(room: &str, row: &Value) -> bool {
+    use oms_command_room::AttemptRoom;
+    match attempt_room(row) {
+        AttemptRoom::Invalid => true,
+        AttemptRoom::Named(id) => !room.is_empty() && id != room,
+        AttemptRoom::Unspecified => false,
+    }
 }
 
 fn prefer_attempt(candidate: &Value, existing: &Value) -> bool {
@@ -1119,7 +1137,7 @@ fn native_assignment_parent<'a>(
         .into_iter()
         .any(|(key, expected)| refs.get(key).is_some_and(|value| value != expected))
         || refs["panel_room_id"] != room_id
-        || !event_room_matches(room_id, refs)
+        || !event_room_matches(room_id, row)
         || !id(text(refs, "plan_id"), "plan_")
         || !id(text(refs, "lease_id"), "lease_")
         || !hex(text(refs, "native_intent_sha256"), 64)
@@ -1158,7 +1176,7 @@ fn native_assignment_parent<'a>(
         && main["tool"] == "panel-main"
         && main["refs"]["panel_role"] == "main"
         && main["refs"]["panel_native_scheduling"] == "unmanaged"
-        && event_room_matches(room_id, &main["refs"])
+        && event_room_matches(room_id, main)
         && oms_panel_core::state::main_participant(main) == parent
         && !text(main, "provider").is_empty()
         && refs["panel_owner"] == main["provider"]
@@ -1177,7 +1195,7 @@ fn native_assignment_parent<'a>(
 
 fn member_matches_attempt(room_id: &str, room: &Value, member: &Value, row: &Value) -> bool {
     let refs = &row["refs"];
-    if row["tool"] == "panel-native-assignment" || attempt_foreign_to_room(room_id, refs) {
+    if row["tool"] == "panel-native-assignment" || attempt_foreign_to_room(room_id, row) {
         return false;
     }
     let parent = text(member, "parent");
@@ -1211,10 +1229,10 @@ fn member_matches_attempt(room_id: &str, room: &Value, member: &Value, row: &Val
         return true;
     }
     let member_attempt = text(member, "attempt");
-    event_room_matches(room_id, refs)
+    event_room_matches(room_id, row)
         || (!member_attempt.is_empty()
             && attempt_id == member_attempt
-            && [text(refs, "panel_room_id"), text(refs, "panel_room")] == ["", ""])
+            && attempt_room(row) == oms_command_room::AttemptRoom::Unspecified)
         || (member_is_main
             && row["tool"] == "panel-main"
             && event_participant.is_empty()
@@ -1252,7 +1270,7 @@ fn current_room_main_custodian<'a>(
                 || row["tool"] != "panel-main"
                 || row["terminal"] != false
                 || !oms_panel_core::state::LIVE_STATES.contains(&text(row, "state"))
-                || !event_room_matches(room_id, &row["refs"])
+                || !event_room_matches(room_id, row)
                 || oms_panel_core::state::main_participant(row) != owner
             {
                 continue;
@@ -1271,7 +1289,7 @@ fn current_room_main_custodian<'a>(
         || attempt["terminal"] != false
         || !oms_panel_core::state::LIVE_STATES.contains(&text(attempt, "state"))
         || attempt["provider"] != main_member["provider"]
-        || !event_room_matches(room_id, &attempt["refs"])
+        || !event_room_matches(room_id, attempt)
         || !(oms_panel_core::state::main_participant(attempt) == owner
             || (text(&attempt["refs"], "panel_room_participant").is_empty()
                 && member_attempt == main_attempt))
@@ -1431,7 +1449,7 @@ fn attached_token_attempt(
     if participant.is_empty()
         || attempt.is_empty()
         || attempt == text(member, "parent")
-        || !event_room_matches(text(room, "id"), refs)
+        || !event_room_matches(text(room, "id"), row)
         || (event_participant != participant && !legacy_main)
         || member_is_main != event_is_main
         || (member_is_main && roles.iter().any(|role| !role.is_empty() && *role != "main"))
@@ -1493,14 +1511,15 @@ fn attached_display_strategy<'a>(room: &str, member: &Value, row: &'a Value) -> 
         && refs["panel_room_participant"] == participant
         && !text(row, "attempt_id").is_empty()
         && (attempt.is_empty() || row["attempt_id"] == attempt)
-        && event_room_matches(room, refs)
+        && event_room_matches(room, row)
         && (provider.is_empty() || providers.iter().all(|id| id.is_empty() || *id == provider))
         && oms_panel_core::routing::kind(strategy).ok() == Some(role))
     .then_some(strategy)
 }
 
 fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Value {
-    let refs = &row["refs"];
+    let empty = json!({});
+    let refs = row.get("refs").unwrap_or(&empty);
     let choose = |key, reference| {
         row[key]
             .as_str()
@@ -1804,7 +1823,7 @@ fn direct_work<'a>(
         || !oms_panel_core::state::LIVE_STATES.contains(&text(attempt, "state"))
         || attempt["provider"] != main["provider"]
         || oms_panel_core::state::main_participant(attempt) != owner
-        || !event_room_matches(room_id, &attempt["refs"])
+        || !event_room_matches(room_id, attempt)
         || calls.iter().any(|call| {
             !std::ptr::eq(call, main)
                 && ["participant", "attempt"]
@@ -1851,7 +1870,7 @@ fn direct_work<'a>(
                 && oms_panel_core::state::LIVE_STATES.contains(&text(row, "state"))
                 && row["provider"] == call["provider"]
                 && refs["panel_room_participant"] == participant
-                && event_room_matches(room_id, refs))
+                && event_room_matches(room_id, row))
             .then_some((participant, attempt))
         })
         .collect()
@@ -2303,6 +2322,18 @@ fn attention_extra_rows(report: &Value, all: &[Value], items: &[attention::Item]
                 }));
             }
             "task" => {
+                let id = &item.row_id.1;
+                let state = if item.cls == "decide" {
+                    "review"
+                } else if item.cls == "info" {
+                    plan_task_state(&report["plan"]["tasks"][id])
+                } else if attention::claim_expired(report, id, &report["plan"]["tasks"][id])
+                    == Some(true)
+                {
+                    "stale"
+                } else {
+                    "held"
+                };
                 let title = if item.what.is_empty() {
                     item.who.clone()
                 } else {
@@ -2314,7 +2345,7 @@ fn attention_extra_rows(report: &Value, all: &[Value], items: &[attention::Item]
                     "alias": item.row_id.1,
                     "role": "task",
                     "provider": "plan",
-                    "state": "held",
+                    "state": state,
                     "title": title,
                     "purpose": item.what,
                     "task_id": item.row_id.1,
@@ -2423,7 +2454,13 @@ pub(crate) fn attention_row_dock(report: &Value, call: &Value) -> Option<(String
                 }
             };
             let state = task
-                .map(plan_task_state)
+                .map(|t| {
+                    if attention::claim_expired(report, id, t) == Some(true) {
+                        "stale"
+                    } else {
+                        plan_task_state(t)
+                    }
+                })
                 .filter(|s| !s.is_empty())
                 .unwrap_or("unknown");
             let task_title = task.map(|t| text(t, "title")).unwrap_or("");
@@ -3026,17 +3063,22 @@ fn frame_with_capacity(
     ));
     let overlay = nav.help || nav.health || nav.detail;
     let mut main_cards = use_cards && height >= 12;
-    let (mut main, mut main_switch_cols) = render_main_section(
-        plan.as_ref(),
-        pinned,
-        board_main,
-        main_selected,
-        columns,
-        main_cards,
-        colored,
-        !overlay,
-        overlay,
-    );
+    let goal_first = default_overview(nav) && !nav.editing && !overlay;
+    let main_section = |cards, allow_switch, compact| {
+        render_main_section(
+            plan.as_ref(),
+            pinned,
+            board_main,
+            main_selected,
+            columns,
+            cards,
+            colored,
+            allow_switch,
+            compact,
+            goal_first,
+        )
+    };
+    let mut main = main_section(main_cards, !overlay, overlay);
     let mut notices = Vec::new();
     if let Some(notice) = &nav.notice {
         for part in wrap(notice, columns.saturating_sub(2).max(1))
@@ -3070,24 +3112,11 @@ fn frame_with_capacity(
             3
         };
     let fixed = lines.len() + notices.len() + usize::from(stale) + usize::from(filtering) + minimum;
-    let required = fixed + main.len();
+    let required = fixed + main.lines.len();
     // Keep the Main and Goal, dropping their card borders only when needed for Weekly.
-    let compact_main = (short_board && main_cards && !main.is_empty() && required >= height)
-        .then(|| {
-            render_main_section(
-                plan.as_ref(),
-                pinned,
-                board_main,
-                main_selected,
-                columns,
-                false,
-                colored,
-                false,
-                true,
-            )
-            .0
-        })
-        .filter(|compact| fixed + compact.len() < height);
+    let compact_main = (short_board && main_cards && !main.lines.is_empty() && required >= height)
+        .then(|| main_section(false, false, true))
+        .filter(|compact| fixed + compact.lines.len() < height);
     let mut optional = Vec::new();
     let scratch = &report["managedScratch"];
     if !stale
@@ -3146,7 +3175,6 @@ fn frame_with_capacity(
             if let Some(compact) = compact_main {
                 main = compact;
                 main_cards = false;
-                main_switch_cols = None;
             }
             lines.push(line);
         }
@@ -3177,7 +3205,7 @@ fn frame_with_capacity(
         count_row_render();
         lines.extend(optional.iter().cloned());
         lines.extend(notices.iter().cloned());
-        lines.extend(main.iter().cloned());
+        lines.extend(main.lines.iter().cloned());
     }
     if nav.help {
         lines.extend(render_help_card(columns, inner_width, use_cards, colored));
@@ -3235,51 +3263,25 @@ fn frame_with_capacity(
         let main_row = usize::from(pinned.is_some() && (main_selected || body >= 3));
         lines.truncate(body.saturating_sub(worker_row + main_row));
         let main_room = body.saturating_sub(lines.len() + worker_row);
-        if main.len() > main_room {
+        if main.lines.len() > main_room {
             if main_cards {
-                let (compact_boxed, compact_switch) = render_main_section(
-                    plan.as_ref(),
-                    pinned,
-                    board_main,
-                    main_selected,
-                    columns,
-                    true,
-                    colored,
-                    !overlay,
-                    true,
-                );
-                if compact_boxed.len() <= main_room {
+                let compact_boxed = main_section(true, true, true);
+                if compact_boxed.lines.len() <= main_room {
                     main = compact_boxed;
-                    main_switch_cols = compact_switch;
                 } else {
-                    (main, main_switch_cols) = render_main_section(
-                        plan.as_ref(),
-                        pinned,
-                        board_main,
-                        main_selected,
-                        columns,
-                        false,
-                        colored,
-                        false,
-                        true,
-                    );
+                    main = main_section(false, false, true);
                     main_cards = false;
                 }
             } else {
-                (main, main_switch_cols) = render_main_section(
-                    plan.as_ref(),
-                    pinned,
-                    board_main,
-                    main_selected,
-                    columns,
-                    false,
-                    colored,
-                    false,
-                    true,
-                );
+                main = main_section(false, false, true);
             }
         }
-        main.truncate(main_room);
+        // On the smallest screen the selected Main must remain reachable.
+        if pinned.is_some() && main_room <= main.goal_rows {
+            main.lines.drain(..main.goal_rows);
+            main.goal_rows = 0;
+        }
+        main.lines.truncate(main_room);
         let groups = provider_groups(&all, &calls, &direct, pinned, &report["provider_sessions"]);
         let (room_total, removed) = if calls.is_empty() {
             room_stages(&all, nav, pinned, &attention_calls)
@@ -3292,7 +3294,7 @@ fn frame_with_capacity(
         // Keep page capacity steady when the direct rows scroll offscreen.
         let provider_chrome =
             groups.len() + usize::from(!groups.is_empty()) + 2 * usize::from(has_direct);
-        let content_start = lines.len() + main.len();
+        let content_start = lines.len() + main.lines.len();
         // On short boards, wrapped notices take precedence over decorative chrome.
         let chrome_start = content_start + if short_board { notices.len() } else { 0 };
         // A filter that removed every Room row shows the empty-board hint, not cards.
@@ -3329,31 +3331,35 @@ fn frame_with_capacity(
         }
         let remaining = height
             .saturating_sub(reserved)
-            .saturating_sub(lines.len() + main.len());
-        lines.extend(optional.into_iter().chain(notices).take(remaining));
+            .saturating_sub(lines.len() + main.lines.len());
+        if goal_first {
+            lines.extend(notices.into_iter().take(remaining));
+        } else {
+            lines.extend(optional.drain(..).chain(notices).take(remaining));
+        }
         if let Some(call) = pinned {
             if main_cards
-                && !main.is_empty()
-                && let Some((start, end)) = main_switch_cols
+                && !main.lines.is_empty()
+                && let Some((start, end)) = main.switch_cols
             {
                 main_switch = Some(ActionZone {
-                    row: lines.len(),
+                    row: lines.len() + main.goal_rows,
                     start,
                     end,
                 });
             }
-            let row = usize::from(main_cards);
-            if row < main.len() {
+            let row = main.goal_rows + usize::from(main_cards);
+            if row < main.lines.len() {
                 register_call(&mut worker_rows, lines.len() + row, call);
             }
-            if row < main.len() && lines.len() + main.len() + reserved < height {
-                main.insert(
+            if row < main.lines.len() && lines.len() + main.lines.len() + reserved < height {
+                main.lines.insert(
                     row + 1,
                     checkout_line(report, call, columns, main_cards, colored),
                 );
             }
         }
-        lines.extend(main);
+        lines.extend(main.lines);
         if !attention.is_empty() && !nav.attention_only {
             let attn_budget = height.saturating_sub(reserved + lines.len());
             lines.extend(render_attention_band(
@@ -3558,6 +3564,8 @@ fn frame_with_capacity(
                 colored,
             ));
         }
+        // Project diagnostics and the legend use space left after actionable work.
+        lines.extend(optional.into_iter().take(body.saturating_sub(lines.len())));
     }
 
     let body_cap = height.saturating_sub(1);
@@ -4311,16 +4319,11 @@ fn room_plan(
             if text(refs, "plan_id") != plan_id {
                 return false;
             }
-            let ref_rooms = [text(refs, "panel_room_id"), text(refs, "panel_room")];
-            if ref_rooms.iter().any(|r| !r.is_empty() && *r != room_id) {
-                return false;
+            match attempt_room(call) {
+                oms_command_room::AttemptRoom::Named(id) => id == room_id,
+                oms_command_room::AttemptRoom::Unspecified => true,
+                oms_command_room::AttemptRoom::Invalid => false,
             }
-            ref_rooms
-                .iter()
-                .find(|r| !r.is_empty())
-                .copied()
-                .unwrap_or(room_id)
-                == room_id
         });
 
     let explicitly_bound = room_plan_match || room_task_match || call_plan_match || claim_match;
@@ -4359,12 +4362,15 @@ fn room_plan(
                 }
             }
             "claimed" | "running" | "landing" | "held" => {
-                if task["claim_expired"] == true || stale_tasks.contains(task_id) {
+                if attention::claim_expired(report, task_id, task) == Some(true)
+                    || stale_tasks.contains(task_id)
+                {
                     stale += 1;
                 } else {
                     claimed += 1;
                 }
             }
+            "stale" => stale += 1,
             _ => {}
         }
     }
@@ -5370,7 +5376,7 @@ fn main_elapsed(report: &Value, main: &Value) -> Option<String> {
         || attempt["refs"]["panel_role"] != "main"
         || attempt["terminal"] != false
         || attempt["provider"] != main["provider"]
-        || !event_room_matches(room, &attempt["refs"])
+        || !event_room_matches(room, attempt)
         || oms_panel_core::state::main_participant(attempt) != text(main, "participant")
         || !oms_panel_core::state::LIVE_STATES.contains(&text(attempt, "state"))
     {
@@ -5483,9 +5489,7 @@ fn worker_elapsed(report: &Value, call: &Value, observed: f64) -> Option<String>
             .flatten();
     }
     let room = text(&report["room"], "id");
-    if text(call, "attempt").is_empty()
-        || (!room.is_empty() && attempt_foreign_to_room(room, &call["refs"]))
-    {
+    if text(call, "attempt").is_empty() || (!room.is_empty() && !event_room_matches(room, call)) {
         return None;
     }
     let terminal = oms_panel_core::state::TERMINAL_STATES.contains(&state)
@@ -5609,6 +5613,13 @@ fn legend_line(colored: bool, columns: usize) -> String {
     render_lr(spans, vec![], columns, false, None, colored)
 }
 
+#[derive(Default)]
+struct MainSection {
+    lines: Vec<String>,
+    switch_cols: Option<(usize, usize)>,
+    goal_rows: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_main_section(
     plan: Option<&PlanProgress>,
@@ -5620,11 +5631,12 @@ fn render_main_section(
     colored: bool,
     allow_switch: bool,
     compact_goal: bool,
-) -> (Vec<String>, Option<(usize, usize)>) {
+    goal_first: bool,
+) -> MainSection {
     let external_only =
         main.is_none() && board_main.is_some_and(|m| m["external_work_active"] == true);
     if main.is_none() && plan.is_none() && !external_only {
-        return (vec![], None);
+        return MainSection::default();
     }
     let model = main
         .map(|call| {
@@ -5655,7 +5667,21 @@ fn render_main_section(
     } else {
         ""
     };
-    let mut out = Vec::new();
+    let mut goal = plan.map_or_else(Vec::new, |plan| {
+        render_goal(
+            plan,
+            columns,
+            use_cards && !goal_first,
+            colored,
+            compact_goal,
+        )
+    });
+    let mut out = if goal_first {
+        std::mem::take(&mut goal)
+    } else {
+        Vec::new()
+    };
+    let goal_rows = out.len();
     let mut switch_cols = None;
     if use_cards {
         let (top, cols) = if allow_switch
@@ -5788,68 +5814,83 @@ fn render_main_section(
         (colored && selected).then_some(SGR_SEL_BG),
         colored,
     ));
-    if let Some(plan) = plan {
-        let show_bar = columns >= 72;
-        let progress_budget = inner.saturating_sub(7).max(7);
-        let progress = plan.goal_progress_label(progress_budget, show_bar);
-        let inline_fit = width("Goal: ") + width(&plan.goal) + 2 + width(&progress) <= inner;
-        if inline_fit || compact_goal {
-            let right_budget = inner.saturating_sub(14).max(7);
-            let inline_progress = if inline_fit {
-                progress
-            } else {
-                plan.goal_progress_label(right_budget, false)
-            };
-            out.push(card_row_lr(
-                vec![Span::raw(
-                    format!("Goal: {}", plan.goal),
-                    1_048_576,
-                    Some(SGR_TEXT),
-                )],
-                vec![Span::raw(inline_progress, inner, Some(SGR_CYAN))],
-                columns,
-                use_cards,
-                None,
-                colored,
-            ));
-        } else {
-            out.push(card_row_lr(
-                vec![Span::literal("Goal:", Some(SGR_GOLD_BOLD))],
-                vec![Span::raw(progress, progress_budget, Some(SGR_CYAN))],
-                columns,
-                use_cards,
-                None,
-                colored,
-            ));
-            let indent = if use_cards { "  " } else { " " };
-            let wrap_width = inner.saturating_sub(width(indent)).max(1);
-            let mut wrapped = wrap_words(&plan.goal, wrap_width);
-            if wrapped.len() > 2 {
-                wrapped.truncate(2);
-                wrapped[1] = clip(
-                    &format!("{}…", wrapped[1].trim_end_matches('…')),
-                    wrap_width,
-                );
-            }
-            for part in wrapped {
-                out.push(card_row_lr(
-                    vec![
-                        Span::literal(indent, None),
-                        Span::raw(part, wrap_width, Some(SGR_TEXT)),
-                    ],
-                    vec![],
-                    columns,
-                    use_cards,
-                    None,
-                    colored,
-                ));
-            }
-        }
-    }
+    out.extend(goal);
     if let Some(bottom) = card_bottom(columns, use_cards, colored) {
         out.push(bottom);
     }
-    (out, switch_cols)
+    MainSection {
+        lines: out,
+        switch_cols,
+        goal_rows,
+    }
+}
+
+fn render_goal(
+    plan: &PlanProgress,
+    columns: usize,
+    use_cards: bool,
+    colored: bool,
+    compact_goal: bool,
+) -> Vec<String> {
+    let inner = columns - if use_cards { 4 } else { 0 };
+    let mut out = Vec::new();
+    let show_bar = columns >= 72;
+    let progress_budget = inner.saturating_sub(7).max(7);
+    let progress = plan.goal_progress_label(progress_budget, show_bar);
+    let inline_fit = width("Goal: ") + width(&plan.goal) + 2 + width(&progress) <= inner;
+    if inline_fit || compact_goal {
+        let right_budget = inner.saturating_sub(14).max(7);
+        let inline_progress = if inline_fit {
+            progress
+        } else {
+            plan.goal_progress_label(right_budget, false)
+        };
+        out.push(card_row_lr(
+            vec![Span::raw(
+                format!("Goal: {}", plan.goal),
+                1_048_576,
+                Some(SGR_TEXT),
+            )],
+            vec![Span::raw(inline_progress, inner, Some(SGR_CYAN))],
+            columns,
+            use_cards,
+            None,
+            colored,
+        ));
+    } else {
+        out.push(card_row_lr(
+            vec![Span::literal("Goal:", Some(SGR_GOLD_BOLD))],
+            vec![Span::raw(progress, progress_budget, Some(SGR_CYAN))],
+            columns,
+            use_cards,
+            None,
+            colored,
+        ));
+        let indent = if use_cards { "  " } else { " " };
+        let wrap_width = inner.saturating_sub(width(indent)).max(1);
+        let mut wrapped = wrap_words(&plan.goal, wrap_width);
+        if wrapped.len() > 2 {
+            wrapped.truncate(2);
+            wrapped[1] = clip(
+                &format!("{}…", wrapped[1].trim_end_matches('…')),
+                wrap_width,
+            );
+        }
+        for part in wrapped {
+            out.push(card_row_lr(
+                vec![
+                    Span::literal(indent, None),
+                    Span::raw(part, wrap_width, Some(SGR_TEXT)),
+                ],
+                vec![],
+                columns,
+                use_cards,
+                None,
+                colored,
+            ));
+        }
+    }
+    out
 }
 
 pub(crate) fn main_switch_frame(
@@ -9038,7 +9079,8 @@ mod tests {
             ["first", "second"]
         );
         let read = BTreeMap::new();
-        let overview = frame(&report, &navigation::Navigation::default(), 80, 24, &read);
+        let board = board_frame(&report, &Default::default(), 80, 24, &read, false, false);
+        let overview = &board.lines;
         let main_top = overview
             .iter()
             .position(|line| line.starts_with("╭─ Overall Main "))
@@ -9051,7 +9093,6 @@ mod tests {
             .iter()
             .position(|line| line.contains("Gate"))
             .unwrap();
-        assert!(status < legend && legend < main_top, "{overview:?}");
         let main_bottom = overview
             .iter()
             .enumerate()
@@ -9063,8 +9104,19 @@ mod tests {
             .iter()
             .position(|line| line.contains("Goal: Ship"))
             .unwrap();
-        assert!(main_top < goal && goal < main_bottom, "{overview:?}");
-        assert!(overview[main_bottom + 1].starts_with("╭─ "), "{overview:?}");
+        let work = overview
+            .iter()
+            .rposition(|line| line.contains("Activity"))
+            .unwrap();
+        assert!(status < goal && goal < main_top, "{overview:?}");
+        assert!(
+            overview[main_bottom + 1].starts_with("╭─ Attention"),
+            "{overview:?}"
+        );
+        assert!(main_bottom < work && work < legend, "{overview:?}");
+        assert_eq!(board.main_switch.unwrap().row, main_top);
+        assert_eq!(board.worker_rows[&(main_top + 1)].0, "main");
+        assert!(!board.worker_rows.contains_key(&goal));
         assert!(!overview.iter().any(|line| line.contains("! Attention")));
         let mut nav = navigation::Navigation {
             view: View::Detail,
@@ -9806,6 +9858,11 @@ mod tests {
             board.contains(
                 "wt-one (detached) · claude peer-review · recorded working at 2026-01-01"
             ),
+            "{board}"
+        );
+        assert!(
+            board.find("No recorded calls").expect("work status")
+                < board.find("Managed scratch records").unwrap(),
             "{board}"
         );
         assert!(calls(&report).is_empty());
@@ -15247,6 +15304,22 @@ mod tests {
 
     #[test]
     fn cross_room_isolation_rejects_foreign_contradictory_and_colliding_attempts() {
+        let legacy = json!({"refs":{"panel_room":"room-demo"}});
+        assert!(event_room_matches("room-demo", &legacy));
+        for refs in [
+            Value::Null,
+            json!({"panel_room_id":false}),
+            json!({"panel_room":""}),
+            json!({"panel_room_id":"room-demo","panel_room":null}),
+        ] {
+            let row = json!({"refs":refs});
+            assert!(attempt_foreign_to_room("room-demo", &row));
+            assert!(!event_room_matches("room-demo", &row));
+        }
+        assert_eq!(
+            attempt_room(&normalize(&json!({}), &mut None)),
+            oms_command_room::AttemptRoom::Unspecified
+        );
         let now = oms_panel_core::timestamp();
         let report = json!({
             "generated_at": now,
@@ -16417,7 +16490,7 @@ mod tests {
                 .expect("Goal header row");
             let goal_body_end = plain[goal_idx + 1..]
                 .iter()
-                .position(|line| line.starts_with('╰') || line.contains("Attention "))
+                .position(|line| line.contains("Overall Main"))
                 .map(|off| goal_idx + 1 + off)
                 .expect("end of Goal section");
             let goal_body_lines = &plain[goal_idx + 1..goal_body_end];
