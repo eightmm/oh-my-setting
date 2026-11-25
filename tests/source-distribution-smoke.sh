@@ -31,6 +31,8 @@ check_affected_planning() (
   cp "$ROOT/scripts/lib/critical-paths.sh" "$repo/scripts/lib/critical-paths.sh"
   cp "$ROOT/tests/source-distribution-smoke.sh" "$repo/tests/source-distribution-smoke.sh"
   cp "$ROOT/tests/lib/smoke-env.sh" "$repo/tests/lib/smoke-env.sh"
+  for lib in file-lock poll cargo-target-lock; do cp "$ROOT/scripts/lib/$lib.sh" "$repo/scripts/lib/$lib.sh"; done
+  cp "$ROOT/verify" "$repo/verify"
   # The planning contract must not enter maintenance or native setup at all.
   # Ordinary execution still has to reach that gate; its sentinel stops there
   # unless OMS_CHECK_MAINT_ALLOW=1 lets the actual docs-only check run.
@@ -64,7 +66,7 @@ EOF
       TMPDIR="$check_probe/tmp" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
       OMS_CHECK_FORBIDDEN_LOG="${OMS_CHECK_FORBIDDEN_LOG:-$check_probe/forbidden.log}" \
       OMS_CHECK_MAINT_ALLOW="${OMS_CHECK_MAINT_ALLOW:-0}" OMS_NATIVE_NO_AUTO_STAGE=0 \
-      OMS_AFFECTED_FULL="${OMS_AFFECTED_FULL:-0}" \
+      OMS_AFFECTED_FULL="${OMS_AFFECTED_FULL:-0}" OMS_CARGO_TARGET_WAIT="${OMS_CARGO_TARGET_WAIT:-3600}" \
       bash "$repo/scripts/check.sh" "$@"
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
@@ -254,6 +256,59 @@ EOF
   ! grep -Eq '^(platform-source|cargo|rustup)$' "$check_probe/docs-exec.log" ||
     fail "clean docs-only execution touched native staging or Cargo: $(cat "$check_probe/docs-exec.log")"
 
+  # Runs sharing one physical Cargo target take turns (#508): a waiter names the
+  # holder and gives up at its bound before building, and a run nested under
+  # the holder does not wait on it. The holder ends when its marker goes, so
+  # removing the probe on failure also stops it.
+  printf 'untracked\n' > "$repo/dirty"
+  # shellcheck disable=SC2016 # the holder script expands its own arguments.
+  env -i HOME="$check_probe/home" PATH=/usr/bin:/bin TMPDIR="$check_probe/tmp" "$BASH" -c '
+    . "$1/scripts/lib/cargo-target-lock.sh"
+    oms_cargo_target_hold "$1" holder || exit
+    : > "$2/held"
+    while [ -e "$2/held" ]; do sleep 0.1; done
+    oms_cargo_target_release' _ "$repo" "$check_probe" &
+  holder=$!
+  until [ -e "$check_probe/held" ]; do
+    kill -0 "$holder" 2>/dev/null || fail "Cargo target holder did not start"
+    sleep 0.1
+  done
+  status=0
+  OMS_CHECK_MAINT_ALLOW=1 OMS_CARGO_TARGET_WAIT=1 OMS_CHECK_FORBIDDEN_LOG="$check_probe/turn.log" \
+    invoke_check --affected --changed-from "$base" --changed-to "$docs" \
+    > "$check_probe/turn.out" 2>&1 || status=$?
+  [ "$status" -eq 75 ] || fail "check did not wait for a held Cargo target (status=$status): $(cat "$check_probe/turn.out")"
+  grep -Fq "in use by verification pid $holder" "$check_probe/turn.out" || fail "waiting check did not name the holder: $(cat "$check_probe/turn.out")"
+  ! grep -Eq '^(platform-source|cargo|rustup)$' "$check_probe/turn.log" || fail "waiting check built before its turn: $(cat "$check_probe/turn.log")"
+  # Lint-only runs Cargo too, and --parallel stages before forking lanes.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$check_probe/bin/shellcheck"
+  chmod +x "$check_probe/bin/shellcheck"
+  for mode in --lint-only --parallel; do
+    status=0
+    OMS_CHECK_MAINT_ALLOW=1 OMS_CARGO_TARGET_WAIT=1 OMS_CHECK_FORBIDDEN_LOG="$check_probe/turn.log" \
+      invoke_check "$mode" > "$check_probe/turn.out" 2>&1 || status=$?
+    [ "$status" -eq 75 ] || fail "check $mode did not wait for a held Cargo target (status=$status): $(cat "$check_probe/turn.out")"
+  done
+  ! grep -Eq '^(platform-source|cargo|rustup|skill-manifest)$' "$check_probe/turn.log" || fail "a waiting check ran Cargo before its turn: $(cat "$check_probe/turn.log")"
+  rm "$check_probe/bin/shellcheck"
+  invoke_verify() {
+    env -i HOME="$check_probe/home" PATH="$check_probe/bin:/usr/bin:/bin" TMPDIR="$check_probe/tmp" \
+      OMS_CHECK_FORBIDDEN_LOG="$check_probe/verify-turn.log" OMS_CARGO_TARGET_WAIT=1 "$@" \
+      bash "$repo/verify" > "$check_probe/verify-turn.out" 2>&1
+  }
+  status=0
+  invoke_verify || status=$?
+  [ "$status" -eq 75 ] || fail "verify did not wait for a held Cargo target (status=$status): $(cat "$check_probe/verify-turn.out")"
+  [ ! -s "$check_probe/verify-turn.log" ] || fail "waiting verify ran Cargo before its turn"
+  status=0
+  invoke_verify OMS_CARGO_TARGET_HELD="$(cd "$repo/target" && pwd -P)" || status=$?
+  if [ "$status" -ne 99 ] || ! grep -Fxq cargo "$check_probe/verify-turn.log"; then
+    fail "a verify nested under the holder waited on it (status=$status): $(cat "$check_probe/verify-turn.out")"
+  fi
+  rm "$check_probe/held"
+  wait "$holder" || fail "Cargo target holder failed"
+  rmdir "$repo/target"
+
   # Dirty worktree must fall back to full verification (reaching native staging),
   # never taking the docs-only no-Cargo fast path.
   printf 'untracked\n' > "$repo/dirty"
@@ -269,6 +324,8 @@ EOF
   if ! grep -Fxq platform-source "$check_probe/dirty-exec.log" || ! grep -Fxq cargo "$check_probe/dirty-exec.log"; then
     fail "dirty fallback skipped native staging: $(cat "$check_probe/dirty-exec.log")"
   fi
+  ! compgen -G "$check_probe/home/.cache/oh-my-setting/locks/cargo-target.*" >/dev/null ||
+    fail "check kept its Cargo target lock after exit"
 
   # ShellCheck alone (blocked rustup/cargo stubs above) leaves no lane runnable.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$check_probe/bin/shellcheck"
