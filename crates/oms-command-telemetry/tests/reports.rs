@@ -15,6 +15,93 @@ fn empty_report_is_successful_json() {
     );
 }
 
+#[test]
+fn resolution_reports_reject_malformed_foreign_and_ambiguous_relations() {
+    let target = r#"{"schema":1,"event_id":"failed","operation_id":"op","artifact_id":"art","kind":"delegate","exit":1}"#;
+    let resolver = r#"{"schema":1,"event_id":"settled","operation_id":"op","artifact_id":"art","kind":"artifact-resolution","resolves_event_id":"failed","parent_event_id":"failed","resolution":"resolved","exit":0}"#;
+    let pair = |resolution: String| vec![target.to_owned(), resolution];
+    let cases = [
+        ("valid", pair(resolver.into()), 1, 0),
+        (
+            "malformed",
+            pair(r#"{"kind":"artifact-resolution","resolves_event_id":"failed"}"#.into()),
+            0,
+            1,
+        ),
+        (
+            "foreign-operation",
+            pair(resolver.replace(r#""operation_id":"op""#, r#""operation_id":"other""#)),
+            0,
+            1,
+        ),
+        (
+            "foreign-artifact",
+            pair(resolver.replace(r#""artifact_id":"art""#, r#""artifact_id":"other""#)),
+            0,
+            1,
+        ),
+        (
+            "wrong-parent",
+            pair(resolver.replace(r#""parent_event_id":"failed""#, r#""parent_event_id":"other""#)),
+            0,
+            1,
+        ),
+        ("out-of-order", vec![resolver.into(), target.into()], 0, 1),
+        (
+            "duplicate-target",
+            vec![target.into(), resolver.into(), target.into()],
+            0,
+            2,
+        ),
+        (
+            "duplicate-resolver",
+            vec![target.into(), resolver.into(), resolver.into()],
+            0,
+            1,
+        ),
+        (
+            "invalid-duplicate",
+            vec![
+                target.into(),
+                resolver.into(),
+                r#"{"event_id":"settled"}"#.into(),
+            ],
+            0,
+            1,
+        ),
+        (
+            "distinct-resolvers",
+            vec![target.into(), resolver.into(), resolver.replace("settled", "settled-again")],
+            1,
+            0,
+        ),
+    ];
+    let root = Temp::new();
+    for (name, rows, resolved, unresolved) in cases {
+        let bytes = format!("{}\n", rows.join("\n"));
+        root.index(&bytes);
+        let (code, out, err) = root.call(&["--json"]);
+        assert_eq!(code, 0, "{name}: {}", String::from_utf8_lossy(&err));
+        let report = oms_context::parse_json(&out).unwrap();
+        let resolution = field(&report, "resolution");
+        assert_eq!(
+            field(resolution, "resolved_nonzero"),
+            &oms_context::Json::Number(resolved.to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            field(resolution, "unresolved_nonzero"),
+            &oms_context::Json::Number(unresolved.to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap(),
+            bytes.as_bytes(),
+            "{name}: reporting must not mutate evidence"
+        );
+    }
+}
+
 /// Golden bytes were captured from the public scripts/artifact-index.sh entry,
 /// whose strict store preflight runs before artifact-telemetry.py. The fixture
 /// covers cached and head/tail metrics, every grouping, range-before-limit,

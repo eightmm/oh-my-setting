@@ -475,6 +475,93 @@ fn state_git_projection_uses_one_status() {
 }
 
 #[test]
+fn artifact_resolution_projection_preserves_invalid_row_accounting() {
+    use serde_json::{Value, json};
+    let repo = TempRepo::new();
+    let path = repo.path().join(".oms/artifacts/index.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let target = json!({
+        "schema":1, "event_id":"failed", "operation_id":"op", "artifact_id":"art",
+        "ts":"2026-01-01T00:00:00Z", "kind":"delegate", "provider":"codex", "exit":1
+    });
+    let resolver = json!({
+        "schema":1, "event_id":"settled", "operation_id":"op", "artifact_id":"art",
+        "ts":"2026-01-01T00:00:01Z", "kind":"artifact-resolution", "provider":"codex",
+        "resolves_event_id":"failed", "parent_event_id":"failed",
+        "resolution":"resolved", "exit":0
+    });
+    let changed = |key: &str, value: Value| {
+        let mut row = resolver.clone();
+        row[key] = value;
+        vec![target.clone(), row]
+    };
+    let mut bad_target = target.clone();
+    bad_target.as_object_mut().unwrap().remove("provider");
+    let cases = [
+        ("valid", vec![target.clone(), resolver.clone()], 0, 1, 0),
+        ("schema", changed("schema", json!(true)), 1, 0, 1),
+        ("provider", changed("provider", Value::Null), 1, 0, 1),
+        ("foreign", changed("operation_id", json!("other")), 1, 0, 1),
+        ("invalid-target", vec![bad_target, resolver.clone()], 2, 0, 1),
+        ("out-of-order", vec![resolver.clone(), target.clone()], 1, 0, 1),
+        (
+            "duplicate-target",
+            vec![target.clone(), resolver.clone(), target.clone()],
+            3,
+            0,
+            2,
+        ),
+        (
+            "duplicate-resolver",
+            vec![target.clone(), resolver.clone(), resolver.clone()],
+            2,
+            0,
+            1,
+        ),
+        // A legacy non-resolution row remains admissible, but its duplicate ID
+        // still invalidates the otherwise well-formed resolution row.
+        (
+            "legacy-duplicate",
+            vec![
+                target.clone(),
+                resolver.clone(),
+                json!({"event_id":"settled"}),
+            ],
+            1,
+            0,
+            2,
+        ),
+    ];
+    for (name, rows, invalid, resolved, unresolved) in cases {
+        let bytes = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        fs::write(&path, &bytes).unwrap();
+        let snapshot = state(repo.path(), &CustomHost { plan: GroupPlan });
+        let artifacts = snapshot.get("artifacts");
+        assert_eq!(
+            artifacts.get("invalid_rows").int().unwrap(),
+            invalid,
+            "{name}"
+        );
+        assert_eq!(
+            artifacts.get("counts").get("resolved").int().unwrap(),
+            resolved,
+            "{name}"
+        );
+        assert_eq!(
+            artifacts.get("counts").get("unresolved").int().unwrap(),
+            unresolved,
+            "{name}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes(), "{name}");
+    }
+    fs::write(&path, format!("{target}\nnot-json\n{resolver}\n")).unwrap();
+    let snapshot = state(repo.path(), &CustomHost { plan: GroupPlan });
+    let artifacts = snapshot.get("artifacts");
+    assert_eq!(artifacts.get("invalid_rows").int().unwrap(), 1);
+    assert_eq!(artifacts.get("counts").get("resolved").int().unwrap(), 1);
+}
+
+#[test]
 fn artifact_repairs_preserve_inode_and_first_later_success() {
     use std::os::unix::fs::MetadataExt;
     let repo = TempRepo::new();
