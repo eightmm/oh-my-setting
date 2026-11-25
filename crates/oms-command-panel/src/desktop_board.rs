@@ -164,7 +164,12 @@ fn columns_for(view: DesktopView) -> Vec<Column> {
             col("dependencies", "실행에 필요한 도구"),
             col("dependenciesPresent", "도구 모두 발견"),
             col("resumePolicy", "재개 계약"),
+            col("resumeRefusalCode", "재개 거절 코드"),
             col("accountSelection", "계정 선택 계약"),
+            col("managedOutgoingSwap", "내보내는 Main 교체 계약"),
+            col("swapEvidence", "교체 계약 및 호스트 조건"),
+            col("configuredMainPermissions", "설정된 Main 권한 모드"),
+            col("fullModeOption", "full 모드 옵션 지원"),
             col("version", "확인된 CLI 버전"),
             col("auth", "인증 준비"),
             col("observedAt", "PATH 조회 시각"),
@@ -2068,6 +2073,16 @@ mod tests {
         assert_eq!(pi["transport"], "CodexGateway");
         assert_eq!(pi["owner"], "codex");
         assert_eq!(pi["resumePolicy"], "unsupported");
+        assert_eq!(pi["resumeRefusalCode"], "binding_unverified");
+        assert_eq!(pi["fullModeOption"], "unsupported");
+        assert_eq!(pi["managedOutgoingSwap"], "unsupported");
+        assert!(
+            connections["columns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|col| col["key"] == "swapEvidence")
+        );
         assert!(pi["auth"].is_null());
         assert!(
             harnesses

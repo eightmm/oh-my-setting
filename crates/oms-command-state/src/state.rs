@@ -76,6 +76,59 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
     collect_snapshot(ctx, host, None)
 }
 
+/// A native Main's owner is also the Pi gateway's inference provider. Only
+/// the exact attempt's producer metadata distinguishes the two harnesses.
+fn conversation_harness(
+    consumer: &str,
+    binding: &oms_command_room::value::Value,
+    rows: &[Value],
+) -> Option<&'static str> {
+    let main = &binding["conversationMain"];
+    let participant = main.text("participant");
+    let room = main.text("room");
+    if binding.text("conversationBinding") != "matched"
+        || main.text("provider") != "codex"
+        || main.text("source") != "room-session"
+        || main.text("state") != "joined"
+        || room.is_empty()
+        || participant.is_empty()
+    {
+        return None;
+    }
+    // As in native Main admission, two unfinished Main attempts in the same
+    // Room cannot identify a single current harness. Other Rooms and old
+    // terminal participants cannot supply this observation.
+    let mut current = rows.iter().filter(|row| {
+        row.text("tool") == "panel-main"
+            && row.get("refs").text("panel_room_id") == room
+            && !matches!(row.get("terminal"), Value::Bool(true))
+    });
+    let row = current.next()?;
+    let refs = row.get("refs");
+    // Fresh launches join as their attempt ID; in-place swaps explicitly
+    // record the participant they retain.
+    let member = refs
+        .opt("panel_room_participant")
+        .map_or_else(|| row.get("attempt_id").str().ok(), |v| v.str().ok())?;
+    if current.next().is_some()
+        || member != participant
+        || !matches!(row.get("terminal"), Value::Bool(false))
+        || row.text("provider") != main.text("provider")
+        || refs.text("panel_owner") != main.text("provider")
+        || refs.text("panel_role") != "main"
+        || refs
+            .opt("panel_session_digest")
+            .is_some_and(|v| v.str().ok() != Some(consumer))
+    {
+        return None;
+    }
+    match refs.text("panel_harness") {
+        "codex" => Some("codex"),
+        "pi" => Some("pi"),
+        _ => None,
+    }
+}
+
 // Keep Room evidence out of the repository-wide recency window. A worker without
 // a Room field may still have an exact parent attempt within this Room.
 fn panel_room_attempts(rows: &[Value], room: &str) -> (Vec<Value>, usize) {
@@ -181,17 +234,22 @@ fn collect_snapshot(
             ctx.interrupted,
             false,
             false,
-        ) && let Ok(binding) = room.conversation_main(consumer, panel_mains)
-            && let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
-            && let Ok(mut binding) = json::parse(&encoded)
+        ) && let Ok(mut binding) = room.conversation_main(consumer, panel_mains)
         {
-            let room = binding.get("conversationMain").text("room");
-            if !room.is_empty() {
-                let (items, omitted) = panel_room_attempts(event_rows, room);
-                binding.set("attempts", Value::Array(items))?;
-                binding.set("attemptsOmitted", number(omitted))?;
+            if let Some(harness) = conversation_harness(consumer, &binding, event_rows) {
+                binding["conversationMain"].set("harness", harness);
             }
-            state.set("conversation", binding)?;
+            if let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
+                && let Ok(mut binding) = json::parse(&encoded)
+            {
+                let room = binding.get("conversationMain").text("room");
+                if !room.is_empty() {
+                    let (items, omitted) = panel_room_attempts(event_rows, room);
+                    binding.set("attempts", Value::Array(items))?;
+                    binding.set("attemptsOmitted", number(omitted))?;
+                }
+                state.set("conversation", binding)?;
+            }
         }
     }
     let mut counts = json::empty();
