@@ -1020,10 +1020,11 @@ and a harness child never starts one.
 
 Cached catalog reads separate tab-delimited model IDs from display labels and discard
 listing banners, so labels cannot leak into automatic recovery routes. `oms models --json`
-lists selector IDs in `models` (and text output), derives per-base-model
-`model_effort_scales` and `selectors` for Antigravity at read time from cached catalog
-rows, and reports Codex's provider-level `effort_values` as the scale-ordered union of
-cached per-model scales when present.
+lists selector IDs in `models`, derives per-base-model `model_effort_scales` and
+`selectors` for Antigravity at read time from cached catalog rows, and reports Codex's
+provider-level `effort_values` as the scale-ordered union of cached per-model scales when
+present. `oms models` text output groups each provider's catalog by base model with its
+effort scale (`fixed` for fixed-effort models, and `(not routed)` when not routable).
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
 and reason.
