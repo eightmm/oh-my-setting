@@ -211,7 +211,6 @@ fn finish_checked(
     } else {
         save(path, row, c.interrupted)?;
     }
-    *c.relay_row.borrow_mut() = Some(row.clone());
     Ok(Output {
         code: i32::from(!matches!(state, "passed" | "awaiting-merge")),
         stdout: format!("land: {message}\nreceipt: {}\n", path.display()).into_bytes(),
@@ -231,8 +230,15 @@ fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<(
         return Ok(());
     }
     storage::ensure_ignore(&root, c.interrupted)?;
-    let row = c.relay_row.borrow();
-    let row = row.as_ref().unwrap_or(&V::Null);
+    // The receipt on disk is the last state this run recorded, whichever path it exited by.
+    let row = c
+        .relay_receipt
+        .borrow()
+        .as_ref()
+        .and_then(|path| storage::read_external(path, true).ok())
+        .and_then(|raw| V::parse(&raw).ok())
+        .unwrap_or(V::Null);
+    let row = &row;
     // Head and branch come only from the receipt row: live HEAD may have moved,
     // so a run that failed before recording one names no commit.
     let sha = string(row, "sha").chars().take(12).collect::<String>();
@@ -1704,7 +1710,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             source: c.source,
             interrupted: &uninterrupted,
             services: c.services,
-            relay_row: std::cell::RefCell::new(c.relay_row.borrow().clone()),
+            relay_receipt: std::cell::RefCell::new(c.relay_receipt.borrow().clone()),
         };
         let _ = relay_card(&relay_context, o, &result);
     }
@@ -2000,6 +2006,7 @@ fn execute_pass(
         )?;
     }
     let receipt = directory.join(format!("{stamp}.json"));
+    *c.relay_receipt.borrow_mut() = Some(receipt.clone());
     let _active = storage::lock(&directory.join("active"), c.interrupted)?;
     if let Some(previous) = previous_update {
         require(
