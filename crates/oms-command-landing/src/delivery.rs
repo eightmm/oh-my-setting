@@ -11,7 +11,10 @@ use crate::{
 };
 use std::{
     ffi::OsStr,
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 pub(super) mod pr_observation;
@@ -162,7 +165,7 @@ fn status(c: &Context<'_>, o: &Options, git: &Git<'_>, directory: &Path) -> Resu
         Output::json(&row)?
     } else {
         let state = string(&row, "state");
-        Output::text(format!(
+        let mut out = Output::text(format!(
             "land {}: {}\n  active: {}\n",
             string(&row, "sha").chars().take(7).collect::<String>(),
             if state == "running" && !matches {
@@ -171,9 +174,21 @@ fn status(c: &Context<'_>, o: &Options, git: &Git<'_>, directory: &Path) -> Resu
                 &state
             },
             observed.as_str()
-        ))
+        ));
+        if state == "superseded" {
+            writeln!(
+                out.stdout,
+                "  successor request: {}",
+                string(&row, "successor_request")
+            )?;
+        }
+        out
     };
-    out.code = code;
+    out.code = if !o.has("active-exit") && row.get("state").text() == Some("superseded") {
+        1
+    } else {
+        code
+    };
     let _ = c;
     Ok(out)
 }
@@ -225,6 +240,7 @@ struct Run<'a> {
     directory: &'a Path,
     receipt: &'a Path,
     stamp: &'a str,
+    request_parts: &'a [&'a str],
     snapshot: &'a Snapshot,
     gate: &'a str,
     destination: &'a str,
@@ -232,17 +248,459 @@ struct Run<'a> {
     target: &'a str,
     ci_wait: u64,
     head_branch: &'a str,
+    local_ref: Option<&'a str>,
     from_sha: &'a str,
     motivation: &'a str,
+    auto_update: bool,
+    updates: usize,
 }
+
+const MAX_TARGET_UPDATES: usize = 2;
+const PR_ANCESTOR_REFUSAL: &str = "remote target is not an ancestor. Fetch the target and merge it into your PR branch, then rerun land with the same head branch.";
+
+struct TargetMoved {
+    tip: Option<String>,
+    refusal: &'static str,
+}
+
+impl TargetMoved {
+    fn observe(tip: Option<String>, base: &str, refusal: &'static str) -> Option<Self> {
+        (tip.as_deref() != Some(base)).then_some(Self { tip, refusal })
+    }
+
+    fn refuse(&self, detail: &str) -> Error {
+        if detail.is_empty() {
+            Error::new(2, self.refusal)
+        } else {
+            Error::new(2, format!("{} ({detail})", self.refusal))
+        }
+    }
+}
+
+struct HeadUpdate {
+    snapshot: Snapshot,
+    branch: String,
+    local_ref: String,
+    destination: String,
+    gate: String,
+    tip: String,
+    request: String,
+    evidence: V,
+}
+
+enum Pass {
+    Done(Output),
+    Updated(Box<HeadUpdate>),
+}
+
+fn requests_target_update(o: &Options, ci_wait: u64) -> bool {
+    o.has("pr")
+        && o.has("merge")
+        && ci_wait > 0
+        && matches!(o.value("merge-method", "squash"), "squash" | "merge")
+}
+
+fn receipt_has_completed_or_requested_merge(row: &V) -> bool {
+    row.get("state").text() == Some("passed")
+        || (row.has("merge") && row.get("merge").get("state").text() != Some("not-requested"))
+}
+
+fn merge_in_progress(git: &Git<'_>) -> Result<bool> {
+    let path = git
+        .repo
+        .join(git.text(&["rev-parse", "--git-path", "MERGE_HEAD"])?);
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+const UNFINISHED_MERGE: &str = "unfinished merge; run git merge --abort before retrying land";
+
+fn restore_merge_index(path: &Path, observed: &str, original: &[u8]) -> Result<()> {
+    let lock = path.with_file_name("index.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock)?;
+    let result = (|| {
+        require(
+            digest(&storage::read_external(path, false)?) == observed,
+            "index changed after merge rollback",
+        )?;
+        file.set_permissions(std::fs::metadata(path)?.permissions())?;
+        file.write_all(original)?;
+        file.sync_all()?;
+        std::fs::rename(&lock, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(lock);
+    }
+    result
+}
+
+// Preserve the full tracked-state fingerprint separately from permission bits.
+fn tracked_modes(git: &Git<'_>) -> Result<(String, Vec<(PathBuf, u32)>)> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let mut proof = git.run(&["ls-files", "--stage", "-z"])?;
+    let paths = git.run(&["ls-files", "-z"])?;
+    let mut modes = Vec::new();
+    for raw in paths.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path = PathBuf::from(OsStr::from_bytes(raw));
+        proof.extend_from_slice(raw);
+        proof.push(0);
+        let full = git.repo.join(&path);
+        match std::fs::symlink_metadata(&full) {
+            Ok(meta) if meta.is_file() => {
+                proof.extend_from_slice(b"file\0");
+                proof.extend_from_slice(digest(&storage::read(git.repo, &path, false)?).as_bytes());
+                require(
+                    oms_reference::storage::generation(&meta, &std::fs::symlink_metadata(&full)?),
+                    "tracked file changed while fingerprinting",
+                )?;
+                modes.push((path, meta.mode() & 0o777));
+            }
+            Ok(meta) if meta.file_type().is_symlink() => {
+                proof.extend_from_slice(b"link\0");
+                proof.extend_from_slice(std::fs::read_link(full)?.as_os_str().as_bytes());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                proof.extend_from_slice(b"missing")
+            }
+            Ok(_) => return Err(Error::new(2, "unsupported tracked file type")),
+            Err(e) => return Err(e.into()),
+        }
+        proof.push(0);
+    }
+    Ok((digest(&proof), modes))
+}
+
+fn restore_tracked_mode(repo: &Path, path: &Path, mode: u32) -> Result<()> {
+    use rustix::fs::{self, Mode, OFlags};
+    use std::os::unix::fs::PermissionsExt;
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir =
+        fs::open(repo, dir_flags, Mode::empty()).map_err(|e| Error::new(2, e.to_string()))?;
+    let mut parts = path.components().peekable();
+    while let Some(part) = parts.next() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(Error::new(2, "invalid tracked path"));
+        };
+        if parts.peek().is_some() {
+            dir = fs::openat(&dir, name, dir_flags, Mode::empty())
+                .map_err(|e| Error::new(2, e.to_string()))?;
+        } else {
+            let fd = fs::openat(
+                &dir,
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| Error::new(2, e.to_string()))?;
+            let file = std::fs::File::from(fd);
+            require(file.metadata()?.is_file(), "tracked file is not regular")?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+    Ok(())
+}
+
+fn rollback_target_update(
+    git: &Git<'_>,
+    before: &Snapshot,
+    local_ref: &str,
+    tip: &str,
+    index: &Path,
+    index_bytes: &[u8],
+    tracked_before: &(String, Vec<(PathBuf, u32)>),
+) -> Result<()> {
+    // Cleanup must run even when the merge was cancelled. Git may have already
+    // committed the merge by the time it stopped the process.
+    let cleanup = AtomicBool::new(false);
+    let git = Git::new(git.repo, &cleanup);
+    require(
+        git.text(&["symbolic-ref", "HEAD"])? == local_ref
+            && (!merge_in_progress(&git)? || git.commit("MERGE_HEAD")? == tip),
+        "another checkout or merge is active",
+    )?;
+    let _ = git.run(&["merge", "--abort"]);
+    require(
+        !merge_in_progress(&git)? && git.text(&["symbolic-ref", "HEAD"])? == local_ref,
+        "merge state or branch changed during rollback",
+    )?;
+    let head = git.commit("HEAD")?;
+    if head != before.head {
+        require(
+            git.text(&["rev-list", "--parents", "-1", "HEAD"])?
+                == format!("{head} {} {tip}", before.head),
+            "HEAD changed outside the target update",
+        )?;
+        git.run(&["reset", "--keep", &before.head])?;
+    }
+    let mut restored = git.snapshot()?;
+    let observed = std::mem::replace(&mut restored.index_sha256, before.index_sha256.clone());
+    if restored.tracked_sha256 != before.tracked_sha256 {
+        let (proof, modes) = tracked_modes(&git)?;
+        let mut without_modes = restored.clone();
+        without_modes.tracked_sha256 = before.tracked_sha256.clone();
+        require(
+            without_modes == *before
+                && proof == tracked_before.0
+                && modes
+                    .iter()
+                    .map(|(p, _)| p)
+                    .eq(tracked_before.1.iter().map(|(p, _)| p)),
+            "tracked checkout changed during rollback",
+        )?;
+        for ((path, current), (_, original)) in modes.iter().zip(&tracked_before.1) {
+            if current != original {
+                restore_tracked_mode(git.repo, path, *original)?;
+            }
+        }
+        restored = git.snapshot()?;
+        require(
+            restored.index_sha256 == observed,
+            "index changed during mode restoration",
+        )?;
+        restored.index_sha256 = before.index_sha256.clone();
+    }
+    require(
+        restored == *before,
+        "tracked checkout changed during rollback",
+    )?;
+    if observed != before.index_sha256 {
+        // Snapshot's write-tree can refresh index cache records. Restore the
+        // captured bytes only after proving the index tree and files match.
+        restore_merge_index(index, &observed, index_bytes)?;
+    }
+    require(
+        storage::read_external(index, false)? == index_bytes
+            && digest(index_bytes) == before.index_sha256,
+        "pre-merge index was not restored",
+    )
+}
+
+fn protect_local_paths(git: &Git<'_>, tip: &str) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let paths = match git.text(&["merge-base", "HEAD", tip]) {
+        Ok(base) => git.run(&["diff", "--name-only", "-z", &base, tip])?,
+        Err(_) => git.run(&["ls-tree", "-r", "--name-only", "-z", tip])?,
+    };
+    let tracked = git.run(&["ls-files", "-z"])?;
+    let tracked: std::collections::HashSet<&[u8]> = tracked.split(|b| *b == 0).collect();
+    for raw in paths.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path = Path::new(OsStr::from_bytes(raw));
+        for component in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            let bytes = component.as_os_str().as_bytes();
+            match std::fs::symlink_metadata(git.repo.join(component)) {
+                Ok(meta)
+                    if (component == path && !tracked.contains(bytes))
+                        || (component != path && !meta.is_dir()) =>
+                {
+                    return Err(Error::new(
+                        2,
+                        "target update would overwrite an untracked or ignored path",
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn update_target(
+    r: &Run<'_>,
+    row: &mut V,
+    moved: TargetMoved,
+    checkpoint: Option<&[u8]>,
+    preflight: bool,
+) -> Result<Pass> {
+    if !r.auto_update {
+        return Err(moved.refuse(""));
+    }
+    if r.updates >= MAX_TARGET_UPDATES {
+        return Err(moved.refuse("target kept moving"));
+    }
+    let Some(tip) = moved.tip.as_deref() else {
+        return Err(moved.refuse(""));
+    };
+    if receipt_has_completed_or_requested_merge(row) {
+        return Err(moved.refuse("existing receipt records a completed or requested merge"));
+    }
+    let git = r.git;
+    let flag = r.c.interrupted;
+    require(!merge_in_progress(git)?, UNFINISHED_MERGE)?;
+    let local_ref = r
+        .local_ref
+        .ok_or_else(|| moved.refuse("target update requires a checked-out branch"))?;
+    // Fetch from the checked push destination. The observed object is the only
+    // merge input even if the target ref advances again while fetching.
+    let prepare = (|| {
+        git.transport_safe()?;
+        require(
+            git.text(&["remote", "get-url", "--push", "--all", r.remote])? == r.destination,
+            "push destination changed before target update",
+        )?;
+        if git.commit(tip).is_err() {
+            git.run(&["fetch", "--no-tags", "--", r.destination, tip])?;
+        }
+        require(
+            git.commit(tip)? == tip,
+            "target update needs the exact observed commit",
+        )?;
+        require(
+            !git.succeeds(&["merge-base", "--is-ancestor", &r.snapshot.head, tip])?,
+            "HEAD is already contained in the target",
+        )?;
+        protect_local_paths(git, tip)?;
+        if preflight {
+            pr_motivation(git, r.o, tip, &r.snapshot.head)?;
+        }
+        let before = git.snapshot()?;
+        require(
+            !merge_in_progress(git)?
+                && git.text(&["symbolic-ref", "HEAD"])? == local_ref
+                && before == *r.snapshot
+                && before.tree == git.text(&["rev-parse", "HEAD^{tree}"])?,
+            "checkout changed before target update",
+        )?;
+        git.tracked_clean()?;
+        let index = r
+            .repo
+            .join(git.text(&["rev-parse", "--git-path", "index"])?);
+        let bytes = storage::read_external(&index, false)?;
+        require(
+            digest(&bytes) == before.index_sha256,
+            "index changed before target update",
+        )?;
+        let tracked = tracked_modes(git)?;
+        require(
+            git.snapshot()? == before,
+            "checkout changed before target update",
+        )?;
+        Ok::<_, Error>((before, index, bytes, tracked))
+    })();
+    let (before, index, index_bytes, tracked_before) =
+        prepare.map_err(|e| moved.refuse(&e.message))?;
+    let prior = if let Some(bytes) = checkpoint {
+        bytes.to_vec()
+    } else {
+        row.json(false)?
+    };
+    let mut environment = global_git_config();
+    environment.push(("OMS_LAND_ACTIVE".into(), "1".into()));
+    let mut replacement = None;
+    let updated: Result<_> = (|| {
+        let merge = crate::git::process(
+            r.repo,
+            ["git", "merge", "--no-edit", "--no-ff", tip]
+                .map(std::ffi::OsString::from)
+                .to_vec(),
+            None,
+            Duration::from_secs(3600),
+            flag,
+            &environment,
+        )?;
+        require(merge.code == 0, "target update merge failed")?;
+        git.transport_safe()?;
+        git.tracked_clean()?;
+        let snapshot = git.snapshot()?;
+        let head = &snapshot.head;
+        require(
+            !merge_in_progress(git)?
+                && git.text(&["symbolic-ref", "HEAD"])? == local_ref
+                && snapshot.tree == git.text(&["rev-parse", "HEAD^{tree}"])?
+                && git.text(&["rev-list", "--parents", "-1", "HEAD"])?
+                    == format!("{head} {} {tip}", before.head),
+            "target update did not produce the expected merge commit",
+        )?;
+        let request = request_stamp(head, r.request_parts)?;
+        let evidence = obj([
+            ("commit", head.as_str().into()),
+            (
+                "parents",
+                V::Arr(vec![before.head.clone().into(), tip.into()]),
+            ),
+            ("predecessor_request", r.stamp.into()),
+        ]);
+        row.set("state", "superseded");
+        row.set("finished_at", now());
+        row.set(
+            "message",
+            format!("target moved; superseded by request {request}"),
+        );
+        row.set("successor_request", request.clone());
+        row.set("superseding_update", evidence.clone());
+        let bytes = replacement.insert(row.json(false)?);
+        storage::write_external(r.receipt, Some(&prior), bytes, flag)?;
+        crate::check(flag)?;
+        Ok(Box::new(HeadUpdate {
+            snapshot,
+            branch: r.head_branch.into(),
+            local_ref: local_ref.into(),
+            destination: r.destination.into(),
+            gate: r.gate.into(),
+            tip: tip.into(),
+            request,
+            evidence,
+        }))
+    })();
+    match updated {
+        Ok(update) => Ok(Pass::Updated(update)),
+        Err(error) => {
+            let restore_receipt: Result<()> = (|| {
+                if let Some(bytes) = replacement {
+                    let current = storage::read_external(r.receipt, false)?;
+                    if current == bytes {
+                        // A failed fsync or cancellation after rename can leave
+                        // the superseded receipt published despite the error.
+                        storage::write_external(
+                            r.receipt,
+                            Some(&bytes),
+                            &prior,
+                            &AtomicBool::new(false),
+                        )?;
+                    } else {
+                        require(current == prior, "receipt changed during target update")?;
+                    }
+                }
+                Ok(())
+            })();
+            rollback_target_update(git, &before, local_ref, tip, &index, &index_bytes, &tracked_before)
+                .map_err(|_| moved.refuse("target update rollback could not be verified; inspect the checkout before retrying"))?;
+            restore_receipt.map_err(|_| {
+                moved.refuse("target update receipt rollback could not be verified")
+            })?;
+            Err(moved.refuse(&format!(
+                "target update failed and was rolled back: {}",
+                error.message
+            )))
+        }
+    }
+}
+
 /// Runs the gate in a detached sandbox at the exact HEAD (local-merge: at the
 /// merge result). `Some` is a finished failure; nothing has been published.
-fn gate_phase(r: &Run<'_>, row: &mut V) -> Result<Option<Output>> {
+fn gate_phase(r: &Run<'_>, row: &mut V, updated_base: Option<&str>) -> Result<Option<Output>> {
     let (c, repo, snapshot, gate) = (r.c, r.repo, r.snapshot, r.gate);
     if row.get("gate").get("rc") == &0usize.into() {
         return Ok(None);
     }
     let scratch = Sandbox::new(repo, &snapshot.head, c.interrupted)?;
+    if let Some(base) = updated_base {
+        // The default gate reads this tracking ref in its private clone.
+        Git::new(&scratch.path, c.interrupted).run(&[
+            "update-ref",
+            &format!("refs/remotes/{}/{}", r.remote, r.target),
+            base,
+        ])?;
+    }
     let mut merged_tree = None;
     if !r.from_sha.is_empty() {
         let sandbox = Git::new(&scratch.path, c.interrupted);
@@ -427,11 +885,20 @@ fn pr_text(base: &str, r: &Run<'_>, scope: &str) -> Result<(String, String)> {
         .text(&["rev-list", "--count", &range])?
         .parse()
         .map_err(|_| Error::new(2, "unreadable commit count"))?;
-    let newest = log
+    let subjects = r.git.text(&[
+        "log",
+        "--first-parent",
+        "--no-merges",
+        "--format=%s",
+        "--max-count=50",
+        &range,
+    ])?;
+    let newest = subjects
         .lines()
         .next()
-        .and_then(|l| l.split_once(' '))
-        .map_or("land", |(_, s)| s);
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| r.motivation.lines().find(|s| !s.trim().is_empty()))
+        .unwrap_or("land");
     let mut title: String = newest.chars().take(100).collect();
     if count > 1 {
         title += &format!(" (+{} more)", count - 1);
@@ -547,7 +1014,7 @@ fn observe_pr_ci(
     Ok(PrCi::Passed(scope))
 }
 
-fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Result<Output> {
+fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Result<Pass> {
     let (c, o, git, snapshot, target, head_branch) =
         (r.c, r.o, r.git, r.snapshot, r.target, r.head_branch);
     if base == snapshot.head {
@@ -565,7 +1032,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             "passed",
             "remote target already contains HEAD; nothing to land",
             c,
-        );
+        )
+        .map(Pass::Done);
     }
     let repo_arg = ci::query_repo(r.destination)?;
     let method = o.value("merge-method", "squash");
@@ -577,10 +1045,13 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             .services
             .publication_guard(&c.state(r.repo)?, c.interrupted)?;
         require(git.snapshot()? == *snapshot, "tree moved before push")?;
-        require(
-            crate::review::remote_tip(git, r.destination, target)?.as_deref() == Some(base),
+        if let Some(moved) = TargetMoved::observe(
+            crate::review::remote_tip(git, r.destination, target)?,
+            base,
             "remote target changed before push",
-        )?;
+        ) {
+            return update_target(r, row, moved, None, false);
+        }
         git.transport_safe()?;
         let existing = crate::review::remote_tip(git, r.destination, head_branch)?;
         if let Some(tip) = existing.as_deref().filter(|t| *t != snapshot.head) {
@@ -601,7 +1072,7 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
                     "failed",
                     "remote head branch has diverged from local HEAD. Fetch and merge the existing remote PR head into your local branch, then rerun land without a force push.",
                     c,
-                );
+                ).map(Pass::Done);
             }
         }
         if existing.as_deref() != Some(&snapshot.head) {
@@ -630,7 +1101,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
                     "failed",
                     "branch push failed or outcome unknown; inspect remote before retrying",
                     c,
-                );
+                )
+                .map(Pass::Done);
             }
         }
     }
@@ -664,7 +1136,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
                 "failed",
                 "branch pushed; pull request creation failed",
                 c,
-            );
+            )
+            .map(Pass::Done);
         }
         pr = open_pr(r, &repo_arg)?;
     }
@@ -687,7 +1160,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             "failed",
             "no open pull request at the exact HEAD; nothing merged",
             c,
-        );
+        )
+        .map(Pass::Done);
     };
     let number = pr.get("number").py();
     row.set("pr_number", pr.get("number").clone());
@@ -707,15 +1181,23 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
         let checkpoint = pr_observation::Checkpoint::begin(r, row, &mut active)?;
         let observed = observe_pr_ci(r, row, Duration::from_secs(r.ci_wait), Some(&checkpoint))?;
         crate::check(c.interrupted)?;
-        let (guard, bytes) = checkpoint.reenter(r, &pr, base)?;
+        let pr_observation::Reentry {
+            guard,
+            receipt: bytes,
+            moved,
+        } = checkpoint.reenter(r, &pr, base)?;
         // The repository guard stays alive through every later write and merge.
         guard
             .check()
             .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
         active = Some(guard);
+        if let Some(moved) = moved {
+            return update_target(r, row, moved, Some(&bytes), false);
+        }
         prior = Some(bytes);
         if let PrCi::Failed(reason) = observed {
-            return finish_checked(r.receipt, row, "failed", &reason, c, prior.as_deref());
+            return finish_checked(r.receipt, row, "failed", &reason, c, prior.as_deref())
+                .map(Pass::Done);
         }
     }
     if !o.has("merge") {
@@ -739,7 +1221,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             &message,
             c,
             prior.as_deref(),
-        );
+        )
+        .map(Pass::Done);
     }
     let checkpoint = prior.ok_or_else(|| Error::new(2, "merge requires a CI checkpoint"))?;
     let delete_branch = dependent_pr_delete_guard(r, &repo_arg)?;
@@ -774,17 +1257,21 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
         }
         // The observed verdict predates writer reentry; a rerun may have replaced it.
         let fresh = observe_pr_ci(r, row, Duration::ZERO, None)?;
-        pr_observation::validate_destination(r, &pr, base)?;
+        let moved = pr_observation::validate_destination(r, &pr, base)?;
         let writer = active
             .as_ref()
             .ok_or_else(|| Error::new(2, "missing publication lock"))?;
         writer
             .check()
             .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+        if let Some(moved) = moved {
+            return update_target(r, row, moved, Some(&checkpoint), false);
+        }
         ci_scope = match fresh {
             PrCi::Passed(scope) => scope,
             PrCi::Failed(reason) => {
-                return finish_checked(r.receipt, row, "failed", &reason, c, Some(&checkpoint));
+                return finish_checked(r.receipt, row, "failed", &reason, c, Some(&checkpoint))
+                    .map(Pass::Done);
             }
         };
         row.set("merge", merge_state);
@@ -807,7 +1294,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             "failed",
             "merge refused or outcome unknown; pull request left open",
             c,
-        );
+        )
+        .map(Pass::Done);
     }
     let view = ci::gh(
         c,
@@ -847,7 +1335,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             "failed",
             "merge requested; merged state not confirmed",
             c,
-        );
+        )
+        .map(Pass::Done);
     }
     let fetched = git.run(&[
         "-c",
@@ -865,7 +1354,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
             "failed",
             "merged; fetching the target failed",
             c,
-        );
+        )
+        .map(Pass::Done);
     }
     let local_full = row.get("gate").get("scope").text() == Some("full");
     let merge_commit = row
@@ -918,7 +1408,8 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
                 "failed",
                 "merged; installation failed or was deferred",
                 c,
-            );
+            )
+            .map(Pass::Done);
         }
     } else {
         row.set(
@@ -936,7 +1427,7 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str, active: oms_lock::Guard) -> Res
     };
     let mut output = finish(r.receipt, row, "passed", &message, c)?;
     tail(r, &mut output)?;
-    Ok(output)
+    Ok(Pass::Done(output))
 }
 /// `oms/<type>/<slug>` from a `<type>: <description>` subject, else `oms/land-<sha12>`.
 fn default_head_branch(subject: &str, head: &str) -> String {
@@ -1087,6 +1578,31 @@ fn land_local(r: &Run<'_>, row: &mut V) -> Result<Output> {
         c,
     )
 }
+
+fn pr_motivation(git: &Git<'_>, o: &Options, base: &str, head: &str) -> Result<String> {
+    let motivation = if o.has("why") {
+        o.get("why").trim().to_owned()
+    } else {
+        git.text(&[
+            "log",
+            "--format=%b%x00",
+            "--max-count=50",
+            &format!("{base}..{head}"),
+        ])?
+        .split('\0')
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+    };
+    require(
+        !motivation.is_empty(),
+        "a pull request needs a motivation: pass --why TEXT or write a commit body",
+    )?;
+    crate::safe(motivation.as_bytes())?;
+    Ok(motivation)
+}
+
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     if o.action("") == "wait" {
         return crate::wait::execute(c, o);
@@ -1113,6 +1629,59 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         return status(c, o, &git, &directory);
     }
     parent()?;
+    let mut previous_update = None;
+    let mut progress = Vec::new();
+    for updates in 0..=MAX_TARGET_UPDATES {
+        match execute_pass(
+            c,
+            o,
+            &repo,
+            &git,
+            &directory,
+            previous_update.as_deref(),
+            updates,
+        ) {
+            Ok(Pass::Done(mut output)) => {
+                if !progress.is_empty() {
+                    progress.extend(output.stdout);
+                    output.stdout = progress;
+                }
+                return Ok(output);
+            }
+            Err(e) if !progress.is_empty() => {
+                return Ok(Output {
+                    code: e.code,
+                    stdout: progress,
+                    stderr: format!("error: {}; target update successor was not completed; retry land from the updated checkout with the same head branch\n", e.message).into_bytes(),
+                });
+            }
+            Err(e) => return Err(e),
+            Ok(Pass::Updated(update)) => {
+                // All guards from the previous pass have been released.
+                let _ = writeln!(
+                    progress,
+                    "land: target moved; merged {} into {} as {} (update {} of {MAX_TARGET_UPDATES})",
+                    update.tip,
+                    update.branch,
+                    update.snapshot.head,
+                    updates + 1
+                );
+                previous_update = Some(update);
+            }
+        }
+    }
+    unreachable!("target updates are capped inside each pass")
+}
+
+fn execute_pass(
+    c: &Context<'_>,
+    o: &Options,
+    repo: &Path,
+    git: &Git<'_>,
+    directory: &Path,
+    previous_update: Option<&HeadUpdate>,
+    updates: usize,
+) -> Result<Pass> {
     let env_mode = std::env::var("OMS_LAND_MODE").unwrap_or_default();
     require(
         ["", "direct", "pr"].contains(&env_mode.as_str()),
@@ -1145,6 +1714,14 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     )?;
     let target = o.value("target", "main");
     git.run(&["check-ref-format", &format!("refs/heads/{target}")])?;
+    let requests_update = requests_target_update(o, ci_wait);
+    if requests_update && merge_in_progress(git)? {
+        let destination = git.text(&["remote", "get-url", "--push", remote])?;
+        require(
+            !ci::query_repo(&destination).is_ok_and(|s| s.starts_with("github.com/")),
+            UNFINISHED_MERGE,
+        )?;
+    }
     git.transport_safe()?;
     git.tracked_clean()?;
     let snapshot = git.snapshot()?;
@@ -1192,6 +1769,18 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "--handoff-receipt-to and --sync-shared need --merge in pull-request mode",
     )?;
     let observes_pr_ci = mode == Mode::Pr && ci_wait > 0;
+    let auto_update =
+        mode == Mode::Pr && github && requests_update && (branch != target || o.has("head-branch"));
+    let local_ref = (auto_update && branch != "HEAD").then(|| format!("refs/heads/{branch}"));
+    if let Some(previous) = previous_update {
+        require(
+            auto_update
+                && destination == previous.destination
+                && snapshot == previous.snapshot
+                && git.text(&["symbolic-ref", "HEAD"])? == previous.local_ref,
+            "target update checkout or destination changed before the new gate",
+        )?;
+    }
     if observes_pr_ci {
         require(
             git.text(&["remote", "get-url", "--push", "--all", remote])? == destination,
@@ -1201,7 +1790,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let mut head_branch = String::new();
     let mut from_sha = String::new();
     if mode == Mode::Pr {
-        head_branch = if o.has("head-branch") {
+        head_branch = if let Some(previous) = previous_update {
+            previous.branch.clone()
+        } else if o.has("head-branch") {
             o.get("head-branch").to_owned()
         } else if branch != "HEAD" && branch != target {
             branch.clone()
@@ -1233,7 +1824,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "--from is already contained in HEAD; nothing to merge",
         )?;
     }
-    let gate = if o.has("gate") {
+    let gate = if let Some(previous) = previous_update {
+        previous.gate.clone()
+    } else if o.has("gate") {
         o.get("gate").into()
     } else if repo.join("scripts/check.sh").is_file() {
         if repo.join("crates/oms").is_dir() {
@@ -1252,50 +1845,38 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         return Err(Error::new(2, "no default gate; pass --gate CMD"));
     };
     crate::safe(gate.as_bytes())?;
+    let mut moved_before_gate = None;
     let base = if mode == Mode::LocalMerge {
         String::new()
     } else {
-        let base = crate::review::remote_tip(&git, &destination, target)?
+        let base = crate::review::remote_tip(git, &destination, target)?
             .ok_or_else(|| Error::new(2, "remote target is absent"))?;
-        require(
-            git.succeeds(&["merge-base", "--is-ancestor", &base, &snapshot.head])?,
-            if mode == Mode::Pr {
-                "remote target is not an ancestor. Fetch the target and merge it into your PR branch, then rerun land with the same head branch."
-            } else {
-                "remote target is not an ancestor; rebase before land"
-            },
-        )?;
+        if !git.succeeds(&["merge-base", "--is-ancestor", &base, &snapshot.head])? {
+            let moved = TargetMoved {
+                tip: Some(base.clone()),
+                refusal: if mode == Mode::Pr {
+                    PR_ANCESTOR_REFUSAL
+                } else {
+                    "remote target is not an ancestor; rebase before land"
+                },
+            };
+            if !auto_update {
+                return Err(moved.refuse(""));
+            }
+            moved_before_gate = Some(moved);
+        }
         base
     };
     let mut motivation = String::new();
     if base != snapshot.head && mode == Mode::Direct && github {
         require(
-            trivial_docs(&git, &base, &snapshot.head)?,
+            trivial_docs(git, &base, &snapshot.head)?,
             format!(
                 "direct land to {target} is limited to a docs-only change of at most 2 lines; land without --direct to open a pull request"
             ),
         )?;
-    } else if base != snapshot.head && mode == Mode::Pr {
-        motivation = if o.has("why") {
-            o.get("why").trim().to_owned()
-        } else {
-            git.text(&[
-                "log",
-                "--format=%b%x00",
-                "--max-count=50",
-                &format!("{base}..{}", snapshot.head),
-            ])?
-            .split('\0')
-            .map(str::trim)
-            .filter(|b| !b.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n")
-        };
-        require(
-            !motivation.is_empty(),
-            "a pull request needs a motivation: pass --why TEXT or write a commit body",
-        )?;
-        crate::safe(motivation.as_bytes())?;
+    } else if base != snapshot.head && mode == Mode::Pr && moved_before_gate.is_none() {
+        motivation = pr_motivation(git, o, &base, &snapshot.head)?;
     }
     // Merge choices stay out of the identity: a later `--merge` resumes the
     // awaiting-merge receipt and reuses its exact-head gate.
@@ -1304,8 +1885,21 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         request_parts.extend([mode.name(), head_branch.as_str(), from_sha.as_str()]);
     }
     let stamp = request_stamp(&snapshot.head, &request_parts)?;
+    if let Some(previous) = previous_update {
+        require(
+            stamp == previous.request,
+            "target update successor request changed",
+        )?;
+    }
     let receipt = directory.join(format!("{stamp}.json"));
     let _active = storage::lock(&directory.join("active"), c.interrupted)?;
+    if let Some(previous) = previous_update {
+        require(
+            git.snapshot()? == snapshot
+                && git.text(&["symbolic-ref", "HEAD"])? == previous.local_ref,
+            "target update checkout changed before the new gate",
+        )?;
+    }
     if mode == Mode::Pr {
         // Every observer claims its request while holding active. While we hold
         // active, a successful nonblocking acquisition proves no observer can
@@ -1335,6 +1929,13 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     ]);
     save(&directory.join("active-holder"), &holder, c.interrupted)?;
     let previous = storage::read_external(&receipt, true)?;
+    let gate_pending = || {
+        obj([
+            ("command", gate.clone().into()),
+            ("rc", "pending".into()),
+            ("scope", "unknown".into()),
+        ])
+    };
     let mut row = if previous.is_empty() {
         obj([
             ("schema", 1usize.into()),
@@ -1346,14 +1947,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             ("mode", mode.name().into()),
             ("started_at", now().into()),
             ("state", "running".into()),
-            (
-                "gate",
-                obj([
-                    ("command", gate.clone().into()),
-                    ("rc", "pending".into()),
-                    ("scope", "unknown".into()),
-                ]),
-            ),
+            ("gate", gate_pending()),
             ("push", obj([("rc", "pending".into())])),
             ("ci", obj([("conclusion", "pending".into())])),
             (
@@ -1377,17 +1971,40 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                         && row.get("target").text() == Some(target))),
             "land receipt identity mismatch",
         )?;
+        if row.get("state").text() == Some("superseded") {
+            return Err(Error::new(
+                2,
+                format!(
+                    "land receipt superseded by request {}",
+                    string(&row, "successor_request")
+                ),
+            ));
+        }
         row
     };
+    if moved_before_gate.is_some() && receipt_has_completed_or_requested_merge(&row) {
+        return Err(Error::new(
+            2,
+            "existing receipt records a completed or requested merge; target update refused",
+        ));
+    }
+    if let Some(previous) = previous_update {
+        row.set("target_update", previous.evidence.clone());
+        row.set("gate", gate_pending());
+    }
+    if moved_before_gate.is_some() {
+        row.set("head_branch", head_branch.as_str());
+    }
     save(&receipt, &row, c.interrupted)?;
     let ctx = Run {
         c,
         o,
-        repo: &repo,
-        git: &git,
-        directory: &directory,
+        repo,
+        git,
+        directory,
         receipt: &receipt,
         stamp: &stamp,
+        request_parts: &request_parts,
         snapshot: &snapshot,
         gate: &gate,
         destination: &destination,
@@ -1395,11 +2012,17 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         target,
         ci_wait,
         head_branch: &head_branch,
+        local_ref: local_ref.as_deref(),
         from_sha: &from_sha,
         motivation: &motivation,
+        auto_update,
+        updates,
     };
-    if let Some(failed) = gate_phase(&ctx, &mut row)? {
-        return Ok(failed);
+    if let Some(moved) = moved_before_gate {
+        return update_target(&ctx, &mut row, moved, None, true);
+    }
+    if let Some(failed) = gate_phase(&ctx, &mut row, previous_update.map(|_| base.as_str()))? {
+        return Ok(Pass::Done(failed));
     }
     require(
         git.snapshot()? == snapshot,
@@ -1408,20 +2031,20 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     git.tracked_clean()?;
     if !o.has("ignore-siblings") {
         c.services
-            .wait_siblings(&repo, Duration::from_secs(sibling_wait), c.interrupted)?;
+            .wait_siblings(repo, Duration::from_secs(sibling_wait), c.interrupted)?;
     }
     match mode {
         Mode::Pr => return land_pr(&ctx, &mut row, &base, _active),
-        Mode::LocalMerge => return land_local(&ctx, &mut row),
+        Mode::LocalMerge => return land_local(&ctx, &mut row).map(Pass::Done),
         Mode::Direct => {}
     }
     if base != snapshot.head {
         let _guard = c
             .services
-            .publication_guard(&c.state(&repo)?, c.interrupted)?;
+            .publication_guard(&c.state(repo)?, c.interrupted)?;
         require(git.snapshot()? == snapshot, "tree moved before push")?;
         require(
-            crate::review::remote_tip(&git, &destination, target)?.as_deref() == Some(&base),
+            crate::review::remote_tip(git, &destination, target)?.as_deref() == Some(&base),
             "remote target changed before push",
         )?;
         git.transport_safe()?;
@@ -1452,7 +2075,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                 "failed",
                 "push failed or outcome unknown; inspect remote before retrying",
                 c,
-            );
+            )
+            .map(Pass::Done);
         }
     } else if row.get("push").get("rc") != &0usize.into() {
         row.set(
@@ -1469,8 +2093,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         && let Some(base) = crate::helpers::recorded_base(&row)?
     {
         let _ = crate::attribution::record_commits(
-            &c.state(&repo)?,
-            &repo,
+            &c.state(repo)?,
+            repo,
             &format!("{base}..{}", snapshot.head),
             &stamp,
             c.interrupted,
@@ -1488,7 +2112,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "passed",
             "pushed; CI skipped; nothing installed",
             c,
-        );
+        )
+        .map(Pass::Done);
     }
     let deadline = Instant::now() + Duration::from_secs(ci_wait);
     let mut successful = None;
@@ -1517,7 +2142,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                         "failed",
                         &format!("pushed; CI {conclusion}"),
                         c,
-                    );
+                    )
+                    .map(Pass::Done);
                 }
             }
             Ok(None) => {}
@@ -1528,7 +2154,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                     "failed",
                     &format!("pushed; CI unknown: {e}"),
                     c,
-                );
+                )
+                .map(Pass::Done);
             }
         }
         if Instant::now() >= deadline
@@ -1547,7 +2174,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "failed",
             "pushed; CI pending or missing; retry --wait",
             c,
-        );
+        )
+        .map(Pass::Done);
     };
     let detailed = ci::run_details(c, &destination, run.get("databaseId"), &snapshot.head)?;
     let mut scope = ci::full_scope(&detailed, &snapshot.head).unwrap_or("unknown");
@@ -1567,7 +2195,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         }
         if scope != "full" && o.has("ci-full") && !row.get("ci").get("dispatch").truth() {
             require(
-                crate::review::remote_tip(&git, &destination, target)?.as_deref()
+                crate::review::remote_tip(git, &destination, target)?.as_deref()
                     == Some(&snapshot.head),
                 "remote target moved before full CI dispatch",
             )?;
@@ -1577,7 +2205,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             save(&receipt, &row, c.interrupted)?;
             let bin = std::env::var_os("OMS_GH_BIN").unwrap_or_else(|| "gh".into());
             let result = crate::git::process(
-                &repo,
+                repo,
                 vec![
                     bin,
                     "workflow".into(),
@@ -1600,7 +2228,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                     "failed",
                     "full CI dispatch outcome unknown; request will not be repeated",
                     c,
-                );
+                )
+                .map(Pass::Done);
             }
         }
         if scope != "full"
@@ -1634,7 +2263,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                             "failed",
                             "full CI did not succeed for the exact SHA",
                             c,
-                        );
+                        )
+                        .map(Pass::Done);
                     }
                 }
                 std::thread::park_timeout(
@@ -1648,7 +2278,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                     "failed",
                     "full CI remains pending or unproved; retry --wait",
                     c,
-                );
+                )
+                .map(Pass::Done);
             }
         }
     }
@@ -1663,11 +2294,11 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     } else if scope == "full" || local_full {
         require(
             git.snapshot()? == snapshot
-                && crate::review::remote_tip(&git, &destination, target)?.as_deref()
+                && crate::review::remote_tip(git, &destination, target)?.as_deref()
                     == Some(&snapshot.head),
             "install target moved from verified SHA",
         )?;
-        let update = c.services.after_land(&repo, &row, c.interrupted)?;
+        let update = c.services.after_land(repo, &row, c.interrupted)?;
         row.set("update", update);
         if row.get("update").get("rc") != &0usize.into() {
             return finish(
@@ -1676,7 +2307,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                 "failed",
                 "pushed; CI passed; installation failed or was deferred",
                 c,
-            );
+            )
+            .map(Pass::Done);
         }
     } else {
         row.set(
@@ -1700,7 +2332,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         c,
     )?;
     tail(&ctx, &mut output)?;
-    Ok(output)
+    Ok(Pass::Done(output))
 }
 fn tail(r: &Run<'_>, output: &mut Output) -> Result<()> {
     let (c, o, repo, receipt, remote, target) = (r.c, r.o, r.repo, r.receipt, r.remote, r.target);
@@ -1877,5 +2509,128 @@ fn conflicts(c: &Context<'_>, o: &Options) -> Result<Output> {
         out += &branches.join(" -> ");
         out.push('\n');
         Ok(Output::text(out))
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn receipt_merge_guard_allows_only_unrequested_merge() {
+        let cases = [
+            (r#"{"state":"running"}"#, false),
+            (
+                r#"{"state":"awaiting-merge","merge":{"state":"not-requested"}}"#,
+                false,
+            ),
+            (
+                r#"{"state":"passed","merge":{"state":"not-requested"}}"#,
+                true,
+            ),
+            (r#"{"state":"running","merge":{"state":"requested"}}"#, true),
+            (r#"{"state":"running","merge":{}}"#, true),
+            (r#"{"state":"running","merge":null}"#, true),
+        ];
+        for (json, expected) in cases {
+            let row = V::parse(json.as_bytes()).unwrap();
+            assert_eq!(
+                receipt_has_completed_or_requested_merge(&row),
+                expected,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicted_target_update_restores_snapshot() {
+        let path = std::env::temp_dir().join(format!("oms-rollback-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.clone());
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(path.join("file"), "base\n").unwrap();
+        run(&["add", "file"]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "target"]);
+        std::fs::write(path.join("file"), "target\n").unwrap();
+        run(&["commit", "-qam", "target"]);
+        let interrupted = AtomicBool::new(false);
+        let git = Git::new(&path, &interrupted);
+        let tip = git.commit("HEAD").unwrap();
+        run(&["checkout", "-qb", "feature", "HEAD^"]);
+        std::fs::write(path.join("file"), "feature\n").unwrap();
+        run(&["commit", "-qam", "feature"]);
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        std::fs::set_permissions(path.join("file"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::File::open(path.join("file"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+            .unwrap();
+        let before = git.snapshot().unwrap();
+        assert_eq!(
+            before.index_sha256,
+            digest(&std::fs::read(path.join(".git/index")).unwrap())
+        );
+        let tracked_before = tracked_modes(&git).unwrap();
+        let local_ref = git.text(&["symbolic-ref", "HEAD"]).unwrap();
+        let index = path.join(git.text(&["rev-parse", "--git-path", "index"]).unwrap());
+        let index_bytes = storage::read_external(&index, false).unwrap();
+        assert_eq!(digest(&index_bytes), before.index_sha256);
+        assert!(
+            !Command::new("git")
+                .current_dir(&path)
+                .args(["merge", "--no-edit", "--no-ff", &tip])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(git.commit("MERGE_HEAD").unwrap(), tip);
+        rollback_target_update(
+            &git,
+            &before,
+            &local_ref,
+            &tip,
+            &index,
+            &index_bytes,
+            &tracked_before,
+        )
+        .unwrap();
+        assert_eq!(storage::read_external(&index, false).unwrap(), index_bytes);
+        assert!(!merge_in_progress(&git).unwrap());
+        assert_eq!(git.text(&["symbolic-ref", "HEAD"]).unwrap(), local_ref);
+        assert_eq!(git.commit("HEAD").unwrap(), before.head);
+        assert_eq!(git.text(&["write-tree"]).unwrap(), before.tree);
+        assert_eq!(std::fs::read(path.join("file")).unwrap(), b"feature\n");
+        assert_eq!(
+            std::fs::metadata(path.join("file")).unwrap().mode() & 0o777,
+            0o644
+        );
+        let mut after = git.snapshot().unwrap();
+        // The restored index bytes can contain pre-merge stat entries; a later
+        // snapshot may refresh them for the file recreated by merge --abort.
+        after.index_sha256 = before.index_sha256.clone();
+        assert_eq!(after, before);
     }
 }

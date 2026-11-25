@@ -1868,7 +1868,11 @@ worktree; create a local, nontracking task branch there with
 the remote target. No upstream is needed. After verification, commit and run
 `oms land` from that worktree only when commit and publication are authorized;
 `oms land` opens a GitHub PR for the verified SHA (merging only with `--merge`) or
-pushes it to a non-GitHub target. Nobody commits in the shared
+pushes it to a non-GitHub target. With `--pr --merge`, a positive `--ci-wait`
+and a `squash` or `merge` method, land can merge the observed target tip into
+the checked-out branch and run the gate and exact-SHA CI again. Each invocation
+allows two updates, and each superseded receipt points to the successor request.
+Nobody commits in the shared
 checkout. Mains in sessions outside this panel may land independently:
 a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
 Worker guard stop diagnostics identify the snapshot, path and kind that caused

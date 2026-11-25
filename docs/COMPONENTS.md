@@ -3622,17 +3622,26 @@ listing and its details must confirm success. A green project-specific workflow
 can merge with unknown OMS verification scope. Installation keeps its existing
 full-verification requirement. A sibling that started during CI defers the merge
 unless the caller selected `--ignore-siblings`. The merge-request write compares
-the receipt with its saved checkpoint. If a ref or PR changed, the checkpoint
-is preserved. GitHub checks the source SHA in the merge request. A target
+the receipt with its saved checkpoint. Changes to the PR or its head stop the
+merge and preserve the checkpoint. GitHub checks the source SHA in the merge request. A target
 change after the last observation still requires the post-merge tree/base checks.
 PRs observed with a nonzero `--ci-wait` require one exact push URL.
+
+On GitHub, `oms land --pr --merge` with a positive `--ci-wait` and the `squash`
+or `merge` method can absorb a target move before push or during CI. Land merges
+the observed target tip into the checked-out branch, then runs the gate and
+exact-SHA CI again on the combined head and the same PR branch. The old receipt
+becomes `superseded` and points to the successor request. Land makes at most two
+such updates per invocation. A conflict aborts the update and restores the
+pre-merge checkout. A previous unfinished merge requires `git merge --abort`
+before retrying.
 
 After a squash merge, installation proceeds when the merge
 commit's tree equals the PR head tree on an unchanged base; otherwise it waits for CI
 on the target. On GitHub, `--direct` pushes straight to the target and accepts only a
 change of at most two lines in `.md` files.
 
-To update an existing PR after its target moves, fetch the remote and keep the
+For publish-only land or the `rebase` method, fetch the remote and keep the
 published PR head in the history of the branch you update. For example, with
 `origin` and target `main`, run `git fetch origin` on the local PR branch.
 If the fetched PR head contains commits your branch lacks, first merge that

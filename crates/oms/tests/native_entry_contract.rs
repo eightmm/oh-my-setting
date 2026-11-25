@@ -4440,15 +4440,48 @@ fn plan_queries_from_registered_scratch_use_only_proven_shared_state() {
             "--json",
         ])
     };
-    assert_eq!(read(scratch), (0, canonical.clone(), String::new()));
     let nested = scratch.join("nested");
     fs::create_dir(&nested).unwrap();
+    // Every path, kind and content, so any state written by a query shows.
+    let tree = |root: &Path| {
+        let mut pending = vec![root.to_path_buf()];
+        let mut entries = std::collections::BTreeMap::new();
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let kind = fs::symlink_metadata(&path).unwrap().file_type();
+                let content = if kind.is_dir() {
+                    pending.push(path.clone());
+                    None
+                } else if kind.is_symlink() {
+                    Some(
+                        fs::read_link(&path)
+                            .unwrap()
+                            .into_os_string()
+                            .into_encoded_bytes(),
+                    )
+                } else {
+                    Some(fs::read(&path).unwrap())
+                };
+                entries.insert(path, content);
+            }
+        }
+        entries
+    };
+    let untouched = tree(scratch);
+    assert_eq!(read(scratch), (0, canonical.clone(), String::new()));
     assert_eq!(read(&nested), (0, canonical.clone(), String::new()));
     let name = scratch.to_str().unwrap();
     assert_eq!(
         host.ok(&["agent-plan", "--repo", name, "show", "--id", "task-a"]),
         host.ok(&["agent-plan", "show", "--id", "task-a"])
     );
+    for query in ["list", "ready"] {
+        let shared = host.oms(&["agent-plan", query]);
+        assert!(shared.1.contains("task-a"), "{query}: {shared:?}");
+        assert_eq!(host.oms(&["agent-plan", "--repo", name, query]), shared);
+    }
+    assert_eq!(tree(scratch), untouched);
     assert_ne!(
         host.oms(&[
             "agent-plan",
@@ -4497,6 +4530,28 @@ fn plan_queries_from_registered_scratch_use_only_proven_shared_state() {
     let unrelated = host.f.0.join("unrelated");
     fs::create_dir(&unrelated).unwrap();
     host.git_in(&unrelated, &["init", "-q"]);
+    let name_unrelated = unrelated.to_str().unwrap();
+    host.ok(&[
+        "agent-plan",
+        "--repo",
+        name_unrelated,
+        "init",
+        "--goal",
+        "foreign goal",
+    ]);
+    let foreign = tree(&unrelated);
+    // A genuine scratch whose marker names another repository owns neither Plan.
+    let owner = format!("repo={}\n", host.repo.display());
+    let rebound = String::from_utf8(original.clone()).unwrap();
+    assert!(rebound.contains(&owner), "{rebound}");
+    fs::write(
+        &marker,
+        rebound.replace(&owner, &format!("repo={name_unrelated}\n")),
+    )
+    .unwrap();
+    let refused = read(scratch);
+    assert_eq!((refused.0, refused.1.as_str()), (2, ""), "{}", refused.2);
+    fs::write(&marker, &original).unwrap();
     let redirect = host.oms_env(
         &["agent-plan", "--repo", name, "status", "--json"],
         &[
@@ -4538,7 +4593,9 @@ fn plan_queries_from_registered_scratch_use_only_proven_shared_state() {
     symlink(&unrelated, &copied).unwrap();
     assert_ne!(read(&copied).0, 0);
     assert_eq!(fs::read(&stored).unwrap(), unchanged);
-    for repo in [scratch, &unrelated, &swapped] {
+    assert_eq!(tree(scratch), untouched);
+    assert_eq!(tree(&unrelated), foreign);
+    for repo in [scratch, &swapped] {
         assert!(!repo.join(".oms/plan").exists());
     }
 }
