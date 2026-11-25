@@ -788,7 +788,7 @@ pub fn repair_candidate(
         source: repo,
         interrupted,
         services: &crate::Unavailable,
-        relay_repo: std::cell::RefCell::new(None),
+        relay_row: std::cell::RefCell::new(None),
     };
     let evidence = assess(&c, &event)?;
     let mut observation = event;
@@ -822,7 +822,7 @@ pub fn revalidate_repair(repo: &Path, evidence: &V, interrupted: &AtomicBool) ->
         source: repo,
         interrupted,
         services: &crate::Unavailable,
-        relay_repo: std::cell::RefCell::new(None),
+        relay_row: std::cell::RefCell::new(None),
     };
     let fresh = assess(&c, evidence.get("event"))?;
     require(

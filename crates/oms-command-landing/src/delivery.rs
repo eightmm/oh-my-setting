@@ -211,115 +211,90 @@ fn finish_checked(
     } else {
         save(path, row, c.interrupted)?;
     }
-    let _ = relay_card(c, row, state);
+    *c.relay_row.borrow_mut() = Some(row.clone());
     Ok(Output {
         code: i32::from(!matches!(state, "passed" | "awaiting-merge")),
         stdout: format!("land: {message}\nreceipt: {}\n", path.display()).into_bytes(),
         stderr: vec![],
     })
 }
-fn relay_card(c: &Context<'_>, row: &V, state: &str) -> Result<()> {
-    let repo = c.relay_repo.borrow();
-    let repo = repo
-        .as_ref()
-        .ok_or_else(|| Error::new(2, "relay repository unavailable"))?;
-    let root = c.state(repo)?;
+fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<()> {
+    if !matches!(
+        std::env::var("OMS_RELAY").as_deref(),
+        Err(_) | Ok("") | Ok("1")
+    ) {
+        return Ok(());
+    }
+    let repo = c.repo(o)?;
+    let root = c.state(&repo)?;
     if !std::fs::symlink_metadata(root.join(".oms")).is_ok_and(|m| m.file_type().is_dir()) {
         return Ok(());
     }
     storage::ensure_ignore(&root, c.interrupted)?;
-    let sha = string(row, "sha").chars().take(7).collect::<String>();
+    let row = c.relay_row.borrow();
+    let row = row.as_ref().unwrap_or(&V::Null);
+    let git = Git::new(&repo, c.interrupted);
+    let sha = git
+        .text(&["rev-parse", "--short", "HEAD"])
+        .unwrap_or_default();
+    if !(7..=40).contains(&sha.len())
+        || !sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Ok(());
+    }
     let branch = if string(row, "head_branch").is_empty() {
-        Git::new(repo, c.interrupted)
-            .text(&["branch", "--show-current"])
-            .unwrap_or_default()
+        git.text(&["branch", "--show-current"]).unwrap_or_default()
     } else {
         string(row, "head_branch")
     };
-    let environment: Vec<_> = std::env::vars_os().collect();
-    let entries: Vec<_> = environment
-        .iter()
-        .map(|(k, v)| (k.as_encoded_bytes(), v.as_encoded_bytes()))
-        .collect();
-    let limit = std::env::var("OMS_RELAY_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(800)
-        .clamp(120, 4000);
-    let clean = |s: &str| {
-        let bytes = oms_scrub::redact(s.as_bytes(), &entries)
-            .ok()
-            .map(|r| r.bytes)
-            .unwrap_or_else(|| b"[withheld]".to_vec());
-        let mut value = String::from_utf8_lossy(&bytes).into_owned();
-        if let Some(home) = std::env::var("HOME")
-            .ok()
-            .filter(|h| h.starts_with('/') && !h.trim_end_matches('/').is_empty())
-        {
-            let home = home.trim_end_matches('/');
-            let mut result = String::new();
-            let mut rest = value.as_str();
-            while let Some(pos) = rest.find(home) {
-                let (before, suffix) = rest.split_at(pos);
-                let after = &suffix[home.len()..];
-                let start_boundary = before
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !c.is_alphanumeric() && !matches!(c, '/' | '_' | '-' | '.'));
-                if start_boundary && (after.is_empty() || after.starts_with('/')) {
-                    result.push_str(before);
-                    result.push('~');
-                } else {
-                    result.push_str(before);
-                    result.push_str(&suffix[..home.len()]);
-                }
-                rest = after;
-            }
-            result.push_str(rest);
-            value = result;
-        }
-        let value = value
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut end = value.len().min(limit);
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        value[..end].to_owned()
-    };
-    let number = row.get("pr_number").py().parse::<u64>().ok();
-    let outcome = format!(
-        "land {} {}{}",
-        clean(&sha),
-        state,
-        number.map(|n| format!(" PR #{n}")).unwrap_or_default()
-    );
-    let url = string(row, "pr_url");
-    let url = if url.starts_with("https://")
-        && !url.contains('@')
-        && !url.contains('?')
-        && !url.contains('#')
+    let branch = if branch.len() <= 200
+        && branch
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
     {
-        clean(&url)
+        branch
     } else {
         String::new()
     };
+    let code = match result {
+        Ok(output) => output.code,
+        Err(error) => error.code,
+    };
+    let state = if matches!(result, Ok(output) if output.code == 0)
+        && matches!(string(row, "state").as_str(), "passed" | "awaiting-merge")
+    {
+        string(row, "state")
+    } else {
+        "failed".to_owned()
+    };
+    let number = row.get("pr_number").py().parse::<usize>().ok();
+    let url = string(row, "pr_url");
+    let valid_url = url.strip_prefix("https://github.com/").is_some_and(|rest| {
+        let parts: Vec<_> = rest.split('/').collect();
+        parts.len() == 4
+            && parts[2] == "pull"
+            && !parts[3].is_empty()
+            && parts[3].bytes().all(|b| b.is_ascii_digit())
+            && parts[..2].iter().all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
+    });
+    let message = format!("land {sha} {state} (exit {code}); run oms land status");
     let card = obj([
         ("schema", 1usize.into()),
-        ("ended_at", string(row, "finished_at").into()),
-        ("head", clean(&sha).into()),
-        ("branch", clean(&branch).into()),
+        ("ended_at", now().into()),
+        ("head", sha.into()),
+        ("branch", branch.into()),
         ("state", state.into()),
-        (
-            "pr_number",
-            number.map(|n| V::from(n as usize)).unwrap_or(V::Null),
-        ),
-        ("pr_url", url.into()),
-        ("message", outcome.into()),
+        ("exit", V::from(i64::from(code))),
+        ("pr_number", number.map(V::from).unwrap_or(V::Null)),
+        ("pr_url", if valid_url { url } else { String::new() }.into()),
+        ("message", message.into()),
     ]);
     let path = Path::new(".oms/hooks/relay/land.json");
     let old = match std::fs::symlink_metadata(root.join(path)) {
@@ -1717,6 +1692,23 @@ fn pr_motivation(git: &Git<'_>, o: &Options, base: &str, head: &str) -> Result<S
 }
 
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
+    let run = o.action("").is_empty() && !o.has("check-manifest");
+    let result = execute_inner(c, o);
+    if run {
+        let uninterrupted = AtomicBool::new(false);
+        let relay_context = Context {
+            cwd: c.cwd,
+            source: c.source,
+            interrupted: &uninterrupted,
+            services: c.services,
+            relay_row: std::cell::RefCell::new(c.relay_row.borrow().clone()),
+        };
+        let _ = relay_card(&relay_context, o, &result);
+    }
+    result
+}
+
+fn execute_inner(c: &Context<'_>, o: &Options) -> Result<Output> {
     if o.action("") == "wait" {
         return crate::wait::execute(c, o);
     }
@@ -1735,7 +1727,6 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         _ => return Err(Error::new(2, "unknown land action")),
     }
     let repo = c.repo(o)?;
-    *c.relay_repo.borrow_mut() = Some(repo.clone());
     let git = Git::new(&repo, c.interrupted);
     let directory = state_directory(&git)?;
     if o.action("") == "status" {

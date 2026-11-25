@@ -4350,6 +4350,22 @@ fn land_direct_still_gates_then_pushes_the_target() {
         V::parse(&failed_card).unwrap().get("state").text(),
         Some("failed")
     );
+    assert_eq!(V::parse(&failed_card).unwrap().get("exit").py(), "1");
+    iso.git(&repo, &["checkout", "-b", "invalid@branch"]);
+    let failed = iso.run_with_services("land", &repo, &args, &[]);
+    assert_eq!(failed.0, 1, "{failed:?}");
+    assert_eq!(
+        V::parse(&fs::read(&card).unwrap())
+            .unwrap()
+            .get("branch")
+            .text(),
+        Some("")
+    );
+    fs::remove_file(&card).unwrap();
+    let failed = iso.run_with_services("land", &repo, &args, &[("OMS_RELAY", "0")]);
+    assert_eq!(failed.0, 1, "{failed:?}");
+    assert!(!card.exists());
+    iso.git(&repo, &["checkout", "main"]);
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
     let args = ["--gate", "true", "--ignore-siblings", "--ci-wait", "0"];
     let pushed = iso.run_with_services("land", &repo, &args, &[]);
@@ -4363,6 +4379,12 @@ fn land_direct_still_gates_then_pushes_the_target() {
     assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     assert!(status.contains("\"mode\": \"direct\""), "{status}");
+    assert_eq!(fs::read(&card).unwrap(), passed_card);
+    let early = iso.run_with_services("land", &repo, &["--ci-wait", "invalid"], &[]);
+    assert_ne!(early.0, 0, "{early:?}");
+    let early_card = V::parse(&fs::read(&card).unwrap()).unwrap();
+    assert_eq!(early_card.get("state").text(), Some("failed"));
+    assert_eq!(early_card.get("exit").py(), early.0.to_string());
     // a GitHub target takes a direct push only for a docs-only change of at most 2 lines
     let (repo, bare) = iso.with_github_remote("directgh");
     let main = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);

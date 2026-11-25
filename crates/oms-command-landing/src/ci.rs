@@ -135,7 +135,7 @@ pub fn observe_attempt(
         source: repo,
         interrupted,
         services: &crate::Unavailable,
-        relay_repo: std::cell::RefCell::new(None),
+        relay_row: std::cell::RefCell::new(None),
     };
     let get = |endpoint: &str| {
         gh(
@@ -1585,7 +1585,7 @@ pub fn comparison(
         source: repo,
         interrupted,
         services: &crate::Unavailable,
-        relay_repo: std::cell::RefCell::new(None),
+        relay_row: std::cell::RefCell::new(None),
     };
     let fields = "databaseId,status,conclusion,workflowName,headSha,url";
     let runs = gh(
