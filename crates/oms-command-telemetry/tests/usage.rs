@@ -290,7 +290,7 @@ fn dispatch_reservations_share_exact_flock_and_preserve_partial_publications() {
     use std::path::Path;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
-    let root = Temp::private();
+    let root = Temp::new();
     let stop = AtomicBool::new(false);
     let timeout = Duration::from_millis(60);
     let mut settings = Settings::from_env().unwrap();
@@ -351,7 +351,25 @@ fn dispatch_reservations_share_exact_flock_and_preserve_partial_publications() {
     assert!(!error.publication_uncertain);
     stop.store(false, Ordering::Release);
     let tx = Transaction::acquire(&root.0, timeout, &stop).unwrap();
+    // Replacing the lock inode loses the guard; the registry is not at fault.
+    let lock = root.0.join(dispatch::LOCK);
+    std::fs::rename(&lock, lock.with_extension("moved")).unwrap();
+    std::fs::write(&lock, b"").unwrap();
+    for error in [
+        tx.snapshot().unwrap_err(),
+        tx.replace(Some(foreign), seed).unwrap_err(),
+    ] {
+        assert_eq!(
+            error.source,
+            oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Changed)
+        );
+        assert_eq!(error.file(), Some(dispatch::LOCK));
+    }
+    drop(tx);
+    std::fs::rename(lock.with_extension("moved"), &lock).unwrap();
+    let tx = Transaction::acquire(&root.0, timeout, &stop).unwrap();
     let error = tx.replace(Some(seed), seed).unwrap_err();
+    assert_eq!(error.file(), Some(dispatch::REGISTRY));
     assert!(
         !error.publication_uncertain,
         "a fresh failed CAS has no publication effect"
@@ -489,6 +507,39 @@ fn pending_admission_bounds_receipt_and_ignore_lock_waits() {
 }
 
 #[test]
+fn settlement_refuses_to_publish_after_losing_the_dispatch_lock() {
+    use oms_command_telemetry::store::{StoreError, dispatch};
+    use std::time::{Duration, Instant};
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let receipt = usage::begin(&root.0, identity("call_settling"), None, &stop).unwrap();
+    let terminal = observe(receipt, 1, 7, Cost::Unpriced);
+    let ledger = root.0.join(usage::RECEIPTS);
+    let pending = std::fs::read(&ledger).unwrap();
+    let lock = root.0.join(dispatch::LOCK);
+    let mut reached = false;
+    let outcome = usage::record_checked(
+        &root.0,
+        &terminal,
+        &stop,
+        Instant::now() + Duration::from_secs(2),
+        // Every earlier check has passed; another admission could now lock
+        // the replacement inode and still read the unsettled ledger.
+        || {
+            std::fs::rename(&lock, lock.with_extension("moved")).unwrap();
+            std::fs::write(&lock, b"").unwrap();
+            reached = true;
+        },
+    );
+    assert!(reached);
+    let error = outcome.unwrap_err();
+    assert_eq!(error.source, StoreError::Lock(oms_lock::Error::Changed));
+    assert_eq!(error.file(), Some(dispatch::LOCK));
+    assert!(!error.publication_uncertain);
+    assert_eq!(std::fs::read(&ledger).unwrap(), pending);
+}
+
+#[test]
 fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability() {
     use oms_command_telemetry::store::{
         dispatch,
@@ -497,11 +548,11 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
     use oms_lock::{Lock, Mode, Settings};
     use std::path::Path;
     use std::time::{Duration, Instant};
-    let root = Temp::private();
+    let root = Temp::new();
     let stop = AtomicBool::new(false);
     let deadline = || Instant::now() + Duration::from_secs(2);
     for changed_operation in [false, true] {
-        let existing_root = Temp::private();
+        let existing_root = Temp::new();
         let mut request = identity("call_receipt_only");
         usage::begin(&existing_root.0, request.clone(), None, &stop).unwrap();
         let before = std::fs::read(existing_root.0.join(usage::RECEIPTS)).unwrap();
@@ -560,6 +611,101 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
         std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
         before
     );
+    // An admission decision and a settlement of the ledger it read serialize.
+    let terminal = observe(receipt, 1, 7, Cost::Unpriced);
+    let ledger = root.0.join(usage::RECEIPTS);
+    let pending = std::fs::read(&ledger).unwrap();
+    let patience = Duration::from_secs(oms_lock::legacy_seconds(
+        std::env::var_os("OMS_TEST_CALL_TIMEOUT").as_deref(),
+        30,
+    ));
+    let (contended, contention) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let mut waiting = None;
+        physical::begin_checked(
+            &root.0,
+            physical_request(identity("call_admitted"), false),
+            &stop,
+            // Outlasts the bounded wait for the contender inside admission.
+            Instant::now() + patience * 2,
+            |_, projection| {
+                assert_eq!(projection.calls[0].receipt.phase, Phase::Pending);
+                let refused = usage::record_before(
+                    &root.0,
+                    &terminal,
+                    &stop,
+                    Instant::now() + Duration::from_millis(70),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    refused.source,
+                    oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Busy)
+                );
+                assert_eq!(refused.file(), Some(dispatch::LOCK));
+                assert!(!refused.publication_uncertain);
+                assert_eq!(std::fs::read(&ledger).unwrap(), pending);
+                let busy = physical::begin(
+                    &root.0,
+                    identity("call_contending"),
+                    None,
+                    false,
+                    &stop,
+                    Instant::now() + Duration::from_millis(70),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    busy.source,
+                    oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Busy)
+                );
+                assert_eq!(busy.file(), Some(dispatch::LOCK));
+                waiting = Some(scope.spawn(|| {
+                    let contended = contended;
+                    let give_up = Instant::now() + patience * 2;
+                    loop {
+                        let attempt = Instant::now() + Duration::from_millis(70);
+                        match usage::record_before(&root.0, &terminal, &stop, attempt) {
+                            Err(error)
+                                if error.source
+                                    == oms_command_telemetry::store::StoreError::Lock(
+                                        oms_lock::Error::Busy,
+                                    )
+                                    && Instant::now() < give_up =>
+                            {
+                                // An expired attempt names no file and proves
+                                // nothing. The receiver closes after proof.
+                                if error.file() == Some(dispatch::LOCK) {
+                                    let _ = contended.send(());
+                                }
+                            }
+                            outcome => return outcome,
+                        }
+                    }
+                }));
+                // Admission keeps dispatch until the settlement has been refused by it.
+                contention.recv_timeout(patience).unwrap();
+                drop(contention);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(waiting.unwrap().join().unwrap().unwrap());
+    });
+    let settled = std::fs::read(&ledger).unwrap();
+    assert_eq!(&settled[..pending.len()], &pending[..]);
+    let rows = std::str::from_utf8(&settled[pending.len()..])
+        .unwrap()
+        .lines()
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows[0].contains("call_admitted"),
+        "admission publishes first"
+    );
+    assert!(rows[1].contains("call_registered"));
+    assert_eq!(usage::load(&root.0).unwrap().calls[0].receipt, terminal);
+    assert!(!usage::record(&root.0, &terminal, &stop).unwrap());
+    assert_eq!(std::fs::read(&ledger).unwrap(), settled);
+    let before = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
     assert!(
         physical::begin(&root.0, request, None, false, &stop, deadline()).is_err(),
         "changed access cannot reuse the same physical identity"
@@ -581,6 +727,18 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
         .unwrap()
         .try_acquire()
         .unwrap();
+    let blocked = usage::record_before(
+        &root.0,
+        &terminal,
+        &stop,
+        Instant::now() + Duration::from_millis(70),
+    )
+    .unwrap_err();
+    assert_eq!(
+        blocked.source,
+        oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Busy)
+    );
+    assert_eq!(blocked.file(), Some(usage::RECEIPTS));
     let orphan = identity("call_orphan");
     let failed = physical::begin(
         &root.0,
@@ -595,7 +753,13 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
         failed.publication_uncertain,
         "the intent survives refused pending registration"
     );
-    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
+    assert_eq!(failed.file(), Some(usage::RECEIPTS));
+    assert!(
+        failed
+            .to_string()
+            .starts_with(&format!("dispatch reservation: {}: ", usage::RECEIPTS))
+    );
+    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 2);
     let pending = physical::load(&root.0, &stop)
         .unwrap()
         .into_iter()
@@ -655,7 +819,7 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
 
     // Account-home evidence is one immutable part of the existing admission,
     // not a second registry or a reason to resend an acknowledged call.
-    let scoped = Temp::private();
+    let scoped = Temp::new();
     let request = Identity {
         account_scope_sha256: Some("a".repeat(64)),
         ..identity("call_scoped")
@@ -843,7 +1007,7 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         }),
         ..legacy.clone()
     };
-    let root = Temp::private();
+    let root = Temp::new();
     assert!(resources::snapshot(&root.0, &stop).unwrap().is_none());
     assert!(resources::summary(&root.0, &stop).unwrap().is_none());
     assert!(!root.0.join(dispatch::LOCK).exists());
@@ -1500,7 +1664,7 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         1
     );
 
-    let sessions = Temp::private();
+    let sessions = Temp::new();
     let session_policy = Policy {
         max_invocations: 2,
         ..policy.clone()
@@ -1676,7 +1840,7 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     )
     .unwrap();
 
-    let strict = Temp::private();
+    let strict = Temp::new();
     resources::activate(&strict.0, &policy, None, &stop, deadline()).unwrap();
     let strict_binding = Binding {
         cleanup_scopes: vec![Scope::WholeTree],
@@ -1714,7 +1878,7 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     );
 
     for only_receipt in [false, true] {
-        let old = Temp::private();
+        let old = Temp::new();
         if only_receipt {
             usage::begin(&old.0, identity("call_old_receipt"), None, &stop).unwrap();
         } else {
@@ -1774,7 +1938,7 @@ fn resource_partial_registration_and_reviewer_headroom_keep_liability() {
         .sha256()
         .is_err()
     );
-    let root = Temp::private();
+    let root = Temp::new();
     assert!(resources::activate(&root.0, &policy, None, &stop, Instant::now()).is_err());
     assert!(
         resources::activate(&root.0, &policy, None, &AtomicBool::new(true), deadline()).is_err()
@@ -1864,7 +2028,7 @@ fn resource_partial_registration_and_reviewer_headroom_keep_liability() {
         partial
     );
 
-    let reviews = Temp::private();
+    let reviews = Temp::new();
     let policy = Policy {
         max_invocations: 2,
         max_open_processes: 2,
@@ -1937,7 +2101,7 @@ fn resource_partial_registration_and_reviewer_headroom_keep_liability() {
         .is_err()
     );
 
-    let racing = Temp::private();
+    let racing = Temp::new();
     let barrier = Arc::new(Barrier::new(3));
     let (activation, receipt) = std::thread::scope(|scope| {
         let repo = &racing.0;

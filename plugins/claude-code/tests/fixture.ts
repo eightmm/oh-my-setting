@@ -14,7 +14,7 @@ export const DASHBOARD = {
   repo: { name: 'demo', branch: 'main', head: 'b6c3a2aa8c39' },
   coverage:
     'OMS-managed collaboration records only; native provider subagents that never touched OMS state are not observed',
-  collection: { ok: true, sources: { state: 'ok', artifacts: 'ok', attempts: 'ok' } },
+  collection: { ok: true, sources: { state: 'ok', goal: 'ok', artifacts: 'ok', attempts: 'ok' } },
   goal: { text: 'operator fixture', source: 'plan' },
   scope: { allowed: [], forbidden: [], source: 'unbounded' },
   task: { present: false, healthy: true },
@@ -125,7 +125,7 @@ export const DASHBOARD = {
 // derived from state is null, which means "not known", never "none".
 export const DEGRADED = {
   ...DASHBOARD,
-  collection: { ok: false, sources: { state: 'degraded', artifacts: 'ok', attempts: 'invalid lifecycle contract' } },
+  collection: { ok: false, sources: { state: 'degraded', goal: 'degraded', artifacts: 'ok', attempts: 'invalid lifecycle contract' } },
   goal: null,
   scope: null,
   task: null,

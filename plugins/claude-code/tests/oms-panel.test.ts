@@ -84,6 +84,11 @@ test('each tab draws the recorded state and marks what it cannot know', async ()
   expect(now).toEqual(['Goal: operator fixture', 'Verification: 1/2 criteria verified', 'Project task: none active', 'Open attempts: 1'])
   expect(texts(bodyLines(DASHBOARD, 'nope'))).toEqual(now)
   expect(texts(bodyLines({ ...DASHBOARD, goal: null }, 'now'))).toContain('Goal: none recorded')
+  // Healthy overall state does not prove the goal sources (e.g. an unreadable PROJECT.md) were read
+  for (const goal of ['degraded', undefined]) {
+    const unread = { ...DASHBOARD, goal: null, collection: { ok: true, sources: { ...DASHBOARD.collection.sources, goal } } }
+    expect(texts(bodyLines(unread, 'now'))).toContain('Goal: unavailable')
+  }
   expect(texts(bodyLines({ ...DASHBOARD, task: { healthy: true, present: true, stale: true, task_id: 'older', status: 'open' } }, 'now'))).toContain('Previous task: older · open')
 
   const work = bodyLines(DASHBOARD, 'work')

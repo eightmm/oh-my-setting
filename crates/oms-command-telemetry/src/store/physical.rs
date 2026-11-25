@@ -43,10 +43,7 @@ fn invalid(message: &'static str) -> StoreError {
     StoreError::Invalid(message)
 }
 fn initial(error: StoreError) -> dispatch::Error {
-    dispatch::Error {
-        source: error,
-        publication_uncertain: false,
-    }
+    dispatch::Error::new(error, false)
 }
 fn encoded(value: &V) -> std::result::Result<Vec<u8>, StoreError> {
     encode(value).map_err(|_| invalid("cannot encode physical invocation intent"))
@@ -296,7 +293,8 @@ fn begin_inner(
     let timeout = deadline
         .saturating_duration_since(Instant::now())
         .min(Duration::from_secs(10));
-    let tx = dispatch::Transaction::acquire(repo, timeout, interrupted)?;
+    let tx = dispatch::Transaction::acquire(repo, timeout, interrupted)
+        .map_err(|error| error.in_file(dispatch::LOCK))?;
     let snapshot = tx.snapshot()?;
     // Transaction validated strict JSON before this private value conversion.
     let mut registry = match snapshot.as_deref() {
@@ -321,7 +319,8 @@ fn begin_inner(
         request["resource_binding"] = binding.value().map_err(|e| tx.error(e))?;
     }
     let intents = intents(&registry["physical"]).map_err(|source| tx.error(source))?;
-    let projection = usage::load(tx.repo()).map_err(|source| tx.error(source))?;
+    let projection =
+        usage::load(tx.repo()).map_err(|source| tx.error(source).in_file(usage::RECEIPTS))?;
     resources::validate_receipts(&registry, &intents, &projection)
         .map_err(|source| tx.error(source))?;
     let receipt = projection
@@ -379,7 +378,7 @@ fn begin_inner(
     )?;
     let receipt =
         usage::begin_registered_before(&tx, identity.clone(), cumulative, interrupted, deadline)
-            .map_err(|source| tx.error(source))?;
+            .map_err(|source| tx.error(source).in_file(usage::RECEIPTS))?;
     before(interrupted, Some(deadline)).map_err(|source| tx.error(source))?;
     let reserved = encoded(&registry).map_err(|source| tx.error(source))?;
     let record = &mut registry["physical"]["calls"][identity.call_id.as_str()];
