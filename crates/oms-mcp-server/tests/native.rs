@@ -1979,6 +1979,35 @@ fn panel_command_catalog() {
                     .any(|column| column["key"] == k)
             );
         }
+        let evidence_keys = [
+            "managedOutgoingSwap",
+            "swapEvidence",
+            "configuredMainPermissions",
+            "fullModeOption",
+        ];
+        for omitted in 1..(1 << evidence_keys.len()) {
+            let mut partial = current.clone();
+            let mut expected = current.clone();
+            for (index, key) in evidence_keys.iter().enumerate() {
+                if omitted & (1 << index) != 0 {
+                    partial.as_object_mut().unwrap().remove(*key);
+                    expected[*key] = json!("unknown");
+                }
+            }
+            let response = read(&partial);
+            good(&response);
+            assert_eq!(payload(&response)["rows"][0], expected);
+        }
+        for (key, wrong) in [
+            ("managedOutgoingSwap", json!("ready")),
+            ("swapEvidence", json!("invalid")),
+            ("configuredMainPermissions", json!(null)),
+            ("fullModeOption", json!(true)),
+        ] {
+            let mut partial = legacy.clone();
+            partial[key] = wrong;
+            bad(&read(&partial), "unrecognized Connections evidence");
+        }
         let mut previous = current.clone();
         previous
             .as_object_mut()

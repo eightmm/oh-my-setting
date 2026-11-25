@@ -553,9 +553,14 @@ fn connections(mut data: Value) -> PanelResult<Value> {
         {
             return Err(INVALID.into());
         }
-        let old_policy = CONNECTION_EVIDENCE
-            .iter()
-            .all(|(k, _)| !shape.contains_key(k));
+        let swap_missing = !shape.contains_key("managedOutgoingSwap");
+        let evidence_missing = !shape.contains_key("swapEvidence");
+        for (key, _) in CONNECTION_EVIDENCE {
+            if row.get(key).is_none() {
+                legacy = true;
+                row[key] = json!("unknown");
+            }
+        }
         let (key, _) = RESUME_REFUSAL_COLUMN;
         match row.get(key).and_then(Value::as_str) {
             None if row.get(key).is_none() => row[key] = json!("unknown"),
@@ -564,41 +569,25 @@ fn connections(mut data: Value) -> PanelResult<Value> {
             Some("binding_unverified") if !selectable => {}
             _ => return Err(INVALID.into()),
         }
-        if old_policy {
-            // A legacy runtime reports no policy evidence. Never infer a
-            // permission or swap capability from the harness name or PATH.
-            legacy = true;
-            for (key, _) in CONNECTION_EVIDENCE {
-                row[key] = json!("unknown");
-            }
-            continue;
-        }
         let swap = row["managedOutgoingSwap"].as_str();
         let evidence = row["swapEvidence"].as_str();
-        let valid = matches!(
-            (harness, swap, evidence),
-            (_, Some("unknown"), Some("unknown"))
-                | (
-                    "codex",
-                    Some("supported"),
-                    Some("requires-verified-idle-pane-exit")
-                )
-                | (
-                    "claude",
-                    Some("supported"),
-                    Some("assisted-exit-linux-proc-available")
-                )
-                | (
-                    "claude",
-                    Some("unsupported"),
-                    Some("assisted-exit-linux-proc-unavailable")
-                )
-                | (
-                    "pi" | "agy",
-                    Some("unsupported"),
-                    Some("no-managed-outgoing-adapter")
-                )
-        );
+        let valid = [
+            ("unknown", "unknown"),
+            match harness {
+                "codex" => ("supported", "requires-verified-idle-pane-exit"),
+                "claude" => ("supported", "assisted-exit-linux-proc-available"),
+                _ => ("unsupported", "no-managed-outgoing-adapter"),
+            },
+            if harness == "claude" {
+                ("unsupported", "assisted-exit-linux-proc-unavailable")
+            } else {
+                ("unknown", "unknown")
+            },
+        ]
+        .iter()
+        .any(|(s, e)| {
+            (swap_missing || swap == Some(s)) && (evidence_missing || evidence == Some(e))
+        });
         if !valid
             || !matches!(
                 row["configuredMainPermissions"].as_str(),
