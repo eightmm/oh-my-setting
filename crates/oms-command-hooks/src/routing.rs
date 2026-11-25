@@ -1197,13 +1197,29 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             )
         ));
     }
-    let card = load(&repo.join(".oms/hooks/relay/land.json"));
+    // Read without following symlinks at any path component under the repo.
+    let card = oms_safe_fs::Root::open(repo)
+        .ok()
+        .and_then(|r| {
+            r.read_no_follow(
+                Path::new(".oms/hooks/relay/land.json"),
+                oms_safe_fs::ByteReadOptions {
+                    missing_ok: true,
+                    max_bytes: 65536,
+                },
+            )
+            .ok()
+        })
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or(Value::Null);
     let ended = text(&card, "ended_at");
+    // Seconds-resolution timestamps can repeat, so the head and exit code are part of the key.
+    let key = format!("{ended} {} {}", text(&card, "head"), card["exit"]);
     if let Some(at) = epoch(ended)
         && ctx.snapshot.seconds() - at <= max
-        && old["seen"]["land"] != ended
+        && old["seen"]["land"] != key
     {
-        old["seen"]["land"] = json!(ended);
+        old["seen"]["land"] = json!(key);
         lines.push(format!(
             "[oms relay] {}",
             safe_text(

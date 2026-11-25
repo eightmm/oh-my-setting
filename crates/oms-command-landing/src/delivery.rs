@@ -234,10 +234,15 @@ fn relay_card(c: &Context<'_>, o: &Options, result: &Result<Output>) -> Result<(
     let row = c.relay_row.borrow();
     let row = row.as_ref().unwrap_or(&V::Null);
     let git = Git::new(&repo, c.interrupted);
-    let sha = git
-        .text(&["rev-parse", "--short", "HEAD"])
-        .unwrap_or_default();
-    if !(7..=40).contains(&sha.len())
+    // The receipt records the head this run landed; HEAD may have moved since.
+    let sha = match string(row, "sha") {
+        s if s.is_empty() => git.text(&["rev-parse", "HEAD"]).unwrap_or_default(),
+        s => s,
+    }
+    .chars()
+    .take(12)
+    .collect::<String>();
+    if sha.len() < 7
         || !sha
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
