@@ -2380,7 +2380,8 @@ case "$1 $2" in
       git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
     fi ;;
   "pr view")
-    if [ -f '{state}.view' ]; then
+    if [[ "$*" == *'--json state' ]]; then echo '{{"state":"OPEN"}}'
+    elif [ -f '{state}.view' ]; then
       IFS= read -rd '' text < '{state}.view'; printf '%s' "$text"
     else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
   "run view")
@@ -2734,11 +2735,6 @@ fn target_update_after_publish_only_merges_successor() {
     let old = f.receipt(&f.head);
     assert_eq!(old.get("state").text(), Some("awaiting-merge"));
     assert_eq!(old.get("merge").get("state").text(), Some("not-requested"));
-    let script = fs::read_to_string(&f.gh).unwrap().replace(
-        "\"pr view\")",
-        "\"pr view\")\n    if [[ \"$*\" == *'--json state' ]]; then echo '{\"state\":\"OPEN\"}'; exit 0; fi",
-    );
-    fs::write(&f.gh, script).unwrap();
     f.advance_target();
     let result = f.land(&["--merge"]);
     assert_eq!(result.0, 0, "{result:?}");
@@ -2771,17 +2767,25 @@ fn externally_merged_pr_preserves_awaiting_receipt() {
         .map(|e| e.path())
         .find(|p| p.extension().is_some_and(|ext| ext == "json"))
         .unwrap();
-    let mut row = V::parse(&fs::read(&receipt).unwrap()).unwrap();
-    row.set("state", "awaiting-merge");
-    row.set("pr_number", 7usize);
-    row.set("merge", obj([("state", "not-requested".into())]));
-    let original = row.json(false).unwrap();
-    fs::write(&receipt, &original).unwrap();
+    let script = fs::read_to_string(&f.gh).unwrap().replace(
+        "\"pr view\")",
+        "\"pr view\")\n    if [[ \"$*\" == *'--json state' ]]; then echo '{\"state\":\"MERGED\"}'; exit 0; fi",
+    );
+    fs::write(&f.gh, script).unwrap();
     f.advance_target();
-    let result = f.land(&["--pr", "--merge"]);
-    assert_refused(&result, "use land reconcile");
-    assert_eq!(fs::read(receipt).unwrap(), original);
-    assert_eq!(f.checkout_head(), f.head);
+    // Any receipt that recorded the PR, not only awaiting-merge, belongs to reconcile.
+    for state in ["awaiting-merge", "running", "failed"] {
+        let mut row = V::parse(&fs::read(&receipt).unwrap()).unwrap();
+        row.set("state", state);
+        row.set("pr_number", 7usize);
+        row.set("merge", obj([("state", "not-requested".into())]));
+        let original = row.json(false).unwrap();
+        fs::write(&receipt, &original).unwrap();
+        let result = f.land(&["--pr", "--merge"]);
+        assert_refused(&result, "use land reconcile");
+        assert_eq!(fs::read(&receipt).unwrap(), original, "{state}");
+        assert_eq!(f.checkout_head(), f.head, "{state}");
+    }
 }
 
 #[test]

@@ -629,6 +629,21 @@ fn update_target(
     if receipt_has_completed_or_requested_merge(row) {
         return Err(moved.refuse("existing receipt records a completed or requested merge"));
     }
+    if row.get("pr_number").integer(true) {
+        // A recorded PR merged or closed outside OMS belongs to land reconcile;
+        // updating would re-land its commits over the external merge.
+        let number = row.get("pr_number").py();
+        let repo = ci::query_repo(r.destination)?;
+        let pr = ci::gh(
+            r.c,
+            &["pr", "view", &number, "--repo", &repo, "--json", "state"],
+            Duration::from_secs(30),
+        )?;
+        require(
+            pr.get("state").text() == Some("OPEN"),
+            "recorded PR is not open; use land reconcile",
+        )?;
+    }
     let git = r.git;
     let flag = r.c.interrupted;
     require(!merge_in_progress(git)?, UNFINISHED_MERGE)?;
@@ -2208,24 +2223,6 @@ fn execute_pass(
     }
     if moved_before_gate.is_none() || !previous.is_empty() {
         *c.relay_receipt.borrow_mut() = Some(receipt.clone());
-    }
-    if moved_before_gate.is_some()
-        && row.get("state").text() == Some("awaiting-merge")
-        && row.get("pr_number").integer(true)
-    {
-        let number = row.get("pr_number").py();
-        let repo_arg = ci::query_repo(&destination)?;
-        let pr = ci::gh(
-            c,
-            &[
-                "pr", "view", &number, "--repo", &repo_arg, "--json", "state",
-            ],
-            Duration::from_secs(30),
-        )?;
-        require(
-            pr.get("state").text() == Some("OPEN"),
-            "PR is not open; use land reconcile",
-        )?;
     }
     let ctx = Run {
         c,
