@@ -298,7 +298,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             VIEW,
-            "Read one OMS panel page. connections checks runtime PATH and harness policy, modelcatalog reads cached model and effort evidence, routes previews expected choices, and attribution shows recorded calls. Null means unverified.",
+            "Read one OMS panel page. connections reports CLI presence, managed outgoing swap policy, host preconditions and configured permission policy, modelcatalog reads cached model and effort evidence, routes previews expected choices, and attribution shows recorded calls. Null means unverified.",
             json!({"project":project,"view":{"type":"string","enum":VIEWS.to_vec()},"page":{"type":"integer","minimum":1,"maximum":1000}}),
             &["view"],
             false
@@ -484,6 +484,198 @@ fn alias(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
 }
+const RESUME_REFUSAL_COLUMN: (&str, &str) = ("resumeRefusalCode", "재개 거절 코드");
+
+const CONNECTION_EVIDENCE: [(&str, &str); 4] = [
+    ("managedOutgoingSwap", "내보내는 Main 교체 계약"),
+    ("swapEvidence", "교체 계약 및 호스트 조건"),
+    ("configuredMainPermissions", "설정된 Main 권한 모드"),
+    ("fullModeOption", "full 모드 옵션 지원"),
+];
+
+fn connections(mut data: Value) -> PanelResult<Value> {
+    const INVALID: &str = "OMS returned unrecognized Connections evidence.";
+    const CELLS: &[(&str, &str)] = &[
+        ("harness", "하네스"),
+        ("owner", "디스패치 소유자"),
+        ("transport", "Main 전송 경로"),
+        ("installed", "CLI 설치"),
+        ("dependencies", "실행에 필요한 도구"),
+        ("dependenciesPresent", "도구 모두 발견"),
+        ("resumePolicy", "재개 계약"),
+        ("accountSelection", "계정 선택 계약"),
+        ("version", "확인된 CLI 버전"),
+        ("auth", "인증 준비"),
+        ("observedAt", "PATH 조회 시각"),
+    ];
+    let column_contract = |key: &str| {
+        CELLS
+            .iter()
+            .chain(&CONNECTION_EVIDENCE)
+            .chain([&RESUME_REFUSAL_COLUMN])
+            .find(|(k, _)| *k == key)
+            .map(|(_, label)| *label)
+    };
+    let columns = data["columns"].as_array().ok_or(INVALID)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for column in columns {
+        let key = column["key"].as_str().ok_or(INVALID)?;
+        let label = column_contract(key).ok_or(INVALID)?;
+        if !seen.insert(key)
+            || column["label"] != label
+            || !column.as_object().is_some_and(|o| o.keys().count() == 2)
+        {
+            return Err(INVALID.into());
+        }
+    }
+    if !data.as_object().is_some_and(|obj| {
+        obj.keys().all(|k| {
+            matches!(
+                k.as_str(),
+                Some(
+                    "view"
+                        | "page"
+                        | "nextPage"
+                        | "columns"
+                        | "rows"
+                        | "status"
+                        | "total"
+                        | "incomplete"
+                )
+            )
+        })
+    }) || !matches!(data["status"].as_str(), Some("ready" | "unavailable"))
+        || !data["nextPage"].is_null()
+        || !(data["total"].is_null() || data["total"].as_u64().is_some_and(|n| n <= 4))
+        || !(data["incomplete"].is_null() || data["incomplete"].is_boolean())
+    {
+        return Err(INVALID.into());
+    }
+    let page_has_rows = data["status"] == "ready" && data["page"] == 1;
+    let total = data["total"].as_u64().unwrap_or(4);
+    let Value::Array(rows) = &mut data["rows"] else {
+        return Err(INVALID.into());
+    };
+    if (!page_has_rows && !rows.is_empty()) || rows.len() as u64 > total {
+        return Err(INVALID.into());
+    }
+    let mut harnesses = std::collections::BTreeSet::new();
+    let has_rows = !rows.is_empty();
+    let mut legacy = false;
+    for row in rows {
+        let harness = match row["harness"].as_str() {
+            Some("codex") => "codex",
+            Some("claude") => "claude",
+            Some("pi") => "pi",
+            Some("agy" | "antigravity") => "agy",
+            _ => return Err(INVALID.into()),
+        };
+        let owner = match harness {
+            "pi" => "codex",
+            "agy" => "antigravity",
+            x => x,
+        };
+        let deps = if harness == "pi" {
+            "pi, codex, oms"
+        } else {
+            harness
+        };
+        let selectable = matches!(harness, "codex" | "claude");
+        let shape = row.as_object().ok_or(INVALID)?;
+        if !harnesses.insert(harness)
+            || !shape
+                .keys()
+                .all(|k| k.as_str().and_then(column_contract).is_some())
+            || row["owner"] != owner
+            || row["transport"]
+                != if harness == "pi" {
+                    "CodexGateway"
+                } else {
+                    "native"
+                }
+            || row["dependencies"] != deps
+            || !row["dependenciesPresent"].is_boolean()
+            || !row["installed"].is_boolean()
+            || row["resumePolicy"]
+                != if selectable {
+                    "requires verified session"
+                } else {
+                    "unsupported"
+                }
+            || row["accountSelection"].as_bool() != Some(selectable)
+            || !row["auth"].is_null()
+            || !row["version"].is_null()
+            || !(row["observedAt"].is_null() || row["observedAt"].as_u64().is_some())
+        {
+            return Err(INVALID.into());
+        }
+        let swap_missing = !shape.contains_key("managedOutgoingSwap");
+        let evidence_missing = !shape.contains_key("swapEvidence");
+        for (key, _) in CONNECTION_EVIDENCE {
+            if row.get(key).is_none() {
+                legacy = true;
+                row[key] = json!("unknown");
+            }
+        }
+        let (key, _) = RESUME_REFUSAL_COLUMN;
+        match row.get(key).and_then(Value::as_str) {
+            None if row.get(key).is_none() => row[key] = json!("unknown"),
+            Some("unknown") => {}
+            Some("not_applicable") if selectable => {}
+            Some("binding_unverified") if !selectable => {}
+            _ => return Err(INVALID.into()),
+        }
+        let swap = row["managedOutgoingSwap"].as_str();
+        let evidence = row["swapEvidence"].as_str();
+        let valid = [
+            ("unknown", "unknown"),
+            match harness {
+                "codex" => ("supported", "requires-verified-idle-pane-exit"),
+                "claude" => ("supported", "assisted-exit-linux-proc-available"),
+                _ => ("unsupported", "no-managed-outgoing-adapter"),
+            },
+            if harness == "claude" {
+                ("unsupported", "assisted-exit-linux-proc-unavailable")
+            } else {
+                ("unknown", "unknown")
+            },
+        ]
+        .iter()
+        .any(|(s, e)| {
+            (swap_missing || swap == Some(s)) && (evidence_missing || evidence == Some(e))
+        });
+        if !valid
+            || !matches!(
+                row["configuredMainPermissions"].as_str(),
+                Some("native" | "full" | "unknown")
+            )
+            || !(row["fullModeOption"] == "unknown"
+                || row["fullModeOption"]
+                    == if harness == "pi" {
+                        "unsupported"
+                    } else {
+                        "supported"
+                    })
+        {
+            return Err(INVALID.into());
+        }
+    }
+    if let Value::Array(columns) = &mut data["columns"] {
+        if legacy {
+            for (key, label) in CONNECTION_EVIDENCE {
+                if !columns.iter().any(|column| column["key"] == key) {
+                    columns.push(json!({"key":key,"label":label}));
+                }
+            }
+        }
+        let (key, label) = RESUME_REFUSAL_COLUMN;
+        if has_rows && !columns.iter().any(|column| column["key"] == key) {
+            columns.push(json!({"key":key,"label":label}));
+        }
+    }
+    Ok(data)
+}
+
 fn valid_work_items_receipt(data: &Value) -> bool {
     let keys = [
         "id",
@@ -1590,7 +1782,11 @@ impl Server<'_> {
                 && data["columns"].is_array()
                 && data["rows"].is_array() =>
             {
-                Ok(data)
+                if data["view"] == "connections" {
+                    connections(data)
+                } else {
+                    Ok(data)
+                }
             }
             START
                 if data["status"] == "started"
@@ -2105,7 +2301,8 @@ impl Server<'_> {
         ];
         // Codex supplies threadId on each call, outside model/widget arguments.
         // Only its native consumer hash leaves this process; it grants no authority.
-        if let Some(thread) = meta["threadId"].as_str().filter(|v| uuid(v)) {
+        let thread = meta["threadId"].as_str().filter(|v| uuid(v));
+        if let Some(thread) = thread {
             argv.extend([
                 "--conversation-digest".into(),
                 crate::storage::hash(thread)[..32].into(),
@@ -2119,11 +2316,34 @@ impl Server<'_> {
             return Err("Unsupported OMS panel snapshot version.".into());
         }
         let mut dashboard = report["dashboard"].clone();
-        if partial {
+        let main = &dashboard["conversationMain"];
+        let room_id = |v: &Value| {
+            v.as_str().is_some_and(|s| {
+                (1..=160).contains(&s.len())
+                    && !s.starts_with(['-', '.'])
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
+        };
+        let harness_unverified = !main["harness"].is_null()
+            && !(thread.is_some()
+                && dashboard["conversationBinding"] == "matched"
+                && main["source"] == "room-session"
+                && main["provider"] == "codex"
+                && main["state"] == "joined"
+                && room_id(&main["room"])
+                && room_id(&main["participant"])
+                && matches!(main["harness"].as_str(), Some("codex" | "pi")));
+        if harness_unverified {
+            dashboard["conversationMain"]["harness"] = Value::Null;
+        }
+        if partial || harness_unverified {
             let was_degraded = dashboard["degraded"] == true;
             dashboard["degraded"] = json!(true);
             if dashboard["observation"].is_object()
-                && (!was_degraded || dashboard["observation"]["completeness"] == "complete")
+                && (harness_unverified
+                    || !was_degraded
+                    || dashboard["observation"]["completeness"] == "complete")
             {
                 if dashboard["observation"]["completeness"] == "complete" {
                     dashboard["observation"]["completeness"] = json!("partial");

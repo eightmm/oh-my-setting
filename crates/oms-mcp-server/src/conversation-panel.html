@@ -135,6 +135,7 @@ const messages = {
   "connecting": ["OMS 연결 중…", "Connecting to OMS…"],
   "connectionFailed": ["OMS 프로젝트를 확인할 수 없습니다. 연결을 확인한 뒤 새로고침하세요.", "Could not read the OMS project. Check the connection and refresh."],
   "criteriaMet": ["프로젝트 완료 기준 {n}개를 모두 검증했습니다.", "All {n} project completion criteria verified."],
+  "dispatchOnly": ["Main · {provider} 연결", "Main · via {provider}"],
   "currentMain": ["이 대화의 Main", "Conversation Main"],
   "emptyChat": ["아직 기록된 메시지가 없습니다.", "No messages recorded yet."],
   "goalLabel": ["프로젝트 목표", "Project goal"],
@@ -600,6 +601,10 @@ function clearProject() {
   closeDialogs();resetIssue();el('leads').replaceChildren();el('approvals').replaceChildren();
   updateContext(null);
 }
+function conversationMainName(main) {
+  return Object.hasOwn(names,main.harness) ? providerName(main.harness)+' Main' :
+    t('dispatchOnly',{provider:providerName(main.provider)});
+}
 function joinedMain() {
   const m=dashboardData?.conversationMain;
   return !readOnly && dashboardData?.conversationBinding==='matched' && m?.source==='room-session' &&
@@ -649,8 +654,9 @@ function render(d) {
   el('project').textContent=d.project || project || 'OMS';el('new-goal').hidden=readOnly;
   const owner=main || (readOnly?d.main:null);
   put('main-scope',main?'currentMain':readOnly?'repositoryMain':'currentMain');
-  paintAvatar(el('avatar'),owner?.provider);
-  put('main-name',()=>owner?.provider?providerName(owner.provider)+' Main':t('unknownMain'));
+  paintAvatar(el('avatar'),main ? main.harness : owner?.provider);
+  put('main-name',()=>main?conversationMainName(main):owner?.provider?providerName(owner.provider)+' Main':t('unknownMain'));
+  if(main && selectedChat?.room===main.room && selectedChat.participant===main.participant)put('chat-title',()=>conversationMainName(main));
   el('header-main').hidden=!main;
   members=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];
   if(main && !members.some(m=>m.participant===main.participant))members.push(main);
@@ -720,7 +726,7 @@ async function readChat(before,openNative=false) {
   } catch {if(current())put('chat-status','chatMismatch');}
   finally {if(current())el('chat-older').disabled=false;}
 }
-onClick('header-main',()=>{const m=joinedMain();if(m)openConversation(m,()=>providerName(m.provider)+' Main',el('header-main'));});
+onClick('header-main',()=>{const m=joinedMain();if(m)openConversation(m,()=>conversationMainName(m),el('header-main'));});
 onClick('chat-older',()=>{if(chatCursor!=null)readChat(chatCursor);});
 onClick('chat-back',()=>{el('conversation').close();(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();});
 on('conversation','close',()=>{

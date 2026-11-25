@@ -440,7 +440,7 @@ test('display mode follows host support, user choice and teardown independently 
 });
 
 
-const main={source:'room-session',state:'joined',provider:'codex',room:'room-a',participant:'owner',incomplete:false};
+const main={source:'room-session',state:'joined',provider:'codex',harness:'codex',room:'room-a',participant:'owner',incomplete:false};
 const lead={room:main.room,participant:'lead-one',parent:main.participant,role:'worker',provider:'claude',joined:true};
 const dashboard={conversationBinding:'matched',conversationMain:{...main,participants:[lead]},
   conversationAttempts:[
@@ -472,6 +472,25 @@ test('the first screen shows proven participants and only requests registry, sna
   assert.deepEqual(generic.calls.map(c=>c.name),startup.slice(0,2));
   assert.equal(generic.get('new-goal').hidden,true);assert.equal(generic.get('header-main').hidden,true);
   assert.equal(generic.get('leads-section').hidden,true);
+});
+test('Main identity and conversation use the recorded harness without treating the dispatch owner as the harness',async()=>{
+  const d={...dashboard,conversationMain:{...main,harness:'pi'}};
+  const p=await panel(['one'],d,{locale:'en',tools:{oms_panel_chat:args=>({...args,source:'room',messages:[]})}});
+  assert.equal(p.get('main-name').textContent,'Pi Main');
+  assert.equal(p.get('avatar').getAttribute('data-provider'),'pi');
+  await p.event('header-main','click');
+  assert.equal(p.get('chat-title').textContent,'Pi Main');
+  assert.deepEqual({...p.calls.at(-1).args},{room:main.room,participant:main.participant,project:'one'});
+  for(const harness of [null,'unrecognized',undefined]){
+    d.conversationMain.harness=harness;await p.event('refresh','click');
+    assert.equal(p.get('main-name').textContent,'Main · via Codex');
+    assert.equal(p.get('chat-title').textContent,'Main · via Codex');
+    assert.equal(p.get('avatar').textContent,'–');
+  }
+  await choose(p,'ko');
+  assert.equal(p.get('main-name').textContent,'Main · Codex 연결');
+  assert.equal(p.get('chat-title').textContent,p.get('main-name').textContent);
+  assert.ok(p.calls.every(c=>[...startup,'oms_panel_chat'].includes(c.name)));
 });
 test('the team respects parent, provider, terminal membership and partial visibility',async()=>{
   const d={...dashboard,conversationMain:{...main,participants:[{...lead,parent:'someone-else'},{...lead,participant:'left',joined:false},
