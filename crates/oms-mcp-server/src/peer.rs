@@ -469,13 +469,14 @@ impl Server<'_> {
         }
     }
     pub(crate) fn start_peer(&self, args: &Value) -> ToolResult {
-        self.start_bound_peer(args, None)
+        self.start_bound_peer(args, None, false)
     }
 
     pub(crate) fn start_bound_peer(
         &self,
         args: &Value,
         assignment: Option<(&str, &str)>,
+        preserve_current: bool,
     ) -> ToolResult {
         if delegated()
             && !(matches!(args["kind"].as_str(), Some("message" | "ack"))
@@ -593,7 +594,13 @@ impl Server<'_> {
             meta["context_options"] = context.clone();
         }
         // Owner reconstruction uses only validated typed fields, not stored argv.
-        let launch = json!({"kind":kind,"targets":targets,"thread":thread,"new_thread":new,"debate_rounds":rounds,"context_options":context});
+        let mut launch = json!({"kind":kind,"targets":targets,"thread":thread,"new_thread":new,"debate_rounds":rounds,"context_options":context});
+        if preserve_current {
+            if assignment.is_none() || kind != "ask" || thread != op {
+                return Err("error: invalid non-selecting assignment".into());
+            }
+            launch["preserve_current"] = json!(true);
+        }
         if kind == "ask" {
             let mut argv: Vec<OsString> = vec![
                 "thread".into(),
@@ -613,6 +620,9 @@ impl Server<'_> {
                 argv.extend(["context", "--require-open"].map(OsString::from));
             } else {
                 argv.extend(["new", "--live", "--topic", "Council"].map(OsString::from));
+                if preserve_current {
+                    argv.push("--no-current".into());
+                }
             }
             if self
                 .command(&argv, &self.caller_cwd, Duration::from_secs(5))?
@@ -1287,6 +1297,17 @@ fn owner_run(
     }
     if !thread.is_empty() {
         argv.extend(["--thread".into(), thread.into()]);
+    }
+    if let Some(field) = launch.get("preserve_current") {
+        let preserve = field
+            .as_bool()
+            .ok_or_else(|| fail("invalid stored preserve_current"))?;
+        if preserve {
+            if kind != "ask" || thread != op {
+                return Err(fail("invalid stored non-selecting thread"));
+            }
+            argv.push("--no-current".into());
+        }
     }
     if new {
         argv.push("--new-thread".into());

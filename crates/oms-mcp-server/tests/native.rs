@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v20.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v21.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v19.html";
+        let legacy_uri = "ui://oms/conversation-panel/v20.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1043,6 +1043,192 @@ fn desktop_reviewed_issue() {
     bad(&c.read(), "OMS_PANEL_REPO");
 }
 
+fn desktop_lead_conversations() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let read = "oms_lead_conversation_status";
+    let open = "oms_open_lead_conversations";
+    let owner = "01900000-0000-7000-8000-0000000000bb";
+    let args = json!({"room":"lead-room"});
+    let call = |c: &mut Client, name: &str, params: &Value, thread: &str| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":params,"_meta":{"threadId":thread}}),
+        )
+    };
+    let runs = || std::fs::read_dir(repo.join(".oms/artifacts/mcp")).map_or(0, |d| d.count());
+    let opener = c.tool("oms_open_panel", json!({"leadConversations":true}));
+    assert_eq!(payload(&opener)["leadConversations"], true);
+    assert!(
+        payload(&c.tool("oms_open_panel", json!({})))
+            .get("leadConversations")
+            .is_none()
+    );
+    assert_eq!(
+        c.tool("oms_open_panel", json!({"leadConversations":"yes"}))["result"]["isError"],
+        true
+    );
+    assert_eq!(
+        call(
+            &mut c,
+            open,
+            &json!({"room":"lead-room","owner":"other"}),
+            owner
+        )["error"]["code"],
+        -32602
+    );
+    for (profile, child) in [("mcp-app", false), ("chatgpt-panel", true)] {
+        let mut blocked = Client::with_depth(
+            &source,
+            &repo,
+            profile,
+            false,
+            child,
+            if child { "1" } else { "0" }.as_ref(),
+        );
+        for name in [open, read] {
+            let denied = call(&mut blocked, name, &args, owner);
+            if child {
+                bad(&denied, "parent app");
+            } else {
+                assert_eq!(denied["error"]["code"], -32602);
+            }
+        }
+    }
+    bad(&call(&mut c, open, &args, ""), "bound conversation");
+    assert!(!source.join("last-call.json").exists());
+    let setup = |fail_link: bool| {
+        fixture_settings(&source, json!({"leadRoom":true,"failClaudeLink":fail_link}))
+    };
+    setup(true);
+    bad(
+        &call(&mut c, open, &args, "01900000-0000-7000-8000-0000000000aa"),
+        "current Main",
+    );
+    let initial = payload(&call(&mut c, read, &args, owner));
+    assert_eq!(initial["leads"].as_array().unwrap().len(), 3);
+    assert!(
+        initial["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["status"] == "not_started")
+    );
+    let key = initial["projectKey"].as_str().unwrap();
+    assert_eq!(key.len(), 64);
+    bad(
+        &call(
+            &mut c,
+            open,
+            &json!({"room":"lead-room","projectKey":"f".repeat(64)}),
+            owner,
+        ),
+        "project changed",
+    );
+    assert_eq!(runs(), 0);
+    let opened = payload(&call(
+        &mut c,
+        open,
+        &json!({"room":"lead-room","projectKey":key}),
+        owner,
+    ));
+    assert_eq!(opened["leads"][1]["status"], "unconfirmed");
+    assert_eq!(runs(), 3);
+    until(|| {
+        std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+            .unwrap()
+            .all(|e| e.unwrap().path().join("status").exists())
+    });
+    let status = payload(&call(&mut c, read, &args, owner));
+    assert_eq!(status["leads"][0]["status"], "ready");
+    assert_eq!(status["leads"][1]["status"], "unconfirmed");
+    assert_eq!(status["leads"][2]["status"], "ready");
+    assert!(status.get("leadConversation").is_none());
+    setup(false);
+    let repaired = payload(&call(&mut c, open, &args, owner));
+    assert_eq!(repaired["leads"][1]["status"], "ready");
+    assert_eq!(repaired, payload(&call(&mut c, open, &args, owner)));
+    assert_eq!(
+        runs(),
+        3,
+        "a repeat or a receipt repair started a duplicate"
+    );
+    let one = call(
+        &mut c,
+        read,
+        &json!({"room":"lead-room","provider":"claude"}),
+        owner,
+    );
+    let detail = &one["result"]["_meta"]["leadConversation"];
+    assert_eq!(detail["room"], "lead-room");
+    assert_eq!(detail["provider"], "claude");
+    assert_eq!(detail["transcript"]["turns"][0]["text"], "fixture answer");
+    assert!(
+        !one["result"]["structuredContent"]
+            .to_string()
+            .contains("fixture answer")
+    );
+    assert!(
+        !one["result"]["content"]
+            .to_string()
+            .contains("fixture answer")
+    );
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(source.join("lead-fixture-claude")).unwrap())
+            .unwrap();
+    let op = receipt["operation"].as_str().unwrap();
+    let dir = repo.join(".oms/artifacts/mcp").join(op);
+    let thread_log = source.join(format!("thread-{op}"));
+    std::fs::write(&thread_log, "closed").unwrap();
+    for _ in 0..2 {
+        let detail = call(
+            &mut c,
+            read,
+            &json!({"room":"lead-room","provider":"claude"}),
+            owner,
+        );
+        assert_eq!(payload(&detail)["leads"][0]["status"], "unconfirmed");
+        assert!(detail["result"]["_meta"]["leadConversation"]["transcript"].is_null());
+        assert_eq!(
+            payload(&call(&mut c, open, &args, owner))["leads"][1]["status"],
+            "unconfirmed"
+        );
+        assert_eq!(runs(), 3);
+        if thread_log.exists() {
+            std::fs::remove_file(&thread_log).unwrap();
+        }
+    }
+    std::fs::write(&thread_log, "open").unwrap();
+    let metadata = dir.join("meta.json");
+    let original = std::fs::read(&metadata).unwrap();
+    let mut altered: Value = serde_json::from_slice(&original).unwrap();
+    altered.as_object_mut().unwrap().remove("answer_storage");
+    std::fs::write(&metadata, altered.to_string()).unwrap();
+    assert_eq!(
+        payload(&call(&mut c, read, &args, owner))["leads"][1]["status"],
+        "unconfirmed"
+    );
+    std::fs::write(&metadata, original).unwrap();
+    std::fs::write(
+        dir.join("answers/fixture.md"),
+        "## Output\nempty failure\n## Exit\n7\n",
+    )
+    .unwrap();
+    assert_eq!(
+        payload(&call(&mut c, read, &args, owner))["leads"][1]["status"],
+        "unconfirmed"
+    );
+    std::fs::write(dir.join("status"), "-15\n").unwrap();
+    assert_eq!(
+        payload(&call(&mut c, read, &args, owner))["leads"][1]["status"],
+        "unavailable"
+    );
+    assert_eq!(runs(), 3);
+}
+
 // Provider assignment: the Room store is proven in room_contract; here the
 // MCP side must launch exactly once per requestId and trust only the host binding.
 fn desktop_assignment() {
@@ -1475,7 +1661,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 18);
+    assert_eq!(tools.as_array().unwrap().len(), 20);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -1486,7 +1672,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v20.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v21.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -1532,6 +1718,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v17.html"),
         json!("ui://oms/conversation-panel/v18.html"),
         json!("ui://oms/conversation-panel/v19.html"),
+        json!("ui://oms/conversation-panel/v20.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -4841,6 +5028,16 @@ fn fake_oms() {
         s.to_str()
             .is_some_and(|s| ["consult", "advise", "peer-ask"].contains(&s))
     }) {
+        assert_eq!(
+            args.iter().any(|a| a == "--no-current"),
+            cfg["leadRoom"] == true
+        );
+        if cfg["leadRoom"] == true {
+            let id = args.windows(2).find(|a| a[0] == "--thread").unwrap()[1]
+                .to_str()
+                .unwrap();
+            assert!(source.join(format!("thread-{id}")).is_file());
+        }
         let out =
             PathBuf::from(&args[args.iter().position(|s| s == "--artifact-dir").unwrap() + 1]);
         std::fs::create_dir_all(&out).unwrap();
@@ -4861,6 +5058,95 @@ fn fake_oms() {
         std::fs::write(&artifact, "## Output\nfixture answer\n## Exit\n0\n").unwrap();
         println!("artifact: {}", artifact.display());
         println!("thread: fixture-thread");
+        return;
+    }
+    if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "thread") {
+        let id = args.windows(2).find(|a| a[0] == "--id").unwrap()[1]
+            .to_str()
+            .unwrap();
+        let thread = source.join(format!("thread-{id}"));
+        if args.iter().any(|a| a == "new") {
+            assert!(args.iter().any(|a| a == "--live"));
+            assert!(args.iter().any(|a| a == "--no-current"));
+            assert!(!thread.exists(), "recreated existing thread");
+            std::fs::write(&thread, "open").unwrap();
+            return;
+        }
+        if args.iter().any(|a| a == "context") {
+            assert!(args.iter().any(|a| a == "--require-open"));
+            if std::fs::read_to_string(thread).ok().as_deref() != Some("open") {
+                std::process::exit(2);
+            }
+            println!("Open collaboration note");
+            return;
+        }
+    }
+    if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "room") {
+        use sha2::{Digest, Sha256};
+        let arg = |flag: &str| {
+            args.windows(2)
+                .find(|a| a[0] == flag)
+                .and_then(|a| a[1].to_str())
+        };
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(b"01900000-0000-7000-8000-0000000000bb")
+        );
+        if arg("--id") != Some("lead-room") || arg("--conversation-digest") != Some(&digest[..32]) {
+            std::process::exit(2);
+        }
+        let providers = ["codex", "claude", "agy"];
+        let req = |idx: usize| format!("d0000000-0000-8000-8000-{idx:012}");
+        let Some((i, provider)) =
+            providers
+                .iter()
+                .enumerate()
+                .find(|(i, p)| match arg("--provider") {
+                    Some(selected) => selected == **p,
+                    None => arg("--request") == Some(req(*i).as_str()),
+                })
+        else {
+            std::process::exit(2)
+        };
+        let request = req(i);
+        assert!(arg("--request").is_none_or(|id| id == request));
+        let path = source.join(format!("lead-fixture-{provider}"));
+        let absent = !path.exists();
+        let mut row = if absent {
+            json!({"request":request,"status":"not_found"})
+        } else {
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
+        };
+        match args[1].to_str().unwrap() {
+            "desktop-lead-open" => {
+                if absent {
+                    let canonical = if *provider == "agy" {
+                        "antigravity"
+                    } else {
+                        provider
+                    };
+                    row = json!({"request":request,"room":"lead-room","participant":format!("ask-{request}"),
+                        "provider":canonical,"role":"worker","purpose":"provider-lead","readOnly":true,
+                        "title":(["Codex Lead","Claude Lead","AGY Lead"][i]),"task":"Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.",
+                        "assignedAt":"2026-11-24T01:02:03Z","status":"assigned","thread":null,"operation":null});
+                    std::fs::write(&path, row.to_string()).unwrap();
+                }
+                row["fresh"] = json!(absent);
+            }
+            "desktop-assign-receipt" => {
+                if *provider == "claude" && cfg["failClaudeLink"] == true {
+                    std::process::exit(2);
+                }
+                let op = arg("--operation").unwrap();
+                row["operation"] = json!(op);
+                row["thread"] = json!(op);
+                row["status"] = json!("started");
+                std::fs::write(&path, row.to_string()).unwrap();
+            }
+            "desktop-lead-status" => (),
+            other => panic!("unexpected lead command {other}"),
+        }
+        println!("{row}");
         return;
     }
     if args.first().is_some_and(|v| v == "room")
@@ -5339,7 +5625,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 36] = [
+    let cases: [(&str, fn()); 37] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -5349,6 +5635,7 @@ fn main() {
         ("desktop_reviewed_issue", desktop_reviewed_issue),
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
+        ("desktop_lead_conversations", desktop_lead_conversations),
         ("desktop_assignment", desktop_assignment),
         ("panel_command_catalog", panel_command_catalog),
         ("environment_authority", environment_authority),

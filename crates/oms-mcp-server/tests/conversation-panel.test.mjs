@@ -63,6 +63,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     switch (name) {
       case 'oms_list_projects': return {projects,readOnly:options.readOnly};
       case 'oms_panel_snapshot': return {dashboard:{project:args.project, ...dashboard}};
+      case 'oms_lead_conversation_status': return leadStatus(args);
       case 'oms_list_approvals': return {approvals:[]};
       case 'oms_start_main':
         if (host.failStart) throw new Error('start outcome unavailable');
@@ -104,7 +105,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+        result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -131,7 +132,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
   class Option extends Element { tagName = 'option'; constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
   const context = createContext({window, document, Option, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
-    ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
+    ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
   return {get, elements, calls, host, notify, staticNodes, document, run: expression => runInContext(expression, context),
@@ -449,29 +450,38 @@ const dashboard={conversationBinding:'matched',conversationMain:{...main,partici
     {room:main.room,id:'delegated',parentAttempt:'m',tool:'panel-native-assignment',provider:'codex',state:'verifying',task:'opaque'},
     {room:main.room,id:'alien',parentAttempt:'old-main',role:'lead',provider:'pi',state:'running',taskTitle:'Foreign task'}
   ]};
-const startup=['oms_list_projects','oms_panel_snapshot','oms_list_approvals'];
+const managedRead='oms_lead_conversation_status', managedOpen='oms_open_lead_conversations';
+function leadStatus(args,status='not_started',projectKey='b'.repeat(64)){
+  const leads=['codex','claude','agy'].map((provider,i)=>({provider,status,requestId:'12345678-1234-8234-9234-123456789ab'+i}));
+  return {projectKey,room:args.room,leads:leads.filter(r=>!args.provider || r.provider===args.provider)};
+}
+const startup=['oms_list_projects','oms_panel_snapshot','oms_list_approvals',managedRead];
 test('the first screen shows proven participants and only requests registry, snapshot and actionable approvals',async()=>{
   const p=await panel(['one'],dashboard,{locale:'en'});
   assert.deepEqual(p.calls.map(c=>c.name),startup);
   assert.equal(p.host.initialize.appInfo.version,readFileSync(new URL('../../../VERSION',import.meta.url),'utf8').trim());
   assert.equal(p.get('main-name').textContent,'Codex Main');
   assert.match(p.get('main-status').textContent,/Working · Coordinate edits/);
-  assert.equal(p.get('leads-section').hidden,false);
   const cards=p.get('leads').children;
-  assert.deepEqual(cards.map(c=>c.tagName),['button','article']);
-  assert.match(cards[0].textContent,/Claude Lead.*Check indexing.*Blocked.*Open conversation/);
-  assert.match(cards[1].textContent,/Codex assignment/);
+  assert.deepEqual(cards.map(c=>c.tagName),['section','section','section']);
+  assert.deepEqual(cards.map(slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.tagName==='h3').textContent),['Codex Lead','Claude Lead','AGY Lead']);
+  assert.match(cards[2].textContent,/Waiting for assignment/);
+  assert.equal(cards[0].children[2].tagName,'article');
+  assert.match(cards[0].children[2].textContent,/Codex assignment.*Verifying/);
+  assert.equal(cards[1].children[2].tagName,'button');
+  assert.match(cards[1].children[2].textContent,/Claude Lead.*Check indexing.*Blocked.*Open conversation/);
   assert.doesNotMatch(p.get('leads').textContent,/opaque|Foreign task|lead-one/);
   assert.equal(p.get('approval-card').hidden,true);
   assert.equal(p.get('outcome').hidden,true);
-  await choose(p,'ko');assert.match(cards[0].textContent,/차단됨.*대화 열기/);
+  await choose(p,'ko');assert.match(cards[1].textContent,/차단됨.*대화 열기/);assert.match(cards[2].textContent,/배정 대기/);
   assert.ok(!html.includes('role="tablist"'));
   for(const tool of ['oms_panel_project_graph','oms_panel_work_items','oms_panel_usage','oms_panel_capabilities','oms_panel_tui_view'])
     assert.ok(!script.includes(tool),tool);
   const generic=await panel([],dashboard,{locale:'en',readOnly:true});
   assert.deepEqual(generic.calls.map(c=>c.name),startup.slice(0,2));
   assert.equal(generic.get('new-goal').hidden,true);assert.equal(generic.get('header-main').hidden,true);
-  assert.equal(generic.get('leads-section').hidden,true);
+  assert.equal(generic.get('leads').children.length,3);
+  assert.ok(generic.get('leads').children.every(slot=>slot.textContent.endsWith('Assignment unknown') && slot.children.length===2));
 });
 test('Main identity and conversation use the recorded harness without treating the dispatch owner as the harness',async()=>{
   const d={...dashboard,conversationMain:{...main,harness:'pi'}};
@@ -492,6 +502,108 @@ test('Main identity and conversation use the recorded harness without treating t
   assert.equal(p.get('chat-title').textContent,p.get('main-name').textContent);
   assert.ok(p.calls.every(c=>[...startup,'oms_panel_chat'].includes(c.name)));
 });
+test('explicit control opens three managed Leads, preserves member chat and reads only the selected verified transcript',async()=>{
+  let started=false,spoof=false;
+  const p=await panel(['one'],dashboard,{locale:'en',tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,started?'ready':'not_started');
+      if(a.provider)v._private={...v.leads[0],room:spoof?'wrong':a.room,transcript:{turns:[{role:'claude',text:'Recorded review'}]}};
+      return v;
+    },
+    [managedOpen]:a=>{started=true;assert.deepEqual({...a},{project:'one',room:main.room,projectKey:'b'.repeat(64)});return leadStatus(a,'ready');}
+  }});
+  assert.deepEqual(p.calls.map(c=>c.name),startup);
+  await p.event('open-leads','click');
+  assert.equal(p.calls.filter(c=>c.name===managedOpen).length,1);
+  const claude=p.get('leads').children[1], opener=claude.children[1].children.find(e=>e.type==='button');
+  assert.equal(opener.textContent,'Open Claude chat');assert.ok(!opener.hidden);
+  assert.equal(claude.children[2].tagName,'button');
+  opener.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',room:main.room,provider:'claude'});
+  assert.match(p.get('chat-messages').textContent,/Recorded review/);
+  await p.event('chat-back','click');assert.ok(opener.focused);
+  spoof=true;opener.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('chat-messages').textContent,'');assert.match(p.get('chat-status').textContent,/Could not load/);
+  await choose(p,'ko');assert.match(opener.textContent,/Claude 대화 열기/);
+  assert.equal(p.host.messages.length,0);
+});
+test('only an exact explicit opener pair opts into this physical project and refresh never replays an uncertain write',async()=>{
+  const memory=new Map(),storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const tools={[managedOpen]:()=>{throw Error('acknowledgement lost');}};
+  const p=await panel(['one'],dashboard,{storage,tools});
+  const input={arguments:{project:'one',leadConversations:true}}, result={structuredContent:{panel:'OMS',project:'one',leadConversations:true}};
+  await p.open('input',input);assert.ok(!p.calls.some(c=>c.name===managedOpen));
+  await p.open('result',result);await p.open('result',result);await p.event('refresh','click');
+  assert.equal(p.calls.filter(c=>c.name===managedOpen).length,1);
+  const q=await panel(['one'],dashboard,{storage,tools:{[managedOpen]:a=>leadStatus(a,'starting')}});
+  assert.equal(q.calls.filter(c=>c.name===managedOpen).length,1);
+  assert.match(q.get('leads').textContent,/시작 중/);await q.event('lead-auto-off','click');q.notify({method:'ui/resource-teardown',id:'close-auto',params:{}});
+  const after=await panel(['one'],dashboard,{storage});assert.ok(!after.calls.some(c=>c.name===managedOpen));
+  const readOnly=await panel(['one'],dashboard,{readOnly:true,storage,tools});
+  await readOnly.open('input',input);await readOnly.open('result',result);await readOnly.event('open-leads','click');
+  assert.deepEqual(readOnly.calls.map(c=>c.name),startup.slice(0,2));
+  const deniedStorage={getItem(){throw Error('disabled');},setItem(){throw Error('disabled');}};
+  const q2=await panel(['one'],dashboard,{storage:deniedStorage,tools});
+  await q2.event('open-leads','click');assert.equal(q2.calls.filter(c=>c.name===managedOpen).length,1);
+  const after2=await panel(['one'],dashboard,{storage:deniedStorage,tools});assert.ok(!after2.calls.some(c=>c.name===managedOpen));
+});
+test('starting Leads use bounded sequential status reads until ready, scoped away, or closed',async()=>{
+  let now=0;
+  const callbacks=new Map(), timers={
+    Date:{now:()=>now},
+    setTimeout(fn,ms){const id=Symbol();callbacks.set(id,{fn,ms,at:now+ms});return id;},
+    clearTimeout(id){callbacks.delete(id);}
+  };
+  const polls=()=>[...callbacks].filter(([,v])=>v.ms>=8000 && v.ms<=15000);
+  async function tick(){
+    const jobs=polls();assert.equal(jobs.length,1);
+    const [id,job]=jobs[0];callbacks.delete(id);now=job.at;job.fn();await setImmediate();
+  }
+  let status='not_started';
+  const tools={[managedRead]:a=>leadStatus(a,status),[managedOpen]:a=>{status='starting';return leadStatus(a,status);}};
+  const p=await panel(['one'],dashboard,{locale:'en',timers,tools});
+  assert.equal(polls().length,0);
+  await p.event('open-leads','click');
+  assert.equal(polls()[0][1].ms,8000);
+  p.host.delayTool=managedRead;await tick();assert.equal(polls().length,0);
+  p.host.release();await setImmediate();assert.equal(polls()[0][1].ms,12000);
+  status='ready';await tick();assert.equal(polls().length,0);
+  assert.match(p.get('leads').textContent,/Open Claude chat/);
+  assert.equal(p.calls.filter(c=>c.name===managedOpen).length,1);
+  status='starting';await p.event('refresh','click');const start=now;
+  while(polls().length){await tick();assert.ok(now-start<=120000);}
+  status='starting';
+  const gated={getItem:key=>key.startsWith('oms.lead-conversations.')?'on':null};
+  const snapshot={...dashboard};
+  const q=await panel(['one','two'],snapshot,{timers,tools,storage:gated});
+  await q.open('input',{arguments:{project:'one'}});
+  status='not_started';await tick();assert.ok(!q.calls.some(c=>c.name===managedOpen));
+  status='starting';await q.event('refresh','click');const stale=polls()[0][1].fn;
+  await q.open('input',{arguments:{project:'unknown'}});
+  assert.equal(polls().length,0);const mark=q.calls.length;stale();await setImmediate();assert.equal(q.calls.length,mark);
+  await q.open('input',{arguments:{project:'two'}});assert.equal(polls().length,1);
+  const oldMainPoll=polls()[0][1].fn;
+  snapshot.conversationMain=null;await q.event('refresh','click');assert.equal(polls().length,0);
+  const lostMain=q.calls.length;oldMainPoll();await setImmediate();assert.equal(q.calls.length,lostMain);
+  snapshot.conversationMain=dashboard.conversationMain;await q.event('refresh','click');assert.equal(polls().length,1);
+  q.notify({method:'ui/resource-teardown',id:'close-poll',params:{}});assert.equal(polls().length,0);
+});
+test('changed alias target, unconfirmed status and stale host or read responses cannot launch',async()=>{
+  const storage={getItem:k=>k.endsWith('b'.repeat(64))?'on':null,setItem(){}};
+  for(const [key,status] of [['c','not_started'],['b','unconfirmed'],['b','unavailable'],['b','ready']]){
+    const q=await panel(['one'],dashboard,{storage,tools:{[managedRead]:a=>leadStatus(a,status,key.repeat(64))}});
+    assert.ok(!q.calls.some(c=>c.name===managedOpen));
+  }
+  const p=await panel(['one','two'],dashboard,{});
+  await p.open('input',{arguments:{project:'one',leadConversations:true}});
+  p.get('project-choice').value='two';await p.event('project-choice','change');
+  await p.open('result',{structuredContent:{panel:'OMS',project:'one',leadConversations:true}});
+  assert.equal(p.get('project').textContent,'two');assert.ok(!p.calls.some(c=>c.name===managedOpen));
+  p.host.delayTool=managedRead;await p.open('input',{arguments:{project:'one',leadConversations:true}});
+  await p.open('result',{structuredContent:{panel:'OMS',project:'one',leadConversations:true}});
+  await p.open('input',{arguments:{project:'two'}});
+  p.host.release();await setImmediate();assert.ok(!p.calls.some(c=>c.name===managedOpen));
+});
 test('Pi Main keeps its run and parent-linked Leads without adopting another participant',async()=>{
   const run=(id,participant,extra)=>({room:main.room,id,...(participant&&{participant}),tool:'panel-main',role:'main',provider:'pi',state:'working',...extra});
   const child=(id,parentAttempt)=>({room:main.room,id,parentAttempt,role:'lead',provider:'claude',state:'running',taskTitle:id});
@@ -501,7 +613,10 @@ test('Pi Main keeps its run and parent-linked Leads without adopting another par
       [run('other','someone-else'),{...owner,taskTitle:'Drive Pi'},child('mine',owner.id),child('foreign','other')]};
     const p=await panel(['one'],d,{locale:'en'});
     assert.match(p.get('main-status').textContent,/Working · Drive Pi/);
-    assert.equal(p.get('leads').children.length,1);assert.match(p.get('leads').textContent,/mine/);
+    const slots=p.get('leads').children;
+    assert.equal(slots.length,3);
+    assert.match(slots[1].textContent,/Claude Lead.*mine.*Running/);
+    assert.doesNotMatch(p.get('leads').textContent,/foreign/);
   }
 });
 test('a degraded, partial or trimmed snapshot keeps a visible status until a clean read',async()=>{
@@ -545,15 +660,43 @@ test('the team respects parent, provider, terminal membership and partial visibi
     {...lead,participant:'other',provider:'agy'}],participantsOmitted:1},conversationAttempts:
     ['lead-one','left','other'].map(participant=>({room:main.room,participant,id:participant,role:'lead',provider:'claude',state:'running'}))};
   const p=await panel(['one'],d,{locale:'en'});
-  assert.equal(p.get('leads').children.length,0);assert.match(p.get('lead-note').textContent,/part of/);
+  assert.equal(p.get('leads').children.length,3);
+  assert.ok(p.get('leads').children.every(slot=>slot.textContent.endsWith('Assignment unknown')));assert.match(p.get('lead-note').textContent,/part of/);
   assert.match(p.get('main-status').textContent,/Joined this room/);
-  d.conversationMain.participantsOmitted=0;await p.event('refresh','click');assert.equal(p.get('leads-section').hidden,true);
+  d.conversationMain.participantsOmitted=0;await p.event('refresh','click');
+  assert.ok(p.get('leads').children.every(slot=>slot.textContent.endsWith('Waiting for assignment')));
+  assert.equal(p.get('lead-note').textContent,'');
+});
+test('fixed roles keep distinct conversations together and leave unknown or unbound assignments passive',async()=>{
+  const second={...lead,participant:'lead-two',label:'Documentation'};
+  const agy={...lead,participant:'lead-three',provider:'agy'};
+  const d={...dashboard,conversationMain:{...main,participants:[lead,second,agy],incomplete:true},conversationAttempts:[
+    ...dashboard.conversationAttempts,
+    {room:main.room,id:'l2',participant:second.participant,role:'lead',provider:'claude',state:'working',taskTitle:'Write the guide'},
+    {room:main.room,id:'l3',participant:agy.participant,role:'lead',provider:'antigravity',state:'review'}]};
+  const p=await panel(['one'],d,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:[]})}});
+  const slots=p.get('leads').children;
+  assert.equal(slots.length,3);
+  const buttons=slots[1].children.filter(e=>e.tagName==='button');
+  assert.equal(buttons.length,2);assert.match(buttons[1].textContent,/Documentation.*Write the guide/);
+  assert.match(slots[2].textContent,/AGY Lead.*In review/);assert.match(p.get('lead-note').textContent,/part of/);
+  for(const [i,button] of buttons.entries()){
+    button.dispatchEvent(new Event('click'));await setImmediate();
+    assert.equal(p.calls.at(-1).args.participant,[lead,second][i].participant);
+    await p.event('chat-back','click');assert.ok(button.focused);
+  }
+  const unconfirmed=await panel(['one'],{conversationBinding:'unconfirmed',activeAttempts:d.conversationAttempts},{locale:'ko'});
+  assert.deepEqual(unconfirmed.calls.map(c=>c.name),startup.slice(0,3));
+  assert.ok(unconfirmed.get('leads').children.every(slot=>slot.textContent.endsWith('배정 미확인') && slot.children.length===2));
+  const unbound=await panel([],{}, {tools:{oms_list_projects:()=>({binding:'unbound',projects:[]})}});
+  assert.equal(unbound.get('view').hidden,true);assert.equal(unbound.get('leads').children.length,0);
+  assert.deepEqual(unbound.calls.map(c=>c.name),['oms_list_projects']);
 });
 test('scoped transcript paginates only on demand and erases private data after switching projects',async()=>{
   const p=await panel(['one','two'],dashboard,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:
     [{seq:a.before==null?3:1,text:a.before==null?'Latest message':'Prior message'}],nextBefore:a.before==null?3:null})}});
   await p.open('input',{arguments:{project:'one'}});
-  p.get('leads').children[0].dispatchEvent(new Event('click'));await setImmediate();
+  p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   assert.equal(p.get('chat-messages').textContent,'Latest message');
   assert.deepEqual({...p.calls.at(-1).args},{room:'room-a',participant:'lead-one',project:'one'});
   await p.event('chat-older','click');assert.equal(p.get('chat-messages').textContent,'Prior messageLatest message');

@@ -47,7 +47,14 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #header-main{margin-top:.65rem}
 #leads-section{padding-top:1.15rem}
 .lead-children{margin-top:.45rem;display:grid}
-.person{width:100%;background:none;text-align:start;border:0;border-top:1px solid var(--line);border-radius:0;padding:.72rem .05rem;cursor:default}
+.lead-slot{border-top:1px solid var(--line);padding:.65rem .05rem}
+.slot-heading{display:flex;align-items:center;gap:.6rem}
+.slot-heading:only-child .avatar{background:transparent;border:1px solid var(--line);color:var(--soft)}
+.slot-heading h3{font-size:.92rem;flex:1}
+.lead-slot .person{padding:.4rem 0 .15rem 2.8rem}
+.lead-slot .state{max-width:44%}
+.person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:.72rem .05rem;cursor:default}
+.lead-children>.person{border-top:1px solid var(--line)}
 button.person{cursor:pointer}
 .person .body{display:grid;flex:1;gap:.12rem;min-width:0}
 .person strong{font-size:.92rem;overflow-wrap:anywhere}
@@ -88,7 +95,7 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 <p id="goal" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p></section>
 <section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="openChat" hidden>대화 열기</button></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
-<section id="leads-section" aria-labelledby="leads-heading" hidden><h2 id="leads-heading">Leads</h2><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
+<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Leads</h2><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 열기</button></div><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><p id="lead-control-status" class="note" role="status"></p><button id="lead-auto-off" type="button" class="subtle" data-i18n="autoLeadsOff" hidden>이 프로젝트 자동 열기 해제</button><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
 <p id="outcome" hidden></p>
 </div>
@@ -157,7 +164,19 @@ const messages = {
   "noRecordedMain": ["확인된 프로젝트 Main이 없습니다.", "No project Main has been confirmed."],
   "older": ["이전 메시지", "Earlier messages"],
   "openApp": ["호스트 대화에서 OMS를 열어주세요.", "Open OMS in the host conversation."],
+  "openLeads": ["세 Lead 열기", "Open three Leads"],
+  "autoLeadsOff": ["이 프로젝트 자동 열기 해제", "Turn off automatic opening for this project"],
+  "leadOptIn": ["세 공급자에 요청하고, 이 프로젝트를 다시 열 때도 자동으로 연결합니다.", "Request all three providers and open them automatically on future visits to this project."],
+  "transcriptPartial": ["최근 대화 일부입니다.", "Showing part of the recorded conversation."],
+  "startingLeads": ["Lead 대화를 여는 중…", "Opening Lead conversations…"],
+  "leadStatusFailed": ["Lead 대화 상태를 확인하지 못했습니다. 새로고침해 주세요.", "Could not confirm the Lead conversations. Refresh to check."],
+  "lead.starting": ["대화 시작 중", "Starting conversation"],
+  "lead.ready": ["{provider} 대화 열기", "Open {provider} chat"],
+  "lead.unconfirmed": ["대화 미확인", "Conversation unconfirmed"],
+  "lead.unavailable": ["대화 사용 불가", "Conversation unavailable"],
   "openChat": ["대화 열기", "Open conversation"],
+  "waitingAssignment": ["배정 대기", "Waiting for assignment"],
+  "unknownAssignment": ["배정 미확인", "Assignment unknown"],
   "partialLeads": ["조회된 담당 기록이 일부입니다.", "Only part of the assignment history is available."],
   "progress": ["계획 작업 {total}개 중 {verified}개 검증 완료", "{verified} of {total} planned tasks verified"],
   "projChanged": ["프로젝트가 변경되었습니다.", "The project changed."],
@@ -276,6 +295,9 @@ let dashboardData, members=[], rows=[], selectedChat, chatOrigin, chatCursor, ch
 let approvedScope=0, issueTicket=0, reviewedIssue;
 const approvalState=new Map();
 
+let leadControl, leadIntent, managedChat;
+const leadSlots=new Map();
+
 const pending = new Map();
 let sequence = 0;
 let hostOrigin = '*';
@@ -357,7 +379,7 @@ window.addEventListener('message', event => {
     const origin = event.origin && event.origin !== 'null' ? event.origin : '*';
     if (msg.method === 'ui/resource-teardown' && !disposed) {
       disposed = true;
-      generation++;
+      generation++;resetLeadControl();
       closeDialogs(); resetIssue();
       setBusy(true, true);
       syncDisplayMode();
@@ -386,9 +408,12 @@ window.addEventListener('message', event => {
   }
   if (msg.method === 'ui/notifications/tool-input') {
     const target = projectArgument(msg.params?.arguments?.project);
+    // An unlabelled result has no request ID. Only an unambiguous initial opener can authorize a launch.
+    const explicit=!seenInputOrManual && msg.params?.arguments?.leadConversations===true;
     seenInputOrManual = true;
-    pendingOpens.push({id:++openSeq, target});
+    leadIntent=undefined;
     switchProject(target);
+    pendingOpens.push({id:++openSeq,target,explicit,generation,room:joinedMain()?.room,owner:joinedMain()?.participant});
     return;
   }
   if (msg.method === 'ui/notifications/tool-result') {
@@ -408,8 +433,16 @@ window.addEventListener('message', event => {
         if (pendingOpens[i].target === target) { index = i; break; }
       }
       if (index >= 0) {
+        const opened=pendingOpens[index];
+        const authorized=opened.explicit && opened.id===openSeq && opened.generation===generation &&
+          pendingOpens.length===1 && !pendingErrors.length && result.leadConversations===true && result.readOnly!==true;
         pendingOpens.splice(index, 1);
         reconcileOpens();
+        if(authorized && target!==invalidProject && requestedProject===target){
+          leadIntent=opened;
+          if(leadControl?.observed)considerLeadOpen(leadControl);
+          else if(!leadControl && !busy)leadIntent=undefined;
+        }
       } else {
         switchProject(target);
       }
@@ -450,7 +483,7 @@ function switchProject(target) {
     requestedProject = target;
     return;
   }
-  generation++;
+  generation++;leadIntent=undefined;
   requestedProject = target;
   project = '';
   clearProject();
@@ -584,7 +617,7 @@ function attemptMember(row) {
 }
 
 function clearChat() {
-  selectedChat=undefined;chatCursor=null;chatPage++;
+  selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
   el('chat-older').hidden=true;
 }
@@ -597,6 +630,7 @@ function resetIssue() {
   el('issue-review').hidden=!issueInput() || !issueOwner();el('issue-review').disabled=false;
 }
 function clearProject() {
+  resetLeadControl();leadSlots.clear();paintLeadControls();
   dashboardData=undefined;members=[];rows=[];retryStart=undefined;approvalState.clear();approvedScope++;
   el('view').hidden=true;el('project').textContent='';el('receipt').textContent='';
   el('goal-expand').setAttribute('aria-expanded','false');el('goal').className='clamp';goalToggleLabel();
@@ -640,12 +674,187 @@ function verifiedLeads(main,d) {
   const priority=({attempt})=>['blocked','waiting_for_input','waiting_approval'].includes(attempt.state)?0:
     ['working','running','verifying','review'].includes(attempt.state)?1:2;
   leads.sort((a,b)=>priority(a)-priority(b));
-  return {leads,ownerRun:ownerRecords[0],partial:main.incomplete || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
+  const source=d.observation?.sources?.attempts;
+  return {leads,ownerRun:ownerRecords[0],partial:(source!=null && source!=='ok') || main.incomplete!==false || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
     (scoped?d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0:!Array.isArray(d.activeAttempts)||d.activeAttemptsTrimmed>0 || d.active!==active.length)};
 }
 function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
   element.textContent=Object.hasOwn(names,provider)?providerName(provider).slice(0,1):'–';
+}
+function leadEntry({attempt,member},inSlot) {
+  const entry=node(member?'button':'article','','person');
+  const label=typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
+  const identity=()=>label?label+' · '+assignmentLabel(attempt):assignmentLabel(attempt);
+  const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
+  const body=node('span','','body');
+  if(inSlot && attempt.role==='lead'){
+    if(member)body.append(node('span',()=>assignmentLabel(attempt)+' · ','sr-only'));
+    body.append(node('strong',label || title || 'Lead'));
+    if(label && title)body.append(node('small',title));
+  }else{
+    body.append(node('strong',identity));
+    if(title)body.append(node('small',title));
+  }
+  entry.append(body,node('span',()=>(attempt.state==='blocked'?'! ':'')+stateLabel(attempt.state),'state'));
+  if(member){
+    entry.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
+    entry.append(node('span',message('openChat'),'sr-only'));
+    entry.addEventListener('click',()=>openConversation(member,identity,entry));
+  }
+  return entry;
+}
+function renderLeadSlots(leads,complete) {
+  const list=el('leads');list.replaceChildren();leadSlots.clear();
+  const providerOf=record=>record.attempt.provider==='antigravity'?'agy':record.attempt.provider;
+  for(const provider of providers) {
+    const entries=leads.filter(r=>providerOf(r)===provider);
+    const slot=node('section','','lead-slot'), heading=node('div','','slot-heading');
+    const avatar=node('span','','avatar');paintAvatar(avatar,provider);avatar.setAttribute('aria-hidden','true');
+    heading.append(avatar,node('h3',names[provider]+' Lead'));
+    const status=node('span','','state'), open=node('button','','subtle');
+    open.type='button';open.hidden=true;
+    const ctl=leadControl;
+    open.addEventListener('click',()=>openManagedChat(ctl,provider,open));
+    heading.append(status,open);
+    leadSlots.set(provider,{status,open,placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
+    slot.append(heading);
+    for(const entry of entries)slot.append(leadEntry(entry,true));
+    list.append(slot);
+  }
+  for(const entry of leads)if(!providers.includes(providerOf(entry)))list.append(leadEntry(entry,false));
+  paintLeadControls();
+}
+function currentLeadControl(ctl) {
+  const m=joinedMain();
+  return Boolean(ctl && ctl===leadControl && !disposed && m?.provider==='codex' && ctl.generation===generation &&
+    ctl.room===m.room && ctl.owner===m.participant);
+}
+function preferenceKey(ctl) {
+  return ctl?.projectKey && 'oms.lead-conversations.v1:'+hostOrigin+':'+ctl.projectKey;
+}
+function autoLeads(ctl) {
+  try {const key=preferenceKey(ctl);return Boolean(key && localStorage.getItem(key)==='on');} catch {return false;}
+}
+function rememberLeads(ctl,on) {
+  try {const key=preferenceKey(ctl);if(key)localStorage.setItem(key,on?'on':'off');} catch {}
+}
+function paintLeadControls(){
+  const ctl=leadControl, known=currentLeadControl(ctl);
+  const opener=el('open-leads');
+  opener.hidden=!known;opener.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
+  const auto=known && autoLeads(ctl);
+  el('lead-auto-off').hidden=!auto;
+  el('lead-opt-in-note').hidden=!known || !ctl.observed || auto;
+  if(managedChat && (!known || ctl.items.get(managedChat.provider)?.requestId!==managedChat.requestId ||
+      ctl.items.get(managedChat.provider)?.status!=='ready')){
+    el('conversation').close();clearChat();
+  }
+  put('lead-control-status',()=>!known?'':ctl.writing?t('startingLeads'):ctl.failed?t('leadStatusFailed'):'');
+  for(const [provider,slot] of leadSlots){
+    const row=known && ctl.items.get(provider);
+    const ready=row?.status==='ready', key=row && row.status!=='not_started' && !ready?'lead.'+row.status:ready?null:slot.placeholder;
+    slot.status.hidden=!key;
+    if(key)put(slot.status,key);else slot.status.textContent='';
+    slot.open.hidden=!ready;
+    if(ready)put(slot.open,()=>t('lead.ready',{provider:names[provider]}));else slot.open.textContent='';
+  }
+}
+function validatedTeam(response,ctl,provider){
+  const data=response?.structuredContent, expected=provider?[provider]:providers;
+  if(data?.room!==ctl.room || typeof data.projectKey!=='string' || !/^[a-f0-9]{64}$/.test(data.projectKey) || (ctl.projectKey && ctl.projectKey!==data.projectKey) ||
+     !Array.isArray(data.leads) || data.leads.length!==expected.length)throw uiError('chatMismatch');
+  const items=new Map(), requests=new Set();
+  for(const item of data.leads){
+    if(!item || !expected.includes(item.provider) || items.has(item.provider) ||
+      !['not_started','starting','ready','unconfirmed','unavailable'].includes(item.status) ||
+      !(item.status==='unavailable' && item.requestId==null || typeof item.requestId==='string' &&
+        /^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(item.requestId) && !requests.has(item.requestId)))throw uiError('chatMismatch');
+    items.set(item.provider,item);requests.add(item.requestId);
+  }
+  return {items,projectKey:data.projectKey};
+}
+function considerLeadOpen(ctl,allowSaved=true){
+  if(!currentLeadControl(ctl) || !ctl.observed || ctl.reading || ctl.writing)return;
+  const intent=leadIntent;leadIntent=undefined;
+  const explicit=intent && intent.generation===generation && intent.id===openSeq &&
+    (!intent.room || (intent.room===ctl.room && intent.owner===ctl.owner));
+  if(explicit)rememberLeads(ctl,true);
+  const statuses=[...ctl.items.values()].map(r=>r.status);
+  if((explicit || (allowSaved && autoLeads(ctl))) && !ctl.attempted && statuses.includes('not_started') &&
+     statuses.every(s=>['not_started','starting','ready'].includes(s)))writeLeads(ctl);
+  else paintLeadControls();
+}
+function resetLeadControl(){
+  clearTimeout(leadControl?.pollTimer);
+  leadControl=undefined;
+}
+function scheduleLeadRead(ctl){
+  clearTimeout(ctl.pollTimer);
+  if(!currentLeadControl(ctl) || ctl.reading || ctl.writing || ![...ctl.items.values()].some(r=>r.status==='starting'))return;
+  const delay=ctl.pollDelay;
+  if(Date.now()+delay>ctl.pollUntil)return;
+  ctl.pollDelay=Math.min(delay+4000,15000);
+  ctl.pollTimer=setTimeout(()=>{
+    if(currentLeadControl(ctl) && Date.now()<=ctl.pollUntil)observeLeads(ctl,true);
+  },delay);
+}
+async function observeLeads(ctl,poll=false){
+  if(!currentLeadControl(ctl) || ctl.reading || ctl.writing)return;
+  clearTimeout(ctl.pollTimer);
+  if(!poll){ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;}
+  ctl.reading=true;paintLeadControls();
+  try{
+    const result=await tool('oms_lead_conversation_status',{room:ctl.room},ctl.generation);
+    if(!currentLeadControl(ctl))return;
+    Object.assign(ctl,validatedTeam(result,ctl),{observed:true,failed:false});
+  }catch{if(currentLeadControl(ctl)){ctl.observed=false;ctl.failed=true;ctl.items.clear();leadIntent=undefined;}}
+  finally{if(currentLeadControl(ctl)){
+    ctl.reading=false;paintLeadControls();
+    if(!poll || leadIntent)considerLeadOpen(ctl,!poll);
+    scheduleLeadRead(ctl);
+  }}
+}
+async function writeLeads(ctl){
+  if(!currentLeadControl(ctl) || !ctl.observed || ctl.writing || ctl.reading)return;
+  clearTimeout(ctl.pollTimer);
+  ctl.attempted=true;ctl.writing=true;ctl.failed=false;paintLeadControls();
+  try{
+    const result=await tool('oms_open_lead_conversations',{room:ctl.room,projectKey:ctl.projectKey},ctl.generation);
+    if(currentLeadControl(ctl))Object.assign(ctl,validatedTeam(result,ctl));
+  }catch{if(currentLeadControl(ctl)){ctl.failed=true;ctl.observed=false;ctl.items.clear();}}
+  finally{if(currentLeadControl(ctl)){
+    ctl.writing=false;paintLeadControls();
+    ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;scheduleLeadRead(ctl);
+  }}
+}
+onClick('open-leads',()=>{
+  const ctl=leadControl;
+  if(currentLeadControl(ctl) && ctl.observed && !ctl.reading && !ctl.writing){
+    rememberLeads(ctl,true);writeLeads(ctl);
+  }
+});
+onClick('lead-auto-off',()=>{if(currentLeadControl(leadControl)){rememberLeads(leadControl,false);paintLeadControls();}});
+async function openManagedChat(ctl,provider,origin){
+  if(!currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
+  const requestId=ctl.items.get(provider).requestId;
+  clearChat();managedChat={provider,requestId};chatOrigin=origin;const ticket=chatPage;
+  put('chat-title',()=>names[provider]+' Lead');put('chat-status','chatLoading');
+  el('conversation').showModal();el('chat-back').focus();
+  const current=()=>ticket===chatPage && currentLeadControl(ctl) && el('conversation').open &&
+    ctl.items.get(provider)?.requestId===requestId;
+  try{
+    const result=await tool('oms_lead_conversation_status',{room:ctl.room,provider},ctl.generation);
+    if(!current())return;
+    const item=validatedTeam(result,ctl,provider).items.get(provider), page=result._meta?.leadConversation;
+    if(item.status!=='ready' || item.requestId!==requestId || page?.status!=='ready' || page.room!==ctl.room ||
+      page.provider!==provider || page.requestId!==requestId || !Array.isArray(page.transcript?.turns) ||
+      !page.transcript.turns.every(r=>typeof r?.text==='string' && r.role===(provider==='agy'?'antigravity':provider)))throw uiError('chatMismatch');
+    const turns=page.transcript.turns.map(turn=>{
+      const row=node('li','');row.append(node('small',names[provider]),node('p',turn.text));return row;
+    });
+    el('chat-messages').replaceChildren(...turns);put('chat-status',()=>page.transcript.hasMore?t('transcriptPartial'):turns.length?'':t('emptyChat'));
+  }catch{if(current())put('chat-status','chatMismatch');}
 }
 function snapshotNotice(d) {
   const completeness=d.observation?(d.observation.completeness||'unknown'):'';
@@ -657,6 +866,11 @@ function snapshotNotice(d) {
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
   const prior=joinedMain();dashboardData=d;const main=joinedMain();
+  if(main?.provider!=='codex'){resetLeadControl();leadIntent=undefined;}
+  else if(!currentLeadControl(leadControl)){
+    resetLeadControl();
+    leadControl={room:main.room,owner:main.participant,generation,items:new Map()};
+  }
   if(readOnly || prior?.room!==main?.room || prior?.participant!==main?.participant){closeDialogs();resetIssue();}
   const goal=(!Object.hasOwn(d,'goalAvailability') || d.goalAvailability==='available') && typeof d.goal==='string' && d.goal.trim()?d.goal:'';
   put('goal',()=>goal || t(d.goalAvailability==='absent' && d.goal==null?'goalNone':'goalUnknown'));
@@ -676,23 +890,10 @@ function render(d) {
   const {leads,partial,ownerRun}=main?verifiedLeads(main,d):{leads:[],partial:false};
   put('main-status',()=>main ? [ownerRun?.state?stateLabel(ownerRun.state):t('joined'),ownerRun?.taskTitle].filter(Boolean).join(' · ') :
     owner?stateLabel(owner.state):t(readOnly?'noRecordedMain':'noJoinedMain'));
-  rows=leads;const list=el('leads');list.replaceChildren();el('leads-section').hidden=!main || (!leads.length && !partial);
+  rows=leads;
+  renderLeadSlots(leads,Boolean(main) && !partial);
+  if(managedChat)chatOrigin=leadSlots.get(managedChat.provider)?.open;
   put('lead-note',()=>partial?t('partialLeads'):'');
-  for(const {attempt,member} of leads) {
-    const button=node(member?'button':'article','','person');
-    const avatar=node('span','','avatar');paintAvatar(avatar,attempt.provider);avatar.setAttribute('aria-hidden','true');
-    const label=typeof member?.label==='string' && member.label.trim() && member.label!==member.participant ? member.label.trim() : '';
-    const identity=()=>label?label+' · '+assignmentLabel(attempt):assignmentLabel(attempt);
-    const body=node('span','','body');body.append(node('strong',identity));
-    if(typeof attempt.taskTitle==='string' && attempt.taskTitle.trim()) body.append(node('small',attempt.taskTitle));
-    button.append(avatar,body,node('span',()=>(attempt.state==='blocked'?'! ':'')+stateLabel(attempt.state),'state'));
-    if(member){
-      button.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');button.append(arrow);
-      button.append(node('span',message('openChat'),'sr-only'));
-      button.addEventListener('click',()=>openConversation(member,identity,button));
-    }
-    list.append(button);
-  }
   if(selectedChat && !canChat(selectedChat)){el('conversation').close();clearChat();}
   if(reviewedIssue && !sameIssue(reviewedIssue))resetIssue();
   const criteria=d.acceptance, complete=criteria?.available===true && criteria.complete===true && Number.isSafeInteger(criteria.total) &&
@@ -845,10 +1046,12 @@ async function loadStatus(expected,recover=true) {
       if(!Array.isArray(response.structuredContent?.approvals))throw uiError('appr.bad');
       renderApprovals(response.structuredContent.approvals,response.structuredContent.incomplete);
     }catch{if(expected===generation){approvedScope++;el('approval-card').hidden=false;put('approvals-heading','appr.list');el('approvals').replaceChildren(node('p',message('appr.bad')));}}
+    if(expected===generation && leadControl)observeLeads(leadControl);
     if(expected===generation && recover && retryStart){
       try{await recoverStart(expected);}catch{if(expected===generation)launchNotice('start.unknown');}
     }
   }catch{if(expected===generation){
+    resetLeadControl();leadIntent=undefined;paintLeadControls();
     dashboardData=undefined;members=[];rows=[];approvedScope++;closeDialogs();resetIssue();updateContext(null);el('view').hidden=true;
     put('status','connectionFailed');
   }}
@@ -1009,7 +1212,7 @@ on('launch','submit', event => {
 on('launch','input', () => { briefInvalid = false; el('brief').setCustomValidity(''); });
 on('project-choice','change', () => {
   if (el('project-choice').disabled) return;
-  seenInputOrManual = true;
+  seenInputOrManual = true;leadIntent=undefined;openSeq++;
   switchProject(projectArgument(el('project-choice').value || null));
 });
 onClick('display-mode',()=>{const n=nextDisplayMode();if(n)requestDisplayMode(n.mode);});
