@@ -1408,3 +1408,89 @@ fn list_input_and_output_limit_edges() {
     assert!(result.1.is_empty());
     assert!(String::from_utf8_lossy(&result.2).contains("input exceeds 1048576 bytes"));
 }
+
+#[test]
+fn agy_catalog_row_parses_selector_base_effort_and_label() {
+    use oms_command_agent_role::native_model::{
+        AgyCatalogRow, agy_catalog_row, agy_catalog_selector,
+    };
+
+    assert_eq!(
+        agy_catalog_row("gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)"),
+        Some(AgyCatalogRow {
+            selector: "gemini-4-neon-xhigh",
+            base_model: "gemini-4-neon",
+            effort: Some("xhigh"),
+            label: Some("Gemini 4 Neon (XHigh)"),
+        })
+    );
+    assert_eq!(
+        agy_catalog_row("gpt-oss-120b-medium\tGPT-OSS 120B (Medium)"),
+        Some(AgyCatalogRow {
+            selector: "gpt-oss-120b-medium",
+            base_model: "gpt-oss-120b",
+            effort: Some("medium"),
+            label: Some("GPT-OSS 120B (Medium)"),
+        })
+    );
+    assert_eq!(
+        agy_catalog_row("gemini-pro-orchestrator-neon\tOrchestrator (Neon)"),
+        Some(AgyCatalogRow {
+            selector: "gemini-pro-orchestrator-neon",
+            base_model: "gemini-pro-orchestrator-neon",
+            effort: None,
+            label: Some("Orchestrator (Neon)"),
+        })
+    );
+    assert_eq!(
+        agy_catalog_row("gemini-pro-orchestrator\tOrchestrator (Carbon)"),
+        Some(AgyCatalogRow {
+            selector: "gemini-pro-orchestrator",
+            base_model: "gemini-pro-orchestrator",
+            effort: None,
+            label: Some("Orchestrator (Carbon)"),
+        })
+    );
+    // Label must agree in parenthesised form; bare selectors and non-matching labels keep effort None.
+    assert_eq!(
+        agy_catalog_row("qwen-3-max\tQwen 3 Max"),
+        Some(AgyCatalogRow {
+            selector: "qwen-3-max",
+            base_model: "qwen-3-max",
+            effort: None,
+            label: Some("Qwen 3 Max"),
+        })
+    );
+    assert_eq!(
+        agy_catalog_row("gemini-4-carbon-high\tGemini 4 Carbon (Medium)"),
+        Some(AgyCatalogRow {
+            selector: "gemini-4-carbon-high",
+            base_model: "gemini-4-carbon-high",
+            effort: None,
+            label: Some("Gemini 4 Carbon (Medium)"),
+        })
+    );
+    assert_eq!(
+        agy_catalog_row("gemini-4-oxygen-low"),
+        Some(AgyCatalogRow {
+            selector: "gemini-4-oxygen-low",
+            base_model: "gemini-4-oxygen-low",
+            effort: None,
+            label: None,
+        })
+    );
+    assert_eq!(
+        agy_catalog_selector("gemini-4-carbon-high\tGemini 4 Carbon (High)"),
+        Some("gemini-4-carbon-high")
+    );
+    for invalid in [
+        "",
+        "Fetching available models...",
+        "gemini-4-bogus-high\twrong\tlabel",
+        "gemini-4-malformed-high\t",
+        "gemini-4-malformed-high\t   ",
+    ] {
+        assert_eq!(agy_catalog_row(invalid), None, "{invalid}");
+        assert_eq!(agy_catalog_selector(invalid), None, "{invalid}");
+    }
+}
