@@ -31,6 +31,7 @@ impl Terminal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Navigation {
     Usage,
+    Version,
     Help,
     List,
 }
@@ -219,6 +220,7 @@ fn select(
     }
     let navigation = match first {
         b"-h" | b"--help" => Some(Navigation::Usage),
+        b"--version" => Some(Navigation::Version),
         b"help" => Some(Navigation::Help),
         b"list" => Some(Navigation::List),
         _ => None,

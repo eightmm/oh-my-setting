@@ -94,6 +94,15 @@ pub struct DeliveryReceipt {
 pub trait Services: Sync {
     fn state_repository(&self, path: &Path) -> Result<PathBuf>;
     fn canonical_provider(&self, provider: &str) -> Result<String>;
+    fn check_reviewed_issue(
+        &self,
+        _checkout: &Path,
+        _state: &Path,
+        _reference: &str,
+        _pin: Option<&str>,
+    ) -> Result<()> {
+        Err(Error::new("reviewed project issue service unavailable"))
+    }
     fn current_claude_session(&self) -> Result<String> {
         Err(Error::new("current native identity service is unavailable"))
     }

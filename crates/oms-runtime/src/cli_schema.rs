@@ -7,7 +7,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":".","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","help":"pretty-print JSON"},
-    {"names":["--version"],"action":"version","version":"0.7.0"}
+    {"names":["--version"],"action":"version"}
    ],"children":[{"name":"envelope","help":"project the effective TaskEnvelope"},{"name":"evidence","help":"criterion-level evidence coverage"},{"name":"next","help":"return the smallest currently valid internal actions"},{"name":"brief","help":"read a return brief, optionally comparing a saved envelope"},{"name":"failure","help":"classify failures and inspect recovery metadata"},{"name":"context","help":"compile a bounded context manifest and bundle"},{"name":"context-inspect","help":"inspect saved context metadata and optionally verify source files"},{"name":"profile","help":"optional capability contracts"},{"name":"release","help":"stable/edge update channel handling"},{"name":"capsule","help":"sanitized cross-machine continuity state"},{"name":"backend","help":"trusted-local, isolated, apptainer, or remote execution"},{"name":"experiment","help":"ExperimentContract v2 and invariant packs"},{"name":"benchmark","help":"harness effectiveness telemetry"},{"name":"resources","help":"explicit observed host-local resource policy"},{"name":"doctor","help":"validate the runtime projection without replacing OMS doctor"}],"groups":[]},
   {"path":["envelope"],"description":"",
    "arguments":[

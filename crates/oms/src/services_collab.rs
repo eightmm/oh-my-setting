@@ -1082,6 +1082,23 @@ fn room_delivery_receipt(
 }
 
 impl oms_command_room::Services for CollabServices<'_> {
+    fn check_reviewed_issue(
+        &self,
+        checkout: &Path,
+        state: &Path,
+        reference: &str,
+        pin: Option<&str>,
+    ) -> oms_command_room::Result<()> {
+        oms_command_autonomy::check_reviewed_project_issue(
+            checkout,
+            state,
+            reference,
+            pin,
+            self.interrupted,
+            &self.control,
+        )
+        .map_err(room_error)
+    }
     fn state_repository(&self, repo: &Path) -> oms_command_room::Result<PathBuf> {
         oms_command_autonomy::Services::state_repository(&self.control, repo, self.interrupted)
             .map_err(room_error)

@@ -196,6 +196,37 @@ pub(crate) fn read_project_issue(ctx: &Context<'_>, issue: &IssueRef) -> Result<
     Ok(frozen)
 }
 
+/// Bind a Room artifact to the selected checkout and canonical state repository.
+/// A supplied pin requests a fresh strict OPEN issue observation; no text escapes.
+pub fn check_reviewed_project_issue(
+    checkout: &Path,
+    state: &Path,
+    reference: &str,
+    pin: Option<&str>,
+    stop: &std::sync::atomic::AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<()> {
+    crate::checkpoint(stop)?;
+    require(
+        services.state_repository(checkout, stop)? == state,
+        "issue state repository changed",
+    )?;
+    let ctx = Context::new(checkout.to_owned(), state.to_owned(), services, stop)?;
+    let issue = project_issue(&ctx, reference)?;
+    require(
+        issue.to_string() == reference,
+        "canonical same-project issue reference required",
+    )?;
+    if let Some(pin) = pin {
+        let document = read_project_issue(&ctx, &issue)?;
+        require(
+            value::hash(value::canonical(&document)?) == pin,
+            "reviewed GitHub issue source changed",
+        )?;
+    }
+    Ok(())
+}
+
 const REQUIREMENTS_DIR: &str = ".oms/plan/reviewed-issue-sources";
 const REQUIREMENTS_LIMIT: usize = 128 * 1024;
 
