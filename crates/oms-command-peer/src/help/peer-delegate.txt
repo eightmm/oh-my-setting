@@ -2,8 +2,8 @@ Usage: peer-delegate.sh --to PROVIDER (--prompt TEXT | --brief-file PATH) [optio
 
 Delegate a write task to another agent CLI. The worker runs non-interactively
 inside an isolated git worktree; the result comes back as a patch artifact that
-the caller reviews before applying. The worker never touches the main tree and
-never commits or pushes.
+the caller admits or lands with oms patch-admit / oms patch-land. The worker
+never touches the main tree and never commits or pushes.
 
 Options:
   --to PROVIDER        Registered write-capable agent transport. Required;
@@ -14,7 +14,7 @@ Options:
                        A bound Plan delegation preserves its frozen role.
                        A bundled role the
                        contract marks read_only launches with --read-only
-                       access unless --apply, --interactive or
+                       access unless --interactive or
                        OMS_DELEGATE_ROLE_WRITE=1 is given.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
@@ -35,7 +35,7 @@ Options:
                        {"finish":true}. Every turn returns an unverified answer;
                        finish runs the final verifier and returns a patch.
                        Standalone writes only: no repair, plan-task,
-                       read-only, apply, fallback-model, or dry-run.
+                       read-only, fallback-model, or dry-run.
   --max-turns N        Interactive turn cap including the initial prompt (1-20;
                        default 5). Reaching it still requires explicit finish.
   --idle-timeout N     Seconds to wait for each control message (1-3600;
@@ -56,7 +56,7 @@ Options:
   --read-only          Run the worker with read access (plan mode / read-only
                        sandbox). An audit or review role produces a report,
                        never a patch; the role's prose mandate gains the
-                       matching authority. Incompatible with --apply.
+                       matching authority.
                        When the check fails, an `escalate:` line prints the same
                        command with --reasoning-effort one step higher (then
                        --workload standard from routine at the top). It is
@@ -75,8 +75,6 @@ Options:
                        Default: 0 (one-shot).
                        With --repair 2|3, historical replay may stop repeated
                        identical failures early; sparse evidence keeps this cap.
-  --apply              Apply the resulting patch to the main tree when the
-                       worker and --verify succeed. Requires a clean main tree.
   --allow-restructure  Forward to the landing gate: permit an unscoped patch
                        that adds top-level files or moves files across
                        directories (normally rejected by the structural floor).
@@ -96,10 +94,6 @@ Options:
                        worker brief and the outcome is appended (thread.sh).
   --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
-  --resume-session ID  Continue this provider session (claude, codex) in the
-                       new worktree; its id is recorded as refs.native_session.
-  --observe-plan-binding JSON
-                       Reserved observer integration; currently refused.
   --plan-task ID --plan-binding JSON
                        Native plan-run supplies schema-1 issued plan/task
                        digest, lease/epoch and HEAD. The owning Plan adapter

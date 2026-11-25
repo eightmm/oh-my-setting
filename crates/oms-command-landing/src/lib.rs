@@ -223,6 +223,18 @@ impl Context<'_> {
             )?,
         )
     }
+    fn patch_path(
+        &self,
+        options: &cli::Options,
+        repo: &Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        let base = if options.has("repo") {
+            repo.to_owned()
+        } else {
+            std::fs::canonicalize(self.cwd)?
+        };
+        Ok(options.path("patch", &base))
+    }
 }
 pub(crate) fn check(flag: &AtomicBool) -> Result<()> {
     if flag.load(Ordering::Relaxed) {

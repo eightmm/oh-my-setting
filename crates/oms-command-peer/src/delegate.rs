@@ -793,16 +793,6 @@ fn bound_task_id(args: &Args) -> Option<String> {
             return Some(value.to_owned());
         }
     }
-    if args.has("observe-plan-binding")
-        && let Ok(binding) = V::parse(args.get("observe-plan-binding").as_bytes())
-        && let Some(id) = binding
-            .get("task_id")
-            .text()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-    {
-        return Some(id.to_owned());
-    }
     None
 }
 
@@ -835,17 +825,6 @@ fn should_attach_task_packet(args: &Args, read: bool, packet: &[u8]) -> bool {
 
 pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
-    if args.has("observe-plan-binding") {
-        return fail("plan lease integration must be supplied by the owning native plan adapter");
-    }
-    if args.has("apply") {
-        return fail(
-            "automatic apply requires the native patch-admission service; no worker started",
-        );
-    }
-    if args.has("resume-session") {
-        return fail("native session relocation must be bound before resuming a delegation");
-    }
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;
     let mut resolved = args.clone();
     let mut plan = crate::plan_delegate::BoundDelegate::prepare(&mut resolved, &repo, context)?;
@@ -1558,16 +1537,38 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         note.push_str(&format!("worktree cleanup deferred: {}\n", e.message));
     }
     plan_review?;
+    let next = if code == 0 && !written_patch.is_empty() {
+        let repo_arg = shell_arg(&repo);
+        let patch_arg = shell_arg(&patch);
+        format!(
+            "next: oms patch-land --repo {repo_arg} --patch {patch_arg} (or oms patch-admit --repo {repo_arg} --patch {patch_arg})\n"
+        )
+    } else {
+        String::new()
+    };
     Ok((
         code,
         format!(
-            "{interactive_stdout}{}\n{}\n",
+            "{interactive_stdout}{}\n{}\n{next}",
             repo.join(artifact).display(),
             repo.join(patch).display()
         )
         .into_bytes(),
         note.into_bytes(),
     ))
+}
+
+fn shell_arg(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if !raw.is_empty()
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+:@".contains(&b))
+    {
+        raw.into_owned()
+    } else {
+        format!("'{}'", raw.replace('\'', "'\\''"))
+    }
 }
 fn lint(body: &str) -> Vec<&'static str> {
     if body.len() < 240 {
@@ -1833,27 +1834,6 @@ mod tests {
             false,
             active
         ));
-        assert!(should_attach_task_packet(
-            &parse(&[
-                "--observe-plan-binding",
-                r#"{"plan_id":"plan_00000000000000000000000000000000","task_id":"task-459"}"#,
-            ]),
-            false,
-            active
-        ));
-        assert!(!should_attach_task_packet(
-            &parse(&[
-                "--observe-plan-binding",
-                r#"{"plan_id":"plan_00000000000000000000000000000000","task_id":"other"}"#,
-            ]),
-            false,
-            active
-        ));
-        assert!(!should_attach_task_packet(
-            &parse(&["--observe-plan-binding", "not-json"]),
-            false,
-            active
-        ));
 
         // Read delegations stay opt-in via --task even when bound to the same task.
         assert!(!should_attach_task_packet(
@@ -1863,11 +1843,6 @@ mod tests {
         ));
         assert!(!should_attach_task_packet(
             &parse(&["--plan-task", "task-459"]),
-            true,
-            active
-        ));
-        assert!(!should_attach_task_packet(
-            &parse(&["--observe-plan-binding", r#"{"task_id":"task-459"}"#]),
             true,
             active
         ));
@@ -1910,5 +1885,105 @@ mod tests {
             unnamed
         ));
         assert!(!should_attach_task_packet(&parse(&["--task"]), false, b""));
+    }
+
+    #[test]
+    fn help_options_match_parser_spec_and_omit_removed_flags() {
+        let help = std::str::from_utf8(peer::help("peer-delegate")).unwrap();
+        for removed in ["--apply", "--resume-session", "--observe-plan-binding"] {
+            assert!(
+                !help.contains(removed),
+                "removed/refused flag documented in help: {removed}"
+            );
+        }
+        assert!(
+            peer::parse(&["--apply".into()])
+                .unwrap_err()
+                .message
+                .contains("unknown option: --apply")
+        );
+        assert!(
+            peer::parse(&["--resume-session".into(), "s1".into()])
+                .unwrap_err()
+                .message
+                .contains("unknown option: --resume-session")
+        );
+        assert!(
+            peer::parse(&["--observe-plan-binding".into(), "{}".into()])
+                .unwrap_err()
+                .message
+                .contains("unknown option: --observe-plan-binding")
+        );
+
+        let options_block = help
+            .split_once("\nOptions:\n")
+            .and_then(|(_, rest)| rest.split_once("\nEnvironment:\n"))
+            .map(|(opts, _)| opts)
+            .expect("Options section in peer-delegate help");
+        let mut parsed_entries = Vec::new();
+        for line in options_block.lines() {
+            let Some(header) = line.strip_prefix("  ") else {
+                continue;
+            };
+            if !header.starts_with('-') {
+                continue;
+            }
+            let spec = header.split("  ").next().unwrap().trim();
+            if spec == "-h, --help" {
+                parsed_entries.push(("-h".to_owned(), false));
+                parsed_entries.push(("--help".to_owned(), false));
+                continue;
+            }
+            let tokens: Vec<&str> = spec.split_whitespace().collect();
+            let mut idx = 0;
+            while idx < tokens.len() {
+                let tok = tokens[idx];
+                if !tok.starts_with("--") {
+                    break;
+                }
+                let takes_value = tokens.get(idx + 1).is_some_and(|next| {
+                    !next.starts_with('-') && next.bytes().all(|b| b.is_ascii_uppercase())
+                });
+                parsed_entries.push((tok.to_owned(), takes_value));
+                idx += if takes_value { 2 } else { 1 };
+            }
+        }
+        assert!(
+            parsed_entries.len() >= 40,
+            "unexpectedly few options parsed: {}",
+            parsed_entries.len()
+        );
+        for (opt, takes_value) in &parsed_entries {
+            if *takes_value {
+                assert!(
+                    peer::parse(&[opt.as_str().into(), "fixture".into()]).is_ok(),
+                    "valued option from --help rejected by parser: {opt}"
+                );
+                assert!(
+                    peer::parse(&[opt.as_str().into()])
+                        .unwrap_err()
+                        .message
+                        .contains("requires a value"),
+                    "valued option in --help did not require a value: {opt}"
+                );
+            } else {
+                assert!(
+                    peer::parse(&[opt.as_str().into()]).is_ok(),
+                    "flag from --help rejected by parser: {opt}"
+                );
+            }
+        }
+
+        // Every --flag reference anywhere in help prose/usage must also be known to the parser.
+        for mat in regex::Regex::new(r"--[a-z0-9][a-z0-9-]*")
+            .unwrap()
+            .find_iter(help)
+        {
+            let name = &mat.as_str()[2..];
+            assert!(
+                name == "help" || peer::VALUES.contains(&name) || peer::FLAGS.contains(&name),
+                "help mentions unknown option --{name}"
+            );
+        }
     }
 }
