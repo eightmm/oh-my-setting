@@ -130,7 +130,7 @@ pub(crate) fn observe_with_peer_runs(
 /// Attempts arrive newest-updated first; a stable live-first sort keeps an older working
 /// attempt from being cut by newer finished ones.
 fn live_first(runs: &mut Vec<ScratchPeerRun>) {
-    runs.sort_by_key(|r| !crate::board::is_live_or_stalled(&r.state));
+    runs.sort_by_key(|r| crate::board::activity_rank(&r.state));
     runs.truncate(crate::board::MAX_ACTIVITY_ROWS);
 }
 

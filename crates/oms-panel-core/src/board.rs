@@ -132,8 +132,15 @@ fn is_active_peer_state(state: &str) -> bool {
     )
 }
 
-pub(crate) fn is_live_or_stalled(state: &str) -> bool {
-    is_active_peer_state(state) || state == "stalled"
+/// Display order before any cap: running work, then stalled, then finished.
+pub(crate) fn activity_rank(state: &str) -> u8 {
+    if is_active_peer_state(state) {
+        0
+    } else if state == "stalled" {
+        1
+    } else {
+        2
+    }
 }
 
 fn peer_operation_row(
@@ -915,15 +922,13 @@ pub(crate) fn project_with_scratch(
     }
 
     activity.sort_by(|a, b| {
-        let a_live = is_live_or_stalled(&text(a, "state"));
-        let b_live = is_live_or_stalled(&text(b, "state"));
-        b_live
-            .cmp(&a_live)
+        activity_rank(&text(a, "state"))
+            .cmp(&activity_rank(&text(b, "state")))
             .then_with(|| text(b, "started_at").cmp(&text(a, "started_at")))
             .then_with(|| text(a, "id").cmp(&text(b, "id")))
     });
-    activity.truncate(MAX_ACTIVITY_ROWS);
 
+    // Main is derived from every observed row; only the display list is capped.
     let main = project_main(
         repo,
         room,
@@ -934,6 +939,7 @@ pub(crate) fn project_with_scratch(
         &activity,
         now_epoch,
     );
+    activity.truncate(MAX_ACTIVITY_ROWS);
     json!({
         "schema": 1,
         "main": main,
@@ -1074,6 +1080,32 @@ mod tests {
         assert_eq!(main["external_work_active"], true);
         assert_eq!(main["summary"], "No panel Main · work from external Main");
         assert_ne!(main["active_main"], "codex");
+
+        // Newer stalled runs (owner gone, no status) never displace the running one from
+        // the capped list or from the Main projection.
+        for idx in 0..=MAX_ACTIVITY_ROWS {
+            let stamp = chrono::DateTime::<chrono::Utc>::from_timestamp(now_epoch - 5, 0)
+                .unwrap()
+                .format("%Y%m%dT%H%M%SZ")
+                .to_string();
+            let dir = repo
+                .0
+                .join(RUN_ROOT)
+                .join(format!("consult-{stamp}-{idx:08x}"));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&dir)
+                .unwrap();
+            std::fs::write(dir.join("pid"), "2147483646\n").unwrap();
+        }
+        let crowded = crate::state::snapshot(&repo.0, None, &services, &stop).unwrap();
+        let board = &crowded.report["board"];
+        let activity = board["activity"].as_array().expect("activity array");
+        assert_eq!(activity.len(), MAX_ACTIVITY_ROWS, "{board}");
+        assert_eq!(activity[0]["state"], "running", "{board}");
+        assert_eq!(activity[1]["state"], "stalled", "{board}");
+        assert_eq!(board["main"]["external_work_active"], true);
 
         for bytes in [
             include_bytes!("board.rs").as_slice(),
