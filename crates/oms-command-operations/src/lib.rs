@@ -9,6 +9,7 @@ mod help;
 mod incremental;
 pub mod lock;
 pub mod observation;
+pub mod peer_operations;
 pub mod projection;
 pub mod storage;
 pub mod value;

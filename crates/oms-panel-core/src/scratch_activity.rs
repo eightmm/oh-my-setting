@@ -19,15 +19,38 @@ fn issue_code(issue: DiscoveryIssue) -> &'static str {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScratchPeerRun {
+    pub id: String,
+    pub worktree: String,
+    pub provider: Option<&'static str>,
+    pub tool: &'static str,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// The caller owns canonical attempts and all action targets. These IDs are
 /// opaque observation keys, never arguments for native attempt/Room commands.
 pub fn observe(repo: &Path, stop: &AtomicBool) -> Value {
+    observe_with_peer_runs(repo, stop).0
+}
+
+pub(crate) fn observe_with_peer_runs(
+    repo: &Path,
+    stop: &AtomicBool,
+) -> (Value, Vec<ScratchPeerRun>) {
     let result = Resolver::from_env()
         .map_err(|_| DiscoveryIssue::Unavailable)
         .and_then(|r| r.observe_managed_lifecycle(repo, LifecycleScope::ScratchOnly, stop));
     let report = match result {
         Ok(r) => r,
-        Err(issue) => return json!({"status":"unavailable","reason":issue_code(issue)}),
+        Err(issue) => {
+            return (
+                json!({"status":"unavailable","reason":issue_code(issue)}),
+                Vec::new(),
+            );
+        }
     };
     let mut partial = report.discovery_issue.is_some()
         || report.unverified_checkouts != 0
@@ -61,6 +84,29 @@ pub fn observe(repo: &Path, stop: &AtomicBool) -> Value {
         );
         sources.push(json!({"id":source.id,"label":label,"head":head,"branch":source.branch_label,"status":status}));
     }
+    let peer_runs: Vec<ScratchPeerRun> = report
+        .attempts
+        .iter()
+        .filter_map(|a| {
+            let tool = a.tool.filter(|t| {
+                matches!(
+                    *t,
+                    "peer-delegate" | "peer-review" | "peer-ask" | "consult" | "advise"
+                )
+            })?;
+            let prefix = &a.source_id[..12.min(a.source_id.len())];
+            Some(ScratchPeerRun {
+                id: a.id.clone(),
+                worktree: format!("wt-{prefix}"),
+                provider: a.provider,
+                tool,
+                state: a.state.clone(),
+                created_at: a.created_at.clone(),
+                updated_at: a.updated_at.clone(),
+            })
+        })
+        .take(crate::board::MAX_ACTIVITY_ROWS)
+        .collect();
     let attempts: Vec<_> = report
         .attempts
         .iter()
@@ -73,7 +119,10 @@ pub fn observe(repo: &Path, stop: &AtomicBool) -> Value {
         })
         .collect();
     let omitted = report.omitted_attempts + report.attempts.len() - attempts.len();
-    json!({"status":if partial || omitted > 0 {"partial"} else {"ready"},
-        "reason":report.discovery_issue.map(issue_code),"sources":sources,"attempts":attempts,
-        "unverifiedCheckouts":report.unverified_checkouts,"unexaminedCheckouts":report.unexamined_checkouts,"omittedAttempts":omitted})
+    (
+        json!({"status":if partial || omitted > 0 {"partial"} else {"ready"},
+            "reason":report.discovery_issue.map(issue_code),"sources":sources,"attempts":attempts,
+            "unverifiedCheckouts":report.unverified_checkouts,"unexaminedCheckouts":report.unexamined_checkouts,"omittedAttempts":omitted}),
+        peer_runs,
+    )
 }

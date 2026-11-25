@@ -6075,7 +6075,7 @@ fn safe_label(raw: Option<&str>) -> String {
         Some(v) if !v.trim().is_empty() && !v.contains('/') && !v.contains('\\') => {
             crate::render::clean(v, 120)
         }
-        _ => "Native task not recorded".into(),
+        _ => oms_panel_core::board::UNRECORDED_NATIVE_TASK.into(),
     }
 }
 
