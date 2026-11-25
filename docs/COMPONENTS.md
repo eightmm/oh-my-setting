@@ -1019,7 +1019,11 @@ reports the cached data plus a one-line note (`catalog_refresh: started` in `--j
 and a harness child never starts one.
 
 Cached catalog reads separate tab-delimited model IDs from display labels and discard
-listing banners, so labels cannot leak into automatic recovery routes.
+listing banners, so labels cannot leak into automatic recovery routes. `oms models --json`
+lists selector IDs in `models` (and text output), derives per-base-model
+`model_effort_scales` and `selectors` for Antigravity at read time from cached catalog
+rows, and reports Codex's provider-level `effort_values` as the scale-ordered union of
+cached per-model scales when present.
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
 and reason.

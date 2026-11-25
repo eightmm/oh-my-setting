@@ -339,6 +339,16 @@ fn models_preview_preserves_full_catalog_routability() {
         format!("{}\n", catalog.join("\n")),
     )
     .expect("catalog");
+    fs::write(
+        cache.join("codex.env"),
+        "effort_mechanism=config\neffort_values=low medium high\nmodels_probe=ok\nprobed_at=1\n",
+    )
+    .expect("codex env");
+    fs::write(
+        cache.join("codex.efforts"),
+        "gpt-6.1-sol\tlow medium high xhigh max\ngpt-6.2-sol\tmedium high xhigh max ultra\n",
+    )
+    .expect("codex efforts");
     let (code, out, err) = isolated(
         "models",
         &["--providers", "codex", "--json"],
@@ -361,7 +371,11 @@ fn models_preview_preserves_full_catalog_routability() {
     assert_eq!(row["not_routed"], serde_json::json!(not_routed));
     assert_eq!(row["usable"], serde_json::Value::Null);
     assert_eq!(row["exact_model_override"], true);
-    assert!(!cache.join("codex.env").exists());
+    assert_eq!(
+        row["effort_values"],
+        serde_json::json!(["low", "medium", "high", "xhigh", "max", "ultra"])
+    );
+    assert_eq!(row["catalog_probe"], "ok");
 
     let (code, out, err) = isolated(
         "models",
@@ -384,14 +398,18 @@ fn models_preview_preserves_full_catalog_routability() {
     let mut rows = (0..21)
         .map(|minor| format!("gemini-3.{minor}-flash-low\tGemini 3 Flash"))
         .collect::<Vec<_>>();
-    let preview = rows[..20].to_vec();
     rows.extend([
-        "gemini-4-carbon-high\tCarbon High".into(),
-        "gemini-4-neon-high\tNeon High".into(),
+        "gemini-4-carbon-high\tGemini 4 Carbon (High)".into(),
+        "gemini-4-carbon-low\tGemini 4 Carbon (Low)".into(),
+        "gemini-4-carbon-medium\tGemini 4 Carbon (Medium)".into(),
+        "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)".into(),
+        "gemini-4-neon-high\tGemini 4 Neon (High)".into(),
         "gemini-4-neon-high\tAlternate label".into(),
         "gemini-4-oxygen-low".into(),
-        "gemini-pro-orchestrator\tOrchestrator".into(),
-        "gemini-pro-orchestrator-argon\tOrchestrator Argon".into(),
+        "gemini-pro-orchestrator\tOrchestrator (Carbon)".into(),
+        "gemini-pro-orchestrator-argon\tOrchestrator (Argon)".into(),
+        "gemini-pro-orchestrator-neon\tOrchestrator (Neon)".into(),
+        "claude-opus-5-5-high\tClaude Opus 5.5 (High)".into(),
         "gemini-4-bogus-high\twrong\tlabel".into(),
         "gemini-4-malformed-high\t".into(),
     ]);
@@ -411,25 +429,33 @@ fn models_preview_preserves_full_catalog_routability() {
     assert_eq!(code, 0, "{err}");
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
     let row = &report["providers"][0];
-    assert_eq!(row["models"], serde_json::json!(preview));
     let selectors = (0..21)
         .map(|minor| format!("gemini-3.{minor}-flash-low"))
         .chain(
             [
                 "gemini-4-carbon-high",
+                "gemini-4-carbon-low",
+                "gemini-4-carbon-medium",
+                "gemini-4-neon-xhigh",
                 "gemini-4-neon-high",
                 "gemini-4-oxygen-low",
                 "gemini-pro-orchestrator",
                 "gemini-pro-orchestrator-argon",
+                "gemini-pro-orchestrator-neon",
+                "claude-opus-5-5-high",
             ]
             .map(str::to_owned),
         )
         .collect::<Vec<_>>();
+    assert_eq!(row["models"], serde_json::json!(&selectors[..20]));
     assert_eq!(row["catalog_models"], serde_json::json!(selectors));
     assert_eq!(
         row["routable"],
         serde_json::json!([
             "gemini-4-carbon-high",
+            "gemini-4-carbon-low",
+            "gemini-4-carbon-medium",
+            "gemini-4-neon-xhigh",
             "gemini-4-neon-high",
             "gemini-4-oxygen-low",
             "gemini-pro-orchestrator",
@@ -437,8 +463,149 @@ fn models_preview_preserves_full_catalog_routability() {
         ])
     );
     assert_eq!(
+        row["model_effort_scales"],
+        serde_json::json!({
+            "claude-opus-5-5": ["high"],
+            "gemini-4-carbon": ["low", "medium", "high"],
+            "gemini-4-neon": ["high", "xhigh"]
+        })
+    );
+    assert_eq!(
+        row["selectors"],
+        serde_json::json!({
+            "claude-opus-5-5": {"high": "claude-opus-5-5-high"},
+            "gemini-4-carbon": {
+                "low": "gemini-4-carbon-low",
+                "medium": "gemini-4-carbon-medium",
+                "high": "gemini-4-carbon-high"
+            },
+            "gemini-4-neon": {
+                "high": "gemini-4-neon-high",
+                "xhigh": "gemini-4-neon-xhigh"
+            }
+        })
+    );
+    assert_eq!(
         fs::read_to_string(cache.join("antigravity.models")).unwrap(),
         contents
+    );
+
+    let (code, text_out, err) = isolated(
+        "models",
+        &["--providers", "antigravity"],
+        tmp.path(),
+        &oms_source(),
+        &[
+            ("HOME", utf8(&home)),
+            ("OMS_CAPABILITY_DIR", utf8(&cache)),
+            ("PATH", ""),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(!text_out.contains('\t'), "raw tab label leaked: {text_out}");
+    assert!(
+        text_out.contains("gemini-4-carbon-high"),
+        "missing selector in text output: {text_out}"
+    );
+
+    // Probe stderr help (agy) and unparenthesised level list (pi).
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let agy = bin.join("agy");
+        fs::write(
+            &agy,
+            "#!/bin/sh\ncase \"$1\" in\n--version) echo 1.5.16;;\n--help) echo '  --effort  Reasoning effort (low|medium|high|xhigh|max)' >&2;;\nmodels) printf 'Fetching available models...\\ngemini-4-carbon-high\\tGemini 4 Carbon (High)\\ngemini-4-carbon-low\\tGemini 4 Carbon (Low)\\n';;\n*) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&agy, fs::Permissions::from_mode(0o700)).unwrap();
+        let pi = bin.join("pi");
+        fs::write(
+            &pi,
+            "#!/bin/sh\ncase \"$1\" in\n--version) echo 1.5.2;;\n--help) printf '  --thinking <level>  Set thinking level: off, minimal, low, medium, high, xhigh, max\\n  --mode <mode>       Output mode (text, json)\\n';;\n*) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&pi, fs::Permissions::from_mode(0o700)).unwrap();
+        let locks = tmp.path().join("locks");
+        let (code, out, err) = isolated(
+            "models",
+            &["--providers", "antigravity,pi", "--refresh", "--json"],
+            tmp.path(),
+            &oms_source(),
+            &[
+                ("HOME", utf8(&home)),
+                ("OMS_CAPABILITY_DIR", utf8(&cache)),
+                ("OMS_LOCK_DIR", utf8(&locks)),
+                ("PATH", utf8(&bin)),
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let agy_row = &report["providers"][0];
+        assert_eq!(agy_row["provider"], "antigravity");
+        assert_eq!(agy_row["effort_mechanism"], "flag");
+        assert_eq!(
+            agy_row["effort_values"],
+            serde_json::json!(["low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(
+            agy_row["model_effort_scales"],
+            serde_json::json!({"gemini-4-carbon": ["low", "high"]})
+        );
+        assert_eq!(
+            agy_row["selectors"],
+            serde_json::json!({"gemini-4-carbon": {"low": "gemini-4-carbon-low", "high": "gemini-4-carbon-high"}})
+        );
+        let pi_row = &report["providers"][1];
+        assert_eq!(pi_row["provider"], "pi");
+        assert_eq!(pi_row["effort_mechanism"], "flag");
+        assert_eq!(
+            pi_row["effort_values"],
+            serde_json::json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+        );
+    }
+
+    // Direct model_probe coverage: stderr help, unparenthesised levels, wrapped continuations,
+    // label-preserving catalog cleaning, and scale-ordered union.
+    use oms_command_providers_skills::model_probe;
+    let agy_ev = model_probe::inspect(
+        "antigravity",
+        0,
+        0,
+        b"",
+        b"  --effort   Reasoning effort (low|medium|high|xhigh|max)\n",
+    );
+    assert_eq!(agy_ev.effort_mechanism, "flag");
+    assert_eq!(
+        agy_ev.effort_values,
+        vec!["low", "medium", "high", "xhigh", "max"]
+    );
+    let pi_ev = model_probe::inspect(
+        "pi",
+        0,
+        0,
+        b"  --thinking <level>\n    Set thinking level: off, minimal, low, medium, high, xhigh, max\n  --mode (text, json)\n",
+        b"",
+    );
+    assert_eq!(pi_ev.effort_mechanism, "flag");
+    assert_eq!(
+        pi_ev.effort_values,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+    let cleaned = model_probe::clean_catalog_rows(
+        "antigravity",
+        "Fetching available models...\ngemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-4-carbon-high\tDuplicate\ngemini-4-bad\tbad\tlabel\n",
+    );
+    assert_eq!(
+        cleaned,
+        vec!["gemini-4-carbon-high\tGemini 4 Carbon (High)"]
+    );
+    let scales = model_probe::parse_effort_scales("m1\thigh low\nm2\tultra medium xhigh max\n");
+    assert_eq!(
+        model_probe::union_effort_scales(&scales),
+        vec!["low", "medium", "high", "xhigh", "max", "ultra"]
     );
 }
 
