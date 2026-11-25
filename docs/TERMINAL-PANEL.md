@@ -372,10 +372,10 @@ see [receipt handoff](COMPONENTS.md#plans-and-bounded-autonomy).
 
 To refresh the shared checkout's scripts after a passed land and handoff, add
 `--sync-shared PATH` with an explicit checkout path. The separate refresh respects
-live-call locks and refuses dirty or diverged trees; deferred/refused sync is
-reported in land status without failing the passed land. Its companion sync
-receipt preserves the original handed-off landing bytes. Without this flag,
-handoff leaves the checkout untouched.
+live-call locks and refuses tracked or staged edits and detached, ahead or
+diverged trees; untracked files may stay. A deferred or refused sync keeps the
+passed land's exit zero and prints `land: sync deferred|refused: reason`.
+Without this flag, handoff leaves the checkout untouched.
 
 ### Start a main in an existing panel
 

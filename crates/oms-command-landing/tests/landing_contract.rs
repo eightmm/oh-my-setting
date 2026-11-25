@@ -2468,9 +2468,15 @@ fn check_publish_then_merge(flock: bool) {
             r.2.contains("land: sync refused: tracked worktree"),
             "{r:?}"
         );
-        // Untracked files alone do not block the fast-forward.
+        // A staged change is refused even when the worktree matches HEAD;
+        // untracked files alone do not block the fast-forward.
+        iso.git(&shared, &["add", "--", tracked.to_str().unwrap()]);
         fs::write(&tracked, original).unwrap();
         iso.git(&repo, &["push", "-q", "origin", "HEAD:main"]);
+        let staged = iso.run_with_services("sync-shared", &shared, &[], &[]);
+        assert_ne!(staged.0, 0, "{staged:?}");
+        assert!(staged.2.contains("index changed"), "{staged:?}");
+        iso.git(&shared, &["reset", "-q"]);
         let synced = iso.run_with_services("sync-shared", &shared, &[], &[]);
         assert_eq!(synced.0, 0, "{synced:?}");
         assert_eq!(iso.git_out(&shared, &["rev-parse", "HEAD"]), head);

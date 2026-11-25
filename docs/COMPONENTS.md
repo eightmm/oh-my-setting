@@ -1902,8 +1902,8 @@ To refresh panel boards after landing from another clone, use `oms sync-shared
 `git merge`. Calls register a shared lock before canonical snapshots and retain
 it through final guards and receipts; sync takes the same admission gate
 exclusively through fetch and `merge --ff-only`. It returns exit 75 with
-`deferred: N calls running (ids...)` while calls remain, and refuses tracked
-edits, detached, ahead or diverged trees; untracked files from other tools may
+`deferred: N calls running (ids...)` while calls remain, and refuses tracked or
+staged edits, detached, ahead or diverged trees; untracked files from other tools may
 stay, and `merge --ff-only` still refuses one the target would overwrite. Any
 local branch may follow the target.
 New calls wait at most five seconds for an active sync, then refuse safely;

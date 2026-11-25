@@ -1728,6 +1728,7 @@ fn tail(r: &Run<'_>, output: &mut Output) -> Result<()> {
                 output.stdout.extend(synced.stdout);
                 output.stderr.extend(synced.stderr);
             }
+            Err(error) if error.code == 130 => return Err(error),
             Err(error) => {
                 let state = if error.code == 75 {
                     "deferred"
@@ -1764,7 +1765,14 @@ pub(crate) fn sync(c: &Context<'_>, o: &Options) -> Result<Output> {
     git.run(&["symbolic-ref", "--quiet", "HEAD"])?;
     // Untracked files from other tools do not block a fast-forward; `merge
     // --ff-only` still refuses one that the target would overwrite.
-    git.tracked_clean()?;
+    let tracked_clean = || {
+        require(
+            git.run(&["status", "--porcelain=v1", "--untracked-files=no"])?
+                .is_empty(),
+            "tracked worktree or index changed; sync refused",
+        )
+    };
+    tracked_clean()?;
     let before = git.snapshot()?;
     let reference = format!("refs/remotes/{remote}/{target}");
     git.run(&[
@@ -1780,7 +1788,7 @@ pub(crate) fn sync(c: &Context<'_>, o: &Options) -> Result<Output> {
         git.succeeds(&["merge-base", "--is-ancestor", "HEAD", &reference])?,
         "shared checkout is ahead or diverged; sync refused",
     )?;
-    git.tracked_clean()?;
+    tracked_clean()?;
     require(
         git.snapshot()? == before,
         "shared checkout changed during fetch",
