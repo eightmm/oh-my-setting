@@ -17,6 +17,9 @@ Run the fail-fast 4-phase verification pipeline:
   2. architecture_lint bash scripts/check.sh --lint-only
   3. unit_integration  OMS_VERIFY_DEFER_CORE_E2E=1 cargo +1.99.1 test --workspace --locked
   4. core_e2e          cargo +1.99.1 test --locked -p oms --test verify_smoke verify_core_e2e -- --exact --nocapture
+
+Runs that share one Cargo target directory take turns; OMS_CARGO_TARGET_WAIT
+bounds the wait in seconds (default 3600) before exiting 75.
 EOF
 }
 
@@ -50,7 +53,9 @@ chmod 700 "$VERIFY_TMP"
 # Tests must not read the host provider capability cache (as in scripts/check.sh).
 export XDG_CACHE_HOME="$VERIFY_TMP/cache"
 mkdir -p "$XDG_CACHE_HOME"
-trap 'rm -rf "$VERIFY_TMP"' EXIT
+# shellcheck source=scripts/lib/cargo-target-lock.sh
+. "$ROOT/scripts/lib/cargo-target-lock.sh"
+trap 'oms_cargo_target_release; rm -rf "$VERIFY_TMP"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -66,6 +71,7 @@ run_stage() {
   printf 'verify: stage=%s status=ok\n' "$stage"
 }
 
+oms_cargo_target_hold "$ROOT" verify || exit $?
 run_stage type cargo +1.99.1 check --workspace --all-targets "${CARGO_FLAGS[@]}"
 run_stage architecture_lint bash "$ROOT/scripts/check.sh" --lint-only
 # Defer verify_core_e2e during the workspace test pass so it runs once in stage 4.
