@@ -157,6 +157,9 @@ impl Plan<'_> {
             format!("# Task {}: {}", t.text("id"), t.text("title")),
             format!("state: {state}"),
         ];
+        if !t.text("brief").is_empty() {
+            lines.push(format!("\n{}", t.text("brief")));
+        }
         if v.get("completion_verified") == &Value::Bool(false) {
             lines.push("completion: not verified (stored state: done)".into());
         }

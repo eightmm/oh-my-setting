@@ -130,6 +130,90 @@ fn owns_only_agent_plan() {
 }
 
 #[test]
+fn brief_file_round_trip_and_bounds() {
+    if isolated("brief_file_round_trip_and_bounds") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    let file = tmp.0.join("brief.txt");
+    let path = file.to_str().unwrap();
+    fs::write(&file, "first work\nsecond line").unwrap();
+    assert_eq!(go(&r, &["init", "--goal", "brief test"]).0, 0);
+    let added = go(
+        &r,
+        &["add", "--id", "a", "--title", "work", "--brief-file", path],
+    );
+    assert_eq!(added.0, 0, "{:?}", added);
+    for action in ["brief", "show"] {
+        let out = go(&r, &[action, "--id", "a"]);
+        assert_eq!(out.0, 0, "{:?}", out);
+        assert!(out.1.contains("first work"));
+    }
+    let raw = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let doc = oms_command_plan::json::parse(&raw).unwrap();
+    let task_hash = oms_command_plan::json::hash(doc.get("tasks").get("a")).unwrap();
+    let plan_hash = oms_command_plan::json::sha(&raw);
+    fs::write(&file, "amended work").unwrap();
+    let amended = go(
+        &r,
+        &[
+            "amend",
+            "--id",
+            "a",
+            "--expected-plan-sha256",
+            &plan_hash,
+            "--expected-task-sha256",
+            &task_hash,
+            "--reason",
+            "more detail",
+            "--brief-file",
+            path,
+        ],
+    );
+    assert_eq!(amended.0, 0, "{:?}", amended);
+    for action in ["brief", "show"] {
+        assert!(go(&r, &[action, "--id", "a"]).1.contains("amended work"));
+    }
+    let raw = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let doc = oms_command_plan::json::parse(&raw).unwrap();
+    let task_hash = oms_command_plan::json::hash(doc.get("tasks").get("a")).unwrap();
+    let plan_hash = oms_command_plan::json::sha(&raw);
+    for bytes in [vec![b'x'; 65537], vec![0xff]] {
+        fs::write(&file, bytes).unwrap();
+        assert_ne!(
+            go(
+                &r,
+                &["add", "--id", "b", "--title", "bad", "--brief-file", path]
+            )
+            .0,
+            0
+        );
+        assert_ne!(
+            go(
+                &r,
+                &[
+                    "amend",
+                    "--id",
+                    "a",
+                    "--expected-plan-sha256",
+                    &plan_hash,
+                    "--expected-task-sha256",
+                    &task_hash,
+                    "--reason",
+                    "bad input",
+                    "--brief-file",
+                    path
+                ]
+            )
+            .0,
+            0
+        );
+        assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), raw);
+    }
+}
+
+#[test]
 fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
     if isolated("delegate_binding_keeps_the_issued_lease_and_fences_native_review") {
         return;

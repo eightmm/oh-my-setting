@@ -3481,11 +3481,16 @@ mod tests {
         ctx.owner_id = value::text(&row, "owner_id").into();
         ctx.run_id = "first-worker".into();
         ctx.cycle = Some(1);
+        private(
+            &dir.plan("fixture-brief"),
+            b"Implement the scoped behavior.",
+        );
         assert_eq!(
             ctx.action(
                 &Request::new(Action::Add)
                     .with("id", "t1")
                     .with("title", "one")
+                    .with("brief-file", dir.plan("fixture-brief"))
                     .with("allowed", "src")
                     .with("verify", "bash tests/check.sh")
             )

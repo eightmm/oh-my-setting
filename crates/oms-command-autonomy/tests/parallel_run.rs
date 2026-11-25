@@ -453,6 +453,11 @@ fn fixture(tasks: &[(&str, &str)]) -> Repo {
     git(&repo.0, &["commit", "-qm", "seed"]);
     let mock = Mock::default();
     mock.plan(&repo.0, &["init", "--goal", "parallel"]);
+    fs::write(
+        repo.0.join(".oms/fixture-brief"),
+        "Implement the scoped task.",
+    )
+    .unwrap();
     // Ids are chosen so the plan's id-tiebroken creation order equals `tasks`.
     for (id, allowed) in tasks {
         mock.plan(
@@ -467,6 +472,8 @@ fn fixture(tasks: &[(&str, &str)]) -> Repo {
                 allowed,
                 "--verify",
                 "true",
+                "--brief-file",
+                ".oms/fixture-brief",
             ],
         );
     }
@@ -705,6 +712,8 @@ fn overlapping_resources_never_run_together() {
             allowed,
             "--verify",
             "true",
+            "--brief-file",
+            ".oms/fixture-brief",
         ];
         if let Some(res) = resources {
             args.extend(["--resources", res]);

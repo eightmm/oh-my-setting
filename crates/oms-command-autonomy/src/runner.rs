@@ -582,6 +582,13 @@ pub(crate) fn run_task(
             "Plan selection base moved before preflight",
         )?;
         let review = value::text(&task, "state") == "review" && args.flag("land");
+        // A task already in review was issued before briefs were stored and cannot be amended.
+        require(
+            review || !value::text(&task, "brief").trim().is_empty(),
+            format!(
+                "task {id} has no work brief; use agent-plan amend --id {id} --brief-file PATH"
+            ),
+        )?;
         let initial_review = (review && !args.flag("dry-run"))
             .then(|| review_fence(ctx, &task, base))
             .transpose()?;

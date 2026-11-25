@@ -2053,6 +2053,7 @@ exec "$real_git" "$@"
                                 .join(" ")
                         });
                     assert!(prompt.contains("Required verification:"));
+                    assert!(prompt.contains("Implement the detailed fixture work."));
                     assert!(prompt.contains("Forbidden paths: denied.txt"));
                     let script = match self.mode {
                         "unknown-stderr-only" => {
@@ -2160,9 +2161,11 @@ exec "$real_git" "$@"
                     git_at(&repo.0, &["config", "core.splitIndex", "true"]);
                 }
                 host.plan(Request::new(Action::Init).with("goal", "native Plan delegate"));
+                repo.write(".oms/fixture-brief", "Implement the detailed fixture work.");
                 let mut task_request = Request::new(Action::Add)
                     .with("id", "t1")
                     .with("title", "update tracked.txt")
+                    .with("brief-file", ".oms/fixture-brief")
                     .with("allowed", "tracked.txt,denied.txt")
                     .with("forbidden", "denied.txt")
                     .with("verify", "test -s tracked.txt")
