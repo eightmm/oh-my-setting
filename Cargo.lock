@@ -1248,6 +1248,7 @@ dependencies = [
  "oms-command-failure",
  "oms-command-plan",
  "oms-command-runs",
+ "oms-command-telemetry",
  "oms-context",
  "oms-context-report",
  "oms-context-session",

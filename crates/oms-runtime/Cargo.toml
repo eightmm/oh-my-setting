@@ -11,6 +11,7 @@ oms-command-runs = { path = "../oms-command-runs" }
 oms-command-plan = { path = "../oms-command-plan" }
 oms-command-failure = { path = "../oms-command-failure" }
 oms-command-experiment = { path = "../oms-command-experiment" }
+oms-command-telemetry = { path = "../oms-command-telemetry" }
 oms-context = { path = "../oms-context" }
 oms-context-source = { path = "../oms-context-source" }
 oms-context-report = { path = "../oms-context-report" }
