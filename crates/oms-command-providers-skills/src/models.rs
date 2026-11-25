@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::model_probe;
-use oms_command_agent_role::native_model::supports_exact_model_override;
+use oms_command_agent_role::native_model::{fixed_effort_model, supports_exact_model_override};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -149,6 +149,58 @@ fn age(path: &std::path::Path) -> Option<u64> {
         .elapsed()
         .ok()
         .map(|d| d.as_secs())
+}
+
+fn format_models_section(
+    provider: &str,
+    catalog: &[String],
+    routable: &[String],
+    scales: &BTreeMap<String, Vec<String>>,
+    selectors: &model_probe::AgySelectors,
+) -> String {
+    if catalog.is_empty() {
+        return "models: unknown\n".to_owned();
+    }
+    let routable_set = routable.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let mut selector_to_base = BTreeMap::<&str, &str>::new();
+    for (base, effort_map) in selectors {
+        for selector in effort_map.values() {
+            selector_to_base
+                .entry(selector.as_str())
+                .or_insert(base.as_str());
+        }
+    }
+    let mut out = String::from("models:\n");
+    let mut emitted_bases = BTreeSet::<&str>::new();
+    for selector in catalog {
+        if let Some(&base) = selector_to_base.get(selector.as_str()) {
+            if !emitted_bases.insert(base) {
+                continue;
+            }
+            let is_routable = selectors
+                .get(base)
+                .is_some_and(|map| map.values().any(|s| routable_set.contains(s.as_str())));
+            let suffix = if is_routable { "" } else { " (not routed)" };
+            if let Some(scale) = scales.get(base).filter(|s| !s.is_empty()) {
+                out.push_str(&format!("  {base}: {}{suffix}\n", scale.join(" ")));
+            } else {
+                out.push_str(&format!("  {base}{suffix}\n"));
+            }
+        } else {
+            let is_routable = routable_set.contains(selector.as_str());
+            let suffix = if is_routable { "" } else { " (not routed)" };
+            if fixed_effort_model(provider, selector).is_some() {
+                out.push_str(&format!("  {selector}: fixed{suffix}\n"));
+            } else if provider != "antigravity"
+                && let Some(scale) = scales.get(selector).filter(|s| !s.is_empty())
+            {
+                out.push_str(&format!("  {selector}: {}{suffix}\n", scale.join(" ")));
+            } else {
+                out.push_str(&format!("  {selector}{suffix}\n"));
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<Output> {
@@ -392,23 +444,14 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             rows.push(json!({"provider":provider,"binary":bin,"present":present,"usable":usable,"exact_model_override":supports_exact_model_override(&provider),"catalog_models":catalog,"models":models,"routable":routable,"not_routed":not_routed,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"model_effort_scales":scales,"selectors":selectors,"catalog_probe":if ["codex","antigravity","opencode"].contains(&provider.as_str()){fields.get("models_probe").map(String::as_str).unwrap_or("unknown")}else{"unsupported"},"snapshot_age_seconds":snapshot_age,"catalog_age_seconds":age(&models_file)}));
         }
         text.push_str(&format!(
-            "## {provider} ({})\nmodels: {}\neffort: {} {}\n",
+            "## {provider} ({})\n{}effort: {} {}\n",
             match usable {
                 Some(true) => "usable",
                 Some(false) if present => "broken",
                 _ if present => "present",
                 _ => "absent",
             },
-            if routable.is_empty() {
-                "unknown".into()
-            } else {
-                routable
-                    .iter()
-                    .take(20)
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            },
+            format_models_section(&provider, &catalog, &routable, &scales, &selectors),
             fields
                 .get("effort_mechanism")
                 .map(String::as_str)
