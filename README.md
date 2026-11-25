@@ -18,7 +18,7 @@
 | Task | OMS tools and behavior | Guide |
 |---|---|---|
 | **Run a project from the terminal** | `oms` opens the panel. Pick an installed Codex, Claude Code, Antigravity (Agy), or gateway-backed Pi Main. In a managed tmux panel, OMS can open native provider leads in the background and reconnect to a live Main. Board and Detail show weekly quota, token usage, and activity when provider or OMS records support them. | [Terminal panel](docs/TERMINAL-PANEL.md) |
-| **Delegate and route work** | The Overall Main manages: it assigns scoped work, reviews evidence and decides acceptance without editing the repository itself. Provider leads run one assignment each and coordinate supported native workers. `oms peer-delegate` isolates builder changes. Inspect role profiles with `oms agent-role` and quota-aware routing with `oms panel --routes`. Use `oms connect-services` to register distinct Codex, Claude, and Pi account homes for routing. | [Main policy](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [Routing](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [Accounts](docs/TERMINAL-PANEL.md#provider-accounts) |
+| **Delegate and route work** | The Overall Main manages: it assigns scoped work, reviews evidence and decides acceptance without editing the repository itself. Provider leads run one assignment each and coordinate supported native workers. `oms peer-delegate` isolates builder changes. Inspect role profiles with `oms agent-role` and quota-aware routing with `oms panel --routes`. Use `oms connect-services` to register distinct Codex, Claude, and Pi account homes for routing. Sign in to Codex, Claude Code, or Antigravity from the panel with `L`, or with `oms connect-services --login PROVIDER`; this uses the default account home. | [Main policy](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [Routing](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [Accounts](docs/TERMINAL-PANEL.md#provider-accounts) |
 | **Get independent advice and review** | `oms consult` asks one peer. `oms peer-ask --debate` compares provider responses. `oms peer-review` requests independent diff review. The Overall Main integrates review findings and decides acceptance. | [Peer collaboration](docs/COMPONENTS.md#asking-other-agents) |
 | **Capture project intent and find affected code** | `oms init` sets up project policy. `PROJECT.md` records the agreed scope, decisions, and verification. `oms graph project` finds symbols, dependencies, and affected paths, and `oms runtime context` builds bounded context for a task. | [Project context](docs/PROJECT-CONTEXT.md) · [Graph guide](docs/GRAPH-ENGINEERING.md#project-graph) |
 | **Plan, track, and hand off work** | `oms agent-plan` tracks dependencies and review state. `oms inbox` and `oms dashboard` surface work that needs attention. `oms agent-task`, `oms journal`, and `oms session-handoff` preserve resume notes, work history, and session summaries. | [Planning](docs/COMPONENTS.md#plans-and-bounded-autonomy) · [State and handoff](docs/COMPONENTS.md#state-memory-and-handoff) |
@@ -44,7 +44,7 @@ In a Git repository, run `oms` to open the terminal panel. You can also open Cod
 
 OMS runs as a native Rust CLI at `~/.local/bin/oms`. The core commands require no system Python setup. The default `core` install provisions one coding-agent provider, and the managed panel uses tmux. [Installation guide](docs/INSTALL.md)
 
-In a Codex or ChatGPT Work desktop chat, mention **@OMS** to choose a Main, give it a goal, check progress and decide pending approvals. ChatGPT Work also offers a conversation panel. [Connect a project or SSH host](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
+In a Codex or ChatGPT Work desktop chat, mention **@OMS** to choose a Main, give it a goal, check progress and decide pending approvals. ChatGPT Work also offers a conversation panel, and Claude Desktop and the Antigravity App can open the OMS panel through the `oms-panel` MCP App ([Plugins and integrations](#plugins-and-integrations)). [Connect a project or SSH host](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
 
 <details>
 <summary>What the installer configures</summary>
@@ -61,6 +61,20 @@ oms doctor       # Verify harness wiring and provider readiness
 oms update       # Update the OMS installation through its configured ref
 oms uninstall    # Remove managed links and restore backed-up config files
 ```
+
+---
+
+## Plugins and integrations
+
+| Name | Host | What it does | How to install |
+|---|---|---|---|
+| [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) | Codex CLI | Prompt routing to skills, pre-compaction handoff, high-risk turn guards, content-free lifecycle counters | Registered by the OMS installer (`oms update` keeps it) |
+| [`oms`](plugins/oms/plugin.json) | Codex desktop, ChatGPT Work | `@OMS`: choose a Main, give a goal, follow leads, decide approvals; panel tools over `oms mcp-server` | Marketplace at the repository root, entry `oms@oh-my-setting-local` ([guide](docs/DASHBOARD.md#register-a-marketplace-once)) |
+| [`oms`](plugins/oms-ssh/oms/plugin.json) over SSH | Desktop app on a PC that reaches the OMS host with OpenSSH | Same `@OMS` tools through the `oms-runtime` SSH host alias | Marketplace path `plugins/oms-ssh`, entry `oms@oms-ssh` |
+| [`oms-panel`](plugins/oms-app/) (MCP App) | Antigravity App 2.34+, Claude Desktop | Interactive OMS panel (project, Board, GitHub, usage) inside the app; asks the host to expand beside or over the chat when the host allows it | Antigravity: install the plugin directory; Claude Desktop: add `oms-panel` from [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json) ([guide](docs/DASHBOARD.md#claude-and-antigravity)) |
+| [`oh-my-setting`](plugins/antigravity/plugin.json) (Antigravity) | Antigravity CLI/IDE | Harness state over MCP: task packet, failure ledger, handoff digests, Work Journal | Installed by the OMS installer when Antigravity is present |
+| [`oms-skills`](.claude-plugin/marketplace.json) | Claude Code | The nine `custom-skills/` OMS skills as a plugin, for setups that load skills only from plugins; needs an OMS install; no hooks, MCP or panel | Optional: `claude plugin marketplace add eightmm/oh-my-setting`, then `claude plugin install oms-skills@oh-my-setting` ([note](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)). Not needed with a normal install (skills would be listed twice) |
+| [`oms-panel`](plugins/claude-code/) (Claude Code pane) | Claude Code v2.1.287+ | Read-only pane beside the transcript drawn from `oms dashboard --json`; `/oms-panel` | Preview: `claude --plugin-dir plugins/claude-code`; not in the marketplace yet ([README](plugins/claude-code/README.md)) |
 
 ---
 

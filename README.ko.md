@@ -18,7 +18,7 @@
 | 작업 | OMS 명령과 동작 | 안내 문서 |
 |---|---|---|
 | **터미널에서 프로젝트 운영하기** | `oms`로 패널을 엽니다. 설치된 Codex, Claude Code, Antigravity(Agy), 또는 Codex 게이트웨이를 쓰는 Pi를 Main으로 선택할 수 있습니다. tmux 관리 패널은 별도 창에 provider 오케스트레이터를 열고, 실행 중인 Main에 다시 연결할 수 있습니다. Board와 Detail에는 provider 또는 OMS 기록으로 확인할 수 있는 주간 쿼터, 토큰 사용량, 활동이 표시됩니다. | [터미널 패널](docs/TERMINAL-PANEL.md) |
-| **작업을 위임하고 배정하기** | Overall Main은 관리만 합니다. 범위를 정해 작업을 위임하고 증거를 검토해 수락을 결정하며 저장소를 직접 수정하지 않습니다. Provider Lead는 배정 하나를 맡는 팀리더로 지원되는 네이티브 워커를 조율합니다. `oms peer-delegate`는 빌더의 수정 작업을 격리합니다. `oms agent-role`로 역할 프로필을, `oms panel --routes`로 쿼터를 고려하는 라우팅 정책을 확인합니다. `oms connect-services`로 Codex, Claude, Pi의 별도 계정 홈을 라우팅에 등록합니다. | [Main 정책](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [라우팅](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [계정](docs/TERMINAL-PANEL.md#provider-accounts) |
+| **작업을 위임하고 배정하기** | Overall Main은 관리만 합니다. 범위를 정해 작업을 위임하고 증거를 검토해 수락을 결정하며 저장소를 직접 수정하지 않습니다. Provider Lead는 배정 하나를 맡는 팀리더로 지원되는 네이티브 워커를 조율합니다. `oms peer-delegate`는 빌더의 수정 작업을 격리합니다. `oms agent-role`로 역할 프로필을, `oms panel --routes`로 쿼터를 고려하는 라우팅 정책을 확인합니다. `oms connect-services`로 Codex, Claude, Pi의 별도 계정 홈을 라우팅에 등록합니다. 패널에서 `L`을 누르거나 `oms connect-services --login PROVIDER`를 실행해 Codex, Claude Code, Antigravity에 로그인할 수 있으며, 이 로그인은 기본 계정 홈을 사용합니다. | [Main 정책](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [라우팅](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [계정](docs/TERMINAL-PANEL.md#provider-accounts) |
 | **독립 자문과 리뷰 받기** | `oms consult`로 한 에이전트에게 묻고, `oms peer-ask --debate`로 provider별 응답을 비교합니다. `oms peer-review`로 독립 diff 리뷰를 요청합니다. Overall Main은 리뷰 결과를 종합해 수락 여부를 판단합니다. | [에이전트 협업](docs/COMPONENTS.md#asking-other-agents) |
 | **프로젝트 의도를 기록하고 영향 범위 찾기** | `oms init`으로 프로젝트 정책을 구성하고, 합의한 범위·결정·검증 조건을 `PROJECT.md`에 기록합니다. `oms graph project`로 심볼·의존 관계·영향 경로를 찾고, `oms runtime context`로 필요한 작업 맥락을 제한된 분량으로 구성합니다. | [프로젝트 맥락](docs/PROJECT-CONTEXT.md) · [그래프 안내](docs/GRAPH-ENGINEERING.md#project-graph) |
 | **계획을 추적하고 인수인계하기** | `oms agent-plan`은 의존 관계와 검토 상태를 추적합니다. `oms inbox`와 `oms dashboard`에서 확인이 필요한 일을 찾고, `oms agent-task`, `oms journal`, `oms session-handoff`로 재개 메모·작업 이력·세션 요약을 남깁니다. | [계획](docs/COMPONENTS.md#plans-and-bounded-autonomy) · [상태와 인수인계](docs/COMPONENTS.md#state-memory-and-handoff) |
@@ -44,7 +44,7 @@ Git 저장소에서 `oms`를 실행하면 터미널 패널을 열 수 있습니�
 
 OMS는 `~/.local/bin/oms`에서 네이티브 Rust CLI로 실행됩니다. 핵심 명령에는 시스템 Python 설정이 필요 없습니다. 기본 `core` 설치는 코딩 에이전트 provider 하나를 구성하며, 관리 패널은 tmux를 사용합니다. [설치 안내](docs/INSTALL.ko.md)
 
-Codex 또는 ChatGPT Work 데스크톱 대화에서 **@OMS**를 불러 Main을 고르고 목표를 전달할 수 있습니다. 같은 대화에서 Lead의 진행 상황과 승인 요청을 확인합니다. ChatGPT Work에서는 대화 옆에 OMS 패널도 열 수 있습니다. [프로젝트·SSH 호스트 연결 방법](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
+Codex 또는 ChatGPT Work 데스크톱 대화에서 **@OMS**를 불러 Main을 고르고 목표를 전달할 수 있습니다. 같은 대화에서 Lead의 진행 상황과 승인 요청을 확인합니다. ChatGPT Work에서는 대화 옆에 OMS 패널을 열 수 있고, Claude Desktop과 Antigravity App에서도 `oms-panel` MCP App으로 OMS 패널을 열 수 있습니다([플러그인과 연동](#플러그인과-연동)). [프로젝트·SSH 호스트 연결 방법](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
 
 <details>
 <summary>설치 시 구성되는 항목</summary>
@@ -61,6 +61,20 @@ oms doctor       # 하네스 연결 상태 및 provider 점검
 oms update       # 설정된 ref를 따라 OMS 설치 갱신
 oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 ```
+
+---
+
+## 플러그인과 연동
+
+| 이름 | 호스트 | 기능 | 설치 방법 |
+|---|---|---|---|
+| [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) | Codex CLI | 프롬프트 스킬 라우팅, 압축 전 인수인계, 고위험 턴 가드, 내용 없는 라이프사이클 카운터 | OMS 설치기가 등록 (`oms update`로 유지) |
+| [`oms`](plugins/oms/plugin.json) | Codex 데스크톱, ChatGPT Work | `@OMS`: Main 선택, 목표 전달, Lead 추적, 승인 결정, `oms mcp-server` 기반 패널 도구 | 저장소 루트 마켓플레이스, 항목 `oms@oh-my-setting-local` ([안내](docs/DASHBOARD.md#register-a-marketplace-once)) |
+| [`oms`](plugins/oms-ssh/oms/plugin.json) (SSH 경유) | OpenSSH로 OMS 호스트에 연결하는 PC의 데스크톱 앱 | `oms-runtime` SSH 호스트 별칭으로 동일한 `@OMS` 도구 제공 | 마켓플레이스 경로 `plugins/oms-ssh`, 항목 `oms@oms-ssh` |
+| [`oms-panel`](plugins/oms-app/) (MCP App) | Antigravity App 2.34+, Claude Desktop | 앱 내부 대화형 OMS 패널(프로젝트, Board, GitHub, 사용량); 호스트가 허용하면 대화 옆이나 위에 확장 표시 요청 | Antigravity: 플러그인 디렉터리 설치; Claude Desktop: [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json)의 `oms-panel` 추가 ([안내](docs/DASHBOARD.md#claude-and-antigravity)) |
+| [`oh-my-setting`](plugins/antigravity/plugin.json) (Antigravity) | Antigravity CLI/IDE | MCP 기반 하네스 상태: 작업 패킷, 실패 기록, 인수인계 요약, Work Journal | Antigravity가 있으면 OMS 설치기가 설치 |
+| [`oms-skills`](.claude-plugin/marketplace.json) | Claude Code | 플러그인에서만 스킬을 불러오는 환경용 `custom-skills/` OMS 스킬 9종; OMS 설치 필요; 훅·MCP·패널 미포함 | 선택 사항: `claude plugin marketplace add eightmm/oh-my-setting` 후 `claude plugin install oms-skills@oh-my-setting` ([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)). 일반 설치에서는 불필요(스킬이 중복 표시됨) |
+| [`oms-panel`](plugins/claude-code/) (Claude Code pane) | Claude Code v2.1.287+ | `oms dashboard --json`으로 그리는 대화 옆 읽기 전용 패널; `/oms-panel` | 미리보기: `claude --plugin-dir plugins/claude-code`; 마켓플레이스 미등록 ([README](plugins/claude-code/README.md)) |
 
 ---
 
