@@ -48,6 +48,7 @@ fn json_files(ctx: &Context<'_>, folder: &str) -> Result<Vec<Value>> {
     Ok(result)
 }
 fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usize)> {
+    use oms_command_telemetry::store::resolution::{Exit, Row, project};
     let (rows, mut bad) = rows(ctx, ".oms/artifacts/index.jsonl");
     let mut counts = HashMap::new();
     for row in &rows {
@@ -63,33 +64,40 @@ fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usi
                 && row.get("exit").int().is_ok_and(|n| n >= 0)
                 && counts.get(row.text("event_id")) == Some(&1)
     };
-    let mut resolved = BTreeSet::new();
-    let mut previous = HashMap::new();
-    for row in &rows {
-        let target = previous.get(row.text("resolves_event_id")).copied();
-        previous.entry(row.text("event_id")).or_insert(row);
-        if !valid(row) {
-            bad += 1;
-            continue;
-        }
-        if row.text("kind") == "artifact-resolution" {
-            if target.is_some_and(|t| {
-                valid(t)
-                    && t.get("schema").is_int(1)
-                    && t.get("exit").int().is_ok_and(|n| n > 0)
-                    && t.text("kind") != "artifact-resolution"
-                    && t.text("operation_id") == row.text("operation_id")
-                    && t.text("artifact_id") == row.text("artifact_id")
-                    && row.get("exit").is_int(0)
-                    && row.text("resolution") == "resolved"
-                    && row.text("parent_event_id") == t.text("event_id")
-            }) {
-                resolved.insert(row.text("resolves_event_id").to_owned());
-            } else {
-                bad += 1;
-            }
-        }
-    }
+    let views = rows
+        .iter()
+        .map(|row| Row {
+            event_id: row.get("event_id").str().ok().map(str::as_bytes),
+            schema_one: row.get("schema").is_int(1) && valid(row),
+            is_resolution: row.text("kind") == "artifact-resolution",
+            exit: match row.get("exit").int() {
+                Ok(0) => Exit::Success,
+                Ok(n) if n > 0 => Exit::Failure,
+                _ => Exit::Invalid,
+            },
+            resolves_event_id: row.get("resolves_event_id").str().ok().map(str::as_bytes),
+            parent_event_id: row.get("parent_event_id").str().ok().map(str::as_bytes),
+            resolved: row.text("resolution") == "resolved",
+        })
+        .collect::<Vec<_>>();
+    let projection = project(&views, |target, resolver| {
+        rows[target].text("operation_id") == rows[resolver].text("operation_id")
+            && rows[target].text("artifact_id") == rows[resolver].text("artifact_id")
+    });
+    bad += rows
+        .iter()
+        .enumerate()
+        .filter(|(pos, row)| {
+            !valid(row)
+                || row.text("kind") == "artifact-resolution"
+                    && !projection.accepted_resolution_rows.contains(pos)
+        })
+        .count();
+    let resolved = projection
+        .resolved_event_ids
+        .into_iter()
+        .filter_map(|id| std::str::from_utf8(id).ok().map(str::to_owned))
+        .collect();
     Ok((rows, resolved, bad))
 }
 const STATE_ACTIONABLE_MAX: usize = 5;

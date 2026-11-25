@@ -1,6 +1,6 @@
 use crate::common::*;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, ffi::OsString, path::Path};
+use std::{ffi::OsString, path::Path};
 
 fn packet(repo: &Path) -> Vec<u8> {
     oms_safe_fs::Root::open(repo)
@@ -100,18 +100,41 @@ fn snapshot(repo: &Path, ctx: &Context<'_>) -> String {
         .split(|b| *b == b'\n')
         .filter_map(document)
         .collect::<Vec<_>>();
-    let resolved = rows
+    use oms_command_telemetry::store::resolution::{Exit, Row, project};
+    let views = rows
         .iter()
-        .filter(|r| r["kind"] == "artifact-resolution")
-        .map(|r| text(r, "resolves_event_id"))
-        .collect::<BTreeSet<_>>();
+        .map(|row| Row {
+            event_id: row["event_id"].as_str().map(str::as_bytes),
+            // The hook reads raw rows, so require the typed artifact contract
+            // before a resolution can hide dissent from the next session.
+            schema_one: row["schema"].as_u64() == Some(1)
+                && ["event_id", "operation_id", "artifact_id", "ts", "kind"]
+                    .iter()
+                    .all(|key| row[*key].as_str().is_some_and(|s| !s.is_empty()))
+                && row["provider"].is_string(),
+            is_resolution: row["kind"] == "artifact-resolution",
+            exit: match row["exit"].as_u64() {
+                Some(0) => Exit::Success,
+                Some(_) => Exit::Failure,
+                None => Exit::Invalid,
+            },
+            resolves_event_id: row["resolves_event_id"].as_str().map(str::as_bytes),
+            parent_event_id: row["parent_event_id"].as_str().map(str::as_bytes),
+            resolved: row["resolution"] == "resolved",
+        })
+        .collect::<Vec<_>>();
+    let resolved = project(&views, |target, resolver| {
+        rows[target]["operation_id"] == rows[resolver]["operation_id"]
+            && rows[target]["artifact_id"] == rows[resolver]["artifact_id"]
+    })
+    .resolved_event_ids;
     let open = rows
         .iter()
         .filter(|r| {
             r["kind"] == "review-outcome"
                 && r["exit"] == 1
                 && r["review"]["overall"] == 1
-                && !resolved.contains(text(r, "event_id"))
+                && !resolved.contains(text(r, "event_id").as_bytes())
         })
         .rfind(|r| {
             let seats = r["review"]["seats"].as_array().cloned().unwrap_or_default();

@@ -19,6 +19,7 @@ use account_binding::{
 };
 use oms_command_peer::native_model::{self, AGY_FIXED_EFFORT_MODELS};
 use oms_panel_core::native::reference::process::Owner;
+use oms_panel_core::services::ExecutionRequest;
 use oms_panel_core::{NativeCommand, Store, Transaction, Value, state::AttemptCache, terminals};
 use serde_json::json;
 use std::borrow::Cow;
@@ -5975,6 +5976,174 @@ fn binding_summary(
     }
 }
 
+/// Claude/AGY canonical tasks use the issued Plan lease path. This does not
+/// create, type into or claim custody of a persistent native provider Lead.
+pub(crate) fn run_managed_plan(
+    repo: &Path,
+    execution: &Path,
+    options: &Options,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Output> {
+    crate::parent_only()?;
+    require(options.managed_plan_task(), "managed Plan task required")?;
+    let provider = options.required("orchestrator")?;
+    let task_id = options.required("task-id")?;
+    crate::identifier(&task_id)?;
+    let room = commands::room(options).ok_or_else(|| Error::new("select the Main's room"))?;
+    let panel = Panel::load(repo, &room, services, stop)?;
+    panel.require_main_with_cache(options.get("owner"), &AttemptCache::default())?;
+    let request = |argv| {
+        let mut request = ExecutionRequest::new(argv, execution);
+        request.environment = vec![
+            ("OMS_STATE_REPO".into(), repo.as_os_str().into()),
+            ("OMS_ROOM_REPO".into(), repo.as_os_str().into()),
+            ("OMS_ROOM_ID".into(), room.clone().into()),
+            (
+                "OMS_ROOM_PARTICIPANT".into(),
+                panel.participant.clone().into(),
+            ),
+            (
+                "OMS_PANEL_MAIN_ATTEMPT".into(),
+                panel.attempt.clone().into(),
+            ),
+            ("OMS_PANEL_OWNER".into(), panel.owner.clone().into()),
+        ];
+        request
+    };
+    let selected = services
+        .command_context(
+            NativeCommand::Plan,
+            &request(commands::strings(&["evidence-snapshot", "--id", &task_id])),
+            stop,
+        )?
+        .json()?;
+    require(
+        selected["id"] == task_id && selected["state"] == "ready",
+        "managed --task-id requires the selected ready Plan task; reconcile existing custody separately",
+    )?;
+    require(
+        selected["contract_stale"] == false,
+        "the selected Plan contract is stale; review the current Plan before dispatch",
+    )?;
+    let assignment = selected
+        .get("assignment")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let assignment_fields = assignment
+        .as_object()
+        .ok_or_else(|| Error::new("Plan task lacks a canonical assignment"))?;
+    require(
+        assignment_fields.is_empty()
+            || assignment_fields.get("provider").and_then(Value::as_str) == Some(provider.as_str()),
+        "--orchestrator conflicts with the frozen Plan assignment provider; select that provider or review a new Plan",
+    )?;
+    let sha = text(&selected, "task_sha256");
+    require(
+        sha.len() == 64
+            && sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "Plan evidence-snapshot lacks an exact task digest",
+    )?;
+    require(
+        selected["allowed_paths"]
+            .as_array()
+            .is_some_and(|paths| !paths.is_empty())
+            && !text(&selected, "verify").trim().is_empty(),
+        "managed Plan task requires frozen allowed paths and a verifier",
+    )?;
+    let argv = commands::strings(&[
+        "--to",
+        &provider,
+        "--id",
+        &task_id,
+        "--expected-task-sha256",
+        sha,
+    ]);
+    let mut value = json!({
+        "mode": "managed-plan-run",
+        "transport": "managed",
+        "provider": provider,
+        "task_id": task_id,
+        "task_sha256": sha,
+        "room": room,
+        "owner": panel.owner,
+        "owner_attempt": panel.attempt,
+        "participant": panel.participant,
+        "state_repo": repo,
+        "execution_repo": execution,
+        "native_lead_input": false,
+        "auto_land": false,
+        "publication": "none",
+        "review_status": "not-inferred",
+        "assignment": assignment,
+        "allowed_paths": selected["allowed_paths"],
+        "verify": selected["verify"],
+    });
+    if options.has("dry-run") {
+        value["status"] = "preview".into();
+        value["command"] = json!("plan-run");
+        value["argv"] = json!(
+            argv.iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+        );
+        return if options.has("json") {
+            Ok((0, json(&value)?, vec![]))
+        } else {
+            Ok((
+                0,
+                format!(
+                    "panel: preview managed plan-run provider={provider} task={task_id}; frozen Plan assignment/scope/verifier, review-only, publication=none; no native Lead input\n"
+                )
+                .into_bytes(),
+                vec![],
+            ))
+        };
+    }
+    // Never hold the native provider-session transaction while a managed worker
+    // runs. Plan's exact claim CAS and issued binding own execution authority.
+    panel.require_main_with_cache(options.get("owner"), &AttemptCache::default())?;
+    let result = services.command_context(NativeCommand::PlanRun, &request(argv), stop)?;
+    let complete = result.cleanup_complete && result.output_complete && !result.limited;
+    let code = if result.code == 0 && !complete {
+        75
+    } else {
+        result.code
+    };
+    if options.has("json") {
+        value["status"] = if complete { "returned" } else { "unknown" }.into();
+        value["producer"] = json!({
+            "exit_code": result.code,
+            "stdout": String::from_utf8_lossy(&result.stdout),
+            "stderr": String::from_utf8_lossy(&result.stderr),
+            "cleanup_complete": result.cleanup_complete,
+            "output_complete": result.output_complete,
+            "limited": result.limited,
+        });
+        // Normally native output is UTF-8; retain bytes too if the producer
+        // returns non-text evidence instead of silently replacing those bytes.
+        if std::str::from_utf8(&result.stdout).is_err() {
+            value["producer"]["stdout_bytes"] = json!(result.stdout);
+        }
+        if std::str::from_utf8(&result.stderr).is_err() {
+            value["producer"]["stderr_bytes"] = json!(result.stderr);
+        }
+        Ok((code, json(&value)?, result.stderr))
+    } else {
+        let mut stderr = format!(
+            "panel: managed plan-run provider={provider} task={task_id}; review-only, publication=none; no native Lead input\n"
+        )
+        .into_bytes();
+        if !complete {
+            stderr.extend_from_slice(b"panel: managed completion is unknown; inspect retained Plan/worker evidence before retrying\n");
+        }
+        stderr.extend(result.stderr);
+        Ok((code, result.stdout, stderr))
+    }
+}
+
 pub fn run(
     repo: &Path,
     provider: &str,
@@ -8819,6 +8988,8 @@ pub(crate) mod tests {
             // Canonical-query port for mutation and retirement boundary fixtures;
             // this never writes a Plan completion or a landing receipt.
             task_snapshot_override: RefCell<Option<Value>>,
+            managed_requests: RefCell<Vec<(NativeCommand, ExecutionRequest)>>,
+            managed_result: RefCell<Option<CommandOutput>>,
             event_lists: Cell<usize>,
             assignment_events: Cell<usize>,
             main_attempt: String,
@@ -8882,6 +9053,8 @@ pub(crate) mod tests {
                     real_events: Cell::new(false),
                     canonical_assignment: Cell::new(false),
                     task_snapshot_override: RefCell::new(None),
+                    managed_requests: RefCell::new(Vec::new()),
+                    managed_result: RefCell::new(None),
                     event_lists: Cell::new(0),
                     assignment_events: Cell::new(0),
                     main_attempt: MAIN.into(),
@@ -9769,6 +9942,24 @@ pub(crate) mod tests {
                 _stop: &AtomicBool,
             ) -> Option<oms_command_plan::services::GroupMembership> {
                 self.workspace_group.borrow().clone()
+            }
+            fn command_context(
+                &self,
+                command: NativeCommand,
+                request: &ExecutionRequest,
+                stop: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                self.managed_requests
+                    .borrow_mut()
+                    .push((command, request.clone()));
+                if command == NativeCommand::PlanRun {
+                    return Ok(self
+                        .managed_result
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| out(b"worker returned".to_vec())));
+                }
+                self.command(command, &self.repo, &request.argv, stop)
             }
             fn command(
                 &self,
@@ -13951,6 +14142,160 @@ pub(crate) mod tests {
                         "--verify",
                         "true",
                     ]);
+                }
+                if scenario == 0 {
+                    // Use the real public caller, before any Lead exists. This
+                    // also catches accidental routing through native dry-run.
+                    plan(&[
+                        "add",
+                        "--id",
+                        "managed-frozen",
+                        "--title",
+                        "Reviewed provider work",
+                        "--allowed",
+                        "managed",
+                        "--verify",
+                        "true",
+                        "--assignment",
+                        r#"{"provider":"claude","model":"frozen-model","reasoning_effort":"high"}"#,
+                    ]);
+                    let run = |provider: &str, task: &str, extra: &[&str]| {
+                        let mut args = commands::strings(&[
+                            "--orchestrator",
+                            provider,
+                            "--room",
+                            ROOM,
+                            "--task-id",
+                            task,
+                            "--json",
+                        ]);
+                        args.extend(commands::strings(extra));
+                        crate::run_with_services("panel", &args, &repo, &repo, &spy.stop, &spy)
+                    };
+                    let plan_bytes = std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap();
+                    for provider in ["claude", "antigravity"] {
+                        let preview = run(provider, "native-one", &["--dry-run"]);
+                        assert_eq!(preview.0, 0, "{}", String::from_utf8_lossy(&preview.2));
+                        let preview: Value = serde_json::from_slice(&preview.1).unwrap();
+                        assert_eq!(preview["mode"], "managed-plan-run");
+                        assert_eq!(preview["status"], "preview");
+                        assert_eq!(preview["native_lead_input"], false);
+                        assert_eq!(preview["allowed_paths"], json!(["src"]));
+                        assert_eq!(preview["verify"], "true");
+                        assert!(
+                            !spy.managed_requests
+                                .borrow()
+                                .iter()
+                                .any(|(command, _)| *command == NativeCommand::PlanRun)
+                        );
+                    }
+                    assert_eq!(
+                        std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+                        plan_bytes
+                    );
+                    assert!(spy.mutating_calls().is_empty());
+                    let preview = run("claude", "managed-frozen", &["--dry-run"]);
+                    assert_eq!(preview.0, 0);
+                    let preview: Value = serde_json::from_slice(&preview.1).unwrap();
+                    assert_eq!(preview["assignment"]["model"], "frozen-model");
+                    assert_eq!(preview["assignment"]["reasoning_effort"], "high");
+                    let refused = run("antigravity", "managed-frozen", &[]);
+                    assert_ne!(refused.0, 0);
+                    assert!(
+                        String::from_utf8_lossy(&refused.2)
+                            .contains("frozen Plan assignment provider")
+                    );
+                    spy.task_snapshot_override.replace(Some(json!({
+                        "id": "native-one", "state": "claimed"
+                    })));
+                    assert_ne!(run("antigravity", "native-one", &[]).0, 0);
+                    spy.task_snapshot_override.replace(None);
+                    assert_ne!(run("claude", "native-one", &["--owner", "claude"]).0, 0);
+                    spy.managed_result.replace(Some(CommandOutput {
+                        code: 124,
+                        stdout: b"retained partial report".to_vec(),
+                        stderr: b"worker outcome unknown".to_vec(),
+                        cleanup_complete: false,
+                        output_complete: false,
+                        limited: false,
+                    }));
+                    let returned = run("claude", "native-one", &[]);
+                    assert_eq!(returned.0, 124);
+                    assert_eq!(returned.2, b"worker outcome unknown");
+                    let returned: Value = serde_json::from_slice(&returned.1).unwrap();
+                    assert_eq!(returned["status"], "unknown");
+                    assert_eq!(returned["review_status"], "not-inferred");
+                    assert_eq!(returned["producer"]["stdout"], "retained partial report");
+                    assert_eq!(returned["producer"]["exit_code"], 124);
+                    assert_eq!(returned["auto_land"], false);
+                    let requests = spy.managed_requests.borrow();
+                    let (_, request) = requests
+                        .iter()
+                        .find(|(command, _)| *command == NativeCommand::PlanRun)
+                        .unwrap();
+                    assert_eq!(request.cwd, repo);
+                    assert_eq!(
+                        request.argv,
+                        commands::strings(&[
+                            "--to",
+                            "claude",
+                            "--id",
+                            "native-one",
+                            "--expected-task-sha256",
+                            text(&returned, "task_sha256"),
+                        ])
+                    );
+                    for (key, expected) in [
+                        ("OMS_STATE_REPO", repo.as_os_str()),
+                        ("OMS_ROOM_REPO", repo.as_os_str()),
+                        ("OMS_ROOM_ID", std::ffi::OsStr::new(ROOM)),
+                        ("OMS_ROOM_PARTICIPANT", std::ffi::OsStr::new(MAIN)),
+                        ("OMS_PANEL_MAIN_ATTEMPT", std::ffi::OsStr::new(MAIN)),
+                        ("OMS_PANEL_OWNER", std::ffi::OsStr::new("codex")),
+                    ] {
+                        assert!(
+                            request
+                                .environment
+                                .iter()
+                                .any(|(name, value)| name == key && value == expected)
+                        );
+                    }
+                    drop(requests);
+                    spy.managed_result.replace(Some(CommandOutput {
+                        code: 0,
+                        stdout: b"partial output".to_vec(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: true,
+                        ..Default::default()
+                    }));
+                    let limited = run("antigravity", "native-one", &[]);
+                    assert_eq!(limited.0, 75);
+                    let limited: Value = serde_json::from_slice(&limited.1).unwrap();
+                    assert_eq!(limited["status"], "unknown");
+                    assert_eq!(limited["producer"]["exit_code"], 0);
+                    assert_eq!(limited["producer"]["stdout"], "partial output");
+                    let plain = crate::run_with_services(
+                        "panel",
+                        &commands::strings(&[
+                            "--orchestrator",
+                            "claude",
+                            "--task-id",
+                            "native-one",
+                        ]),
+                        &repo,
+                        &repo,
+                        &spy.stop,
+                        &spy,
+                    );
+                    assert_eq!(plain.0, 75);
+                    assert_eq!(plain.1, b"partial output");
+                    assert!(String::from_utf8_lossy(&plain.2).contains("completion is unknown"));
+                    assert!(spy.mutating_calls().is_empty());
+                    assert_eq!(
+                        std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+                        plan_bytes
+                    );
                 }
                 let state = private_dir(&tmp.0.join("state"));
                 let codex_home = private_dir(&tmp.0.join("codex"));

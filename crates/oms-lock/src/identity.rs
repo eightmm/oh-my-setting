@@ -1,5 +1,5 @@
 //! One fixed process query for hosts without procfs; never a transform chain.
-use crate::{Cancellation, Error};
+use crate::Error;
 #[cfg(target_os = "linux")]
 use std::fs::File;
 use std::io::Read;
@@ -14,11 +14,11 @@ use std::time::Instant;
 #[derive(Clone, Copy)]
 pub(crate) struct Observation<'a> {
     pub deadline: Instant,
-    pub cancellation: Option<&'a Cancellation>,
+    pub cancellation: Option<&'a (dyn Fn() -> bool + Sync)>,
 }
 impl Observation<'_> {
     pub fn check(self) -> Result<(), Error> {
-        if self.cancellation.is_some_and(Cancellation::is_cancelled) {
+        if self.cancellation.is_some_and(|cancelled| cancelled()) {
             return Err(Error::Cancelled);
         }
         if Instant::now() >= self.deadline {
@@ -300,11 +300,12 @@ mod tests {
                 Err(rustix::io::Errno::CHILD)
             ));
         }
-        let cancellation = Cancellation::default();
+        let cancellation = crate::Cancellation::default();
+        let cancelled = || cancellation.is_cancelled();
         std::thread::scope(|scope| {
             let observation = Observation {
                 deadline: Instant::now() + Duration::from_secs(2),
-                cancellation: Some(&cancellation),
+                cancellation: Some(&cancelled),
             };
             let fixture = &fixture;
             let waiter = scope.spawn(move || ps(7, observation, fixture));

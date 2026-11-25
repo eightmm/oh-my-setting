@@ -255,9 +255,35 @@ Room reservation while preserving the reusable Lead session. There is no automat
 claim heartbeat, native child cancellation/resume, or cleanup proof;
 `write_isolation` remains `unmanaged` and `child_cleanup` remains `unsupported`.
 
-This bound path supports the ordinary Codex Lead. Other native providers and the
-alternate Codex Lead use managed `--dispatch ROLE --task-id TASK` for canonical
-work. Explicit `--unbound --task TEXT` is conversation without task credit. Main
+This native bound path supports the ordinary Codex Lead. Claude and AGY expose
+the same task selection through a managed Plan runner:
+
+```sh
+oms panel --orchestrator claude --room ROOM --task-id TASK
+oms panel --orchestrator antigravity --room ROOM --task-id TASK --dry-run --json
+```
+
+The current Main must own the Room. The task must be ready and its frozen
+assignment provider must match the selected provider when one is recorded.
+This route pins the canonical task digest, then uses `plan-run` and its issued
+claim, scope, verifier and review gates. It does not type into a native Lead or
+claim native child custody. It stops at review without automatic landing or
+publication. Do not pre-claim; this route claims the ready task itself.
+An existing claim is refused, even when expired; reconcile it
+separately. `--task`, account, model, effort and native-result overrides are
+refused: amend the reviewed Plan to change the work. `--dry-run` only checks
+ownership and the frozen selection; it launches no runner or provider. JSON
+labels the managed transport and preserves producer output and completion
+flags. Incomplete output or cleanup is unknown, with exit 75 when the producer
+otherwise returned zero; review success is never inferred from a process exit.
+For a failure or unknown return, inspect retained Plan/worker evidence and follow
+checked Plan recovery. Do not use `panel --continue` for this route or resubmit
+the task blindly; `--continue` belongs to role-dispatch workers.
+
+The alternate Codex Lead remains outside the native task binding. Direct
+`--dispatch ROLE --task-id TASK` labels managed work but is not an issued Plan
+lease; use `plan-run` when the canonical Plan lifecycle is required.
+Explicit `--unbound --task TEXT` is conversation without task credit. Main
 chooses import, review and the next round; the existing bounded tick wake can send
 a reminder into Main's native session, without importing, reconciling or dispatching
 the Lead automatically. The

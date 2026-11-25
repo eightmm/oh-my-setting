@@ -119,7 +119,6 @@ pub mod resources;
 pub mod router;
 pub mod services;
 pub mod ssh_adapter;
-mod statistics;
 pub mod storage;
 pub mod targets;
 pub mod value;

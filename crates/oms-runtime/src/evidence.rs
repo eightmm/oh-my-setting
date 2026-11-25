@@ -198,39 +198,37 @@ pub fn artifacts(rt: &Runtime<'_>) -> Result<Vec<Value>> {
     Ok(out)
 }
 pub fn resolved_ids(rows: &[Value]) -> BTreeSet<String> {
-    let mut counts = BTreeMap::<&str, usize>::new();
-    for r in rows.iter().filter(|r| r.text("_source") == INDEX) {
-        if let Ok(id) = r.get("event_id").str() {
-            *counts.entry(id).or_default() += 1
-        }
-    }
-    let by_id = rows
+    use oms_command_telemetry::store::resolution::{Exit, Row, project};
+    let rows = rows
         .iter()
-        .filter(|r| r.text("_source") == INDEX && counts.get(r.text("event_id")) == Some(&1))
-        .map(|r| (r.text("event_id"), r))
-        .collect::<BTreeMap<_, _>>();
-    let mut out = BTreeSet::new();
-    for r in by_id.values() {
-        if r.text("kind") != "artifact-resolution" {
-            continue;
-        }
-        let id = r.text("resolves_event_id");
-        let Some(t) = by_id.get(id) else { continue };
-        if r.get("schema").is_int(1)
-            && r.text("parent_event_id") == id
-            && r.text("resolution") == "resolved"
-            && r.get("exit").is_int(0)
-            && t.get("exit").int().is_ok_and(|n| n > 0)
-            && t.get("_ordinal").int().ok() < r.get("_ordinal").int().ok()
-            && t.get("schema").is_int(1)
-            && t.text("kind") != "artifact-resolution"
-            && r.get("operation_id") == t.get("operation_id")
-            && r.get("artifact_id") == t.get("artifact_id")
-        {
-            out.insert(id.into());
-        }
-    }
-    out
+        .filter(|r| r.text("_source") == INDEX)
+        .collect::<Vec<_>>();
+    let views = rows
+        .iter()
+        .map(|row| Row {
+            event_id: row.get("event_id").str().ok().map(str::as_bytes),
+            schema_one: row.get("schema").is_int(1),
+            is_resolution: row.text("kind") == "artifact-resolution",
+            exit: match row.get("exit").int() {
+                Ok(0) => Exit::Success,
+                Ok(n) if n > 0 => Exit::Failure,
+                _ => Exit::Invalid,
+            },
+            resolves_event_id: row.get("resolves_event_id").str().ok().map(str::as_bytes),
+            parent_event_id: row.get("parent_event_id").str().ok().map(str::as_bytes),
+            resolved: row.text("resolution") == "resolved",
+        })
+        .collect::<Vec<_>>();
+    project(&views, |target, resolver| {
+        let (target, resolver) = (rows[target], rows[resolver]);
+        target.get("_ordinal").int().ok() < resolver.get("_ordinal").int().ok()
+            && target.get("operation_id") == resolver.get("operation_id")
+            && target.get("artifact_id") == resolver.get("artifact_id")
+    })
+    .resolved_event_ids
+    .into_iter()
+    .filter_map(|id| std::str::from_utf8(id).ok().map(str::to_owned))
+    .collect()
 }
 fn admission_digest(rt: &Runtime<'_>, row: &Value) -> Result<String> {
     let raw = row.text("artifact");

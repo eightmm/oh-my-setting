@@ -144,43 +144,33 @@ fn admission_digest(v: &V) -> bool {
     })
 }
 pub(crate) fn resolved(rows: &[V]) -> BTreeSet<Vec<u8>> {
-    let mut entries = BTreeMap::<Vec<u8>, Vec<(usize, &V)>>::new();
-    for (pos, row) in rows.iter().enumerate() {
-        if let Some(id) = row["event_id"].bytes() {
-            entries.entry(id.to_vec()).or_default().push((pos, row));
-        }
-    }
-    let mut result = BTreeSet::new();
-    for (pos, row) in rows.iter().enumerate() {
-        if row["kind"].text() != Some("artifact-resolution") {
-            continue;
-        }
-        let (Some(target), Some(id)) = (row["resolves_event_id"].bytes(), row["event_id"].bytes())
-        else {
-            continue;
-        };
-        let (Some(targets), Some(resolvers)) = (entries.get(target), entries.get(id)) else {
-            continue;
-        };
-        if targets.len() != 1 || resolvers.len() != 1 {
-            continue;
-        }
-        let (oldpos, old) = targets[0];
-        if oldpos < pos
-            && schema_one(&row["schema"])
-            && schema_one(&old["schema"])
-            && row["parent_event_id"] == row["resolves_event_id"]
-            && row["resolution"].text() == Some("resolved")
-            && row["exit"].int() == Some("0")
-            && old["exit"].int().is_some_and(|v| v != "0")
-            && old["kind"].text() != Some("artifact-resolution")
-            && equal(&row["operation_id"], &old["operation_id"])
-            && equal(&row["artifact_id"], &old["artifact_id"])
-        {
-            result.insert(target.to_vec());
-        }
-    }
-    result
+    use crate::store::resolution::{Exit, Row, project};
+    let views = rows
+        .iter()
+        .map(|row| Row {
+            event_id: row["event_id"].bytes(),
+            schema_one: schema_one(&row["schema"]),
+            is_resolution: row["kind"].text() == Some("artifact-resolution"),
+            exit: match row["exit"].int() {
+                Some("0") => Exit::Success,
+                Some(_) => Exit::Failure,
+                None => Exit::Invalid,
+            },
+            resolves_event_id: row["resolves_event_id"].bytes(),
+            parent_event_id: row["parent_event_id"].bytes(),
+            resolved: row["resolution"].text() == Some("resolved"),
+        })
+        .collect::<Vec<_>>();
+    project(&views, |target, resolver| {
+        equal(
+            &rows[target]["operation_id"],
+            &rows[resolver]["operation_id"],
+        ) && equal(&rows[target]["artifact_id"], &rows[resolver]["artifact_id"])
+    })
+    .resolved_event_ids
+    .into_iter()
+    .map(<[u8]>::to_vec)
+    .collect()
 }
 fn schema_one(v: &V) -> bool {
     v.number() == Some(1.0) || *v == V::Bool(true)

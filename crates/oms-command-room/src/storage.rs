@@ -539,23 +539,8 @@ impl Store {
     }
     pub fn acquire(lock: &oms_lock::Lock, stop: &AtomicBool) -> Result<oms_lock::Guard> {
         checkpoint(stop)?;
-        let cancellation = oms_lock::Cancellation::default();
-        let finished = AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            let watcher = scope.spawn(|| {
-                while !finished.load(Ordering::Acquire) {
-                    if stop.load(Ordering::Acquire) {
-                        cancellation.cancel();
-                        break;
-                    }
-                    std::thread::park_timeout(Duration::from_millis(25));
-                }
-            });
-            let result = lock.acquire(Some(&cancellation)).map_err(io);
-            finished.store(true, Ordering::Release);
-            watcher.thread().unpark();
-            result
-        })
+        lock.acquire_with_cancel(|| stop.load(Ordering::Acquire))
+            .map_err(io)
     }
     pub fn rollover_lock(&self, id: &str, stop: &AtomicBool) -> Result<PanelGuard> {
         self.root.check()?;
