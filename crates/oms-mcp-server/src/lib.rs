@@ -582,7 +582,9 @@ impl<'a> Server<'a> {
 
 /// Serve bounded newline records, draining an oversized record before recovery.
 /// Blocking readers must be interruptible by the embedding process; the atomic
-/// flag is observed between records and while waiting on child operations.
+/// flag is observed between records and while waiting on child operations. A
+/// reader may report EOF once the flag is set; an unterminated record read
+/// before that EOF is then discarded, not dispatched.
 pub fn serve<R: BufRead, W: Write>(
     source_root: &Path,
     caller_cwd: &Path,
@@ -644,6 +646,7 @@ fn read_records(
         let mut record = Vec::new();
         let mut oversize = false;
         let mut seen = false;
+        let mut ended = false;
         loop {
             let buffer = reader.fill_buf()?;
             if buffer.is_empty() {
@@ -654,7 +657,7 @@ fn read_records(
                 .iter()
                 .position(|b| *b == b'\n')
                 .map_or(buffer.len(), |n| n + 1);
-            let ended = buffer[count - 1] == b'\n';
+            ended = buffer[count - 1] == b'\n';
             if !oversize {
                 if record.len() + count > MAX_REQUEST_BYTES {
                     oversize = true;
@@ -668,7 +671,8 @@ fn read_records(
                 break;
             }
         }
-        if !seen {
+        // A shutdown-interrupted read ends like EOF; never dispatch its partial record.
+        if !seen || (!ended && interrupted.load(Ordering::Relaxed)) {
             break;
         }
         let parsed = if oversize {
@@ -762,4 +766,60 @@ impl Server<'_> {
 /// OMS_PROGRAM the owner resolves `oms` itself and fails before publishing `pid`.
 pub fn peer_owner(arguments: &[std::ffi::OsString]) -> io::Result<()> {
     peer::owner(arguments)
+}
+
+#[cfg(test)]
+mod read_records_tests {
+    use super::*;
+
+    /// Serves `bytes`, then reports EOF; with `signal`, the flag is set at that
+    /// EOF as the stdio wake reader does when a signal arrives.
+    struct Input<'a> {
+        bytes: &'a [u8],
+        flag: &'a AtomicBool,
+        signal: bool,
+    }
+    impl io::Read for Input<'_> {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            unreachable!("read_records uses BufRead")
+        }
+    }
+    impl BufRead for Input<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.bytes.is_empty() && self.signal {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+            Ok(self.bytes)
+        }
+        fn consume(&mut self, n: usize) {
+            self.bytes = &self.bytes[n..];
+        }
+    }
+
+    fn dispatched(bytes: &[u8], signal: bool) -> usize {
+        let flag = AtomicBool::new(false);
+        let mut input = Input {
+            bytes,
+            flag: &flag,
+            signal,
+        };
+        let mut count = 0;
+        read_records(&flag, &mut input, |record| {
+            assert!(record.is_ok());
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        count
+    }
+
+    #[test]
+    fn shutdown_discards_only_an_unterminated_record() {
+        let partial = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        assert_eq!(dispatched(partial, true), 0);
+        assert_eq!(dispatched(partial, false), 1);
+        let complete = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}
+"#;
+        assert_eq!(dispatched(complete, true), 1);
+    }
 }
