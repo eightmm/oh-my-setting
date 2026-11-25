@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="730" viewBox="0 0 1080 730" role="img" aria-labelledby="title desc">
+  <title id="title">OMS의 별도 관계도: 담당 구조와 작업 의존성</title>
+  <desc id="desc">담당 구조는 하나의 Main이 구현, 호스트 연동, 검토 역할을 조율하고 각 역할이 작업을 맡는 예시다. 작업 의존성은 작업 카드 구성에서 첫 화면 구성으로 이어지고, 첫 화면 구성과 연결 상태 표시가 좁은 화면 전환에 필요한 선행 작업임을 보여준다. 작업 노드는 같은 상세 화면으로 연결한다. 실제 실행 상태가 아닌 개념 시안이다.</desc>
+  <defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1L7 4L0 7Z" fill="#8c99a7"/></marker></defs>
+  <style>
+    text{font-family:"Noto Sans CJK KR","Noto Sans KR",sans-serif;fill:#19232d;font-size:16px}
+    .sub{fill:#5f6c7c;font-size:15px}.heading{font-size:22px;font-weight:500}.label{font-weight:500}.small{font-size:14px}
+    .surface{fill:#fff;stroke:#dde3ea}.wire{fill:none;stroke:#8c99a7;stroke-width:1.5;marker-end:url(#arrow)}
+  </style>
+  <rect width="1080" height="730" fill="#f5f6f8"/>
+  <text x="20" y="36" class="heading">관계도 · 두 가지 보기</text>
+  <text x="708" y="36" class="sub">개념 배치도 · 실제 실행 상태 아님</text>
+  <rect x="20" y="62" width="510" height="600" rx="12" class="surface"/>
+  <rect x="550" y="62" width="510" height="600" rx="12" class="surface"/>
+  <text x="42" y="103" class="heading">담당 구조</text>
+  <text x="42" y="132" class="sub">Main → 역할 → 맡은 작업</text>
+  <path d="M275 223V254H113V281" class="wire"/>
+  <path d="M275 223V281" class="wire"/>
+  <path d="M275 223V254H437V281" class="wire"/>
+  <path d="M113 365V420" class="wire"/>
+  <path d="M275 365V420" class="wire"/>
+  <path d="M437 365V420" class="wire"/>
+  <rect x="203" y="156" width="144" height="68" rx="9" fill="#eaf5f2" stroke="#d2e8e1"/>
+  <text x="275" y="183" text-anchor="middle" class="small">전체 조율</text>
+  <text x="275" y="209" text-anchor="middle" class="label">Main · Claude</text>
+  <rect x="40" y="285" width="146" height="80" rx="9" fill="#f5f6f8" stroke="#dde3ea"/>
+  <text x="113" y="317" text-anchor="middle" class="label">구현</text>
+  <text x="113" y="344" text-anchor="middle" class="sub">Codex</text>
+  <rect x="202" y="285" width="146" height="80" rx="9" fill="#f5f6f8" stroke="#dde3ea"/>
+  <text x="275" y="317" text-anchor="middle" class="label">호스트 연동</text>
+  <text x="275" y="344" text-anchor="middle" class="sub">AGY</text>
+  <rect x="364" y="285" width="146" height="80" rx="9" fill="#f5f6f8" stroke="#dde3ea"/>
+  <text x="437" y="317" text-anchor="middle" class="label">검토</text>
+  <text x="437" y="344" text-anchor="middle" class="sub">Claude</text>
+  <rect x="40" y="425" width="146" height="126" rx="9" class="surface"/>
+  <text x="113" y="456" text-anchor="middle" class="label">연결 상태 표시</text>
+  <text x="113" y="485" text-anchor="middle" class="sub">검증 2 / 3</text>
+  <text x="113" y="526" text-anchor="middle" style="fill:#345f9b;font-size:15px">검증 중</text>
+  <rect x="202" y="425" width="146" height="126" rx="9" class="surface"/>
+  <text x="275" y="456" text-anchor="middle" class="label">좁은 화면 전환</text>
+  <text x="275" y="485" text-anchor="middle" class="sub">선행 작업 필요</text>
+  <text x="275" y="526" text-anchor="middle" class="sub">준비</text>
+  <rect x="364" y="425" width="146" height="126" rx="9" class="surface"/>
+  <text x="437" y="456" text-anchor="middle" class="label">작업 카드 구성</text>
+  <text x="437" y="485" text-anchor="middle" class="sub">완료 조건 3 / 3</text>
+  <text x="437" y="526" text-anchor="middle" style="fill:#16756a;font-size:15px">수락됨</text>
+  <text x="42" y="603" class="sub">역할과 provider는 예시 배치</text>
+  <text x="42" y="632" class="sub">실제 담당 관계를 읽어 표시</text>
+  <text x="572" y="103" class="heading">작업 의존성</text>
+  <text x="572" y="132" class="sub">선행 작업 → 후속 작업</text>
+  <path d="M655 238V299" class="wire"/>
+  <path d="M655 388V449H798V499M942 388V449H798" fill="none" stroke="#8c99a7" stroke-width="1.5"/>
+  <path d="M798 476V499" class="wire"/>
+  <rect x="575" y="156" width="160" height="82" rx="9" class="surface"/>
+  <text x="655" y="187" text-anchor="middle" class="label">작업 카드 구성</text>
+  <text x="655" y="217" text-anchor="middle" style="fill:#16756a;font-size:15px">수락됨</text>
+  <rect x="575" y="304" width="160" height="84" rx="9" class="surface"/>
+  <text x="655" y="337" text-anchor="middle" class="label">첫 화면 구성</text>
+  <text x="655" y="367" text-anchor="middle" style="fill:#875717;font-size:15px">검토 중</text>
+  <rect x="862" y="304" width="160" height="84" rx="9" class="surface"/>
+  <text x="942" y="337" text-anchor="middle" class="label">연결 상태 표시</text>
+  <text x="942" y="367" text-anchor="middle" style="fill:#345f9b;font-size:15px">검증 중</text>
+  <rect x="746" y="454" width="104" height="27" rx="4" fill="#fff"/>
+  <text x="798" y="473" text-anchor="middle" class="small">둘 다 필요</text>
+  <rect x="718" y="504" width="160" height="82" rx="9" class="surface"/>
+  <text x="798" y="536" text-anchor="middle" class="label">좁은 화면 전환</text>
+  <text x="798" y="567" text-anchor="middle" class="sub">선행 대기</text>
+  <text x="572" y="632" class="sub">관계 확인은 실행 요청과 별개</text>
+  <text x="20" y="703" class="label">작업 노드 선택 → 같은 작업의 요약 · 변경 · 검증 · 이력</text>
+</svg>

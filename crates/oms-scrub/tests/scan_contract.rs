@@ -1,5 +1,6 @@
 use oms_scrub::{
-    Error, MAX_ENV_BYTES, MAX_ENV_ENTRIES, MAX_HITS, MAX_INPUT_BYTES, Tier, redact, scan,
+    Error, MAX_ENV_BYTES, MAX_ENV_ENTRIES, MAX_HITS, MAX_INPUT_BYTES, Tier,
+    first_unpaired_key_end_line, redact, scan,
 };
 
 #[test]
@@ -74,6 +75,81 @@ fn private_blocks_and_precedence() {
     assert_eq!(
         redact(&data, &[(name.as_slice(), val)]).unwrap().bytes,
         b"[oms-redacted:token-assignment]\n"
+    );
+
+    // Lowercase and no-space markers close key blocks without swallowing trailing lines.
+    let begin_l = concat!("-----", "begin");
+    let begin_u = concat!("-----", "BEGIN");
+    let end_l = concat!("-----", "end");
+    let end_u = concat!("-----", "END");
+
+    let lower =
+        format!("first\n{begin_l} private key-----\nbody\n{end_l} private key-----\nlast\n");
+    assert_eq!(
+        redact(lower.as_bytes(), &[]).unwrap().bytes,
+        b"first\n[oms-redacted:private-key]\nlast\n"
+    );
+
+    let no_space = format!("first\n{begin_u}-----\nbody\n{end_u}-----\nlast\n");
+    assert_eq!(
+        redact(no_space.as_bytes(), &[]).unwrap().bytes,
+        b"first\n[oms-redacted:private-key]\nlast\n"
+    );
+
+    let single_line = format!("first\n{begin_u} KEY----- body {end_l} KEY-----\nlast\n");
+    assert_eq!(
+        redact(single_line.as_bytes(), &[]).unwrap().bytes,
+        b"first\n[oms-redacted:private-key]\nlast\n"
+    );
+
+    let back_to_back = format!(
+        "first\n{begin_u} KEY-----\nbody1\n{end_u} KEY----- {begin_u} KEY-----\nbody2\n{end_u} KEY-----\nlast\n"
+    );
+    assert_eq!(
+        redact(back_to_back.as_bytes(), &[]).unwrap().bytes,
+        b"first\n[oms-redacted:private-key]\nlast\n"
+    );
+
+    // first_unpaired_key_end_line reports only END markers with no preceding BEGIN.
+    assert_eq!(first_unpaired_key_end_line(b""), None);
+    assert_eq!(first_unpaired_key_end_line(b"ordinary\ntext\n"), None);
+    assert_eq!(
+        first_unpaired_key_end_line(format!("body\n{end_u} PRIVATE KEY-----\nafter").as_bytes()),
+        Some(2)
+    );
+    assert_eq!(
+        first_unpaired_key_end_line(format!("body\n{end_u}-----\nafter").as_bytes()),
+        Some(2)
+    );
+    assert_eq!(
+        first_unpaired_key_end_line(format!("body\n{end_l} private key-----\nafter").as_bytes()),
+        Some(2)
+    );
+    assert_eq!(
+        first_unpaired_key_end_line(
+            format!("body\r\n{end_u} PRIVATE KEY-----\r\nafter").as_bytes()
+        ),
+        Some(2)
+    );
+    assert_eq!(first_unpaired_key_end_line(lower.as_bytes()), None);
+    assert_eq!(first_unpaired_key_end_line(single_line.as_bytes()), None);
+    assert_eq!(
+        first_unpaired_key_end_line(
+            format!("body\n{end_u} KEY----- {begin_u} KEY-----\nbody2\n{end_u} KEY-----")
+                .as_bytes()
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        first_unpaired_key_end_line(format!("before\n{begin_u} PRIVATE KEY-----\nbody").as_bytes()),
+        None
+    );
+    assert_eq!(
+        first_unpaired_key_end_line(
+            format!("cut\n{end_u} KEY-----\nmid\n{begin_u} KEY-----\nb2\n{end_u} KEY-----")
+                .as_bytes()
+        ),
+        Some(2)
     );
 }
 

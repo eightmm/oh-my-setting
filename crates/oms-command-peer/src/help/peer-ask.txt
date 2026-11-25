@@ -44,6 +44,18 @@ Options:
                        Requires --debate; implies --require-complete.
   --require-complete   Fail unless every required seat completes the final round.
                        Partial quorum remains available without this flag.
+  --synthesize TARGET  Add one advisory synthesis with the selected provider/model.
+  --synthesis-json     Emit schema-1 oms-council-synthesis instead of human text.
+                       Requires --synthesize with an exact model, --debate,
+                       --deliberation and --require-complete. One required seat
+                       per provider; all declared rounds must complete. Enforces
+                       nonempty evidence/counterargument/verification sections
+                       and synthesis Decision/Evidence/Remaining disagreements/
+                       Verification sections. Binds request, run, rounds and
+                       artifact/output bytes by SHA-256. Requested models do not
+                       prove served models or independent reasoning. Missing,
+                       refused or malformed output fails; no automatic restatement.
+                       Existing text and --json modes are unchanged without it.
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Repo context is in round-1 prompts;

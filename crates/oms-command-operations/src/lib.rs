@@ -8,6 +8,7 @@ mod events;
 mod help;
 mod incremental;
 pub mod lock;
+pub mod observation;
 pub mod projection;
 pub mod storage;
 pub mod value;

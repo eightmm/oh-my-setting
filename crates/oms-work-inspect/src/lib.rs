@@ -122,6 +122,25 @@ pub fn task_status_snapshot(raw: &[u8]) -> Result<Json> {
     Ok(payload)
 }
 
+/// Select a display objective from the native packet freshness and unfinished Plan status.
+/// Closed, dormant and undated packets retain their original goal in the task history.
+pub fn current_objective<'a>(
+    recent_task_goal: &'a str,
+    plan_goal: &'a str,
+    plan_unfinished: bool,
+    project_goal: &'a str,
+) -> (&'a str, &'static str) {
+    if !recent_task_goal.is_empty() {
+        (recent_task_goal, "task")
+    } else if plan_unfinished && !plan_goal.is_empty() {
+        (plan_goal, "plan")
+    } else if !project_goal.is_empty() {
+        (project_goal, "project")
+    } else {
+        ("", "none")
+    }
+}
+
 /// Validate a present `agent-plan status --json` snapshot against the physical
 /// plan's projected task IDs. Counts and actionable membership must agree;
 /// cancelled tasks close work but do not establish verified completion.

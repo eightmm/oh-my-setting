@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+/// Schema-versioned advisory projection shared with the bounded handoff host.
+/// Consumers retain the 16 KiB limit and never treat it as execution authority.
+pub type ExperienceContext = serde_json::Value;
+
 #[derive(Clone, Debug)]
 pub struct Invocation {
     /// Public native OMS verb, never a shell command or script path.
@@ -63,6 +67,13 @@ impl Invocation {
 /// dispatch native implementations and preserve their exact exit/output.
 /// `Sync` lets `plan-run --parallel` share one host across worker threads.
 pub trait Services: oms_command_plan::Services + Sync {
+    /// Canonical failure metadata; the classification never grants a retry.
+    fn classify_autonomy_failure(&self, _text: &str, _exit: i32) -> Result<serde_json::Value> {
+        Ok(
+            serde_json::json!({"code":"unknown_failure", "recovery":"preserve_and_escalate",
+            "retryable":false,"fallback_allowed":false,"context_escalation_allowed":false}),
+        )
+    }
     /// Resolve the native registry/model-routing contract without calling a
     /// provider. The returned exact route is used for both failure identity
     /// and delegation, preventing defaults from moving between those steps.
@@ -92,6 +103,32 @@ pub trait Services: oms_command_plan::Services + Sync {
             2,
             "native discovery projection service unavailable",
         ))
+    }
+    /// Observe one exact external operation through its canonical producer.
+    /// Refresh may reconcile or query, but must never submit/retry the operation.
+    /// The autopilot receipt, not this projection, owns consumption of a result.
+    fn external_observation(
+        &self,
+        _repo: &Path,
+        _state: &Path,
+        _binding: &serde_json::Value,
+        _refresh: bool,
+        _interrupted: &AtomicBool,
+    ) -> Result<serde_json::Value> {
+        Err(Error::new(
+            2,
+            "native external observation service unavailable",
+        ))
+    }
+    /// Bounded source-checked experience for planning and handoff. Entries are
+    /// advisory observations, never acceptance, permission or an execution plan.
+    fn experience_context(
+        &self,
+        _repo: &Path,
+        _query: &str,
+        _interrupted: &AtomicBool,
+    ) -> Result<ExperienceContext> {
+        Err(Error::new(2, "native experience context unavailable"))
     }
     fn provider_names(&self) -> Result<Vec<String>> {
         Ok(["codex", "claude", "antigravity"]
@@ -307,9 +344,10 @@ impl oms_command_plan::Services for LocalServices<'_> {
             self.interrupted,
         )
         .map_err(|e| plan_error(e.message))?;
+        let exit = execution.0.clamp(0, 255) as u8;
         Ok(Execution {
-            exit: execution.0.clamp(0, 255) as u8,
-            runner_exit: 0,
+            exit,
+            runner_exit: exit,
             timed_out: execution.0 == 124,
             output_limited: execution.0 == 125,
             launch_error: false,

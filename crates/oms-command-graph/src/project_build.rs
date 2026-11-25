@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const GRAPH_LIMIT: usize = 256 * 1024 * 1024;
 pub(super) const SCHEMA: u32 = 2;
-pub(super) const VERSION: u32 = 12;
+pub(super) const VERSION: u32 = 13;
 const EXCLUDES: &[&str] = &[
     ".git",
     ".oms",
@@ -447,12 +447,14 @@ impl Parser for Python<'_> {
         })
     }
 }
-fn helper(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
-    let path = explicit.map(Path::to_path_buf).or_else(|| {
+fn configured_helper(explicit: Option<&Path>) -> Option<PathBuf> {
+    explicit.map(Path::to_path_buf).or_else(|| {
         std::env::var_os("OMS_GRAPH_PYTHON_HELPER")
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-    });
+    })
+}
+fn validate_helper(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
     if let Some(ref path) = path {
         if !path.is_absolute() {
             return Err(Error::new("Python parser helper path must be absolute"));
@@ -632,7 +634,7 @@ fn build_from(
     let guard = lock.try_acquire().map_err(|e| Error::new(e.to_string()))?;
     let mut python = Python {
         session: None,
-        helper: helper(explicit_helper)?,
+        helper: validate_helper(configured_helper(explicit_helper))?,
         max_bytes: 0,
         cancel,
     };
@@ -900,9 +902,20 @@ pub(super) fn revision_nodes(
     explicit_helper: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<Vec<Value>> {
+    selected_source_nodes(path, text, configured_helper(explicit_helper), cancel)
+}
+
+// The panel supplies only the packaged helper from its native caller. A
+// missing helper leaves Python unavailable even if a build override is set.
+pub(super) fn selected_source_nodes(
+    path: &str,
+    text: &str,
+    helper_path: Option<PathBuf>,
+    cancel: &AtomicBool,
+) -> Result<Vec<Value>> {
     let mut python = Python {
         session: None,
-        helper: helper(explicit_helper)?,
+        helper: validate_helper(helper_path)?,
         max_bytes: 0,
         cancel,
     };
@@ -1116,7 +1129,7 @@ pub(super) fn fallback_graph(
     let cache = cache_open(&state, false).ok().flatten();
     let mut python = Python {
         session: None,
-        helper: helper(helper_path)?,
+        helper: validate_helper(configured_helper(helper_path))?,
         max_bytes: 0,
         cancel,
     };

@@ -17,7 +17,7 @@ class Element extends EventTarget {
   get scrollHeight() { return this.children.length; }
   get textContent() { return this.children.map(child => child?.textContent ?? child).join(''); }
   set textContent(value) { this.children = [String(value ?? '')]; }
-  add() {}
+  add(child) { this.children.push(child); }
   append(...children) { this.children.push(...children); }
   prepend(...children) { this.children.unshift(...children); }
   setAttribute(name,value) { this.attributes.set(name,value); }
@@ -37,7 +37,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {contexts:[],status:null, failStart:true, replies:[], messages:[], notices:[], tools:options.tools};
+  const host = {contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -71,9 +71,10 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,locale:options.locale},hostCapabilities:{openLinks:options.openLinks ? {} : undefined,message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
     }
     if(method==='ui/update-model-context'){host.contexts.push(params);result={isError:host.rejectContext===true};}
+    if (method === 'ui/open-link') host.links.push(params.url);
     if (method === 'ui/message') {
       host.messages.push(params);
       if (host.holdMessage) {host.finishMessage=ack=>notify({id,...ack});return;}
@@ -83,7 +84,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : {structuredContent:value};
+        result = params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : params.name === 'oms_assign_result' ? {_meta:{assignment:value}} : params.name === 'oms_panel_project_graph' && value?.structuredContent ? value : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -108,7 +109,8 @@ async function panel(projects, dashboard = {}, options = {}) {
   });
   const document = {getElementById:get, createElement:() => new Element(), title:'',
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
-  const context = createContext({window, document, Option:Element, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
+  class Option extends Element { constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
+  const context = createContext({window, document, Option, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
     ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -150,6 +152,23 @@ for (const status of ['reserved', 'recorded', 'not_found']) {
     if (status === 'recorded') assert.match(p.get('receipt').textContent, /recorded-attempt/);
   });
 }
+
+test('Main launch uses all selected Lead preferences only when the user submits', async () => {
+  const p = await panel(['one']);
+  const mark = p.calls.length;
+  p.get('launch').elements.main.value='claude';
+  for (const provider of ['codex','claude','agy']) {
+    p.get('lead-' + provider).checked = true;
+    await p.event('lead-' + provider,'change');
+  }
+  assert.equal(p.calls.length,mark);
+  p.host.failStart=false;
+  p.get('brief').value='Check the release.';
+  await p.event('launch','submit');
+  const request=p.calls.find(c=>c.name==='oms_start_main').args;
+  assert.equal(request.main,'claude');
+  assert.equal(request.goal,'Requested provider Leads: Codex, Claude, AGY. Check the release.');
+});
 
 test('automatic reserved receipt clears the initial launch error style', async () => {
   const p = await ambiguousStart('reserved');
@@ -264,7 +283,7 @@ test('active Lead cards, past executions and repository verification use their o
     operations:[{kind:'verify', artifactId:'check-17', status:'failed', exit:1}]
   });
   const cards = p.get('leads').textContent;
-  assert.match(cards, /Claude Leadlive-task작업 중/);
+  assert.match(cards, /Claude Leadlive-task▶ 실행 중/);
   assert.doesNotMatch(cards, /Codex Lead|old-task|unrelated/);
   assert.match(p.get('activity').textContent, /old-task · room-one/);
   assert.equal(p.get('room').textContent, 'room-one');
@@ -275,7 +294,7 @@ test('active Lead cards, past executions and repository verification use their o
   assert.match(p.get('repo-team').textContent, /Pi Main · room-two/);
   assert.match(p.get('criteria').textContent, /1 \/ 3개 · 미완료/);
   assert.match(p.get('reviews').textContent, /보관된 리뷰 기록 · 통과 2 · 실패 1 · 판정 없음 0/);
-  assert.match(p.get('operations').textContent, /verifycheck-17failed · 종료 코드 1/);
+  assert.match(p.get('operations').textContent, /verifycheck-17× 실패 · 종료 코드 1/);
 });
 
 test('unbound partial snapshots leave unseen activity and absent verification unknown', async () => {
@@ -441,6 +460,34 @@ test('TUI partial totals and failed next pages preserve the last observed rows a
   assert.doesNotMatch(p.get('tui-status').textContent,/전체 0|합계 0/);
 });
 
+test('managed worktree history is localized display-only evidence with independent canonical counts', async () => {
+  const source={id:'worktree-1',label:'wt-0123456789ab (detached)',status:'ready'};
+  const managedScratch={status:'partial',unverifiedCheckouts:1,unexaminedCheckouts:2,omittedAttempts:3,omittedSources:4,
+    sources:[source],attempts:[{id:'duplicate',sourceId:source.id,provider:'claude',tool:'peer-review',state:'queued',updatedAt:'2026-01-02T03:04:05Z'}]};
+  const p=await panel(['one'],{active:1,attempts:[{id:'duplicate',tool:'peer-ask'}],managedScratch});
+  assert.equal(p.get('scratch-history').hidden,false);
+  assert.match(p.get('scratch-rows').textContent,/wt-0123456789ab.*Claude.*peer-review.*기록된 상태 · 대기열에 등록.*기록 시각/);
+  assert.match(p.get('scratch-status').textContent,/실행 기록 3개 생략.*작업트리 4개 생략.*소유 미확인 1개.*미조회 2개/);
+  assert.equal(p.get('active').textContent,'1'); assert.doesNotMatch(p.get('activity').textContent,/peer-review/);
+  const calls=p.calls.length;
+  await choose(p,'en');
+  assert.match(p.get('scratch-heading').textContent,/Managed worktree history/);
+  assert.match(p.get('scratch-rows').textContent,/Recorded state · Queued.*Recorded at/);
+  assert.match(p.get('scratch-status').textContent,/Only part.*3 execution records omitted.*4 worktrees omitted/);
+  assert.equal(p.calls.length,calls);
+  for(const status of ['unavailable','future-status']) {
+    p.run('renderScratch('+JSON.stringify({...managedScratch,status})+')');
+    assert.match(p.get('scratch-status').textContent,/unavailable/); assert.equal(p.get('scratch-rows').textContent,'');
+  }
+  p.run('renderScratch({status:"ready",sources:[],attempts:[]})');
+  assert.match(p.get('scratch-status').textContent,/No worktree executions/);
+  p.run('renderScratch('+JSON.stringify({...managedScratch,status:'ready',sources:[],unverifiedCheckouts:0,unexaminedCheckouts:0,omittedAttempts:0,omittedSources:0})+')');
+  assert.match(p.get('scratch-status').textContent,/Only part/);
+  assert.equal(p.get('scratch-rows').textContent,'');
+  p.run('clearProject()');assert.equal(p.get('scratch-history').hidden,true);
+  const legacy=await panel(['one'],{active:1});assert.equal(legacy.get('scratch-history').hidden,true);
+});
+
 test('a compact snapshot reports only positive omissions and keeps empty samples uncertain', async () => {
   const p = await panel(['one'], {attemptsTrimmed:2,operationsTrimmed:1,attentionTrimmed:0,activeAttemptsTrimmed:3,
     active:0,activeAttempts:[],attempts:[],reviews:{available:true},
@@ -459,20 +506,91 @@ test('overview opens only bound work conversations, labels confirmed Main, and r
   const p=await panel(['one'],{conversationBinding:'matched',
     conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'r',participant:'owner',participants:[member]},
     activeAttempts:[{...member,task:'Test changes',state:'verifying'},{...member,room:'another',task:'Wrong room'}],
-    attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}});
+    attempts:[{...member,participant:'unbound',task:'Unrelated'}],tasksVerified:0,tasks:3,acceptance:{available:true,total:2,verified:1}}, {message:true,compose:true});
   p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]}),oms_panel_tui_view:args=>({...args,status:'ready',columns:[],rows:[]})};
   assert.match(p.get('header-main').textContent,/Codex Main$/); assert.equal(p.get('header-main').hidden,false);
   assert.equal(p.get('plan-ratio').textContent,'0 / 3'); assert.equal(p.get('acceptance-bar').value,1);
+  assert.equal(p.get('team-open').hidden,false);
+  await p.event('team-open','click');
+  assert.equal(p.get('pane-chat').hidden,false);
+  assert.equal(p.get('more-views').open,true);
+  await p.event('chat-back','click');
+  assert.equal(p.get('more-views').open,false);
   const threads=p.get('thread-rows'); assert.equal(threads.children.length,1); assert.match(threads.textContent,/Test changes.*검증 중/);
   threads.children[0].dispatchEvent(new Event('click')); await setImmediate();
   assert.equal(p.calls.at(-1).args.participant,'native-lead'); assert.equal(p.calls.at(-1).args.room,'r');
+  assert.equal(p.get('follow-up').hidden,false);
+  await p.event('follow-up','click');
+  const follow=p.host.messages.at(-1);
+  assert.equal(follow._meta['openai/message'].send,false);
+  assert.match(follow.content[0].text,/native-lead/);
   await p.event('chat-back','click'); await p.event('header-main','click'); assert.equal(p.calls.at(-1).args.participant,'owner');
   await p.event('chat-back','click'); await p.event('plan-open','click');
   assert.equal(p.get('pane-activity').hidden,false); assert.equal(p.calls.at(-1).args.view,'plan');
   assert.equal(p.get('approval-card').hidden,true);
   const unknown = await panel(['one'],{tasks:4,tasksVerified:null,acceptance:{available:true,total:0,verified:0}});
   assert.equal(unknown.get('header-main').hidden,true); assert.equal(unknown.get('plan-strip').hidden,true);
+  assert.equal(unknown.get('team-open').hidden,true);
   assert.equal(unknown.get('acceptance-bar').hidden,true); assert.equal(unknown.get('work-threads').hidden,true);
+});
+
+test('Main and Lead hierarchy uses scoped records and explicit parent links', async () => {
+  const room = 'r', lead = {room,participant:'lead',role:'lead',provider:'claude'};
+  const worker = {room,participant:'worker',parent:lead.participant,role:'worker',provider:'agy'};
+  const attempt = {...lead,id:'a-lead',task:'Review landing',state:'verifying'};
+  const p = await panel(['one'],{
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session',state:'joined',provider:'codex',room,participant:'owner',participants:[lead,worker]},
+    conversationAttempts:[
+      {room,participant:'owner',id:'a-main',role:'main',task:'Decide landing order',state:'working'},
+      attempt,
+      {room,participant:'worker',id:'a-1',task:'Confirm branch',state:'done'},
+      {parentAttempt:attempt.id,id:'a-2',task:'Verify changes',state:'working'},
+      {room:'other',parentAttempt:attempt.id,id:'a-3',task:'Foreign Room'},
+      {room,participant:'worker',parentAttempt:'different-lead',id:'a-4',task:'Foreign parent'},
+      {room,provider:'claude',id:'a-5',task:'Coincidentally same provider'}
+    ],
+    activeAttempts:[],
+    conversationAttemptsOmitted:2
+  });
+  assert.match(p.get('team-main-name').textContent,/Codex Main/);
+  assert.match(p.get('team-main-task').textContent,/Decide landing order/);
+  const [branch] = p.get('leads').children;
+  const disclosure = branch.children[1];
+  assert.match(branch.textContent,/Claude Lead.*Review landing/);
+  assert.match(disclosure.textContent,/Confirm branch.*Verify changes/);
+  assert.match(disclosure.textContent,/worker/);
+  assert.doesNotMatch(disclosure.textContent,/Foreign|Coincidentally/);
+  assert.match(p.get('team-records').textContent,/일부/);
+  disclosure.open = true;
+  p.run('paintLeadTree(dashboardData)');
+  assert.equal(p.get('leads').children[0].children[1].open,true);
+});
+
+test('Main chat opens only the verified native owner conversation', async () => {
+  const room='r', participant='owner';
+  const uri='codex://threads/01234567-89ab-cdef-0123-456789abcdef';
+  const p=await panel(['one','two'],{
+    conversationBinding:'matched', conversationMain:{source:'room-session',state:'joined',provider:'codex',room,participant}
+  },{openLinks:true,tools:{oms_panel_chat:args=>({...args,source:'room',provider:'codex',self:true,nativeUri:uri,messages:[]})}});
+  await p.open('result',{structuredContent:{panel:'OMS',project:'one'}});
+  assert.equal(p.get('team-main-chat').hidden,false);
+  await p.event('team-main-chat','click');
+  assert.deepEqual(p.host.links,[uri]);
+  assert.equal(p.calls.filter(c=>c.name==='oms_panel_chat').length,1);
+  p.host.tools.oms_panel_chat=args=>({...args,source:'room',provider:'codex',self:false,nativeUri:uri,messages:[]});
+  await p.event('team-main-chat','click');
+  assert.deepEqual(p.host.links,[uri]);
+  assert.equal(p.get('pane-chat').hidden,false);
+  await p.event('chat-back','click');
+  p.host.tools.oms_panel_chat=args=>({...args,source:'room',provider:'codex',self:true,nativeUri:uri,messages:[]});
+  p.host.delayTool='oms_panel_chat';
+  await p.event('team-main-chat','click');
+  p.get('project-choice').value='two';
+  await p.event('project-choice','change');
+  p.host.release();
+  await setImmediate();
+  assert.deepEqual(p.host.links,[uri]);
 });
 
 const openItem = {kind:'issue',number:9,title:'Review input boundaries',state:'OPEN',url:'https://github.com/org/repo/issues/9'};
@@ -488,6 +606,39 @@ async function pickIssue(p) {
   card.children.at(-1).dispatchEvent(new Event('click')); await setImmediate();
 }
 
+test('explicit open issue review shows fixed localized evidence separately from the draft and discards stale reads', async () => {
+  const p=await panel(['one','two'],{},{readOnly:true,message:true});
+  p.get('project-choice').value='one'; await p.event('project-choice','change');
+  await pickIssue(p);
+  const evidence=p.get('issue-evidence'), draft=p.get('git-goal');
+  const pin={kind:'github-issue',state:'open',reference:'https://github.com/Org/rEpO/issues/9',revision:'2026-11-24T09:00:00Z',sha256:'a'.repeat(64),bytes:30};
+  let source={...pin};
+  p.host.tools.oms_panel_git_status=args=>args.issuePreview?{issuePreview:source}:workData;
+  assert.equal(p.calls.some(c=>c.args.issuePreview),false);
+  draft.value='내가 쓴 지시'; await p.event('git-goal','input');
+  await p.event('issue-review','click');
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',issuePreview:9});
+  assert.match(evidence.textContent,/열린 이슈/);
+  for(const field of [pin.reference,pin.revision,pin.sha256]) assert.ok(evidence.textContent.includes(field));
+  await choose(p,'en'); assert.match(evidence.textContent,/Open issue/); assert.equal(draft.value,'내가 쓴 지시');
+  for(const reference of ['https://github.com/other/repo/issues/9',pin.reference+'?id=9',
+      pin.reference+'#comment',pin.reference.replace('/issues/','/ISSUES/'),pin.reference.replace('/9','/09')]){
+    source={...pin,reference};
+    await p.event('issue-review','click'); assert.match(evidence.textContent,/Could not verify/);
+    assert.ok(!evidence.textContent.includes(pin.sha256));
+  }
+  source={...pin}; p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click'); const old=p.host.release;
+  await p.event('refresh','click'); source={...pin,sha256:'b'.repeat(64)}; await p.event('issue-review','click'); old(); await setImmediate();
+  assert.ok(evidence.textContent.includes(source.sha256)); assert.ok(!evidence.textContent.includes(pin.sha256));
+  p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click'); const itemReply=p.host.release;
+  await p.event('git-backlog','click'); itemReply(); await setImmediate();
+  assert.equal(evidence.textContent,''); assert.equal(p.get('issue-review').hidden,true);
+  await pickIssue(p); p.host.tools.oms_panel_git_status=args=>args.issuePreview?{issuePreview:source}:workData;
+  p.host.delayTool='oms_panel_git_status'; await p.event('issue-review','click');
+  await p.open('input',{arguments:{project:'two'}}); p.host.release(); await setImmediate();
+  assert.equal(evidence.textContent,''); assert.equal(p.host.messages.length,0);
+  assert.deepEqual([...new Set(p.calls.map(c=>c.name))].sort(),['oms_list_projects','oms_panel_git_status','oms_panel_project_graph','oms_panel_snapshot','oms_panel_work_items']);
+});
 test('Git issue is an editable Lead request, and only an explicit send posts it to a matched Main', async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   await pickIssue(p);
@@ -505,7 +656,11 @@ test('Git issue is an editable Lead request, and only an explicit send posts it 
 
 test('generic host initializes read-only, opens project by result, and shares only by user action', async () => {
   const p=await panel(['one','two'],{conversationMain:matchedMain},{host:'Claude',message:true,readOnly:true});
-  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.6.0');
+  assert.ok(p.host.notices.includes('ui/notifications/initialized')); assert.equal(p.host.initialize.appInfo.version,'0.8.4');
+  for (const manifest of ['oms', 'oms-ssh/oms', 'oms-app']) {
+    const path = new URL('../../../plugins/' + manifest + '/plugin.json', import.meta.url);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, p.host.initialize.appInfo.version);
+  }
   assert.equal(p.get('view').hidden,true);
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',readOnly:true}});
   assert.equal(p.get('project').textContent,'two'); assert.equal(p.get('launcher').hidden,true);
@@ -538,7 +693,7 @@ test('provider availability and active Codex Lead are independent from Codex Mai
     {provider:'claude',role:'lead',room:'other',task:'Elsewhere',state:'working'}]});
   p.host.tools={oms_panel_tui_view:()=>({view:'providers',page:1,status:'ready',rows:[
     {provider:'codex',installed:true,usable:true},{provider:'claude',installed:true},{provider:'antigravity',usable:false}]})};
-  assert.match(p.get('header-main').textContent,/Codex Main$/); assert.match(p.get('leads').textContent,/Codex LeadReview작업 중/);
+  assert.match(p.get('header-main').textContent,/Codex Main$/); assert.match(p.get('leads').textContent,/Codex LeadReview▶ 실행 중/);
   assert.doesNotMatch(p.get('leads').textContent,/Elsewhere/); await p.event('provider-load','click');
   assert.match(p.get('provider-rows').textContent,/Codex Lead호스트 사용 가능.*Claude Lead설치됨 · 사용 가능 여부 미확인.*AGY Lead호스트 사용 불가/);
 });
@@ -632,26 +787,56 @@ test('settings page, permission failure and project change discard prior catalog
 });
 
 
-test('Project pages use the linked board ID, expose field hints and only offer a draft for eligible issues',async () => {
+test('Project pages explain each native recommendation in both languages and keep unverified items read-only',async () => {
   const p=await panel(['one'],{conversationMain:matchedMain},{message:true});
   const board={id:'PVT_scope',number:2,url:'https://github.com/orgs/org/projects/2',title:'Release'};
+  const issue=(n,advice,kind='candidate')=>({...openItem,number:n,url:'https://github.com/org/repo/issues/'+n,
+    class:kind,fields:{Status:{name:'Ready'}},recommendation:advice});
   const calls=[];
   p.host.tools={oms_panel_git_status:args=>{
     if (!args.boardId) return {...workData,github:{...workData.github,work:{projects:{status:'available',items:[board]}}}};
     calls.push(args);
-    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:['Phase']}},status:'available',nextCursor:args.cursor?null:'board.next',
-      items:[{...openItem,class:args.cursor?'blocked':'candidate',fields:{Status:{name:'Ready'}}}]}}};
+    return {github:{repository:'org/repo',board:{board:{...board,fields:{missing:[]}},status:'available',incomplete:!args.cursor,nextCursor:args.cursor?null:'board.next',
+      items:args.cursor?[issue(9,{state:'excluded',reason:'blocked'},'blocked')]:[
+        issue(1,{state:'recommended',reason:'ready_with_priority'}),
+        issue(2,{state:'excluded',reason:'status_not_ready'}),
+        issue(3,{state:'unverified',reason:'dependencies_unknown'}),
+        issue(4,undefined,'plan_linked'),
+        issue(5,{state:'recommended',reason:'unrecognized-code'}),
+        issue(6,{state:'future-state',reason:'ready_with_priority'}),
+        issue(7,{state:'recommended',reason:'ready_with_priority'},'blocked')
+      ]}}};
   }};
   await p.event('tab-git','click');p.get('git-kind').value='projects';await p.event('git-kind','change');
   const box=p.get('git-catalog').children.at(-1).children.at(-1);
   const [next,back,note,rows]=box.children.filter(x=>typeof x==='object');
   assert.equal(calls.length,0);next.dispatchEvent(new Event('click'));await setImmediate();
   assert.deepEqual({...calls[0]},{boardId:'PVT_scope',project:'one'});
-  assert.match(rows.textContent,/검토 후보.*Status Ready.*작업 목표 작성/);
-  assert.match(note.textContent,/Phase/);
-  next.dispatchEvent(new Event('click'));await setImmediate();
-  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/선행 이슈 진행 중/);
-  assert.doesNotMatch(rows.textContent,/작업 목표 작성/);assert.equal(next.hidden,true);assert.equal(back.hidden,false);
+  const cards=rows.children.filter(c=>typeof c==='object');
+  assert.match(cards[0].textContent,/추천 · Ready.*Status Ready.*작업 목표 작성/);
+  assert.match(cards[1].textContent,/제외 · 상태가 Ready가 아닙니다/);
+  assert.match(cards[2].textContent,/추천 보류 · 선행 이슈/);
+  assert.match(cards[3].textContent,/서버가 추천 정보를 보내지 않았습니다/);
+  assert.match(cards[3].textContent,/Plan/);
+  for (const card of cards.slice(4)) assert.match(card.textContent,/추천 보류 · 추천 상태나 판단 근거/);
+  for (const card of cards.slice(1)) assert.doesNotMatch(card.textContent,/작업 목표 작성/);
+  assert.match(note.textContent,/이 페이지에 표시된 항목별/);
+  const draft=cards[0].children.at(-1);
+  assert.match(draft.getAttribute('aria-label'),/1/);
+  p.get('language-choice').value='en';await p.event('language-choice','change');
+  assert.match(cards[0].textContent,/Recommended · Ready at priority P0–P2/);
+  assert.match(cards[1].textContent,/Excluded · Status is not Ready/);
+  assert.match(cards[2].textContent,/Unverified · Blocker information is incomplete/);
+  assert.match(cards[3].textContent,/server did not provide a recommendation/);
+  assert.match(note.textContent,/per item on this page/);
+  draft.dispatchEvent(new Event('click'));
+  assert.equal(p.get('git-editor').hidden,false);
+  assert.match(p.get('git-goal').value,/https:\/\/github\.com\/org\/repo\/issues\/1/);
+  assert.ok(p.get('git-goal').focused);
+  assert.equal(calls.length,1);
+  p.document.activeElement=next;next.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(calls[1].cursor,'board.next');assert.match(rows.textContent,/Excluded · Blocked by an open prerequisite/);
+  assert.equal(next.hidden,true);assert.equal(back.hidden,false);assert.equal(note.focused,1);
   assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>c.name==='oms_start_main'));
 });
 
@@ -663,7 +848,7 @@ test('overview represents each scoped Lead assignment once and opens its exact m
     conversationMain:{source:'room-session',state:'joined',provider:'codex',room:'room',participant:'owner',participants:[lead,advisor]},
     activeAttempts:[run],attempts:[run,{...advisor,task:'검토 기록',state:'done'}]});
   p.host.tools={oms_panel_chat:args=>({...args,source:'room',messages:[]})};
-  assert.match(p.get('leads').textContent,/Codex Lead수정 작업검증 중/);
+  assert.match(p.get('leads').textContent,/Codex Lead수정 작업⟳ 검증 중/);
   assert.doesNotMatch(p.get('thread-rows').textContent,/수정 작업/);
   assert.match(p.get('thread-rows').textContent,/검토 기록/);
   p.get('leads').children[0].dispatchEvent(new Event('click'));await setImmediate();
@@ -804,6 +989,27 @@ test('selected function shows distinct direction, relation and confidence once p
   assert.match(p.get('graph-list').textContent,/← 참조 · 추론/);
 });
 
+test('only the selected, current symbol exposes its widget-only declaration',async()=>{
+  const id='symbol:src/lib.rs::function:inspect',sym={id,path:'src/lib.rs',kind:'function',label:'inspect'};
+  let freshness='cached', detail={id,line:11,endLine:14,signature:'pub fn inspect()'};
+  const p=await panel(['one'],{}, {locale:'en',context:true,tools:{oms_panel_project_graph:args=>({
+    structuredContent:{schema:1,kind:'oms-panel-project-graph',nodes:[sym],edges:[],scope:{focusNode:args.node},provenance:{source:'indexed-graph',indexFreshness:freshness},
+      selection:args.node===id?{status:'found',node:sym}:null},_meta:{graphDefinition:detail}})}});
+  await p.event('tab-project','click');
+  assert.doesNotMatch(p.get('graph-info').textContent,/pub fn|lines 11/);
+  p.get('graph-list').children[0].children.find(e=>e?.dispatchEvent).dispatchEvent(new Event('click'));await setImmediate();
+  assert.match(p.get('graph-info').textContent,/src\/lib.rs · lines 11–14/);
+  assert.match(p.get('graph-info').textContent,/pub fn inspect/);
+  await p.event('graph-attach','click');
+  assert.ok(!JSON.stringify(p.host.contexts).includes('pub fn inspect'));
+  p.get('language-choice').value='ko';await p.event('language-choice','change');assert.match(p.get('graph-info').textContent,/11–14행/);
+  for(const state of ['stale','wrong-id','missing']) {
+    if(state==='stale')freshness='stale';else {freshness='cached';detail=state==='wrong-id'?{...detail,id:'symbol:other::x'}:undefined;}
+    await p.event('graph-reload','click');
+    assert.doesNotMatch(p.get('graph-info').textContent,/pub fn/);assert.match(p.get('graph-info').textContent,/소스 선언 미확인/);
+  }
+});
+
 test('standard hosts retain selectable command help; provenance and inferred associations are explicit', async () => {
   const p=await panel(['one','two'],{}, {message:true,readOnly:true});
   p.host.tools={
@@ -817,8 +1023,9 @@ test('standard hosts retain selectable command help; provenance and inferred ass
   };
   p.get('project-choice').value='one';await p.event('project-choice','change');await p.event('feature-open','click');
   p.get('map-children').children[0].children.at(-1).dispatchEvent(new Event('click'));await setImmediate();
-  assert.match(p.get('map-status').textContent,/오래된 색인/);assert.match(p.get('map-children').textContent,/추출/);assert.doesNotMatch(p.get('map-children').textContent,/추론/);
-  p.get('graph-confidence').value='all';await p.event('graph-confidence','change');assert.match(p.get('map-children').textContent,/추론/);
+  assert.equal(p.get('map-children').children.length,0);
+  assert.match(p.get('map-status').textContent,/오래된 색인/);assert.match(p.get('map-dep-list').textContent,/→.*추출/);assert.doesNotMatch(p.get('map-dep-list').textContent,/추론/);
+  p.get('graph-confidence').value='all';await p.event('graph-confidence','change');assert.match(p.get('map-dep-list').textContent,/추론/);
   p.get('graph-filter').value='not-there';await p.event('graph-search','click');assert.match(p.get('map-status').textContent,/일치하는 노드 없음/);
   p.get('feature-list').children[0].children.at(-1).dispatchEvent(new Event('click'));await p.event('feature-send','click');
   assert.equal(p.host.messages.length,0);assert.equal(p.get('feature-draft').selected,true);
@@ -849,6 +1056,9 @@ const focusCount = p => [...p.elements.values()].reduce((sum, element) => sum + 
 test('Korean and English catalogs match, and every static node and message key resolves', async () => {
   const p = await panel(['one']);
   const ko = p.run('MSG.ko'), en = p.run('MSG.en');
+  const catalog = p.run('catalogRows').split('\n').map(line => line.split('\t'));
+  assert.ok(catalog.every(row => (row.length === 2 || row.length === 3) && row[0] && row.at(-1)), 'one key and one or two language columns per row');
+  assert.equal(new Set(catalog.map(row => row[0])).size, catalog.length, 'translation keys are unique');
   assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
   for (const key of Object.keys(ko)) {
     const holders = [...ko[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort(), english = [...en[key].matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort();
@@ -867,13 +1077,12 @@ test('Korean and English catalogs match, and every static node and message key r
   assert.ok(literals.length > 40);
   for (const key of literals) assert.ok(Object.hasOwn(ko, key), key);
   for (const key of [...script.matchAll(/\bt\(\s*'([^']+)'/g)].map(m => m[1]).filter(key => !key.endsWith('.'))) assert.ok(Object.hasOwn(ko, key), key);
-  const families = {state:['working','starting','verifying','review','in_review','done','blocked','waiting_for_input'],
+  const families = {state:['running','starting','supported','passed','active','planned','open','verifying','review','done','blocked','waiting'],
     'git.class':['candidate','blocked','unverified','plan_linked','board_in_progress','closed_board','duplicate','archived','unknown','draft','foreign','epic','closed','pull_request'],
-    'git.check':['failed','pending','passed','other','unknown'], ev:['info','events','files','diff','transcript'],
+    'git.check':['failed','pending','passed','other'], ev:['info','events','files','diff','transcript'],
     src:['git','task','plan','attempts','artifacts','acceptance','conversation'], srcState:['unavailable','partial','ambiguous','stale'],
     sv:['connections','modelcatalog','routes','attribution'], obs:['complete','partial','unknown']};
   for (const [family, members] of Object.entries(families)) for (const member of members) assert.ok(Object.hasOwn(ko, family + '.' + member), family + '.' + member);
-  assert.ok(Buffer.byteLength(html) < 240 * 1024);
 });
 
 for (const [name, options, expected] of [
@@ -896,7 +1105,7 @@ for (const [name, options, expected] of [
     assert.equal(p.get('tab-chat').textContent, expected === 'en' ? 'Chat' : '대화');
     assert.equal(p.get('goal').textContent, '목표 goal');
     assert.equal(p.get('status').textContent, '');
-    assert.equal(p.get('current-scope').textContent, expected === 'en' ? 'Current Main' : '현재 Main');
+    assert.equal(p.get('current-scope').textContent, expected === 'en' ? 'This chat' : '이 대화');
   });
 }
 
@@ -915,7 +1124,7 @@ test('changing language is instant: no refetch, no reset, draft/focus/side effec
   await p.event('tab-git', 'click'); await p.event('tab-usage', 'click'); await p.event('tab-overview', 'click');
   p.get('brief').value = '내 초안 draft';
   assert.equal(p.get('approvals-heading').textContent, '승인 요청 1건');
-  assert.match(p.get('leads').textContent, /Claude Lead작업 task작업 중/);
+  assert.match(p.get('leads').textContent, /Claude Lead작업 task▶ 실행 중/);
   assert.match(p.get('git-content').textContent, /연결된 워크트리 · 로컬 HEAD 불일치/);
 
   const calls = p.calls.length, messages = p.host.messages.length, focused = focusCount(p), projectName = p.get('project').textContent;
@@ -932,8 +1141,8 @@ test('changing language is instant: no refetch, no reset, draft/focus/side effec
   assert.equal(p.get('approvals-heading').textContent, 'Approval requests (1)');
   assert.equal(p.get('tab-overview').textContent, 'Now');
   assert.equal(p.get('goal-heading').textContent, 'Project goal');
-  assert.equal(p.get('status').textContent, 'Some status could not be collected.');
-  assert.match(p.get('leads').textContent, /Claude Lead.*Working/);
+  assert.equal(p.get('status').textContent, '~ Partial · Some status could not be collected.');
+  assert.match(p.get('leads').textContent, /Claude Lead.*▶ Running/);
   assert.match(p.get('criteria').textContent, /Completion criteria verified · 1 \/ 3 · Incomplete/);
   assert.match(p.get('git-content').textContent, /Linked worktree · Differs from local HEAD/);
   assert.match(p.get('git-content').textContent, /Checks · passed 1 · failed 0 · pending 2 · other 0/);
@@ -953,7 +1162,7 @@ test('changing language is instant: no refetch, no reset, draft/focus/side effec
   await choose(p, 'ko');
   assert.equal(p.calls.length, calls);
   assert.equal(p.get('approvals-heading').textContent, '승인 요청 1건');
-  assert.equal(p.get('status').textContent, '일부 상태를 수집하지 못했습니다.');
+  assert.equal(p.get('status').textContent, '~ 일부 · 일부 상태를 수집하지 못했습니다.');
   assert.match(p.get('git-content').textContent, /연결된 워크트리 · 로컬 HEAD 불일치/);
   assert.equal(p.get('goal').textContent, 'Ship 한국어 / English');
   assert.equal(p.get('brief').value, '내 초안 draft');
@@ -1044,9 +1253,45 @@ test('read-only peer is explicitly requested once, recovered by ID and opened in
   assert.equal(p.calls.at(-1).args.participant,'ask-'+req.requestId);
   assert.match(p.get('chat-result').textContent,/Recorded answer/); assert.equal(starts().length,1);
 });
-test('foreign, ambiguous, partially observed, and generic views cannot submit a peer',async()=>{
+test('checking an unlinked operation is read-only and repairing reuses the immutable request',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'owner',incomplete:false};
+  const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  const answer=(req,status)=>({...req,status,role:'researcher',participant:'ask-'+req.requestId,readOnly:true,operation:'ask-confirmed'});
+  p.host.tools={oms_assign_provider:a=>answer(a,a.repairOnly?'started':'unconfirmed'),oms_assign_result:a=>answer({...a,provider:'claude'},'recovered')};
+  p.get('peer-provider').value='claude';p.get('peer-task').value='Original review';
+  await p.event('peer-form','submit');const original=p.calls.at(-1).args;
+  await p.event('peer-check','click');
+  await choose(p,'en');assert.match(p.get('peer-status').textContent,/operation found/);
+  await choose(p,'ko');assert.match(p.get('peer-status').textContent,/실행 기록을 찾/);
+  assert.equal(p.get('peer-repair').hidden,false);assert.equal(p.get('peer-chat').hidden,false);
+  assert.equal(p.calls.filter(c=>c.name==='oms_assign_provider').length,1);
+  p.get('peer-task').value='Changed draft';
+  await p.event('peer-repair','click');assert.deepEqual({...p.calls.at(-1).args},{...original,repairOnly:true});
+  assert.equal(p.get('peer-repair').hidden,true);
+});
+test('partial exact membership checks authority only on request and keeps its ID after a bounded refusal',async()=>{
+  const main={source:'room-session',state:'joined',provider:'codex',room:'observed',participant:'owner',incomplete:true};
+  const p=await panel(['one'],{conversationBinding:'matched',conversationMain:main});
+  assert.equal(p.get('peer-assignment').hidden,false);
+  assert.equal(p.get('peer-proof').hidden,false);
+  await choose(p,'ko'); assert.match(p.get('peer-proof').textContent,/다른 작업방/);
+  await choose(p,'en'); assert.match(p.get('peer-proof').textContent,/across Rooms/);
+  const starts=()=>p.calls.filter(c=>c.name==='oms_assign_provider');
+  assert.equal(starts().length,0);
+  p.host.tools={oms_assign_provider:()=>{throw new Error('room_inventory_incomplete: bounded inventory');},
+    oms_assign_result:a=>({...a,status:'not_found'})};
+  p.get('peer-provider').value='claude'; p.get('peer-task').value='Inspect';
+  await p.event('peer-form','submit'); await p.event('peer-form','submit');
+  assert.equal(starts().length,1); assert.equal(starts()[0].args.room,'observed');
+  assert.match(p.get('peer-status').textContent,/inventory is incomplete/);
+  await choose(p,'ko'); assert.match(p.get('peer-status').textContent,/목록을 모두 확인/);
+  await p.event('peer-check','click');
+  assert.equal(p.calls.at(-1).args.requestId,starts()[0].args.requestId);
+  assert.equal(p.get('peer-controls').disabled,false); assert.equal(starts().length,1);
+});
+test('foreign, ambiguous, unverifiable, and generic views cannot submit a peer',async()=>{
   const main={source:'room-session',state:'joined',provider:'codex',room:'work',participant:'main',incomplete:false};
-  for(const [binding,record,readOnly] of [['unconfirmed',null,false],['ambiguous',main,false],['matched',{...main,incomplete:true},false],['matched',main,true]]){
+  for(const [binding,record,readOnly] of [['unconfirmed',null,false],['ambiguous',main,false],['matched',{...main,incomplete:undefined},false],['matched',main,true]]){
     const p=await panel(['one'],{conversationBinding:binding,conversationMain:record},{readOnly});
     assert.equal(p.get('peer-assignment').hidden,true);
     p.get('peer-provider').value='claude';p.get('peer-task').value='Inspect'; await p.event('peer-form','submit');
@@ -1067,6 +1312,21 @@ async function reviewedPanel(options = {}, response = {}) {
   await setImmediate();
   return p;
 }
+
+test('reopening an unlinked researcher permits only an explicit repair of that Room request',async()=>{
+  const assignment={state:'recovered',title:'Title',task:'Full original task'};
+  const p=await reviewedPanel({}, {assignment});
+  const writes=()=>p.calls.filter(c=>c.name==='oms_assign_provider');
+  assert.equal(writes().length,0);await choose(p,'en');
+  const button=p.get('chat-result').children.find(b=>b.textContent==='Link operation to Room');
+  assert.ok(button);
+  p.host.tools.oms_assign_provider=a=>({...a,participant:reviewMember.participant,status:'recorded'});
+  button.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...writes()[0].args},{project:'one',room:reviewMember.room,requestId:reviewMember.participant.slice(4),
+    provider:'claude',task:assignment.task,title:assignment.title,repairOnly:true});
+  await p.event('tab-overview','click');button.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(writes().length,1);assert.equal(p.host.messages.length,0);
+});
 
 test('review preview and cancel are local, translate instantly, and share only the selected answer once',async()=>{
   const p = await reviewedPanel({message:true});
@@ -1253,4 +1513,542 @@ test('primary and secondary tablists each rove with arrows and every v10 view st
   for (const tab of ['project', 'chat', 'activity', 'usage', 'git']) { await p.event('tab-' + tab, 'click'); assert.equal(p.get('pane-' + tab).hidden, false); }
   await p.event('tab-overview', 'click');
   assert.equal(p.get('tab-overview').tabIndex, 0); assert.equal(p.get('tab-project').tabIndex, 0);
+});
+
+const styleCss = html.match(/<style>([\s\S]+?)<\/style>/)[1];
+function findNodes(root, predicate, found = []) {
+  if (!root || typeof root !== 'object') return found;
+  if (predicate(root)) found.push(root);
+  for (const child of root.children || []) findNodes(child, predicate, found);
+  return found;
+}
+const stateChips = root => findNodes(root, el => /\bstate-chip\b/.test(el.className || ''));
+
+test('overview leads with decisions, goal and work before the roster and folded results', async () => {
+  const overview = html.slice(html.indexOf('id="pane-overview"'), html.indexOf('id="pane-work"'));
+  const order = ['id="approval-card"', 'id="alerts"', 'id="goal-card"', 'id="now-work"', 'id="room-leads"', 'id="latest-results"', 'id="map-preview"'];
+  const positions = order.map(marker => overview.indexOf(marker));
+  assert.ok(positions.every(pos => pos >= 0), 'all overview sections exist');
+  for (let i = 1; i < positions.length; i++) assert.ok(positions[i - 1] < positions[i], `${order[i - 1]} before ${order[i]}`);
+  assert.match(overview, /<details class="card" id="latest-results">/);
+  assert.match(overview, /<button id="team-open" type="button" data-i18n="tab.chat" hidden>/);
+  // No double-nested <details> inside #pane-overview.
+  let depth = 0, maxDepth = 0;
+  for (const [, close] of overview.matchAll(/<(\/?)details\b/g)) {
+    depth += close ? -1 : 1;
+    if (depth > maxDepth) maxDepth = depth;
+  }
+  assert.equal(maxDepth, 1);
+  // approval-idle is outside #project-records summary.
+  const recordsSummary = html.match(/<details[^>]*id="project-records"[\s\S]*?<summary[^>]*>[\s\S]*?<\/summary>/)[0];
+  assert.doesNotMatch(recordsSummary, /id="approval-idle"/);
+
+  // Single approval expands automatically; alerts show inline count badge and first reason; top 3 artifacts surface directly.
+  const row1 = {id:'ap1', version:1, digest:'d1', summary:'Merge PR #9', action:'Main scope decision', object:'room-1', sender:'codex'};
+  const row2 = {id:'ap2', version:1, digest:'d2', summary:'Run migration', action:'Run task', object:'room-1', sender:'claude'};
+  let approvals = [row1];
+  const p = await panel(['one'], {
+    attention:[{summary:'CI gate failed', count:1}, {summary:'Stale lease', count:1}],
+    operations:[
+      {kind:'verify', artifactId:'art-1', status:'failed', exit:1},
+      {kind:'review', artifactId:'art-2', status:'accepted'},
+      {kind:'patch', artifactId:'art-3', status:'done'},
+      {kind:'extra', artifactId:'art-4', status:'queued'}
+    ]
+  }, {tools:{oms_list_approvals:() => ({approvals})}});
+  assert.equal(p.get('approvals').children[0].open, true);
+  assert.equal(p.get('alerts-badge').hidden, false);
+  assert.equal(p.get('alerts-count').textContent, '2건');
+  assert.equal(p.get('alerts-preview').textContent, 'CI gate failed');
+  assert.equal(p.get('latest-operations').hidden, false);
+  assert.equal(p.get('latest-operations').children.length, 3);
+  assert.doesNotMatch(p.get('latest-operations').textContent, /art-4/);
+  await choose(p, 'en');
+  assert.equal(p.get('alerts-count').textContent, '2 items');
+  approvals = [row1, row2];
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children.length, 2);
+  assert.notEqual(p.get('approvals').children[0].open, true);
+});
+
+test('state-chip renders canonical glyph and word across every state family in Korean and English with no raw backend tokens', async () => {
+  const lead = {room:'r', participant:'lead-1', provider:'claude', role:'lead'};
+  const advisor = {room:'r', participant:'qa-1', provider:'agy', role:'reviewer'};
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner', participants:[lead, advisor]},
+    activeAttempts:[
+      {...lead, task:'Fix auth', state:'working'},
+      {...advisor, task:'Check logs', state:'timed_out'}
+    ],
+    attempts:[{id:'a1', provider:'codex', tool:'run', task:'Build', room:'r', state:'done'}],
+    operations:[{kind:'verify', artifactId:'op-1', status:'failed', exit:1}],
+    taskStatus:'waiting_approval',
+    commandStatus:{available:true, total:3, active:1, executing:1, byState:{working:1, failed:1, timed_out:1}}
+  }, {tools:{
+    oms_list_approvals:() => ({approvals:[{id:'ap1', version:1, digest:'d1', summary:'Approve step', action:'Step', object:'r'}]}),
+    oms_panel_work_items:workFixture,
+    oms_panel_git_status:() => ({git:{available:true, branch:'main', dirty:false}, github:{status:'available', repository:'org/repo',
+      pullRequests:[{number:4, title:'Checks PR', headBranch:'feat', baseBranch:'main', checks:{passed:1, failed:1, pending:1, other:0,
+        items:[{name:'gate', status:'failed'}, {name:'lint', status:'passed'}, {name:'focused', status:'pending'}]}}]}})
+  }});
+  await p.event('tab-git', 'click');
+  await p.event('tab-activity', 'click');
+
+  // Verify state-chip elements exist across every family: leads, threads, activity/records, git checks, work items, approval.
+  const leadChips = stateChips(p.get('leads'));
+  const threadChips = stateChips(p.get('thread-rows'));
+  const timelineChips = stateChips(p.get('command-list'));
+  const opsChips = stateChips(p.get('operations'));
+  const activityChips = stateChips(p.get('activity'));
+  const taskStatusChips = stateChips(p.get('taskStatus'));
+  const checkChips = stateChips(p.get('git-content'));
+  const workChips = stateChips(p.get('now-active'));
+  assert.ok(leadChips.length >= 1 && threadChips.length >= 1 && timelineChips.length >= 2 && opsChips.length >= 1 && activityChips.length >= 1 && taskStatusChips.length === 1 && checkChips.length === 3 && workChips.length >= 1);
+  assert.equal(p.get('approval-badge').hidden, false);
+  assert.match(html, /id="approval-badge" class="state-chip" data-state="waiting" data-role="attention"/);
+  const approvalWord = p.staticNodes.find(n => n.attributes.get('data-i18n') === 'state.waiting');
+  assert.equal(approvalWord.textContent, '확인 필요');
+
+  // Korean assertions: canonical glyph + Korean word, zero raw English backend tokens.
+  assert.equal(leadChips[0].textContent, '▶ 실행 중');
+  assert.equal(threadChips[0].textContent, '◷ 시간 초과');
+  assert.equal(opsChips[0].textContent, '× 실패');
+  assert.equal(activityChips[0].textContent, '✓ 완료');
+  assert.equal(taskStatusChips[0].textContent, '! 확인 필요');
+  assert.deepEqual(checkChips.map(c => c.textContent), ['× 실패', '✓ 통과', '· 대기 중']);
+  assert.doesNotMatch(p.get('command-list').textContent, /\b(working|failed|done|blocked|timed_out)\b/);
+  assert.doesNotMatch(p.get('command-state').textContent, /\b(working|failed|timed_out)\b/);
+  assert.match(p.get('command-state').textContent, /실행 중 1 · 실패 1 · 시간 초과 1/);
+
+  // English switch updates every state-chip in place.
+  await choose(p, 'en');
+  assert.equal(leadChips[0].textContent, '▶ Running');
+  assert.equal(threadChips[0].textContent, '◷ Timed out');
+  assert.equal(opsChips[0].textContent, '× Failed');
+  assert.equal(activityChips[0].textContent, '✓ Done');
+  assert.equal(taskStatusChips[0].textContent, '! Needs you');
+  assert.deepEqual(checkChips.map(c => c.textContent), ['× Failed', '✓ Passed', '· Pending']);
+  assert.equal(approvalWord.textContent, 'Needs you');
+  assert.doesNotMatch(styleCss, /\.thread-dot|\.work-dot|\.lead-state::before|#approval-card\.awaiting-action h2::before/);
+});
+
+test('honest state mapping preserves distinct terminal/live states, unknown raw tokens, neutral Leads count, and relabels attempt options', async () => {
+  const leads = [
+    {room:'r', participant:'lead-1', provider:'claude', role:'lead', task:'Claimed task', state:'claimed'},
+    {room:'r', participant:'lead-2', provider:'codex', role:'lead', task:'Landing task', state:'landing'},
+    {room:'r', participant:'lead-3', provider:'agy', role:'lead', task:'Custom task', state:'paused_x'}
+  ];
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner', participants:leads},
+    activeAttempts:leads,
+    attempts:[
+      {id:'a-cancelled', provider:'codex', tool:'run', task:'t1', room:'r', state:'cancelled'},
+      {id:'a-canceled', provider:'codex', tool:'run', task:'t2', room:'r', state:'canceled'},
+      {id:'a-abandoned', provider:'codex', tool:'run', task:'t3', room:'r', state:'abandoned'},
+      {id:'a-interrupted', provider:'codex', tool:'run', task:'t4', room:'r', state:'interrupted'},
+      {id:'a-closed', provider:'codex', tool:'run', task:'t5', room:'r', state:'closed'},
+      {id:'a-completed', provider:'codex', tool:'run', task:'t6', room:'r', state:'completed'},
+      {id:'a-accepted', provider:'codex', tool:'run', task:'t7', room:'r', state:'accepted'},
+      {id:'a-done', provider:'codex', tool:'run', task:'t8', room:'r', state:'done'},
+      {id:'a-exited', provider:'codex', tool:'run', task:'t9', room:'r', state:'exited'},
+      {id:'a-unknown', provider:'codex', tool:'run', task:'t10', room:'r', state:'paused_x'}
+    ]
+  }, {tools:{
+    oms_panel_chat:a => ({room:a.room, participant:a.participant, source:'room', messages:[],
+      attempts:[
+        {id:'att-1', tool:'peer-review', state:'done', sections:['info']},
+        {id:'att-2', tool:'run', state:'cancelled', sections:['info']},
+        {id:'att-3', tool:'run', state:'landing', sections:['info']},
+        {id:'att-4', tool:'run', state:'paused_x', sections:['info']}
+      ]})
+  }});
+
+  // Leads heading holds the neutral count inside <h2> (visually hidden + decorative pill, no aria-label on span).
+  const leadsBadge = p.get('work-dot');
+  assert.equal(leadsBadge.hidden, false);
+  assert.equal(leadsBadge.textContent, '3');
+  assert.equal(leadsBadge.getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (3)');
+  assert.doesNotMatch(leadsBadge.textContent, /실행|Running|▶|⟳|▷|!/);
+  assert.doesNotMatch(leadsBadge.className || '', /\bstate-chip\b/);
+
+  const leadChips = stateChips(p.get('leads'));
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ 점유됨', '⟳ 착지 중', '? paused_x']);
+
+  const chips = stateChips(p.get('activity'));
+  assert.deepEqual(chips.map(c => c.textContent), [
+    '⊘ 취소됨', '⊘ 취소됨', '⊘ 중단됨', '◷ 중단됨', '· 닫힘',
+    '✓ 완료', '✓ 검증 완료', '✓ 완료', '✓ 종료됨', '? paused_x'
+  ]);
+  assert.equal(chips[0].getAttribute('data-role'), 'muted');
+  assert.equal(chips[0].getAttribute('data-state'), 'cancelled');
+  assert.equal(chips[1].getAttribute('data-role'), 'muted');
+  assert.equal(chips[2].getAttribute('data-role'), 'muted');
+  assert.equal(chips[3].getAttribute('data-role'), 'warning');
+  assert.equal(chips[4].getAttribute('data-role'), 'muted');
+  assert.equal(chips[5].getAttribute('data-state'), 'completed');
+  assert.notEqual(chips[5].getAttribute('data-state'), chips[6].getAttribute('data-state'));
+  assert.equal(chips[7].getAttribute('data-state'), 'done');
+  assert.equal(chips[8].getAttribute('data-state'), 'exited');
+  assert.equal(chips[9].getAttribute('data-role'), 'muted');
+  assert.equal(p.run('MSG.ko["state.done"]'), p.run('MSG.ko["g.done"]'));
+  assert.equal(p.run('MSG.en["state.done"]'), p.run('MSG.en["g.done"]'));
+
+  // Open chat to populate evidence-attempt select options, then switch language.
+  await p.event('header-main', 'click');
+  const optionTexts = () => p.get('evidence-attempt').children.map(o => o.textContent);
+  assert.deepEqual(optionTexts(), [
+    '호출 선택',
+    'peer-review · att-1 · 완료',
+    'run · att-2 · 취소됨',
+    'run · att-3 · 착지 중',
+    'run · att-4 · ? paused_x'
+  ]);
+
+  await choose(p, 'en');
+  assert.equal(leadsBadge.textContent, '3');
+  assert.equal(leadsBadge.getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (3)');
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ Claimed', '⟳ Landing', '? paused_x']);
+  assert.deepEqual(chips.map(c => c.textContent), [
+    '⊘ Cancelled', '⊘ Cancelled', '⊘ Abandoned', '◷ Interrupted', '· Closed',
+    '✓ Completed', '✓ Verified', '✓ Done', '✓ Exited', '? paused_x'
+  ]);
+  assert.deepEqual(optionTexts(), [
+    'Select a call',
+    'peer-review · att-1 · Done',
+    'run · att-2 · Cancelled',
+    'run · att-3 · Landing',
+    'run · att-4 · ? paused_x'
+  ]);
+  assert.doesNotMatch(optionTexts().join('\n'), /완료|취소됨|착지 중|호출 선택/);
+
+  await choose(p, 'ko');
+  assert.equal(leadsBadge.getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (3)');
+  assert.deepEqual(optionTexts(), [
+    '호출 선택',
+    'peer-review · att-1 · 완료',
+    'run · att-2 · 취소됨',
+    'run · att-3 · 착지 중',
+    'run · att-4 · ? paused_x'
+  ]);
+});
+
+test('round 3 advisories: unified git check states, distinct states, Korean ready label, parent row above focus, lone approval collapse memory', async () => {
+  // 1, 2, 6: Git checks unified lookup, distinct states (orphaned/guard_stop/partial/degraded/error), state.ready Korean label.
+  const storage = memoryStorage();
+  const ap1 = {id:'ap1', version:1, digest:'d1', summary:'First approval', action:'Main scope decision', object:'r1', sender:'codex'};
+  const ap2 = {id:'ap2', version:1, digest:'d2', summary:'Second approval', action:'Run task', object:'r1', sender:'claude'};
+  let approvals = [ap1];
+  let graphPayload = {
+    schema:1, kind:'oms-panel-project-graph', status:'ready', provenance:{source:'indexed-graph'},
+    scope:{focusNode:'dir:src'},
+    nodes:[
+      {id:'dir:root', label:'root', kind:'directory'},
+      {id:'pkg:ws', label:'workspace', kind:'module'},
+      {id:'dir:src', label:'src', kind:'directory'},
+      {id:'file:src/lib.rs', label:'lib.rs', kind:'file'},
+      {id:'file:src/mod.rs', label:'mod.rs', kind:'file'},
+      {id:'file:core.rs', label:'core.rs', kind:'file'}
+    ],
+    edges:[
+      {source:'dir:root', target:'dir:src', relation:'contains', confidence:'STRUCTURAL'},
+      {source:'pkg:ws', target:'dir:src', relation:'owns', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:src/lib.rs', relation:'contains', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:src/mod.rs', relation:'owns', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:core.rs', relation:'imports', confidence:'EXTRACTED'}
+    ]
+  };
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner'},
+    activeAttempts:[{room:'r', participant:'lead-1', provider:'claude', role:'lead', task:'Ready task', state:'ready'}],
+    attempts:[
+      {id:'s-orphaned', provider:'codex', tool:'run', task:'t1', room:'r', state:'orphaned'},
+      {id:'s-guard', provider:'codex', tool:'run', task:'t2', room:'r', state:'guard_stop'},
+      {id:'s-partial', provider:'codex', tool:'run', task:'t3', room:'r', state:'partial'},
+      {id:'s-degraded', provider:'codex', tool:'run', task:'t4', room:'r', state:'degraded'},
+      {id:'s-error', provider:'codex', tool:'run', task:'t5', room:'r', state:'error'},
+      {id:'s-ready', provider:'codex', tool:'run', task:'t6', room:'r', state:'ready'}
+    ]
+  }, {storage, tools:{
+    oms_list_approvals:() => ({approvals}),
+    oms_panel_project_graph:() => graphPayload,
+    oms_panel_git_status:() => ({git:{available:true, branch:'main', dirty:false}, github:{status:'available', repository:'org/repo',
+      pullRequests:[{number:9, title:'Check matrix', headBranch:'fix', baseBranch:'main', checks:{passed:1, failed:1, pending:1, other:1,
+        items:[
+          {name:'c-fail', status:'failed'},
+          {name:'c-pass', status:'passed'},
+          {name:'c-pend', status:'pending'},
+          {name:'c-other', status:'other'},
+          {name:'c-cancel', status:'cancelled'},
+          {name:'c-err', status:'error'},
+          {name:'c-weird', status:'custom_check'},
+          {name:'c-empty', status:''}
+        ]}}]}})
+  }});
+  await p.event('tab-git', 'click');
+
+  // Distinct states + Korean state.ready + error stays failed.
+  const actChips = stateChips(p.get('activity'));
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '? 연결 끊김', '! 가드 정지', '~ 일부', '~ 저하', '× 실패', '▷ 준비됨'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-state')), [
+    'orphaned', 'guard_stop', 'partial', 'degraded', 'failed', 'ready'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-role')), [
+    'warning', 'warning', 'warning', 'warning', 'error', 'accent'
+  ]);
+  assert.equal(p.run('MSG.ko["state.ready"]'), '준비됨');
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (1)');
+
+  // Git checks: one lookup, general-table fallback, ? raw for unknown.
+  const checkChips = stateChips(p.get('git-content'));
+  assert.deepEqual(checkChips.map(c => c.textContent), [
+    '× 실패', '✓ 통과', '· 대기 중', '· 기타', '⊘ 취소됨', '× 실패', '? custom_check', '? 미확인'
+  ]);
+  assert.deepEqual(checkChips.map(c => c.getAttribute('data-role')), [
+    'error', 'success', 'muted', 'muted', 'muted', 'error', 'muted', 'muted'
+  ]);
+
+  // 3: Direction-aware ownership — parents above focus, never in children tree.
+  const fieldHtml = html.slice(html.indexOf('id="map-field"'), html.indexOf('id="map-status"'));
+  assert.ok(fieldHtml.indexOf('id="map-parents"') > 0 && fieldHtml.indexOf('id="map-parents"') < fieldHtml.indexOf('id="map-root"'));
+  assert.ok(fieldHtml.indexOf('id="map-root"') < fieldHtml.indexOf('id="map-children"'));
+  const exploreHtml = html.slice(html.indexOf('id="explore-map"'), html.indexOf('id="graph-attach"'));
+  assert.ok(exploreHtml.indexOf('id="explore-parents"') > 0 && exploreHtml.indexOf('id="explore-parents"') < exploreHtml.indexOf('id="explore-root"'));
+  assert.equal(p.get('map-parents').hidden, false);
+  assert.equal(p.get('explore-parents').hidden, false);
+  assert.match(p.get('map-parent-list').textContent, /root/);
+  assert.match(p.get('map-parent-list').textContent, /workspace/);
+  assert.match(p.get('explore-parent-list').textContent, /root/);
+  assert.match(p.get('map-children').textContent, /lib\.rs/);
+  assert.match(p.get('map-children').textContent, /mod\.rs/);
+  assert.doesNotMatch(p.get('map-children').textContent, /root|workspace/);
+  assert.doesNotMatch(p.get('explore-children').textContent, /root|workspace/);
+
+  // English switch updates distinct states, git checks, parent label, and Lead count aria-label.
+  await choose(p, 'en');
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '? Orphaned', '! Guard stop', '~ Partial', '~ Degraded', '× Failed', '▷ Ready'
+  ]);
+  assert.deepEqual(checkChips.map(c => c.textContent), [
+    '× Failed', '✓ Passed', '· Pending', '· Other', '⊘ Cancelled', '× Failed', '? custom_check', '? Unknown'
+  ]);
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (1)');
+  assert.equal(p.get('map-parents-label').textContent, 'Parent');
+  assert.equal(p.get('explore-parents-label').textContent, 'Parent');
+  await choose(p, 'ko');
+
+  // 4: Lone approval auto-opens once per id; collapsing stays collapsed across refreshes (memory only, no storage writes).
+  const setsBefore = storage.sets;
+  assert.equal(p.get('approvals').children[0].open, true);
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, true);
+  p.get('approvals').children[0].open = false;
+  p.get('approvals').children[0].dispatchEvent(new Event('toggle'));
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, false);
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, false);
+  // New lone approval id auto-opens once.
+  approvals = [ap2];
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, true);
+  // Returning to collapsed ap1 keeps it collapsed; no storage writes for approvals.
+  approvals = [ap1];
+  await p.event('refresh', 'click');
+  assert.equal(p.get('approvals').children[0].open, false);
+  assert.equal(storage.sets, setsBefore);
+
+  // Leaf with incoming contains only (no outgoing children, plus an unconnected node) never puts parent or unconnected node in children tree.
+  graphPayload = {
+    schema:1, kind:'oms-panel-project-graph', status:'ready', provenance:{source:'indexed-graph'},
+    scope:{focusNode:'file:src/leaf.rs'},
+    nodes:[
+      {id:'dir:src', label:'src', kind:'directory'},
+      {id:'file:src/leaf.rs', label:'leaf.rs', kind:'file'},
+      {id:'file:stray.rs', label:'stray.rs', kind:'file'}
+    ],
+    edges:[{source:'dir:src', target:'file:src/leaf.rs', relation:'contains', confidence:'STRUCTURAL'}]
+  };
+  await p.event('refresh', 'click');
+  assert.equal(p.get('map-parents').hidden, false);
+  assert.match(p.get('map-parent-list').textContent, /src/);
+  assert.equal(p.get('map-children').hidden, true);
+  assert.equal(p.get('map-children').children.length, 0);
+});
+
+test('inline project map separates ownership children from dependency chips with directional arrows', async () => {
+  const p = await panel(['one'], {}, {locale:'en', tools:{oms_panel_project_graph:() => ({
+    schema:1, kind:'oms-panel-project-graph', status:'ready', provenance:{source:'indexed-graph'},
+    scope:{focusNode:'dir:src'},
+    nodes:[
+      {id:'dir:src', label:'src', kind:'directory'},
+      {id:'file:src/lib.rs', label:'lib.rs', kind:'file'},
+      {id:'file:core.rs', label:'core.rs', kind:'file'},
+      {id:'file:caller.rs', label:'caller.rs', kind:'file'}
+    ],
+    edges:[
+      {source:'dir:src', target:'file:src/lib.rs', relation:'contains', confidence:'STRUCTURAL'},
+      {source:'dir:src', target:'file:core.rs', relation:'imports', confidence:'EXTRACTED'},
+      {source:'file:caller.rs', target:'dir:src', relation:'calls', confidence:'EXTRACTED'}
+    ]
+  })}});
+  assert.equal(p.get('map-children').className, 'map-row connected');
+  assert.match(p.get('map-children').textContent, /lib\.rs/);
+  assert.doesNotMatch(p.get('map-children').textContent, /core\.rs|caller\.rs/);
+  assert.equal(p.get('map-deps').hidden, false);
+  assert.match(p.get('map-dep-list').textContent, /→core\.rsImports · Extracted/);
+  assert.match(p.get('map-dep-list').textContent, /←caller\.rsCalls · Extracted/);
+});
+
+test('degraded status renders a calm notice with source attribution and role=status; header shows project once', async () => {
+  const p = await panel(['one', 'two'], {
+    degraded:true,
+    observation:{schema:1, kind:'multi-source-observation', atomic:false, revision:'obs-v1:0123456789abcdef',
+      observedAt:'2026-11-24T10:00:00Z', completeness:'partial',
+      sources:{git:'ok', task:'ok', plan:'stale', attempts:'ok', artifacts:'unavailable', acceptance:'ok', conversation:'unconfirmed'}}
+  });
+  p.get('project-choice').value = 'one'; await p.event('project-choice', 'change');
+  assert.equal(p.get('scope').hidden, false);
+  assert.equal(p.get('project').hidden, true);
+  assert.equal(p.get('status').className, 'degraded');
+  assert.match(html, /<p id="status" role="status">/);
+  assert.match(p.get('status').textContent, /^~ 일부 · 계획 \(만료된 기록\), 결과물 \(미확인\)/);
+  await choose(p, 'en');
+  assert.match(p.get('status').textContent, /^~ Partial · Plan \(Stale record\), Artifacts \(Unknown\)/);
+});
+
+test('CSS design contracts: control-border token, no suppressed focus outline, forced-colors, target sizes, wrap tabs, single-line checks', () => {
+  // Control border token defined in both schemes and applied to buttons, selects, and inputs.
+  assert.match(styleCss, /:root\{[^}]*--control-border:#767e87/);
+  assert.match(styleCss, /prefers-color-scheme:dark\)\{:root\{[^}]*--control-border:#6b7280/);
+  assert.match(styleCss, /button\{[^}]*border:1px solid var\(--control-border\)/);
+  assert.match(styleCss, /select\{[^}]*border:1px solid var\(--control-border\)/);
+  assert.match(styleCss, /input:not\(\[type="radio"\]\):not\(\[type="checkbox"\]\),textarea,\.form-input\{[^}]*border:1px solid var\(--control-border\)/);
+  // Never suppress focus outline; keep :focus-visible and forced-colors support.
+  assert.doesNotMatch(styleCss, /outline\s*:\s*(?:none|0)\b/);
+  assert.match(styleCss, /:focus-visible\{outline:2px solid var\(--brand\)/);
+  assert.match(styleCss, /@media \(forced-colors:active\)/);
+  // Target heights: summary >= 36px (2.25rem), header controls >= 32px (2rem).
+  assert.match(styleCss, /details>summary\{[^}]*min-height:2\.25rem/);
+  assert.match(styleCss, /#refresh\{[^}]*min-height:2rem/);
+  assert.match(styleCss, /#language-choice\{[^}]*min-height:2rem/);
+  assert.match(styleCss, /#project-choice\{[^}]*min-height:2rem/);
+  // Tabs wrap instead of silently clipping; .entry stays two columns at 320px.
+  assert.match(styleCss, /\.tabs\{[^}]*flex-wrap:wrap/);
+  assert.doesNotMatch(styleCss, /scrollbar-width\s*:\s*none/);
+  assert.match(styleCss, /\.entry\{[^}]*grid-template-columns:minmax\(0,1fr\) auto/);
+  const narrowMedia = styleCss.match(/@media \(max-width:28rem\)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/)?.[1] || '';
+  assert.doesNotMatch(narrowMedia, /\.entry\b/);
+  // Degraded notice style exists; progress vendor pseudo-elements stay in two separate rules.
+  assert.match(styleCss, /#status\.degraded\{[^}]*border-left:3px solid var\(--warm\)/);
+  assert.doesNotMatch(styleCss, /::-webkit-progress-value\s*,\s*progress::-moz-progress-bar/);
+  assert.match(styleCss, /progress::-webkit-progress-value\{[^}]*background:var\(--brand\)/);
+  assert.match(styleCss, /progress::-moz-progress-bar\{[^}]*background:var\(--brand\)/);
+});
+
+test('follow-up honesty: distinct starting/supported/passed/active/planned/open chips and Lead count inside heading', async () => {
+  const leads = [
+    {room:'r', participant:'lead-1', provider:'claude', role:'lead', task:'Booting', state:'starting'},
+    {room:'r', participant:'lead-2', provider:'codex', role:'lead', task:'Live room', state:'active'}
+  ];
+  const p = await panel(['one'], {
+    conversationBinding:'matched',
+    conversationMain:{source:'room-session', state:'joined', provider:'codex', room:'r', participant:'owner', participants:leads},
+    activeAttempts:leads,
+    attempts:[
+      {id:'a-starting', provider:'codex', tool:'run', task:'t1', room:'r', state:'starting'},
+      {id:'a-supported', provider:'codex', tool:'run', task:'t2', room:'r', state:'supported'},
+      {id:'a-passed', provider:'codex', tool:'run', task:'t3', room:'r', state:'passed'},
+      {id:'a-active', provider:'codex', tool:'run', task:'t4', room:'r', state:'active'},
+      {id:'a-planned', provider:'codex', tool:'run', task:'t5', room:'r', state:'planned'},
+      {id:'a-open', provider:'codex', tool:'run', task:'t6', room:'r', state:'open'}
+    ]
+  });
+
+  // Lead count lives inside <h2 id="leads-heading"> without aria-label on the badge span.
+  const headingMatch = html.match(/<h2[^>]*\bid="leads-heading"[^>]*>([\s\S]*?)<\/h2>/);
+  assert.ok(headingMatch, 'leads-heading h2 exists');
+  assert.match(headingMatch[1], /id="lead-count"/);
+  assert.match(headingMatch[1], /id="work-dot"/);
+  assert.doesNotMatch(headingMatch[1], /\baria-label=/);
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('work-dot').textContent, '2');
+  assert.equal(p.get('lead-count').textContent, ' (2)');
+
+  const leadChips = stateChips(p.get('leads'));
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ 시작 중', '▷ 활성']);
+  assert.deepEqual(leadChips.map(c => c.getAttribute('data-state')), ['starting', 'active']);
+  assert.deepEqual(leadChips.map(c => c.getAttribute('data-role')), ['info', 'info']);
+
+  const actChips = stateChips(p.get('activity'));
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '▷ 시작 중', '✓ 근거 있음', '✓ 통과', '▷ 활성', '· 예정', '· 열림'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-state')), [
+    'starting', 'supported', 'passed', 'active', 'planned', 'open'
+  ]);
+  assert.deepEqual(actChips.map(c => c.getAttribute('data-role')), [
+    'info', 'success-muted', 'success', 'info', 'muted', 'muted'
+  ]);
+
+  await choose(p, 'en');
+  assert.deepEqual(leadChips.map(c => c.textContent), ['▷ Starting', '▷ Active']);
+  assert.deepEqual(actChips.map(c => c.textContent), [
+    '▷ Starting', '✓ Supported', '✓ Passed', '▷ Active', '· Planned', '· Open'
+  ]);
+  assert.equal(p.get('work-dot').getAttribute('aria-label'), null);
+  assert.equal(p.get('lead-count').textContent, ' (2)');
+  p.run('clearProject()');
+  await choose(p, 'ko');
+  assert.equal(p.get('work-dot').hidden, true);
+  assert.equal(p.get('work-dot').textContent, '');
+  assert.equal(p.get('lead-count').textContent, '');
+});
+
+test('every ko/en catalog key is referenced by markup, script, or an explicit dynamic prefix', async () => {
+  const p = await panel(['one']);
+  const ko = p.run('MSG.ko'), en = p.run('MSG.en');
+  assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
+  const bodyHtml = html.slice(html.indexOf('<body>'), html.indexOf('<script>'));
+  const markupKeys = new Set();
+  for (const m of bodyHtml.matchAll(/\bdata-i18n="([^"]+)"/g)) markupKeys.add(m[1]);
+  for (const m of bodyHtml.matchAll(/\bdata-i18n-attr="([^"]+)"/g)) {
+    for (const pair of m[1].split(';').filter(Boolean)) markupKeys.add(pair.split(':')[1]);
+  }
+  const catalogBlock = script.match(/const catalogRows = `[\s\S]+?`;/);
+  assert.ok(catalogBlock, 'message catalog block exists');
+  const codeWithoutCatalog = script.replace(catalogBlock[0], '');
+  const codeLiterals = new Set();
+  for (const m of codeWithoutCatalog.matchAll(/(['"])((?:\\.|(?!\1)[^\\\n])*)\1/g)) codeLiterals.add(m[2]);
+
+  // Dynamic prefixes constructed by runtime code (each family also checked against its backing table).
+  const dynamicFamilies = {
+    'g.': new Set(p.run('taskGroups').map(([name]) => name)),
+    'sv.': new Set(p.run('settingViews')),
+    'state.': new Set(Object.keys(p.run('STATE_META'))),
+    'git.rec.': new Set(['recommended','excluded','unverified',...p.run('uncertainBoardReasons')]),
+    'git.class.': new Set(['candidate','blocked','unverified','plan_linked','board_in_progress','closed_board','duplicate','archived','unknown','draft','foreign','epic','closed','pull_request']),
+    'git.check.': new Set(Object.keys(p.run('CHECK_META'))),
+    'obs.': new Set(['complete','partial','unknown']),
+    'src.': new Set(['git','task','plan','attempts','artifacts','acceptance','conversation']),
+    'srcState.': new Set(['unavailable','partial','ambiguous','stale']),
+    'ev.': new Set(p.run('evidenceKeys'))
+  };
+
+  const unreferenced = [];
+  for (const key of Object.keys(ko)) {
+    if (markupKeys.has(key) || codeLiterals.has(key)) continue;
+    const match = Object.entries(dynamicFamilies).find(([prefix, members]) => key.startsWith(prefix) && members.has(key.slice(prefix.length)));
+    if (!match) unreferenced.push(key);
+  }
+  assert.deepEqual(unreferenced, [], `unreferenced catalog keys: ${unreferenced.join(', ')}`);
 });

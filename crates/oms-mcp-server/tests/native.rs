@@ -310,6 +310,10 @@ fn cross_host_project_reads() {
             .find(|t| t["name"] == "oms_open_panel")
             .unwrap();
         assert_eq!(
+            opener["description"],
+            "Open the OMS panel (expands beside or over the conversation when the host allows it)."
+        );
+        assert_eq!(
             opener["_meta"]["openai/ui"]["entrypoints"][0]["type"],
             "global"
         );
@@ -319,10 +323,16 @@ fn cross_host_project_reads() {
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
         let view = c.call("resources/read", json!({"uri":uri}));
+        let html = view["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(html.len() < 240 * 1024);
+        let template = include_str!("../src/conversation-panel.html");
         assert!(
-            view["result"]["contents"][0]["text"].as_str()
-                == Some(include_str!("../src/conversation-panel.html"))
+            html.lines()
+                .map(str::trim_start)
+                .eq(template.lines().map(str::trim_start))
         );
+        assert!(html.contains("ui/request-display-mode"));
+        assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
         assert_eq!(
             view["result"]["contents"][0]["mimeType"],
             "text/html;profile=mcp-app"
@@ -361,6 +371,78 @@ fn cross_host_project_reads() {
         json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
     );
     let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
+    // The transport duplicates compact payloads in text and structuredContent.
+    // A dense snapshot still retains structured evidence within the wire budget.
+    let large = json!({"scope":"repository","goal":"g".repeat(2000),
+        "managedScratch":{"status":"partial","attempts":[]},
+        "operations":(0..100).map(|n|json!({"id":n,"description":"d".repeat(410)})).collect::<Vec<_>>()});
+    fixture_settings(
+        &source,
+        json!({"stdout":json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":large}).to_string()}),
+    );
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let mut bound = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let result = bound.tool("oms_panel_snapshot", json!({"project":"fixture"}));
+        assert_eq!(
+            result["result"]["structuredContent"]["dashboard"], large,
+            "{profile}"
+        );
+        assert!(result.to_string().len() < 60_000, "{profile}");
+    }
+    let issue = json!({"kind":"github-issue","reference":"https://github.com/org/repo/issues/9",
+        "revision":"2026-11-24T09:00:00Z","state":"open","bytes":12,"sha256":"a".repeat(64)});
+    let mut preview = json!({"schema":1,"kind":"oms-intent-source","trusted":false,"source":issue,
+        "text":"not for relay","note":"not for relay"});
+    preview["source"]["title"] = json!("not for relay");
+    fixture_settings(&source, json!({"stdout":preview.to_string()}));
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let mut bound = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let result = bound.tool(
+            "oms_panel_git_status",
+            json!({"project":"fixture","issuePreview":9}),
+        );
+        assert_eq!(payload(&result), json!({"issuePreview":issue}));
+        assert!(!result.to_string().contains("not for relay"));
+        assert_eq!(
+            record(&source)["argv"],
+            json!([
+                "intent",
+                "draft",
+                "--repo",
+                repo,
+                "--from-project-issue",
+                "9",
+                "--dry-run"
+            ])
+        );
+    }
+    for (key, value) in [
+        ("reference", json!("https://github.com/org/repo/issues/10")),
+        ("reference", json!("https://github.com/org/repo/pull/9")),
+        ("state", json!("closed")),
+        ("bytes", json!(32769)),
+        ("sha256", json!("A".repeat(64))),
+        ("revision", json!("2026-02-31T00:00:00Z")),
+    ] {
+        let mut bad_source = preview.clone();
+        bad_source["source"][key] = value;
+        fixture_settings(&source, json!({"stdout":bad_source.to_string()}));
+        bad(
+            &c.tool(
+                "oms_panel_git_status",
+                json!({"project":"fixture","issuePreview":9}),
+            ),
+            "Unverified project issue",
+        );
+    }
+    fixture_settings(&source, json!({"exit":1,"stderr":"not for relay"}));
+    bad(
+        &c.tool(
+            "oms_panel_git_status",
+            json!({"project":"fixture","issuePreview":9}),
+        ),
+        "Cannot verify an open issue",
+    );
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","updated":"2026-11-24T10:00:00Z","conversationMain":null,"observation":obs}});
     fixture_settings(&source, json!({"stdout":snapshot.to_string()}));
     let reply=c.call("tools/call",json!({"name":"oms_panel_snapshot","arguments":{"project":"fixture"},"_meta":{"threadId":"00000000-0000-4000-8000-000000000001"}}));
@@ -445,6 +527,81 @@ fn cross_host_project_reads() {
             .contains("60 nodes")
     );
     assert!(page.to_string().len() < 60_000);
+
+    // A long tracked path is escaped in the widget-only declaration, outside structuredContent.
+    let path = format!("{}/{}/code.rs", "\"".repeat(224), "\"".repeat(223));
+    let node = format!("symbol:{path}::function:read_value");
+    let parameters = (0..15)
+        .map(|i| format!("parameter_{i}: usize"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let definition =
+        json!({"id":node,"line":1,"endLine":2,"signature":format!("fn read_value({parameters})")});
+    let selected = json!({"id":node,"label":"read_value","kind":"function","path":&path[..260]});
+    let mut nodes = vec![selected.clone()];
+    nodes.extend((0..53).map(|i| {
+        let path = format!("src/{i:02}/{}.rs", "x".repeat(128));
+        json!({"id":format!("file:{path}"),"label":"f".repeat(110),"kind":"file","path":path,"language":"rust"})
+    }));
+    let mut graph = json!({"schema":1,"kind":"oms-panel-project-graph","status":"ready","completeness":"complete",
+        "provenance":{"source":"cache"},"limits":{"maxNodes":60,"maxEdges":180,"maxBytes":52000},
+        "counts":{"shown_nodes":54,"shown_edges":0},"nodes":nodes,"edges":[],
+        "selection":{"status":"found","node":selected,"neighbors":[],"breadcrumbs":[]}});
+    let mut native = graph.clone();
+    native["selection"]["definition"] = definition.clone();
+    fixture_settings(&source, json!({"stdout":native.to_string()}));
+    let params = json!({"name":"oms_panel_project_graph","arguments":{"project":"fixture","node":node,"limit":60},
+        "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}});
+    let wire_call = |c: &mut Client, id: Value| {
+        let request = json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params});
+        c.raw(format!("{request}\n").as_bytes());
+        let line = c.read_line();
+        assert!(
+            line.ends_with('\n') && line.len() <= 60_000,
+            "{} wire bytes",
+            line.len()
+        );
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["result"]["resultType"], "complete");
+        reply
+    };
+    let reply = wire_call(&mut c, json!(2));
+    good(&reply);
+    assert_eq!(reply["result"]["structuredContent"], graph);
+    assert_eq!(reply["result"]["_meta"]["graphDefinition"], definition);
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("54 nodes")
+    );
+
+    // Even a summary can exceed the envelope budget with a maximally escaped legal request ID.
+    let paths = (0..4)
+        .map(|i| format!("{}/{}{i}.rs", "🌳".repeat(40), "🌳".repeat(34)))
+        .chain((0..49).map(|i| format!("src/{i}_{}/{}.rs", "z".repeat(220), "x".repeat(78))));
+    let mut nodes = paths
+        .map(|path| {
+            json!({
+                "id":format!("file:{path}"),"path":path,"kind":"file","language":"rust",
+                "label":path.rsplit('/').next().unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    nodes.insert(4, selected);
+    graph["nodes"] = json!(nodes);
+    native = graph.clone();
+    native["selection"]["definition"] = definition.clone();
+    fixture_settings(&source, json!({"stdout":native.to_string()}));
+    let reply = wire_call(&mut c, json!("\u{1}".repeat(1024)));
+    good(&reply);
+    assert_eq!(reply["result"]["structuredContent"], graph);
+    assert_eq!(reply["result"]["_meta"]["graphDefinition"], definition);
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        "Project graph available in structuredContent."
+    );
 }
 fn mcp_app_binding_boundaries() {
     use std::os::unix::fs::PermissionsExt;
@@ -608,7 +765,7 @@ fn desktop_assignment() {
     let record_for = |status: &str, fresh: Option<bool>, operation: Value| {
         let mut r = json!({"request":req,"room":"r","participant":format!("ask-{req}"),"provider":"claude","role":"researcher",
             "title":"Find callers","task":"inspect the callers","readOnly":true,"thread":operation,
-            "status":status,"operation":operation});
+            "status":status,"operation":operation,"assignedAt":"2026-11-24T01:02:03Z"});
         if let Some(f) = fresh {
             r["fresh"] = json!(f);
         }
@@ -660,6 +817,20 @@ fn desktop_assignment() {
     );
     assert!(!source.join("last-call.json").exists());
     assert_eq!(runs(), 0);
+    fixture_settings(
+        &source,
+        json!({"exit": 2, "stderr": "room: room_inventory_incomplete"}),
+    );
+    bad(
+        &call(
+            &mut c,
+            "oms_assign_provider",
+            args.clone(),
+            json!({"threadId":thread}),
+        ),
+        "room_inventory_incomplete:",
+    );
+    assert_eq!(runs(), 0, "incomplete ownership never launches a reviewer");
     // A fresh intent launches once and records the returned operation.
     // The fixture cannot know the generated operation id, so its receipt names another one.
     fixture_settings(
@@ -694,41 +865,181 @@ fn desktop_assignment() {
             .join("status")
             .is_file()
     });
-    // A retry observes the recorded intent and never starts another provider.
-    for (status, expected) in [("assigned", "unconfirmed"), ("started", "recorded")] {
-        let op = if status == "started" {
-            json!(operation)
+    let assigned = record_for("assigned", Some(false), Value::Null);
+    let linked = record_for("started", None, json!(operation));
+    let query = json!({"room":"r","requestId":req});
+    let repair = {
+        let mut a = args.clone();
+        a["repairOnly"] = true.into();
+        a
+    };
+    let host = json!({"threadId":thread});
+    // A new client has only the Room/request after losing the launch reply.
+    drop(c);
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign-status":assigned,"desktop-assign":assigned,"desktop-assign-receipt":linked}}),
+    );
+    let opdir = repo.join(".oms/artifacts/mcp").join(&operation);
+    let pidpath = opdir.join("pid");
+    let pid = std::fs::read(&pidpath).unwrap();
+    for invalid in [None, Some("0\n"), Some("-15\n"), Some("bad")] {
+        if let Some(bytes) = invalid {
+            std::fs::write(&pidpath, bytes).unwrap();
         } else {
-            Value::Null
-        };
-        fixture_settings(
-            &source,
-            json!({"room":{"desktop-assign":record_for(status,Some(false),op)}}),
+            std::fs::remove_file(&pidpath).unwrap();
+        }
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_result",
+                query.clone(),
+                host.clone()
+            ))["status"],
+            "assigned"
         );
-        let again = call(
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_provider",
+                repair.clone(),
+                host.clone()
+            ))["status"],
+            "unconfirmed"
+        );
+        assert_eq!(record(&source)["argv"][1], "desktop-assign-status");
+    }
+    std::fs::write(&pidpath, &pid).unwrap();
+    let meta_path = opdir.join("meta.json");
+    let metadata = std::fs::read_to_string(&meta_path).unwrap();
+    let duplicate = metadata.replacen('{', "{\"thread\":\"foreign\",", 1);
+    std::fs::write(&meta_path, duplicate).unwrap();
+    assert_eq!(
+        payload(&call(
+            &mut c,
+            "oms_assign_result",
+            query.clone(),
+            host.clone()
+        ))["status"],
+        "assigned"
+    );
+    std::fs::write(&meta_path, &metadata).unwrap();
+    std::fs::remove_file(&pidpath).unwrap();
+    std::os::unix::fs::symlink(opdir.join("status"), &pidpath).unwrap();
+    assert_eq!(
+        payload(&call(
             &mut c,
             "oms_assign_provider",
-            args.clone(),
-            json!({"threadId":thread}),
-        );
-        good(&again);
-        assert_eq!(payload(&again)["status"], expected);
-        assert_eq!(payload(&again)["role"], "researcher");
-        assert_eq!(payload(&again)["readOnly"], true);
-        assert_eq!(runs(), 1, "retry never redispatches");
-        assert_eq!(record(&source)["argv"][1], "desktop-assign");
-        let digest = record(&source)["argv"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .position(|v| v == "--conversation-digest")
-            .unwrap();
-        assert_ne!(
-            record(&source)["argv"][digest + 1],
-            thread,
-            "only a digest leaves the process"
+            repair.clone(),
+            host.clone()
+        ))["status"],
+        "unconfirmed"
+    );
+    std::fs::remove_file(&pidpath).unwrap();
+    std::fs::write(&pidpath, &pid).unwrap();
+    let exitpath = opdir.join("status");
+    let exit = std::fs::read(&exitpath).unwrap();
+    // The supervisor writes code or -signal, including the final newline.
+    std::fs::write(&exitpath, "-15\n").unwrap();
+    let signalled = call(&mut c, "oms_assign_result", query.clone(), host.clone());
+    let assignment = &signalled["result"]["_meta"]["assignment"];
+    assert_eq!(assignment["status"], "recovered");
+    assert_eq!(assignment["execution"], json!({"state":"done","exit":-15}));
+    for invalid in [
+        "broken\n", "-127\n", "256\n", "-0\n", "-015\n", "+0\n", "-15",
+    ] {
+        std::fs::write(&exitpath, invalid).unwrap();
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_result",
+                query.clone(),
+                host.clone()
+            ))["status"],
+            "assigned",
+            "{invalid:?}"
         );
     }
+    std::fs::write(&exitpath, exit).unwrap();
+    // Discovery normally returns only the newest twenty; recovery is an exact lookup.
+    let newer: Vec<_> = (0..21)
+        .map(|i| {
+            opdir
+                .parent()
+                .unwrap()
+                .join(format!("ask-20991231T235959Z-{i:08x}"))
+        })
+        .collect();
+    for d in &newer {
+        std::fs::create_dir(d).unwrap();
+    }
+    let recovered = call(&mut c, "oms_assign_result", query.clone(), host.clone());
+    assert_eq!(payload(&recovered)["status"], "recovered");
+    assert_eq!(
+        recovered["result"]["_meta"]["assignment"]["operation"],
+        operation
+    );
+    assert!(payload(&recovered)["operation"].is_null());
+    assert_ne!(record(&source)["argv"][1], "desktop-assign-receipt");
+    // The same synthetic Room data for another conversation cannot locate an operation.
+    assert_eq!(
+        payload(&call(
+            &mut c,
+            "oms_assign_result",
+            query.clone(),
+            json!({"threadId":"01900000-0000-7000-8000-0000000000cc"})
+        ))["status"],
+        "assigned"
+    );
+    for d in newer {
+        std::fs::remove_dir(d).unwrap();
+    }
+    let mut wrong_room = query.clone();
+    wrong_room["room"] = json!("another");
+    bad(
+        &call(&mut c, "oms_assign_result", wrong_room, host.clone()),
+        "unrecognized",
+    );
+    let mut wrong = repair.clone();
+    wrong["title"] = "changed".into();
+    bad(
+        &call(&mut c, "oms_assign_provider", wrong, host.clone()),
+        "does not match",
+    );
+    for original in [&repair, &args] {
+        assert_eq!(
+            payload(&call(
+                &mut c,
+                "oms_assign_provider",
+                original.clone(),
+                host.clone()
+            ))["status"],
+            "started"
+        );
+        assert_eq!(record(&source)["argv"][1], "desktop-assign-receipt");
+    }
+    fixture_settings(&source, json!({"room":{"desktop-assign-status":linked}}));
+    assert_eq!(
+        payload(&call(
+            &mut c,
+            "oms_assign_provider",
+            repair.clone(),
+            host.clone()
+        ))["status"],
+        "recorded"
+    );
+    assert_eq!(record(&source)["argv"][1], "desktop-assign-status");
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign-status":json!({"request":req,"status":"not_found"}).to_string()}}),
+    );
+    bad(
+        &call(&mut c, "oms_assign_provider", repair.clone(), host.clone()),
+        "unrecognized",
+    );
+    assert_eq!(record(&source)["argv"][1], "desktop-assign-status");
+    assert_eq!(runs(), 1, "read and repair never redispatch");
     // A Room record for another request, role or thread is never trusted.
     let mut forged: Value =
         serde_json::from_str(&record_for("started", Some(false), json!(operation))).unwrap();
@@ -820,6 +1131,29 @@ fn desktop_assignment() {
         ),
         "does not match",
     );
+    // A pre-upgrade receipt still addresses its recorded random operation.
+    let legacy = "ask-20250501T010203Z-abcd1234";
+    let legacy_dir = opdir.with_file_name(legacy);
+    std::fs::rename(&opdir, &legacy_dir).unwrap();
+    let mut old_meta: Value = serde_json::from_str(&metadata).unwrap();
+    old_meta["operation"] = legacy.into();
+    old_meta["thread"] = legacy.into();
+    std::fs::write(legacy_dir.join("meta.json"), old_meta.to_string()).unwrap();
+    let mut old_record: Value =
+        serde_json::from_str(&record_for("started", None, json!(legacy))).unwrap();
+    old_record.as_object_mut().unwrap().remove("assignedAt");
+    fixture_settings(
+        &source,
+        json!({"room":{"desktop-assign-status":old_record.to_string()}}),
+    );
+    let old = call(&mut c, "oms_assign_result", query.clone(), host.clone());
+    assert_eq!(old["result"]["_meta"]["assignment"]["operation"], legacy);
+    assert_eq!(payload(&old)["status"], "started");
+    fixture_settings(&source, json!({"room":{"desktop-assign-status":assigned}}));
+    assert_eq!(
+        payload(&call(&mut c, "oms_assign_result", query, host))["status"],
+        "assigned"
+    );
     // Delegated workers and the read-only app profile have no assignment authority.
     let before = runs();
     let mut worker = Client::with_depth(&source, &repo, "chatgpt-panel", false, true, "1".as_ref());
@@ -851,12 +1185,17 @@ fn conversation_panel() {
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
     assert_eq!(tools.as_array().unwrap().len(), 16);
+    assert_eq!(tools[0]["name"], "oms_open_panel");
+    assert_eq!(
+        tools[0]["description"],
+        "Open the OMS panel (expands beside or over the conversation when the host allows it)."
+    );
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v11.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v17.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -870,7 +1209,19 @@ fn conversation_panel() {
     };
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
-    assert!(current["text"].as_str() == Some(include_str!("../src/conversation-panel.html")));
+    let html = current["text"].as_str().unwrap();
+    assert!(html.len() < 240 * 1024);
+    let template = include_str!("../src/conversation-panel.html");
+    assert!(
+        html.lines()
+            .map(str::trim_start)
+            .eq(template.lines().map(str::trim_start))
+    );
+    for marker in ["team-main-chat", "lead-children", "nativeMainUri"] {
+        assert!(html.contains(marker));
+    }
+    assert!(html.contains("ui/request-display-mode"));
+    assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
     assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
     for historical_uri in [
         json!("ui://oms/conversation-panel/v1.html"),
@@ -883,6 +1234,12 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v8.html"),
         json!("ui://oms/conversation-panel/v9.html"),
         json!("ui://oms/conversation-panel/v10.html"),
+        json!("ui://oms/conversation-panel/v11.html"),
+        json!("ui://oms/conversation-panel/v12.html"),
+        json!("ui://oms/conversation-panel/v13.html"),
+        json!("ui://oms/conversation-panel/v14.html"),
+        json!("ui://oms/conversation-panel/v15.html"),
+        json!("ui://oms/conversation-panel/v16.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -1173,6 +1530,13 @@ fn conversation_panel() {
         ])
     );
     for args in [
+        json!({"issuePreview":0}),
+        json!({"issuePreview":10000000000i64}),
+        json!({"issuePreview":"9"}),
+        json!({"issuePreview":9,"cursor":null}),
+        json!({"issuePreview":9,"kind":"issue","number":9}),
+        json!({"issuePreview":9,"inventory":"issues"}),
+        json!({"issuePreview":9,"boardId":"PVT_1"}),
         json!({"kind":"issue"}),
         json!({"number":2}),
         json!({"kind":"pr","number":2}),
@@ -2309,6 +2673,58 @@ fn fixed_argv() {
             "requires",
         );
     }
+    let symbol =
+        "symbol:crates/oms-command-room/src/desktop.rs::function:impl Room<'_>#2::assignment_owner";
+    fixture_settings(
+        &source,
+        json!({"stdout":json!([{"id":symbol}]).to_string()}),
+    );
+    let rows = payload(&c.tool(
+        "oms_project_graph_query",
+        json!({"query":"assignment_owner"}),
+    ));
+    good(&c.tool("oms_project_graph_trace", json!({"node":rows[0]["id"]})));
+    let trace = json!([
+        "graph",
+        "project",
+        "trace",
+        "--json",
+        "--depth",
+        "2",
+        "--direction",
+        "out",
+        symbol
+    ]);
+    assert_eq!(record(&source)["argv"], trace);
+    for node in [
+        "--help",
+        "file:../escape",
+        "symbol:src/../x::run",
+        "file:foo\\bar",
+        "symbol:a::f\ng",
+        "symbol:a::f\u{0085}g",
+        "symbol:a::f\u{202e}g",
+        "symbol:a::f\u{2060}g",
+        "symbol:a::f\u{2028}g",
+    ] {
+        bad(
+            &c.tool("oms_project_graph_trace", json!({"node":node})),
+            "requires",
+        );
+    }
+    assert_eq!(
+        record(&source)["argv"],
+        trace,
+        "invalid IDs never reached the command"
+    );
+    let prefix = "file:";
+    let at_limit = format!("{prefix}{}", "한".repeat(169));
+    assert_eq!(at_limit.len(), 512);
+    good(&c.tool("oms_project_graph_trace", json!({"node":at_limit})));
+    bad(
+        &c.tool("oms_project_graph_trace", json!({"node":at_limit+"x"})),
+        "requires",
+    );
     bad(&c.tool("oms_inbox", json!({"repo":17})), "repo must");
     bad(&c.tool("oms_inbox", json!({"repo":"missing"})), "no such");
 }

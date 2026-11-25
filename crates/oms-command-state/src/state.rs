@@ -6,6 +6,7 @@ use crate::{
 };
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 #[path = "state_projection.rs"]
 mod projection;
@@ -34,22 +35,41 @@ fn collector(result: Result<Value>, present: bool) -> Value {
     }
 }
 
-fn plan(
-    ctx: &Context<'_>,
+fn plan_action(
+    repo: &Path,
     action: oms_command_plan::Action,
     host: &dyn HostServices,
+    interrupted: &AtomicBool,
 ) -> Result<Value> {
     let req = oms_command_plan::Request::new(action).flag("json");
-    let mut context = oms_command_plan::Context::from_environment(&req, &ctx.repo)?;
-    context.state_repo = ctx.repo.clone();
-    context.plan_file = ctx.repo.join(".oms/plan/tasks.json");
-    let plan = oms_command_plan::Plan::open(context, host.plan_services(), ctx.interrupted)?;
+    let mut context = oms_command_plan::Context::from_environment(&req, repo)?;
+    context.state_repo = repo.to_path_buf();
+    context.plan_file = repo.join(".oms/plan/tasks.json");
+    let plan = oms_command_plan::Plan::open(context, host.plan_services(), interrupted)?;
     let response = plan.execute(&req)?;
     require(
         response.code == 0,
         String::from_utf8_lossy(&response.stderr),
     )?;
     json::parse(&response.stdout)
+}
+
+fn plan(
+    ctx: &Context<'_>,
+    action: oms_command_plan::Action,
+    host: &dyn HostServices,
+) -> Result<Value> {
+    plan_action(&ctx.repo, action, host, ctx.interrupted)
+}
+
+pub(crate) fn plan_status(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    host: &dyn HostServices,
+) -> Result<Value> {
+    crate::checkpoint(interrupted)?;
+    let repo = repo.canonicalize().map_err(|e| error(2, e))?;
+    plan_action(&repo, oms_command_plan::Action::Status, host, interrupted)
 }
 
 pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Value> {
@@ -107,6 +127,42 @@ fn conversation_harness(
         "pi" => Some("pi"),
         _ => None,
     }
+}
+
+// Keep Room evidence out of the repository-wide recency window. A worker without
+// a Room field may still have an exact parent attempt within this Room.
+fn panel_room_attempts(rows: &[Value], room: &str) -> (Vec<Value>, usize) {
+    fn room_of(row: &Value) -> &str {
+        row.get("refs").text("panel_room_id")
+    }
+    let lead = |row: &Value| {
+        row.get("refs").text("panel_role") == "lead"
+            || row.text("tool") == "panel-native-assignment"
+    };
+    let leads: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter(|row| room_of(row) == room && lead(row))
+        .map(|row| row.text("attempt_id"))
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut scoped: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            let scope = room_of(row);
+            scope == room || (scope.is_empty() && leads.contains(row.text("parent_attempt_id")))
+        })
+        .collect();
+    scoped.sort_by(|a, b| {
+        let rank = |row: &Value| {
+            let root = row.text("tool") == "panel-main" || lead(row);
+            (row.get("terminal").truth(), !root)
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| b.text("updated_at").cmp(a.text("updated_at")))
+    });
+    let omitted = scoped.len().saturating_sub(24);
+    (scoped.into_iter().take(24).cloned().collect(), omitted)
 }
 
 fn collect_snapshot(
@@ -184,8 +240,14 @@ fn collect_snapshot(
                 binding["conversationMain"].set("harness", harness);
             }
             if let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
-                && let Ok(binding) = json::parse(&encoded)
+                && let Ok(mut binding) = json::parse(&encoded)
             {
+                let room = binding.get("conversationMain").text("room");
+                if !room.is_empty() {
+                    let (items, omitted) = panel_room_attempts(event_rows, room);
+                    binding.set("attempts", Value::Array(items))?;
+                    binding.set("attemptsOmitted", number(omitted))?;
+                }
                 state.set("conversation", binding)?;
             }
         }
@@ -602,10 +664,15 @@ pub(crate) fn run(
     let mut code = 0;
     for i in 0..count {
         crate::checkpoint(ctx.interrupted)?;
-        let state = match cached.take() {
+        let mut state = match cached.take() {
             Some(state) => state,
             None => collect_snapshot(&ctx, host, consumer)?,
         };
+        if matches!(tool, "state" | "dashboard")
+            && let Some(observed) = host.scratch_activity(&ctx.repo, ctx.interrupted)
+        {
+            state.set("managedScratch", observed)?;
+        }
         let report = match tool {
             "state" => state,
             "inbox" => {
@@ -697,4 +764,27 @@ pub(crate) fn run(
         }
     }
     Ok((code, out, vec![]))
+}
+
+#[cfg(test)]
+mod panel_room_tests {
+    use super::*;
+
+    #[test]
+    fn attempt_window_keeps_the_room_and_only_explicit_unscoped_children() {
+        let events = json::parse(
+            br#"[
+            {"attempt_id":"child","parent_attempt_id":"lead"},
+            {"attempt_id":"foreign","parent_attempt_id":"lead","refs":{"panel_room_id":"outside"}},
+            {"attempt_id":"other","parent_attempt_id":"foreign"},
+            {"attempt_id":"lead","refs":{"panel_room_id":"work","panel_role":"lead"}},
+            {"attempt_id":"main","tool":"panel-main","refs":{"panel_room_id":"work"}}
+        ]"#,
+        )
+        .unwrap();
+        let (rows, omitted) = panel_room_attempts(events.array().unwrap(), "work");
+        let ids: Vec<_> = rows.iter().map(|row| row.text("attempt_id")).collect();
+        assert_eq!(ids, ["lead", "main", "child"]);
+        assert_eq!(omitted, 0);
+    }
 }

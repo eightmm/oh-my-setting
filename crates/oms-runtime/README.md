@@ -92,3 +92,72 @@ retirement after releasing its guards;
 active contracts retain their slots. Lost-owner/host recovery and persistent
 session settlement remain unsupported until those producers expose exact owned
 bindings; this API never accepts caller-supplied done/cleanup Booleans.
+
+
+## Exact external waits and experiment continuation
+
+The native autonomy host uses `external::observe` for one schema-1 wait relation
+in the existing autopilot receipt. CI, Slurm, SSH and experiments remain the
+record owners; there is no second operation ledger. A relation binds these
+identities:
+
+| Source | Exact identity |
+| --- | --- |
+| CI | repository, local HEAD, workflow ID, run ID and run attempt |
+| Slurm | submission key and attempt, cluster and allocated job (or empty job before allocation) |
+| SSH | operation ID/tag, command digest and execution snapshot |
+| Experiment | experiment/run ID, frozen contract digest and request digest |
+
+Pending/running/unknown observations suppress generic unfinished-task wakeups
+for the waiting owner. A fresh confirmed terminal result gives each currently
+verified Main attempt one cue, across days; only the autopilot receipt CAS
+consumes that exact result. Main replacement preserves result identity and
+consumption. Parent stop suppresses both external and generic wakes while
+keeping evidence and spent budgets. Existing idle, live-child, pane custody and
+six-wakes-per-day guards still apply. Missing or unsafe observations never
+become a ready signal, and refresh never submits or cancels work.
+
+CI uses bounded GET-only run/attempt/jobs reads, validates repository/head/job
+identity, checks the run again after the jobs and rechecks local HEAD/origin
+before retaining a compact row in `.oms/ci.jsonl`. All GETs share a 20-second
+observation deadline; lock contention refuses. A newer rerun invalidates the
+old attempt. It does not claim all workflows are healthy. SSH `exec`,
+`reconcile`, `cancel` and `probe` use `--timeout-seconds` as a transport wall
+limit, including a connected peer that hangs. A local timeout leaves remote
+custody unknown; it is never proof that a remote job was cancelled.
+
+`runtime experiment next --id ID` is a read-only projection over the registered
+contract and existing run/budget streams. It prioritizes an unresolved exact
+run, then the latest evidence for each preregistered arm/seed. Missing cells
+produce Main planning input; no command from another cell is replayed. The
+adaptive consumer carries that exact evidence into its existing reviewed
+proposal and Lead task path. Invalid/missing/NaN metrics remain inconclusive;
+a valid negative result completes its registered hypothesis and can inform a
+next-hypothesis proposal. Contracts and original budgets remain immutable.
+A cell earns useful progress once per experiment/contract/arm/seed, even when
+a repeat generates a new run ID or slightly different metric values. Exact
+result hashes still distinguish the measurements.
+
+`runtime experiment checkpoint --id ID --run-id RUN --manifest FILE` checks
+registered run identity, frozen code/data/config/evaluation declarations,
+seed, declared step/RNG digest and the exact regular checkpoint bytes. It never
+deserializes a model or proves application optimizer/RNG restoration. The
+checked Slurm template requires OMS and the canonical/shared project state on
+the execution host; Git-only bundle deployment does not supply those. See
+[the checkpoint contract](../../templates/ml-docs/CHECKPOINTS.md#checked-slurm-resume)
+for manifest fields, bounds and the separate remote staging path.
+
+Before a detached autopilot wake, tick retains an exact launch ID and input
+receipt digest. The real CLI records matching started/finished markers in the
+existing progress stream. A missing acknowledgement or start without finish
+never causes another send, even if the receipt advanced or the day changed.
+Those markers prove CLI entry/completion only, not provider delivery or goal
+acceptance.
+
+Planning and handoff consume source-checked journal outcomes and the existing
+query-relevant memory view as advisory context. Facts must match the current
+repository HEAD/tree, PROJECT digest and a clean source/current worktree;
+external facts are revalidated against the exact retained result. Changed
+code/contract or unavailable source evidence withholds the fact. Memory's own
+source/curation/retirement rules remain in force. These observations never
+change provider policy, scope, acceptance or resource authority.

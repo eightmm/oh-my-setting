@@ -277,6 +277,11 @@ pub(crate) fn failures(raw: &[u8]) -> Vec<Entry> {
     let mut newest = HashMap::new();
     for row in failure_rows(raw) {
         let fp = text(&row, "fingerprint");
+        // An accepted task rerun can leave other failures of this fingerprint
+        // open. It is neither a new failure nor a command-wide resolution.
+        if text(&row, "event") == "verified" {
+            continue;
+        }
         if text(&row, "event") == "resolved" {
             if !fp.is_empty() {
                 resolved.insert(fp.clone(), true);

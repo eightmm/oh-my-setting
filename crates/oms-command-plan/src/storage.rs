@@ -380,6 +380,17 @@ impl Store {
         limit: usize,
         create: bool,
     ) -> Result<()> {
+        self.mutate_checked(path, old, new, limit, create, None::<fn() -> Result<()>>)
+    }
+    pub(crate) fn mutate_checked(
+        &self,
+        path: impl AsRef<Path>,
+        old: Option<&[u8]>,
+        new: &[u8],
+        limit: usize,
+        create: bool,
+        check: Option<impl FnOnce() -> Result<()>>,
+    ) -> Result<()> {
         let path = path.as_ref();
         self.relative(path)?;
         self.validate_write_parent(path, create)?;
@@ -388,32 +399,34 @@ impl Store {
         {
             self.trusted(&s, false, false)?;
         }
-        self.root
-            .atomic_mutate(
-                path,
-                MutationOptions {
-                    read: ByteReadOptions {
-                        missing_ok: create,
-                        max_bytes: limit,
-                    },
-                    create_parent: create,
-                    max_output: limit,
-                    expected_exists: if !create { Some(true) } else { None },
-                    ..Default::default()
-                },
-                |bytes| {
-                    if let Some(expected) = old {
-                        require(bytes == expected, "plan CAS drift before publication")?;
-                    }
-                    Ok::<_, crate::Error>(new.to_vec())
-                },
-            )
-            .map_err(|e| match e {
-                MutationError::Transform(e) => e,
-                MutationError::Storage { phase, error: e } => error(format!(
-                    "plan write {phase:?}: {e:?}; reconcile before retry"
-                )),
-            })?;
+        let options = MutationOptions {
+            read: ByteReadOptions {
+                missing_ok: create,
+                max_bytes: limit,
+            },
+            create_parent: create,
+            max_output: limit,
+            expected_exists: if !create { Some(true) } else { None },
+            ..Default::default()
+        };
+        let transform = |bytes: &[u8]| {
+            if let Some(expected) = old {
+                require(bytes == expected, "plan CAS drift before publication")?;
+            }
+            Ok::<_, crate::Error>(new.to_vec())
+        };
+        match check {
+            Some(check) => self
+                .root
+                .atomic_mutate_checked(path, options, transform, check),
+            None => self.root.atomic_mutate(path, options, transform),
+        }
+        .map_err(|e| match e {
+            MutationError::Transform(e) => e,
+            MutationError::Storage { phase, error: e } => error(format!(
+                "plan write {phase:?}: {e:?}; reconcile before retry"
+            )),
+        })?;
         let a = self.anchor(path)?;
         let s = a
             .stat()?

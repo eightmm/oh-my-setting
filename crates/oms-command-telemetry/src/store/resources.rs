@@ -594,7 +594,7 @@ fn count(registry: &V, resource: &V, policy: &Policy) -> Result<Occupancy, Store
             physical != &V::Null
                 && hash(&physical["request"])? == claim["request_sha256"].text().unwrap()
                 && physical["request"]["identity"]["operation_id"] == claim["operation_id"]
-                && physical["schema"] == V::from(3)
+                && matches!(physical["schema"].int(), Some("3" | "4"))
                 && physical["request"]["resource_binding"] == claim["binding"],
             "resource claim lost physical intent",
         )?;

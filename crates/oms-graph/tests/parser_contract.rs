@@ -329,3 +329,149 @@ fn r#type() { let brace = '}'; }
             .any(|n| n["name"] == "missing" && n["metadata"]["span_complete"] == false)
     );
 }
+
+fn rust_calls(source: &str) -> Vec<(String, String, u64)> {
+    let parsed = parse("src/lib.rs", source, "digest", &mut Fake::default()).unwrap();
+    parsed
+        .edges
+        .iter()
+        .filter(|e| e["relation"] == "calls")
+        .map(|e| {
+            assert_eq!(e["confidence"], "INFERRED");
+            assert_eq!(e["evidence"]["path"], "src/lib.rs");
+            assert_eq!(e["evidence"]["source_digest"], "digest");
+            let name = |key: &str| {
+                let id = e[key].as_str().unwrap();
+                assert!(parsed.nodes.iter().any(|n| n["id"] == id), "{id}");
+                id.strip_prefix("symbol:src/lib.rs::function:")
+                    .unwrap()
+                    .to_owned()
+            };
+            (
+                name("source"),
+                name("target"),
+                e["evidence"]["line"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn rust_root_forwarding_calls_require_positive_scope_and_uniqueness() {
+    let chain = r#"#![forbid(unsafe_code)]
+use std::path::Path;
+pub fn run(
+    tool: &str,
+    cwd: &Path,
+) -> (i32, Vec<u8>) {
+    run_with_source(tool, cwd, cwd)
+}
+#[must_use]
+pub(crate) fn run_with_source(tool: &str, cwd: &Path, source: &Path) -> (i32, Vec<u8>) {
+    return run_with_services(
+        tool, cwd, source, &Unavailable,
+    );
+}
+pub fn run_with_services(tool: &str, cwd: &Path, source: &Path, s: &dyn Services) -> (i32, Vec<u8>) {
+    (0, Vec::new())
+}
+trait Services {}
+struct Unavailable;
+impl Services for Unavailable {}
+"#;
+    let edge = |from: &str, to: &str, line: u64| (from.to_owned(), to.to_owned(), line);
+    assert_eq!(
+        rust_calls(chain),
+        vec![
+            edge("run", "run_with_source", 7),
+            edge("run_with_source", "run_with_services", 11),
+        ]
+    );
+    // Prove the shared negative fixture shape is accepted before varying it.
+    assert_eq!(
+        rust_calls(
+            "fn a(mut x: u8) { b(x, &mut x, 1, \"s\"); }\nfn b(_: u8, _: &mut u8, _: u8, _: &str) {}"
+        ),
+        vec![edge("a", "b", 1)]
+    );
+    for declaration in [
+        "struct K { field: u8 }",
+        "type K = u8;",
+        "trait K {}",
+        "enum K { V }",
+        "use other::K as Other; mod other { pub struct K; }",
+        "mod inner { const K: u8 = 0; }",
+    ] {
+        let source = format!("fn run() {{ K() }} fn K() {{}} {declaration}");
+        assert_eq!(rust_calls(&source), vec![edge("run", "K", 1)], "{source}");
+    }
+    for source in [
+        // Opaque callees.
+        "fn a(x: X) { x.b() }\nfn b() {}",
+        "fn a() { util::b() }\nfn b() {}",
+        "fn a() { ::b() }\nfn b() {}",
+        "fn a() { b::<u8>() }\nfn b() {}",
+        "fn a() { b!() }\nfn b() {}",
+        "fn a() { r#b() }\nfn b() {}",
+        "fn a() { b() }\nfn r#b() {}",
+        "fn a() { a() }",
+        // Shadowing, or a header that can hide a binding.
+        "fn a(b: fn()) { b() }\nfn b() {}",
+        "fn run(K: fn()) { K() } fn K() {}",
+        "fn run() { pick() } struct pick(u8); fn pick() {}",
+        "fn run() { pick() } struct pick; fn pick() {}",
+        "fn run() { pick() } const r#pick: fn() = run; fn pick() {}",
+        "fn run() { pick() } static mut pick: fn() = run; fn pick() {}",
+        "fn run() { pick() } use other::pick; fn pick() {}",
+        "fn run() { pick() } use other::{self, inner::{callback as r#pick}}; fn pick() {}",
+        "fn run() { K() } fn K() {} const K: fn() = run;",
+        "fn run() { K() } fn K() {} use other::callback as K;",
+        "fn a((x, b): (u8, fn())) { b() }\nfn b() {}",
+        "fn a(bind!(): u8) { b() }\nfn b() {}",
+        "fn a<const N: usize>() { b() }\nfn b() {}",
+        "fn a() -> Foo<{ 1 }> { b() }\nfn b() {}",
+        // Macro token trees and nested scopes.
+        "macro_rules! m { () => { fn a() { b() } } }\nfn b() {}",
+        "m! { fn b() {} }\nfn a() { b() }",
+        "fn a() { b() }\nmod inner { fn b() {} }",
+        "fn a() { b() }\nmod inner { pub fn c() {} }",
+        "mod inner { fn a() { b() } }\nfn b() {}",
+        "impl T { fn b() {} }\nfn a() { b() }",
+        "extern \"C\" { fn b(); }\nfn a() { b() }",
+        // Conditional or rewriting inner attributes still apply beyond later items.
+        "#![cfg(any())] use std::io; fn a() { b() } fn b() {}",
+        "#![forbid(unsafe_code)] #![cfg_attr(test, something)] fn a() { b() } fn b() {}",
+        "#![rewrite] fn a() { b() } fn b() {}",
+        // Conditional or duplicate declarations.
+        "fn a() { b() }\n#[cfg(unix)]\nfn b() {}\n#[cfg(not(unix))]\nfn b() {}",
+        "fn a() { b() }\n#[cfg(unix)]\nfn b() {}",
+        "fn a() { b() }\n#[cfg(unix)]\n#[inline]\npub(crate) fn b() {}",
+        "#[cfg_attr(unix, inline)]\nfn a() { b() }\nfn b() {}",
+        "#[test]\nfn a() { b() }\nfn b() {}",
+        "#[some::rewrite]\nfn a() { b() }\nfn b() {}",
+        "fn a() { b() }\nfn b() {}\nfn b() {}",
+        // Anything beyond one call with simple arguments.
+        "fn a() { let x = 1; b() }\nfn b() {}",
+        "fn a() { b(); b() }\nfn b() {}",
+        "fn a() { b(c()) }\nfn b() {}",
+        "fn a() { b(x.y) }\nfn b() {}",
+        "fn a() { b(return) }\nfn b() {}",
+        "fn a() { b(&&x) }\nfn b() {}",
+        "fn a() { b(x y) }\nfn b() {}",
+        "fn a() { b(,) }\nfn b() {}",
+        "fn a() { b()? }\nfn b() {}",
+        "fn a() { b().await }\nfn b() {}",
+        "fn a() { unsafe { b() } }\nfn b() {}",
+        // Incomplete or unbalanced files, and names with no local declaration.
+        "fn a() { b() }\nfn b() {",
+        "fn a() { b() }\nfn b() {}\n)",
+        "fn a() { b() }\nfn b();",
+        "use other::b;\nfn a() { b() }",
+    ] {
+        assert!(rust_calls(source).is_empty(), "{source}");
+    }
+    let long = format!("fn a() {{ b({}) }}\nfn b() {{}}", "x,".repeat(100_000));
+    assert!(rust_calls(&long).is_empty());
+    let header = format!("fn a({}) {{ b() }}\nfn b() {{}}", "x: u8,".repeat(100_000));
+    assert!(rust_calls(&header).is_empty());
+}

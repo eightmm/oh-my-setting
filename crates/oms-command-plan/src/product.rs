@@ -417,6 +417,90 @@ pub(crate) fn legacy_relative(plan: &Plan<'_>, value: &str) -> Result<String> {
     relative(rel)?;
     Ok(rel.into())
 }
+pub fn patch_landing_receipt_digest(row: &Value) -> Result<String> {
+    require(
+        row.get("schema").is_int(1),
+        "invalid patch landing receipt schema",
+    )?;
+    let mut canonical = object([("schema", number(1))]);
+    for field in [
+        "landing_id",
+        "patch",
+        "patch_sha",
+        "base_sha",
+        "task",
+        "lease",
+        "plan_receipt_sha",
+        "plan_done_receipt_sha",
+        "approval",
+        "approval_version",
+    ] {
+        canonical.set(field, string(row.get(field).str()?))?;
+    }
+    if let Some(binding) = row.opt("plan_review_binding") {
+        let fence = crate::ReviewFence::parse(&json::canonical(binding)?)?;
+        require(
+            fence.task_id() == row.text("task")
+                && fence.base_sha() == row.text("base_sha")
+                && fence.patch_sha256() == row.text("patch_sha")
+                && fence.lease_id() == row.text("lease")
+                && fence.plan_id() == row.text("plan_id"),
+            "landing receipt differs from its exact Plan review binding",
+        )?;
+    }
+    json::hash(&canonical)
+}
+
+/// Recover the immutable intent and its successful terminal counterpart from
+/// one bounded landing ledger snapshot.
+pub fn completed_patch_landing<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    landing_id: &str,
+) -> Result<(&'a Value, &'a Value)> {
+    require(!landing_id.is_empty(), "missing landing identity")?;
+    // Managed capture has its own lifecycle in this ledger under the same id.
+    let mut rows = rows.into_iter().filter(|r| {
+        r.text("landing_id") == landing_id
+            && matches!(r.text("event"), "intent" | "complete" | "abandoned")
+    });
+    let intent = rows
+        .next()
+        .ok_or_else(|| error("landing intent unavailable"))?;
+    require(
+        intent.text("event") == "intent",
+        "landing terminal precedes intent",
+    )?;
+    let hash = patch_landing_receipt_digest(intent)?;
+    require(
+        intent.text("receipt_sha") == hash,
+        "landing intent digest mismatch",
+    )?;
+    let mut completed = None;
+    for row in rows {
+        require(
+            completed.is_none()
+                && row.text("event") == "complete"
+                && row.get("plan_id") == intent.get("plan_id")
+                && row.get("worktree") == intent.get("worktree")
+                && row.get("plan_review_binding") == intent.get("plan_review_binding")
+                && row.text("receipt_sha") == hash
+                && patch_landing_receipt_digest(row)? == hash,
+            "landing ledger lacks an unambiguous successful terminal receipt",
+        )?;
+        completed = Some(row);
+    }
+    Ok((
+        intent,
+        completed.ok_or_else(|| error("landing completion unavailable"))?,
+    ))
+}
+
+impl Plan<'_> {
+    pub fn patch_landing_rows(&self) -> Result<Vec<Value>> {
+        self.store.rows(".oms/landings.jsonl", true)
+    }
+}
+
 pub(crate) fn satisfaction(
     plan: &Plan<'_>,
     bundle: &Value,
@@ -473,52 +557,10 @@ pub(crate) fn satisfaction(
         !task.get("landing").truth() && !task.get("landed_commit").truth(),
         "patch successor has contradictory commit landing fields",
     )?;
-    let rows = plan.store.rows(".oms/landings.jsonl", false)?;
-    let entries = rows
-        .iter()
-        .filter(|r| r.get("landing_id") == successor.get("landing_id"))
-        .collect::<Vec<_>>();
-    let intents = entries
-        .iter()
-        .filter(|r| r.text("event") == "intent")
-        .collect::<Vec<_>>();
+    let rows = plan.patch_landing_rows()?;
+    let (intent, completed) = completed_patch_landing(&rows, successor.text("landing_id"))?;
     require(
-        intents.len() == 1,
-        "exact immutable landing intent unavailable",
-    )?;
-    let intent = *intents[0];
-    let fields = [
-        "landing_id",
-        "patch",
-        "patch_sha",
-        "base_sha",
-        "task",
-        "lease",
-        "plan_receipt_sha",
-        "plan_done_receipt_sha",
-        "approval",
-        "approval_version",
-    ];
-    let mut canonical = object([("schema", number(1))]);
-    for field in fields {
-        intent.get(field).str()?;
-        canonical.set(field, intent.get(field).clone())?;
-    }
-    let hash = json::hash(&canonical)?;
-    let completed = entries
-        .iter()
-        .filter(|r| {
-            r.text("event") == "complete"
-                && r.get("schema").is_int(1)
-                && r.text("plan_id") == plan_id
-                && fields.iter().all(|f| r.get(f) == intent.get(f))
-                && r.text("receipt_sha") == hash
-        })
-        .collect::<Vec<_>>();
-    require(
-        !completed.is_empty()
-            && !entries.iter().any(|r| r.text("event") == "abandoned")
-            && intent.text("plan_id") == plan_id
+        intent.text("plan_id") == plan_id
             && intent.get("task") == successor.get("task_id")
             && intent.get("lease") == task.get("lease_id")
             && intent.text("plan_done_receipt_sha") == json::receipt_digest(task)?
@@ -530,6 +572,17 @@ pub(crate) fn satisfaction(
         ("path", string(legacy_relative(plan, intent.text("patch"))?)),
         ("sha256", string(json::digest(intent.get("patch_sha"))?)),
     ]);
+    let binding = intent
+        .opt("plan_review_binding")
+        .map(|value| crate::ReviewFence::parse(&json::canonical(value)?))
+        .transpose()?;
+    let plan_identity = object([("plan_id", string(plan_id))]);
+    plan.check_landing_result(
+        &plan_identity,
+        task,
+        binding.as_ref(),
+        patch_ref.text("sha256"),
+    )?;
     let patch = reference(plan, &patch_ref)?;
     require(
         !patch.iter().all(u8::is_ascii_whitespace),
@@ -580,7 +633,7 @@ pub(crate) fn satisfaction(
         reference(plan, &report)?.starts_with(b"# Patch admission: ADMIT\n"),
         "successor admission verdict is not successful",
     )?;
-    crate::approval::landing_authority(plan, intent, completed.last().unwrap())?;
+    crate::approval::landing_authority(plan, intent, completed)?;
     let product = crate::repository::ProductIndex::new(&plan.git())?;
     product.run(&plan.git(), &["read-tree", intent.text("base_sha")], None)?;
     product.run(
@@ -627,7 +680,7 @@ pub(crate) fn satisfaction(
     )?;
     Ok(object([
         ("intent", intent.clone()),
-        ("complete", (***completed.last().unwrap()).clone()),
+        ("complete", completed.clone()),
         ("admission", admission),
         ("land", landed),
     ]))
@@ -757,6 +810,57 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn completed_patch_receipt_requires_the_exact_prior_intent() {
+        let mut intent = object([
+            ("schema", number(1)),
+            ("event", string("intent")),
+            ("landing_id", string("land-fixture")),
+            ("patch", string("exact.patch")),
+            ("patch_sha", string("a".repeat(64))),
+            ("base_sha", string("b".repeat(40))),
+            ("task", string("task")),
+            ("lease", string("lease")),
+            ("plan_receipt_sha", string("c".repeat(64))),
+            ("plan_done_receipt_sha", string("d".repeat(64))),
+            ("approval", string("")),
+            ("approval_version", string("")),
+            ("worktree", string("workspace")),
+            ("plan_id", string("plan")),
+        ]);
+        let hash = patch_landing_receipt_digest(&intent).unwrap();
+        intent.set("receipt_sha", string(&hash)).unwrap();
+        let mut completed = intent.clone();
+        completed.set("event", string("complete")).unwrap();
+        let finish = |rows: &[Value]| completed_patch_landing(rows, "land-fixture").is_ok();
+        assert!(finish(&[intent.clone(), completed.clone()]));
+        let capture = object([
+            ("event", string("capture-reserved")),
+            ("landing_id", string("land-fixture")),
+        ]);
+        assert!(finish(&[capture, intent.clone(), completed.clone()]));
+        assert!(!finish(std::slice::from_ref(&completed)));
+        assert!(!finish(&[
+            intent.clone(),
+            completed.clone(),
+            completed.clone()
+        ]));
+        assert!(!finish(&[completed.clone(), intent.clone()]));
+        assert!(!finish(&[
+            intent.clone(),
+            intent.clone(),
+            completed.clone()
+        ]));
+        let mut forged = completed.clone();
+        forged
+            .set("plan_done_receipt_sha", string("e".repeat(64)))
+            .unwrap();
+        assert!(!finish(&[intent.clone(), forged]));
+        let mut abandoned = intent.clone();
+        abandoned.set("event", string("abandoned")).unwrap();
+        assert!(!finish(&[intent, completed, abandoned]));
+    }
 
     #[test]
     fn receipt_entries_keep_the_bounded_group_readset() {

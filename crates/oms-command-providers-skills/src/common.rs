@@ -120,13 +120,18 @@ impl ChildGroup {
         }
     }
     fn finish(&mut self) -> Result<i32> {
+        use std::os::unix::process::ExitStatusExt;
         if self.reaped {
             return Err(error("child has already been reaped"));
         }
         self.exited()?;
         let _ = rustix::process::kill_process_group(self.group, rustix::process::Signal::KILL);
         self.reaped = true;
-        Ok(self.child.wait()?.code().unwrap_or(1))
+        let status = self.child.wait()?;
+        Ok(status
+            .code()
+            .or_else(|| status.signal().map(|sig| 128 + sig))
+            .unwrap_or(1))
     }
 }
 impl Drop for ChildGroup {
@@ -138,10 +143,14 @@ impl Drop for ChildGroup {
 }
 
 /// Pipes are nonblocking; cancellation and deadlines cover the child process group.
-pub(crate) fn capture(
+pub(crate) fn capture(command: Command, interrupted: &AtomicBool, seconds: u64) -> Result<Output> {
+    capture_timeout(command, interrupted, Duration::from_secs(seconds))
+}
+
+pub(crate) fn capture_timeout(
     mut command: Command,
     interrupted: &AtomicBool,
-    seconds: u64,
+    timeout: Duration,
 ) -> Result<Output> {
     use rustix::process::Pid;
     use std::os::unix::process::CommandExt;
@@ -211,9 +220,7 @@ pub(crate) fn capture(
             Ok(false)
         }
         loop {
-            if interrupted.load(Ordering::Relaxed)
-                || start.elapsed() >= Duration::from_secs(seconds)
-            {
+            if interrupted.load(Ordering::Relaxed) || start.elapsed() >= timeout {
                 if !group.reaped {
                     let _ = group.finish();
                 }

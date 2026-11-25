@@ -935,15 +935,28 @@ fn append_transcript_for_target(
         )));
         return Ok(());
     }
-    for filename in transcript_candidates(target) {
-        if let Some(read) = read_dispatch_transcript(repo, &filename, *remaining_budget) {
+    for candidate in transcript_candidates(target, prefix == "Call") {
+        if let Some((source, read)) = read_dispatch_transcript(repo, &candidate, *remaining_budget)
+        {
             *remaining_budget = remaining_budget.saturating_sub(read.bytes_read);
-            let formatted =
-                format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?;
-            let safe = oms_panel_core::redact(formatted.as_bytes())?;
-            items.push(TextItem::Line(format!("{prefix} {label}")));
+            let (safe, heading, empty_note) = match source {
+                TranscriptSource::DispatchLog => (
+                    oms_panel_core::redact(
+                        format_transcript_bytes(&read.bytes, read.truncated, read.budget_limited)?
+                            .as_bytes(),
+                    )?,
+                    format!("{prefix} {label}"),
+                    "No transcript events recorded",
+                ),
+                TranscriptSource::DispatchReport => (
+                    format_report_bytes(&read.bytes, read.truncated, read.budget_limited)?,
+                    format!("{prefix} {label} · dispatch report"),
+                    "No dispatch report content recorded",
+                ),
+            };
+            items.push(TextItem::Line(heading));
             if safe.trim().is_empty() {
-                items.push(TextItem::Line("No transcript events recorded".into()));
+                items.push(TextItem::Line(empty_note.into()));
             } else {
                 items.push(TextItem::Wrapped(safe));
             }
@@ -1027,6 +1040,25 @@ fn resume_offset(old_lines: &[String], offset: usize, new_lines: &[String]) -> u
     new_lines.len().saturating_sub(1)
 }
 
+const DISPATCH_REPORT_SUBDIRS: [&str; 6] =
+    ["delegate", "ask", "advise", "consult", "review", "call"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum TranscriptCandidate {
+    DispatchLog(String),
+    DispatchReport {
+        subdir: &'static str,
+        filename: String,
+        expected_sha256: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptSource {
+    DispatchLog,
+    DispatchReport,
+}
+
 struct ReadTranscript {
     bytes: Vec<u8>,
     bytes_read: usize,
@@ -1034,7 +1066,46 @@ struct ReadTranscript {
     budget_limited: bool,
 }
 
-fn transcript_candidates(call: &Value) -> Vec<String> {
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_report_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('.')
+        && name.ends_with(".md")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn dispatch_report_candidate(call: &Value) -> Option<TranscriptCandidate> {
+    let rel = call.get("artifact").and_then(Value::as_str)?;
+    let rest = rel.strip_prefix(".oms/artifacts/")?;
+    let (subdir_raw, filename) = rest.split_once('/')?;
+    if !is_report_filename(filename) {
+        return None;
+    }
+    let &subdir = DISPATCH_REPORT_SUBDIRS
+        .iter()
+        .find(|&&allowed| allowed == subdir_raw)?;
+    let expected_sha256 = match call.get("artifact_sha256") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if is_sha256_hex(s) => Some(s.to_owned()),
+        _ => return None,
+    };
+    Some(TranscriptCandidate::DispatchReport {
+        subdir,
+        filename: filename.to_owned(),
+        expected_sha256,
+    })
+}
+
+fn transcript_candidates(call: &Value, allow_report_fallback: bool) -> Vec<TranscriptCandidate> {
     let attempt_raws = [
         call.get("attempt_id").and_then(Value::as_str),
         call.get("call_id").and_then(Value::as_str),
@@ -1078,39 +1149,42 @@ fn transcript_candidates(call: &Value) -> Vec<String> {
             }
         }
     }
-    filenames
+    let mut candidates: Vec<TranscriptCandidate> = filenames
+        .into_iter()
+        .map(TranscriptCandidate::DispatchLog)
+        .collect();
+    if allow_report_fallback && let Some(report) = dispatch_report_candidate(call) {
+        candidates.push(report);
+    }
+    candidates
 }
 
-/// Read an owner-scoped dispatch transcript from `.oms/panel-state/dispatch-logs/`
-/// without following symlinks, leaving the repository, or reading provider homes.
-fn read_dispatch_transcript(
+/// Read an owner-scoped, repository-confined file without following symlinks,
+/// accepting hardlinks, leaving the repository, or reading provider homes.
+fn read_confined_file(
     repo: &Path,
+    dirs: &[&str],
     filename: &str,
     max_bytes: usize,
 ) -> Option<ReadTranscript> {
     use rustix::fs::{self, FileType, Mode, OFlags};
 
     let cap = max_bytes.min(TRANSCRIPT_MAX_BYTES);
-    if cap == 0
-        || filename.is_empty()
-        || filename.contains('/')
-        || filename.contains('\0')
-        || !filename.ends_with(".transcript")
-    {
+    if cap == 0 || filename.is_empty() || filename.contains('/') || filename.contains('\0') {
         return None;
     }
     let euid = rustix::process::geteuid().as_raw();
     let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let root_fd = fs::open(
+    let mut cur_fd = fs::open(
         repo,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .ok()?;
-    let oms_fd = fs::openat(&root_fd, ".oms", dir_flags, Mode::empty()).ok()?;
-    let state_fd = fs::openat(&oms_fd, "panel-state", dir_flags, Mode::empty()).ok()?;
-    let logs_fd = fs::openat(&state_fd, "dispatch-logs", dir_flags, Mode::empty()).ok()?;
-    let dir_stat = fs::fstat(&logs_fd).ok()?;
+    for dir in dirs {
+        cur_fd = fs::openat(&cur_fd, *dir, dir_flags, Mode::empty()).ok()?;
+    }
+    let dir_stat = fs::fstat(&cur_fd).ok()?;
     if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory
         || dir_stat.st_uid != euid
         || (dir_stat.st_mode & 0o022) != 0
@@ -1118,7 +1192,7 @@ fn read_dispatch_transcript(
         return None;
     }
     let fd = fs::openat(
-        &logs_fd,
+        &cur_fd,
         filename,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
@@ -1173,6 +1247,83 @@ fn read_dispatch_transcript(
         truncated,
         budget_limited,
     })
+}
+
+/// Read an owner-scoped dispatch transcript from `.oms/panel-state/dispatch-logs/`
+/// or a per-attempt dispatch report under `.oms/artifacts/` without following
+/// symlinks, leaving the repository, or reading provider homes.
+fn read_dispatch_transcript(
+    repo: &Path,
+    candidate: &TranscriptCandidate,
+    max_bytes: usize,
+) -> Option<(TranscriptSource, ReadTranscript)> {
+    match candidate {
+        TranscriptCandidate::DispatchLog(filename) => {
+            if !filename.ends_with(".transcript") {
+                return None;
+            }
+            let read = read_confined_file(
+                repo,
+                &[".oms", "panel-state", "dispatch-logs"],
+                filename,
+                max_bytes,
+            )?;
+            Some((TranscriptSource::DispatchLog, read))
+        }
+        TranscriptCandidate::DispatchReport {
+            subdir,
+            filename,
+            expected_sha256,
+        } => {
+            if !is_report_filename(filename) {
+                return None;
+            }
+            let read =
+                read_confined_file(repo, &[".oms", "artifacts", subdir], filename, max_bytes)?;
+            if let Some(expected) = expected_sha256
+                && !read.truncated
+                && oms_panel_core::digest(&read.bytes) != *expected
+            {
+                return None;
+            }
+            Some((TranscriptSource::DispatchReport, read))
+        }
+    }
+}
+
+fn format_report_bytes(bytes: &[u8], truncated: bool, budget_limited: bool) -> Result<String> {
+    let raw = String::from_utf8_lossy(bytes);
+    let kept: Vec<&str> = raw.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let body = kept.join("\n");
+    // A tail cut can drop a key block's BEGIN line. Delegate marker recognition
+    // to oms_scrub so redaction visibly covers the cut block instead of dropping lines.
+    let redact_input =
+        if truncated && oms_scrub::first_unpaired_key_end_line(body.as_bytes()).is_some() {
+            format!("{}\n{body}", concat!("-----", "BEGIN PRIVATE KEY-----"))
+        } else {
+            body.clone()
+        };
+    let safe = oms_panel_core::redact(redact_input.as_bytes())?;
+    let safe_body = if !body.ends_with('\n') {
+        safe.strip_suffix('\n').unwrap_or(&safe)
+    } else {
+        &safe
+    };
+    let mut lines: Vec<String> = Vec::new();
+    if truncated {
+        lines.push(
+            if budget_limited {
+                TRANSCRIPT_BUDGET_TRUNCATED_NOTE
+            } else {
+                TRANSCRIPT_TRUNCATED_NOTE
+            }
+            .into(),
+        );
+    }
+    if !safe_body.is_empty() {
+        lines.push(safe_body.to_owned());
+    }
+    Ok(lines.join("\n"))
 }
 
 fn transcript_value_text(value: &Value) -> String {
@@ -2420,6 +2571,475 @@ mod tests {
         assert!(
             !rendered.contains("CALL3_NEVER_READ"),
             "att-3 must not be read after budget exhaustion:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_reads_masked_bounded_dispatch_report_and_prefers_dispatch_log() {
+        let repo = TempRepo::new("transcript-delegate-report");
+        let delegate_dir = repo.0.join(".oms/artifacts/delegate");
+        std::fs::create_dir_all(&delegate_dir).unwrap();
+        std::fs::set_permissions(&delegate_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let secret_like = [
+            ["sk", "-", "live", "_"].concat(),
+            ["1234567890", "abcdefghij", "klmnop"].concat(),
+        ]
+        .concat();
+        let report_rel = ".oms/artifacts/delegate/codex-delegate-run1.md";
+        let report_body = format!(
+            concat!(
+                "# OMS peer-delegate\n\n",
+                "- provider: codex\n\n",
+                "## Output\n\n",
+                "Checked delegate report\n",
+                "{{\"status\":\"ok\"}}\n",
+                "Leaked value {}\n\n",
+                "## Exit\n\n0\n"
+            ),
+            secret_like
+        );
+        let report_path = repo.0.join(report_rel);
+        std::fs::write(&report_path, report_body.as_bytes()).unwrap();
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let report_sha = oms_panel_core::digest(report_body.as_bytes());
+
+        let report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [{
+                    "kind": "delegate",
+                    "participant": "call-builder",
+                    "attempt_id": "att-delegate",
+                    "artifact": report_rel,
+                    "artifact_sha256": report_sha,
+                }]
+            }]
+        });
+
+        // Without .oms/panel-state/dispatch-logs/, Transcript reads the per-attempt dispatch report
+        // masked and preserving JSON lines from worker output.
+        let mut reader = Reader {
+            view: View::Transcript,
+            ..Default::default()
+        };
+        let rendered = reader.lines(&repo.0, &report, 120).unwrap().join("\n");
+        assert!(rendered.contains("Checked delegate report"), "{rendered}");
+        assert!(rendered.contains("{\"status\":\"ok\"}"), "{rendered}");
+        assert!(rendered.contains("## Exit"), "{rendered}");
+        assert!(
+            !rendered.contains(TRANSCRIPT_NOT_CAPTURED),
+            "expected report instead of not captured:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&secret_like),
+            "secret leaked:\n{rendered}"
+        );
+
+        // Resize reuses cached report without rereading disk.
+        std::fs::remove_file(&report_path).unwrap();
+        let narrow = reader.lines(&repo.0, &report, 36).unwrap().join("\n");
+        assert!(narrow.contains("Checked delegate report"), "{narrow}");
+        std::fs::write(&report_path, report_body.as_bytes()).unwrap();
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // When a .oms/panel-state/dispatch-logs/ transcript exists, it stays first choice.
+        let logs_dir = repo.0.join(".oms/panel-state/dispatch-logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tx_file = logs_dir.join("att-delegate.transcript");
+        std::fs::write(
+            &tx_file,
+            b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"DISPATCH_LOG_FIRST_CHOICE\"}}\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tx_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let with_log = reader.render(&repo.0, &report, 120).unwrap().join("\n");
+        assert!(with_log.contains("DISPATCH_LOG_FIRST_CHOICE"), "{with_log}");
+        assert!(
+            !with_log.contains("Checked delegate report"),
+            "dispatch-logs must take precedence over dispatch report:\n{with_log}"
+        );
+
+        // Symlink, hardlink, traversal, non-dispatch subdir, digest mismatch, and group-writable
+        // reports are all refused and fall back to not captured.
+        let outside = repo.write_file("outside-report.md", b"OUTSIDE_SECRET_BODY\n");
+        std::os::unix::fs::symlink(&outside, delegate_dir.join("sym-report.md")).unwrap();
+
+        let hard_src = repo.write_file("hard-report.md", b"HARDLINK_SECRET_BODY\n");
+        std::fs::hard_link(&hard_src, delegate_dir.join("hard-report.md")).unwrap();
+
+        let non_dispatch_dir = repo.0.join(".oms/artifacts/panel-results");
+        std::fs::create_dir_all(&non_dispatch_dir).unwrap();
+        std::fs::set_permissions(&non_dispatch_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let non_dispatch_file = non_dispatch_dir.join("result.md");
+        std::fs::write(&non_dispatch_file, b"NON_DISPATCH_BODY\n").unwrap();
+        std::fs::set_permissions(&non_dispatch_file, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+
+        let tampered_file = delegate_dir.join("tampered-report.md");
+        std::fs::write(&tampered_file, b"TAMPERED_BODY\n").unwrap();
+        std::fs::set_permissions(&tampered_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let writable_file = delegate_dir.join("writable-report.md");
+        std::fs::write(&writable_file, b"WRITABLE_BODY\n").unwrap();
+        std::fs::set_permissions(&writable_file, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        let refused_report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T2",
+                "calls": [
+                    { "attempt_id": "att-sym", "artifact": ".oms/artifacts/delegate/sym-report.md" },
+                    { "attempt_id": "att-hard", "artifact": ".oms/artifacts/delegate/hard-report.md" },
+                    { "attempt_id": "att-trav", "artifact": ".oms/artifacts/delegate/../../outside-report.md" },
+                    { "attempt_id": "att-nondisp", "artifact": ".oms/artifacts/panel-results/result.md" },
+                    {
+                        "attempt_id": "att-badsha",
+                        "artifact": ".oms/artifacts/delegate/tampered-report.md",
+                        "artifact_sha256": "0".repeat(64)
+                    },
+                    { "attempt_id": "att-writable", "artifact": ".oms/artifacts/delegate/writable-report.md" },
+                ]
+            }]
+        });
+        let refused = reader.render(&repo.0, &refused_report, 120).unwrap();
+        let refused_text = refused.join("\n");
+        for forbidden in [
+            "OUTSIDE_SECRET_BODY",
+            "HARDLINK_SECRET_BODY",
+            "NON_DISPATCH_BODY",
+            "TAMPERED_BODY",
+            "WRITABLE_BODY",
+        ] {
+            assert!(
+                !refused_text.contains(forbidden),
+                "refused artifact leaked {forbidden}:\n{refused_text}"
+            );
+        }
+        for att in [
+            "att-sym",
+            "att-hard",
+            "att-trav",
+            "att-nondisp",
+            "att-badsha",
+            "att-writable",
+        ] {
+            assert!(
+                refused
+                    .iter()
+                    .any(|l| l.contains(att) && l.contains(TRANSCRIPT_NOT_CAPTURED)),
+                "expected not captured for {att}:\n{refused_text}"
+            );
+        }
+
+        // View byte budget bounds total bytes read across dispatch reports.
+        let r1 = format!(
+            "REPORT1_A_{}\nREPORT1_B_{}\n",
+            "a".repeat(60),
+            "b".repeat(60)
+        );
+        let r2 = format!(
+            "REPORT2_HEAD_{}\nREPORT2_TAIL\nsecret {secret_like}\n",
+            "c".repeat(80)
+        );
+        let r3 = format!("REPORT3_NEVER_READ_{}\n", "d".repeat(60));
+        for (name, body) in [("r1.md", &r1), ("r2.md", &r2), ("r3.md", &r3)] {
+            let p = delegate_dir.join(name);
+            std::fs::write(&p, body.as_bytes()).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let budget_report = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T3",
+                "calls": [
+                    {
+                        "attempt_id": "att-r1",
+                        "artifact": ".oms/artifacts/delegate/r1.md",
+                        "artifact_sha256": oms_panel_core::digest(r1.as_bytes()),
+                    },
+                    {
+                        "attempt_id": "att-r2",
+                        "artifact": ".oms/artifacts/delegate/r2.md",
+                        "artifact_sha256": oms_panel_core::digest(r2.as_bytes()),
+                    },
+                    {
+                        "attempt_id": "att-r3",
+                        "artifact": ".oms/artifacts/delegate/r3.md",
+                        "artifact_sha256": oms_panel_core::digest(r3.as_bytes()),
+                    },
+                ]
+            }]
+        });
+        let budget = r1.len() + (r2.len() / 2) + 20;
+        let items = load_transcript_items(&repo.0, &budget_report, budget).unwrap();
+        let budgeted = render_text_items(&items, View::Transcript, 120).join("\n");
+        assert!(budgeted.contains("REPORT1_A_"), "{budgeted}");
+        assert!(budgeted.contains("REPORT1_B_"), "{budgeted}");
+        assert!(
+            budgeted.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE),
+            "expected budget truncation note for att-r2:\n{budgeted}"
+        );
+        assert!(
+            !budgeted.contains("REPORT2_HEAD_"),
+            "att-r2 head should be truncated:\n{budgeted}"
+        );
+        assert!(
+            budgeted.contains("REPORT2_TAIL"),
+            "att-r2 tail should be retained:\n{budgeted}"
+        );
+        // A tail cut inside a PEM block must visibly redact the body whose BEGIN line was dropped.
+        let dashes = "-".repeat(5);
+        let cut = format!(
+            "KEYBODY_LINE\n{dashes}END {}{dashes}\nAFTER_KEY",
+            ["PRIVATE", "KEY"].join(" ")
+        );
+        let shown = format_report_bytes(cut.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains("KEYBODY_LINE"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_KEY"), "{shown}");
+        assert!(
+            format_report_bytes(cut.as_bytes(), false, false)
+                .unwrap()
+                .contains("KEYBODY_LINE")
+        );
+        let indented = cut.replace('\n', "\n    > ");
+        let shown = format_report_bytes(indented.as_bytes(), true, true).unwrap();
+        assert!(
+            !shown.contains("KEYBODY_LINE")
+                && shown.contains("[oms-redacted:private-key]")
+                && shown.contains("AFTER_KEY"),
+            "{shown}"
+        );
+        assert!(
+            !budgeted.contains(&secret_like),
+            "secret in truncated report tail leaked:\n{budgeted}"
+        );
+        assert!(
+            budgeted.contains("att-r3") && budgeted.contains(TRANSCRIPT_BUDGET_EXHAUSTED_NOTE),
+            "att-r3 should report budget exhaustion:\n{budgeted}"
+        );
+        assert!(
+            !budgeted.contains("REPORT3_NEVER_READ_"),
+            "att-r3 must not be read after budget exhaustion:\n{budgeted}"
+        );
+    }
+
+    #[test]
+    fn truncated_report_key_marker_redaction_uses_oms_scrub() {
+        let begin_u = concat!("-----", "BEGIN");
+        let begin_l = concat!("-----", "begin");
+        let end_u = concat!("-----", "END");
+        let end_l = concat!("-----", "end");
+
+        // END without trailing space must be visibly redacted, never leak body.
+        let no_space = format!("KEYBODY_NOSPACE\n{end_u}-----\nAFTER_NOSPACE");
+        let shown = format_report_bytes(no_space.as_bytes(), true, true).unwrap();
+        assert!(shown.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE), "{shown}");
+        assert!(!shown.contains("KEYBODY_NOSPACE"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_NOSPACE"), "{shown}");
+
+        // Lowercase END in cut block must be visibly redacted and keep trailing lines.
+        let lower_cut = format!("KEYBODY_LOWER\n{end_l} private key-----\nAFTER_LOWER");
+        let shown = format_report_bytes(lower_cut.as_bytes(), true, false).unwrap();
+        assert!(shown.contains(TRANSCRIPT_TRUNCATED_NOTE), "{shown}");
+        assert!(!shown.contains("KEYBODY_LOWER"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_LOWER"), "{shown}");
+
+        // Lowercase intact block in truncated report keeps sections before and after.
+        let lower_intact = format!(
+            "BEFORE_LOWER\n{begin_l} private key-----\nSECRET_LOWER\n{end_l} private key-----\nAFTER_LOWER"
+        );
+        let shown = format_report_bytes(lower_intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("BEFORE_LOWER"), "{shown}");
+        assert!(!shown.contains("SECRET_LOWER"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_LOWER"), "{shown}");
+
+        // Mixed-case BEGIN + uppercase END keeps preceding sections.
+        let mixed_intact = format!(
+            "BEFORE_MIXED\n{begin_l} private key-----\nSECRET_MIXED\n{end_u} PRIVATE KEY-----\nAFTER_MIXED"
+        );
+        let shown = format_report_bytes(mixed_intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("BEFORE_MIXED"), "{shown}");
+        assert!(!shown.contains("SECRET_MIXED"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("AFTER_MIXED"), "{shown}");
+
+        // Single-line BEGIN+END pair on the END line keeps sections before and after.
+        let single_line = format!(
+            "SECTION_BEFORE\n{begin_u} PRIVATE KEY----- INLINE_SECRET {end_u} PRIVATE KEY-----\nSECTION_AFTER"
+        );
+        let shown = format_report_bytes(single_line.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("SECTION_BEFORE"), "{shown}");
+        assert!(!shown.contains("INLINE_SECRET"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("SECTION_AFTER"), "{shown}");
+
+        // Unpaired END in prose after normal sections is visibly redacted when truncated
+        // (never silently dropped) and preserved verbatim when untruncated.
+        let prose = format!(
+            "## Summary\nNormal section\nQuoted {end_u} PRIVATE KEY----- in prose\n## Exit\n0"
+        );
+        let shown_trunc = format_report_bytes(prose.as_bytes(), true, true).unwrap();
+        assert!(
+            shown_trunc.contains("[oms-redacted:private-key]"),
+            "{shown_trunc}"
+        );
+        assert!(shown_trunc.contains("## Exit"), "{shown_trunc}");
+        let shown_full = format_report_bytes(prose.as_bytes(), false, false).unwrap();
+        assert!(shown_full.contains("## Summary"), "{shown_full}");
+        assert!(shown_full.contains("Normal section"), "{shown_full}");
+        assert!(shown_full.contains("## Exit"), "{shown_full}");
+        assert!(
+            !shown_full.contains("[oms-redacted:"),
+            "untruncated report should not redact unpaired END:\n{shown_full}"
+        );
+
+        // Intact BEGIN..END block in a truncated report preserves preceding and following text.
+        let intact = format!(
+            "NORMAL_BEFORE\n{begin_u} PRIVATE KEY-----\nINTACT_SECRET\n{end_u} PRIVATE KEY-----\nNORMAL_AFTER"
+        );
+        let shown = format_report_bytes(intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("NORMAL_BEFORE"), "{shown}");
+        assert!(!shown.contains("INTACT_SECRET"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("NORMAL_AFTER"), "{shown}");
+
+        // BEGIN kept but END cut hides body through EOF while keeping preceding text.
+        let unclosed =
+            format!("KEEP_BEFORE\n{begin_u} PRIVATE KEY-----\nUNCLOSED_BODY_1\nUNCLOSED_BODY_2");
+        let shown = format_report_bytes(unclosed.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("KEEP_BEFORE"), "{shown}");
+        assert!(!shown.contains("UNCLOSED_BODY_1"), "{shown}");
+        assert!(!shown.contains("UNCLOSED_BODY_2"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+
+        // CRLF line endings for both cut and intact blocks.
+        let crlf_cut = format!("CRLF_BODY\r\n{end_u} PRIVATE KEY-----\r\nCRLF_AFTER\r\n");
+        let shown = format_report_bytes(crlf_cut.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains('\r'), "{shown:?}");
+        assert!(!shown.contains("CRLF_BODY"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("CRLF_AFTER"), "{shown}");
+
+        let crlf_intact = format!(
+            "CRLF_BEFORE\r\n{begin_u} PRIVATE KEY-----\r\nCRLF_SECRET\r\n{end_u} PRIVATE KEY-----\r\nCRLF_AFTER\r\n"
+        );
+        let shown = format_report_bytes(crlf_intact.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains('\r'), "{shown:?}");
+        assert!(shown.contains("CRLF_BEFORE"), "{shown}");
+        assert!(!shown.contains("CRLF_SECRET"), "{shown}");
+        assert!(shown.contains("[oms-redacted:private-key]"), "{shown}");
+        assert!(shown.contains("CRLF_AFTER"), "{shown}");
+
+        // Multiple blocks: cut first block + intact second block.
+        let multi_cut_then_intact = format!(
+            "CUT_BODY_1\n{end_u} PRIVATE KEY-----\nBETWEEN_BLOCKS\n{begin_u} RSA PRIVATE KEY-----\nINTACT_BODY_2\n{end_u} RSA PRIVATE KEY-----\nAFTER_ALL"
+        );
+        let shown = format_report_bytes(multi_cut_then_intact.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains("CUT_BODY_1"), "{shown}");
+        assert!(shown.contains("BETWEEN_BLOCKS"), "{shown}");
+        assert!(!shown.contains("INTACT_BODY_2"), "{shown}");
+        assert!(shown.contains("AFTER_ALL"), "{shown}");
+        assert_eq!(
+            shown.matches("[oms-redacted:private-key]").count(),
+            2,
+            "{shown}"
+        );
+
+        // Multiple blocks: two intact blocks keep surrounding sections.
+        let multi_intact = format!(
+            "START_TEXT\n{begin_u} PRIVATE KEY-----\nB1\n{end_u} PRIVATE KEY-----\nMID_TEXT\n{begin_u} PRIVATE KEY-----\nB2\n{end_u} PRIVATE KEY-----\nEND_TEXT"
+        );
+        let shown = format_report_bytes(multi_intact.as_bytes(), true, true).unwrap();
+        assert!(shown.contains("START_TEXT"), "{shown}");
+        assert!(shown.contains("MID_TEXT"), "{shown}");
+        assert!(shown.contains("END_TEXT"), "{shown}");
+        assert!(
+            !shown.contains("\nB1\n") && !shown.contains("\nB2\n"),
+            "{shown}"
+        );
+        assert_eq!(
+            shown.matches("[oms-redacted:private-key]").count(),
+            2,
+            "{shown}"
+        );
+
+        // Multiple blocks: cut first block + unclosed second block.
+        let multi_cut_then_unclosed = format!(
+            "CUT_BODY_1\n{end_u}-----\nMID_VISIBLE\n{begin_u} PRIVATE KEY-----\nUNCLOSED_BODY_2"
+        );
+        let shown = format_report_bytes(multi_cut_then_unclosed.as_bytes(), true, true).unwrap();
+        assert!(!shown.contains("CUT_BODY_1"), "{shown}");
+        assert!(shown.contains("MID_VISIBLE"), "{shown}");
+        assert!(!shown.contains("UNCLOSED_BODY_2"), "{shown}");
+        assert_eq!(
+            shown.matches("[oms-redacted:private-key]").count(),
+            2,
+            "{shown}"
+        );
+
+        // End-to-end load_transcript_items path with a budget-truncated dispatch report on disk.
+        let repo = TempRepo::new("transcript-truncated-pem-e2e");
+        let delegate_dir = repo.0.join(".oms/artifacts/delegate");
+        std::fs::create_dir_all(&delegate_dir).unwrap();
+        std::fs::set_permissions(&delegate_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let head = format!(
+            "# Report\n{}\n{begin_u} PRIVATE KEY-----\nEARLY_KEY_LINE_{}\n",
+            "h".repeat(120),
+            "k".repeat(80)
+        );
+        let tail = format!(
+            "CUT_KEY_BODY_SECRET\n{end_l}-----\nVISIBLE_BETWEEN\n{begin_u} PRIVATE KEY-----\nSECOND_SECRET\n{end_u} PRIVATE KEY-----\nVISIBLE_END\n"
+        );
+        let full_report = format!("{head}{tail}");
+        let report_path = delegate_dir.join("cut-key.md");
+        std::fs::write(&report_path, full_report.as_bytes()).unwrap();
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let report_doc = serde_json::json!({
+            "kind": "oms-panel-results",
+            "rows": [{
+                "task_id": "T1",
+                "calls": [{
+                    "attempt_id": "att-cut-key",
+                    "artifact": ".oms/artifacts/delegate/cut-key.md",
+                    "artifact_sha256": oms_panel_core::digest(full_report.as_bytes()),
+                }]
+            }]
+        });
+
+        // Pick a budget that lands inside EARLY_KEY_LINE so read_confined_file drops
+        // through the newline right before CUT_KEY_BODY_SECRET (dropping BEGIN).
+        let budget = tail.len() + 24;
+        let items = load_transcript_items(&repo.0, &report_doc, budget).unwrap();
+        let rendered = render_text_items(&items, View::Transcript, 120).join("\n");
+        assert!(
+            rendered.contains(TRANSCRIPT_BUDGET_TRUNCATED_NOTE),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("CUT_KEY_BODY_SECRET"),
+            "cut key body leaked:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("SECOND_SECRET"),
+            "second key body leaked:\n{rendered}"
+        );
+        assert!(rendered.contains("VISIBLE_BETWEEN"), "{rendered}");
+        assert!(rendered.contains("VISIBLE_END"), "{rendered}");
+        assert_eq!(
+            rendered.matches("[oms-redacted:private-key]").count(),
+            2,
+            "expected both cut and intact blocks to show redaction placeholders:\n{rendered}"
         );
     }
 }

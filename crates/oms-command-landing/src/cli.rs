@@ -75,6 +75,7 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "patch",
                 "verify",
                 "plan-task",
+                "expected-plan-review",
                 "panel-accept",
                 "allow-floor-change",
                 "approval",
@@ -114,6 +115,10 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "check-manifest",
                 "manifest-receipt",
                 "expected-preview-sha256",
+                "after",
+                "wait-seconds",
+                "reviewed-head",
+                "request",
             ],
             &[
                 "pr",
@@ -228,6 +233,15 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         }
         i += 1;
     }
+    if tool == "patch-land" && out.has("expected-plan-review") {
+        require(
+            out.all("expected-plan-review").len() == 1
+                && out.all("plan-task").len() == 1
+                && !out.has("recover")
+                && !out.has("panel-accept"),
+            "--expected-plan-review requires one --plan-task outside recovery or panel acceptance",
+        )?;
+    }
     if tool == "patch-land" && out.has("panel-accept") {
         require(
             !out.has("recover") && !out.has("plan-task"),
@@ -240,6 +254,15 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
     }
     if tool == "land" {
         let action = out.action("");
+        require(
+            action == "wait" || (!out.has("after") && !out.has("wait-seconds")),
+            "--after and --wait-seconds require land wait",
+        )?;
+        require(
+            matches!(action, "wait" | "reconcile")
+                || (!out.has("request") && !out.has("reviewed-head")),
+            "--request and --reviewed-head require land wait or reconcile",
+        )?;
         if matches!(action, "batch-preview" | "batch-check") {
             let verify = action == "batch-check";
             require(
@@ -324,7 +347,7 @@ pub(crate) fn usage(tool: &str) -> Option<&'static str> {
             "Usage: oms patch-land [--patch FILE | --plan-task ID] [--repo PATH] [--verify CMD] [--recover] [--request-approval | --approval ID --approval-token GRANT --approval-version N] [--ml] [--allow-verifier-change] [--allow-test-reduction] [--allow-restructure] [--allow-floor-change REASON] [--accept-salvaged] [--accept-encoding-loss]\n"
         }
         "land" => {
-            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land [--pr] [--why TEXT] [--head-branch NAME] [--merge [--merge-method squash|merge|rebase]] [land options]\n       oms land --direct [land options]\n       oms land --local-merge --from REF [land options]\n       (default: a GitHub destination opens a pull request and leaves it unmerged unless --merge; other destinations push directly. --direct to GitHub is limited to a docs-only change of at most 2 lines. OMS_LAND_MODE=pr|direct selects the mode when no mode flag is given)\n       oms land --check-manifest FILE --manifest-receipt PATH [--execute-manifest]  (multi-repo: verify, or fast-forward with --execute-manifest; exit 3 = partial hold)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n       oms land batch-preview --base REF REF... [--repo PATH] [--json]
+            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land [--pr] [--why TEXT] [--head-branch NAME] [--merge [--merge-method squash|merge|rebase]] [land options]\n       To update an existing PR after its target moves, fetch and merge the target into the existing PR branch, then rerun land with the same head branch.\n       oms land --direct [land options]\n       oms land --local-merge --from REF [land options]\n       (default: a GitHub destination opens a pull request and leaves it unmerged unless --merge; other destinations push directly. --direct to GitHub is limited to a docs-only change of at most 2 lines. OMS_LAND_MODE=pr|direct selects the mode when no mode flag is given)\n       oms land --check-manifest FILE --manifest-receipt PATH [--execute-manifest]  (multi-repo: verify, or fast-forward with --execute-manifest; exit 3 = partial hold)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land wait --reviewed-head FULL_SHA --request RECEIPT_STAMP [--after CURSOR] [--wait-seconds 0..50] [--repo PATH] [--json]\n       oms land reconcile --reviewed-head FULL_SHA [--request RECEIPT_STAMP] [--repo PATH] [--remote NAME] [--target BRANCH] [--json]  (read-only: verifies a merged PR against its saved receipt)\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n       oms land batch-preview --base REF REF... [--repo PATH] [--json]
        oms land batch-check --base REF --expected-preview-sha256 SHA256 REF... [--repo PATH] [--json]\n"
         }
         "change-guard" => {

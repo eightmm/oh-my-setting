@@ -874,15 +874,86 @@ fn canonical_native_main_succession_preserves_contract_and_account_anchor() {
         assert!(!artifact.exists());
         assert!(spy.mutating_calls().is_empty());
     }
+    // A new assignment belongs to this physical Main while its canonical
+    // claimant remains the original Room participant. Preserve upstream unsent
+    // recovery and retirement across that distinction after a real swap.
+    native_assignment::CRASH_AFTER_BINDING_WRITE.with(|crash| crash.set(true));
+    assert!(
+        send("native-two", "next task after retirement", None)
+            .unwrap_err()
+            .message
+            .contains("test crash")
+    );
+    let history = AttemptCache::default()
+        .attempts(&repo, &spy, &spy.stop)
+        .unwrap();
+    let unsent = crate::rows(&history)
+        .iter()
+        .find(|operation| operation["task_id"] == "native-two")
+        .unwrap();
+    let unsent_attempt = text(unsent, "attempt_id");
+    assert_eq!(unsent["parent_attempt_id"], spy.main_attempt);
+    assert_eq!(unsent["sequence"], 1);
+    let unsent_path = repo.join(format!(
+        ".oms/lifecycle/attempts/{unsent_attempt}/native-assignment.json"
+    ));
+    let unsent_packet = std::fs::read(&unsent_path).unwrap();
+    std::fs::remove_file(&unsent_path).unwrap();
+    assert!(spy.mutating_calls().is_empty());
+    if settled {
+        let retire_unsent = [
+            "--native-reconcile",
+            unsent_attempt,
+            "--intent-sha256",
+            text(&unsent["refs"], "native_intent_sha256"),
+            "--decision",
+            "retire-unsent",
+        ];
+        let plan_before = std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap();
+        let retired = invoke(&retire_unsent).unwrap();
+        assert_eq!(retired["status"], "retired-unsent");
+        assert_eq!(retired["plan_changed"], false);
+        assert_eq!(
+            std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+            plan_before
+        );
+        let events_before = std::fs::read(repo.join(".oms/lifecycle/events.jsonl")).unwrap();
+        assert_eq!(invoke(&retire_unsent).unwrap()["reused"], true);
+        assert_eq!(
+            std::fs::read(repo.join(".oms/lifecycle/events.jsonl")).unwrap(),
+            events_before
+        );
+        assert!(
+            send("native-two", "next task after retirement", None)
+                .unwrap_err()
+                .message
+                .contains("release its exact Plan lease")
+        );
+        plan(&[
+            "release",
+            "--id",
+            "native-two",
+            "--lease-id",
+            text(&unsent["refs"], "lease_id"),
+        ]);
+        assert!(spy.mutating_calls().is_empty());
+    }
     let second = send("native-two", "next task after retirement", None).unwrap();
     let second_raw = std::fs::read(repo.join(text(&second, "binding"))).unwrap();
+    if settled {
+        assert_ne!(text(&second, "attempt_id"), unsent_attempt);
+        assert!(!unsent_path.exists());
+    } else {
+        assert_eq!(text(&second, "attempt_id"), unsent_attempt);
+        assert_eq!(second_raw, unsent_packet);
+    }
     let second_assignment = oms_panel_core::native_contract::CheckedAssignment::parse(&second_raw)
         .unwrap()
         .unwrap();
     assert_eq!(second_assignment.parent_attempt_id(), spy.main_attempt);
     assert_eq!(second_assignment.parent_participant(), MAIN);
     assert_eq!(second_assignment.owner(), "claude");
-    assert_eq!(second_assignment.lease_epoch(), 1);
+    assert_eq!(second_assignment.lease_epoch(), if settled { 2 } else { 1 });
     assert_eq!(
         second_assignment.packet()["account"],
         assignment.packet()["account"]

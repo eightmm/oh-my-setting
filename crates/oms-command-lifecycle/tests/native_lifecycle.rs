@@ -2316,10 +2316,11 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         }
         let aggregate_cache = fields(&cache.join("claude.env"));
         if expected {
-            for key in ["effort_mechanism", "effort_values"] {
+            for key in ["effort_mechanism", "effort_values", "models_probe"] {
                 assert_eq!(narrow_cache[key], aggregate_cache[key], "{key}");
             }
         }
+        assert_eq!(aggregate_cache["models_probe"], "failed");
         assert_ne!(aggregate_cache["binary_key"], "previous-binary");
         assert_eq!(
             fs::read_to_string(cache.join("claude.models")).unwrap(),
@@ -2329,6 +2330,12 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
             fs::read_to_string(cache.join("claude.efforts")).unwrap(),
             "cached-model\tlow high\n"
         );
+        let agy_cache = fields(&cache.join("antigravity.env"));
+        if expected {
+            assert_eq!(agy_cache["effort_mechanism"], "flag");
+            assert_eq!(agy_cache["effort_values"], "low medium high xhigh max");
+        }
+        assert_eq!(agy_cache["models_probe"], "ok");
         return;
     }
     let root = std::env::temp_dir().join(format!("oms-probe-parity-{}", std::process::id()));
@@ -2346,6 +2353,9 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
     let executable = bin.join("claude");
     fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '--effort (low|medium|high|xhigh)'; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let agy_exec = bin.join("agy");
+    fs::write(&agy_exec, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '  --effort  Reasoning effort (low|medium|high|xhigh|max)' >&2; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
+    fs::set_permissions(&agy_exec, fs::Permissions::from_mode(0o700)).unwrap();
     for (version, help, mode) in [(0, 0, "auto"), (1, 0, "auto"), (0, 1, "1"), (1, 1, "1")] {
         let case = root.join(format!("{version}-{help}"));
         let cache = case.join("capabilities");
@@ -2353,6 +2363,8 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         fs::write(cache.join("claude.env"), "binary_key=previous-binary\neffort_mechanism=none\neffort_values=low\nmodels_probe=failed\nprobed_at=1\n").unwrap();
         fs::write(cache.join("claude.models"), "cached-model\n").unwrap();
         fs::write(cache.join("claude.efforts"), "cached-model\tlow high\n").unwrap();
+        fs::write(cache.join("antigravity.env"), "binary_key=previous-agy\neffort_mechanism=none\neffort_values=\nmodels_probe=ok\nprobed_at=1\n").unwrap();
+        fs::write(cache.join("antigravity.models"), "gemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-pro-orchestrator\tOrchestrator (Carbon)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n").unwrap();
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

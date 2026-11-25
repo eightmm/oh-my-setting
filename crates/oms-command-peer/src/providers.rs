@@ -794,6 +794,7 @@ struct Bound {
     environment: Vec<(OsString, OsString)>,
     remove: Vec<OsString>,
     id: Option<String>,
+    home: Option<PathBuf>,
 }
 fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bound> {
     if spec.name == "claude"
@@ -805,7 +806,7 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
         return fail("credential environment overrides the selected Claude account");
     }
     Ok(Bound {
-        environment: vec![(spec.env.into(), location.into_os_string())],
+        environment: vec![(spec.env.into(), location.as_os_str().to_owned())],
         // A session directory override would leave transcripts outside the account.
         remove: if spec.name == "pi" {
             vec!["PI_CODING_AGENT_SESSION_DIR".into()]
@@ -813,7 +814,89 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
             Vec::new()
         },
         id: Some(id.into()),
+        home: Some(location),
     })
+}
+
+/// Keep the selected directory open through execution. Birth time is needed
+/// for a persisted generation, while the open directory proves this call's
+/// identity even on filesystems that do not report birth time.
+struct AccountHome {
+    named: PathBuf,
+    physical: PathBuf,
+    directory: std::fs::File,
+    sha256: Option<String>,
+}
+impl AccountHome {
+    fn capture(provider: &str, named: &Path) -> Result<Self> {
+        let invalid = || {
+            Error::new(
+                75,
+                "selected provider account home is unavailable; no request was sent",
+            )
+        };
+        if !owned_private(named) {
+            return Err(invalid());
+        }
+        let physical = named.canonicalize().map_err(|_| invalid())?;
+        let directory = std::fs::File::from(
+            rustix::fs::open(
+                &physical,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|_| invalid())?,
+        );
+        let metadata = directory.metadata().map_err(|_| invalid())?;
+        let proof = Self {
+            sha256: Self::digest(provider, &physical, &metadata),
+            named: named.into(),
+            physical,
+            directory,
+        };
+        proof.current().then_some(proof).ok_or_else(invalid)
+    }
+
+    fn digest(provider: &str, path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
+        let birth = metadata
+            .created()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        if birth.is_zero() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        digest.update(format!("oms-account-home-v1\0{provider}\0"));
+        digest.update(path.as_os_str().as_bytes());
+        digest.update(format!(
+            "\0{}\0{}\0{}\0{}\0{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.uid(),
+            birth.as_secs(),
+            birth.subsec_nanos(),
+        ));
+        Some(format!("{:x}", digest.finalize()))
+    }
+
+    fn current(&self) -> bool {
+        let (Ok(opened), Ok(visible)) = (
+            self.directory.metadata(),
+            std::fs::symlink_metadata(&self.physical),
+        ) else {
+            return false;
+        };
+        owned_private(&self.named)
+            && self.named.canonicalize().ok().as_ref() == Some(&self.physical)
+            && owned_private_directory(&opened)
+            && owned_private_directory(&visible)
+            && opened.ino() != 0
+            && (opened.dev(), opened.ino()) == (visible.dev(), visible.ino())
+    }
 }
 pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>, Option<String>);
 
@@ -838,11 +921,14 @@ pub(crate) fn session_environment(provider: &str, location: &Path) -> Result<Ses
     Ok((bound.environment, bound.remove, account))
 }
 fn owned_private(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).ok().is_some_and(|m| {
-        m.file_type().is_dir()
-            && m.uid() == rustix::process::getuid().as_raw()
-            && m.mode() & 0o022 == 0
-    })
+    std::fs::symlink_metadata(path)
+        .as_ref()
+        .is_ok_and(owned_private_directory)
+}
+fn owned_private_directory(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir()
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && metadata.mode() & 0o022 == 0
 }
 
 fn codex_models(home: &Path) -> Option<BTreeSet<String>> {
@@ -1134,27 +1220,180 @@ pub fn answer_quality(raw: &str) -> &'static str {
         "ok"
     }
 }
+fn incomplete_stop(reason: &str) -> bool {
+    matches!(
+        reason,
+        "length" | "max_output" | "refusal" | "error" | "aborted"
+    ) || reason.starts_with("max_")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputMode {
+    Legacy,
+    Native,
+}
+
+pub(crate) fn require_native_output(provider: &str) -> Result<()> {
+    if !oms_command_plan::discussion::supports_native_output(provider) {
+        return fail("provider transport cannot prove native output completion");
+    }
+    if !discovered(provider) {
+        return Err(Error::new(127, "provider command not found"));
+    }
+    Ok(())
+}
+
+fn native_text(row: &oms_json::Value, key: &str) -> Option<String> {
+    row.get(key)?.as_string()?.to_str_checked()
+}
+
+fn native_stopped_early(row: &oms_json::Value) -> bool {
+    [
+        native_text(row, "stop_reason"),
+        native_text(row, "finish_reason"),
+        row.get("message")
+            .and_then(|m| native_text(m, "stop_reason")),
+        row.get("event")
+            .and_then(|e| e.get("delta"))
+            .and_then(|d| native_text(d, "stop_reason")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|reason| incomplete_stop(&reason))
+}
+
+fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
+    if provider == "antigravity" {
+        // Unlike JSONL, print mode emits one envelope. Completion and accounting
+        // have separate contracts, including for continued conversations.
+        let row = oms_json::parse_strict(raw).ok()?;
+        let id = native_text(&row, "conversation_id")?;
+        if native_text(&row, "status").as_deref() != Some("SUCCESS")
+            || id.is_empty()
+            || id.chars().any(|c| c.is_whitespace() || c.is_control())
+            || row
+                .get("error")
+                .is_some_and(|v| !matches!(v, oms_json::Value::Null))
+            || native_stopped_early(&row)
+        {
+            return None;
+        }
+        return native_text(&row, "response");
+    }
+    let mut answer = None;
+    let mut terminal = false;
+    for line in std::str::from_utf8(raw)
+        .ok()?
+        .lines()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let row = oms_json::parse_strict(line.as_bytes()).ok()?;
+        let kind = native_text(&row, "type")?;
+        // The terminal event closes the stream. Trailing partial events and
+        // explicit errors invalidate the proof even after an answer was seen.
+        if terminal || native_stopped_early(&row) {
+            return None;
+        }
+        match (provider, kind.as_str()) {
+            ("codex", "turn.failed" | "error") | ("claude", "error") => return None,
+            ("codex", "turn.started") => answer = None,
+            ("codex", "item.completed") => {
+                let item = row.get("item")?;
+                if native_text(item, "type").as_deref() == Some("agent_message") {
+                    answer = Some(native_text(item, "text")?);
+                }
+            }
+            ("codex", "turn.completed") => terminal = true,
+            ("claude", "result") => {
+                if native_text(&row, "subtype").as_deref() != Some("success")
+                    || !matches!(row.get("is_error"), Some(oms_json::Value::Bool(false)))
+                {
+                    return None;
+                }
+                answer = Some(native_text(&row, "result")?);
+                terminal = true;
+            }
+            _ => {}
+        }
+    }
+    answer.filter(|_| terminal)
+}
+
 pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
     let input = String::from_utf8_lossy(raw);
+    decode_provider_events(provider, &input, false).unwrap_or_else(|| (input.into_owned(), true))
+}
+
+fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool {
+    match (provider, kind) {
+        ("codex" | "claude", "usage") => ["input_tokens", "output_tokens", "total_tokens"]
+            .iter()
+            .any(|key| matches!(row.get("usage").get(key), V::Num(n) if n.parse::<u64>().is_ok())),
+        ("claude", "rate_limit_event") => matches!(
+            text(row.get("rate_limit_info"), "status"),
+            "allowed" | "allowed_warning" | "rejected"
+        ),
+        ("claude", "system") => {
+            text(row, "subtype") == "hook_response"
+                && matches!(text(row, "hook_event"), "Stop" | "SessionEnd")
+                && text(row, "outcome") == "success"
+        }
+        _ => false,
+    }
+}
+
+fn decode_bound_output(provider: &str, raw: &[u8]) -> (String, bool) {
+    if provider == "antigravity" {
+        // AGY print mode emits a single JSON document, which may span lines.
+        if let Ok(row) = oms_json::parse_strict(raw)
+            && let Some(answer) = native_text(&row, "response")
+        {
+            let terminal = native_text(&row, "status").as_deref() == Some("SUCCESS")
+                && row
+                    .get("error")
+                    .is_none_or(|v| matches!(v, oms_json::Value::Null))
+                && !native_stopped_early(&row);
+            return (answer, terminal);
+        }
+    } else if let Ok(input) = std::str::from_utf8(raw)
+        && let Some(decoded) = decode_provider_events(provider, input, true)
+    {
+        return decoded;
+    }
+    (String::from_utf8_lossy(raw).into_owned(), false)
+}
+
+fn decode_provider_events(
+    provider: &str,
+    input: &str,
+    require_terminal_json: bool,
+) -> Option<(String, bool)> {
     let mut output = Vec::new();
     let mut recognized = false;
     let mut terminal = false;
     let mut stopped_early = false;
-    for line in input.lines() {
+    let mut malformed = false;
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(row) = V::parse(line.as_bytes()) else {
+            malformed = true;
             continue;
         };
+        if require_terminal_json
+            && (!matches!(row, V::Obj(_)) || oms_json::parse_strict(line.as_bytes()).is_err())
+        {
+            malformed = true;
+        }
         let kind = text(&row, "type");
+        if require_terminal_json && !native_result_footer(provider, kind, &row) {
+            terminal = false;
+        }
         for reason in [
             row.get("stop_reason"),
             row.get("finish_reason"),
             row.get("message").get("stop_reason"),
             row.get("event").get("delta").get("stop_reason"),
         ] {
-            if reason.text().is_some_and(|s| {
-                matches!(s, "length" | "max_output" | "refusal" | "error" | "aborted")
-                    || s.starts_with("max_")
-            }) {
+            if reason.text().is_some_and(incomplete_stop) {
                 stopped_early = true;
             }
         }
@@ -1202,6 +1441,10 @@ pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
                         text(&row, "subtype"),
                         "error_max_turns" | "error_during_execution"
                     );
+                if require_terminal_json {
+                    terminal &= row.get("is_error") == &V::Bool(false)
+                        && text(&row, "subtype") == "success";
+                }
                 let result = text(&row, "result");
                 if !result.is_empty() && output.last().is_none_or(|v| v != result) {
                     output.push(result.into());
@@ -1257,11 +1500,12 @@ pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
             }
         }
     }
-    if recognized {
-        (output.join("\n\n"), terminal && !stopped_early)
-    } else {
-        (input.into_owned(), true)
-    }
+    recognized.then(|| {
+        (
+            output.join("\n\n"),
+            terminal && !stopped_early && (!require_terminal_json || !malformed),
+        )
+    })
 }
 struct ProviderScratch(PathBuf);
 impl ProviderScratch {
@@ -1962,6 +2206,7 @@ fn is_clean_retry(snapshot: &Option<Option<[u8; 32]>>, context: &Context<'_>, cw
         Some(None) => false,
     }
 }
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     route: &mut Route,
@@ -1973,9 +2218,36 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    execute_env_with_output(
+        route,
+        prompt,
+        cwd,
+        write,
+        timeout,
+        account_repo,
+        extra_env,
+        OutputMode::Legacy,
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
+    route: &mut Route,
+    prompt: &P,
+    cwd: &Path,
+    write: bool,
+    timeout: u64,
+    account_repo: &Path,
+    extra_env: &[(OsString, OsString)],
+    output_mode: OutputMode,
+    context: &Context<'_>,
+) -> Result<Completed> {
     prompt.validate()?;
     crate::safety::outbound(prompt.bytes())?;
-    if !discovered(&route.provider) {
+    if output_mode == OutputMode::Native {
+        require_native_output(&route.provider)?;
+    } else if !discovered(&route.provider) {
         return Err(Error::new(127, "provider command not found"));
     }
     if write
@@ -2023,6 +2295,9 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         if write {
             return fail("Team request channels are read-only");
         }
+        if output_mode == OutputMode::Native {
+            return fail("Team request channels do not emit typed native output");
+        }
         Some(team_protocol(route, &transport.argv)?)
     } else {
         None
@@ -2035,6 +2310,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             .unwrap_or(""),
     )?;
     let extra_env = crate::usage::operation_env(extra_env)?;
+    let plan_bound = crate::plan_delegate::has_launch_binding(&extra_env);
     let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
         .map(|(k, _)| k)
@@ -2050,8 +2326,8 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     let mut excluded = BTreeSet::new();
     let mut rebound = None;
     for overflow in 0..2 {
-        let write_snapshot =
-            (overflow == 0 && write && !route.account_pinned).then(|| repo_state(context, cwd));
+        let write_snapshot = (!plan_bound && overflow == 0 && write && !route.account_pinned)
+            .then(|| repo_state(context, cwd));
         let bound = match rebound.take() {
             Some(bound) => bound,
             None => account_environment(route, &excluded, account_repo)?,
@@ -2060,6 +2336,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             mut environment,
             remove,
             id: account,
+            home: account_home,
         } = bound;
         if let Some(id) = &account {
             route.account.clone_from(id);
@@ -2071,8 +2348,35 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             ("OMS_HARNESS_DELEGATE_DEPTH".into(), "1".into()),
         ]);
         environment.extend(transport.environment.clone());
-        environment.extend(extra_env.iter().cloned());
-        if let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
+        environment.extend(
+            extra_env
+                .iter()
+                .filter(|(key, _)| !crate::plan_delegate::launch_key(key))
+                .cloned(),
+        );
+        let named_account = account
+            .as_deref()
+            .filter(|id| !id.is_empty() && *id != "default");
+        let account_home = if let (Some(home), Some(spec)) =
+            (&account_home, isolated(&route.provider))
+        {
+            let (_, value) = environment
+                .iter_mut()
+                .rev()
+                .find(|(key, _)| key == spec.env)
+                .filter(|(_, value)| canonical(Path::new(value.as_os_str())) == canonical(home))
+                .ok_or_else(|| Error::new(2, "provider account home changed after selection"))?;
+            let proof = named_account
+                .map(|_| AccountHome::capture(&route.provider, home))
+                .transpose()?;
+            if let Some(proof) = &proof {
+                *value = proof.physical.as_os_str().to_owned();
+            }
+            proof
+        } else {
+            None
+        };
+        if !plan_bound && let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
             environment.push((
                 "OMS_BASE_SHA".into(),
                 String::from_utf8_lossy(&base).trim().into(),
@@ -2190,10 +2494,17 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             context.interrupted,
         );
         pending_usage.fence(context.interrupted)?;
+        if account_home.as_ref().is_some_and(|home| !home.current()) {
+            let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false, None);
+            return Err(Error::new(
+                75,
+                "provider account home changed before launch; reconcile before retrying",
+            ));
+        }
         let started = std::time::Instant::now();
         let direct = matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
             && exec_argv == transport.argv;
-        let invocation = Invocation {
+        let mut invocation = Invocation {
             argv: exec_argv,
             cwd: cwd.to_owned(),
             input: transport.input.clone(),
@@ -2208,25 +2519,35 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?,
             ),
         };
-        let result = if let Some(protocol) = &team_protocol {
-            context.executor.execute_team_requests(
-                invocation,
-                crate::process::TeamLaunchBinding {
-                    pending: &pending_usage,
-                    attempt: &attempt,
-                    protocol,
-                    actions: &team_actions,
-                },
-                context.interrupted,
-            )
-        } else {
-            context.executor.execute_provider(
-                invocation,
-                &usage_receipt.identity,
-                direct,
-                context.interrupted,
-            )
-        };
+        let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, cwd, context)
+            .and_then(|plan| {
+                if let Some(plan) = plan {
+                    invocation
+                        .environment
+                        .push(("OMS_BASE_SHA".into(), plan.base_sha().into()));
+                    invocation.launch_fence =
+                        Some(pending_usage.launch_fence().with_plan_checkout(plan, cwd)?);
+                }
+                if let Some(protocol) = &team_protocol {
+                    context.executor.execute_team_requests(
+                        invocation,
+                        crate::process::TeamLaunchBinding {
+                            pending: &pending_usage,
+                            attempt: &attempt,
+                            protocol,
+                            actions: &team_actions,
+                        },
+                        context.interrupted,
+                    )
+                } else {
+                    context.executor.execute_provider(
+                        invocation,
+                        &usage_receipt.identity,
+                        direct,
+                        context.interrupted,
+                    )
+                }
+            });
         let mut result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -2247,16 +2568,55 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                 String::from_utf8_lossy(&result.stdout).into_owned(),
                 result.complete,
             )
+        } else if output_mode == OutputMode::Native {
+            match decode_native_output(&route.provider, &result.stdout) {
+                Some(answer) => (answer, result.code == 0),
+                None => {
+                    result.stderr.extend_from_slice(
+                        b"\nnative output completion could not be established\n",
+                    );
+                    // Preserve decoded provider diagnostics for capacity retries.
+                    if let Some((diagnostic, _)) = decode_provider_events(
+                        &route.provider,
+                        &String::from_utf8_lossy(&result.stdout),
+                        false,
+                    ) {
+                        result.stderr.extend_from_slice(diagnostic.as_bytes());
+                    }
+                    (String::new(), false)
+                }
+            }
+        } else if plan_bound
+            && matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
+        {
+            decode_bound_output(&route.provider, &result.stdout)
         } else {
             decode_output(&route.provider, &result.stdout)
         };
-        let accounting = crate::usage::finish(
-            &usage_repo,
-            usage_receipt,
-            &result.stdout,
-            result.complete && terminal && (route.provider != "antigravity" || result.code == 0),
-            result.cleanup_complete,
-        )
+        let home_changed = account_home.as_ref().is_some_and(|home| !home.current());
+        let account_observed = named_account.is_none()
+            || account_home
+                .as_ref()
+                .is_some_and(|home| home.sha256.is_some());
+        let accounting = if home_changed {
+            crate::usage::finish_unobserved(
+                &usage_repo,
+                usage_receipt,
+                Some(&result.stdout),
+                result.cleanup_complete,
+            )
+        } else {
+            crate::usage::finish(
+                &usage_repo,
+                usage_receipt,
+                &result.stdout,
+                result.complete
+                    && terminal
+                    && account_observed
+                    && (route.provider != "antigravity" || result.code == 0),
+                result.cleanup_complete,
+            )
+        }
         .map_err(|error| {
             Error::new(
                 error.code,
@@ -2270,8 +2630,20 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         // completed invocation into a retry-eligible failure.
         let context_record = request_context
             .and_then(|mut prepared| prepared.returned(&usage_repo, true, context.interrupted));
+        if home_changed {
+            // The provider may have consumed the request. Preserve its unknown
+            // receipt and cleanup evidence, but do not retry overflow/fallback.
+            return Err(Error::new(
+                75,
+                "provider account home changed during invocation; reconcile before retrying",
+            ));
+        }
+        if !account_observed {
+            result.stderr.extend_from_slice(b"\nwarning: account-home continuity unavailable; usage attribution remains unknown\n");
+        }
         result.stdout = decoded.into_bytes();
-        if !result.stdout.is_empty()
+        if output_mode == OutputMode::Legacy
+            && !result.stdout.is_empty()
             && let Some(model) = configured
         {
             result
@@ -2290,7 +2662,8 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             context.interrupted,
         );
         // One same-provider retry on another account when the worktree stays untouched.
-        if overflow == 0
+        if !plan_bound
+            && overflow == 0
             && cap_hit
             && !route.account_pinned
             && let Some(account) = account
@@ -2327,10 +2700,38 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    execute_with_fallback_output(
+        route,
+        fallback,
+        prompt,
+        cwd,
+        write,
+        timeout,
+        account_repo,
+        extra_env,
+        OutputMode::Legacy,
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?Sized>(
+    route: &mut Route,
+    fallback: &str,
+    prompt: &P,
+    cwd: &Path,
+    write: bool,
+    timeout: u64,
+    account_repo: &Path,
+    extra_env: &[(OsString, OsString)],
+    output_mode: OutputMode,
+    context: &Context<'_>,
+) -> Result<Completed> {
     let extra_env = crate::usage::operation_env(extra_env)?;
-    let write_snapshot = (write && !fallback.is_empty() && fallback != route.model)
+    let plan_bound = crate::plan_delegate::has_launch_binding(&extra_env);
+    let write_snapshot = (!plan_bound && write && !fallback.is_empty() && fallback != route.model)
         .then(|| repo_state(context, cwd));
-    let result = execute_env(
+    let result = execute_env_with_output(
         route,
         prompt,
         cwd,
@@ -2338,9 +2739,11 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
         timeout,
         account_repo,
         &extra_env,
+        output_mode,
         context,
     )?;
-    if !fallback.is_empty()
+    if !plan_bound
+        && !fallback.is_empty()
         && fallback != route.model
         && capacity(&result)
         && is_clean_retry(&write_snapshot, context, cwd)
@@ -2351,7 +2754,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
         if !route.account_pinned {
             route.account.clear();
         }
-        execute_env(
+        execute_env_with_output(
             route,
             prompt,
             cwd,
@@ -2359,6 +2762,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
             timeout,
             account_repo,
             &extra_env,
+            output_mode,
             context,
         )
     } else {
@@ -2660,6 +3064,107 @@ mod bridge_route_tests {
         let mut route = route.clone();
         execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
     }
+    #[test]
+    fn plan_bound_native_output_requires_a_terminal_envelope() {
+        let cases: &[(&str, &[u8], bool)] = &[
+            ("codex", br#"{"type":"turn.completed"}"#, true),
+            ("codex", br#"{"type":"turn.failed"}"#, false),
+            ("codex", br#"{"type":"bad","type":"turn.completed"}"#, false),
+            (
+                "claude",
+                br#"{"type":"result","subtype":"success","is_error":false}"#,
+                true,
+            ),
+            (
+                "claude",
+                br#"{"type":"result","subtype":"error_during_execution","is_error":true}"#,
+                false,
+            ),
+            ("claude", br#"{"type":"result"}"#, false),
+            (
+                "antigravity",
+                b"{\n\"status\":\"SUCCESS\",\n\"response\":\"done\"\n}",
+                true,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"ERROR","response":"failed"}"#,
+                false,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"SUCCESS","response":"short","stop_reason":"length"}"#,
+                false,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"SUCCESS","response":"bad","error":{}}"#,
+                false,
+            ),
+            (
+                "antigravity",
+                br#"{"status":"SUCCESS","response":"truncated""#,
+                false,
+            ),
+        ];
+        let codex_open = concat!(
+            "{\"type\":\"turn.completed\"}\n",
+            "{\"type\":\"thread.started\",\"thread_id\":\"next\"}\n",
+            "{\"type\":\"item.started\",\"item\":{\"id\":\"pending\"}}\n",
+        );
+        let claude_open = concat!(
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n",
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"pending\"}]}}\n",
+        );
+        for (provider, stream, terminal) in [
+            ("codex", codex_open, "{\"type\":\"turn.completed\"}\n"),
+            (
+                "claude",
+                claude_open,
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n",
+            ),
+        ] {
+            assert!(
+                !decode_bound_output(provider, stream.as_bytes()).1,
+                "{provider}"
+            );
+            assert!(decode_output(provider, stream.as_bytes()).1, "{provider}");
+            assert!(decode_bound_output(provider, format!("{stream}{terminal}").as_bytes()).1);
+        }
+        let codex_footer = concat!(
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2}}\n",
+            "{\"type\":\"usage\",\"usage\":{\"output_tokens\":1}}\n",
+        );
+        let claude_footer = concat!(
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n",
+            "{\"type\":\"system\",\"subtype\":\"hook_response\",\"hook_event\":\"Stop\",\"outcome\":\"success\"}\n",
+            "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\"}}\n",
+        );
+        assert!(decode_bound_output("codex", codex_footer.as_bytes()).1);
+        assert!(decode_bound_output("claude", claude_footer.as_bytes()).1);
+        assert!(
+            !decode_bound_output(
+                "codex",
+                b"{\"type\":\"turn.completed\"}\n{\"type\":\"usage\"}\n",
+            )
+            .1
+        );
+        for &(provider, bytes, terminal) in cases {
+            assert_eq!(
+                decode_bound_output(provider, bytes).1,
+                terminal,
+                "{provider}: {bytes:?}"
+            );
+        }
+        for provider in ["codex", "claude", "antigravity", "fixture", "cursor"] {
+            assert_eq!(
+                decode_output(provider, b"legacy explicit text"),
+                ("legacy explicit text".into(), true)
+            );
+        }
+    }
+
     #[test]
     fn physical_contracts_fence_each_retry_and_settle_owned_execution() {
         isolated_transport(
@@ -4082,6 +4587,29 @@ mod bridge_route_tests {
             resolve_route(source, "antigravity:account=w", "m", "auto", "worker").unwrap_err();
         assert_eq!(err.message, UNPROVED);
     }
+    #[test]
+    fn account_home_revalidates_directory_without_persisted_generation() {
+        isolated_transport(
+            "account_home_revalidates_directory_without_persisted_generation",
+            "custody",
+            |_, home| {
+                fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
+                let mut proof = AccountHome::capture("codex", home).unwrap();
+                proof.sha256 = None;
+                fs::write(home.join("settings"), "ordinary update").unwrap();
+                assert!(proof.current());
+                let displaced = home.with_extension("displaced");
+                fs::rename(home, &displaced).unwrap();
+                fs::create_dir(home).unwrap();
+                fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
+                assert!(!proof.current());
+                fs::remove_dir(home).unwrap();
+                std::os::unix::fs::symlink(displaced, home).unwrap();
+                assert!(AccountHome::capture("codex", home).is_err());
+            },
+        );
+    }
+
     #[test]
     fn sandbox_rw_dirs_cover_every_isolated_account_home() {
         let root = std::env::temp_dir().join(format!("oms-rw-{}", std::process::id()));

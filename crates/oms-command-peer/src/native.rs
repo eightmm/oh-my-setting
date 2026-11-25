@@ -53,6 +53,28 @@ impl oms_command_plan::Services for Services<'_, '_> {
     }
 }
 impl oms_command_autonomy::Services for Services<'_, '_> {
+    fn experience_context(
+        &self,
+        repo: &Path,
+        query: &str,
+        interrupted: &std::sync::atomic::AtomicBool,
+    ) -> oms_command_autonomy::Result<oms_command_autonomy::services::ExperienceContext> {
+        let unavailable =
+            || oms_command_autonomy::Error::new(2, "bounded experience context unavailable");
+        if query.len() > 16 * 1024 {
+            return Err(unavailable());
+        }
+        let value = self
+            .0
+            .executor
+            .experience_context(repo, query, interrupted)
+            .map_err(|e| oms_command_autonomy::Error::new(e.code, e.message))?;
+        if oms_command_autonomy::value::canonical(&value)?.len() > 16 * 1024 {
+            return Err(unavailable());
+        }
+        Ok(value)
+    }
+
     fn invoke(
         &self,
         command: &oms_command_autonomy::Invocation,
@@ -72,6 +94,7 @@ impl oms_command_autonomy::Services for Services<'_, '_> {
             HandoffProjection::NextStep,
             HandoffProjection::JournalDecisions,
             HandoffProjection::ReviewFindings,
+            HandoffProjection::AutopilotStatus,
         ]
         .into_iter()
         .find(|projection| {

@@ -123,7 +123,7 @@ explains overlapping entrypoints.
 | Component | Purpose | Invoke | Details |
 |---|---|---|---|
 | `install-profile` | Inspect or install tools for selected capabilities. | `oms install-profile` | [Install guide](INSTALL.md) |
-| `connect-services` | Connect GitHub/Notion or register another Codex account home. | `oms connect-services --account codex:ID [--home PATH] [--first\|--last] [--repair\|--remove\|--verify]` | [Provider accounts](TERMINAL-PANEL.md#provider-accounts) |
+| `connect-services` | Connect GitHub/Notion, register another account home, or sign in to a provider. | `oms connect-services --account codex:ID [--home PATH] [--first\|--last] [--repair\|--remove\|--verify]` · `oms connect-services --login PROVIDER \| --login-menu` | [Provider accounts](TERMINAL-PANEL.md#provider-accounts) |
 | `status` | Show install, task and update status. | `oms status` | [Install and ownership](#install-and-ownership) |
 | `doctor` | Check managed links, tools, skills and manifest sync. | `oms doctor` | [Install and ownership](#install-and-ownership) |
 | `project-doctor` | Check project agent-facing files for agreement. | `oms project-doctor` | [Project onboarding](#project-onboarding) |
@@ -1019,7 +1019,11 @@ reports the cached data plus a one-line note (`catalog_refresh: started` in `--j
 and a harness child never starts one.
 
 Cached catalog reads separate tab-delimited model IDs from display labels and discard
-listing banners, so labels cannot leak into automatic recovery routes.
+listing banners, so labels cannot leak into automatic recovery routes. `oms models --json`
+lists selector IDs in `models` (and text output), derives per-base-model
+`model_effort_scales` and `selectors` for Antigravity at read time from cached catalog
+rows, and reports Codex's provider-level `effort_values` as the scale-ordered union of
+cached per-model scales when present.
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
 and reason.
@@ -1298,6 +1302,40 @@ are never pushed with `oms land` (and `patch-land --recover` landings) are not r
 Field names follow the Agent Trace contributor-type vocabulary (`ai`, `human`, `mixed`,
 `unknown`); this is not a claim of compliance with any spec.
 
+`oms land wait --reviewed-head FULL_SHA --request STAMP [--after CURSOR] [--wait-seconds 0..50] [--json]`
+observes one existing private landing receipt from its issuing checkout. Take an immediate
+snapshot, then pass its cursor and a wait duration for the next observation. The cursor
+binds the checkout, request, receipt revision and observed holder. Each waiter samples independently at
+most once a second. Exit 0 reports a local observation, including an unchanged timeout.
+A running receipt without its matching live process and held lock returns immediately
+with `holder-unconfirmed`. The `activity` field distinguishes a free lock, a different
+holder, an ended process and unavailable evidence. A repeated terminal receipt returns
+immediately. If a publisher resumes that exact request, the current holder and previously
+saved outcome are shown together. `awaiting-merge` records PR publication only. The
+observer never queries GitHub, claims a queued request, starts a publisher, or infers a
+merge, closure or installation. Requests queued before their first receipt are unavailable.
+An interrupt exits 130. A missing or untrusted receipt fails without changing any state.
+
+`oms land reconcile --reviewed-head FULL_SHA [--request STAMP] [--remote NAME] [--target BRANCH] [--json]`
+is the observation-only recovery for a PR landing whose reviewed head was merged after the
+target moved, so the delivery ancestor guard refuses a rerun. It writes no receipt, ref,
+status, install, claim, push or merge. It requires a trusted (owner-only, no-follow, bounded)
+saved receipt whose request identity recomputes from this repo, remote, target and gate, then
+a GitHub PR observed `MERGED` with the receipt's number, URL, same-repository head, ref and
+exact head, a merge commit reachable from the live target, and an identical reviewed tree.
+If the PR merged while its publisher was waiting for CI, the recorded gate, successful
+push, base and PR identity can establish the same result from a still-running receipt.
+The saved receipt keeps its original state.
+The PR gate links to the actual hosted `test.yml` pull-request run and successful gate job
+on that head and run attempt. If GitHub omits the run’s PR membership after merge, the
+source branch must identify a single PR across all states. The complete hosted job list
+must satisfy the full CI policy. A push run, an unrelated green check, ambiguous PR
+membership, missing local objects, or a different merged tree cannot prove delivery.
+Exit 0 emits `verified` / `same-tree`. The observation carries the saved local gate scope
+(`unknown` for a custom command) separately from hosted CI. A Plan consumer still needs
+its own patch and lease evidence. The command never fetches; receipts outside the scan
+limit can be selected with an explicit request stamp.
+
 `oms land blame-session [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE` prints
 each commit's row or `unrecorded` and a summary (`N ai / N human / N mixed / N unknown / N
 unrecorded`). It is a `land` sub-action, beside `notes`, because the rows are written by
@@ -1360,6 +1398,52 @@ anything. Tune with `OMS_STALL_WINDOW`, `OMS_STALL_ERROR_REPEAT`,
 default 86400); `0` disables a rule or the age cutoff. The ledger records
 failures and the pass that resolves one, not every command, so "same action,
 same successful result" repeats cannot be seen there.
+
+Native `agent-task verify` observations carry a `verification` object
+in the existing schema-2 ledger. Its scope is
+`agent-task-reference-v1`: the active packet task ID, exact command digest,
+actual snapshot and outcome reference-operation attempt IDs, and hashes of the
+packet bytes each operation published. An accepted outcome additionally retains
+the verified repository state. These reference operations are not worker or Lead
+attempts. A failure has `result: failed`; a successful observation is emitted only
+after the final receipt and reference finish are accepted.
+
+Before execution, the native observer selects up to 128 canonical failure-row
+hashes for the same active task and exact command. The final append rechecks those
+identities; another task's failure or a failure appended during the rerun is not
+added to `prior_failures`. An empty list means no matching native failures were
+observed; `null` means the source was unavailable, invalid, over the bound, or
+changed so the selected identities could not be confirmed. Native passes append
+the additive `verified` event while any open row lacks exact accepted evidence;
+this is an accepted observation, not a new failure or a command-wide resolution.
+Exact observations can accumulate across tasks. Only when every currently open
+row is covered does a native pass append `resolved`. Retry guards, state views
+and memory therefore keep an unrelated or later failure open. Counts remain
+conservative at fingerprint scope until that aggregate closes. Legacy failures
+without identity remain advisory and require explicit manual resolution.
+
+Manual CLI `resolve` keeps its established command-wide scope. JSON views expose
+the latest failure's `verification`/`failure_sha256` separately from the last
+`resolution_verification` and its explicit prior hashes. The ledger retains
+schema 2; readers must understand the additional `verified` event for complete
+views. Partial receipts use `observed_fingerprint` for the exact ledger subject.
+Legacy memory clients interpret a top-level `fingerprint` as an update to the
+failure's open/closed status. Keeping that key on fail and resolved records
+preserves manual resolutions even when an older memory client reads a later
+partial receipt. Current readers also accept previously written `verified`
+rows with `fingerprint`. An older strict state reader counts a partial receipt
+as invalid and refuses ledger compaction. Upgrade state and bundle readers for
+complete evidence and retention, without migrating existing rows.
+
+Attempt bundles match these native reference IDs even outside the timestamp
+window and label them `native-reference-attempt`. Other included rows are
+`time-window-only` candidates when the ledger contains native correlations;
+legacy-only bundles retain their original warning and bytes. The recorded action
+is a verification rerun. The chain proves neither the cause of a repair nor
+success in another environment or current tree, and does not grant memory review,
+task completion, or execution authority. There is no CLI option for supplying
+accepted evidence. Existing memory review, hygiene and supersede/retire apply.
+
 `oms agent-memory recall` and `search` also cover the failure ledger. An open
 failure carries its recorded next step (`record --next`), and the newest failure
 of a resolved fingerprint carries how it was fixed (`resolve --how`), each as one
@@ -1710,12 +1794,12 @@ checked. One that names an id the spec does not carry is recorded as
 looks unimplemented and never marks a criterion satisfied. A run with no
 eligible work creates no proposal and exits successfully. Otherwise it prints
 the proposal, evidence packet, and candidate report paths with their SHA-256
-digests. With `--collaboration auto`, the council reviews the contract without
-the packet. Every `--collaboration auto` council is first asked to judge the
-requirements themselves under three headings, Contradictions, Missing
-situations and Unverifiable criteria, quoting the contract line and writing
-none where nothing applies; its answer stays untrusted evidence for the planner
-and nothing parses or gates on those headings. Applying a proposal requires `--expected-proposal-sha256` for the
+digests. With `--collaboration auto`, the council receives the contract,
+current plan and bounded discovery packet as untrusted observations. Its native
+response contract preserves alternatives, evidence, counterarguments,
+verification, deltas and disagreements; a separate synthesis is validated before
+decomposition. Structural completeness does not establish a requirement's truth
+or acceptance. Applying a proposal requires `--expected-proposal-sha256` for the
 reviewed proposal bytes. `oms autopilot propose --discover` uses discovery for
 the initial tranche only; when no eligible work is found, its receipt remains
 at proposing so the attempt can be retried. In GitHub project mode applied tasks
@@ -1923,35 +2007,43 @@ task-state contradictions, residual intents, and active/retired lineage conflict
 
 ### Collaborative planning
 
-With `--collaboration auto`, initial planning and the bounded remainder proposal trigger
-the panel council with one rebuttal round: its seats come from the same policy as
-`oms panel --council` (Codex, Claude and Antigravity at the deep tier), and an
-unavailable family refuses before any call, naming the family. Every seat must finish
-and meet `--deliberation`'s per-seat response contract: alternatives, evidence,
-counterargument, verification and explicit deltas/disagreements. JSON-only task lists
-or empty sections fail closed. A seat whose answer is otherwise complete but lacks
-required headings is asked once, in the same round, to restate its own answer under
-every heading; the restatement is used only if it passes, and both answers stay in the
-artifacts.
+With explicit `--collaboration auto`, initial planning and the one bounded
+remainder proposal call the existing Codex, Claude and Antigravity council with
+one rebuttal round. These are the current fixed native seats; this mode does not
+adopt panel council customization. Registry and transport checks run before
+provider execution. Every required seat and declared round must finish with a
+usable response. Nonempty alternatives, evidence, counterargument and
+verification sections are required, with explicit deltas and disagreements in
+rebuttals. Missing, refused or malformed responses stop planning; there is no
+automatic restatement or claim that headings prove sound reasoning.
 
-The council receives only contract data; JSON decomposition instructions stay in the
-planner call. Structure is checked mechanically; reasoning still needs parent judgment.
-Planner reasoning effort applies only to decomposition; the council keeps provider
-defaults, disclosed before dispatch alongside its retained log path. That path remains
-available for parent inspection after early child failure, even when the child did not
-emit its own summary. The bounded synthesis feeds the planner as untrusted evidence
-before normal exact parent proposal review.
+The caller explicitly requests synthesis on the planner's resolved advisor
+route. The additive `--synthesis-json` contract binds the question digest, run,
+complete provider/round matrix, requested synthesis model, artifact digests and
+exact output byte ranges. The planner receives only that validated advisory
+synthesis and the original bounded inputs. Planner model and effort apply to
+synthesis and decomposition, while other council seats keep their own routes.
+Requested model metadata does not claim the actual served model or independent
+reasoning; existing usage receipts retain observed model/fallback evidence. Every
+decomposition also uses `agent-call --output-json`: the same validator binds its
+fresh artifact and exact stdout byte range, excluding prompt and diagnostics
+from task extraction. Failed, refused, incomplete or timed-out calls stop first.
 
-Without the option, `oms autopilot` selects auto only when the review mode is gate, the
-routes satisfy the rule below and all three council families are available (never a
-partial council); otherwise it stays off and prints one line saying why.
-`--collaboration off` opts out. The durable contract retains the effective mode through
-resume and enforces gated opposite-provider review. Codex routes for the planner,
-workers and reviewer (not the council seats) are pinned to a GPT-6-or-newer version of
-Astra, Sol, Terra or Luna, including reviewed assignments and optional capacity fallbacks.
-Claude Code can implement with `--worker claude`, leaving Codex as the reviewer; each
-campaign keeps one implementation transport to preserve independent review. The existing
-provider-neutral behavior is unchanged when the mode is off. No background daemon or
+A native immutable decision manifest retains the discussion with exact
+spec/plan/base/scope bindings. Its reference is covered by the reviewed proposal
+SHA and copied to applied tasks. Generation rechecks source bytes after
+planning; direct Plan apply, replay and autopilot resume revalidate the retained
+question and artifacts without rerunning the council. Auto apply/resume require
+this lineage. Changed, missing, foreign or malformed evidence refuses admission.
+No task is admitted merely because participants completed or agreed.
+
+Omitting the option selects `off`. The frozen autopilot contract retains the
+explicit mode through resume, requires gated review by a different provider and
+keeps one implementation transport per campaign. Planner/worker/reviewer routes
+use the existing registry, exact-model/effort validation and physical execution
+capabilities. Auto mode adds no model-generation name allowlist and does not
+turn an unavailable read/write transport into a supported one. Existing scope,
+cycle and parent proposal-review boundaries remain in force; no new daemon or
 publication permission is added.
 
 #### Whole-change review scope
@@ -3509,10 +3601,33 @@ Conventional Commit subject, else `oms/land-<sha12>`) and opens a PR whose body 
 `--why TEXT`, else the commit bodies; with neither, land refuses. Without `--merge`,
 land ends after CI in receipt state `awaiting-merge` with exit 0 and installs nothing.
 `--merge [--merge-method squash|merge|rebase]` merges after CI succeeds for the exact
-PR head, then installs. After a squash merge, installation proceeds when the merge
+PR head, then installs. Each merge needs `--merge` on that invocation. While CI runs,
+land releases the repository lock so other requests can publish. A second invocation
+of the same request exits 75. After CI, land waits up to `OMS_LOCK_TIMEOUT` to
+reacquire the writer and checks the original receipt, open PR, source and base.
+A merge samples same-head CI again under publication authority. Both the run
+listing and its details must confirm success. A green project-specific workflow
+can merge with unknown OMS verification scope. Installation keeps its existing
+full-verification requirement. A sibling that started during CI defers the merge
+unless the caller selected `--ignore-siblings`. The merge-request write compares
+the receipt with its saved checkpoint. If a ref or PR changed, the checkpoint
+is preserved. GitHub checks the source SHA in the merge request. A target
+change after the last observation still requires the post-merge tree/base checks.
+PRs observed with a nonzero `--ci-wait` require one exact push URL.
+
+After a squash merge, installation proceeds when the merge
 commit's tree equals the PR head tree on an unchanged base; otherwise it waits for CI
 on the target. On GitHub, `--direct` pushes straight to the target and accepts only a
 change of at most two lines in `.md` files.
+
+To update an existing PR after its target moves, fetch the remote and keep the
+published PR head in the history of the branch you update. For example, with
+`origin` and target `main`, run `git fetch origin` on the local PR branch.
+If the fetched PR head contains commits your branch lacks, first merge that
+remote-tracking PR branch. Then run `git merge origin/main`, resolve any
+conflicts and rerun `oms land` with the same remote, target and PR head branch
+(use `--head-branch` when needed). The new HEAD receives its own gate and
+fast-forwards the source branch of the same open PR.
 
 A moving update target is rejected by the updater. Local CI-parity hides registry
 provider CLIs and adds operator-tools when tier-routing inputs change; it does not parse
@@ -3541,7 +3656,8 @@ It reports sibling worktrees with live autopilot receipts (`proposing`,
 Retrying the same commit, destination and gate resumes CI/install from its
 successful push receipt; successful stages are reused. An installation receipt
 is reused only while the installed checkout is clean and still at the same SHA.
-A repository-wide lock prevents concurrent landing gates; background launches
+A repository-wide lock prevents concurrent landing gates and publication writes (a PR
+landing releases it while observing CI); background launches
 acknowledge lock acquisition before reporting success. CI query errors are recorded immediately,
 and each query is bounded by the remaining polling deadline (at most 30 seconds).
 

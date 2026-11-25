@@ -159,6 +159,7 @@ pub(crate) const NAMES: &[&str] = &[
     "landed-commit",
     "executor-id",
     "executor-soul-sha256",
+    "expected-review-binding",
     "expected-review-patch",
     "expected-review-artifact-sha256",
     "expected-review-patch-sha256",
@@ -167,6 +168,7 @@ pub(crate) const NAMES: &[&str] = &[
     "expected-review-executor-soul-sha256",
     "expected-review-lease-id",
     "expected-landing-receipt-sha256",
+    "expected-landing-done-receipt-sha256",
     "assignment",
     "depends",
     "resources",
@@ -424,6 +426,23 @@ impl Request {
                 format!("--{name} is invalid for {}", self.action.name()),
             )?;
         }
+        if self.action == Release
+            && (self.has("expected-state") || self.has("expected-task-sha256"))
+        {
+            require(
+                self.value("expected-state")? == "claimed"
+                    && self.has("lease-id")
+                    && self.has("expected-task-sha256"),
+                "conditional release requires its exact unstarted claim state, lease and task digest",
+            )?;
+        }
+        require(
+            !self.has("expected-review-binding")
+                || matches!(self.action, Land | Repair)
+                || self.action == Finish && !self.has("landed-commit")
+                || self.action == Release && self.has("expected-landing-receipt-sha256"),
+            "--expected-review-binding requires land, repair or a patch landing transition",
+        )?;
         let completion_options = [
             "completion-bundle",
             "expected-completion-bundle-sha256",
@@ -432,9 +451,17 @@ impl Request {
             "expected-main-review-approval-sha256",
         ];
         require(
+            self.has("expected-landing-done-receipt-sha256")
+                == (self.action == Finish && self.has("expected-review-binding")),
+            "bound patch finish requires its exact expected done receipt",
+        )?;
+        require(
             !self.has("expected-task-sha256")
                 || self.action.completion()
-                || matches!(self.action, Amend | Cancel | RelocateDecision),
+                || matches!(
+                    self.action,
+                    Claim | Release | Repair | Block | Amend | Cancel | RelocateDecision
+                ),
             "completion options require their matching completion action",
         )?;
         require(

@@ -14,6 +14,9 @@ pub enum V {
 pub static NULL: V = V::Null;
 impl V {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        Self::parse_with_depth(bytes, 1024)
+    }
+    pub(crate) fn parse_with_depth(bytes: &[u8], depth: usize) -> Result<Self, String> {
         fn convert(v: &Json) -> V {
             match v {
                 Json::Null => V::Null,
@@ -27,7 +30,7 @@ impl V {
         if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
             return Err("invalid JSON".into());
         }
-        oms_context::parse_experiment_json(bytes, usize::MAX)
+        oms_context::parse_experiment_json_with_depth(bytes, usize::MAX, depth)
             .map(|v| convert(&v))
             .map_err(|_| "invalid JSON".into())
     }

@@ -561,10 +561,34 @@ impl Root {
                 ..Default::default()
             },
             |_| Ok(body.to_vec()),
+            None::<fn() -> Result<(), std::convert::Infallible>>,
             |_| Ok(()),
             true,
         )
         .map(|_| ())
+    }
+
+    /// Like [`Self::atomic_mutate`], with a final caller-supplied read-only
+    /// authority check after file fsync. Final ancestry, destination and
+    /// temporary identity checks follow approval, before rename. It runs only
+    /// for a replacement or creation. Refusal returns `MutationError::Transform`
+    /// and discards the owned temporary file. The check must not modify the
+    /// mutation paths.
+    pub fn atomic_mutate_checked<E>(
+        &self,
+        path: &Path,
+        options: MutationOptions,
+        transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
+        before_publish: impl FnOnce() -> Result<(), E>,
+    ) -> Result<MutationOutcome, MutationError<E>> {
+        self.mutate_with_publication(
+            path,
+            options,
+            transform,
+            Some(before_publish),
+            |_| Ok(()),
+            false,
+        )
     }
 
     /// Persists the directory entry of an existing destination through the same
@@ -597,7 +621,14 @@ impl Root {
         transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
         hook: impl FnMut(Stage) -> Result<(), Errno>,
     ) -> Result<MutationOutcome, MutationError<E>> {
-        self.mutate_with_publication(path, options, transform, hook, false)
+        self.mutate_with_publication(
+            path,
+            options,
+            transform,
+            None::<fn() -> Result<(), E>>,
+            hook,
+            false,
+        )
     }
 
     fn mutate_with_publication<E>(
@@ -605,6 +636,7 @@ impl Root {
         path: &Path,
         options: MutationOptions,
         transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
+        before_publish: Option<impl FnOnce() -> Result<(), E>>,
         mut hook: impl FnMut(Stage) -> Result<(), Errno>,
         exclusive: bool,
     ) -> Result<MutationOutcome, MutationError<E>> {
@@ -667,13 +699,25 @@ impl Root {
         hook(Stage::BeforeFileSync).map_err(io_error)?;
         fs::fsync(&temp.file).map_err(io_error)?;
         hook(Stage::BeforePublish).map_err(io_error)?;
+        let staged = if let Some(before_publish) = before_publish {
+            let staged = fs::fstat(&temp.file).map_err(io_error)?;
+            before_publish().map_err(MutationError::Transform)?;
+            Some(staged)
+        } else {
+            None
+        };
         anchor.revalidate()?;
         anchor.check_leaf(before.as_ref())?;
-        if !temp.owns_name()
-            || (self.private_ancestry.is_some()
-                && !anchor.valid_leaf(&fs::fstat(&temp.file).map_err(io_error)?))
-        {
+        if !temp.owns_name() {
             return Err(ByteError::Changed.into());
+        }
+        if self.private_ancestry.is_some() || staged.is_some() {
+            let current = fs::fstat(&temp.file).map_err(io_error)?;
+            if !anchor.valid_leaf(&current)
+                || staged.is_some_and(|staged| !anchor.leaf_unchanged(&staged, &current))
+            {
+                return Err(ByteError::Changed.into());
+            }
         }
         // From<ByteError> always means BeforePublication. Every fallible operation
         // from here must map its explicit phase; never add a bare ? after rename.

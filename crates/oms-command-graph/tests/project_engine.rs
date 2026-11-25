@@ -597,10 +597,14 @@ fn rust_workspace_cache_and_impact() {
         ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"core\"]\n"),
         (
             "app/Cargo.toml",
-            "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
+            "[package]\nname = \"app\"\n[dependencies]\napp_core = { package = \"core\", path = \"../core\" }\n",
         ),
         ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
         ("app/src/lib.rs", "pub fn app() {}\n"),
+        (
+            "app/src/chain.rs",
+            "pub fn run() { run_with_source() }\nfn run_with_source() { run_with_services(&Unavailable) }\nfn run_with_services(_: &Unavailable) {}\nfn elsewhere() { core() }\nstruct Unavailable;\nuse app_core::core;\n",
+        ),
         (
             "core/src/lib.rs",
             "pub fn core() {}\nimpl First { pub fn new() -> Self { Self } }\nimpl Second { pub fn new() -> Self { Self } }\n",
@@ -654,9 +658,54 @@ fn rust_workspace_cache_and_impact() {
             .iter()
             .all(|s| s["signature"].as_str().unwrap().contains("fn new()"))
     );
+    // `core` exists only in another file, so same-name resolution must not
+    // turn `elsewhere` into a caller.
+    let calls = |graph: &Value| -> Vec<Value> {
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e["relation"] == "calls"
+                    && e["source"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("symbol:app/src/chain.rs::"))
+            })
+            .cloned()
+            .collect()
+    };
+    let cold_calls = calls(&graph);
+    let id = |name: &str| format!("symbol:app/src/chain.rs::function:{name}");
+    let digest = &graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id("run").as_str())
+        .unwrap()["source_digest"];
+    let expected: Vec<Value> = [
+        ("run", "run_with_source", 1),
+        ("run_with_source", "run_with_services", 2),
+    ]
+    .iter()
+    .map(|(source, target, line)| {
+        json!({"source":id(source),"target":id(target),"relation":"calls","confidence":"INFERRED","evidence":{"path":"app/src/chain.rs","source_digest":digest,"line":line}})
+    })
+    .collect();
+    assert_eq!(cold_calls, expected);
+    for (direction, other) in [("in", "run"), ("out", "run_with_services")] {
+        assert_eq!(
+            f.graph()
+                .neighbors(&id("run_with_source"), "calls", direction)
+                .unwrap(),
+            vec![
+                json!({"id":id(other),"relation":"calls","direction":direction,"confidence":"INFERRED"})
+            ]
+        );
+    }
     let warm = f.build();
     assert!(warm["stats"]["cached"].as_u64().unwrap() > 0);
     assert_eq!(warm["stats"]["parsed"], 0);
+    assert_eq!(calls(&project::load(&f.state()).unwrap()), cold_calls);
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .args(args)
@@ -695,6 +744,91 @@ fn rust_workspace_cache_and_impact() {
 }
 
 #[test]
+fn panel_interrupt_during_selected_python_request_returns_no_output() {
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+
+    let repo = Fixture::new();
+    repo.build();
+    let path = "focus.py";
+    let source = "def focus():\n    pass\n";
+    fs::write(repo.0.join(path), source).unwrap();
+    for args in [["init", "-q"], ["add", path]] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repo.0)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    // Model a selection from a previously indexed Python file without
+    // requiring the optional packaged AST binary to build the test index.
+    let mut graph = project::load(&repo.state()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+    let nodes = graph["nodes"].as_array_mut().unwrap();
+    nodes.push(json!({"id":"file:focus.py","kind":"file","path":path,"source_digest":digest}));
+    nodes.push(json!({"id":"symbol:focus.py::focus","kind":"function","name":"focus","path":path,
+        "language":"python","source_digest":digest,"metadata":{"signature":"def focus()","line":1,"end_line":2}}));
+    fs::write(repo.state().join("graph.json"), graph.to_string()).unwrap();
+
+    let private = Fixture::empty();
+    let helper = private.0.join("parser");
+    let ready = private.0.join("parser.ready");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&ready)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        &helper,
+        br#"#!/bin/sh
+[ "$(dd bs=1 count=6 2>/dev/null)" = "$(printf 'OGPY\002\001')" ] || exit 1
+printf 'request\n' > "$0.ready"
+exec cat >/dev/null
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let args = [
+        "project",
+        "panel",
+        "--repo",
+        ".",
+        "--node=symbol:focus.py::focus",
+        "--json",
+    ]
+    .map(OsString::from);
+    let cancel = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let call = scope
+            .spawn(|| oms_command_graph::run_with_helper(&args, &repo.0, &cancel, Some(&helper)));
+        // Opening both ends makes the start deadline apply even if the helper
+        // was never invoked. The helper blocks until the session cancels it.
+        let started = Command::new("bash")
+            .args([
+                "-c",
+                r#"exec 3<>"$1"; IFS= read -r -t 8 -u 3 marker && [[ $marker = request ]]"#,
+                "wait",
+            ])
+            .arg(&ready)
+            .status();
+        cancel.store(true, Ordering::SeqCst);
+        let (code, stdout, stderr) = call.join().unwrap();
+        assert!(
+            started.unwrap().success(),
+            "parser did not receive its request"
+        );
+        assert_eq!(code, 130);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"graph: interrupted\n");
+    });
+}
+
+#[test]
 fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
     fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
         fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, u64, std::time::SystemTime)>) {
@@ -720,29 +854,32 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         walk(root, root, &mut out);
         out
     }
-    let run_panel = |repo: &Path, extra: &[&str]| -> (i32, Value, String) {
-        let mut args: Vec<OsString> = vec![
-            "project".into(),
-            "panel".into(),
-            "--repo".into(),
-            repo.as_os_str().to_owned(),
-            "--json".into(),
-        ];
-        args.extend(extra.iter().map(OsString::from));
-        let (code, out, err) = run(&args, repo, &AtomicBool::new(false));
-        let stderr = String::from_utf8_lossy(&err).into_owned();
-        let value = if out.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&out).unwrap_or_else(|e| {
-                panic!(
-                    "invalid panel JSON ({e}): stdout={} stderr={stderr}",
-                    String::from_utf8_lossy(&out)
-                )
-            })
+    let panel_with_helper =
+        |repo: &Path, extra: &[&str], helper: Option<&Path>| -> (i32, Value, String) {
+            let mut args: Vec<OsString> = vec![
+                "project".into(),
+                "panel".into(),
+                "--repo".into(),
+                repo.as_os_str().to_owned(),
+                "--json".into(),
+            ];
+            args.extend(extra.iter().map(OsString::from));
+            let (code, out, err) =
+                oms_command_graph::run_with_helper(&args, repo, &AtomicBool::new(false), helper);
+            let stderr = String::from_utf8_lossy(&err).into_owned();
+            let value = if out.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&out).unwrap_or_else(|e| {
+                    panic!(
+                        "invalid panel JSON ({e}): stdout={} stderr={stderr}",
+                        String::from_utf8_lossy(&out)
+                    )
+                })
+            };
+            (code, value, stderr)
         };
-        (code, value, stderr)
-    };
+    let run_panel = |repo: &Path, extra: &[&str]| panel_with_helper(repo, extra, None);
     let git = |repo: &Path, args: &[&str]| {
         let output = std::process::Command::new("git")
             .args(args)
@@ -1079,8 +1216,29 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         "#!/usr/bin/env bash\nsource src/main.sh\nrun_app\n",
     )
     .unwrap();
-    for path in ["src/lib.sh", "src/main.sh", "tests/test-app.sh"] {
+    fs::write(
+        indexed.0.join("src/record.rs"),
+        "pub fn inspect(value: usize) -> usize {\n    value\n}\nfn measured(_: [u8; \"literal\".len()]) {}\nfn replacement() {}\nmod left {\n    pub fn scoped() {}\n}\nmod right {\n    pub fn scoped() {}\n}\n",
+    )
+    .unwrap();
+    for path in [
+        "src/lib.sh",
+        "src/main.sh",
+        "src/record.rs",
+        "tests/test-app.sh",
+    ] {
         fs::set_permissions(indexed.0.join(path), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let helper_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("oms-graph-python-helper");
+    let helper_bin = helper_bin.is_file().then_some(helper_bin.as_path());
+    if helper_bin.is_some() {
+        fs::write(indexed.0.join("src/inspect.py"), "def focus():\n    pass\n").unwrap();
     }
     git(&indexed.0, &["add", "."]);
     fs::write(
@@ -1088,7 +1246,14 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         "untracked_sentinel() { echo ok; }",
     )
     .unwrap();
-    let built = indexed.build();
+    let built = project::build(
+        &indexed.0,
+        &indexed.state(),
+        &Default::default(),
+        &AtomicBool::new(false),
+        helper_bin,
+    )
+    .unwrap();
     assert!(built["stats"]["nodes"].as_u64().unwrap() > 0);
     let before_indexed = tree_fingerprint(&indexed.0);
 
@@ -1128,6 +1293,44 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         "expected EXTRACTED neighbor: {idx_focus}"
     );
 
+    if let Some(parser) = helper_bin {
+        let args = ["--node=symbol:src/inspect.py::focus"];
+        let (_, python, _) = panel_with_helper(&indexed.0, &args, Some(parser));
+        assert_eq!(
+            python["selection"]["definition"]["signature"],
+            "def focus()"
+        );
+        assert_eq!(python["selection"]["definition"]["endLine"], 2);
+        let (_, unavailable, _) = run_panel(&indexed.0, &args);
+        assert_eq!(unavailable["selection"]["status"], "found");
+        assert!(unavailable["selection"].get("definition").is_none());
+    }
+    let helper_id = "--node=symbol:src/lib.sh::helper";
+    let (_, helper, _) = run_panel(&indexed.0, &[helper_id]);
+    let detail = &helper["selection"]["definition"];
+    assert_eq!(detail["id"], "symbol:src/lib.sh::helper");
+    assert_eq!(detail["signature"], "helper()");
+    assert_eq!(
+        (&detail["line"], &detail["endLine"]),
+        (&json!(2), &json!(2))
+    );
+    assert!(!helper["nodes"].to_string().contains("helper()"));
+    assert!(idx_focus["selection"].get("definition").is_none());
+    let rust_id = "--node=symbol:src/record.rs::function:inspect";
+    let (_, rust, _) = run_panel(&indexed.0, &[rust_id]);
+    let detail = &rust["selection"]["definition"];
+    assert_eq!(detail["signature"], "pub fn inspect(value: usize) -> usize");
+    assert_eq!(
+        (&detail["line"], &detail["endLine"]),
+        (&json!(1), &json!(3))
+    );
+    let (_, literal, _) = run_panel(
+        &indexed.0,
+        &["--node=symbol:src/record.rs::function:measured"],
+    );
+    assert_eq!(literal["selection"]["status"], "found");
+    assert!(literal["selection"].get("definition").is_none());
+    assert!(!literal.to_string().contains("literal"));
     // Indexed directory drilldown and missing node.
     let (code, idx_dir, _) = run_panel(&indexed.0, &["--node=dir:src"]);
     assert_eq!(code, 0);
@@ -1153,6 +1356,49 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
     // Assert zero writes or mtime changes to the index or repo.
     assert_eq!(tree_fingerprint(&indexed.0), before_indexed);
 
+    // Even with unchanged bytes, a cached declaration can point at another
+    // real function, including an identical spelling in a different scope.
+    let graph_path = indexed.state().join("graph.json");
+    let original = fs::read(&graph_path).unwrap();
+    let mut changed: Value = serde_json::from_slice(&original).unwrap();
+    let nodes = changed["nodes"].as_array_mut().unwrap();
+    let index_of = |local: &str| {
+        let id = format!("symbol:src/record.rs::function:{local}");
+        nodes.iter().position(|n| n["id"] == id).unwrap()
+    };
+    let (inspect, replacement) = (index_of("inspect"), index_of("replacement"));
+    let (left, right) = (index_of("left::scoped"), index_of("right::scoped"));
+    let left_arg = "--node=symbol:src/record.rs::function:left::scoped";
+    let (_, scoped, _) = run_panel(&indexed.0, &[left_arg]);
+    assert_eq!(scoped["selection"]["definition"]["line"], 7);
+    for key in ["name", "metadata"] {
+        nodes[inspect][key] = nodes[replacement][key].clone();
+    }
+    for key in ["line", "end_line"] {
+        nodes[left]["metadata"][key] = nodes[right]["metadata"][key].clone();
+    }
+    fs::write(&graph_path, changed.to_string()).unwrap();
+    for arg in [rust_id, left_arg] {
+        let (_, changed, _) = run_panel(&indexed.0, &[arg]);
+        assert_eq!(changed["selection"]["status"], "found");
+        assert!(changed["selection"].get("definition").is_none(), "{arg}");
+    }
+    fs::write(&graph_path, original).unwrap();
+
+    // Matching manifest versions cannot authorize text from an edited file.
+    fs::write(indexed.0.join("src/lib.sh"), "helper() { echo changed; }\n").unwrap();
+    let (_, edited, _) = run_panel(&indexed.0, &[helper_id]);
+    assert_eq!(edited["selection"]["status"], "found");
+    assert!(edited["selection"].get("definition").is_none());
+
+    let mut stale: Value =
+        serde_json::from_slice(&fs::read(indexed.state().join("manifest.json")).unwrap()).unwrap();
+    stale["parser_version"] = json!(0);
+    indexed.manifest(&stale);
+    let (_, stale, _) = run_panel(&indexed.0, &[rust_id]);
+    assert_eq!(stale["provenance"]["indexFreshness"], "stale");
+    assert!(stale["selection"].get("definition").is_none());
+
     // 7. Large repository scale cap keeps payload bounded under MAX_RESPONSE_BYTES.
     let large = Fixture::empty();
     git(&large.0, &["init", "-q"]);
@@ -1173,4 +1419,170 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
     assert_eq!(large_dto["limits"]["truncated"], true);
     assert_eq!(large_dto["completeness"], "partial");
     assert_eq!(tree_fingerprint(&large.0), before_large);
+}
+
+#[test]
+fn panel_streams_indexes_between_sixteen_and_twenty_four_mib() {
+    let repo = Fixture::empty();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo.0)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    fs::create_dir_all(repo.0.join("src")).unwrap();
+    fs::set_permissions(repo.0.join("src"), fs::Permissions::from_mode(0o700)).unwrap();
+    for (path, text) in [
+        ("src/lib.sh", "#!/usr/bin/env bash\nhelper() { echo ok; }\n"),
+        (
+            "src/main.sh",
+            "#!/usr/bin/env bash\nsource src/lib.sh\nrun_app() { helper; }\n",
+        ),
+    ] {
+        fs::write(repo.0.join(path), text).unwrap();
+        fs::set_permissions(repo.0.join(path), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    git(&["add", "."]);
+    fs::write(
+        repo.0.join("src/untracked_sentinel.sh"),
+        "untracked_sentinel() { echo ok; }\n",
+    )
+    .unwrap();
+    project::build(
+        &repo.0,
+        &repo.state(),
+        &Default::default(),
+        &AtomicBool::new(false),
+        None,
+    )
+    .unwrap();
+    let panel = |extra: &[&str]| -> Value {
+        let mut args: Vec<OsString> = ["project", "panel", "--repo"].map(Into::into).to_vec();
+        args.push(repo.0.as_os_str().to_owned());
+        args.push("--json".into());
+        args.extend(extra.iter().map(OsString::from));
+        let (code, out, err) =
+            oms_command_graph::run_with_helper(&args, &repo.0, &AtomicBool::new(false), None);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        serde_json::from_slice(&out).unwrap()
+    };
+    let probes: [&[&str]; 3] = [
+        &[],
+        &["--query=helper"],
+        &["--node=symbol:src/lib.sh::helper"],
+    ];
+    let small: Vec<Value> = probes.iter().map(|p| panel(p)).collect();
+    assert_eq!(small[0]["provenance"]["mode"], "indexed");
+    assert_eq!(small[2]["selection"]["status"], "found");
+    assert!(small[2]["selection"]["definition"].is_object());
+
+    let graph_path = repo.state().join("graph.json");
+    let original = fs::read(&graph_path).unwrap();
+    let base: Value = serde_json::from_slice(&original).unwrap();
+    assert!(
+        base["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "src/untracked_sentinel.sh")
+    );
+
+    // The field lives inside a node: oversized rows still work when most of
+    // the input is a discarded field. Fill once, without building a second DOM.
+    let large = |graph: &Value| {
+        let mut raw = serde_json::to_vec(graph).unwrap();
+        let start = raw.windows(8).position(|w| w == b"ROW_PAD!").unwrap();
+        raw.splice(start..start + 8, std::iter::repeat_n(b'x', 17 << 20));
+        assert!(raw.len() > 16 << 20 && raw.len() < 24 << 20);
+        raw
+    };
+    let mut fixture = base.clone();
+    fixture["nodes"][0]["unused"] = json!("ROW_PAD!");
+    fixture["unused_root"] = json!("ROOT_PAD");
+    let tracked_file = "file:src/lib.sh";
+    let untracked_file = "file:src/untracked_sentinel.sh";
+    fixture["edges"].as_array_mut().unwrap().push(json!({
+        "source":untracked_file, "target":tracked_file, "relation":"imports", "confidence":"EXTRACTED"
+    }));
+    let mut raw = large(&fixture);
+    fs::write(&graph_path, &raw).unwrap();
+    for (probe, expected) in probes.iter().zip(&small) {
+        assert_eq!(&panel(probe), expected, "{probe:?}");
+    }
+    let missing = panel(&["--query=untracked_sentinel"]);
+    assert_eq!(missing["provenance"]["mode"], "indexed");
+    assert_eq!(missing["status"], "empty");
+    let selected = panel(&["--node=file:src/lib.sh"]);
+    assert_eq!(selected["selection"]["status"], "found");
+    assert!(
+        selected["selection"]["neighbors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["id"] != untracked_file)
+    );
+    assert_eq!(fs::read(&graph_path).unwrap(), raw);
+
+    let mark = raw.windows(8).position(|w| w == b"ROOT_PAD").unwrap();
+    for invalid in [
+        br"\uD800xx".as_slice(),
+        &[0xff, b'b', b'c', b'd', b'e', b'f', b'g', b'h'],
+    ] {
+        raw[mark..mark + 8].copy_from_slice(invalid);
+        fs::write(&graph_path, &raw).unwrap();
+        assert_eq!(panel(&[])["provenance"]["indexState"], "invalid");
+    }
+    raw[mark..mark + 8].copy_from_slice(b"ROOT_PAD");
+    raw.truncate(raw.len() - 3);
+    fs::write(&graph_path, &raw).unwrap();
+    assert_eq!(panel(&[])["provenance"]["indexState"], "invalid");
+    raw.resize((24 << 20) + 1, b' ');
+    fs::write(&graph_path, &raw).unwrap();
+    let over = panel(&[]);
+    assert_eq!(over["provenance"]["mode"], "fallback");
+    assert_eq!(over["provenance"]["indexState"], "invalid");
+    drop(raw);
+
+    let helper = fixture["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|row| row["id"] == "symbol:src/lib.sh::helper")
+        .unwrap();
+    assert!(
+        fixture["nodes"][helper]["metadata"]
+            .get("scope_truncated")
+            .is_none()
+    );
+    fixture["nodes"][helper]["metadata"]["scope_truncated"] = json!("wrong type");
+    for bytes in [serde_json::to_vec(&fixture).unwrap(), large(&fixture)] {
+        fs::write(&graph_path, bytes).unwrap();
+        let dto = panel(probes[2]);
+        assert_eq!(dto["provenance"]["mode"], "indexed");
+        assert_eq!(dto["selection"]["status"], "found");
+        assert!(dto["selection"].get("definition").is_none());
+    }
+
+    // The file fits the raw limit and its record count fits the node limit.
+    // Individually valid text fields must still respect the aggregate search budget.
+    for i in 0..1100 {
+        fixture["nodes"].as_array_mut().unwrap().push(json!({
+            "id":format!("symbol:src/lib.sh::node_{i}"),
+            "path":"src/lib.sh", "summary":"word ".repeat(800)
+        }));
+    }
+    fs::write(&graph_path, large(&fixture)).unwrap();
+    let heavy = panel(&[]);
+    assert_eq!(heavy["provenance"]["mode"], "fallback");
+    assert_eq!(heavy["provenance"]["indexState"], "invalid");
+    assert!(
+        heavy["provenance"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("budget")
+    );
 }

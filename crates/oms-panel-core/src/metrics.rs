@@ -1438,32 +1438,44 @@ mod receipt_token_tests {
 
     #[test]
     fn desktop_provider_totals_preserve_cost_basis_and_partial_coverage() {
-        use usage::{AccountedCall, Cost, Receipt};
-        let call = |cost: Cost, tokens: Option<u64>, accounted: Option<u64>| AccountedCall {
-            receipt: Receipt {
-                identity: Identity {
+        use usage::Cost;
+        let repo = Repo::new();
+        let stop = AtomicBool::new(false);
+        for (call, cost, tokens, resumed) in [
+            ("zero", Cost::Reported(0), Some(0), false),
+            ("baseline", Cost::ProviderEstimate(60), Some(10), true),
+            ("resume", Cost::ProviderEstimate(80), Some(15), true),
+            ("missing", Cost::Unknown, None, false),
+        ] {
+            let mut receipt = usage::begin(
+                &repo.0,
+                Identity {
+                    call_id: call.into(),
+                    operation_id: format!("op-{call}"),
                     provider: "codex".into(),
                     ..Default::default()
                 },
-                cost,
-                ..Default::default()
-            },
-            tokens,
-            cost_microusd: accounted,
-            conflict: false,
-            reasoning_tokens: None,
-        };
-        let p = Projection {
-            calls: vec![
-                call(Cost::Reported(0), Some(0), Some(0)),
-                call(Cost::ProviderEstimate(80), Some(5), Some(20)),
-                call(Cost::Unknown, None, None),
-            ],
-        };
-        let totals = provider_receipts(&p);
+                resumed.then(|| Cumulative {
+                    session_id: "resumed".into(),
+                    baseline_unknown: true,
+                }),
+                &stop,
+            )
+            .unwrap();
+            receipt.revision = 1;
+            receipt.phase = if tokens.is_some() {
+                Phase::Final
+            } else {
+                Phase::Unknown
+            };
+            receipt.cost = cost;
+            receipt.usage.total_tokens = tokens;
+            usage::record(&repo.0, &receipt, &stop).unwrap();
+        }
+        let totals = provider_receipts(&usage::load(&repo.0).unwrap());
         assert_eq!(
             totals[0],
-            json!({"provider":"codex","calls":3,"tokens":5,"tokenReports":2,
+            json!({"provider":"codex","calls":4,"tokens":5,"tokenReports":2,
             "reportedCostMicrousd":0,"reportedCostCalls":1,"estimatedCostMicrousd":20,"estimatedCostCalls":1})
         );
     }

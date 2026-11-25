@@ -6,8 +6,6 @@ use crate::{
     json::{copy, field, object, string, text},
 };
 use oms_context::Json;
-use regex::Regex;
-use std::sync::OnceLock;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 const FIELDS: &[&str] = &[
@@ -166,9 +164,7 @@ pub fn fields(route: &Json) -> Result<Vec<u8>> {
     Ok(out)
 }
 pub fn validate_collaboration(task: &Json, worker: &str) -> Result<()> {
-    if !["codex", "claude"].contains(&worker) {
-        return Err(fail("auto collaboration worker must be codex or claude"));
-    }
+    validate(&object([("provider", string(worker))]))?;
     let route = resolve(task, &object([] as [(&str, Json); 0]))?;
     let explicit = matches!(field(task,"assignment"),Json::Object(v) if !v.is_empty());
     if explicit && get(&route, "provider", "") != worker {
@@ -182,19 +178,8 @@ pub fn validate_collaboration(task: &Json, worker: &str) -> Result<()> {
             "auto collaboration plan contains another implementation provider",
         ));
     }
-    if explicit && worker == "codex" {
-        static ROUTE: OnceLock<Regex> = OnceLock::new();
-        let re = ROUTE.get_or_init(|| {
-            Regex::new(r"\Agpt-0*(?:[6-9]|[1-9]\d+)(?:\.\d+)?-(?:astra|sol|terra|luna)\z").unwrap()
-        });
-        let fallback = get(&route, "fallback_model", "");
-        if !re.is_match(get(&route, "model", "")) || !fallback.is_empty() && !re.is_match(fallback)
-        {
-            return Err(fail(
-                "auto collaboration assignment requires a GPT-6 or newer Astra, Sol, Terra or Luna route",
-            ));
-        }
-    }
+    // This is a serialized allocation contract, not a model capability table.
+    // The existing registry and physical launch validate the selected route.
     Ok(())
 }
 pub fn validate_collaboration_plan(plan: &Json, worker: &str) -> Result<()> {

@@ -6,6 +6,7 @@ use crate::{
     checkpoint, digest, encoded, obj, path_value, storage, text,
 };
 use std::{
+    ffi::OsString,
     fs::{self, DirBuilder},
     os::unix::{
         ffi::OsStrExt,
@@ -108,25 +109,15 @@ impl Producer {
         let device = fs::metadata(&self.index.repo)
             .map_err(|e| e.to_string())?
             .dev();
-        let mut parent = None;
-        for candidate in [
-            Some(std::env::temp_dir()),
-            self.index.repo.parent().map(Path::to_owned),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Ok(candidate) = fs::canonicalize(candidate)
-                && !candidate.starts_with(&self.index.repo)
-                && !candidate.starts_with(&execution)
-                && fs::metadata(&candidate).is_ok_and(|v| v.dev() == device)
-            {
-                parent = Some(candidate);
-                break;
-            }
-        }
-        let parent =
-            parent.ok_or("no same-filesystem private capture parent outside state repository")?;
+        let cache_root =
+            capture_cache_root(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"));
+        let parent = select_capture_parent(
+            &self.index.repo,
+            &execution,
+            device,
+            &std::env::temp_dir(),
+            cache_root.as_deref(),
+        )?;
         let generation = storage::random_hex(16)?;
         let directory = parent.join(format!("oms-landing-capture-{generation}"));
         let item = obj([
@@ -415,6 +406,64 @@ pub fn parent_guard() -> Result<()> {
         Ok(())
     }
 }
+
+fn capture_cache_root(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let base = xdg_cache_home
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            home.filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|p| p.join(".cache"))
+        })?;
+    let base = storage::absolute(&base).ok()?;
+    Some(base.join("oh-my-setting").join("landing-captures"))
+}
+
+fn fits_capture_parent(candidate: &Path, repo: &Path, execution: &Path, device: u64) -> bool {
+    !candidate.starts_with(repo)
+        && !candidate.starts_with(execution)
+        && fs::metadata(candidate).is_ok_and(|v| v.dev() == device)
+}
+
+fn select_capture_parent(
+    repo: &Path,
+    execution: &Path,
+    device: u64,
+    temp_dir: &Path,
+    cache_root: Option<&Path>,
+) -> std::result::Result<PathBuf, AllocationError> {
+    if let Ok(candidate) = fs::canonicalize(temp_dir)
+        && fits_capture_parent(&candidate, repo, execution, device)
+    {
+        return Ok(candidate);
+    }
+    if let Some(cache_root) = cache_root {
+        if !cache_root.starts_with(repo)
+            && !cache_root.starts_with(execution)
+            && DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(cache_root)
+                .is_ok()
+            && let Ok(candidate) = fs::canonicalize(cache_root)
+            && fits_capture_parent(&candidate, repo, execution, device)
+        {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "no same-filesystem private capture parent outside state repository (tried cache root {})",
+            cache_root.display()
+        )
+        .into());
+    }
+    Err(
+        "no same-filesystem private capture parent outside state repository (cache root unavailable: set XDG_CACHE_HOME or HOME)"
+            .into(),
+    )
+}
 fn limit(name: &str, default: u64) -> Result<u64> {
     let value = std::env::var(name).unwrap_or_else(|_| default.to_string());
     if value.is_empty()
@@ -630,4 +679,246 @@ fn release_ready<'a>(index: &'a CaptureIndex, item: &V) -> Result<Option<(usize,
         }
     }
     Ok(candidates.last().copied())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::ErrorKind, os::unix::fs::PermissionsExt};
+
+    struct TestRoot(PathBuf);
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            let tmp = fs::canonicalize(std::env::temp_dir()).unwrap();
+            let path = (0u32..)
+                .find_map(|i| {
+                    let candidate =
+                        tmp.join(format!("oms-producer-{name}-{}-{i}", std::process::id()));
+                    match DirBuilder::new().mode(0o700).create(&candidate) {
+                        Ok(()) => Some(candidate),
+                        Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                        Err(e) => panic!("create test root: {e}"),
+                    }
+                })
+                .unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn capture_cache_root_resolves_xdg_then_home() {
+        let xdg = OsString::from("/var/cache/custom");
+        let account = OsString::from("/opt/account");
+        assert_eq!(
+            capture_cache_root(Some(xdg), Some(account.clone())),
+            Some(PathBuf::from(
+                "/var/cache/custom/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(
+            capture_cache_root(Some(OsString::new()), Some(account.clone())),
+            Some(PathBuf::from(
+                "/opt/account/.cache/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(
+            capture_cache_root(
+                Some(OsString::from("relative/cache")),
+                Some(account.clone())
+            ),
+            Some(PathBuf::from(
+                "/opt/account/.cache/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(
+            capture_cache_root(None, Some(account)),
+            Some(PathBuf::from(
+                "/opt/account/.cache/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(capture_cache_root(None, None), None);
+        assert_eq!(
+            capture_cache_root(Some(OsString::new()), Some(OsString::from("rel"))),
+            None
+        );
+    }
+
+    #[test]
+    fn select_capture_parent_prefers_tmpdir_then_cache_root() {
+        let root = TestRoot::new("select-parent");
+        let projects = root.path().join("projects");
+        let repo = projects.join("project");
+        let execution = root.path().join("execution");
+        let outside_tmp = root.path().join("outside-tmp");
+        let tmp_in_repo = repo.join("tmp");
+        let tmp_in_exec = execution.join("tmp");
+        for dir in [&repo, &execution, &outside_tmp, &tmp_in_repo, &tmp_in_exec] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let device = fs::metadata(&repo).unwrap().dev();
+
+        // Outside TMPDIR wins and leaves the cache root uncreated.
+        let unused_cache = root
+            .path()
+            .join("unused-cache/oh-my-setting/landing-captures");
+        assert_eq!(
+            select_capture_parent(&repo, &execution, device, &outside_tmp, Some(&unused_cache))
+                .unwrap(),
+            outside_tmp
+        );
+        assert!(!unused_cache.exists());
+
+        // TMPDIR inside repo falls back to the cache root, never repo.parent().
+        let cache_root = root.path().join("cache/oh-my-setting/landing-captures");
+        assert_eq!(
+            select_capture_parent(&repo, &repo, device, &tmp_in_repo, Some(&cache_root)).unwrap(),
+            cache_root
+        );
+        assert_eq!(
+            fs::symlink_metadata(&cache_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read_dir(&projects).unwrap().count(), 1);
+
+        // TMPDIR inside a separate execution repo also falls back to the cache root.
+        assert_eq!(
+            select_capture_parent(&repo, &execution, device, &tmp_in_exec, Some(&cache_root))
+                .unwrap(),
+            cache_root
+        );
+
+        // Cache root inside repo or execution repo is rejected without creating it.
+        let cache_in_repo = repo.join("cache/oh-my-setting/landing-captures");
+        let err = select_capture_parent(&repo, &repo, device, &tmp_in_repo, Some(&cache_in_repo))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains(&cache_in_repo.display().to_string())
+        );
+        assert!(!repo.join("cache").exists());
+
+        let cache_in_exec = execution.join("cache/oh-my-setting/landing-captures");
+        let err = select_capture_parent(
+            &repo,
+            &execution,
+            device,
+            &tmp_in_exec,
+            Some(&cache_in_exec),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains(&cache_in_exec.display().to_string())
+        );
+        assert!(!execution.join("cache").exists());
+
+        // Uncreatable cache root (blocked by a regular file) is skipped and fails closed.
+        let blocked = root.path().join("blocked");
+        fs::write(&blocked, b"file").unwrap();
+        let blocked_cache = blocked.join("oh-my-setting/landing-captures");
+        let err = select_capture_parent(&repo, &repo, device, &tmp_in_repo, Some(&blocked_cache))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains(&blocked_cache.display().to_string())
+        );
+
+        // Different filesystem or unavailable cache root fails closed.
+        let wrong_dev = select_capture_parent(
+            &repo,
+            &repo,
+            device.wrapping_add(1),
+            &outside_tmp,
+            Some(&cache_root),
+        )
+        .unwrap_err();
+        assert_eq!(wrong_dev.exit_code(), 2);
+        assert!(
+            wrong_dev
+                .to_string()
+                .contains(&cache_root.display().to_string())
+        );
+
+        let no_cache = select_capture_parent(&repo, &repo, device, &tmp_in_repo, None).unwrap_err();
+        assert_eq!(no_cache.exit_code(), 2);
+        assert!(
+            no_cache
+                .to_string()
+                .contains("no same-filesystem private capture parent outside state repository")
+        );
+        assert_eq!(fs::read_dir(&projects).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn existing_capture_remains_readable_wherever_recorded() {
+        let root = TestRoot::new("legacy-read");
+        let projects = root.path().join("projects");
+        let repo = projects.join("project");
+        fs::create_dir_all(repo.join(".oms")).unwrap();
+        let body = b"diff --git a/a.txt b/a.txt\n-old\n+new\n".to_vec();
+        let landing = "land-20261125T000000Z-0000000000000020";
+        let generation = "0123456789abcdef0123456789abcdef";
+        let directory = projects.join(format!("oms-landing-capture-{generation}"));
+        let item = obj([
+            ("version", 1usize.into()),
+            ("generation", generation.into()),
+            ("landing_id", landing.into()),
+            ("namespace", digest(repo.as_os_str().as_bytes()).into()),
+            ("directory", path_value(&directory)),
+            ("bytes", V::Num((2 * body.len()).to_string())),
+            ("sha256", digest(&body).into()),
+        ]);
+        let mut index = CaptureIndex::load(&repo).unwrap();
+        index
+            .append_event("capture-reserved", &item, obj([]))
+            .unwrap();
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        let info = storage::private_directory(&directory).unwrap();
+        let target = directory.join(format!("{landing}.patch"));
+        let payload =
+            storage::create_private(&directory, Path::new(target.file_name().unwrap()), &body)
+                .unwrap();
+        storage::link(&target, &directory, Path::new("capture.anchor"), &payload).unwrap();
+        let certificate = obj([
+            ("reservation", item),
+            ("directory", storage::identity(&info)),
+            (
+                "objects",
+                obj([(
+                    "capture",
+                    obj([
+                        ("identity", storage::identity(&payload)),
+                        ("size", body.len().into()),
+                        ("path", path_value(&target)),
+                        ("anchor", path_value(&directory.join("capture.anchor"))),
+                    ]),
+                )]),
+            ),
+            ("terminal", V::Null),
+        ]);
+        storage::create_private(
+            &directory,
+            Path::new("owner.json"),
+            &encoded(&certificate).unwrap(),
+        )
+        .unwrap();
+
+        let reloaded = CaptureIndex::load(&repo).unwrap();
+        assert_eq!(reloaded.indexed_bytes(&target).unwrap(), Some(body));
+    }
 }

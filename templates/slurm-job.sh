@@ -6,8 +6,8 @@
 # a preempted job goes back in the queue (--requeue below, or the cluster's
 # JobRequeue setting) and when the warning signal arrives (--signal below).
 # This script only reacts: it passes the signal to the training process, waits
-# for it to write a checkpoint, and on the next start resumes from the newest
-# one. Exit codes after preemption differ between clusters, so none is assumed.
+# for it to write a checkpoint, and on the next start resumes only from a
+# provenance-checked checkpoint. Exit codes after preemption differ between clusters, so none is assumed.
 
 #SBATCH --job-name=TODO-name
 #SBATCH --time=TODO-D-HH:MM:SS
@@ -24,15 +24,27 @@ mkdir -p logs
 CKPT_DIR="${CKPT_DIR:-checkpoints/${SLURM_JOB_NAME:-job}}"
 mkdir -p "$CKPT_DIR"
 
-# Newest checkpoint, if any: a requeued job starts this script again from the
-# top with the same job id, so resuming is this lookup and nothing else.
+# This template requires OMS on PATH and the canonical/shared project checkout
+# (registered contract and original run ledger) on the execution host. A Git
+# bundle alone does not carry ignored .oms state or install OMS. For a remote
+# Git-only checkout, collect the checkpoint to the canonical project, verify it
+# there, then use the project's explicit staged resume path; do not copy a ledger
+# to manufacture authority on the remote host.
+# The application writes this manifest atomically after writing its checkpoint.
+# It binds the registered experiment/run, frozen inputs, seed, step, RNG-state
+# identity and exact checkpoint bytes. OMS never loads model data. Do not select
+# by mtime: a newer file can belong to another run or configuration.
 resume=""
-for candidate in "$CKPT_DIR"/*; do
-  [ -f "$candidate" ] || continue
-  if [ -z "$resume" ] || [ "$candidate" -nt "$resume" ]; then
-    resume="$candidate"
-  fi
-done
+if [ -n "${OMS_CHECKPOINT_MANIFEST:-}" ]; then
+  : "${OMS_EXPERIMENT_ID:?checkpoint resume needs the registered experiment id}"
+  : "${OMS_EXPERIMENT_RUN_ID:?checkpoint resume needs the exact run id}"
+  resume=$(oms runtime experiment checkpoint \
+    --id "$OMS_EXPERIMENT_ID" --run-id "$OMS_EXPERIMENT_RUN_ID" \
+    --manifest "$OMS_CHECKPOINT_MANIFEST" --path-only)
+elif [ "${SLURM_RESTART_COUNT:-0}" -gt 0 ]; then
+  echo "requeued run has no checkpoint provenance manifest; refusing a silent fresh start" >&2
+  exit 75
+fi
 echo "job ${SLURM_JOB_ID:-local} restart ${SLURM_RESTART_COUNT:-0}: resume from ${resume:-nothing}"
 
 # --signal=B:USR1@120 delivers USR1 to this shell 120 seconds before the time

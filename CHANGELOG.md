@@ -22,6 +22,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `plugins/claude-code` is an optional Claude Code mod, `oms-panel`: the
+  `/oms-panel` command opens a read-only pane that draws the schema-1
+  `oms dashboard --json` projection in four tabs and refreshes while it is
+  drawn. It starts no other process and is checked with `claude plugin test`
+  against fixtures. Live rendering is unverified and the marketplace does not
+  list it yet.
 - `docs/examples/agent-adapter-conformance.sh` is a reference check of the
   one-shot custom adapter contract: adapter name, bounded `--version`/`--help`
   probes and, with `--run`, read and write calls in a throwaway repository

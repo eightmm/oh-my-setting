@@ -47,6 +47,240 @@ pub(crate) fn api(c: &Context<'_>, endpoint: &str) -> Result<V> {
         Duration::from_secs(30),
     )
 }
+
+/// A bounded read of one exact current run attempt, retained in the existing
+/// CI ledger. This never dispatches a workflow and never certifies another
+/// workflow, commit, repository, or a later rerun of the same run id.
+pub fn observe_attempt(
+    repo: &Path,
+    state: &Path,
+    identity: &V,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> Result<V> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let remaining = || {
+        deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|v| !v.is_zero())
+            .ok_or_else(|| Error::new(124, "CI observation deadline exceeded"))
+    };
+    let fields = [
+        "repository",
+        "head_sha",
+        "workflow_id",
+        "run_id",
+        "run_attempt",
+    ];
+    require(
+        matches!(identity, V::Obj(keys) if keys.len() == fields.len()
+            && fields.iter().all(|name| identity.has(name))),
+        "malformed CI wait identity",
+    )?;
+    let repository = string(identity, "repository");
+    let (owner, name) = repository
+        .split_once('/')
+        .ok_or_else(|| Error::new(2, "invalid CI repository"))?;
+    require(
+        crate::report::github_slug(owner, name)? == repository,
+        "invalid CI repository",
+    )?;
+    let head = string(identity, "head_sha");
+    require(
+        [40, 64].contains(&head.len())
+            && head
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && ["workflow_id", "run_id", "run_attempt"]
+                .iter()
+                .all(|key| identity.get(key).integer(true)),
+        "invalid CI head or run attempt",
+    )?;
+    let git_text = |args: &[&str]| -> Result<String> {
+        let out = process(
+            repo,
+            [
+                "git",
+                "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ]
+            .into_iter()
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect(),
+            None,
+            remaining()?.min(Duration::from_secs(2)),
+            interrupted,
+            &[],
+        )?;
+        if out.code == 130 {
+            return Err(Error::new(130, "CI lookup interrupted"));
+        }
+        require(out.code == 0, "CI repository identity unavailable")?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    let current = || -> Result<()> {
+        require(
+            crate::report::github_remote(&git_text(&["remote", "get-url", "origin"])?)?
+                .eq_ignore_ascii_case(&repository)
+                && git_text(&["rev-parse", "--verify", "HEAD"])? == head,
+            "CI wait repository or HEAD changed",
+        )
+    };
+    current()?;
+    let context = Context {
+        cwd: repo,
+        source: repo,
+        interrupted,
+        services: &crate::Unavailable,
+    };
+    let get = |endpoint: &str| {
+        gh(
+            &context,
+            &[
+                "api",
+                "--method",
+                "GET",
+                "-H",
+                "Accept: application/vnd.github+json",
+                endpoint,
+            ],
+            remaining()?.min(Duration::from_secs(8)),
+        )
+    };
+    let endpoint = format!(
+        "repos/{repository}/actions/runs/{}",
+        identity.get("run_id").py()
+    );
+    let run = get(&endpoint)?;
+    let validate = |row: &V| -> Result<()> {
+        require(
+            row.get("id") == identity.get("run_id")
+                && row.get("workflow_id") == identity.get("workflow_id")
+                && row.get("run_attempt") == identity.get("run_attempt")
+                && row.get("head_sha") == identity.get("head_sha")
+                && string(row.get("repository"), "full_name").eq_ignore_ascii_case(&repository),
+            "CI observation belongs to another repository, head, workflow or run attempt",
+        )
+    };
+    validate(&run)?;
+    let jobs = get(&format!(
+        "{endpoint}/attempts/{}/jobs?per_page=100",
+        identity.get("run_attempt").py()
+    ))?;
+    require(
+        matches!(jobs.get("jobs"), V::Arr(_))
+            && jobs.get("jobs").array().len() <= 100
+            && jobs.get("total_count").py() == jobs.get("jobs").array().len().to_string()
+            && jobs.get("jobs").array().iter().all(|job| {
+                job.get("run_id") == identity.get("run_id")
+                    && job.get("run_attempt") == identity.get("run_attempt")
+                    && job.get("head_sha") == identity.get("head_sha")
+                    && string(job, "run_url")
+                        .eq_ignore_ascii_case(&format!("https://api.github.com/{endpoint}"))
+            }),
+        "incomplete or mixed CI job-attempt observation",
+    )?;
+    let after = get(&endpoint)?;
+    validate(&after)?;
+    require(
+        ["status", "conclusion", "updated_at"]
+            .iter()
+            .all(|key| run.get(key) == after.get(key)),
+        "CI run changed during observation; reconcile again",
+    )?;
+    require(
+        string(&run, "status") != "completed"
+            || jobs
+                .get("jobs")
+                .array()
+                .iter()
+                .all(|job| string(job, "status") == "completed"),
+        "completed CI run has incomplete job observations",
+    )?;
+    let mut job_ids = BTreeSet::new();
+    let mut selected_jobs = Vec::new();
+    for job in jobs.get("jobs").array() {
+        require(
+            job.get("id").integer(true) && job_ids.insert(job.get("id").py()),
+            "invalid or duplicate CI job identity",
+        )?;
+        selected_jobs.push(obj([
+            "id",
+            "run_id",
+            "run_attempt",
+            "head_sha",
+            "name",
+            "status",
+            "conclusion",
+            "started_at",
+            "completed_at",
+        ]
+        .into_iter()
+        .map(|key| (key, job.get(key).clone()))));
+    }
+    selected_jobs.sort_by_key(|job| job.get("id").py());
+    let mut row = obj([
+        ("schema", 1usize.into()),
+        ("kind", "exact-run-attempt".into()),
+        ("identity", identity.clone()),
+        ("status", run.get("status").clone()),
+        ("conclusion", run.get("conclusion").clone()),
+        ("jobs", V::Arr(selected_jobs)),
+    ]);
+    // The result fingerprint excludes lookup time, so duplicate observations
+    // retain one identity even when the process restarts or polls the next day.
+    use sha2::{Digest, Sha256};
+    row.set(
+        "observation_sha256",
+        format!("{:x}", Sha256::digest(row.json(false)?)),
+    );
+    row.set("updated_at", run.get("updated_at").clone());
+    row.set("ts", now());
+    let ledger = state.join(".oms/ci.jsonl");
+    crate::check(interrupted)?;
+    // A read-only observer does not wait behind a long-lived writer. The
+    // caller can observe again; no stale success is returned on contention.
+    let mut settings =
+        oms_lock::Settings::from_env().map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+    settings.timeout = remaining()?;
+    let _guard = oms_lock::Lock::for_file(&ledger, settings)
+        .map_err(|e| Error::new(e.exit_code(), e.to_string()))?
+        .try_acquire()
+        .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+    current()?;
+    let raw = storage::root(state)?
+        .read_no_follow(
+            Path::new(".oms/ci.jsonl"),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .map_err(|e| Error::new(2, format!("CI ledger unreadable: {e:?}")))?;
+    let prior = storage::parse_rows(&raw)?;
+    if !prior
+        .iter()
+        .any(|old| old.get("observation_sha256") == row.get("observation_sha256"))
+    {
+        let mut next = raw.clone();
+        next.extend(row.json(false)?);
+        next.push(b'\n');
+        require(
+            next.len() <= 8 * 1024 * 1024,
+            "CI ledger exceeds observation bound",
+        )?;
+        storage::replace(
+            state,
+            Path::new(".oms/ci.jsonl"),
+            if ledger.exists() { Some(&raw) } else { None },
+            &next,
+        )?;
+    }
+    Ok(row)
+}
 pub fn query_repo(destination: &str) -> Result<String> {
     require(
         !destination.trim().is_empty() && !destination.chars().any(char::is_control),
@@ -246,6 +480,160 @@ pub(crate) fn run_details(c: &Context<'_>, destination: &str, id: &V, sha: &str)
         }
     }
 }
+pub(crate) enum ReconciledCi {
+    Pending,
+    Unsuccessful,
+    Full(V),
+}
+
+/// Verify one exact PR observation. The check rollup only locates the gate job;
+/// its publisher, workflow, event, run attempt, full job set and PR association
+/// come from the authenticated repository-scoped Actions API.
+pub(crate) fn reconciled_pr(
+    c: &Context<'_>,
+    repo: &str,
+    number: &str,
+    sha: &str,
+    branch: &str,
+    target: &str,
+    rollup: &V,
+) -> Result<ReconciledCi> {
+    let prefix = format!("repos/{repo}");
+    let runs = api(
+        c,
+        &format!(
+            "{prefix}/actions/workflows/test.yml/runs?head_sha={sha}&branch={}&event=pull_request&per_page=1",
+            component(branch)
+        ),
+    )?;
+    let [run] = runs.get("workflow_runs").array() else {
+        return Err(Error::new(2, "latest PR workflow run unavailable"));
+    };
+    let id = run.get("id");
+    let attempt = run.get("run_attempt");
+    require(
+        id.integer(true)
+            && attempt.integer(true)
+            && string(run, "path") == ".github/workflows/test.yml"
+            && string(run, "event") == "pull_request"
+            && string(run, "head_sha") == sha
+            && string(run, "head_branch") == branch
+            && string(run.get("repository"), "full_name") == repo
+            && string(run.get("head_repository"), "full_name") == repo,
+        "workflow run identity mismatch",
+    )?;
+    let V::Arr(linked) = run.get("pull_requests") else {
+        return Err(Error::new(2, "missing PR association"));
+    };
+    if linked.is_empty() {
+        // A check rollup can be shared by two PRs using the same head.
+        // GitHub may omit association after merge. Require precisely one PR ever
+        // opened from this head branch in the repository in that case.
+        let owner = repo
+            .split_once('/')
+            .ok_or_else(|| Error::new(2, "invalid repository"))?
+            .0;
+        let pulls = api(
+            c,
+            &format!(
+                "{prefix}/pulls?state=all&head={owner}%3A{}&per_page=2",
+                component(branch)
+            ),
+        )?;
+        let [pr] = pulls.array() else {
+            return Err(Error::new(2, "ambiguous PR association"));
+        };
+        require(
+            pr.get("number").py() == number
+                && string(pr.get("head"), "sha") == sha
+                && string(pr.get("head"), "ref") == branch
+                && string(pr.get("base"), "ref") == target
+                && string(pr.get("head").get("repo"), "full_name") == repo
+                && string(pr.get("base").get("repo"), "full_name") == repo,
+            "unbound PR branch",
+        )?;
+    } else {
+        let [pr] = linked.as_slice() else {
+            return Err(Error::new(2, "ambiguous workflow association"));
+        };
+        require(
+            pr.get("number").py() == number
+                && string(pr.get("head"), "sha") == sha
+                && string(pr.get("head"), "ref") == branch
+                && string(pr.get("base"), "ref") == target
+                && run.get("repository").get("id").integer(true)
+                && pr.get("head").get("repo").get("id") == run.get("repository").get("id")
+                && pr.get("base").get("repo").get("id") == run.get("repository").get("id"),
+            "workflow belongs to another pull request",
+        )?;
+    }
+    let mut detail = obj([
+        ("headSha", sha.into()),
+        ("status", run.get("status").clone()),
+        ("conclusion", run.get("conclusion").clone()),
+    ]);
+    match conclusion(&detail, sha)?.as_str() {
+        "success" => {}
+        "pending" => return Ok(ReconciledCi::Pending),
+        _ => return Ok(ReconciledCi::Unsuccessful),
+    }
+    let response = api(
+        c,
+        &format!(
+            "{prefix}/actions/runs/{}/attempts/{}/jobs?per_page=100",
+            id.py(),
+            attempt.py()
+        ),
+    )?;
+    let V::Arr(jobs) = response.get("jobs") else {
+        return Err(Error::new(2, "CI jobs unavailable"));
+    };
+    require(
+        !jobs.is_empty()
+            && jobs.len() <= 100
+            && response.get("total_count") == &V::from(jobs.len())
+            && jobs.iter().all(|job| {
+                job.get("run_id") == id
+                    && job.get("run_attempt") == attempt
+                    && string(job, "head_sha") == sha
+                    && string(job, "status") == "completed"
+            }),
+        "unbound or incomplete jobs",
+    )?;
+    let mut gates = jobs.iter().filter(|job| string(job, "name") == "gate");
+    let gate = gates
+        .next()
+        .ok_or_else(|| Error::new(2, "stable gate missing"))?;
+    let url = format!(
+        "https://github.com/{repo}/actions/runs/{}/job/{}",
+        id.py(),
+        gate.get("id").py()
+    );
+    require(
+        gates.next().is_none()
+            && gate.get("id").integer(true)
+            && string(gate, "conclusion") == "success"
+            && string(gate, "html_url") == url
+            && rollup.array().len() <= 100
+            && rollup.array().iter().any(|check| {
+                string(check, "__typename") == "CheckRun"
+                    && string(check, "conclusion") == "SUCCESS"
+                    && string(check, "name") == "gate"
+                    && string(check, "detailsUrl") == url
+            }),
+        "PR gate job mismatch",
+    )?;
+    detail.set("jobs", response.get("jobs").clone());
+    require(
+        full_scope(&detail, sha)? == "full",
+        "full CI proof unavailable",
+    )?;
+    Ok(ReconciledCi::Full(obj([
+        ("run_id", id.clone()),
+        ("attempt", attempt.clone()),
+        ("scope", "full".into()),
+    ])))
+}
 fn red(v: &str) -> bool {
     [
         "failure",
@@ -365,6 +753,30 @@ pub(crate) fn latest(
         Ok(None)
     }
 }
+/// Generic projects need no OMS job names, but their run and listed jobs must
+/// agree that execution actually finished successfully.
+pub(crate) fn successful_scope(run: &V, sha: &str) -> Result<&'static str> {
+    require(
+        conclusion(run, sha)? == "success",
+        "CI detail is not a completed success",
+    )?;
+    let jobs = run.get("jobs");
+    require(
+        matches!(jobs, V::Arr(rows) if !rows.is_empty())
+            && jobs.array().iter().all(|job| {
+                let name = job.get("name").text().unwrap_or("");
+                !name.is_empty()
+                    && (!job.has("status") || job.get("status").text() == Some("completed"))
+                    && matches!(
+                        job.get("conclusion").text(),
+                        Some("success" | "skipped" | "neutral")
+                    )
+            }),
+        "CI detail contains incomplete or inconsistent jobs",
+    )?;
+    Ok(full_scope(run, sha).unwrap_or("unknown"))
+}
+
 pub fn full_scope(run: &V, sha: &str) -> Result<&'static str> {
     require(
         conclusion(run, sha)? == "success",
@@ -1317,6 +1729,38 @@ mod tests {
         full_scope(&run(&borrowed), SHA)
     }
 
+    #[test]
+    fn successful_scope_separates_terminal_job_evidence_from_oms_selection() {
+        assert_eq!(
+            successful_scope(&run(&[("project CI", "success")]), SHA).unwrap(),
+            "unknown"
+        );
+        assert_eq!(
+            successful_scope(
+                &run(&[
+                    ("lint", "skipped"),
+                    ("affected_plan", "success"),
+                    ("gate", "success")
+                ]),
+                SHA
+            )
+            .unwrap(),
+            "affected"
+        );
+        let jobs = pure_rust();
+        let full: Vec<_> = jobs
+            .iter()
+            .map(|(name, conclusion)| (name.as_str(), *conclusion))
+            .collect();
+        assert_eq!(successful_scope(&run(&full), SHA).unwrap(), "full");
+        for bad in [
+            run(&[]),
+            run(&[("project CI", "failure")]),
+            run(&[("project CI", "")]),
+        ] {
+            assert!(successful_scope(&bad, SHA).is_err());
+        }
+    }
     #[test]
     fn full_scope_accepts_pure_rust_runs_without_python() {
         let jobs = pure_rust();

@@ -13,6 +13,12 @@ pub struct Args {
     pub command: Vec<OsString>,
 }
 impl Args {
+    pub(crate) fn add_value(&mut self, key: &str, value: impl Into<OsString>) {
+        self.values
+            .entry(key.into())
+            .or_default()
+            .push(value.into());
+    }
     pub(crate) fn set_value(&mut self, key: &str, value: impl Into<OsString>) {
         self.values.insert(key.into(), vec![value.into()]);
     }

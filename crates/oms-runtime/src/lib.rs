@@ -108,6 +108,7 @@ pub mod context;
 pub mod evidence;
 pub mod exec_snapshot;
 pub mod experiment;
+pub mod external;
 mod help;
 mod io;
 pub mod parser;

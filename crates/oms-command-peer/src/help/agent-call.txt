@@ -21,6 +21,12 @@ Options:
   --thread ID          Join a cross-agent thread: prior turns are injected and
                        this exchange is appended (thread.sh).
   --operation NAME     Record the work phase in artifacts; it does not select a model.
+  --output-json        Emit schema-1 oms-agent-output for exactly one completed
+                       required target. Binds the question, run, requested model,
+                       native artifact digest and exact stdout byte range. Prompt
+                       and diagnostics are excluded from the returned answer.
+                       Incomplete, refused or nonzero calls fail; no dry-run,
+                       debate or synthesis options. Ordinary text stays unchanged.
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).

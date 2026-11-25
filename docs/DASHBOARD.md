@@ -168,7 +168,15 @@ MCP tool call. OMS checks whether that thread is enrolled as the Codex owner
 of an open Room in the selected repository. A matching Room identifies the
 Main for this chat. Opening or refreshing the panel only reads existing
 membership. To continue an enrolled Main, give it work in the current chat.
-It can use a Lead from the same provider. An explicitly requested new managed
+The overview groups Main, Lead and worker attempts for the enrolled Room.
+A worker row is nested when the recorded parent attempt or Room participant
+connects it to that Lead. Partial collection is shown as partial. **Main chat**
+opens the original Codex conversation when the host advertises link support
+and the Room confirms the current user conversation as the owner. Use that
+conversation's normal composer to send messages and see replies. Otherwise
+the panel can show the permitted Room history.
+
+The Main can use a Lead from the same provider. An explicitly requested new managed
 Main gets a separate Room and launch receipt. Project-wide attempt and acceptance counts retain
 their repository scope. If OMS cannot establish a single match, the panel
 leaves this conversation’s Main unconfirmed.
@@ -218,7 +226,10 @@ This 570-pixel Chromium capture uses a local example project with three recorded
 In a Codex conversation with a verified Room owner, expand **읽기 전용 검토 요청**
 to ask one Claude or AGY researcher a question. Submitting the form invokes the
 selected provider once and can use its allowance. **요청 상태 확인** checks the
-same request ID. **검토 대화 보기** opens the Room handoff and the provider's
+same request ID. If the operation was found but its Room receipt is missing,
+**작업방에 실행 기록 연결** links the existing operation. It is also available
+in the researcher’s conversation. Linking rechecks Room ownership and never
+starts another provider. **검토 대화 보기** opens the Room handoff and the provider's
 recorded answer. A pending request or missing answer remains visible as such.
 The research request grants no write scope, Lead role or approval.
 To share an answer, choose **Attach review result** (검토 결과 첨부), review the
@@ -435,3 +446,13 @@ Activity require this conversation's enrolled Main. Council shows the number
 of recorded answers and their model names when a validated linked thread
 exists. Activity shows recent Room message metadata addressed to the Main.
 Capacity shows the recorded resource policy and its occupancy when configured.
+
+## Claude Code pane
+
+Claude Code does not render MCP Apps HTML, so its view of this projection is a
+native pane drawn by a mod. `plugins/claude-code/README.md` describes the
+optional `oms-panel` plugin: `/oms-panel` runs `oms dashboard --json` for the
+session directory and draws schema 1 in four tabs. It follows the reading rules
+above, starts no other process and writes nothing. Its fixture tests run with
+`claude plugin test`. Rendering in a live session has not been verified yet,
+and the repository marketplace does not list the plugin.

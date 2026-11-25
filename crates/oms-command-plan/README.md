@@ -41,6 +41,34 @@ The internal consumers have one authority entry point:
 The native parent wires these domains directly. There is no legacy command
 backend or fallback.
 
+`Claim --json` and `Next --claim --json` return the issued canonical task digest,
+plan id and lease tuple in the same transaction that grants the claim. Projection
+fields are never stored in the task itself. Native `DelegateBinding` admits only
+that snapshot's Start/Review through `execute_bound_task`, retaining the ordinary
+request, parent, context and writer-lock guards. It samples actual time after the
+lock is acquired, so an expired lease cannot reuse an earlier Context timestamp.
+
+Bound Review requires the actual native delegate index and its verified
+artifact/patch bytes. Under the Plan lock, the owner checks the index and hashes,
+captures immutable files under the existing Plan artifact owner, and saves
+their references and original indexed provenance with Review. The selected
+immutable paths and digests also enable the ordinary exact review-evidence
+checks at admission, Land and Finish. Neither this bridge nor
+an indexed worker exit grants completion or publication; changed and late
+results remain evidence without replacing a newer claimant.
+
+`discussion` is the shared producer/consumer contract for native advisory
+councils. A proposal may carry `discussion: {path, sha256}` pointing to an
+immutable `decision::retain_native` manifest. Apply validates strict JSON,
+spec/plan/base/scope bindings, the exact question, complete rounds and synthesis
+artifact/output digests. Each new task retains that reference; replay refuses
+a different or missing reference. The optional field preserves legacy proposal
+compatibility and adds no approval or acceptance authority. Autonomy requires
+this evidence in its explicit automatic collaboration mode and rechecks it on
+resume without rerunning the council.
+The same native output validator backs `agent-call --output-json`, so planning
+parses the exact provider stdout range instead of searching prompt/diagnostic text.
+
 ## Mode/source checklist
 
 All modes enter the same request/domain layer. Source ranges below identify the

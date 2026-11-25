@@ -12,7 +12,13 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v11.html";
+const URI: &str = "ui://oms/conversation-panel/v17.html";
+const V16: &str = "ui://oms/conversation-panel/v16.html";
+const V15: &str = "ui://oms/conversation-panel/v15.html";
+const V14: &str = "ui://oms/conversation-panel/v14.html";
+const V13: &str = "ui://oms/conversation-panel/v13.html";
+const V12: &str = "ui://oms/conversation-panel/v12.html";
+const V11: &str = "ui://oms/conversation-panel/v11.html";
 const V10: &str = "ui://oms/conversation-panel/v10.html";
 const V9: &str = "ui://oms/conversation-panel/v9.html";
 const V8: &str = "ui://oms/conversation-panel/v8.html";
@@ -63,6 +69,100 @@ const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
 type PanelResult<T> = Result<T, String>;
 
+// The committed handoff fixes the timestamp. Legacy linked requests keep the
+// original operation from their receipt; only new bound asks use this address.
+fn assignment_address(data: &Value, binding: &str) -> Option<String> {
+    let stamp = data["assignedAt"].as_str()?;
+    let time = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%SZ").ok()?;
+    if stamp.len() != 20 || time.format("%Y-%m-%dT%H:%M:%SZ").to_string() != stamp {
+        return None;
+    }
+    let suffix = crate::storage::hash(format!("assignment-operation/{binding}"));
+    Some(format!("ask-{}-{suffix}", time.format("%Y%m%dT%H%M%SZ")))
+}
+
+fn assignment_directory(
+    repo: &Path,
+    data: &Value,
+    op: &str,
+    binding: &str,
+    recovering: bool,
+) -> PanelResult<Option<PathBuf>> {
+    use crate::storage::Directory;
+    let dir = match Directory::run(repo, op, recovering) {
+        Ok(dir) => dir,
+        Err(_) if recovering => return Ok(None),
+        Err(_) => return Err("The recorded assignment operation is unavailable.".into()),
+    };
+    let proof = if recovering {
+        // A reservation and its metadata can precede supervisor startup. Read
+        // only the native supervisor's private directory and its fixed receipts.
+        let Some(before) = rustix::fs::fstat(&dir.fd)
+            .ok()
+            .filter(|s| s.st_mode & 0o077 == 0)
+        else {
+            return Ok(None);
+        };
+        let root = oms_safe_fs::Root::open(repo)
+            .map_err(|_| "The assignment repository is unavailable.")?;
+        let read = |name, limit| {
+            root.read(
+                &format!("{}/{op}/{name}", crate::RUN_ROOT),
+                limit,
+                oms_safe_fs::Policy::manifest(),
+            )
+        };
+        let number = |bytes: &[u8]| -> Option<i32> {
+            let line = std::str::from_utf8(bytes).ok()?.strip_suffix('\n')?;
+            let value: i32 = line.parse().ok()?;
+            (value.to_string() == line).then_some(value)
+        };
+        if !read("pid", 32).is_ok_and(|b| number(&b).is_some_and(|v| v > 0)) {
+            return Ok(None);
+        }
+        match read("status", 32) {
+            // The supervisor writes an 8-bit exit code or a negated Unix
+            // wait-status signal (7 bits, with 0x7f reserved for stops).
+            Ok(bytes) if number(&bytes).is_some_and(|v| (-126..=255).contains(&v)) => (),
+            Err(oms_safe_fs::Error::Missing) => (),
+            _ => return Ok(None),
+        }
+        let Some(bytes) = read("meta.json", 256 * 1024).ok() else {
+            return Ok(None);
+        };
+        // The generic MCP parser permits duplicate members. A linkage proof
+        // must have a single interpretation and still name the opened directory.
+        if oms_context::parse_json_bounded(&bytes, 256 * 1024).is_err()
+            || !Directory::run(repo, op, true)
+                .ok()
+                .and_then(|d| rustix::fs::fstat(&d.fd).ok())
+                .is_some_and(|s| {
+                    s.st_dev == before.st_dev
+                        && s.st_ino == before.st_ino
+                        && s.st_mode == before.st_mode
+                })
+        {
+            return Ok(None);
+        }
+        crate::value::from_slice(&bytes).unwrap_or(Value::Null)
+    } else {
+        crate::storage::meta(&dir.path)
+    };
+    if proof["operation"] != op
+        || proof["thread"] != op
+        || proof["kind"] != "ask"
+        || proof["panel_assignment"] != binding
+        || proof["targets"] != json!([data["provider"]])
+    {
+        return if recovering {
+            Ok(None)
+        } else {
+            Err("The recorded operation does not match this assignment.".into())
+        };
+    }
+    Ok(Some(dir.path))
+}
+
 pub(super) fn runtime_request(request: &Value) -> bool {
     let id = &request["id"];
     (matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024))
@@ -110,7 +210,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let scope = json!({"project":project});
     let mut opener = make(
         OPEN,
-        "Open OMS beside this conversation.",
+        "Open the OMS panel (expands beside or over the conversation when the host allows it).",
         scope.clone(),
         &[],
         false,
@@ -145,8 +245,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             GIT,
-            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId from a linked project to read board pages.",
-            json!({"project":project,"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
+            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId for linked board pages, or issuePreview alone to review immutable metadata for one open issue in the selected project.",
+            json!({"project":project,"issuePreview":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
             &[],
             false
         ),
@@ -230,7 +330,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
                "project":project,"room":ident,"requestId":{"type":"string","format":"uuid"},
                "provider":{"type":"string","enum":["claude","agy"]},
                "title":{"type":"string","minLength":1,"maxLength":120},
-               "task":{"type":"string","minLength":1,"maxLength":4000}
+               "task":{"type":"string","minLength":1,"maxLength":4000},
+               "repairOnly":{"type":"boolean","description":"Only link an existing verified operation; never create an assignment or start a provider."}
             }),
             &["room", "requestId", "provider", "title", "task"],
             true
@@ -679,32 +780,31 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         Ok(data)
     }) {
-        Ok(data) => {
+        Ok(mut data) => {
+            // Selected declarations are for the widget. Sharing a node with the
+            // conversation carries only its existing scoped reference.
+            let definition =
+                if data["kind"] == "oms-panel-project-graph" && data["selection"].is_object() {
+                    data["selection"]
+                        .as_object_mut()
+                        .and_then(|s| s.remove("definition"))
+                } else {
+                    None
+                };
             let mut text = data.to_string();
-            if data["kind"] == "oms-panel-project-graph"
-                && text.len() + json!(&text).to_string().len() + 1024 > 60_000
+            if data["dashboard"]["managedScratch"].is_object()
+                && text.len() + json!(&text).to_string().len() + 1024 > crate::OUTPUT_LIMIT
             {
-                let nodes = data["nodes"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                let ids = nodes
-                    .iter()
-                    .take(4)
-                    .filter_map(|n| n["id"].as_str())
-                    .map(|id| id.chars().take(80).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                text = format!(
-                    "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
-                    data["status"].as_str().unwrap_or("unknown"),
-                    data["provenance"]["source"].as_str().unwrap_or("unknown"),
-                    nodes.len(),
-                    data["edges"].as_array().map_or(0, Vec::len),
-                    ids
-                );
+                if text.len() + 1024 > crate::OUTPUT_LIMIT {
+                    return response(Err("OMS panel snapshot exceeds its output limit.".into()));
+                }
+                text = "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into();
             }
-            json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false})
+            let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false});
+            if let Some(detail) = definition {
+                result["_meta"]["graphDefinition"] = detail;
+            }
+            result
         }
         Err(message) => json!({"isError":true,"content":[{"type":"text","text":message}]}),
     }
@@ -790,11 +890,28 @@ impl Server<'_> {
             "resources/read"
                 if matches!(
                     params["uri"].as_str(),
-                    Some(URI | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10)
+                    Some(
+                        URI | V1
+                            | V2
+                            | V3
+                            | V4
+                            | V5
+                            | V6
+                            | V7
+                            | V8
+                            | V9
+                            | V10
+                            | V11
+                            | V12
+                            | V13
+                            | V14
+                            | V15
+                            | V16
+                    )
                 ) =>
             {
                 json!({"contents":[{
-                    "uri":params["uri"],"mimeType":MIME,"text":include_str!("conversation-panel.html"),
+                    "uri":params["uri"],"mimeType":MIME,"text":panel_html(),
                     "_meta":{"ui":{"preferredDisplayMode":"fullscreen","csp":{"connectDomains":[],"resourceDomains":[]}}}
                 }]})
             }
@@ -809,6 +926,7 @@ impl Server<'_> {
                     OPEN | APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
+                        "issuePreview",
                         "kind",
                         "number",
                         "inventory",
@@ -829,7 +947,15 @@ impl Server<'_> {
                     CAPABILITIES => &["project", "offset"],
                     START_STATUS => &["project", "requestId"],
                     START => &["project", "main", "goal", "requestId"],
-                    ASSIGN => &["project", "room", "requestId", "provider", "title", "task"],
+                    ASSIGN => &[
+                        "project",
+                        "room",
+                        "requestId",
+                        "provider",
+                        "title",
+                        "task",
+                        "repairOnly",
+                    ],
                     ASSIGN_RESULT => &["project", "room", "requestId", "after"],
                     DECIDE => &["project", "id", "version", "digest", "decision"],
                     _ => return error(id, -32602, "unknown desktop tool"),
@@ -850,6 +976,9 @@ impl Server<'_> {
                     &params["_meta"]
                 };
                 let result = self.panel_call(name, args, meta);
+                if name == GRAPH {
+                    return self.graph_reply(id, params, result);
+                }
                 if name == ASSIGN_RESULT {
                     match result {
                         Ok(data)
@@ -907,6 +1036,59 @@ impl Server<'_> {
         reply(
             id,
             self.complete(result, params, method.starts_with("resources/")),
+        )
+    }
+
+    fn graph_reply(&self, id: &Value, params: &Value, data: PanelResult<Value>) -> Value {
+        let mut frame = reply(id, self.complete(response(data), params, false));
+        // write_response uses this ASCII encoding and appends one newline.
+        let fits = |frame: &Value| {
+            crate::value::encode(frame, true, false, false, false)
+                .as_bytes()
+                .len()
+                < crate::OUTPUT_LIMIT
+        };
+        if frame["result"]["isError"] != false || fits(&frame) {
+            return frame;
+        }
+        let graph = &frame["result"]["structuredContent"];
+        let nodes = graph["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let ids = nodes
+            .iter()
+            .take(4)
+            .filter_map(|n| n["id"].as_str())
+            .map(|id| id.chars().take(80).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "Project graph ({}; {}): {} nodes, {} relationships on this page. First nodes: {}. Use node or query to inspect. Full page in structuredContent.",
+            graph["status"].as_str().unwrap_or("unknown"),
+            graph["provenance"]["source"].as_str().unwrap_or("unknown"),
+            nodes.len(),
+            graph["edges"].as_array().map_or(0, Vec::len),
+            ids
+        );
+        for summary in [
+            text.as_str(),
+            "Project graph available in structuredContent.",
+        ] {
+            frame["result"]["content"] = json!([{"type":"text","text":summary}]);
+            if fits(&frame) {
+                return frame;
+            }
+        }
+        reply(
+            id,
+            self.complete(
+                response(Err(
+                    "OMS project graph exceeds the response limit. Request fewer nodes.".into(),
+                )),
+                params,
+                false,
+            ),
         )
     }
 
@@ -977,6 +1159,10 @@ impl Server<'_> {
                     "The approval question changed. Refresh the approval list.",
                 ),
                 (
+                    "room_inventory_incomplete",
+                    "room_inventory_incomplete: OMS could not verify unique assignment ownership within the Room inventory limits.",
+                ),
+                (
                     "conversation is not the owner",
                     "The current conversation is not the confirmed Main of that Room.",
                 ),
@@ -1006,6 +1192,79 @@ impl Server<'_> {
             return Err("OMS response exceeds the desktop capture limit.".into());
         }
         Ok((output.stdout, output.code != 0))
+    }
+
+    fn issue_preview(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
+        if ["kind", "number", "inventory", "boardId", "cursor"]
+            .iter()
+            .any(|key| args.get(key).is_some())
+        {
+            return Err("Select only one issue to review.".into());
+        }
+        let number = args["issuePreview"]
+            .as_u64()
+            .filter(|n| (1..=9_999_999_999).contains(n))
+            .ok_or("Invalid project issue number.")?;
+        // The native reader resolves the project's declared repository and origin itself.
+        let argv = vec![
+            "intent".into(),
+            "draft".into(),
+            "--repo".into(),
+            repo.as_os_str().to_owned(),
+            "--from-project-issue".into(),
+            number.to_string().into(),
+            "--dry-run".into(),
+        ];
+        let (data, _) = self
+            .panel_exec(repo, argv, false)
+            .map_err(|_| "Cannot verify an open issue in the selected project.")?;
+        if self.panel_repo(args)? != repo {
+            return Err(BINDING.into());
+        }
+        let source = &data["source"];
+        let url = source["reference"].as_str().unwrap_or("");
+        let slug = url
+            .strip_prefix("https://github.com/")
+            .and_then(|s| s.strip_suffix(&format!("/issues/{number}")))
+            .unwrap_or("");
+        let valid_slug = slug.split_once('/').is_some_and(|(owner, repo)| {
+            (1..=39).contains(&owner.len())
+                && owner.as_bytes()[0].is_ascii_alphanumeric()
+                && owner
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && (1..=100).contains(&repo.len())
+                && !matches!(repo, "." | "..")
+                && repo
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        });
+        let revision = source["revision"].as_str().unwrap_or("");
+        let sha = source["sha256"].as_str().unwrap_or("");
+        if data["schema"] != 1
+            || data["kind"] != "oms-intent-source"
+            || data["trusted"] != false
+            || source["kind"] != "github-issue"
+            || source["state"] != "open"
+            || !valid_slug
+            || revision.len() != 20
+            || !revision.ends_with('Z')
+            || chrono::DateTime::parse_from_rfc3339(revision).is_err()
+            || revision.as_bytes()[10] != b'T'
+            || sha.len() != 64
+            || !sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !source["bytes"]
+                .as_u64()
+                .is_some_and(|n| (1..=32768).contains(&n))
+        {
+            return Err("Unverified project issue metadata.".into());
+        }
+        Ok(
+            json!({"issuePreview":{"kind":"github-issue","reference":url,"state":"open",
+            "revision":revision,"sha256":sha,"bytes":source["bytes"]}}),
+        )
     }
 
     fn panel_call(&self, name: &str, args: &Value, meta: &Value) -> PanelResult<Value> {
@@ -1053,6 +1312,9 @@ impl Server<'_> {
         }
         if name == CAPABILITIES {
             return self.panel_capabilities(&repo, args);
+        }
+        if name == GIT && args.get("issuePreview").is_some() {
+            return self.issue_preview(&repo, args);
         }
         let request_room = || -> PanelResult<String> {
             let key = args["requestId"]
@@ -1612,20 +1874,21 @@ impl Server<'_> {
             check(&data)?;
             let mut out = summary(&data, data["status"].as_str().unwrap_or("assigned"));
             out["task"] = data["task"].clone();
-            if data["status"] == "started" {
-                let op = data["operation"].as_str().unwrap_or_default();
-                let dir = crate::storage::Directory::run(repo, op, false)
-                    .map_err(|_| "The recorded assignment operation is unavailable.")?;
-                let proof = crate::storage::meta(&dir.path);
-                if proof["operation"] != op
-                    || proof["thread"] != op
-                    || proof["kind"] != "ask"
-                    || proof["panel_assignment"] != binding
-                    || proof["targets"] != json!([data["provider"]])
-                {
-                    return Err("The recorded operation does not match this assignment.".into());
+            let recovered = data["status"] == "assigned";
+            let operation = if recovered {
+                assignment_address(&data, &binding)
+            } else {
+                data["operation"].as_str().map(str::to_owned)
+            };
+            if let Some(op) = operation.as_deref()
+                && let Some(dir) = assignment_directory(repo, &data, op, &binding, recovered)?
+            {
+                if recovered {
+                    out["status"] = json!("recovered");
+                    out["operation"] = json!(op);
+                    out["thread"] = json!(op);
                 }
-                let (state, exit) = crate::peer::status(&dir.path);
+                let (state, exit) = crate::peer::status(&dir);
                 out["execution"] = json!({"state":state,"exit":exit});
                 out["transcript"] = self.provider_thread(
                     repo,
@@ -1656,8 +1919,15 @@ impl Server<'_> {
             crate::output::outbound(field.as_bytes(), &Value::Null)
                 .map_err(|_| "Assignment withheld by the OMS outbound scan.")?;
         }
-        let (data, _) = self.panel_exec(
-            repo,
+        let repair = match args.get("repairOnly") {
+            None => false,
+            Some(v) => v.as_bool().ok_or("Invalid repairOnly flag.")?,
+        };
+        // A repair must remain unable to create an intent even if the Room
+        // changed since the widget observed the unlinked operation.
+        let argv = if repair {
+            Self::assignment_argv("desktop-assign-status", repo, room, request, &digest, &[])
+        } else {
             Self::assignment_argv(
                 "desktop-assign",
                 repo,
@@ -1669,9 +1939,9 @@ impl Server<'_> {
                     ("--label", title),
                     ("--text", task),
                 ],
-            ),
-            false,
-        )?;
+            )
+        };
+        let (data, _) = self.panel_exec(repo, argv, false)?;
         check(&data)?;
         if data["provider"]
             != if provider == "agy" {
@@ -1684,40 +1954,43 @@ impl Server<'_> {
         {
             return Err("The request does not match the recorded assignment.".into());
         }
-        if data["fresh"] != true {
-            // A recorded intent without a receipt may already have launched; its
-            // acknowledgment is unknown, so it is never dispatched again.
-            return Ok(summary(
-                &data,
-                if data["status"] == "started" {
-                    "recorded"
-                } else {
-                    "unconfirmed"
-                },
-            ));
+        if data["status"] == "started" {
+            if repair {
+                assignment_directory(
+                    repo,
+                    &data,
+                    data["operation"].as_str().unwrap_or_default(),
+                    &binding,
+                    false,
+                )?;
+            }
+            return Ok(summary(&data, "recorded"));
         }
         let unconfirmed = |data: &Value| summary(data, "unconfirmed");
-        let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
-        let launched = self.start_bound_peer(
-            &json!({
-                "repo":path,"kind":"ask","prompt":task,"providers":provider,
-                "debate_rounds":0,"include_memory":false,"include_task":false
-            }),
-            Some(&binding),
-        );
-        let Some(launched) = launched
-            .ok()
-            .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
-            .filter(|v| v["started"] == true && v["thread"] == v["operation"])
-        else {
+        let Some(operation) = assignment_address(&data, &binding) else {
             return Ok(unconfirmed(&data));
         };
-        let Some(operation) = launched["operation"]
-            .as_str()
-            .filter(|v| crate::operation(v))
-        else {
+        if !repair && data["fresh"] == true {
+            let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+            let started = self
+                .start_bound_peer(
+                    &json!({"repo":path,"kind":"ask","prompt":task,"providers":provider,
+                    "debate_rounds":0,"include_memory":false,"include_task":false}),
+                    Some((&operation, &binding)),
+                )
+                .ok()
+                .and_then(|t| t.as_str().and_then(|t| crate::value::from_str(t).ok()))
+                .is_some_and(|v| {
+                    v["started"] == true && v["operation"] == operation && v["thread"] == operation
+                });
+            if !started {
+                return Ok(unconfirmed(&data));
+            }
+        } else if (!repair && data["fresh"] != false)
+            || assignment_directory(repo, &data, &operation, &binding, true)?.is_none()
+        {
             return Ok(unconfirmed(&data));
-        };
+        }
         let recorded = self.panel_exec(
             repo,
             Self::assignment_argv(
@@ -1726,12 +1999,18 @@ impl Server<'_> {
                 room,
                 request,
                 &digest,
-                &[("--operation", operation)],
+                &[("--operation", &operation)],
             ),
             false,
         );
         match recorded {
-            Ok((receipt, _)) if check(&receipt).is_ok() && receipt["operation"] == operation => {
+            Ok((receipt, _))
+                if check(&receipt).is_ok()
+                    && receipt["operation"] == operation
+                    && ["provider", "title", "task", "assignedAt"]
+                        .iter()
+                        .all(|k| receipt[*k] == data[*k]) =>
+            {
                 Ok(summary(&receipt, "started"))
             }
             _ => {
@@ -1790,6 +2069,9 @@ impl Server<'_> {
             return;
         };
         data["assignment"] = json!({"state":result["status"],"execution":result["execution"],"title":result["title"]});
+        if result["status"] == "recovered" {
+            data["assignment"]["task"] = result["task"].clone();
+        }
         if result["execution"]["state"] == "done"
             && result["execution"]["exit"] == 0
             && let Some(path) = repo.to_str()
@@ -1907,6 +2189,37 @@ impl Server<'_> {
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         command_catalog(&stdout, offset)
     }
+}
+
+fn panel_html() -> &'static str {
+    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        let source = include_str!("conversation-panel.html");
+        let (prefix, tail) = source.split_once("<script>\n").expect("panel script");
+        let (code, suffix) = tail.split_once("</script>").expect("panel script end");
+        let (before, tail) = code
+            .split_once("const catalogRows = `")
+            .expect("panel catalog");
+        let (catalog, after) = tail.split_once("`;").expect("panel catalog end");
+        let mut body = String::with_capacity(source.len());
+        body.push_str(prefix);
+        body.push_str("<script>\n");
+        // Keep the translations and all line breaks intact. Only the layout
+        // indentation of the surrounding JavaScript is redundant on the wire.
+        let append = |body: &mut String, js: &str| {
+            for line in js.split_inclusive('\n') {
+                body.push_str(line.trim_start_matches(' '));
+            }
+        };
+        append(&mut body, before);
+        body.push_str("const catalogRows = `");
+        body.push_str(catalog);
+        body.push_str("`;");
+        append(&mut body, after);
+        body.push_str("</script>");
+        body.push_str(suffix);
+        body
+    })
 }
 
 fn command_name(value: &str) -> bool {

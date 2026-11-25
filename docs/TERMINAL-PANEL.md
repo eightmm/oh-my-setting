@@ -31,17 +31,20 @@ resolves the current Git top-level and refuses a non-repository with exit 3; exp
 not replace the providers' native conversation or authentication.
 
 <details>
-<summary>Transcripts: navigation, masking and retention</summary>
+<summary>Transcripts: navigation, masking and limits</summary>
 
-Finished dispatch calls keep an owner-only OMS transcript beside their activity summary
-in `.oms/panel-state/dispatch-logs/`. In a call's Detail press `x` for Transcript, or
-select Transcript (`x` or Tab) in its Results reader; arrows, Page Up/Down and search in
-the reader navigate the captured assistant messages, commands and tool results, edit
-content and final report. Esc returns. Secret-shaped lines are masked using the outbound
-scanner patterns. Each capture keeps at most the last 8 MiB with a truncation marker;
-captures older than 30 days or beyond the newest 128 are pruned when another capture
-finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
-“transcript not captured”; provider homes are never read.
+Select Transcript (`x` or Tab) in a call's Results reader to view its recorded output.
+When an owner-only OMS event transcript exists under `.oms/panel-state/dispatch-logs/`,
+the reader loads it first and formats its assistant messages, commands, tool results
+(output excerpts capped at 8 KiB), edit content and final report. Otherwise, for
+finished Rust dispatch calls whose call record names a per-attempt report under
+`.oms/artifacts/` (such as `.oms/artifacts/delegate/*.md` from `oms peer-delegate`),
+the Transcript view reads that report through the same repository-confined, no-symlink,
+owner-only reader path. Arrows, Page Up/Down and `/` search navigate the reader, and Esc
+returns. Secret-shaped lines are masked using the outbound scanner patterns, and reads
+keep at most the last 8 MiB per view with a truncation marker. Calls with neither a
+dispatch log nor a dispatch report show “transcript not captured”; provider homes are
+never read.
 
 </details>
 
@@ -515,6 +518,17 @@ retained for the same Room is marked `last observed`. Detail parses live
 provider-stream activity for running calls and shows a What it did summary for
 finished calls; tree rows include the latest event.
 
+Headless calls verify the selected private account home during execution. A home
+change during the call retains an unknown receipt and the executor's cleanup
+evidence, then stops without retrying another account or model.
+
+During the reader rollout, new calls continue writing legacy receipts. Board
+retains independently measured usage and shows `?` for named-account resumed
+cumulative counters whose home continuity the receipt cannot prove. Readers
+retain any existing account-home scope evidence without storing home paths. See
+the
+[usage schema compatibility contract](../crates/oms-command-telemetry/README.md#lifetime-provider-usage-receipts).
+
 When space permits, the Weekly quota strip includes activity for each connected
 lead. Wide boards spell out `working`, `idle`, `unknown`, `pending`, or `stale`.
 When the words exceed the available width, the strip uses the suffixes `*`,
@@ -555,6 +569,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
 | `N` | — | Previous search match |
 | `s`, then a listed number, then `Y` | Select and confirm a switch from a managed Codex Main. `Esc` cancels the selection | — |
+| `L` | Open a `login` tmux window to sign in to Codex, Claude or Antigravity (`oms connect-services --login-menu`) | — |
 | `a` / `c` | Ask advisor / request selected call cancellation | — |
 | `w` or click Weekly | Open weekly usage details. Quota appears when the Board snapshot is fresh | — |
 | `U` | Refresh weekly quota from idle Claude or AGY sessions. Also available in weekly details | — |
@@ -1362,7 +1377,10 @@ is available to routing without editing JSON.
 
 `oms connect-services --account codex:credits --verify` checks `codex login
 status` for every registered Codex home, including the main home. It fails if
-any home or login cannot be verified, and does not make a model call.
+any home or login cannot be verified, and does not make a model call. To run a
+provider's native sign-in interactively for the default home (or from the panel
+with `L`), use `oms connect-services --login PROVIDER` (`codex`, `claude`, or
+`antigravity`) or `oms connect-services --login-menu`.
 
 `--first` places the account ahead of existing accounts; the default `--last`
 appends it. The ID `default` is reserved for the main home. A fresh registry
@@ -2465,6 +2483,8 @@ retirement supplies no native child-cleanup proof. Results then points to the ne
 ready task instead of recommending admission again. Native consumption and
 completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
 permissions `unknown`, and child cleanup `unsupported`.
+
+#### Recover an unsent first intent
 
 If a first assignment was interrupted before writing its packet and its frozen
 inputs have changed, the owning Main can explicitly retire the original intent.

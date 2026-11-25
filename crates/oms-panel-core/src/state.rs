@@ -643,6 +643,7 @@ fn snapshot_inner(
         "attempts": {"active": active, "recent": recent},
         "room_attempts": room_attempts,
         "room_dispatches": room_dispatches,
+        "managedScratch": crate::scratch_activity::observe(repo, stop),
         "collection": {"ok": true},
         "capacity_stale": false
     });

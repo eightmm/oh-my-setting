@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let args = Args::parse(
         raw,
-        &["--data-source-id", "--account", "--home"],
+        &["--data-source-id", "--account", "--home", "--login"],
         &[
             "--auto",
             "--required",
@@ -19,10 +19,41 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             "--repair",
             "--remove",
             "--verify",
+            "--login-menu",
         ],
     )?;
     args.count(0)?;
     host_mutation()?;
+    if args.get("--login").is_some() || args.has("--login-menu") {
+        if args.get("--login").is_some() && args.has("--login-menu") {
+            return Err(error("choose --login PROVIDER or --login-menu"));
+        }
+        if args.get("--account").is_some()
+            || args.get("--home").is_some()
+            || args.get("--data-source-id").is_some()
+            || [
+                "--auto",
+                "--required",
+                "--no-github",
+                "--no-notion",
+                "--first",
+                "--last",
+                "--repair",
+                "--remove",
+                "--verify",
+            ]
+            .iter()
+            .any(|s| args.has(s))
+        {
+            return Err(error(
+                "login options cannot be combined with account or GitHub/Notion options",
+            ));
+        }
+        if let Some(target) = args.get("--login") {
+            return login_direct(target, ctx);
+        }
+        return login_menu(ctx);
+    }
     if args.get("--account").is_some() {
         if args.get("--data-source-id").is_some()
             || ["--auto", "--required", "--no-github", "--no-notion"]
@@ -546,7 +577,7 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                 );
                 let good = private_home(&path).is_ok();
                 if good && installed("claude") {
-                    let _ = login_verified("claude", &path, ctx)?;
+                    let _ = login_status("claude", Some(&path), ctx)?;
                 }
             }
             return Err(error(
@@ -576,7 +607,8 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                     .ok_or_else(|| error("invalid account home"))?,
             );
             let good = private_home(&path).is_ok();
-            let verified = good && login_verified(provider, &path, ctx)?;
+            let verified =
+                good && login_status(provider, Some(&path), ctx)? == LoginStatus::SignedIn;
             failed |= !verified;
             text.push_str(&format!(
                 "{}: {provider} account {} {}\n",
@@ -1888,15 +1920,331 @@ fn validate_receipt_links(
     }
     Ok(links)
 }
-fn login_verified(provider: &str, path: &Path, ctx: &Context<'_>) -> Result<bool> {
+const CODEX_LOGIN_OVERRIDES: &[&str] = &[
+    concat!("CODEX_API_", "KEY"),
+    concat!("CODEX_ACCESS_", "TOKEN"),
+    concat!("OPENAI_API_", "KEY"),
+    "OPENAI_BASE_URL",
+];
+const CLAUDE_LOGIN_OVERRIDES: &[&str] = &[
+    concat!("ANTHROPIC_API_", "KEY"),
+    concat!("ANTHROPIC_AUTH_", "TOKEN"),
+    concat!("CLAUDE_CODE_OAUTH_", "TOKEN"),
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+];
+fn login_overrides(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "codex" => CODEX_LOGIN_OVERRIDES,
+        "claude" => CLAUDE_LOGIN_OVERRIDES,
+        _ => &[],
+    }
+}
+fn parse_login_spec(raw: &str) -> Result<&'static str> {
+    let (provider, account_id) = match raw.split_once(':') {
+        Some((p, id)) => (p, Some(id)),
+        None => (raw, None),
+    };
+    let canonical = match provider {
+        "codex" => "codex",
+        "claude" => "claude",
+        "antigravity" => "antigravity",
+        _ => {
+            return Err(error(
+                "unsupported login provider; expected codex, claude, or antigravity",
+            ));
+        }
+    };
+    if account_id.is_some() {
+        return Err(error(
+            "per-account sign-in is not available yet; run the provider's sign-in with that account's home",
+        ));
+    }
+    Ok(canonical)
+}
+const LOGIN_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const LOGIN_UNKNOWN_CODE: i32 = 3;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LoginStatus {
+    SignedIn,
+    NotSignedIn,
+    Unknown(String),
+}
+impl LoginStatus {
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::SignedIn => 0,
+            Self::NotSignedIn => 1,
+            Self::Unknown(_) => LOGIN_UNKNOWN_CODE,
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            Self::SignedIn => "signed in".to_owned(),
+            Self::NotSignedIn => "not signed in".to_owned(),
+            Self::Unknown(reason) => format!("unknown: {reason}"),
+        }
+    }
+}
+
+fn provider_login_spec(provider: &str) -> Result<(&'static str, &'static [&'static str])> {
+    match provider {
+        "codex" => Ok(("codex", &["login"])),
+        "claude" => Ok(("claude", &["auth", "login"])),
+        "antigravity" => Ok(("agy", &[])),
+        _ => Err(error(
+            "unsupported login provider; expected codex, claude, or antigravity",
+        )),
+    }
+}
+fn run_login(provider: &str, ctx: &Context<'_>) -> Result<(i32, String)> {
+    use std::io::Write;
+    let (binary, subargs) = provider_login_spec(provider)?;
+    if !installed(binary) {
+        return Err(error(format!("{binary} is not installed or not on PATH")));
+    }
+    if provider == "antigravity" {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(
+            stdout,
+            "Sign in inside Antigravity ({binary}), then exit when done."
+        );
+        let _ = stdout.flush();
+    }
+    let mut command = Command::new(binary);
+    command
+        .args(subargs)
+        .current_dir(ctx.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for var in login_overrides(provider) {
+        command.env_remove(var);
+    }
+    // The child's own exit code is not evidence of sign-in; only the status check below is.
+    match command.status() {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error(format!("{binary} is not installed or not on PATH")));
+        }
+        Err(_) => return Err(error(format!("failed to run {binary}"))),
+    }
+    if provider == "antigravity" {
+        return Ok((
+            LOGIN_UNKNOWN_CODE,
+            format!("{provider}: sign-in not verifiable\n"),
+        ));
+    }
+    let verified = login_status(provider, None, ctx)?;
+    let report = format!("{provider}: {}\n", verified.label());
+    Ok((verified.exit_code(), report))
+}
+fn login_direct(raw: &str, ctx: &Context<'_>) -> Result<Output> {
+    let provider = parse_login_spec(raw)?;
+    let (code, report) = run_login(provider, ctx)?;
+    Ok(Output {
+        code,
+        out: report.into_bytes(),
+        err: Vec::new(),
+    })
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MenuItem {
+    provider: &'static str,
+    status: String,
+}
+fn build_login_menu(ctx: &Context<'_>) -> Vec<MenuItem> {
+    build_login_menu_with(installed, |provider| login_status(provider, None, ctx))
+}
+fn build_login_menu_with(
+    mut has_binary: impl FnMut(&str) -> bool,
+    mut status_for: impl FnMut(&str) -> Result<LoginStatus>,
+) -> Vec<MenuItem> {
+    let mut items = Vec::with_capacity(3);
+    for (provider, binary) in [("codex", "codex"), ("claude", "claude")] {
+        let status = if !has_binary(binary) {
+            format!("{binary} not installed")
+        } else {
+            match status_for(provider) {
+                Ok(status) => status.label(),
+                Err(err) => LoginStatus::Unknown(err.message).label(),
+            }
+        };
+        items.push(MenuItem { provider, status });
+    }
+    let agy_status = if has_binary("agy") {
+        "sign-in not verifiable".to_owned()
+    } else {
+        "agy not installed".to_owned()
+    };
+    items.push(MenuItem {
+        provider: "antigravity",
+        status: agy_status,
+    });
+    items
+}
+fn format_login_menu(items: &[MenuItem]) -> String {
+    let mut out = String::from("Provider sign-in:\n");
+    for (idx, item) in items.iter().enumerate() {
+        out.push_str(&format!(
+            "  {}. {:<16} [{}]\n",
+            idx + 1,
+            item.provider,
+            item.status
+        ));
+    }
+    out
+}
+fn parse_menu_choice(input: &str, count: usize) -> Result<Option<usize>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("q") {
+        return Ok(None);
+    }
+    let choice: usize = trimmed
+        .parse()
+        .map_err(|_| error(format!("invalid selection: expected 1-{count} or q")))?;
+    if choice == 0 || choice > count {
+        return Err(error(format!("invalid selection: expected 1-{count} or q")));
+    }
+    Ok(Some(choice - 1))
+}
+fn wait_for_enter() {
+    use std::io::{BufRead, Write};
+    let mut stdout = std::io::stdout().lock();
+    let _ = write!(stdout, "\nPress Enter to close.");
+    let _ = stdout.flush();
+    drop(stdout);
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+}
+fn login_menu(ctx: &Context<'_>) -> Result<Output> {
+    login_menu_with_terminals(
+        ctx,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )
+}
+fn login_menu_with_terminals(
+    ctx: &Context<'_>,
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> Result<Output> {
+    use std::io::{BufRead, Write};
+    if !stdin_is_tty || !stdout_is_tty {
+        return Err(error("--login-menu requires an interactive terminal"));
+    }
+    let items = build_login_menu(ctx);
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = write!(
+            stdout,
+            "{}\nChoose 1-{} (or q to cancel): ",
+            format_login_menu(&items),
+            items.len()
+        );
+        let _ = stdout.flush();
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line)?;
+    if read == 0 {
+        return Ok(Output {
+            code: 0,
+            out: Vec::new(),
+            err: Vec::new(),
+        });
+    }
+    let selected = match parse_menu_choice(&line, items.len()) {
+        Ok(Some(idx)) => items[idx].provider,
+        Ok(None) => {
+            return Ok(Output {
+                code: 0,
+                out: Vec::new(),
+                err: Vec::new(),
+            });
+        }
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            wait_for_enter();
+            return Ok(Output {
+                code: e.code,
+                out: Vec::new(),
+                err: Vec::new(),
+            });
+        }
+    };
+    match run_login(selected, ctx) {
+        Ok((code, report)) => {
+            let mut stdout = std::io::stdout().lock();
+            let _ = write!(stdout, "{report}");
+            let _ = stdout.flush();
+            drop(stdout);
+            wait_for_enter();
+            Ok(Output {
+                code,
+                out: Vec::new(),
+                err: Vec::new(),
+            })
+        }
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            wait_for_enter();
+            Ok(Output {
+                code: e.code,
+                out: Vec::new(),
+                err: Vec::new(),
+            })
+        }
+    }
+}
+fn login_status(provider: &str, home: Option<&Path>, ctx: &Context<'_>) -> Result<LoginStatus> {
+    login_status_with_timeout(provider, home, ctx, LOGIN_STATUS_TIMEOUT)
+}
+fn login_status_with_timeout(
+    provider: &str,
+    home: Option<&Path>,
+    ctx: &Context<'_>,
+    timeout: std::time::Duration,
+) -> Result<LoginStatus> {
     let (binary, args, env): (&str, &[&str], &str) = match provider {
         "codex" => ("codex", &["login", "status"], "CODEX_HOME"),
         "claude" => ("claude", &["auth", "status"], "CLAUDE_CONFIG_DIR"),
-        _ => return Ok(false),
+        _ => return Ok(LoginStatus::Unknown("unsupported provider".to_owned())),
     };
     let mut command = Command::new(binary);
-    command.args(args).env(env, path).stdin(Stdio::null());
-    Ok(capture(command, ctx.interrupted, 15)?.code == 0)
+    command.args(args).current_dir(ctx.cwd).stdin(Stdio::null());
+    if let Some(path) = home {
+        command.env(env, path);
+    }
+    for var in login_overrides(provider) {
+        command.env_remove(var);
+    }
+    run_login_status_command(command, binary, ctx.interrupted, timeout)
+}
+fn run_login_status_command(
+    command: Command,
+    binary: &str,
+    interrupted: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+) -> Result<LoginStatus> {
+    if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(LoginStatus::Unknown(
+            "status check interrupted (exit 130)".to_owned(),
+        ));
+    }
+    let out = capture_timeout(command, interrupted, timeout)?;
+    Ok(match out.code {
+        0 => LoginStatus::SignedIn,
+        1 => LoginStatus::NotSignedIn,
+        124 => LoginStatus::Unknown("status check timed out (exit 124)".to_owned()),
+        130 => LoginStatus::Unknown("status check interrupted (exit 130)".to_owned()),
+        127 => LoginStatus::Unknown(format!("{binary} not installed (exit 127)")),
+        code => LoginStatus::Unknown(format!("status check failed (exit {code})")),
+    })
 }
 fn stat_id(info: &rustix::fs::Stat) -> Value {
     json!({"st_uid":info.st_uid,"st_dev":info.st_dev,"st_ino":info.st_ino})
@@ -2922,5 +3270,209 @@ mod tests {
         assert_eq!(calls.get(), 2);
         refused(run(&again, &failing), "durability unconfirmed");
         assert_eq!(fx.files(), snapshot);
+    }
+
+    #[test]
+    fn login_spec_and_menu_parsing() {
+        assert_eq!(parse_login_spec("codex").unwrap(), "codex");
+        assert_eq!(parse_login_spec("claude").unwrap(), "claude");
+        assert_eq!(parse_login_spec("antigravity").unwrap(), "antigravity");
+        for bad in [
+            "codex:work",
+            "codex:default",
+            "codex:Bad",
+            "codex:",
+            "claude:work",
+            "claude:UPPER",
+            "antigravity:work",
+            "antigravity:default",
+            "antigravity:",
+        ] {
+            refused(
+                parse_login_spec(bad),
+                "per-account sign-in is not available",
+            );
+        }
+        for bad in ["", "agy", "pi", "gemini:work", ":work"] {
+            refused(parse_login_spec(bad), "unsupported login provider");
+        }
+
+        assert_eq!(parse_menu_choice("1\n", 3).unwrap(), Some(0));
+        assert_eq!(parse_menu_choice(" 3 ", 3).unwrap(), Some(2));
+        assert_eq!(parse_menu_choice("q\n", 3).unwrap(), None);
+        assert_eq!(parse_menu_choice("Q", 3).unwrap(), None);
+        assert_eq!(parse_menu_choice("  \n", 3).unwrap(), None);
+        for bad in ["0", "4", "-1", "abc", "1 2"] {
+            refused(parse_menu_choice(bad, 3), "invalid selection");
+        }
+
+        let menu = format_login_menu(&[
+            MenuItem {
+                provider: "codex",
+                status: LoginStatus::SignedIn.label(),
+            },
+            MenuItem {
+                provider: "claude",
+                status: LoginStatus::NotSignedIn.label(),
+            },
+            MenuItem {
+                provider: "antigravity",
+                status: "sign-in not verifiable".into(),
+            },
+        ]);
+        assert!(menu.contains("1. codex"), "{menu}");
+        assert!(menu.contains("[signed in]"), "{menu}");
+        assert!(menu.contains("2. claude"), "{menu}");
+        assert!(menu.contains("[not signed in]"), "{menu}");
+        assert!(menu.contains("3. antigravity"), "{menu}");
+        assert!(menu.contains("[sign-in not verifiable]"), "{menu}");
+    }
+
+    #[test]
+    fn login_status_reports_three_states_and_menu_handles_probe_errors() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        let sh = |script: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", script]).stdin(Stdio::null());
+            cmd
+        };
+        let clear = AtomicBool::new(false);
+        let interrupted = AtomicBool::new(true);
+
+        let ok_status =
+            run_login_status_command(sh("exit 0"), "codex", &clear, LOGIN_STATUS_TIMEOUT).unwrap();
+        assert_eq!(ok_status, LoginStatus::SignedIn);
+        assert_eq!(ok_status.exit_code(), 0);
+        assert_eq!(ok_status.label(), "signed in");
+
+        let no_status =
+            run_login_status_command(sh("exit 1"), "codex", &clear, LOGIN_STATUS_TIMEOUT).unwrap();
+        assert_eq!(no_status, LoginStatus::NotSignedIn);
+        assert_eq!(no_status.exit_code(), 1);
+        assert_eq!(no_status.label(), "not signed in");
+
+        // Exit 2, exit 137, and real SIGKILL (128+9=137) all report unknown with the code.
+        for (script, expected_code) in [("exit 2", "2"), ("exit 137", "137"), ("kill -9 $$", "137")]
+        {
+            let status =
+                run_login_status_command(sh(script), "codex", &clear, LOGIN_STATUS_TIMEOUT)
+                    .unwrap();
+            assert!(
+                matches!(&status, LoginStatus::Unknown(reason) if reason.contains(expected_code)),
+                "{script}: {status:?}"
+            );
+            assert_eq!(status.exit_code(), LOGIN_UNKNOWN_CODE);
+            assert_ne!(status.exit_code(), 0);
+            assert_ne!(status.exit_code(), 1);
+        }
+
+        // Sleeping past a short timeout cap reports unknown with 124 (never "not signed in").
+        let timed_out =
+            run_login_status_command(sh("sleep 5"), "codex", &clear, Duration::from_millis(100))
+                .unwrap();
+        assert!(
+            matches!(&timed_out, LoginStatus::Unknown(reason) if reason.contains("timed out") && reason.contains("124")),
+            "{timed_out:?}"
+        );
+        assert_eq!(timed_out.exit_code(), LOGIN_UNKNOWN_CODE);
+
+        // Explicit 124 / 130 exit codes and pre-set interrupted flag all report unknown with code.
+        let code_124 =
+            run_login_status_command(sh("exit 124"), "codex", &clear, LOGIN_STATUS_TIMEOUT)
+                .unwrap();
+        assert!(
+            matches!(&code_124, LoginStatus::Unknown(reason) if reason.contains("timed out") && reason.contains("124")),
+            "{code_124:?}"
+        );
+        assert_eq!(code_124.exit_code(), LOGIN_UNKNOWN_CODE);
+
+        let code_130 =
+            run_login_status_command(sh("exit 130"), "claude", &clear, LOGIN_STATUS_TIMEOUT)
+                .unwrap();
+        assert!(
+            matches!(&code_130, LoginStatus::Unknown(reason) if reason.contains("interrupted") && reason.contains("130")),
+            "{code_130:?}"
+        );
+        assert_eq!(code_130.exit_code(), LOGIN_UNKNOWN_CODE);
+
+        let pre_interrupted =
+            run_login_status_command(sh("exit 0"), "claude", &interrupted, LOGIN_STATUS_TIMEOUT)
+                .unwrap();
+        assert!(
+            matches!(&pre_interrupted, LoginStatus::Unknown(reason) if reason.contains("interrupted") && reason.contains("130")),
+            "{pre_interrupted:?}"
+        );
+        assert_eq!(pre_interrupted.exit_code(), LOGIN_UNKNOWN_CODE);
+
+        // Menu always shows exactly three rows (codex, claude, antigravity).
+        let mut probed: Vec<String> = Vec::new();
+        let items = build_login_menu_with(
+            |_| true,
+            |provider| {
+                probed.push(provider.to_owned());
+                match provider {
+                    "codex" => Ok(LoginStatus::SignedIn),
+                    "claude" => Ok(LoginStatus::NotSignedIn),
+                    _ => panic!("unexpected status probe for {provider}"),
+                }
+            },
+        );
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].provider, "codex");
+        assert_eq!(items[0].status, "signed in");
+        assert_eq!(items[1].provider, "claude");
+        assert_eq!(items[1].status, "not signed in");
+        assert_eq!(items[2].provider, "antigravity");
+        assert_eq!(items[2].status, "sign-in not verifiable");
+        assert_eq!(probed, vec!["codex", "claude"]);
+
+        // A probe error on one row (e.g. spawn failure or output budget) marks that row unknown
+        // without aborting the menu, and the remaining rows still render.
+        let fx = Fixture::new("login-menu");
+        let items = build_login_menu_with(
+            |_| true,
+            |provider| match provider {
+                "codex" => run_login_status_command(
+                    Command::new(&fx.0),
+                    "codex",
+                    &clear,
+                    LOGIN_STATUS_TIMEOUT,
+                ),
+                "claude" => Err(error("child output exceeded its byte budget")),
+                _ => panic!("unexpected status probe for {provider}"),
+            },
+        );
+        assert_eq!(items.len(), 3);
+        assert!(items[0].status.starts_with("unknown: "), "{:?}", items[0]);
+        assert_eq!(
+            items[1].status,
+            "unknown: child output exceeded its byte budget"
+        );
+        assert_eq!(items[2].status, "sign-in not verifiable");
+        let rendered = format_login_menu(&items);
+        assert!(rendered.contains("1. codex"), "{rendered}");
+        assert!(rendered.contains("2. claude"), "{rendered}");
+        assert!(rendered.contains("3. antigravity"), "{rendered}");
+
+        let missing = build_login_menu_with(|_| false, |_| panic!("must not probe missing binary"));
+        assert_eq!(missing.len(), 3);
+        assert_eq!(missing[0].status, "codex not installed");
+        assert_eq!(missing[1].status, "claude not installed");
+        assert_eq!(missing[2].status, "agy not installed");
+
+        // --login-menu requires both stdin and stdout to be terminals.
+        let ctx = Context {
+            cwd: &fx.0,
+            source: &fx.0,
+            interrupted: &clear,
+        };
+        for (stdin_tty, stdout_tty) in [(true, false), (false, true), (false, false)] {
+            refused(
+                login_menu_with_terminals(&ctx, stdin_tty, stdout_tty),
+                "interactive terminal",
+            );
+        }
     }
 }

@@ -17,7 +17,7 @@
 |---|---|---|
 | 알려진 이름·경로·문자열에서 탐색 시작 | 사용 가능한 기반 | `find`, `symbol`, `api`, literal/ranked `search`가 구현되어 있다. 원문과 coverage를 함께 확인한다. |
 | 관련 파일·테스트를 제한된 pack으로 전달 | 조건부 | lexical seed와 graph 확장, byte budget은 있다. 맞는 파일을 골라도 필요한 symbol이 출력에서 빠질 수 있다. |
-| Rust의 정확한 caller/trait/impl 탐색 | 보완 필요 | flat-token extraction이며 Rust call ref를 생산하지 않는다. 동명 method ID와 module 경로도 불완전하다. |
+| Rust의 정확한 caller/trait/impl 탐색 | 보완 필요 | 같은 파일의 루트 자유 함수가 다른 루트 함수를 직접 호출해 결과를 전달하는 단순한 경우에만 호출 관계를 `INFERRED`로 표시한다. 동명 method ID와 module 경로도 불완전하다. |
 | Python/shell 관계 분석 | 보완 필요 | Python AST와 shell extractor가 있지만 lexical binding·command 위치에 따른 잘못된 edge 가능성이 남는다. |
 | 한국어 의미 검색 | 미검증·기능 제한 | Unicode는 보존하지만 번역·embedding 검색은 없다. 영어 식별자와 공유하는 단어가 없으면 lexical no-match가 자연스럽다. |
 | 대규모·여러 worktree의 상시 검색 | 성능 판정 보류 | 증분 extraction은 있으나 전체 resolve/projection 및 query별 전처리 비용은 실측하지 않았다. |

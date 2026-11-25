@@ -328,6 +328,13 @@ impl Server<'_> {
         }
         if let Some(pos) = tool["positional"].as_str() {
             let value = text(args, pos, 4096)?;
+            // Project node IDs contain a kind prefix and may include a Rust
+            // qualifier after the path. Check traversal across those boundaries.
+            if tool["name"] == "oms_project_graph_trace"
+                && (value.len() > 512 || value.split([':', '/']).any(|part| part == ".."))
+            {
+                return Err("error: oms_project_graph_trace requires a node id of at most 512 bytes without traversal".into());
+            }
             let pattern = tool["positional_pattern"].as_str();
             let requirement = pattern.map_or_else(
                 || "a bare digest file name".into(),
