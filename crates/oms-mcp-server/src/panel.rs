@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v21.html";
+const URI: &str = "ui://oms/conversation-panel/v22.html";
+const V21: &str = "ui://oms/conversation-panel/v21.html";
 const V20: &str = "ui://oms/conversation-panel/v20.html";
 const V19: &str = "ui://oms/conversation-panel/v19.html";
 const V18: &str = "ui://oms/conversation-panel/v18.html";
@@ -1080,6 +1081,7 @@ impl Server<'_> {
                             | V18
                             | V19
                             | V20
+                            | V21
                     )
                 ) =>
             {
