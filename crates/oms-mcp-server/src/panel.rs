@@ -208,7 +208,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let scope = json!({"project":project});
     let mut opener = make(
         OPEN,
-        "Open OMS beside this conversation.",
+        "Open the OMS panel (expands beside or over the conversation when the host allows it).",
         scope.clone(),
         &[],
         false,
