@@ -440,6 +440,7 @@ mod tests {
         let repo = |label| {
             let repo = dir.join(label);
             fs::create_dir_all(repo.join(".git")).unwrap();
+            fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
             fs::create_dir_all(repo.join(".oms")).unwrap();
             repo
         };

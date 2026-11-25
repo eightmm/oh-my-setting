@@ -1107,6 +1107,73 @@ pub(crate) fn check_python_syntax_with_companion(path: &Path, source: &[u8]) -> 
     .ok()
 }
 
+/// MCP stdio input that SIGINT or SIGTERM wakes while idle. It reads fd 0
+/// directly, so no std buffer hides data from `poll`, and reports EOF once the
+/// shared interrupt flag is set; the server then discards any partial record.
+struct WakeStdin {
+    stdin: std::io::Stdin,
+    wake: std::os::unix::net::UnixStream,
+    interrupted: Arc<AtomicBool>,
+}
+impl WakeStdin {
+    /// Both write ends move into signal actions that stay registered for the
+    /// process lifetime; the read end lives here until the process exits.
+    /// Arm after the flag handlers so a wake implies the flag is already set.
+    fn new(interrupted: Arc<AtomicBool>) -> std::io::Result<Self> {
+        use signal_hook::{consts, low_level::pipe};
+        let (wake, notify) = std::os::unix::net::UnixStream::pair()?;
+        wake.set_nonblocking(true)?;
+        pipe::register(consts::SIGINT, notify.try_clone()?)?;
+        pipe::register(consts::SIGTERM, notify)?;
+        Ok(Self {
+            stdin: std::io::stdin(),
+            wake,
+            interrupted,
+        })
+    }
+}
+impl std::io::Read for WakeStdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use rustix::io::Errno;
+        loop {
+            if self.interrupted.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            let (input, wake) = {
+                let mut fds = [
+                    PollFd::new(&self.stdin, PollFlags::IN),
+                    PollFd::new(&self.wake, PollFlags::IN),
+                ];
+                match poll(&mut fds, None) {
+                    Ok(_) => (fds[0].revents(), fds[1].revents()),
+                    Err(Errno::INTR) => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            if !wake.is_empty() {
+                let mut sink = [0u8; 64];
+                while matches!(rustix::io::read(&self.wake, &mut sink[..]), Ok(n) if n > 0) {}
+                continue;
+            }
+            if input.is_empty() {
+                continue;
+            }
+            // NVAL also reads: a closed fd 0 is EOF as in std, and a device
+            // poll cannot watch falls back to the former blocking read, where a
+            // restarted read(2) still waits for input before seeing a signal.
+            // AGAIN is returned as std's stdin did, so a non-blocking fd that
+            // poll reports ready without data cannot spin here.
+            match rustix::io::read(&self.stdin, &mut *buf) {
+                Ok(n) => return Ok(n),
+                Err(Errno::INTR) => continue,
+                Err(Errno::BADF) => return Ok(0),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
 struct McpExecutor {
     interrupted: Arc<AtomicBool>,
     source: PathBuf,
@@ -1458,7 +1525,13 @@ fn dispatch_owned(
             interrupted: Arc::clone(interrupted),
             source: source.to_path_buf(),
         });
-        let mut reader = std::io::BufReader::new(std::io::stdin().lock());
+        let mut reader = match WakeStdin::new(Arc::clone(interrupted)) {
+            Ok(input) => std::io::BufReader::new(input),
+            Err(err) => {
+                eprintln!("error: cannot arm MCP shutdown wake: {err}");
+                std::process::exit(1);
+            }
+        };
         let mut writer = std::io::stdout();
         match oms_mcp_server::Server::with_executor(source, &cwd, interrupted, config, executor)
             .and_then(|server| server.serve_connection(&mut reader, &mut writer))

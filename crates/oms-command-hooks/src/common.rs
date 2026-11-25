@@ -339,9 +339,7 @@ pub fn root(raw: &Path, cwd: &Path) -> Option<PathBuf> {
         return None;
     }
     for a in p.ancestors() {
-        if let Ok(m) = fs::symlink_metadata(a.join(".git"))
-            && (m.is_dir() || m.is_file())
-        {
+        if oms_safe_fs::has_git_marker(a) {
             return Some(a.into());
         }
     }
