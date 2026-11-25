@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v18.html";
+const URI: &str = "ui://oms/conversation-panel/v19.html";
+const V18: &str = "ui://oms/conversation-panel/v18.html";
 const V17: &str = "ui://oms/conversation-panel/v17.html";
 const V16: &str = "ui://oms/conversation-panel/v16.html";
 const V15: &str = "ui://oms/conversation-panel/v15.html";
@@ -775,8 +776,9 @@ impl Server<'_> {
                             | V13
                             | V14
                             | V15
-                            | V16
+                            | V18
                             | V17
+                            | V16
                     )
                 ) =>
             {
@@ -1143,12 +1145,11 @@ impl Server<'_> {
             } else {
                 "unbound"
             };
-            let mut result =
-                json!({"projects":projects.into_keys().collect::<Vec<_>>(),"binding":binding});
-            if self.config.profile == ToolProfile::McpApp {
-                result["readOnly"] = json!(true);
-            }
-            return Ok(result);
+            return Ok(json!({
+                "projects": projects.into_keys().collect::<Vec<_>>(),
+                "binding": binding,
+                "readOnly": self.config.profile == ToolProfile::McpApp,
+            }));
         }
         if name == OPEN {
             if args.get("project").is_some() {

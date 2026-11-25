@@ -4,6 +4,7 @@ use crate::{
     Context, HostServices, Options, Output, Result, Value, epoch, error, failures, helpers, json,
     json_output, require, spine, storage, success, timestamp,
 };
+use oms_command_room::AttemptRoom;
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -76,27 +77,36 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
     collect_snapshot(ctx, host, None)
 }
 
+fn attempt_room(row: &Value) -> AttemptRoom<'_> {
+    let Some(refs) = row.opt("refs") else {
+        return AttemptRoom::Unspecified;
+    };
+    if refs.object().is_err() {
+        return AttemptRoom::Invalid;
+    }
+    let tag = |key| refs.opt(key).map(|v| v.str().unwrap_or(""));
+    AttemptRoom::from_tags(tag("panel_room_id"), tag("panel_room"))
+}
+
 // Keep Room evidence out of the repository-wide recency window. A worker without
 // a Room field may still have an exact parent attempt within this Room.
 fn panel_room_attempts(rows: &[Value], room: &str) -> (Vec<Value>, usize) {
-    fn room_of(row: &Value) -> &str {
-        row.get("refs").text("panel_room_id")
-    }
     let lead = |row: &Value| {
         row.get("refs").text("panel_role") == "lead"
             || row.text("tool") == "panel-native-assignment"
     };
     let leads: std::collections::BTreeSet<_> = rows
         .iter()
-        .filter(|row| room_of(row) == room && lead(row))
+        .filter(|row| attempt_room(row) == AttemptRoom::Named(room) && lead(row))
         .map(|row| row.text("attempt_id"))
         .filter(|id| !id.is_empty())
         .collect();
     let mut scoped: Vec<_> = rows
         .iter()
-        .filter(|row| {
-            let scope = room_of(row);
-            scope == room || (scope.is_empty() && leads.contains(row.text("parent_attempt_id")))
+        .filter(|row| match attempt_room(row) {
+            AttemptRoom::Named(id) => id == room,
+            AttemptRoom::Unspecified => leads.contains(row.text("parent_attempt_id")),
+            AttemptRoom::Invalid => false,
         })
         .collect();
     scoped.sort_by(|a, b| {
@@ -719,6 +729,15 @@ mod panel_room_tests {
             {"attempt_id":"child","parent_attempt_id":"lead"},
             {"attempt_id":"foreign","parent_attempt_id":"lead","refs":{"panel_room_id":"outside"}},
             {"attempt_id":"other","parent_attempt_id":"foreign"},
+            {"attempt_id":"legacy","refs":{"panel_room":"work","panel_role":"lead"}},
+            {"attempt_id":"legacy-child","parent_attempt_id":"legacy","refs":{}},
+            {"attempt_id":"both","refs":{"panel_room_id":"work","panel_room":"work"}},
+            {"attempt_id":"legacy-foreign","parent_attempt_id":"lead","refs":{"panel_room":"outside"}},
+            {"attempt_id":"conflict","parent_attempt_id":"lead","refs":{"panel_room_id":"work","panel_room":"outside"}},
+            {"attempt_id":"bad","parent_attempt_id":"lead","refs":{"panel_room":null}},
+            {"attempt_id":"invalid","parent_attempt_id":"lead","refs":{"panel_room_id":"../work"}},
+            {"attempt_id":"bad-container","parent_attempt_id":"lead","refs":false},
+            {"attempt_id":"empty","parent_attempt_id":"lead","refs":{"panel_room":""}},
             {"attempt_id":"lead","refs":{"panel_room_id":"work","panel_role":"lead"}},
             {"attempt_id":"main","tool":"panel-main","refs":{"panel_room_id":"work"}}
         ]"#,
@@ -726,7 +745,10 @@ mod panel_room_tests {
         .unwrap();
         let (rows, omitted) = panel_room_attempts(events.array().unwrap(), "work");
         let ids: Vec<_> = rows.iter().map(|row| row.text("attempt_id")).collect();
-        assert_eq!(ids, ["lead", "main", "child"]);
+        assert_eq!(
+            ids,
+            ["legacy", "lead", "main", "child", "legacy-child", "both"]
+        );
         assert_eq!(omitted, 0);
     }
 }

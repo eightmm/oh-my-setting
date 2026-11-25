@@ -72,36 +72,39 @@ test('labels are cleaned and unknown is never shown as zero', async () => {
   expect(shown(0)).toBe('0')
   // A line is bounded as a whole, however many labels it joins
   const wide = { ...DASHBOARD, scope: { allowed: Array(500).fill('a'.repeat(80)), forbidden: [], source: 'task' } }
-  const scope = texts(bodyLines(wide, 'overview')).find((text) => text.startsWith('scope:'))
+  const scope = texts(bodyLines(wide, 'work')).find((text) => text.startsWith('scope:'))
   expect(Array.from(scope ?? '').length).toBe(2000)
 
-  const recent = texts(bodyLines(DASHBOARD, 'agents')).find((text) => text.includes('att_one'))
+  const recent = texts(bodyLines(DASHBOARD, 'activity')).find((text) => text.includes('att_one'))
   expect(recent).toMatch(/tok unknown cost_microusd unknown/)
 })
 
 test('each tab draws the recorded state and marks what it cannot know', async () => {
-  const overview = texts(bodyLines(DASHBOARD, 'overview'))
-  expect(overview).toContain('goal: operator fixture (plan)')
-  expect(overview).toContain('scope: unbounded (none recorded)')
-  expect(overview).toContain('task: none active')
-  expect(overview).toContain('plan: 2 task(s)  ready=1 review=1  actionable=ready_task')
-  expect(overview).toContain('attempts (OMS lifecycle): 2 total, 1 active  running=1 cancelled=1')
-  expect(overview).toContain('acceptance: 1/2 verified  verified=1 missing=1')
-  expect(overview).toContain('next decision: initialize_project (repo_write)')
-  // An unknown tab falls back to the overview
-  expect(texts(bodyLines(DASHBOARD, 'nope'))).toEqual(overview)
+  const now = texts(bodyLines(DASHBOARD, 'now'))
+  expect(now).toEqual(['Goal: operator fixture', 'Verification: 1/2 criteria verified', 'Project task: none active', 'Open attempts: 1'])
+  expect(texts(bodyLines(DASHBOARD, 'nope'))).toEqual(now)
+  expect(texts(bodyLines({ ...DASHBOARD, goal: null }, 'now'))).toContain('Goal: none recorded')
+  expect(texts(bodyLines({ ...DASHBOARD, task: { healthy: true, present: true, stale: true, task_id: 'older', status: 'open' } }, 'now'))).toContain('Previous task: older · open')
 
-  const agents = bodyLines(DASHBOARD, 'agents')
-  expect(texts(agents)).toContain('  att_two running claude/panel task=task_two role=lead model=model-test at=worktree:lead-one 2026-08-01T00:00:09Z')
-  expect(agents.find((item) => item.text.includes('del_dead'))).toMatchObject({ tone: 'error' })
-  expect(texts(agents)).toContain('  claude review model=unknown served=unreported exit=1 unresolved')
+  const work = bodyLines(DASHBOARD, 'work')
+  const blocked = { ...DASHBOARD, attempts: { ...DASHBOARD.attempts, by_state: { blocked: 1, cancelled: 1 }, active_recent: [{ ...DASHBOARD.attempts.active_recent[0], state: 'blocked' }] } }
+  expect(texts(bodyLines(blocked, 'now'))).toContain('Open attempts: 1')
+  const openWork = texts(bodyLines(blocked, 'work'))
+  expect(openWork[openWork.indexOf('Recent open attempts:') + 1]).toContain('att_two blocked')
+  expect(texts(work)).toContain('scope: unbounded (none recorded)')
+  expect(texts(work)).toContain('plan: 2 task(s)  ready=1 review=1  actionable=ready_task')
+  expect(texts(work)).toContain('attempts (OMS lifecycle): 2 total, 1 open  running=1 cancelled=1')
+  expect(texts(work)).toContain('  att_two running claude/panel task=task_two role=lead model=model-test at=worktree:lead-one 2026-08-01T00:00:09Z')
+  expect(work.find((item) => item.text.includes('del_dead'))).toMatchObject({ tone: 'error' })
 
-  const evidence = bodyLines(DASHBOARD, 'evidence')
+  const evidence = bodyLines(DASHBOARD, 'results')
   expect(evidence.find((item) => item.text.includes('review_task'))).toMatchObject({ tone: 'warn' })
   expect(evidence.find((item) => item.text.includes('ready_task'))).toMatchObject({ tone: 'ok' })
   expect(texts(evidence)).toContain('review gate: none recorded in window (not a pass)  seat answers=1')
 
-  const attention = texts(bodyLines(DASHBOARD, 'attention'))
+  const attention = texts(bodyLines(DASHBOARD, 'activity'))
+  expect(attention).toContain('next decision: initialize_project (repo_write)')
+  expect(attention).toContain('  claude review model=unknown served=unreported exit=1 unresolved')
   expect(attention).toContain('  P1 unresolved-artifacts: 1 unresolved artifact outcome(s)')
   expect(attention).toContain('     next: oms artifact-index --repo . unresolved')
 
@@ -109,16 +112,14 @@ test('each tab draws the recorded state and marks what it cannot know', async ()
   const header = texts(headerLines({ status: 'ready', report: DEGRADED }))
   expect(header).toContain('COLLECTION FAILED state: degraded')
   expect(header).toContain('COLLECTION FAILED attempts: invalid lifecycle contract')
-  const degraded = texts(bodyLines(DEGRADED, 'overview'))
-  expect(degraded).toContain('goal: none recorded')
-  expect(degraded).toContain('scope: unavailable (runtime projection)')
-  expect(degraded).toContain('task: UNAVAILABLE or invalid')
-  expect(degraded).toContain('plan: UNAVAILABLE or invalid')
-  expect(degraded).toContain('attempts: UNAVAILABLE (lifecycle stream invalid)')
-  expect(degraded).toContain('acceptance: UNAVAILABLE')
-  expect(degraded).toContain('attention: UNAVAILABLE')
-  expect(texts(bodyLines(DEGRADED, 'agents'))).toContain('delegations: UNAVAILABLE')
-  expect(texts(bodyLines(DEGRADED, 'evidence'))).toContain('review gate: UNAVAILABLE')
+  expect(texts(bodyLines(DEGRADED, 'now'))).toEqual(['Goal: unavailable', 'Verification: unavailable', 'Project task: unavailable', 'Open attempts: unavailable'])
+  const workUnavailable = texts(bodyLines(DEGRADED, 'work'))
+  expect(workUnavailable).toContain('scope: unavailable (runtime projection)')
+  expect(workUnavailable).toContain('plan: UNAVAILABLE or invalid')
+  expect(workUnavailable).toContain('attempts: UNAVAILABLE (lifecycle stream invalid)')
+  expect(workUnavailable).toContain('delegations: UNAVAILABLE')
+  expect(texts(bodyLines(DEGRADED, 'activity'))).toContain('attention: UNAVAILABLE')
+  expect(texts(bodyLines(DEGRADED, 'results'))).toContain('review gate: UNAVAILABLE')
 })
 
 test('session start registers /oms-panel so it can open while Claude works', async ($, on) => {
@@ -141,7 +142,7 @@ test('/oms-panel opens the pane and runs only the read-only dashboard query', as
   expect(answer).toEqual({})
   expect(runs.length).toBe(0)
   expect(opened.length).toBe(1)
-  expect(opened[0]).toMatchObject({ id: 'oms-panel', title: 'OMS', closeOnEscape: true })
+  expect(opened[0]).toMatchObject({ id: 'oms-panel', title: 'OMS', focus: true, closeOnEscape: true })
 
   await clock.settle()
   expect(runs.length).toBe(1)
@@ -151,19 +152,22 @@ test('/oms-panel opens the pane and runs only the read-only dashboard query', as
   // The same tree is valid in the terminal and in the Desktop app
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: 'repo=demo  main@b6c3a2aa8c39  snapshot=2026-10-04T00:51:30Z' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'goal: operator fixture (plan)' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'demo · main' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Goal: operator fixture' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^read-only · auto 15s$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /private stderr/ })).toBeUndefined()
 
-    await ui.press({ key: 'tab-agents' })
+    for (const [i, label] of ['Now', 'Work', 'Results', 'Activity'].entries()) {
+      expect(await ui.find({ type: 'Button', label, hotkey: String(i + 1) })).toBeDefined()
+    }
+    await ui.press({ key: 'tab-work' })
     expect(await ui.find({ type: 'Text', text: /^delegation: del_dead .*ORPHAN \(dead pid\)$/ })).toBeDefined()
-    await ui.press({ key: 'tab-evidence' })
+    await ui.press({ key: 'tab-results' })
     expect(await ui.find({ type: 'Text', text: 'worker completion is not acceptance' })).toBeDefined()
-    await ui.press({ key: 'tab-attention' })
+    await ui.press({ key: 'tab-activity' })
     expect(await ui.find({ type: 'Text', text: '     next: oms artifact-index --repo . unresolved' })).toBeDefined()
-    await ui.press({ key: 'tab-overview' })
-    expect(await ui.find({ type: 'Text', text: 'task: none active' })).toBeDefined()
+    await ui.press({ key: 'tab-now' })
+    expect(await ui.find({ type: 'Text', text: 'Project task: none active' })).toBeDefined()
     await ui.unmount()
   }
 
@@ -186,7 +190,7 @@ test('a degraded snapshot names the failed sources', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'COLLECTION FAILED state: degraded' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'DEGRADED: unavailable sections are not known, not empty' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'plan: UNAVAILABLE or invalid' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Verification: unavailable' })).toBeDefined()
 })
 
 test('a missing oms command or an unknown contract is reported, not guessed', async ($, on) => {
@@ -199,11 +203,11 @@ test('a missing oms command or an unknown contract is reported, not guessed', as
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^OMS UNAVAILABLE: the oms command could not be started or timed out/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /private path/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^goal:/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Goal:/ })).toBeUndefined()
 
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /^OMS UNAVAILABLE: unsupported contract \(schema 2, kind oms-dashboard\)/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^goal:/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Goal:/ })).toBeUndefined()
 })
 
 test('the pane reads again while it is drawn and stops once nobody draws it', async ($, on) => {
@@ -238,7 +242,7 @@ test('a pane drawn before any read says so and reads on r', async ($, on) => {
   expect(runs.length).toBe(0)
   await ui.press({ key: 'refresh' })
   expect(runs.length).toBe(1)
-  expect(await ui.find({ type: 'Text', text: 'goal: operator fixture (plan)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Goal: operator fixture' })).toBeDefined()
 })
 
 test("another mod's pane is left alone", async ($, on) => {

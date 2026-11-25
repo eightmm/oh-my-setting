@@ -120,7 +120,7 @@ impl Client {
         child: bool,
         depth: &std::ffi::OsStr,
     ) -> Self {
-        let mut p = Command::new(std::env::current_exe().unwrap())
+        let p = Command::new(std::env::current_exe().unwrap())
             .env_remove("PYTHONUTF8")
             .env_remove("PYTHONIOENCODING")
             .arg("--stdio")
@@ -140,6 +140,9 @@ impl Client {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        Self::from_child(p)
+    }
+    fn from_child(mut p: Child) -> Self {
         Self {
             input: p.stdin.take().unwrap(),
             output: BufReader::new(p.stdout.take().unwrap()),
@@ -322,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v18.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v19.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -607,12 +610,85 @@ fn cross_host_project_reads() {
         "Project graph available in structuredContent."
     );
 }
+// Execute only the packaged remote shell command in a synthetic host. Its local
+// oms shim opens this fixture's real MCP server with the requested profile.
+fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let shim = bin.join("oms");
+    std::fs::write(&shim, b"#!/bin/sh\n[ \"$#:$1\" = 1:mcp-server ] || exit 2\nexec \"$FIXTURE_NATIVE\" --stdio \"$FIXTURE_SOURCE\" \"$PWD\" \"$OMS_MCP_TOOL_PROFILE\" 1\n").unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let xdg = home.join("remote config");
+    let map = xdg.join("oh-my-setting/desktop-projects.json");
+    std::fs::create_dir_all(map.parent().unwrap()).unwrap();
+    std::fs::write(&map, json!({"remote":repo}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let codex = include_str!("../../../plugins/oms-ssh/oms/mcp.json");
+    let generic = include_str!("../../../plugins/oms-app/mcp_config.json");
+    let open = |manifest: &str, overrides: &[(&str, &str)]| {
+        let pkg: Value = serde_json::from_str(manifest).unwrap();
+        let argv = pkg["mcpServers"]["oms-panel"]["args"].as_array().unwrap();
+        let child = Command::new("/bin/sh")
+            .args(["-c", argv.last().unwrap().as_str().unwrap()])
+            .current_dir(repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", &xdg)
+            .env("FIXTURE_NATIVE", std::env::current_exe().unwrap())
+            .env("FIXTURE_SOURCE", source)
+            .envs(overrides.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        Client::from_child(child)
+    };
+    let projects = |c: &mut Client| c.tool("oms_list_projects", json!({}));
+    let mut desktop = open(codex, &[]);
+    let mut readonly = open(generic, &[]);
+    for (client, read_only) in [(&mut desktop, false), (&mut readonly, true)] {
+        assert_eq!(
+            payload(&projects(client)),
+            json!({"projects":["remote"],"binding":"catalog","readOnly":read_only})
+        );
+        good(&client.tool("oms_open_panel", json!({"project":"remote"})));
+    }
+    // A stale selection cannot silently retarget the current checkout.
+    std::fs::write(&map, json!({"renamed":repo}).to_string()).unwrap();
+    for client in [&mut desktop, &mut readonly] {
+        bad(
+            &client.tool("oms_open_panel", json!({"project":"remote"})),
+            "OMS_PANEL_REPO",
+        );
+    }
+    std::fs::remove_file(&map).unwrap();
+    bad(&projects(&mut desktop), "Invalid OMS project map");
+    assert_eq!(
+        payload(&projects(&mut readonly)),
+        json!({"projects":[],"binding":"unbound","readOnly":true})
+    );
+    let mut pinned = open(generic, &[("OMS_PANEL_REPO", repo.to_str().unwrap())]);
+    assert_eq!(
+        payload(&projects(&mut pinned)),
+        json!({"projects":[],"binding":"pinned","readOnly":true})
+    );
+    let inline = json!({"operator":repo}).to_string();
+    let mut catalog = open(generic, &[("OMS_PANEL_PROJECTS", &inline)]);
+    assert_eq!(
+        payload(&projects(&mut catalog)),
+        json!({"projects":["operator"],"binding":"catalog","readOnly":true})
+    );
+}
+
 fn mcp_app_binding_boundaries() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = Temp::new();
     let source = tmp.source();
     let repo = tmp.repo();
     std::fs::create_dir(repo.join(".oms")).unwrap();
+    packaged_remote_catalog(&source, &repo, &tmp.0.join("remote-home"));
     let other = source.join("other-checkout");
     std::fs::create_dir_all(other.join(".oms")).unwrap();
     let dir = source.join("test-config/oh-my-setting");
@@ -1406,7 +1482,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v18.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v19.html");
     assert_eq!(tools[0]["_meta"]["openai/outputTemplate"], *uri);
     assert_eq!(
         c.call("resources/templates/list", json!({}))["result"]["resourceTemplates"],
@@ -1428,7 +1504,7 @@ fn conversation_panel() {
             .map(str::trim_start)
             .eq(template.lines().map(str::trim_start))
     );
-    for marker in ["team-main-chat", "lead-children", "nativeMainUri"] {
+    for marker in [r#"id="header-main""#, "lead-children", "nativeMainUri"] {
         assert!(html.contains(marker));
     }
     assert!(html.contains("ui/request-display-mode"));
@@ -1452,6 +1528,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v15.html"),
         json!("ui://oms/conversation-panel/v16.html"),
         json!("ui://oms/conversation-panel/v17.html"),
+        json!("ui://oms/conversation-panel/v18.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -1472,8 +1549,16 @@ fn conversation_panel() {
         c.call("tasks/cancel", json!({"_meta":modern(),"taskId":"absent"}))["error"].is_object()
     );
     bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({}))),
+        json!({"projects":[],"binding":"unbound","readOnly":false})
+    );
     assert!(!source.join("last-call.json").exists());
     std::fs::create_dir(repo.join(".oms")).unwrap();
+    assert_eq!(
+        payload(&c.tool("oms_list_projects", json!({}))),
+        json!({"projects":[],"binding":"cwd","readOnly":false})
+    );
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","currentRoom":null,"project":"demo","goal":"Finish inspection","active":null,"activeAttempts":[],"attention":[{"summary":"Review pending","count":2}]}});
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     let result = c.tool("oms_panel_snapshot", json!({}));

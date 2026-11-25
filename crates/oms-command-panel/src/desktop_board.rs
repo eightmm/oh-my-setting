@@ -9,13 +9,14 @@
 use crate::cli::Options;
 use crate::commands::{self, Session};
 use crate::{Error, Output, Result, Services, rows, text};
+use oms_command_peer::native_model;
 use oms_panel_core::{
     NativeCommand, Store, Value, health, jobs, metrics, results, state, teams, workspaces,
 };
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -870,6 +871,37 @@ fn project_catalog(
         if catalog.is_empty() && provider["catalog_probe"] != "ok" {
             incomplete = true;
         }
+        let provider_name = provider["provider"].as_str().unwrap_or_default();
+        let is_antigravity = provider_name == "antigravity";
+        let mut selector_to_base = BTreeMap::<&str, &str>::new();
+        let mut base_selectors = BTreeMap::<&str, Vec<&str>>::new();
+        if is_antigravity
+            && let Some(selectors) = provider.get("selectors").and_then(Value::as_object)
+        {
+            for (base, effort_map) in selectors {
+                if base.is_empty() {
+                    continue;
+                }
+                let Some(map) = effort_map.as_object() else {
+                    continue;
+                };
+                for selector_val in map.values() {
+                    let Some(selector) = selector_val.as_str().filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        selector_to_base.entry(selector)
+                    {
+                        slot.insert(base.as_str());
+                        base_selectors
+                            .entry(base.as_str())
+                            .or_default()
+                            .push(selector);
+                    }
+                }
+            }
+        }
+        let mut emitted_bases = BTreeSet::<&str>::new();
         for model in catalog {
             if entries.len() > MAX_INPUT_ROWS {
                 break 'providers;
@@ -878,22 +910,51 @@ fn project_catalog(
                 incomplete = true;
                 continue;
             };
+            let (display_model, efforts, is_routable) = if is_antigravity {
+                if let Some(&base) = selector_to_base.get(name) {
+                    if !emitted_bases.insert(base) {
+                        continue;
+                    }
+                    let routable = provider["routable"].as_array().map(|values| {
+                        base_selectors.get(base).is_some_and(|sels| {
+                            sels.iter()
+                                .any(|sel| values.iter().any(|v| v.as_str() == Some(*sel)))
+                        })
+                    });
+                    (
+                        base,
+                        effort_label(&provider["model_effort_scales"][base]),
+                        routable,
+                    )
+                } else {
+                    let routable = provider["routable"]
+                        .as_array()
+                        .map(|values| values.contains(model));
+                    let efforts = if native_model::fixed_effort_model(provider_name, name).is_some()
+                    {
+                        json!("fixed")
+                    } else {
+                        Value::Null
+                    };
+                    (name, efforts, routable)
+                }
+            } else {
+                let routable = provider["routable"]
+                    .as_array()
+                    .map(|values| values.contains(model));
+                let efforts = if native_model::fixed_effort_model(provider_name, name).is_some() {
+                    json!("fixed")
+                } else {
+                    effort_label(&provider["model_effort_scales"][name])
+                };
+                (name, efforts, routable)
+            };
             entries.push(row_map(vec![
                 ("provider", opt_nonempty_str(&provider, "provider", 48)),
-                ("model", opt_text_value(Some(name), 128)),
-                (
-                    "efforts",
-                    effort_label(&provider["model_effort_scales"][name]),
-                ),
+                ("model", opt_text_value(Some(display_model), 128)),
+                ("efforts", efforts),
                 ("providerEfforts", effort_label(&provider["effort_values"])),
-                (
-                    "routable",
-                    json!(
-                        provider["routable"]
-                            .as_array()
-                            .map(|values| values.contains(model))
-                    ),
-                ),
+                ("routable", json!(is_routable)),
                 ("source", json!("oms models · cache")),
                 ("probe", opt_nonempty_str(&provider, "catalog_probe", 32)),
                 ("age", opt_u64(&provider, "catalog_age_seconds")),
@@ -2540,5 +2601,175 @@ mod tests {
         assert_eq!(shown + bounded["omitted"].as_u64().unwrap() as usize, 90);
         let encoded = bounded.to_string();
         assert!(encoded.len() + json!(encoded).to_string().len() + 1024 < 60_000);
+    }
+
+    #[test]
+    fn modelcatalog_groups_antigravity_by_selectors_without_name_parsing() {
+        struct CatalogFixture {
+            payload: Value,
+        }
+        impl PeerExecutor for CatalogFixture {
+            fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                Err(Error::new("no external commands"))
+            }
+        }
+        impl Services for CatalogFixture {
+            fn command(
+                &self,
+                cmd: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                match cmd {
+                    NativeCommand::ProviderCatalog => Ok(CommandOutput {
+                        code: 0,
+                        stdout: serde_json::to_vec(&self.payload).unwrap(),
+                        stderr: vec![],
+                        output_complete: true,
+                        cleanup_complete: true,
+                        limited: false,
+                    }),
+                    _ => Err(Error::new("unused")),
+                }
+            }
+        }
+
+        let payload = json!({
+            "providers": [
+                {
+                    "provider": "antigravity",
+                    "catalog_models": [
+                        "gemini-4-carbon-high",
+                        "gemini-4-carbon-low",
+                        "gemini-4-carbon-medium",
+                        "gemini-4-neon-xhigh",
+                        "gemini-4-neon-high",
+                        "gemini-4-unmapped-high",
+                        "gemini-pro-orchestrator",
+                        "gemini-pro-orchestrator-argon",
+                        "claude-opus-5-5-high"
+                    ],
+                    "routable": [
+                        "gemini-4-carbon-high",
+                        "gemini-4-neon-xhigh",
+                        "gemini-pro-orchestrator",
+                        "gemini-pro-orchestrator-argon"
+                    ],
+                    "effort_values": ["low", "medium", "high", "xhigh", "max"],
+                    "model_effort_scales": {
+                        "gemini-4-carbon": ["low", "medium", "high"],
+                        "gemini-4-neon": ["high", "xhigh"],
+                        "claude-opus-5-5": ["high"],
+                        "gemini-4-unmapped-high": ["high"]
+                    },
+                    "selectors": {
+                        "gemini-4-carbon": {
+                            "low": "gemini-4-carbon-low",
+                            "medium": "gemini-4-carbon-medium",
+                            "high": "gemini-4-carbon-high"
+                        },
+                        "gemini-4-neon": {
+                            "high": "gemini-4-neon-high",
+                            "xhigh": "gemini-4-neon-xhigh"
+                        },
+                        "claude-opus-5-5": {
+                            "high": "claude-opus-5-5-high"
+                        }
+                    },
+                    "catalog_probe": "ok",
+                    "catalog_age_seconds": 12
+                },
+                {
+                    "provider": "codex",
+                    "catalog_models": ["gpt-6.2-sol", "gpt-5.0-sol"],
+                    "routable": ["gpt-6.2-sol"],
+                    "effort_values": ["low", "medium", "high", "xhigh"],
+                    "model_effort_scales": {
+                        "gpt-6.2-sol": ["medium", "high", "xhigh"]
+                    },
+                    "selectors": {},
+                    "catalog_probe": "ok",
+                    "catalog_age_seconds": 5
+                }
+            ]
+        });
+
+        let tmp = TempDir::new("desktop-modelcatalog");
+        let fixture = CatalogFixture { payload };
+        let response = project_catalog(&tmp.0, 1, &fixture, &AtomicBool::new(false)).unwrap();
+        let (_, bytes, _) = finalize_response(response).unwrap();
+        let projected: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(projected["view"], "modelcatalog");
+        assert_eq!(projected["status"], "ready");
+        let rows = projected["rows"].as_array().unwrap();
+
+        let models: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r["provider"].as_str().unwrap(),
+                    r["model"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                ("antigravity", "gemini-4-carbon"),
+                ("antigravity", "gemini-4-neon"),
+                ("antigravity", "gemini-4-unmapped-high"),
+                ("antigravity", "gemini-pro-orchestrator"),
+                ("antigravity", "gemini-pro-orchestrator-argon"),
+                ("antigravity", "claude-opus-5-5"),
+                ("codex", "gpt-6.2-sol"),
+                ("codex", "gpt-5.0-sol"),
+            ]
+        );
+
+        let by_model = |provider: &str, model: &str| {
+            rows.iter()
+                .find(|r| r["provider"] == provider && r["model"] == model)
+                .unwrap()
+        };
+
+        let carbon = by_model("antigravity", "gemini-4-carbon");
+        assert_eq!(carbon["efforts"], "low, medium, high");
+        assert_eq!(carbon["providerEfforts"], "low, medium, high, xhigh, max");
+        assert_eq!(carbon["routable"], true);
+        assert_eq!(carbon["source"], "oms models · cache");
+        assert_eq!(carbon["probe"], "ok");
+        assert_eq!(carbon["age"], 12);
+
+        // Routable is true when any selector for the base is routable.
+        let neon = by_model("antigravity", "gemini-4-neon");
+        assert_eq!(neon["efforts"], "high, xhigh");
+        assert_eq!(neon["routable"], true);
+
+        // Selector absent from `selectors` stays its own row with no efforts (no name parsing).
+        let unmapped = by_model("antigravity", "gemini-4-unmapped-high");
+        assert!(unmapped["efforts"].is_null());
+        assert_eq!(unmapped["routable"], false);
+
+        // Fixed-effort models stay one row each and show `fixed` rather than unknown (`null`).
+        let orch = by_model("antigravity", "gemini-pro-orchestrator");
+        assert_eq!(orch["efforts"], "fixed");
+        assert_eq!(orch["routable"], true);
+        let argon = by_model("antigravity", "gemini-pro-orchestrator-argon");
+        assert_eq!(argon["efforts"], "fixed");
+        assert_eq!(argon["routable"], true);
+
+        // Grouped base model with no routable selectors has routable = false.
+        let opus = by_model("antigravity", "claude-opus-5-5");
+        assert_eq!(opus["efforts"], "high");
+        assert_eq!(opus["routable"], false);
+
+        // Other providers remain unchanged.
+        let codex_sol = by_model("codex", "gpt-6.2-sol");
+        assert_eq!(codex_sol["efforts"], "medium, high, xhigh");
+        assert_eq!(codex_sol["routable"], true);
+        let codex_old = by_model("codex", "gpt-5.0-sol");
+        assert!(codex_old["efforts"].is_null());
+        assert_eq!(codex_old["routable"], false);
     }
 }

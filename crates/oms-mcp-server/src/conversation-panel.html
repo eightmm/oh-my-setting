@@ -31,9 +31,8 @@ header:has(#scope:not([hidden])) #project{display:none}
 .brand i:last-child{background:var(--brand)}
 .wordmark h1{flex-shrink:0}
 #project{font-size:1.08rem;letter-spacing:-.03em;font-weight:750}
-#project,.alerts-preview,.map-node strong,.map-node small,.map-dep-chip strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#project,.map-node strong,.map-node small,.map-dep-chip strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #scope{margin:0;flex:0 1 auto;min-width:0}
-#scope label{color:var(--muted);font-size:.78rem}
 select{max-width:100%;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);min-height:2rem;border-radius:.4rem;padding:.15rem .45rem}
 #project-choice{width:min(11rem,42vw);min-height:2rem;font-size:.8rem}
 #language-choice{flex:0 0 auto;max-width:5.4rem;min-height:2rem;font-size:.78rem}
@@ -53,7 +52,6 @@ details>summary{cursor:pointer;font-weight:600;min-height:2.25rem;display:flex;a
 details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:'▸';color:var(--muted);font-size:.8em;flex-shrink:0;transition:transform .12s}
 details[open]>summary::before{transform:rotate(90deg)}
-.alerts-preview{font-weight:400;font-size:.78rem;min-width:0;flex:1 1 8rem}
 .state-chip,.count-badge{--c:var(--muted);--cbg:var(--tint);display:inline-flex;align-items:center;gap:.26rem;white-space:nowrap;font-size:.74rem;font-weight:650;line-height:1.25;padding:.12rem .42rem;border-radius:.35rem;color:var(--c);background:var(--cbg);border:1px solid color-mix(in srgb,var(--c) 34%,transparent);flex-shrink:0}
 .count-badge{font-variant-numeric:tabular-nums;border-color:var(--line)}
 .state-glyph{font-family:var(--mono);font-size:.82em}
@@ -129,7 +127,6 @@ a{color:var(--brand);text-underline-offset:.18em}
 #approval-card h2,.section-label,#goal-card h2,.leads-region h2,.work-threads h2{font-size:.76rem;font-weight:650;color:var(--muted)}
 .approval{padding:.25rem 0 0}
 .approval[open]>div{padding:.35rem .1rem}
-.approval code{font-size:.74rem;display:block;color:var(--muted);margin:.35rem 0;font-family:var(--mono)}
 .approval .cluster{margin-top:.5rem}
 #approval-card:not(.awaiting-action){padding:.4rem 0}
 #approval-card:not(.awaiting-action) #approvals{color:var(--muted);font-size:.78rem}
@@ -150,14 +147,14 @@ progress::-moz-progress-bar{background:var(--brand)}
 .identity dd{font-weight:500}
 #observation-revision,.explorer-bar .current{font-family:var(--mono)}
 .identity dt:not(:first-child){margin-left:.4rem}
-#main-state,.arrow,.connection-fields dt,.work-threads button>span:last-child,#overview-backlog span[aria-hidden]{color:var(--muted)}
+#main-state,.arrow,.connection-fields dt,.work-threads button>span:last-child{color:var(--muted)}
 #current-main{font-size:.8rem;font-weight:750}
 .avatar{display:inline-grid;place-items:center;width:1.3rem;height:1.3rem;flex:0 0 auto;border-radius:.3rem;background:#c6c8cd;color:#202329;font:700 .68rem/1 var(--mono)}
 .avatar-codex{background:#b5d8c4;color:#1c392b}
 .avatar-claude{background:#e8b7a1;color:#48281d}
 .avatar-agy,.avatar-antigravity{background:#c2c2e7;color:#30304c}
 .avatar-pi{background:#b3d1e9;color:#223b4f}
-#launcher{padding:0 .18rem}
+#launcher{margin-top:.5rem;border-top:1px solid var(--main-line)}
 .lead-picks{margin:.55rem 0}
 .lead-picks input{accent-color:var(--brand)}
 #launcher summary,.history summary{font-size:.82rem}
@@ -165,16 +162,13 @@ progress::-moz-progress-bar{background:var(--brand)}
 .project-meta{display:inline-flex;flex-wrap:wrap;gap:.05rem .55rem}
 #now-work,.leads-region{border:0;padding:.45rem .18rem}
 #now-heading,#leads-heading{color:var(--ink);font-size:.9rem}
-#team-main{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:.55rem;padding:.55rem;margin-bottom:.55rem;background:var(--tint);border-radius:var(--r)}
-#team-main button{color:var(--brand);padding:.2rem .4rem}
 .leads{display:grid;margin:.2rem 0 0 .3rem;padding-left:.65rem;border-left:1px solid var(--line)}
 .lead-children{margin:0 0 .35rem 1.75rem;padding-left:.65rem;border-left:1px solid var(--line)}
 .lead-children .task-row{min-height:2rem;padding:.25rem 0}
 .lead-group>summary{display:flex;gap:.35rem;font-size:.76rem;padding:.1rem 0 .3rem 2rem}
 .leads>p{padding-top:.25rem}
-.plan-strip{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding-block:.4rem 0}
-.plan-strip strong{font-variant-numeric:tabular-nums}
-#plan-strip{border-top:1px solid var(--line);margin-top:.5rem;padding:.45rem 0 0}
+#plan-ratio{font-variant-numeric:tabular-nums}
+#plan-strip{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;border-top:1px solid var(--line);margin-top:.5rem;padding:.45rem 0 0}
 #plan-marker{width:.85rem;height:.85rem;border-radius:100%;background:conic-gradient(var(--brand) var(--verified),var(--line) 0);mask-image:radial-gradient(circle,transparent 44%,black 48%)}
 #plan-open{margin-left:auto;border:0;padding:0 .2rem;color:var(--muted);background:transparent;font-size:.78rem}
 .work-threads{padding:.5rem 0 .4rem;border-top:1px solid var(--line)}
@@ -205,8 +199,6 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 .work-title{display:grid;gap:.05rem}
 .work-title small{color:var(--muted);font-size:.72rem}
 .work-title strong{font-size:.88rem;font-weight:650}
-#overview-backlog{display:flex;width:100%;align-items:center;justify-content:space-between;padding:.45rem 0;margin:.15rem 0 .35rem;font-size:.84rem;min-height:2.25rem;color:var(--muted);text-align:left;border:0;background:transparent}
-#overview-backlog:hover{color:var(--ink)}
 @media (max-width:28rem){main{padding-inline:.8rem}.metrics{grid-template-columns:1fr 1fr}#goal{font-size:1rem}.project-meta{width:100%}#task-body dl{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:23rem){header h1{position:absolute;clip-path:inset(50%)}#project{font-size:.94rem}#display-mode,#refresh{padding-inline:.4rem}#language-choice{max-width:4.6rem}}
 @media (prefers-reduced-motion:reduce){button,details>summary::before{transition:none}}
@@ -285,7 +277,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 .view-nav:has(.more-views[open])>*{grid-column:1/-1}
 .more-views>summary{font-size:.8rem;color:var(--muted);padding-inline:.2rem;white-space:nowrap}
 #pane-overview{display:grid;gap:.55rem}
-#now-active>p:empty,#now-results>p:empty{display:none}
+#now-status:empty{display:none}
 .task-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:.15rem .6rem;width:100%;text-align:left;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent;padding:.55rem .1rem;min-height:2.6rem}
 .task-row[aria-current="true"]{border-left:3px solid var(--brand);padding-left:.5rem}
 .task-row small{color:var(--muted);font-size:.76rem;grid-column:1 / -1}
@@ -295,9 +287,8 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 #task-body dd{font-weight:500}
 #pane-relations h3{margin-top:.9rem}
 .unavailable{color:var(--muted);font-style:italic}
-.waiting-dashboard .main-line,.waiting-dashboard #pane-overview>:not(.map-preview):not(#now-work):not(#latest-results),.waiting-dashboard #source-details{display:none}
-.waiting-dashboard #tabs-secondary button:not(#tab-project){visibility:hidden}
-.waiting-dashboard #more-summary{display:none}
+.waiting-dashboard .main-line,.waiting-dashboard #pane-overview>:not(#now-work),.waiting-dashboard #peer-assignment,.waiting-dashboard #room-leads{display:none}
+.waiting-dashboard #tabs-secondary button:not(#tab-project,#tab-relations){display:none}
 @media (forced-colors:active){:focus-visible{outline:2px solid Highlight;outline-offset:2px}button,input,select,textarea,.state-chip,.count-badge,.map-dep-chip{border:1px solid ButtonBorder}.tabs button[aria-selected="true"]{border-bottom:2px solid Highlight}#tabs-primary button[aria-selected="true"]{border:1px solid Highlight}#status.degraded,#approval-card.awaiting-action{border:1px solid CanvasText;border-left:4px solid Highlight}.choice input:checked+span{outline:2px solid Highlight}.primary{background:Highlight;color:HighlightText;border-color:Highlight}}
 </style>
 </head>
@@ -312,100 +303,75 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
   </header>
   <p id="status" role="status">OMS 연결 중…</p>
   <p id="receipt" role="status"></p>
-  <noscript><p class="muted" lang="ko">이 호스트에서 패널 UI를 실행할 수 없으면 텍스트 MCP 도구(oms_list_projects, oms_panel_snapshot) 또는 CLI(oms dashboard)로 같은 관측 리비전과 상태를 확인하세요.</p><p class="muted" lang="en">If this host cannot run the panel UI, use the text MCP tools (oms_list_projects, oms_panel_snapshot) or the CLI (oms dashboard) to check the same observation revision and status.</p></noscript>
+  <noscript><p lang="ko">패널을 표시할 수 없으면 아래 도구로 같은 관측 상태와 리비전을 확인하세요.</p><p lang="en">If the panel cannot render, check the same status and observation revision using these tools.</p><p>MCP · oms_list_projects, oms_panel_snapshot<br>CLI · oms dashboard</p></noscript>
   <div id="view" hidden>
     <div class="main-line"><span id="current-scope">이 대화</span><button id="header-main" hidden></button><span id="current-main" class="muted"></span></div>
     <div class="view-nav"><nav class="tabs" id="tabs-primary" role="tablist" aria-label="프로젝트 보기" data-i18n-attr="aria-label:tabs"></nav>
     <details id="more-views" class="more-views"><summary id="more-summary" data-i18n="moreViews">더 보기</summary>
     <nav class="tabs" id="tabs-secondary" role="tablist" aria-label="더 보기 화면" data-i18n-attr="aria-label:tabsMore"></nav></details></div>
     <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview">
-    <section id="approval-card" class="card" aria-labelledby="approvals-heading">
-      <div class="section-head"><h2 id="approvals-heading">승인 요청</h2><span id="approval-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span class="state-word" data-i18n="state.waiting">확인 필요</span></span></div>
-      <p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
-    </section>
-    <p id="approval-idle" class="sr-only" role="status"></p>
-    <details class="card" id="alerts"><summary><span data-i18n="alerts">확인이 필요한 항목</span><span id="alerts-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span id="alerts-count" class="state-word"></span></span><span id="alerts-preview" class="alerts-preview muted"></span></summary><ul id="attention"></ul>
-      <button id="attention-open" data-i18n="alertsOpen">주의 항목 자세히 보기</button></details>
     <section class="card" id="goal-card" aria-labelledby="goal-heading">
       <h2 id="goal-heading" class="section-label" data-i18n="goalHeading">프로젝트 목표</h2><p id="goal"></p><button id="goal-expand" aria-controls="goal" aria-expanded="false" hidden></button>
-      <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
-      <div id="plan-strip" class="plan-strip" aria-label="프로젝트 작업 검증" data-i18n-attr="aria-label:planStrip" hidden>
+      <div id="plan-strip" aria-label="프로젝트 작업 검증" data-i18n-attr="aria-label:planStrip" hidden>
         <span id="plan-marker" aria-hidden="true"></span><strong id="plan-ratio"></strong><span class="muted" data-i18n="planVerified">계획 작업 검증</span>
         <button id="plan-open" data-i18n="planOpen">계획 보기 ›</button>
       </div>
+      <p id="goal-criteria" class="muted" hidden></p>
+      <details id="launcher"><summary data-i18n="launcher">새 Main에 목표 맡기기</summary>
+      <form id="launch">
+        <fieldset id="controls"><legend data-i18n="chooseMain">Main 공급자</legend>
+          <div class="choices" id="main-choices"></div>
+          <fieldset class="lead-picks"><legend data-i18n="leadPick">함께 요청할 Lead</legend><div class="cluster" id="lead-choices"></div></fieldset>
+          <label for="brief" data-i18n="briefLabel">새 작업 목표</label>
+          <input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
+          <button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
+        </fieldset>
+      </form></details>
     </section>
-    <details id="launcher" class="card"><summary data-i18n="launcher">새 Main 선택</summary>
-    <form id="launch">
-      <fieldset id="controls"><legend data-i18n="chooseMain">Main 공급자</legend>
-        <div class="choices" id="main-choices"></div>
-<fieldset class="lead-picks"><legend data-i18n="leadPick">함께 요청할 Lead</legend><div class="cluster" id="lead-choices"></div></fieldset>
-        <label for="brief" data-i18n="briefLabel">새 작업 목표</label>
-        <input id="brief" class="form-input" type="text" required placeholder="Main이 Lead들과 수행할 목표를 입력하세요." data-i18n-attr="placeholder:briefPlaceholder">
-        <button class="primary" id="start" type="submit" data-i18n="start">목표 전달</button>
-      </fieldset>
-    </form></details>
+    <section id="approval-card" class="card" hidden aria-labelledby="approvals-heading">
+      <div class="section-head"><h2 id="approvals-heading" tabindex="-1">승인 요청</h2><span id="approval-badge" class="state-chip" data-state="waiting" data-role="attention" hidden><span class="state-glyph" aria-hidden="true">!</span> <span class="state-word" data-i18n="state.waiting">확인 필요</span></span></div>
+      <p id="approval-progress" role="status" class="muted"></p><div id="approvals"></div>
+    </section>
+    <p id="approval-idle" class="sr-only" role="status"></p>
     <section class="card" id="now-work" aria-labelledby="now-heading">
-      <h2 id="now-heading" data-i18n="w.now" class="section-label">진행 중인 작업</h2><p id="now-status" class="muted" role="status"></p>
+      <div class="section-head"><h2 id="now-heading" tabindex="-1" data-i18n="w.now" class="section-label">현재 작업</h2><button type="button" id="roster-open" class="link-action" data-i18n="rosterOpen" hidden>담당 보기 ›</button></div><p id="now-status" class="muted" role="status"></p>
       <div id="now-active" class="rows"></div>
-    </section>
-    <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-      <div id="team-main" hidden><span id="team-main-avatar"></span><div class="work-title"><strong id="team-main-name"></strong><small id="team-main-task"></small></div><button type="button" id="team-main-chat">Main</button></div>
-      <div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><button id="team-open" type="button" class="link-action" data-i18n="tab.chat" hidden>대화</button></div>
-      <p id="team-records" class="muted"></p><div id="leads" class="leads"></div>
-    </section>
-    <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
-    <details class="card" id="latest-results">
-      <summary id="now-results-heading" data-i18n="w.nowResults">작업 결과</summary>
-      <div id="now-results" class="rows"></div>
-      <div class="evidence"><p id="reviews" class="muted"></p></div>
-      <ul id="latest-operations" hidden></ul>
-    </details>
-    <details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
-      <p id="peer-proof" class="muted" data-i18n="peer.proof" hidden>Main을 확인했습니다. 검토 호출 전 다른 작업방의 소유권도 확인합니다.</p>
-      <form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
-        <label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
-        <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" class="form-input" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
-        <button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
-      </fieldset></form><p id="peer-status" class="muted" role="status"></p>
-      <div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
-        <button id="peer-repair" type="button" hidden data-i18n="peer.repair">작업방에 실행 기록 연결</button><button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
-    </details>
-      <details class="card" id="provider-options"><summary data-i18n="providerOptions">Lead 후보 · Codex, Claude, AGY</summary>
-        <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
-        <button id="provider-load" data-i18n="providerLoad">호스트 상태 조회</button>
-      </details>
-    <button id="overview-backlog"><span data-i18n="backlog">GitHub 열린 작업 전체 맡기기</span> <span aria-hidden="true">↗</span></button>
-    <details class="card" id="project-records">
-      <summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span></summary>
-      <dl class="metrics">
-        <div><dt data-i18n="metricActive">종료 기록 없는 시도</dt><dd id="active"></dd></div>
-        <div><dt data-i18n="metricTasks">계획된 작업</dt><dd id="tasks"></dd></div>
-        <div><dt data-i18n="metricState">현재 상태</dt><dd id="taskStatus"></dd></div>
-      </dl>
-      <h3 class="small-title" data-i18n="historyTeam">프로젝트 Main·Lead 기록</h3><ul id="repo-team"></ul>
-      <h3 class="small-title" data-i18n="historyOps">최근 보관된 결과물</h3><ul id="operations"></ul>
-      <h3 class="small-title" data-i18n="historyRuns">최근 실행 기록</h3><ul id="activity"></ul>
-        <section id="scratch-history" aria-labelledby="scratch-heading" hidden>
-          <h3 id="scratch-heading" data-i18n="scratch.heading">관리된 작업트리 기록</h3>
-          <p id="scratch-status" class="muted" role="status"></p><ul id="scratch-rows"></ul>
-        </section>
-    </details>
-    <section class="map-preview" id="map-preview" aria-labelledby="map-title">
-      <div class="map-heading"><h2 id="map-title"></h2><div><button class="map-link" id="feature-open"></button> <button class="map-link" id="map-open"></button></div></div>
-      <div class="map-field" id="map-field" hidden><div class="map-parents" id="map-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="map-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="map-parent-list"></ul></div><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children" data-relation-group="ownership"></ul><div class="map-deps" id="map-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="map-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="map-dep-list"></ul></div></div>
-      <p role="status" id="map-status"></p>
     </section>
     </div>
     <section class="card" id="pane-work" role="tabpanel" aria-labelledby="tab-work" hidden>
-      <h2 id="work-heading" data-i18n="tab.work">작업</h2><p id="work-status" class="muted" role="status"></p><div id="work-groups"></div>
+      <h2 id="work-heading" data-i18n="tab.work">작업</h2>
+      <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
+        <div class="section-head"><h2 id="leads-heading" tabindex="-1"><span id="lead-scope">Main 아래의 Lead 활동</span><span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><button id="team-open" type="button" class="link-action" data-i18n="tab.chat" hidden>대화</button></div>
+        <p id="team-records" class="muted"></p><div id="leads" class="leads"></div>
+      </section>
+      <details class="card" id="peer-assignment" hidden><summary data-i18n="peer.assign">읽기 전용 검토 요청</summary>
+        <p id="peer-proof" class="muted" data-i18n="peer.proof" hidden>Main을 확인했습니다. 검토 호출 전 다른 작업방의 소유권도 확인합니다.</p>
+        <form id="peer-form"><fieldset id="peer-controls"><legend data-i18n="peer.legend">이 작업방의 검토자</legend>
+          <label for="peer-provider" data-i18n="peer.provider">공급자</label><select id="peer-provider"><option value="claude">Claude</option><option value="agy">AGY</option></select>
+          <label for="peer-task" data-i18n="peer.prompt">검토할 내용</label><input id="peer-task" class="form-input" required maxlength="1000" data-i18n-attr="placeholder:peer.hint" placeholder="확인할 코드나 질문을 입력하세요">
+          <button type="submit" data-i18n="peer.start">검토자 1회 호출</button>
+        </fieldset></form><p id="peer-status" class="muted" role="status"></p>
+        <div class="cluster"><button id="peer-check" type="button" hidden data-i18n="peer.check">요청 상태 확인</button>
+          <button id="peer-repair" type="button" hidden data-i18n="peer.repair">작업방에 실행 기록 연결</button><button id="peer-chat" type="button" hidden data-i18n="peer.chat">검토 대화 보기</button><button id="peer-next" type="button" hidden data-i18n="peer.next">다른 검토 요청</button></div>
+      </details>
+      <details id="work-plan"><summary data-i18n="workPlan">프로젝트 작업 목록</summary><p id="work-status" class="muted" role="status"></p><div id="work-groups"></div></details>
+      <button type="button" id="work-activity" class="link-action" data-i18n="workActivity">전체 실행 기록 ›</button>
     </section>
     <section class="card" id="pane-results" role="tabpanel" aria-labelledby="tab-results" hidden>
       <h2 id="results-heading" data-i18n="tab.results">결과</h2><p id="results-status" class="muted" role="status"></p><div id="results-list" class="rows"></div>
+      <div class="measure"><p id="criteria"></p><progress id="acceptance-bar" aria-labelledby="criteria" hidden></progress></div>
+      <p id="reviews" class="muted"></p>
+      <h3 class="small-title" data-i18n="historyOps">최근 보관된 결과물</h3><ul id="operations"></ul>
     </section>
     <section class="card" id="pane-relations" role="tabpanel" aria-labelledby="tab-relations" hidden>
       <h2 id="relations-heading" data-i18n="tab.relations">관계도</h2><p id="relations-status" class="muted" role="status"></p>
       <section aria-labelledby="owners-heading" data-relation-group="ownership"><h3 id="owners-heading" data-i18n="w.owners">담당 연결</h3><p id="owners-note" class="muted"></p><div id="owners-list" class="rows"></div></section>
       <section aria-labelledby="deps-heading" data-relation-group="dependency"><h3 id="deps-heading" data-i18n="w.deps">작업 의존성</h3><p id="deps-note" class="muted"></p><div id="deps-list" class="rows"></div></section>
+      <section class="map-preview" id="map-preview" aria-labelledby="map-title">
+        <div class="map-heading"><h2 id="map-title"></h2><div><button class="map-link" id="feature-open"></button> <button class="map-link" id="map-open"></button></div></div>
+        <div class="map-field" id="map-field" hidden><div class="map-parents" id="map-parents" data-relation-group="ownership" hidden><span class="map-deps-label" id="map-parents-label" data-i18n="map.parent">상위 항목</span><ul class="map-row" id="map-parent-list"></ul></div><span class="map-focus" id="map-root"></span><ul class="map-row" id="map-children" data-relation-group="ownership"></ul><div class="map-deps" id="map-deps" data-relation-group="dependency" hidden><span class="map-deps-label" id="map-deps-label" data-i18n="map.deps">의존성</span><ul class="map-dep-chips" id="map-dep-list"></ul></div></div>
+        <p role="status" id="map-status"></p>
+      </section>
     </section>
     <section class="card" id="pane-task" aria-labelledby="task-heading" hidden>
       <div class="detail-title"><button id="task-back" data-i18n="w.back">← 목록으로</button><h2 id="task-heading" tabindex="-1"></h2></div>
@@ -430,6 +396,7 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     </section>
     <section class="card" id="pane-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
       <div class="detail-title"><h2 data-i18n="chatHeading">작업방 대화</h2><button id="chat-back" data-i18n="chatBack" hidden>이전 보기로</button></div>
+      <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
       <div class="chat-grid"><div class="selection" id="chat-members" aria-label="대화 참여자" data-i18n-attr="aria-label:chatMembers"></div>
         <div><div class="section-head"><h3 id="chat-title"></h3><button id="follow-up" class="link-action" data-i18n="followUp" hidden>후속 요청 초안</button></div><p id="chat-status" class="muted" role="status"></p>
           <button id="chat-older" data-i18n="chatOlder" hidden>이전 메시지</button>
@@ -460,6 +427,26 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
     </section>
     <section class="card" id="pane-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
       <h2 data-i18n="activityHeading">프로젝트 활동</h2><p id="core-state"></p><p id="command-state" class="muted"></p>
+      <details class="card" id="alerts"><summary data-i18n="alerts">진단</summary><ul id="attention"></ul>
+        <button id="attention-open" data-i18n="alertsOpen">진단 기록 보기</button></details>
+      <details class="card" id="project-records">
+        <summary id="progress"><span data-i18n="records">프로젝트 전체 기록</span></summary>
+        <dl class="metrics">
+          <div><dt data-i18n="metricActive">종료 기록 없는 시도</dt><dd id="active"></dd></div>
+          <div><dt data-i18n="metricTasks">계획된 작업</dt><dd id="tasks"></dd></div>
+          <div><dt data-i18n="metricState">현재 상태</dt><dd id="taskStatus"></dd></div>
+        </dl>
+        <h3 class="small-title" data-i18n="historyTeam">프로젝트 Main·Lead 기록</h3><ul id="repo-team"></ul>
+        <h3 class="small-title" data-i18n="historyRuns">최근 실행 기록</h3><ul id="activity"></ul>
+          <section id="scratch-history" aria-labelledby="scratch-heading" hidden>
+            <h3 id="scratch-heading" data-i18n="scratch.heading">관리된 작업트리 기록</h3>
+            <p id="scratch-status" class="muted" role="status"></p><ul id="scratch-rows"></ul>
+          </section>
+      </details>
+      <details class="card" id="provider-options"><summary data-i18n="providerOptions">Lead 후보 · Codex, Claude, AGY</summary>
+        <p class="muted" id="provider-status" role="status"></p><ul id="provider-rows"></ul>
+        <button id="provider-load" data-i18n="providerLoad">호스트 상태 조회</button>
+      </details>
       <section class="history"><div class="cluster"><label for="tui-view" data-i18n="tuiLabel">OMS TUI 상세</label><select id="tui-view"></select></div><p id="tui-status" role="status" class="muted"></p>
       <div id="tui-rows" class="table-wrap" role="region" aria-label="선택한 OMS TUI 기록" data-i18n-attr="aria-label:tuiRegion" tabindex="0"></div>
       <div class="cluster"><button id="tui-prev" data-i18n="prevPage" hidden>이전 페이지</button><button id="tui-next" data-i18n="nextPage" hidden>다음 페이지</button></div></section>
@@ -520,9 +507,7 @@ const onClick = (id, listener) => on(id, 'click', listener);
 const providers = ['codex','claude','agy'];
 const names = {codex:'Codex', claude:'Claude', agy:'AGY', antigravity:'AGY', pi:'Pi'};
 const dots = (...parts) => parts.filter(Boolean).join(' · ');
-// Localization. UI-owned text uses message keys (MSG) and is bound to its element,
-// so a language change re-renders text in place without refetching or rebuilding.
-// Data from OMS (names, stored messages, CLI evidence, backend labels) is never translated.
+// Rebind UI labels on language changes. Keep stored OMS evidence verbatim.
 const LANGS = ['ko', 'en'], LANG_KEY = 'oms.panel.language';
 let lang = 'ko', storedLang = null, hostLocale = '', briefInvalid = false, sweepAt = 2000;
 const textBinds = new Map(), attrBinds = new Map();
@@ -554,7 +539,6 @@ function putAttr(target, name, fn) {
   const map = attrBinds.get(e) || new Map();
   map.set(name, fn); attrBinds.set(e, map);
 }
-// Repeated tabs and fixed options, built once before first reveal and event binding.
 function buildControls() {
   const make = (parent, tag, key, text, attribute) => {
     const element = document.createElement(tag);
@@ -575,7 +559,6 @@ function buildControls() {
       button.setAttribute('role', 'tab');
       button.setAttribute('aria-selected', String(name === 'overview'));
       button.setAttribute('aria-controls', panel || 'pane-' + name);
-      // Each list starts with one tab stop: its first tab.
       if (index) button.setAttribute('tabindex', '-1');
     }
   };
@@ -656,7 +639,7 @@ function initLanguage() {
   el('language-choice').value = lang;
   if (lang !== 'ko') { relocalize(); explorerLabels(); paintTasks(); }
 }
-// One row per key, with Korean and English text. Static Korean labels come from the markup.
+// Static Korean labels come from the markup.
 const MSG = {ko:{}, en:{}};
 const catalogRows = `title	OMS · 프로젝트 제어	OMS · Project control
 language	Language (언어)
@@ -685,8 +668,8 @@ tabs	Project views
 tabsMore	More views
 moreViews	More
 taskSections	Task detail sections
-alerts	Items needing attention
-alertsOpen	View attention items
+alerts	Diagnostics
+alertsOpen	View diagnostic records
 goalHeading	Project goal
 planStrip	Project task verification
 planVerified	Planned tasks verified
@@ -694,8 +677,10 @@ planOpen	View plan ›
 threads	Other work conversations
 providerOptions	Lead candidates · Codex, Claude, AGY
 providerLoad	Check host status
-backlog	Hand all open GitHub work to Main
-launcher	Choose a new Main
+workPlan	Project work list
+workActivity	All execution records ›
+rosterOpen	View team ›
+launcher	Give a new Main a goal
 chooseMain	Main provider
 leadPick	Lead preferences
 followUp	Draft a follow-up
@@ -815,8 +800,7 @@ verification	검증	Verification
 history	이력	History
 [w]
 back	← Back to list
-now	Work in progress
-nowResults	Task results
+now	Current work
 owners	Owner linkage
 deps	Task dependencies
 loading	작업 목록을 읽는 중…	Reading work items…
@@ -867,9 +851,10 @@ planned	예정	Planned
 active	진행	In progress
 review	검토	Review
 done	완료	Done
+blocked	차단됨	Blocked
+cancelled	취소됨	Cancelled
+waiting	입력 대기	Awaiting input
 other	기타 상태	Other states
-[alerts]
-count	{n}건	{n} items
 [map]
 parent	Parent
 deps	Dependencies
@@ -1125,6 +1110,7 @@ fail	현재 연결 내역을 확인할 수 없습니다. OMS 연결과 프로젝
 checkPermissions	프로젝트 권한과 호스트 MCP 연결을 확인하고 다시 조회하세요.	Check project permissions and the host MCP connection, then try again.
 [project]
 unreachable	대화에서 지정한 프로젝트에 연결할 수 없습니다.	Cannot connect to the project specified in the conversation.
+unbound	이 연결에 프로젝트가 없습니다. 호스트에서 프로젝트를 연결한 뒤 새로고침하세요.	No project is bound. Connect a project in the host, then refresh.
 choose	OMS를 사용할 프로젝트를 선택하세요.	Select a project to use with OMS.
 [member]
 left	참여 종료	Left
@@ -1176,15 +1162,14 @@ partialRooms	 · 작업방 목록 일부 조회	 · Room list partially retrieve
 noOwner	이 대화와 연결된 작업방 소유자를 확인할 수 없습니다.	Cannot determine the room owner linked to this conversation.
 repoRecorded	저장소에 기록된 Main	Main recorded in the repository
 thisConversation	이 대화의 Main	Main of this conversation
-repoLeads	저장소의 Lead 활동	Repository Lead activity
 roomLead	작업방 Lead	Room Lead
 noRepoMain	저장소 실행 기록에서 Main을 확인할 수 없습니다.	Cannot determine Main from repository execution records.
 headerAria	이 대화의 {name} 작업방 대화 보기	View the room conversation of {name} for this conversation
 [lead]
-none	미종료 Lead 기록 없음	No open Lead records
-unseen	조회한 기록에서 미종료 Lead를 확인하지 못했습니다.	No open Lead found in the retrieved records.
+none	현재 Main에 연결된 Lead 기록 없음	No Lead records linked to the current Main
+unseen	이 Main에 연결된 Lead 실행을 확인하지 못했습니다.	No Lead runs linked to this Main were confirmed.
 taskUnknown	작업 미확인	Task unknown
-aria	{assignee} · {task} · {p} 대화 열기	Open conversation: {assignee} · {task} · {p}
+aria	{assignee} · {task} 대화 열기	Open conversation: {assignee} · {task}
 [act]
 planned	계획된 작업 {n}	Planned tasks {n}
 partialRuntime	런타임 일부 조회	Runtime partially retrieved
@@ -1224,8 +1209,8 @@ sender	요청자 · {v}	Requester · {v}
 approve	이 요청 승인	Approve this request
 deny	이 요청 거절	Deny this request
 mismatch	결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요.	The decision response does not match the request. Check the approval list.
-approved	승인 처리됨 · {id}	Approved · {id}
-denied	거절 처리됨 · {id}	Denied · {id}
+approved	요청을 승인했습니다.	Request approved.
+denied	요청을 거절했습니다.	Request denied.
 checking	승인 목록을 확인하는 중…	Checking approvals…
 bad	승인 목록 응답을 읽을 수 없습니다.	Cannot read the approval list response.
 [surf]
@@ -1352,7 +1337,7 @@ let hostSurface = {k:'unknown'}, hostVersion = '', displayMode = '', hostModes =
 let connectionState = 'conn.checking', connectionReady = false, profileKnown = false, checkedAt = '';
 let connectionPage = 1, connectionNext = null;
 let gitData, gitItem, draftProvider = '', sentBrief, sendingBrief, providerData;
-let gitReady = false, overviewBacklog = false;
+let gitReady = false;
 const gitDrafts = new Map();
 let contextKey;
 let contextQueue = Promise.resolve();
@@ -1672,7 +1657,6 @@ function showTab(tab, focus = false, origin) {
     el('chat-back').hidden = !backTarget;
     tabScroll.set(currentTab, window.scrollY || 0);
     currentTab = tab;
-    if (tab !== 'git') overviewBacklog = false;
     for (const key of tabs) {
       const selected = key === tab;
       el('pane-' + key).hidden = !selected;
@@ -1685,26 +1669,31 @@ function showTab(tab, focus = false, origin) {
     el('more-views').open = !tabLists[0].includes(tab);
     window.scrollTo(0, tabScroll.get(tab) || 0);
   }
+  el('source-details').hidden = Boolean(dashboardData) && tab !== 'activity';
   if (focus) el('tab-' + tab).focus();
   loadTab(tab);
 }
 
 function bindTabs(items, prefix, select) {
-  for (const [index, name] of items.entries()) {
-    const button = el(prefix + name), count = items.length;
+  for (const name of items) {
+    const button = el(prefix + name);
     button.addEventListener('click', () => select(name));
     button.addEventListener('keydown', event => {
+      const available = prefix === 'tab-' && items === tabLists[1] && !dashboardData ? ['relations','project'] : items;
+      const index = available.indexOf(name), count = available.length;
       const next = {ArrowRight:(index + 1) % count, ArrowLeft:(index + count - 1) % count, Home:0, End:count - 1}[event.key];
-      if (next !== undefined) { event.preventDefault(); select(items[next], true); }
+      if (next !== undefined) { event.preventDefault(); select(available[next], true); }
     });
   }
 }
 for (const list of tabLists) bindTabs(list, 'tab-', showTab);
+onClick('work-activity', () => { showTab('activity',true); el('project-records').open = true; });
+onClick('roster-open', () => { showTab('work'); el('leads-heading').focus(); });
 onClick('team-open', () => showTab('chat', true, el('team-open')));
 
 // Task-centered navigation. Every view reads the same oms_panel_work_items projection and opens
 // one shared detail by the item's own id; labels are display text only and never identify a task.
-const taskGroups = [['planned',['pending','queued','planned','todo','ready','open']],['active',['claimed','landing','working','starting','verifying','in_progress','running','blocked','waiting_for_input']],['review',['review','in_review']],['done',['done','completed','closed','verified']],['other',[]]];
+const taskGroups = [['planned',['pending','queued','planned','todo','ready','open']],['active',['claimed','landing','working','starting','verifying','in_progress','running']],['review',['review','in_review']],['blocked',['blocked']],['waiting',['waiting_for_input']],['cancelled',['cancelled','canceled']],['done',['done','completed','closed','verified']],['other',[]]];
 const taskGroup = item => taskGroups.find(([, states]) => states.includes(item.state))?.[0] || 'other';
 const resultStates={accepted:['결과 수락','Result accepted'],completed:['결과 완료 기록','Completion recorded'],failed:['결과 실패','Result failed'],rejected:['결과 반려','Result rejected']};
 const verifyStates={passed:['검증 통과','Verification passed'],failed:['검증 실패','Verification failed'],not_run:['검증 미실행','Verification not run'],verified:['완료 근거 확인','Completion evidence verified'],unverified:['완료 근거 미확인','Completion evidence unverified']};
@@ -1741,10 +1730,10 @@ function loadWork(force) {
 function taskRow(item, pane, extra) {
   const row = node('button', '', 'task-row'), key = pane + ':' + item.id;
   row.type = 'button';
-  const room = dashboardData?.conversationBinding === 'matched' && dashboardData.conversationMain?.room;
-  const attempts = pane === 'now' && room && dashboardData.activeAttempts?.filter(a => a.room === room && a.task === item.id);
-  row.append(node('strong', item.title || item.id), stateChip(item.state, {extraClass: 'task-state'}),
-    node('small', () => dots(pane !== 'now' && t('w.id', {v:item.id}), item.owner ? t('w.owner', {v:item.owner}) : t('w.ownerUnknown'), attempts?.length === 1 && dateLabel(attempts[0].updated), extra)));
+  const compact = pane === 'now' || pane.startsWith('lead-');
+  row.append(node('strong', () => compact ? workTitle(item) : item.title || item.id), stateChip(item.state, {extraClass: 'task-state'}));
+  const sub = () => compact ? (typeof extra==='function' ? extra() : extra) : dots(t('w.id', {v:item.id}), item.owner ? t('w.owner', {v:item.owner}) : t('w.ownerUnknown'), extra);
+  if (sub()) row.append(node('small', sub));
   if (selectedTask?.id === item.id) row.setAttribute('aria-current', 'true');
   row.addEventListener('click', () => openTask(item.id, key));
   taskRows.set(key, row);
@@ -1770,23 +1759,25 @@ function paintTasks(loading = false) {
   taskRows.clear();
   const data = workData, items = data?.items || [];
   const unavailable=data?.availability==='unavailable';
-  const status = loading && !data ? message('w.loading') : workError ? () => t('w.unavailable', {v:workError}) : unavailable ? () => choice('프로젝트의 작업 기록을 확인할 수 없습니다.','Work records for this project are unavailable.') : () => dots(
-    t('w.count', {n:formatCount(items.length)}), data?.availability==='partial' && choice('일부 기록','Partial records'),
-    data?.omitted && t('w.omitted', {n:formatCount(data.omitted)}), data?.dropped && t('w.dropped', {n:formatCount(data.dropped)}),
-    data?.repeated && t('w.dup', {n:formatCount(data.repeated)}));
-  for (const id of ['now-status', 'work-status', 'results-status', 'relations-status']) put(id, status);
-  const active = items.filter(i => ['active', 'review'].includes(taskGroup(i))), withResult = items.filter(i => i.result);
-  if (data && !unavailable && !workError) put('now-status',()=>choice('조회된 작업 '+formatCount(items.length)+'개 중 진행·검토 '+formatCount(active.length)+'개',formatCount(active.length)+' in progress or review out of '+formatCount(items.length)+' observed'));
-  const fill = (id, rows, emptyKey) => el(id).replaceChildren(...(rows.length ? rows : [node('p', data && !workError && !unavailable ? (data.availability==='partial' && !items.length ? choice('조회 범위에서 기록을 찾지 못했습니다.','No records in this view.') : t(emptyKey)) : '', 'muted')]));
-  fill('now-active', active.slice(0, 3).map(i => taskRow(i, 'now', null)), items.length ? 'w.noneActive' : 'w.empty');
-  if (active.length > 3) el('now-active').append(action(t('w.viewAll'), () => showTab('work', true)));
-  fill('now-results', withResult.slice(0, 3).map(i => taskRow(i, 'now-result', choice(...resultStates[i.result]))), 'w.noneResults');
+  const active = items.filter(i => ['active','review'].includes(taskGroup(i))), blocked = items.filter(i => taskGroup(i) === 'blocked');
+  const partial = data?.availability==='partial' || data?.omitted || data?.dropped || data?.repeated;
+  const status = now => !data && !workError ? (loading ? t('w.loading') : '') : workError ? t('w.unavailable',{v:workError}) : unavailable ? choice('프로젝트의 작업 기록을 확인할 수 없습니다.','Work records for this project are unavailable.') : dots(
+    now && !partial && !active.length && !blocked.length ? t(items.length ? 'w.noneActive' : 'w.empty') : now ? choice('조회된 작업 '+items.length+'개 중 진행·검토 '+active.length+'개',active.length+' in progress or review out of '+items.length+' observed') : t('w.count', {n:formatCount(items.length)}),
+    data?.availability==='partial' && choice('일부 기록','Partial records'),
+    ...[['omitted','w.omitted'],['dropped','w.dropped'],['repeated','w.dup']].map(([k,label])=>data?.[k] && t(label,{n:formatCount(data[k])})));
+  for (const id of ['now-status','work-status','results-status','relations-status']) put(id, () => status(id === 'now-status'));
+  const fill = (id, rows, emptyKey) => el(id).replaceChildren(...(rows.length ? rows : [node('p', data && !workError && !unavailable ? (partial ? choice('조회 범위에서 기록을 찾지 못했습니다.','No records in this view.') : t(emptyKey)) : '', 'muted')]));
+  const current = active.slice(0,3).map(i => taskRow(i,'now'));
+  if (blocked.length) current.push(node('h3',t('g.blocked')+' · '+formatCount(blocked.length)),...blocked.slice(0,2).map(i => taskRow(i,'now')));
+  el('now-active').replaceChildren(...current);
+  if (active.length > 3 || blocked.length > 2) el('now-active').append(action(t('w.viewAll'), () => showTab('work', true)));
   const groups = [];
   for (const [name] of taskGroups) {
     const rows = items.filter(i => taskGroup(i) === name);
     if (rows.length) groups.push(node('h3', t('g.' + name) + ' · ' + formatCount(rows.length)), ...rows.map(i => taskRow(i, 'work', null)));
   }
   fill('work-groups', groups, 'w.empty');
+  const withResult = items.filter(i => i.result);
   const results = withResult.map(i => taskRow(i, 'results', [choice(...resultStates[i.result]), i.verification ? choice(...verifyStates[i.verification]) : t('w.evidenceNo')].join(' · ')));
   const missing = items.length - withResult.length;
   if (data && missing > 0) results.push(node('p', t('w.noResultCount', {n:formatCount(missing)}), 'muted'));
@@ -1925,6 +1916,8 @@ async function detailRead(key, name, args, success, failure) {
 }
 
 function loadTab(tab, force = false) {
+  if (explorerBound && (tab === 'project' || tab === 'relations') && !jobs.has('graph') && (force || !graphData))
+    readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit);
   if (tab === 'project' && explorerBound) {
     if ((!loaded.has('catalog') || force) && !jobs.has('catalog')) readCatalog();
     return;
@@ -1936,6 +1929,8 @@ function loadTab(tab, force = false) {
     return;
   }
   if (tab === 'activity') {
+    if (el('source-details').open) loadConnection(connectionPage);
+    if (el('provider-options').open && (force || !providerData)) loadProviderOptions();
     if (el('tui-view').value && (force || (!loaded.has('tui') && !jobs.has('tui')))) loadTui();
     return;
   }
@@ -2273,11 +2268,6 @@ function prepareBacklog() {
   editGitGoal({kind:'backlog',url,label:() => t('git.backlogLabel',{repo})}, t('git.backlogBody',{url}));
 }
 onClick('git-backlog', prepareBacklog);
-onClick('overview-backlog', () => {
-  overviewBacklog = true;
-  showTab('git',true);
-  if (gitReady) { overviewBacklog = false; prepareBacklog(); }
-});
 function renderGitCatalog() {
   const kind = el('git-kind').value || 'checkout';
   const box = el('git-catalog'), status = el('git-catalog-status');
@@ -2552,7 +2542,6 @@ function renderGit(data) {
     content.append(card);
   }
   renderGitCatalog();
-  if (overviewBacklog && currentTab === 'git') { overviewBacklog = false; prepareBacklog(); }
 }
 
 function renderUsage(data) {
@@ -2618,6 +2607,9 @@ function renderUsage(data) {
 
 function render(d) {
   dashboardData = d;
+  const diagnostics = el('source-details');
+  if (currentTab !== 'activity' && diagnostics.contains?.(document.activeElement)) el('tab-' + currentTab).focus();
+  diagnostics.hidden = currentTab !== 'activity';
   if (workData) paintTasks();
   put('git-local', () => localGit(d.git));
   put('project', () => d.project || t('projectDefault')); el('project').title = el('project').textContent;
@@ -2625,23 +2617,26 @@ function render(d) {
   const bar = el('acceptance-bar'), criteria = d.acceptance;
   bar.hidden = !criteria?.available || !measured(criteria.verified,criteria.total);
   if (!bar.hidden) { bar.max = criteria.total; bar.value = criteria.verified; }
-  el('plan-strip').hidden = !measured(d.tasksVerified,d.tasks);
+  const {total,verified} = d.planProgress || {};
+  el('plan-strip').hidden = !measured(verified,total) && !(total===0 && verified===0);
+  el('goal-criteria').hidden = !el('plan-strip').hidden || bar.hidden;
+  if (!el('goal-criteria').hidden) put('goal-criteria', () => t('act.criteria',{v:criteria.verified,n:criteria.total}));
   if (!el('plan-strip').hidden) {
-    el('plan-ratio').textContent = d.tasksVerified + ' / ' + d.tasks;
-    el('plan-marker').setAttribute('style','--verified:' + (100 * d.tasksVerified / d.tasks) + '%');
+    put('plan-ratio', () => total ? verified+' / '+total : choice('대상 작업 없음','No eligible tasks'));
+    el('plan-marker').hidden = total===0;
+    if (total) el('plan-marker').setAttribute('style','--verified:' + (100 * verified / total) + '%');
   }
   el('branch').textContent = d.branch || '';
-  put('goal', () => d.goal || t('goalNone'));
-  el('goal-expand').hidden=typeof d.goal!=='string' || d.goal.length<80;
+  const goal = (d.goalAvailability===undefined || d.goalAvailability==='available') && typeof d.goal==='string' && d.goal.trim() ? d.goal : '';
+  put('goal', () => goal || (d.goalAvailability==='absent' && d.goal==null ? t('goalNone') : choice('프로젝트 목표 미확인','Project goal unconfirmed')));
+  el('goal-expand').hidden=goal.length<80;
   paintGoalFold();
   for(const key of ['active','tasks']) put(key,()=>d[key]??t('noInfo'));
   if(d.taskStatus) el('taskStatus').replaceChildren(stateChip(d.taskStatus)); else put('taskStatus','noInfo');
   const list=el('attention'),alerts=d.attention||[];
   list.replaceChildren();
   for(const item of alerts){const li=node('li','','entry');li.append(node('span',item.summary),node('strong',item.count??''));list.append(li);}
-  el('alerts').hidden=el('alerts-badge').hidden=!alerts.length;
-  put('alerts-count',()=>alerts.length?t('alerts.count',{n:formatCount(alerts.length)}):'');
-  el('alerts-preview').textContent=alerts[0]?.summary||'';
+  el('alerts').hidden=!alerts.length;
   const obs=d.observation?.schema===1&&d.observation.kind==='multi-source-observation'&&d.observation.atomic===false?d.observation:null;
   const revision=typeof obs?.revision==='string'&&/^obs-v[0-9]+:[0-9a-f]{12,64}$/.test(obs.revision)?obs.revision:null;
   put('observation-revision',()=>revision||t('unknown'));
@@ -2684,21 +2679,21 @@ function clearProject() {
   selectedMember = backTarget = olderCursor = tuiNext = undefined; chatRows = [];
   clearEvidence(); availableAttempts = [];
   members = []; tuiPages = []; el('tui-view').value = '';
-  gitReady = overviewBacklog = false;
+  gitReady = false;
   gitData = gitItem = sendingBrief = sentBrief = providerData = undefined; gitDrafts.clear();
   el('git-kind').value = 'checkout'; el('provider-options').open = false; el('provider-load').disabled = false;
   el('git-number').value = el('git-goal').value = el('git-provider').value = '';
   el('approval-card').className = 'card'; el('approval-card').hidden = false;
-  for (const id of ['view','pane-task','chat-evidence','chat-back','chat-older','tui-next','tui-prev','git-backlog','git-editor','work-threads','plan-strip','acceptance-bar','header-main','approval-badge','alerts-badge','latest-operations','work-dot']) el(id).hidden = true;
+  for (const id of ['view','pane-task','chat-evidence','chat-back','chat-older','tui-next','tui-prev','git-backlog','git-editor','work-threads','roster-open','plan-strip','acceptance-bar','header-main','approval-badge','work-dot']) el(id).hidden = true;
   for (const id of ['work-dot','lead-count']) put(id, () => '');
-  for (const id of ['now-active','now-results','work-groups','results-list','owners-list','deps-list','chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows','git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status','thread-rows','approval-idle','alerts-count','alerts-preview','latest-operations','work-dot','receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
+  for (const id of ['now-active','work-groups','results-list','owners-list','deps-list','chat-members','chat-title','chat-status','chat-messages','chat-result','chat-native','git-status','git-content','git-local','usage-content','usage-status','command-list','command-state','core-state','tui-status','tui-rows','git-catalog','git-catalog-status','git-match','git-editor-status','git-item','provider-rows','provider-status','thread-rows','approval-idle','work-dot','receipt','project','branch','room','participant','main-state','goal','current-main','active','tasks','taskStatus','updated','observation-revision','observation-basis','observation-completeness','observation-sources','approval-progress','approvals','leads','repo-team','criteria','reviews','operations','activity','attention']) {
     el(id).replaceChildren();
   }
   showTab('overview'); tabScroll.clear();
   updateContext(null);
   retryStart = undefined;
   el('launch').reset();
-  el('team-main-chat').disabled = false;
+  el('header-main').disabled = false; el('work-plan').open = false;
   el('launcher').open = false;
   briefInvalid = false; el('brief').setCustomValidity('');
   el('receipt').className = '';
@@ -3235,12 +3230,12 @@ function renderConversation(d) {
   put('participant', () => joined ? main.participant : t('unknown'));
   el('identity').hidden = !joined;
   put('main-scope', () => t(isReadOnly ? 'main.repoRecorded' : 'main.thisConversation'));
-  put('lead-scope', () => t(isReadOnly ? 'main.repoLeads' : 'main.roomLead'));
   if (readOnly) {
     put(current, () => d.main?.provider ? providerName(d.main.provider) + ' Main' : t('main.unknown'));
     put('main-state', () => d.main ? dots(stateLabel(d.main.state),d.main.room) : t('main.noRepoMain'));
   }
-  el('room-leads').hidden = !joined && !readOnly;
+  el('room-leads').hidden = !joined;
+  el('roster-open').hidden = true;
   el('team-open').hidden = !joined;
   el('git-send').hidden = !canMessage || (!joined && !readOnly);
   members = joined ? (main.participants || []).filter(m => m.room === main.room && typeof m.participant === 'string' && m.participant) : [];
@@ -3259,70 +3254,73 @@ function renderConversation(d) {
     paintAvatar(avatar,main); headerMain.replaceChildren(avatar,node('span',name));
     putAttr(headerMain,'aria-label',() => t('main.headerAria',{name}));
   }
-  headerMain.onclick = joined ? () => selectMember(members.find(m => m.participant === main.participant),headerMain) : null;
+  headerMain.onclick = joined ? () => openMainChat(members.find(m => m.participant === main.participant),headerMain) : null;
   updateSendButton();
+}
+function assignmentLabel(row) { return providerName(row.provider) + (row.role === 'lead' ? ' Lead' : choice(' 배정',' assignment')); }
+function attemptMember(row) {
+  // Native Codex assignments enrol the exact attempt ID as the Room participant.
+  return members.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
+    row.tool === 'panel-native-assignment' && row.provider === 'codex' && m.provider === 'codex' && m.role === 'worker' && m.participant === row.id));
 }
 function paintLeadTree(d) {
   if (!d) return;
   const main = d.conversationMain;
-  const joined = !el('room-leads').hidden && !readOnly && main;
   const cards = el('leads');
-  if (!joined && !readOnly) return;
+  if (el('room-leads').hidden || readOnly || !main) {
+    cards.replaceChildren();
+    el('work-dot').hidden = true; put('lead-count', () => '');
+    return;
+  }
   const expanded = Array.from(cards.children, card=>card.children[1]).filter(el=>el?.open).map(el=>el.getAttribute('data-lead'));
   cards.replaceChildren();
-  const scoped = joined && Array.isArray(d.conversationAttempts) && d.conversationAttempts;
-  const records = scoped || [...(d.activeAttempts || []), ...(d.attempts || [])];
-  const mainRecord = joined
-    ? records.find(a => isMain(a) && a.room === main.room && a.participant === main.participant)
-    : d.main;
-  const root = joined ? main : mainRecord, button = el('team-main-chat');
-  el('team-main').hidden = !root;
-  if (root) {
-    paintAvatar(el('team-main-avatar'),root);
-    put('team-main-name',()=>providerName(root.provider)+' Main');
-    put('team-main-task',()=>dots(mainRecord?.state && stateLabel(mainRecord.state),attemptTitle(mainRecord) || t(joined ? 'main.joined' : 'lead.taskUnknown')));
-    button.hidden = !joined;
-    put(button,()=>choice('Main 채팅','Main chat'));
-    button.onclick = joined ? () => openMainChat(members.find(m=>m.participant===main.participant),button) : null;
-  }
-  const active = d.activeAttempts || [];
-  const partial = scoped
-    ? d.conversationAttemptsOmitted > 0 || d.conversationAttemptsTrimmed > 0 || main.incomplete
-    : !Array.isArray(d.activeAttempts) || d.activeAttemptsTrimmed > 0 || d.active !== active.length;
-  put('team-records',()=>scoped && partial ? choice('일부 작업 기록','Partial work records') : '');
-  const seen = new Set();
-  const roomLeads = (scoped || active).filter(a => {
-    const key = a.participant && JSON.stringify([a.room,a.participant]);
-    if (!isLead(a) || (!readOnly && a.room !== main.room) || (key && seen.has(key))) return false;
-    if (key) seen.add(key);
-    return true;
+  const scoped = Array.isArray(d.conversationAttempts) && d.conversationAttempts;
+  const active = d.activeAttempts || [], records = scoped || [...active,...(d.attempts || [])];
+  const partial = !Array.isArray(main.participants) || main.participantsOmitted > 0 || main.incomplete || (scoped
+    ? d.conversationAttemptsOmitted > 0 || d.conversationAttemptsTrimmed > 0
+    : !Array.isArray(d.activeAttempts) || d.activeAttemptsTrimmed > 0 || d.active !== active.length);
+  put('team-records',()=>partial ? choice('일부 작업 기록','Partial work records') : '');
+  const ownerRuns = new Set(records.filter(r=>r.id && isMain(r) && r.room===main.room && r.participant===main.participant && (!r.provider || providerName(r.provider)===providerName(main.provider))).map(r=>r.id));
+  const owned = records.filter(r=>{
+    if (!isLead(r) || r.room !== main.room || r.participant === main.participant) return false;
+    const m = attemptMember(r);
+    if (m?.joined === false || (m?.parent && m.parent !== main.participant)) return false;
+    if (m?.provider && r.provider && providerName(m.provider) !== providerName(r.provider)) return false;
+    if (m?.role && !['lead','worker'].includes(m.role)) return false;
+    return r.parentAttempt ? ownerRuns.has(r.parentAttempt) : m?.parent === main.participant;
   });
+  const seen = new Set();
+  const roomLeads = (scoped || active).filter(r=>{
+    const key = attemptMember(r)?.participant || r.participant || r.id;
+    if (!key || !owned.includes(r) || seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+  const hasNativeAssignment = roomLeads.some(r=>r.role !== 'lead');
+  put('lead-scope', () => hasNativeAssignment ? choice('Lead와 직접 배정','Leads and direct assignments') : t('main.roomLead'));
   const dot = el('work-dot');
-  dot.hidden = !roomLeads.length;
+  el('roster-open').hidden = dot.hidden = !roomLeads.length;
   put(dot, () => roomLeads.length ? formatCount(roomLeads.length) : '');
   put('lead-count', () => roomLeads.length ? ' (' + formatCount(roomLeads.length) + ')' : '');
   if (!roomLeads.length) {
-    cards.append(node('p', () => scoped
-      ? choice('조회된 Lead 기록 없음','No Lead records in this view')
-      : t(partial ? 'lead.unseen' : 'lead.none'), 'muted'));
+    cards.append(node('p',message(partial ? 'lead.unseen' : 'lead.none'),'muted'));
     return;
   }
   for (const lead of roomLeads) {
-    const member = members.find(m => m.room === lead.room && m.participant === lead.participant);
+    const member = attemptMember(lead);
     const card = member ? action('',() => selectMember(member,card)) : node('article','');
     card.className = 'lead';
-    const assignee = providerName(lead.provider) + ' Lead';
+    const assignee = () => assignmentLabel(lead);
     const avatar = node('span',''); paintAvatar(avatar,lead);
     const text = node('span','','work-title');
-    const task = attemptTitle(lead) || lead.id;
-    text.append(node('strong',assignee),node('small',() => dots(task || t('lead.taskUnknown'),dateLabel(lead.updated),readOnly && lead.room)));
+    const item = workData?.byId.get(lead.task);
+    text.append(node('strong',assignee),node('small',() => dots(workTitle(item), item?.result && choice(...resultStates[item.result]))));
     const state = stateChip(lead.state, {extraClass: 'lead-state'});
     card.append(avatar,text,state);
     if (member) {
-      putAttr(card,'aria-label',() => t('lead.aria',{assignee,task:task || '',p:member.participant}));
+      putAttr(card,'aria-label',() => t('lead.aria',{assignee:assignee(),task:workTitle(item)}));
       const arrow = node('span','›','arrow'); arrow.setAttribute('aria-hidden','true'); card.append(arrow);
     }
-    const children = leadChildren(records,lead);
+    const children = leadChildren(records,owned,lead,Boolean(scoped));
     if (!children.length) { cards.append(card); continue; }
     const section = document.createElement('div'), disclosure = node('details','','lead-group');
     const key = JSON.stringify([lead.room,lead.participant || lead.id]);
@@ -3331,9 +3329,9 @@ function paintLeadTree(d) {
     const rows = node('div','','lead-children');
     for (const [attempt,worker] of children) {
       const item = workData?.byId.get(attempt.task);
-      const row = item ? taskRow({...item,state:attempt.state || item.state},'lead-'+attempt.id,workerLabel(worker,attempt)) : node('div','','task-row');
-      if (!item) row.append(node('strong',()=>attemptTitle(attempt) || workerLabel(worker,attempt)),stateChip(attempt.state),
-        node('small',()=>workerLabel(worker,attempt)));
+      const label = () => worker || attempt.role === 'worker' ? providerName(worker?.provider || attempt.provider) + ' Worker' : choice('하위 실행','Subordinate run');
+      const row = item ? taskRow({...item,state:attempt.state || item.state},'lead-'+attempt.id,label) : node('div','','task-row');
+      if (!item) row.append(node('strong',label), stateChip(attempt.state));
       rows.append(row);
     }
     const count = node('summary',()=>choice(formatCount(children.length)+'개 하위 기록',formatCount(children.length)+' subordinate records'));
@@ -3341,16 +3339,17 @@ function paintLeadTree(d) {
   }
 }
 
-function attemptTitle(row) { return workData?.byId.get(row?.task)?.title || row?.task || row?.tool; }
-function workerLabel(member,row) { return dots(providerName(member?.provider || row.provider),member?.participant || row.participant); }
-function leadChildren(records,lead) {
-  const parents = new Set(records.filter(row => isLead(row) && row.room === lead.room &&
-    (row === lead || (lead.participant && row.participant === lead.participant))).map(row => row.id).filter(Boolean));
+function workTitle(item) { return item?.title && item.title !== item.id ? item.title.split('\n')[0] : t('lead.taskUnknown'); }
+function leadChildren(records,owned,lead,scoped) {
+  const person = attemptMember(lead)?.participant || lead.participant;
+  const parents = new Set(owned.filter(r=>r===lead || (person && (attemptMember(r)?.participant || r.participant)===person)).map(r=>r.id).filter(Boolean));
   const rows = new Map();
   for (const row of records) {
-    if (!row.id || row.id === lead.id || (row.room && row.room !== lead.room) || rows.has(row.id) || isMain(row) || isLead(row)) continue;
-    const worker = row.room && row.participant && members.find(m=>m.room===row.room && m.participant===row.participant && m.role==='worker');
-    if (row.parentAttempt ? parents.has(row.parentAttempt) : worker?.parent && worker.parent===lead.participant) rows.set(row.id,[row,worker]);
+    if (!row.id || row.id === lead.id || (row.room && row.room !== lead.room) || rows.has(row.id) || isMain(row) || row.role === 'lead') continue;
+    const worker = attemptMember(row.room || !scoped || !row.parentAttempt ? row : {...row,room:lead.room});
+    if (worker?.provider && row.provider && providerName(worker.provider) !== providerName(row.provider)) continue;
+    if ((row.role && row.role !== 'worker') || (worker && (worker.role !== 'worker' || worker.joined === false || (worker.parent && worker.parent !== person)))) continue;
+    if (row.parentAttempt ? (row.room || scoped) && parents.has(row.parentAttempt) : worker?.parent && worker.parent===person) rows.set(row.id,[row,worker]);
   }
   return [...rows.values()];
 }
@@ -3412,7 +3411,13 @@ function renderScratch(history) {
 
 function renderActivity(d){
   renderScratch(d.managedScratch);
-  const attempts=d.attempts||[],state=d.commandStatus;
+  const recent = d.attempts || [], keys = new Set(recent.filter(a=>a.id).map(a=>JSON.stringify([a.room,a.id])));
+  const extended = [...(d.conversationAttempts || []),...(d.activeAttempts || [])].filter(a=>{
+    const key = JSON.stringify([a.room,a.id]);
+    if (!a.id || keys.has(key)) return false;
+    keys.add(key); return true;
+  });
+  const attempts = [...recent,...extended], state=d.commandStatus;
   put('core-state',()=>dots(t('act.planned',{n:formatCount(d.tasks)}),d.taskStatus&&stateLabel(d.taskStatus),d.degraded===true&&t('act.partialRuntime')));
   put('command-state',()=>state?.available?[t('act.attempts',{n:formatCount(state.total)}),t('act.open',{n:formatCount(state.active)}),t('act.executing',{n:formatCount(state.executing)}),...Object.entries(state.byState||{}).map(([k,v])=>stateLabel(k)+' '+formatCount(v))].join(' · '):t('act.unknown'));
   const timeline=el('command-list');timeline.replaceChildren();
@@ -3430,8 +3435,8 @@ function renderActivity(d){
   const repoMembers=(d.activeAttempts||[]).filter(r=>isMain(r)||isLead(r));
   if(d.main&&!repoMembers.some(r=>r.id===d.main.id&&r.tool===d.main.tool&&r.room===d.main.room&&r.provider===d.main.provider)) repoMembers.unshift(d.main);
   for(const m of repoMembers){
-    const item=node('li','','entry'),role=m===d.main||isMain(m)?'Main':'Lead',name=()=>names[m.provider]||m.provider||t('providerUnknown');
-    item.append(node('span',()=>dots(name()+' '+role,m.room||t('act.roomUnknown'),m.task)),stateChip(m.state));team.append(item);
+    const item=node('li','','entry'),label=()=>m===d.main||isMain(m)?providerName(m.provider)+' Main':assignmentLabel(m);
+    item.append(node('span',()=>dots(label(),m.room||t('act.roomUnknown'),m.task)),stateChip(m.state));team.append(item);
   }
   if(!repoMembers.length) team.append(node('li',message('act.noTeam'),'muted'));
   const activity=el('activity');activity.replaceChildren();
@@ -3447,11 +3452,9 @@ function renderActivity(d){
     if(Number.isFinite(stamp)) label.append(node('small',()=>new Date(stamp).toLocaleString(locale())));
     item.append(label,stateWithExit(o.status,o.exit));return item;
   };
-  const operations=el('operations'),latestOps=el('latest-operations'),opRows=d.operations||[];
-  operations.replaceChildren();latestOps.replaceChildren();
+  const operations=el('operations'),opRows=d.operations||[];
+  operations.replaceChildren();
   for(const o of opRows) operations.append(operationRow(o));
-  for(const o of opRows.slice(0,3)) latestOps.append(operationRow(o));
-  latestOps.hidden=!opRows.length;
   if(!opRows.length) operations.append(node('li',()=>t(reviews?.available===true&&!(d.operationsTrimmed>0)?'act.opsNone':'act.opsUnknown'),'muted'));
 }
 
@@ -3464,7 +3467,9 @@ function renderApprovals(rows, incomplete) {
   put('approvals-heading', () => rows.length ? t('appr.count',{n:rows.length}) : t('appr.list'));
   const list = el('approvals');
   const expected = generation;
+  let focusedId;
   for (const child of list.children || []) {
+    if (child.children[0] === document.activeElement) focusedId = child._approvalId;
     if (child._approvalId && Boolean(child.open) !== child._initialOpen) {
       approvalState.set(child._approvalId, child.open ? 'open' : 'closed');
     }
@@ -3494,27 +3499,36 @@ function renderApprovals(rows, incomplete) {
     body.append(node('p', () => row.action === 'Main scope decision' ? t('appr.scope') : t('appr.action',{v:row.action})));
     body.append(node('p', () => t('appr.target',{v:row.object})));
     if (row.sender) body.append(node('p', () => t('appr.sender',{v:row.sender})));
-    body.append(node('code', row.id + ' · v' + row.version + ' · ' + row.digest));
     const buttons = node('div', '', 'cluster');
     for (const decision of ['approve', 'deny']) {
       const button = node('button', () => t(decision === 'approve' ? 'appr.approve' : 'appr.deny'), decision === 'approve' ? 'review' : '');
       button.type = 'button';
       button.disabled = busy;
-      button.addEventListener('click', () => mutate(
-        () => tool('oms_decide_approval', {id:row.id, version:row.version, digest:row.digest, decision}),
-        result => {
-          if (result?.id !== row.id || result.decision !== decision || result.digest !== row.digest) {
-            throw uiError('appr.mismatch');
-          }
-          put('receipt', () => t(decision === 'approve' ? 'appr.approved' : 'appr.denied',{id:result.id}));
-          updateContext({project:project || null, room:row.object, status:result.decision});
-        }, expected
-      ));
+      button.addEventListener('click', async () => {
+        const hadFocus = document.activeElement === button;
+        let acknowledged = false;
+        await mutate(
+          () => tool('oms_decide_approval', {id:row.id, version:row.version, digest:row.digest, decision}),
+          result => {
+            if (result?.id !== row.id || result.decision !== decision || result.digest !== row.digest) {
+              throw uiError('appr.mismatch');
+            }
+            acknowledged = true;
+            put('receipt', decision === 'approve' ? 'appr.approved' : 'appr.denied');
+            updateContext({project:project || null, room:row.object, status:result.decision});
+          }, expected
+        );
+        if (!acknowledged || !hadFocus || expected !== generation || disposed || currentTab !== 'overview' || taskOpen || el('view').hidden) return;
+        if (document.activeElement !== document.body && document.activeElement !== button) return;
+        const next = Array.from(list.children).find(child => child._approvalId && child._approvalId !== row.id);
+        (next?.children[0] || el(card.hidden ? 'now-heading' : 'approvals-heading')).focus();
+      });
       if (!readOnly) buttons.append(button);
     }
     body.append(buttons);
     details.append(summary, body);
     list.append(details);
+    if (key && key === focusedId && currentTab === 'overview' && !taskOpen) summary.focus({preventScroll:true});
   }
 }
 
@@ -3637,7 +3651,7 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw uiError('openApp');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.5'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.6'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || {k:'surf.unknown'};
       hostLocale = typeof info?.hostContext?.locale === 'string' ? info.hostContext.locale : '';
@@ -3695,8 +3709,15 @@ async function loadStatus(expected, recover = true) {
     const registry = await tool('oms_list_projects', {}, expected);
     readOnly = registry.structuredContent?.readOnly === true;
     el('launcher').hidden = el('git-new').hidden = readOnly;
-    const aliases = registry.structuredContent?.projects;
-    if (!Array.isArray(aliases)) throw uiError('status.badList');
+    const {projects:aliases,binding} = registry.structuredContent || {};
+    if (!Array.isArray(aliases) || (binding !== undefined &&
+        (!['catalog','pinned','cwd','unbound'].includes(binding) || (binding === 'catalog') !== Boolean(aliases.length)))) throw uiError('status.badList');
+    if (binding === 'unbound') {
+      project = ''; clearProject();
+      el('scope').hidden = true; el('source-details').hidden = false;
+      connectionState = 'project.unbound'; hostFacts(); put('status','project.unbound');
+      return;
+    }
     const selected = chooseProject(aliases);
     profileKnown = typeof registry.structuredContent.readOnly === 'boolean';
     checkedAt = new Date().toISOString(); connectionState = 'conn.selectProject'; hostFacts();
@@ -3706,7 +3727,7 @@ async function loadStatus(expected, recover = true) {
       el('view').className = 'waiting-dashboard'; el('view').hidden = false;
     }
     loadWork(true);
-    readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit);
+    if (currentTab === 'relations') readGraph(graphTrail.at(-1)?.id,graphQuery,graphLimit);
     if (project && (contextKey == null || contextKey === 'null')) updateContext({project});
     const result = await tool('oms_panel_snapshot', {}, expected);
     const dashboard = result.structuredContent?.dashboard || result._meta?.dashboard;
@@ -3714,8 +3735,6 @@ async function loadStatus(expected, recover = true) {
     checkedAt = new Date().toISOString(); connectionReady = true; connectionState = 'conn.loaded'; hostFacts();
     el('view').className = '';
     render(dashboard);
-    if (el('source-details').open) loadConnection(connectionPage);
-    if (el('provider-options').open) loadProviderOptions();
     renderConversation(dashboard);
     renderActivity(dashboard);
     loaded.clear();
@@ -3756,7 +3775,7 @@ async function loadStatus(expected, recover = true) {
     for (const id of ['updated','room','participant','main-state','main-scope','branch','provider-rows']) el(id).replaceChildren();
     jobs.delete('lead-providers'); providerData = undefined; el('provider-status').textContent = '';
     put('connection-status','conn.checkPermissions');
-    resetExplorer(); updateContext(null); el('view').hidden = true;
+    resetExplorer(); updateContext(null); el('view').hidden = true; el('source-details').hidden = false;
     el('status').className = 'error';
     put('status', () => error.message);
   }

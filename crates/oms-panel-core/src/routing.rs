@@ -282,6 +282,30 @@ enum ResolvedEffort<'a> {
     None,
 }
 
+pub(crate) fn resolve_route_model(
+    evidence: Option<&ProviderEvidence>,
+    provider: &str,
+    model: &str,
+    effort: &str,
+) -> std::result::Result<String, &'static str> {
+    if provider != "antigravity" || native_model::fixed_effort_model(provider, model).is_some() {
+        return Ok(model.to_owned());
+    }
+    if let Some(evidence) = evidence
+        && let Some(effort_map) = evidence.selectors.get(model).filter(|map| !map.is_empty())
+    {
+        let normalized = native_model::normalized_effort(effort);
+        return effort_map
+            .get(normalized)
+            .cloned()
+            .ok_or("model_effort_unavailable");
+    }
+    if native_model::is_agy_suffixed_selector(model) {
+        return Ok(model.to_owned());
+    }
+    Err("catalog_selector_unknown")
+}
+
 fn resolved_effort_support(
     evidence: Option<&ProviderEvidence>,
     provider: &str,
@@ -348,26 +372,15 @@ impl ProviderEvidence {
     pub(crate) fn exact_model_efforts(&self, model: &str) -> Option<Vec<String>> {
         match self.resolve_effort(model) {
             ResolvedEffort::Direct(scale) => Some(scale.to_vec()),
-            ResolvedEffort::Selector { scale, .. } => scale.map(<[String]>::to_vec),
-            ResolvedEffort::None => None,
-        }
-    }
-
-    pub(crate) fn applicable_efforts(
-        &self,
-        model: &str,
-        account: Option<&str>,
-    ) -> Option<&[String]> {
-        if !self.scope_applies(account) {
-            return None;
-        }
-        match self.resolve_effort(model) {
-            ResolvedEffort::Direct(scale) => Some(scale),
             ResolvedEffort::Selector {
                 scale: Some(scale),
                 effort,
-            } if scale.iter().any(|value| value == effort) => Some(std::slice::from_ref(effort)),
-            _ => None,
+            } => Some(if scale.iter().any(|value| value == effort) {
+                vec![effort.clone()]
+            } else {
+                vec![]
+            }),
+            ResolvedEffort::Selector { scale: None, .. } | ResolvedEffort::None => None,
         }
     }
 
@@ -823,7 +836,9 @@ pub fn model_family(provider: &str, model: &str) -> Result<&'static str> {
     if base.starts_with("gpt-") || base.starts_with("o3") || base.starts_with("o4") {
         return Ok("openai");
     }
-    if base.starts_with("claude-") {
+    if base.starts_with("claude-")
+        || (provider == "claude" && matches!(model, "opus" | "sonnet" | "fable" | "haiku"))
+    {
         return Ok("anthropic");
     }
     if base.starts_with("gemini-") {
@@ -879,6 +894,37 @@ pub fn routable_route_model(
         .collect();
     let mut candidates: Vec<_> = families.iter().filter(|(_, f)| f.0 == family).collect();
     if provider == "antigravity" {
+        if !native_model::is_agy_suffixed_selector(configured) {
+            let base_families: Vec<(&str, (String, Vec<u64>))> = catalog
+                .iter()
+                .filter(|v| native_model::fixed_effort_model(provider, v).is_none())
+                .filter_map(|v| {
+                    let base = native_model::agy_base_model(v);
+                    route_family(provider, base).map(|f| (base, f))
+                })
+                .collect();
+            let mut base_candidates: Vec<_> = base_families
+                .iter()
+                .filter(|(_, f)| f.0 == family)
+                .collect();
+            if base_candidates.is_empty() {
+                require(
+                    base_families
+                        .iter()
+                        .map(|(_, f)| &f.0)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        == 1,
+                    "configured family absent from routable catalog",
+                )?;
+                base_candidates = base_families.iter().collect();
+            }
+            return base_candidates
+                .into_iter()
+                .max_by(|a, b| a.1.1.cmp(&b.1.1).then(a.0.cmp(b.0)))
+                .map(|(base, _)| (*base).to_owned())
+                .ok_or_else(|| Error::new("Antigravity requires a routable catalog"));
+        }
         if candidates.is_empty() {
             let level = family.rsplit('-').next();
             candidates = families
@@ -1139,10 +1185,7 @@ fn allocate_ranked(
             && inputs.preferred.as_ref().is_some_and(|p| &c.provider != p)
         {
             Some("provider_pin")
-        } else if !inputs.explicit_target
-            && role != "security-auditor"
-            && c.model == "claude-fable-5-1"
-        {
+        } else if !inputs.explicit_target && role != "security-auditor" && is_fable_route(c) {
             Some("explicit_model_required")
         } else if access == "write" && c.access.as_deref() == Some("read") {
             Some("read_only_route")
@@ -1191,6 +1234,17 @@ fn allocate_ranked(
             }
         };
         if inputs.requested_model.is_none() {
+            if c.provider == "antigravity"
+                && native_model::fixed_effort_model(&c.provider, &c.model).is_none()
+                && !native_model::is_agy_suffixed_selector(&c.model)
+                && inputs
+                    .provider_evidence
+                    .get(&c.provider)
+                    .is_none_or(|ev| ev.selectors.is_empty())
+            {
+                exclude("catalog_selector_unknown");
+                continue;
+            }
             let catalog = inputs
                 .catalogs
                 .get(&c.provider)
@@ -1212,15 +1266,32 @@ fn allocate_ranked(
         }
         // Apply eligibility to the resolved identity as well. A new catalog
         // revision of Fable cannot escape the existing explicit-use restriction.
-        if !(inputs.explicit_target || role == "security-auditor")
-            && route_family(&c.provider, &c.model)
-                .is_some_and(|f| c.provider == "claude" && f.0 == "fable")
-        {
+        if !(inputs.explicit_target || role == "security-auditor") && is_fable_route(&c) {
             exclude("explicit_model_required");
             continue;
         }
         if role == "researcher" {
             c.effort = "low".into();
+        }
+        match resolve_route_model(
+            inputs.provider_evidence.get(&c.provider),
+            &c.provider,
+            &c.model,
+            &c.effort,
+        ) {
+            Ok(model) => c.model = model,
+            Err(reason) => {
+                exclude(reason);
+                continue;
+            }
+        }
+        if valid_route(&c).is_err() {
+            exclude("resolved_model_or_effort_incompatible");
+            continue;
+        }
+        if daily_capped(&inputs.status, &c) {
+            exclude("model_daily_cap");
+            continue;
         }
         if let Some(row) = trace.as_deref_mut() {
             row.resolved_model = Some(c.model.clone());
@@ -1558,10 +1629,30 @@ fn provider_weekly_reading(status: &Value, provider: &str, now: u64) -> QuotaRea
     .find_map(|key| row.get(key).filter(|value| !value.is_null()));
     weekly_reading(row, now, max_age, observed)
 }
+fn is_fable_route(c: &Candidate) -> bool {
+    c.provider == "claude" && route_family(&c.provider, &c.model).is_some_and(|f| f.0 == "fable")
+}
+
 fn daily_capped(status: &Value, c: &Candidate) -> bool {
-    status[&c.provider]["daily_cap"][&c.model]
-        .as_str()
-        .is_some_and(|v| crate::now().starts_with(v) && v.len() == 10)
+    let Some(caps) = status[&c.provider]["daily_cap"].as_object() else {
+        return false;
+    };
+    let today = crate::now();
+    let is_today = |v: &Value| {
+        v.as_str()
+            .is_some_and(|date| date.len() == 10 && today.starts_with(date))
+    };
+    if caps.get(&c.model).is_some_and(is_today) {
+        return true;
+    }
+    let Some((family, _)) = route_family(&c.provider, &c.model) else {
+        return false;
+    };
+    caps.iter().any(|(capped_model, value)| {
+        is_today(value)
+            && route_family(&c.provider, capped_model)
+                .is_some_and(|(capped_family, _)| capped_family == family)
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2161,7 +2252,7 @@ mod tests {
         inputs.provider_evidence.insert(
             "claude".into(),
             ProviderEvidence::from_catalog_row(&json!({
-                "model_effort_scales":{"claude-sonnet-5-6":["low","medium"]},
+                "model_effort_scales":{"sonnet":["low","medium"]},
                 "capability_evidence":{"schema":1,"source":"fixture","account_alias":"limited"}
             }))
             .unwrap(),
@@ -2336,11 +2427,8 @@ mod tests {
         let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
         let snapshot = route.snapshot.as_ref().unwrap();
         assert_eq!(snapshot.policy_schema, Some(2));
-        assert_eq!(
-            snapshot.configured.as_ref().unwrap().model,
-            "claude-sonnet-5-5"
-        );
-        assert_eq!(snapshot.resolved.model, "claude-sonnet-5-6");
+        assert_eq!(snapshot.configured.as_ref().unwrap().model, "sonnet");
+        assert_eq!(snapshot.resolved.model, "sonnet");
         assert_eq!(snapshot.requested_model, None);
         assert_eq!(snapshot.served_model, None);
         assert_eq!(snapshot.served_effort, None);
@@ -2348,7 +2436,8 @@ mod tests {
         assert_eq!(snapshot.catalog.reported_probe.as_deref(), Some("failed"));
         assert_eq!(snapshot.catalog.catalog_age_seconds, Some(86401));
         assert_eq!(snapshot.capabilities.probe_age_seconds, Some(172801));
-        assert_eq!(snapshot.catalog.resolved_present, Some(true));
+        assert_eq!(snapshot.catalog.resolved_present, Some(false));
+        assert_eq!(snapshot.model_family.as_deref(), Some("anthropic"));
         assert_eq!(snapshot.family_evidence, "identifier_derived_unverified");
         assert_eq!(snapshot.execution_profile, None);
         assert_eq!(snapshot.selected_account, None);
@@ -2359,6 +2448,26 @@ mod tests {
             snapshot.capabilities.freshness,
             CapabilityFreshness::Unknown
         );
+        // Full-id Claude routes still upgrade against the catalog and preserve stored snapshot bytes.
+        let mut pinned_policy = policy.clone();
+        pinned_policy.tiers.get_mut("routine").unwrap()[1].model = "claude-sonnet-5-5".into();
+        let full_route = allocate(
+            &pinned_policy,
+            "codex",
+            "worker",
+            None,
+            "read",
+            None,
+            &inputs,
+        )
+        .unwrap();
+        let full_snapshot = full_route.snapshot.as_ref().unwrap();
+        assert_eq!(
+            full_snapshot.configured.as_ref().unwrap().model,
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(full_snapshot.resolved.model, "claude-sonnet-5-6");
+        assert_eq!(full_snapshot.catalog.resolved_present, Some(true));
         let saved = serde_json::to_value(snapshot).unwrap();
         let old_digest = route.snapshot_sha256().unwrap();
         inputs.requested_model = Some("claude-sonnet-5-5".into());
@@ -2389,9 +2498,9 @@ mod tests {
                 .policy_sha256
         );
         let mut loaded: Route =
-            serde_json::from_value(serde_json::to_value(&route).unwrap()).unwrap();
+            serde_json::from_value(serde_json::to_value(&full_route).unwrap()).unwrap();
         loaded.freeze_snapshot().unwrap();
-        assert_eq!(loaded.snapshot, route.snapshot);
+        assert_eq!(loaded.snapshot, full_route.snapshot);
         // Captured from 30c1a329's existing canonical fixture, with its read
         // time pinned to 1000. New unknown fields must preserve stored bytes.
         let previous = concat!(
@@ -2511,7 +2620,7 @@ mod tests {
         inputs.provider_evidence.insert(
             "claude".into(),
             ProviderEvidence::from_catalog_row(&json!({
-                "model_effort_scales":{"claude-sonnet-5-6":["low","medium"]},
+                "model_effort_scales":{"sonnet":["low","medium"]},
                 "effort_values":["low","medium","high"], "catalog_probe":"ok"
             }))
             .unwrap(),
@@ -2545,22 +2654,61 @@ mod tests {
             route.snapshot.unwrap().capabilities.effort_support,
             EffortSupport::ReportedSupported
         );
+        // Daily cap matches by family across full ids and aliases.
         inputs.status =
             json!({"claude":{"daily_cap":{"claude-sonnet-5-6":crate::now()[..10].to_owned()}}});
         assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.status = json!({"claude":{"daily_cap":{"sonnet":crate::now()[..10].to_owned()}}});
+        inputs.requested_model = Some("claude-sonnet-5-6".into());
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.requested_model = None;
         inputs.status = Value::Null;
         inputs
             .provider_evidence
             .get_mut("claude")
             .unwrap()
             .model_effort_scales
-            .insert("claude-sonnet-5-6".into(), vec!["native-fixed".into()]);
+            .insert("sonnet".into(), vec!["native-fixed".into()]);
         assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
         inputs.requested_effort = Some("max".into());
         assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
         inputs.requested_effort = None;
-        inputs.requested_model = Some("claude-fable-5-2".into());
         inputs.provider_evidence.clear();
+
+        // Researcher accepts the bundled `haiku` alias and keeps low effort.
+        let researcher =
+            allocate(&policy, "codex", "researcher", None, "read", None, &inputs).unwrap();
+        assert_eq!(researcher.candidate.model, "haiku");
+        assert_eq!(researcher.candidate.effort, "low");
+
+        // Fable alias and full ids are both excluded without an explicit target.
+        let mut fable_preview = AllocationEvidence::default();
+        assert!(
+            allocate(
+                &policy,
+                "codex",
+                "worker",
+                Some("frontier"),
+                "read",
+                None,
+                &inputs
+            )
+            .is_err()
+        );
+        inputs.requested_model = Some("fable".into());
+        assert!(
+            allocate(
+                &policy,
+                "codex",
+                "worker",
+                Some("frontier"),
+                "read",
+                None,
+                &inputs
+            )
+            .is_err()
+        );
+        inputs.requested_model = Some("claude-fable-5-2".into());
         assert!(
             allocate(
                 &policy,
@@ -2585,6 +2733,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit.candidate.model, "claude-fable-5-2");
+        inputs.requested_model = Some("fable".into());
+        let explicit_alias = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("frontier"),
+            "read",
+            None,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(explicit_alias.candidate.model, "fable");
         inputs.requested_model = None;
         inputs.explicit_target = false;
         inputs
@@ -2601,11 +2761,36 @@ mod tests {
         )
         .unwrap();
         let snapshot = auditor.snapshot.unwrap();
-        assert_eq!(snapshot.configured.unwrap().model, "claude-fable-5-1");
-        assert_eq!(snapshot.resolved.model, "claude-fable-5-2");
+        assert_eq!(snapshot.configured.unwrap().model, "fable");
+        assert_eq!(snapshot.resolved.model, "fable");
         assert_eq!(snapshot.served_model, None);
+        // Bundled `fable` is also excluded on a non-auditor role preview with explicit_model_required.
+        assert!(
+            allocate_preview(
+                &policy,
+                "codex",
+                "worker",
+                "read",
+                &RoutingInputs {
+                    installed: Some(["claude".into()].into()),
+                    requested_model: Some("fable".into()),
+                    ..Default::default()
+                },
+                &mut fable_preview,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fable_preview
+                .candidates
+                .iter()
+                .find(|candidate| candidate.provider == "claude")
+                .unwrap()
+                .excluded_by,
+            Some("explicit_model_required")
+        );
 
-        // Antigravity selector-mapped effort scales vs Codex model-keyed scales.
+        // Antigravity base route + effort -> exact selector via `selectors`, vs suffixed & Codex.
         let agy_evidence = ProviderEvidence::from_catalog_row(&json!({
             "model_effort_scales": {
                 "gemini-4-carbon": ["low", "medium", "high"],
@@ -2639,7 +2824,7 @@ mod tests {
                     "gemini-4-hydrogen-high".into(),
                 ],
             )]),
-            provider_evidence: BTreeMap::from([("antigravity".into(), agy_evidence)]),
+            provider_evidence: BTreeMap::from([("antigravity".into(), agy_evidence.clone())]),
             preferred: Some("antigravity".into()),
             explicit_target: true,
             ..Default::default()
@@ -2658,12 +2843,121 @@ mod tests {
         assert_eq!(agy_route.candidate.effort, "high");
         let agy_snapshot = agy_route.snapshot.as_ref().unwrap();
         assert_eq!(
+            agy_snapshot.configured.as_ref().unwrap().model,
+            "gemini-4-carbon"
+        );
+        assert_eq!(agy_snapshot.resolved.model, "gemini-4-carbon-high");
+        assert_eq!(
             agy_snapshot.capabilities.effort_support,
             EffortSupport::ReportedSupported
         );
         assert_eq!(
             agy_snapshot.capabilities.exact_model_efforts,
-            Some(vec!["low".into(), "medium".into(), "high".into()])
+            Some(vec!["high".into()])
+        );
+
+        // Explicit base model + effort resolves to exact selector; snapshot records both.
+        agy_inputs.requested_model = Some("gemini-4-carbon".into());
+        agy_inputs.requested_effort = Some("medium".into());
+        let base_requested = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("deep"),
+            "read",
+            None,
+            &agy_inputs,
+        )
+        .unwrap();
+        assert_eq!(base_requested.candidate.model, "gemini-4-carbon-medium");
+        assert_eq!(base_requested.candidate.effort, "medium");
+        let base_snapshot = base_requested.snapshot.as_ref().unwrap();
+        assert_eq!(
+            base_snapshot.requested_model.as_deref(),
+            Some("gemini-4-carbon")
+        );
+        assert_eq!(base_snapshot.resolved.model, "gemini-4-carbon-medium");
+        assert_eq!(
+            base_snapshot.capabilities.effort_support,
+            EffortSupport::ReportedSupported
+        );
+        assert_eq!(
+            base_snapshot.capabilities.exact_model_efforts,
+            Some(vec!["medium".into()])
+        );
+
+        // Base model with an effort missing from `selectors` is excluded with `model_effort_unavailable`.
+        agy_inputs.requested_model = Some("gemini-4-neon".into());
+        agy_inputs.requested_effort = Some("medium".into());
+        let mut missing_effort_preview = AllocationEvidence::default();
+        assert!(
+            allocate_preview(
+                &policy,
+                "codex",
+                "scholar",
+                "read",
+                &agy_inputs,
+                &mut missing_effort_preview,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            missing_effort_preview
+                .candidates
+                .iter()
+                .find(|candidate| candidate.provider == "antigravity")
+                .unwrap()
+                .excluded_by,
+            Some("model_effort_unavailable")
+        );
+
+        // Base route without catalog evidence is excluded with `catalog_selector_unknown`,
+        // while a suffixed route behaves as before.
+        let no_evidence_base = RoutingInputs {
+            installed: Some(["antigravity".into()].into()),
+            catalogs: agy_inputs.catalogs.clone(),
+            preferred: Some("antigravity".into()),
+            explicit_target: true,
+            ..Default::default()
+        };
+        let mut no_evidence_preview = AllocationEvidence::default();
+        assert!(
+            allocate_preview(
+                &policy,
+                "codex",
+                "scholar",
+                "read",
+                &no_evidence_base,
+                &mut no_evidence_preview,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            no_evidence_preview
+                .candidates
+                .iter()
+                .find(|candidate| candidate.provider == "antigravity")
+                .unwrap()
+                .excluded_by,
+            Some("catalog_selector_unknown")
+        );
+        let mut no_evidence_suffixed = no_evidence_base;
+        no_evidence_suffixed.requested_model = Some("gemini-4-carbon-high".into());
+        no_evidence_suffixed.requested_effort = Some("high".into());
+        let suffixed_no_ev = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("deep"),
+            "read",
+            None,
+            &no_evidence_suffixed,
+        )
+        .unwrap();
+        assert_eq!(suffixed_no_ev.candidate.model, "gemini-4-carbon-high");
+        assert_eq!(
+            suffixed_no_ev.snapshot.unwrap().capabilities.effort_support,
+            EffortSupport::Unknown
         );
 
         // Selector suffix disagreeing with requested effort is ReportedUnsupported and refused.
@@ -2711,7 +3005,7 @@ mod tests {
         );
         assert_eq!(
             mismatched_snapshot.capabilities.exact_model_efforts,
-            Some(vec!["low".into(), "high".into()])
+            Some(vec!["high".into()])
         );
         mismatched.snapshot = Some(mismatched_snapshot);
         assert!(mismatched.freeze_snapshot().is_err());
@@ -2737,7 +3031,7 @@ mod tests {
         assert_eq!(unknown_snapshot.capabilities.exact_model_efforts, None);
 
         // Scoped capability_evidence still blocks applying selector effort scales.
-        agy_inputs.requested_model = None;
+        agy_inputs.requested_model = Some("gemini-4-carbon-high".into());
         agy_inputs.requested_effort = Some("low".into());
         agy_inputs
             .provider_evidence
@@ -2768,7 +3062,7 @@ mod tests {
         );
         assert_eq!(
             scoped_snapshot.capabilities.exact_model_efforts,
-            Some(vec!["low".into(), "medium".into(), "high".into()])
+            Some(vec!["high".into()])
         );
 
         // Codex model-keyed scale remains unchanged.

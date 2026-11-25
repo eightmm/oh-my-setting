@@ -605,13 +605,13 @@ fn council_catalog_shapes() {
         {"provider":"pi", "present":true, "catalog_probe":"ok", "routable":[]},
         {"provider":"claude", "present":true, "catalog_probe":"unsupported", "catalog_models":[]},
         {"provider":"codex", "present":true, "catalog_models":["gpt-6.1-terra", "gpt-6.2-terra"], "catalog_probe":"failed", "catalog_age_seconds":86401, "snapshot_age_seconds":172801, "model_effort_scales":{"gpt-6.1-terra":["low"],"gpt-6.2-terra":["medium"]}},
-        {"provider":"antigravity", "present":true, "routable":["gemini-4-carbon-high\tGemini Carbon High"]}
+        {"provider":"antigravity", "present":true, "routable":["gemini-4-carbon-high\tGemini 4 Carbon (High)"], "model_effort_scales":{"gemini-4-carbon":["high"]}, "selectors":{"gemini-4-carbon":{"high":"gemini-4-carbon-high"}}}
     ]});
     *fake.catalog.borrow_mut() = Some(catalog.clone());
     let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
     assert_eq!(
         plan["argv"][1],
-        "claude:effort=medium:model=claude-sonnet-5-5,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=high:model=gemini-4-carbon-high"
+        "claude:effort=medium:model=sonnet,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=high:model=gemini-4-carbon-high"
     );
     assert_eq!(plan["families"], 3);
     assert_eq!(plan["primary_calls"], 6);
@@ -631,20 +631,69 @@ fn council_catalog_shapes() {
         plan["catalog_evidence"][1]["effort_support"],
         "reported_supported"
     );
+    assert_eq!(
+        plan["catalog_evidence"][2]["resolved_model"],
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        plan["catalog_evidence"][2]["effort_support"],
+        "reported_supported"
+    );
+
+    // Council effort_support agrees with routing for a mismatched suffixed selector,
+    // even when model_effort_scales is absent.
+    let mut mismatched_selector_policy = policy.clone();
+    mismatched_selector_policy.council.extra[0].model = "gemini-4-neon-high".into();
+    mismatched_selector_policy.council.extra[0].effort = "low".into();
+    let mut mismatched_catalog = catalog.clone();
+    mismatched_catalog["providers"][3] = json!({
+        "provider":"antigravity",
+        "present":true,
+        "routable":["gemini-4-neon-high\tGemini 4 Neon (High)"],
+        "selectors":{"gemini-4-neon":{"high":"gemini-4-neon-high"}}
+    });
+    *fake.catalog.borrow_mut() = Some(mismatched_catalog);
+    assert_eq!(
+        review::council_plan(
+            Path::new("."),
+            &request,
+            &mismatched_selector_policy,
+            &fake,
+            &STOP
+        )
+        .unwrap_err()
+        .message,
+        "council: antigravity seat unavailable: resolved model does not report support for council reasoning effort"
+    );
+    request.allow_partial = true;
+    let partial_mismatch = review::council_plan(
+        Path::new("."),
+        &request,
+        &mismatched_selector_policy,
+        &fake,
+        &STOP,
+    )
+    .unwrap();
+    assert_eq!(
+        partial_mismatch["catalog_evidence"][2]["effort_support"],
+        "reported_unsupported"
+    );
+    assert_eq!(partial_mismatch["skipped"][1]["provider"], "antigravity");
+    request.allow_partial = false;
 
     let mut fixed = policy.clone();
     fixed.council.extra[0].model = "gemini-pro-orchestrator-argon".into();
     fixed.council.extra[0].effort.clear();
     let mut mixed = catalog.clone();
     mixed["providers"][3]["routable"] = json!([
-        "gemini-4-carbon-high\tGemini Carbon High",
+        "gemini-4-carbon-high\tGemini 4 Carbon (High)",
         "gemini-pro-orchestrator-argon\tOrchestrator Argon"
     ]);
     *fake.catalog.borrow_mut() = Some(mixed);
     let plan = review::council_plan(Path::new("."), &request, &fixed, &fake, &STOP).unwrap();
     assert_eq!(
         plan["argv"][1],
-        "claude:effort=medium:model=claude-sonnet-5-5,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=auto:model=gemini-pro-orchestrator-argon"
+        "claude:effort=medium:model=sonnet,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=auto:model=gemini-pro-orchestrator-argon"
     );
     assert_eq!(plan["seat_routes"][0]["effort"], "medium");
     assert_eq!(plan["seat_routes"][2]["effort"], "");

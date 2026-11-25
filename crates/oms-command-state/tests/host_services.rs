@@ -1094,6 +1094,15 @@ fn dashboard_and_panel_snapshot_share_observation_revision_across_cli_json_and_f
     let cli_json_1 = view_json("dashboard", repo_a.path());
     let panel_1 = panel_json(repo_a.path());
     let text_1 = view("dashboard", repo_a.path(), &[]).1;
+    assert!(text_1.lines().any(|line| line == "goal: none recorded"));
+    assert_eq!(panel_1.get("dashboard").text("goalAvailability"), "absent");
+    assert!(
+        panel_1
+            .get("dashboard")
+            .get("planProgress")
+            .get("total")
+            .is_int(0)
+    );
 
     let rev_cli_1 = cli_json_1.get("observation").text("revision").to_owned();
     let rev_panel_1 = panel_1
@@ -1195,6 +1204,20 @@ fn dashboard_and_panel_snapshot_share_observation_revision_across_cli_json_and_f
     assert_eq!(degraded_obs.get("sources").text("artifacts"), "unavailable");
     assert!(degraded_obs.text("revision").starts_with("obs-v1:"));
     assert_ne!(degraded_obs.text("revision"), rev_changed);
+    assert_eq!(degraded.get("dashboard").text("goalAvailability"), "absent");
+    fs::write(repo_b.path().join("PROJECT.md"), [0xff]).unwrap();
+    assert_eq!(
+        panel_json(repo_b.path())
+            .get("dashboard")
+            .text("goalAvailability"),
+        "unavailable"
+    );
+    let unreadable_text = view("dashboard", repo_b.path(), &[]).1;
+    assert!(
+        unreadable_text
+            .lines()
+            .any(|line| line == "goal: unavailable")
+    );
     let degraded_text = view("dashboard", repo_a.path(), &[]).1;
     assert!(
         degraded_text.contains("observation source gaps: artifacts"),

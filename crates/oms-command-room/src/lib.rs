@@ -43,13 +43,13 @@ pub use model::{
     REPEAT_AFTER, ROLES, SECOND_REMINDER_AFTER, age, member as participant, safe_room_path,
 };
 pub use model::{
+    AttemptRoom, declared_scopes, event_shape, identifier, main_owner_matches, open_questions,
+    overlaps, project, prompt_message, reminder_id, review_ids, unread_messages, visible_to,
+};
+pub use model::{
     CALL_RESERVE, CARRY_CALLS, CARRY_MESSAGES, MAIN_RESERVE, MAX_CALLS, MAX_HOPS, MAX_MESSAGES,
     MAX_METADATA_BYTES, MAX_PARTICIPANTS, MAX_ROOMS, MAX_SCAN_BYTES, MAX_SCAN_ENTRIES,
     MESSAGE_RESERVE, ROLLOVER_CALLS, ROLLOVER_MESSAGES,
-};
-pub use model::{
-    declared_scopes, event_shape, identifier, main_owner_matches, open_questions, overlaps,
-    project, prompt_message, reminder_id, review_ids, unread_messages, visible_to,
 };
 pub use oms_contract_markdown::scope::normalize as normalize_scope;
 pub use relay::{Relay, relay_request};

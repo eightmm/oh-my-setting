@@ -44,7 +44,7 @@ pub fn paths(root: &Path) -> std::io::Result<Inventory> {
         files: BTreeSet::new(),
         watches: BTreeSet::new(),
     };
-    for name in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
+    for name in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "VERSION"] {
         out.add(PathBuf::from(name))?;
     }
     // Standalone native service roots also contribute to the runtime closure.

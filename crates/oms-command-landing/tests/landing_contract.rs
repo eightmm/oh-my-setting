@@ -2438,11 +2438,50 @@ fn check_publish_then_merge(flock: bool) {
     ] {
         assert!(status.contains(needle), "{needle}: {status}");
     }
-    // --merge (any method) resumes the same receipt and merges after exact-SHA CI
-    let merge = ["--merge", "--merge-method", "merge"];
+    // --merge (any method) resumes the same receipt and merges after exact-SHA CI.
+    // A shared checkout with a tracked edit is not synced; the land still passes
+    // and reports the refusal.
+    let shared = iso.home.path().join("shared");
+    iso.git(
+        iso.home.path(),
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            shared.to_str().unwrap(),
+        ],
+    );
+    let tracked = iso.git_out(&shared, &["ls-files"]);
+    let tracked = shared.join(tracked.lines().next().expect("tracked file"));
+    let original = fs::read(&tracked).unwrap();
+    fs::write(&tracked, b"local edit\n").unwrap();
+    fs::write(shared.join("untracked-note"), b"other tool\n").unwrap();
+    let mut merge = vec!["--merge", "--merge-method", "merge"];
+    if !flock {
+        merge.extend(["--sync-shared", shared.to_str().unwrap()]);
+    }
     let r = iso.run_with_services("land", &repo, &[&args[..], &merge].concat(), &env);
     assert_eq!(r.0, 0, "{r:?}");
     assert!(r.1.contains("merged PR #7 (merge)"), "{r:?}");
+    if !flock {
+        assert!(
+            r.2.contains("land: sync refused: tracked worktree"),
+            "{r:?}"
+        );
+        // A staged change is refused even when the worktree matches HEAD;
+        // untracked files alone do not block the fast-forward.
+        iso.git(&shared, &["add", "--", tracked.to_str().unwrap()]);
+        fs::write(&tracked, original).unwrap();
+        iso.git(&repo, &["push", "-q", "origin", "HEAD:main"]);
+        let staged = iso.run_with_services("sync-shared", &shared, &[], &[]);
+        assert_ne!(staged.0, 0, "{staged:?}");
+        assert!(staged.2.contains("index changed"), "{staged:?}");
+        iso.git(&shared, &["reset", "-q"]);
+        let synced = iso.run_with_services("sync-shared", &shared, &[], &[]);
+        assert_eq!(synced.0, 0, "{synced:?}");
+        assert_eq!(iso.git_out(&shared, &["rev-parse", "HEAD"]), head);
+        assert!(shared.join("untracked-note").exists());
+    }
     let calls = fs::read_to_string(log).expect("gh log");
     let ci = calls
         .rfind(&format!("--commit {head} --event pull_request"))
@@ -2870,6 +2909,10 @@ fn pr_ci_yields_to_an_independent_land_and_fences_its_receipt() {
                     iso.git_out(&a, &["rev-parse", "HEAD^{tree}"])
                 );
             } else if matches!(scenario, "target-moved" | "late-target") {
+                assert!(
+                    final_result.2.contains("merge it into the PR branch"),
+                    "{context}"
+                );
                 assert_eq!(target, independent);
                 assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/a"]), head);
             } else {
@@ -3159,7 +3202,7 @@ exec '{real_git}' "$@"
     let args = ["--gate", "true", "--ignore-siblings", "--no-update"];
     let r = iso.run_with_services("land", &repo, &args, &env);
     if squash_during_ci {
-        assert_refused(&r, "ref changed during CI");
+        assert_refused(&r, "target moved during CI");
     } else {
         assert_eq!(r.0, 0, "{r:?}");
     }

@@ -127,7 +127,7 @@ pub use oms_command_plan::{Error, Result};
 pub use parser::{Mode, Request, parse};
 pub use router::{Response, dispatch, run};
 pub use services::{Services, Unavailable};
-pub const CORE_VERSION: &str = "0.7.0";
+pub const CORE_VERSION: &str = include_str!("../../../VERSION").trim_ascii();
 pub(crate) fn error(message: impl ToString) -> Error {
     Error {
         code: 2,

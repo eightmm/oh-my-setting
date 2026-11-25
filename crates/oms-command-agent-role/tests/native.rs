@@ -859,6 +859,52 @@ fn routing_defaults_order_and_validation_edges() {
     assert_eq!(apply(&data).0, 0);
     data["tiers"]["deep"][2]["effort"] = "max".into();
     assert_ne!(apply(&data).0, 0);
+    // Antigravity base-form routes and Neon/Hydrogen max/ultra refusals work for both forms.
+    for (model, effort, ok) in [
+        ("gemini-4-carbon", "high", true),
+        ("gemini-4-neon", "xhigh", true),
+        ("gemini-4-neon", "max", false),
+        ("gemini-4-neon", "ultra", false),
+        ("gemini-4-neon-high", "max", false),
+        ("gemini-4-neon-high", "ultra", false),
+        ("gemini-4-hydrogen", "xhigh", true),
+        ("gemini-4-hydrogen", "max", false),
+        ("gemini-4-hydrogen", "ultra", false),
+        ("gemini-4-high", "high", false),
+    ] {
+        let mut data = baseline.clone();
+        data["tiers"]["deep"][2]["model"] = model.into();
+        data["tiers"]["deep"][2]["effort"] = effort.into();
+        assert_eq!(apply(&data).0 == 0, ok, "{model} {effort}");
+    }
+    // Claude latest-model aliases validate and render cleanly, and bundled policy loads.
+    for alias in ["opus", "sonnet", "fable", "haiku"] {
+        assert_eq!(
+            oms_command_agent_role::native_model::route_family("claude", alias),
+            Some((alias.to_owned(), vec![u64::MAX]))
+        );
+        assert!(oms_command_agent_role::native_model::valid_role_model(
+            "claude", alias
+        ));
+        let mut data = baseline.clone();
+        data["tiers"]["routine"] = json!([{"provider":"claude","model":alias,"effort":"medium"}]);
+        assert_eq!(apply(&data).0, 0, "{alias}");
+    }
+    assert_eq!(
+        oms_command_agent_role::native_model::route_family("antigravity", "gemini-4-carbon"),
+        Some(("carbon".to_owned(), vec![4]))
+    );
+    assert_eq!(
+        oms_command_agent_role::native_model::route_family("antigravity", "gemini-4-carbon-high"),
+        Some(("carbon-high".to_owned(), vec![4]))
+    );
+    assert_eq!(
+        oms_command_agent_role::native_model::route_family("antigravity", "gemini-4-high"),
+        None
+    );
+    let bundled: Value =
+        serde_json::from_slice(include_bytes!("../../../config/panel-routing.json")).unwrap();
+    assert_eq!(apply(&bundled).0, 0);
     let mut data = baseline.clone();
     data["tiers"]["routine"][2]
         .as_object_mut()
@@ -1493,4 +1539,48 @@ fn agy_catalog_row_parses_selector_base_effort_and_label() {
         assert_eq!(agy_catalog_row(invalid), None, "{invalid}");
         assert_eq!(agy_catalog_selector(invalid), None, "{invalid}");
     }
+}
+
+#[test]
+fn agy_selector_derives_base_plus_effort_and_preserves_fixed_and_suffixed() {
+    use oms_command_agent_role::native_model::{
+        agy_base_model, agy_selector, is_agy_suffixed_selector,
+    };
+
+    assert_eq!(
+        agy_selector("gemini-4-carbon", "high"),
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        agy_selector("gemini-4-neon", "xhigh"),
+        "gemini-4-neon-xhigh"
+    );
+    assert_eq!(
+        agy_selector("gemini-4-carbon-high", "high"),
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        agy_selector("gemini-4-carbon-high", "low"),
+        "gemini-4-carbon-high"
+    );
+    assert_eq!(
+        agy_selector("gemini-pro-orchestrator", ""),
+        "gemini-pro-orchestrator"
+    );
+    assert_eq!(
+        agy_selector("gemini-pro-orchestrator", "high"),
+        "gemini-pro-orchestrator"
+    );
+    assert_eq!(
+        agy_selector("gemini-pro-orchestrator-argon", "high"),
+        "gemini-pro-orchestrator-argon"
+    );
+    assert_eq!(agy_selector("gemini-4-carbon", ""), "gemini-4-carbon");
+    assert_eq!(agy_selector("gemini-4-carbon", "auto"), "gemini-4-carbon");
+    assert_eq!(agy_selector("provider-default", "high"), "provider-default");
+    assert!(is_agy_suffixed_selector("gemini-4-carbon-high"));
+    assert!(!is_agy_suffixed_selector("gemini-4-carbon"));
+    assert!(!is_agy_suffixed_selector("-high"));
+    assert_eq!(agy_base_model("gemini-4-carbon-high"), "gemini-4-carbon");
+    assert_eq!(agy_base_model("gemini-4-carbon"), "gemini-4-carbon");
 }

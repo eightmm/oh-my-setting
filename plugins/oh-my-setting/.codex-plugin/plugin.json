@@ -1,6 +1,6 @@
 {
   "name": "oh-my-setting",
-  "version": "0.7.0",
+  "version": "0.8.6",
   "description": "Shared coding-agent routing, handoff, guard, and content-free telemetry hooks for Codex.",
   "author": {
     "name": "oh-my-setting"
@@ -16,7 +16,7 @@
     "skills"
   ],
   "interface": {
-    "displayName": "oh-my-setting",
+    "displayName": "OMS Hooks",
     "shortDescription": "Routing, handoff, guards, and private local telemetry for Codex.",
     "longDescription": "oh-my-setting adds local Codex hooks that route prompts to installed skills, preserve pre-compaction handoffs, guard high-risk coding turns, and retain content-free lifecycle counters without prompts, commands, or output. With the OMS MCP server installed on the project host, ask for the current project’s panel status in chat.",
     "developerName": "oh-my-setting",

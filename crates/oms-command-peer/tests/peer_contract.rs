@@ -1547,6 +1547,8 @@ fn provider_native_transports_match_shell_contract() {
                         "{model}",
                         if model == "provider-default" {
                             ""
+                        } else if provider == "antigravity" {
+                            "--model|fixture-model-high"
                         } else {
                             "--model|fixture-model"
                         },

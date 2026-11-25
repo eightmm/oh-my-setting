@@ -434,31 +434,42 @@ pub fn council_plan(
                 "available"
             }
             .into();
+            let effort = native_model::normalized_effort(&seat.effort);
             let model = if fallback {
                 crate::routing::valid_route(&seat)?;
-                seat.model.clone()
+                crate::routing::resolve_route_model(
+                    Some(&report),
+                    &seat.provider,
+                    &seat.model,
+                    effort,
+                )
+                .map_err(Error::new)?
             } else {
                 require(!models.is_empty(), "empty model catalog")?;
                 let model =
                     crate::routing::routable_route_model(&seat.provider, &seat.model, &models)?;
+                let model = crate::routing::resolve_route_model(
+                    Some(&report),
+                    &seat.provider,
+                    &model,
+                    effort,
+                )
+                .map_err(Error::new)?;
+                let claude_alias = seat.provider == "claude"
+                    && crate::routing::route_family(&seat.provider, &model)
+                        .is_some_and(|(_, version)| version == [u64::MAX]);
                 require(
-                    models.contains(&model),
+                    claude_alias || models.contains(&model),
                     "resolved model absent from routable catalog",
                 )?;
                 model
             };
             evidence["resolved_model"] = serde_json::json!(model);
             evidence["model_selection"] = if fallback { "configured" } else { "catalog" }.into();
-            let effort = native_model::normalized_effort(&seat.effort);
             native_model::validate_effort(&seat.provider, &model, effort).map_err(Error::new)?;
             evidence["requested_effort"] =
                 serde_json::json!((!effort.is_empty()).then_some(effort));
-            let support = native_model::effort_support(
-                &seat.provider,
-                &model,
-                effort,
-                report.applicable_efforts(&model, None),
-            );
+            let support = report.effort_support(&seat.provider, &model, effort, None);
             evidence["effort_support"] = match support {
                 EffortSupport::Fixed => "fixed",
                 EffortSupport::ProviderDefault => "provider_default",
