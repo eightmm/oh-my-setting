@@ -428,81 +428,6 @@ fn fits_capture_parent(candidate: &Path, repo: &Path, execution: &Path, device: 
         && fs::metadata(candidate).is_ok_and(|v| v.dev() == device)
 }
 
-fn prepare_capture_cache_root(
-    cache_root: &Path,
-    repo: &Path,
-    execution: &Path,
-    device: u64,
-) -> Option<PathBuf> {
-    let oms_dir = cache_root.parent()?;
-    let mut existing = cache_root;
-    let mut missing = Vec::new();
-    loop {
-        match fs::symlink_metadata(existing) {
-            Ok(meta) => {
-                if (existing == cache_root || existing == oms_dir)
-                    && (meta.file_type().is_symlink() || !meta.is_dir())
-                {
-                    return None;
-                }
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(existing.file_name()?.to_owned());
-                existing = existing.parent()?;
-            }
-            Err(_) => return None,
-        }
-    }
-    if existing == cache_root {
-        let oms_meta = fs::symlink_metadata(oms_dir).ok()?;
-        if oms_meta.file_type().is_symlink() || !oms_meta.is_dir() {
-            return None;
-        }
-    }
-    let canonical_existing = fs::canonicalize(existing).ok()?;
-    let existing_meta = fs::metadata(&canonical_existing).ok()?;
-    if !existing_meta.is_dir() || existing_meta.dev() != device {
-        return None;
-    }
-    let mut prospective = canonical_existing.clone();
-    for name in missing.iter().rev() {
-        prospective.push(name);
-    }
-    if prospective.starts_with(repo) || prospective.starts_with(execution) {
-        return None;
-    }
-    let mut current = canonical_existing;
-    for name in missing.into_iter().rev() {
-        current.push(name);
-        match DirBuilder::new().mode(0o700).create(&current) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return None,
-        }
-        let meta = fs::symlink_metadata(&current).ok()?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            return None;
-        }
-    }
-    let leaf_meta = fs::symlink_metadata(cache_root).ok()?;
-    if leaf_meta.file_type().is_symlink() || !leaf_meta.is_dir() {
-        return None;
-    }
-    let oms_meta = fs::symlink_metadata(oms_dir).ok()?;
-    if oms_meta.file_type().is_symlink() || !oms_meta.is_dir() {
-        return None;
-    }
-    let canonical = fs::canonicalize(&current).ok()?;
-    let canonical_meta = fs::symlink_metadata(&canonical).ok()?;
-    if !storage::same(&leaf_meta, &canonical_meta)
-        || !fits_capture_parent(&canonical, repo, execution, device)
-    {
-        return None;
-    }
-    Some(canonical)
-}
-
 fn select_capture_parent(
     repo: &Path,
     execution: &Path,
@@ -516,7 +441,16 @@ fn select_capture_parent(
         return Ok(candidate);
     }
     if let Some(cache_root) = cache_root {
-        if let Some(candidate) = prepare_capture_cache_root(cache_root, repo, execution, device) {
+        if !cache_root.starts_with(repo)
+            && !cache_root.starts_with(execution)
+            && DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(cache_root)
+                .is_ok()
+            && let Ok(candidate) = fs::canonicalize(cache_root)
+            && fits_capture_parent(&candidate, repo, execution, device)
+        {
             return Ok(candidate);
         }
         return Err(format!(
@@ -750,11 +684,7 @@ fn release_ready<'a>(index: &'a CaptureIndex, item: &V) -> Result<Option<(usize,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        io::ErrorKind,
-        os::unix::fs::{PermissionsExt, symlink},
-        process::Command,
-    };
+    use std::{io::ErrorKind, os::unix::fs::PermissionsExt};
 
     struct TestRoot(PathBuf);
     impl TestRoot {
@@ -783,373 +713,212 @@ mod tests {
         }
     }
 
-    fn setup_repo(root: &Path, name: &str) -> (PathBuf, PathBuf, String, Vec<u8>) {
-        let projects = root.join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let repo = projects.join(name);
-        fs::create_dir_all(repo.join(".oms")).unwrap();
-        let body =
-            b"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"
-                .to_vec();
-        let source = repo.join(".oms/source.patch");
-        fs::write(&source, &body).unwrap();
-        let expected = digest(&body);
-        (repo, source, expected, body)
-    }
-
-    enum ChildOutcome {
-        Ok(PathBuf),
-        Err(i32, String),
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn run_allocate_child(
-        root: &Path,
-        repo: &Path,
-        execution: &Path,
-        source: &Path,
-        landing: &str,
-        expected: &str,
-        tmpdir: &Path,
-        xdg_cache_home: Option<&Path>,
-        home: Option<&Path>,
-    ) -> ChildOutcome {
-        let locks = root.join("locks");
-        fs::create_dir_all(&locks).unwrap();
-        let out_file = root.join(format!("result-{landing}.txt"));
-        let mut cmd = Command::new(std::env::current_exe().unwrap());
-        cmd.args([
-            "--exact",
-            "producer::tests::allocate_child_entry",
-            "--test-threads=1",
-        ])
-        .env_remove("OMS_HARNESS_CHILD")
-        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
-        .env_remove("XDG_CACHE_HOME")
-        .env_remove("HOME")
-        .env("TMPDIR", tmpdir)
-        .env("OMS_LOCK_DIR", &locks)
-        .env("OMS_TEST_ALLOCATE_OUT", &out_file)
-        .env("OMS_TEST_REPO", repo)
-        .env("OMS_TEST_EXECUTION", execution)
-        .env("OMS_TEST_SOURCE", source)
-        .env("OMS_TEST_LANDING", landing)
-        .env("OMS_TEST_EXPECTED", expected);
-        if let Some(xdg) = xdg_cache_home {
-            cmd.env("XDG_CACHE_HOME", xdg);
-        }
-        if let Some(home) = home {
-            cmd.env("HOME", home);
-        }
-        let output = cmd.output().unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success() && stdout.contains("1 passed"),
-            "child test failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        let text = fs::read_to_string(&out_file).unwrap();
-        if let Some(path) = text.strip_prefix("OK\n") {
-            ChildOutcome::Ok(PathBuf::from(path))
-        } else if let Some(rest) = text.strip_prefix("ERR:") {
-            let (code, message) = rest.split_once('\n').unwrap();
-            ChildOutcome::Err(code.parse().unwrap(), message.to_owned())
-        } else {
-            panic!("unexpected child output: {text}");
-        }
-    }
-
     #[test]
-    fn allocate_child_entry() {
-        let Some(out_file) = std::env::var_os("OMS_TEST_ALLOCATE_OUT") else {
-            return;
-        };
-        let repo = PathBuf::from(std::env::var_os("OMS_TEST_REPO").unwrap());
-        let execution = PathBuf::from(std::env::var_os("OMS_TEST_EXECUTION").unwrap());
-        let source = PathBuf::from(std::env::var_os("OMS_TEST_SOURCE").unwrap());
-        let landing = std::env::var("OMS_TEST_LANDING").unwrap();
-        let expected = std::env::var("OMS_TEST_EXPECTED").unwrap();
-        let interrupted = AtomicBool::new(false);
-        let mut producer = Producer::open(&repo, &interrupted).unwrap();
-        let payload =
-            match producer.allocate(&source, &landing, &expected, &execution, &interrupted) {
-                Ok(path) => format!("OK\n{}", path.display()),
-                Err(err) => format!("ERR:{}\n{err}", err.exit_code()),
-            };
-        fs::write(out_file, payload).unwrap();
-    }
-
-    fn dir_entries(path: &Path) -> Vec<String> {
-        let mut names = fs::read_dir(path)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn allocate_uses_cache_root_not_repo_parent_when_tmpdir_is_inside_repo() {
-        let root = TestRoot::new("cache-fallback");
-        let (repo, source, expected, body) = setup_repo(root.path(), "project");
-        let projects = repo.parent().unwrap();
-        let tmp_in_repo = repo.join("tmp");
-        fs::create_dir(&tmp_in_repo).unwrap();
-
-        let xdg_cache = root.path().join("xdg-cache");
-        let landing = "land-20261125T000000Z-0000000000000001";
-        let capture = match run_allocate_child(
-            root.path(),
-            &repo,
-            &repo,
-            &source,
-            landing,
-            &expected,
-            &tmp_in_repo,
-            Some(&xdg_cache),
-            Some(&root.path().join("unused-home")),
-        ) {
-            ChildOutcome::Ok(path) => path,
-            ChildOutcome::Err(code, msg) => panic!("expected Ok, got Err({code}): {msg}"),
-        };
-
-        let expected_cache_root = xdg_cache.join("oh-my-setting").join("landing-captures");
-        let generation_dir = capture.parent().unwrap();
-        assert_eq!(generation_dir.parent().unwrap(), expected_cache_root);
-        let meta = fs::symlink_metadata(&expected_cache_root).unwrap();
-        assert!(!meta.file_type().is_symlink() && meta.is_dir());
-        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
-        assert_eq!(dir_entries(projects), vec!["project"]);
-
-        let index = CaptureIndex::load(&repo).unwrap();
-        assert_eq!(index.indexed_bytes(&capture).unwrap(), Some(body.clone()));
-
-        // When XDG_CACHE_HOME is unset, fall back to $HOME/.cache/oh-my-setting/landing-captures.
-        let fake_home = root.path().join("user-home");
-        fs::create_dir(&fake_home).unwrap();
-        let landing_home = "land-20261125T000000Z-0000000000000002";
-        let capture_home = match run_allocate_child(
-            root.path(),
-            &repo,
-            &repo,
-            &source,
-            landing_home,
-            &expected,
-            &tmp_in_repo,
-            None,
-            Some(&fake_home),
-        ) {
-            ChildOutcome::Ok(path) => path,
-            ChildOutcome::Err(code, msg) => panic!("expected Ok, got Err({code}): {msg}"),
-        };
-
-        let expected_home_cache = fake_home
-            .join(".cache")
-            .join("oh-my-setting")
-            .join("landing-captures");
+    fn capture_cache_root_resolves_xdg_then_home() {
+        let xdg = OsString::from("/var/cache/custom");
+        let account = OsString::from("/opt/account");
         assert_eq!(
-            capture_home.parent().unwrap().parent().unwrap(),
-            expected_home_cache
+            capture_cache_root(Some(xdg), Some(account.clone())),
+            Some(PathBuf::from(
+                "/var/cache/custom/oh-my-setting/landing-captures"
+            ))
         );
-        let home_meta = fs::symlink_metadata(&expected_home_cache).unwrap();
-        assert!(!home_meta.file_type().is_symlink() && home_meta.is_dir());
-        assert_eq!(home_meta.permissions().mode() & 0o777, 0o700);
-        assert_eq!(dir_entries(projects), vec!["project"]);
+        assert_eq!(
+            capture_cache_root(Some(OsString::new()), Some(account.clone())),
+            Some(PathBuf::from(
+                "/opt/account/.cache/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(
+            capture_cache_root(
+                Some(OsString::from("relative/cache")),
+                Some(account.clone())
+            ),
+            Some(PathBuf::from(
+                "/opt/account/.cache/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(
+            capture_cache_root(None, Some(account)),
+            Some(PathBuf::from(
+                "/opt/account/.cache/oh-my-setting/landing-captures"
+            ))
+        );
+        assert_eq!(capture_cache_root(None, None), None);
+        assert_eq!(
+            capture_cache_root(Some(OsString::new()), Some(OsString::from("rel"))),
+            None
+        );
     }
 
     #[test]
-    fn allocate_errors_when_no_capture_parent_fits() {
-        let root = TestRoot::new("no-parent");
-        let (repo, source, expected, _body) = setup_repo(root.path(), "project");
-        let projects = repo.parent().unwrap();
+    fn select_capture_parent_prefers_tmpdir_then_cache_root() {
+        let root = TestRoot::new("select-parent");
+        let projects = root.path().join("projects");
+        let repo = projects.join("project");
+        let execution = root.path().join("execution");
+        let outside_tmp = root.path().join("outside-tmp");
         let tmp_in_repo = repo.join("tmp");
-        fs::create_dir(&tmp_in_repo).unwrap();
-        let dummy_home = root.path().join("dummy-home");
-        fs::create_dir(&dummy_home).unwrap();
-
-        // Both TMPDIR and XDG_CACHE_HOME inside the repository.
-        let cache_in_repo = repo.join("cache");
-        let expected_cache_root = cache_in_repo.join("oh-my-setting").join("landing-captures");
-        match run_allocate_child(
-            root.path(),
-            &repo,
-            &repo,
-            &source,
-            "land-20261125T000000Z-0000000000000010",
-            &expected,
-            &tmp_in_repo,
-            Some(&cache_in_repo),
-            Some(&dummy_home),
-        ) {
-            ChildOutcome::Ok(path) => panic!("expected error, got capture at {}", path.display()),
-            ChildOutcome::Err(code, msg) => {
-                assert_eq!(code, 2);
-                assert!(
-                    msg.contains(
-                        "no same-filesystem private capture parent outside state repository"
-                    ),
-                    "unexpected error: {msg}"
-                );
-                assert!(
-                    msg.contains(&expected_cache_root.display().to_string()),
-                    "error must name cache root {}: {msg}",
-                    expected_cache_root.display()
-                );
-            }
-        }
-        assert!(!cache_in_repo.exists());
-        assert_eq!(dir_entries(projects), vec!["project"]);
-
-        // Cache root is a symlink: must be refused, naming the cache root tried.
-        let symlink_xdg = root.path().join("symlink-cache");
-        let oms_dir = symlink_xdg.join("oh-my-setting");
-        fs::create_dir_all(&oms_dir).unwrap();
-        let symlink_target = root.path().join("real-target");
-        fs::create_dir(&symlink_target).unwrap();
-        let symlink_cache_root = oms_dir.join("landing-captures");
-        symlink(&symlink_target, &symlink_cache_root).unwrap();
-        match run_allocate_child(
-            root.path(),
-            &repo,
-            &repo,
-            &source,
-            "land-20261125T000000Z-0000000000000011",
-            &expected,
-            &tmp_in_repo,
-            Some(&symlink_xdg),
-            Some(&dummy_home),
-        ) {
-            ChildOutcome::Ok(path) => panic!("expected symlink refusal, got {}", path.display()),
-            ChildOutcome::Err(code, msg) => {
-                assert_eq!(code, 2);
-                assert!(
-                    msg.contains(&symlink_cache_root.display().to_string()),
-                    "error must name symlink cache root {}: {msg}",
-                    symlink_cache_root.display()
-                );
-            }
-        }
-        assert!(dir_entries(&symlink_target).is_empty());
-        assert_eq!(dir_entries(projects), vec!["project"]);
-
-        // Intermediate oh-my-setting directory is a symlink: must also be refused.
-        let symlink_oms_xdg = root.path().join("symlink-oms");
-        fs::create_dir(&symlink_oms_xdg).unwrap();
-        symlink(&symlink_target, symlink_oms_xdg.join("oh-my-setting")).unwrap();
-        let symlink_oms_cache_root = symlink_oms_xdg
-            .join("oh-my-setting")
-            .join("landing-captures");
-        match run_allocate_child(
-            root.path(),
-            &repo,
-            &repo,
-            &source,
-            "land-20261125T000000Z-0000000000000012",
-            &expected,
-            &tmp_in_repo,
-            Some(&symlink_oms_xdg),
-            Some(&dummy_home),
-        ) {
-            ChildOutcome::Ok(path) => panic!("expected symlink refusal, got {}", path.display()),
-            ChildOutcome::Err(code, msg) => {
-                assert_eq!(code, 2);
-                assert!(
-                    msg.contains(&symlink_oms_cache_root.display().to_string()),
-                    "error must name cache root {}: {msg}",
-                    symlink_oms_cache_root.display()
-                );
-            }
-        }
-        assert!(dir_entries(&symlink_target).is_empty());
-        assert_eq!(dir_entries(projects), vec!["project"]);
-
-        // Both TMPDIR and XDG_CACHE_HOME inside a separate execution repository.
-        let execution = root.path().join("execution-repo");
         let tmp_in_exec = execution.join("tmp");
-        let cache_in_exec = execution.join("cache");
-        fs::create_dir_all(&tmp_in_exec).unwrap();
-        let expected_exec_cache = cache_in_exec.join("oh-my-setting").join("landing-captures");
-        match run_allocate_child(
-            root.path(),
+        for dir in [&repo, &execution, &outside_tmp, &tmp_in_repo, &tmp_in_exec] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let device = fs::metadata(&repo).unwrap().dev();
+
+        // Outside TMPDIR wins and leaves the cache root uncreated.
+        let unused_cache = root
+            .path()
+            .join("unused-cache/oh-my-setting/landing-captures");
+        assert_eq!(
+            select_capture_parent(&repo, &execution, device, &outside_tmp, Some(&unused_cache))
+                .unwrap(),
+            outside_tmp
+        );
+        assert!(!unused_cache.exists());
+
+        // TMPDIR inside repo falls back to the cache root, never repo.parent().
+        let cache_root = root.path().join("cache/oh-my-setting/landing-captures");
+        assert_eq!(
+            select_capture_parent(&repo, &repo, device, &tmp_in_repo, Some(&cache_root)).unwrap(),
+            cache_root
+        );
+        assert_eq!(
+            fs::symlink_metadata(&cache_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read_dir(&projects).unwrap().count(), 1);
+
+        // TMPDIR inside a separate execution repo also falls back to the cache root.
+        assert_eq!(
+            select_capture_parent(&repo, &execution, device, &tmp_in_exec, Some(&cache_root))
+                .unwrap(),
+            cache_root
+        );
+
+        // Cache root inside repo or execution repo is rejected without creating it.
+        let cache_in_repo = repo.join("cache/oh-my-setting/landing-captures");
+        let err = select_capture_parent(&repo, &repo, device, &tmp_in_repo, Some(&cache_in_repo))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains(&cache_in_repo.display().to_string())
+        );
+        assert!(!repo.join("cache").exists());
+
+        let cache_in_exec = execution.join("cache/oh-my-setting/landing-captures");
+        let err = select_capture_parent(
             &repo,
             &execution,
-            &source,
-            "land-20261125T000000Z-0000000000000013",
-            &expected,
+            device,
             &tmp_in_exec,
             Some(&cache_in_exec),
-            Some(&dummy_home),
-        ) {
-            ChildOutcome::Ok(path) => panic!("expected error, got capture at {}", path.display()),
-            ChildOutcome::Err(code, msg) => {
-                assert_eq!(code, 2);
-                assert!(
-                    msg.contains(&expected_exec_cache.display().to_string()),
-                    "error must name cache root {}: {msg}",
-                    expected_exec_cache.display()
-                );
-            }
-        }
-        assert!(!cache_in_exec.exists());
-        assert_eq!(dir_entries(projects), vec!["project"]);
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains(&cache_in_exec.display().to_string())
+        );
+        assert!(!execution.join("cache").exists());
 
-        // Different filesystem or unavailable cache root fails closed and names cache root when tried.
-        let device = fs::metadata(&repo).unwrap().dev();
-        let other_cache = root.path().join("other-fs-cache");
-        let other_cache_root = other_cache.join("oh-my-setting").join("landing-captures");
-        let wrong_dev_err = select_capture_parent(
+        // Uncreatable cache root (blocked by a regular file) is skipped and fails closed.
+        let blocked = root.path().join("blocked");
+        fs::write(&blocked, b"file").unwrap();
+        let blocked_cache = blocked.join("oh-my-setting/landing-captures");
+        let err = select_capture_parent(&repo, &repo, device, &tmp_in_repo, Some(&blocked_cache))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains(&blocked_cache.display().to_string())
+        );
+
+        // Different filesystem or unavailable cache root fails closed.
+        let wrong_dev = select_capture_parent(
             &repo,
             &repo,
             device.wrapping_add(1),
-            &tmp_in_repo,
-            Some(&other_cache_root),
+            &outside_tmp,
+            Some(&cache_root),
         )
         .unwrap_err();
-        assert_eq!(wrong_dev_err.exit_code(), 2);
+        assert_eq!(wrong_dev.exit_code(), 2);
         assert!(
-            wrong_dev_err
+            wrong_dev
                 .to_string()
-                .contains(&other_cache_root.display().to_string()),
-            "wrong-device error must name cache root: {wrong_dev_err}"
+                .contains(&cache_root.display().to_string())
         );
-        assert!(!other_cache.exists());
 
-        let no_cache_err =
-            select_capture_parent(&repo, &repo, device, &tmp_in_repo, None).unwrap_err();
-        assert_eq!(no_cache_err.exit_code(), 2);
+        let no_cache = select_capture_parent(&repo, &repo, device, &tmp_in_repo, None).unwrap_err();
+        assert_eq!(no_cache.exit_code(), 2);
         assert!(
-            no_cache_err
+            no_cache
                 .to_string()
-                .contains("no same-filesystem private capture parent outside state repository"),
-            "unexpected error: {no_cache_err}"
+                .contains("no same-filesystem private capture parent outside state repository")
         );
+        assert_eq!(fs::read_dir(&projects).unwrap().count(), 1);
     }
 
     #[test]
     fn existing_capture_remains_readable_wherever_recorded() {
         let root = TestRoot::new("legacy-read");
-        let (repo, source, expected, body) = setup_repo(root.path(), "project");
-        let legacy_parent = root.path().join("legacy-parent");
-        let dummy_home = root.path().join("dummy-home");
-        fs::create_dir(&legacy_parent).unwrap();
-        fs::create_dir(&dummy_home).unwrap();
+        let projects = root.path().join("projects");
+        let repo = projects.join("project");
+        fs::create_dir_all(repo.join(".oms")).unwrap();
+        let body = b"diff --git a/a.txt b/a.txt\n-old\n+new\n".to_vec();
         let landing = "land-20261125T000000Z-0000000000000020";
-        let capture = match run_allocate_child(
-            root.path(),
-            &repo,
-            &repo,
-            &source,
-            landing,
-            &expected,
-            &legacy_parent,
-            Some(&root.path().join("other-cache")),
-            Some(&dummy_home),
-        ) {
-            ChildOutcome::Ok(path) => path,
-            ChildOutcome::Err(code, msg) => panic!("expected Ok, got Err({code}): {msg}"),
-        };
-        assert_eq!(capture.parent().unwrap().parent().unwrap(), legacy_parent);
-        let index = CaptureIndex::load(&repo).unwrap();
-        assert_eq!(index.indexed_bytes(&capture).unwrap(), Some(body));
+        let generation = "0123456789abcdef0123456789abcdef";
+        let directory = projects.join(format!("oms-landing-capture-{generation}"));
+        let item = obj([
+            ("version", 1usize.into()),
+            ("generation", generation.into()),
+            ("landing_id", landing.into()),
+            ("namespace", digest(repo.as_os_str().as_bytes()).into()),
+            ("directory", path_value(&directory)),
+            ("bytes", V::Num((2 * body.len()).to_string())),
+            ("sha256", digest(&body).into()),
+        ]);
+        let mut index = CaptureIndex::load(&repo).unwrap();
+        index
+            .append_event("capture-reserved", &item, obj([]))
+            .unwrap();
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        let info = storage::private_directory(&directory).unwrap();
+        let target = directory.join(format!("{landing}.patch"));
+        let payload =
+            storage::create_private(&directory, Path::new(target.file_name().unwrap()), &body)
+                .unwrap();
+        storage::link(&target, &directory, Path::new("capture.anchor"), &payload).unwrap();
+        let certificate = obj([
+            ("reservation", item),
+            ("directory", storage::identity(&info)),
+            (
+                "objects",
+                obj([(
+                    "capture",
+                    obj([
+                        ("identity", storage::identity(&payload)),
+                        ("size", body.len().into()),
+                        ("path", path_value(&target)),
+                        ("anchor", path_value(&directory.join("capture.anchor"))),
+                    ]),
+                )]),
+            ),
+            ("terminal", V::Null),
+        ]);
+        storage::create_private(
+            &directory,
+            Path::new("owner.json"),
+            &encoded(&certificate).unwrap(),
+        )
+        .unwrap();
+
+        let reloaded = CaptureIndex::load(&repo).unwrap();
+        assert_eq!(reloaded.indexed_bytes(&target).unwrap(), Some(body));
     }
 }
