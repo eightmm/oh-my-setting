@@ -132,7 +132,7 @@ fn is_active_peer_state(state: &str) -> bool {
     )
 }
 
-fn is_live_or_stalled(state: &str) -> bool {
+pub(crate) fn is_live_or_stalled(state: &str) -> bool {
     is_active_peer_state(state) || state == "stalled"
 }
 
@@ -372,10 +372,9 @@ fn read_hook_activity_state(
         return (None, None);
     }
     let Some(row) = store
-        .json(
+        .json_owned(
             Path::new(&format!(".oms/hooks/panel-activity/{participant}.json")),
             HOOK_ACTIVITY_LIMIT,
-            true,
         )
         .ok()
         .flatten()

@@ -15,7 +15,6 @@ pub const RUN_ROOT: &str = ".oms/artifacts/mcp";
 pub const META_LIMIT: usize = 256 * 1024;
 pub const STATUS_LIMIT: usize = 4096;
 pub const MAX_SCAN_ENTRIES: usize = 4096;
-const MAX_OPEN_CANDIDATES: usize = 64;
 pub const MAX_OPERATIONS: usize = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -360,7 +359,8 @@ pub fn list_peer_operations(
     }
     sort_operation_names(&mut names);
     let mut records = Vec::new();
-    for name in names.into_iter().take(MAX_OPEN_CANDIDATES) {
+    let mut finished = 0usize;
+    for name in names {
         let Ok(sub_fd) = rfs::openat(&run_root_fd, name.as_str(), dir_flags, Mode::empty()) else {
             continue;
         };
@@ -372,6 +372,15 @@ pub fn list_peer_operations(
             continue;
         }
         let dir = repo.join(RUN_ROOT).join(&name);
+        // Status is probed before the record is built: once `cap` newer finished records are
+        // kept, older finished ones are skipped, but a live run anywhere in the scan survives.
+        let (op_status, exit) = status_for_owner(&dir, uid);
+        if op_status == "done" {
+            if finished >= cap {
+                continue;
+            }
+            finished += 1;
+        }
         let meta = read_run(&dir, "meta.json", META_LIMIT)
             .ok()
             .and_then(|bytes| V::parse_with_depth(&bytes, 32).ok())
@@ -390,7 +399,6 @@ pub fn list_peer_operations(
             .filter(|s| !s.is_empty() && s.len() <= 64)
             .map(str::to_owned)
             .unwrap_or(fallback_started);
-        let (op_status, exit) = status_for_owner(&dir, uid);
         let cancelled = op_status == "done" && valid_cancel_observed_owned(&dir, &name, uid);
         let observed_updated_at = observed_updated_in_dir(&sub_file, uid);
         let finished_at = (op_status == "done")
@@ -458,8 +466,8 @@ pub fn list_peer_operations(
             attempt_id,
         });
     }
-    // Running records outrank newer finished ones, so a live run is never cut by the cap.
-    records.sort_by_key(|r| r.status != "running");
+    // Live records outrank newer finished ones, so a live run is never cut by the cap.
+    records.sort_by_key(|r| r.status == "done");
     records.truncate(cap);
     records
 }
@@ -573,11 +581,13 @@ mod tests {
         assert!(many[1].finished_at.is_some());
 
         // A running operation behind newer finished ones still survives a small cap.
-        for idx in 0..4u32 {
-            let done = repo
-                .0
-                .join(RUN_ROOT)
-                .join(format!("consult-20261124T00000{idx}Z-{idx:08x}"));
+        // More than 64 newer finished runs once hid it before status was checked.
+        for idx in 0..70u32 {
+            let done = repo.0.join(RUN_ROOT).join(format!(
+                "consult-20261124T00{:02}{:02}Z-{idx:08x}",
+                idx / 60,
+                idx % 60
+            ));
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .recursive(true)

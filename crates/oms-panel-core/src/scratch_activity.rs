@@ -84,7 +84,7 @@ pub(crate) fn observe_with_peer_runs(
         );
         sources.push(json!({"id":source.id,"label":label,"head":head,"branch":source.branch_label,"status":status}));
     }
-    let peer_runs: Vec<ScratchPeerRun> = report
+    let mut peer_runs: Vec<ScratchPeerRun> = report
         .attempts
         .iter()
         .filter_map(|a| {
@@ -105,8 +105,8 @@ pub(crate) fn observe_with_peer_runs(
                 updated_at: a.updated_at.clone(),
             })
         })
-        .take(crate::board::MAX_ACTIVITY_ROWS)
         .collect();
+    live_first(&mut peer_runs);
     let attempts: Vec<_> = report
         .attempts
         .iter()
@@ -125,4 +125,37 @@ pub(crate) fn observe_with_peer_runs(
             "unverifiedCheckouts":report.unverified_checkouts,"unexaminedCheckouts":report.unexamined_checkouts,"omittedAttempts":omitted}),
         peer_runs,
     )
+}
+
+/// Attempts arrive newest-updated first; a stable live-first sort keeps an older working
+/// attempt from being cut by newer finished ones.
+fn live_first(runs: &mut Vec<ScratchPeerRun>) {
+    runs.sort_by_key(|r| !crate::board::is_live_or_stalled(&r.state));
+    runs.truncate(crate::board::MAX_ACTIVITY_ROWS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_working_attempt_survives_newer_finished_ones() {
+        let run = |id: usize, state: &str| ScratchPeerRun {
+            id: format!("a{id}"),
+            worktree: "wt-0".into(),
+            provider: None,
+            tool: "peer-delegate",
+            state: state.into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let mut runs: Vec<_> = (0..crate::board::MAX_ACTIVITY_ROWS + 5)
+            .map(|i| run(i, "completed"))
+            .collect();
+        runs.push(run(99, "working"));
+        live_first(&mut runs);
+        assert_eq!(runs.len(), crate::board::MAX_ACTIVITY_ROWS);
+        assert_eq!(runs[0].id, "a99");
+        assert_eq!(runs[1].id, "a0");
+    }
 }
