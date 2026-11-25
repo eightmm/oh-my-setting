@@ -165,7 +165,12 @@ progress::-moz-progress-bar{background:var(--brand)}
 .project-meta{display:inline-flex;flex-wrap:wrap;gap:.05rem .55rem}
 #now-work,.leads-region{border:0;padding:.45rem .18rem}
 #now-heading,#leads-heading{color:var(--ink);font-size:.9rem}
-.leads{display:grid;margin-top:.2rem}
+#team-main{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:.55rem;padding:.55rem;margin-bottom:.55rem;background:var(--tint);border-radius:var(--r)}
+#team-main button{color:var(--brand);padding:.2rem .4rem}
+.leads{display:grid;margin:.2rem 0 0 .3rem;padding-left:.65rem;border-left:1px solid var(--line)}
+.lead-children{margin:0 0 .35rem 1.75rem;padding-left:.65rem;border-left:1px solid var(--line)}
+.lead-children .task-row{min-height:2rem;padding:.25rem 0}
+.lead-group>summary{display:flex;gap:.35rem;font-size:.76rem;padding:.1rem 0 .3rem 2rem}
 .leads>p{padding-top:.25rem}
 .plan-strip{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding-block:.4rem 0}
 .plan-strip strong{font-variant-numeric:tabular-nums}
@@ -370,7 +375,8 @@ button.lead:hover,button.lead:focus-visible{background:var(--tint)}
 <div id="now-active" class="rows"></div>
 </section>
 <section class="card leads-region" id="room-leads" aria-labelledby="leads-heading">
-<div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span> <span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><button id="team-open" type="button" data-i18n="tab.chat" hidden>대화</button></div><div id="leads" class="leads"></div>
+<div id="team-main" hidden><span id="team-main-avatar"></span><div class="work-title"><strong id="team-main-name"></strong><small id="team-main-task"></small></div><button type="button" id="team-main-chat">Main</button></div>
+<div class="section-head"><h2 id="leads-heading"><span id="lead-scope">Main 아래의 Lead 활동</span> <span id="lead-count" class="sr-only"></span><span id="work-dot" class="count-badge" aria-hidden="true" hidden></span></h2><button id="team-open" type="button" data-i18n="tab.chat" hidden>대화</button></div><p id="team-records" class="muted"></p><div id="leads" class="leads"></div>
 </section>
 <section class="work-threads" id="work-threads" hidden><h2 data-i18n="threads">다른 작업 대화</h2><div id="thread-rows"></div></section>
 <details class="card" id="latest-results">
@@ -1656,7 +1662,7 @@ function loadWork(force) {
   paintTasks(true);
   detailRead('work', 'oms_panel_work_items', {}, data => {
     try { workData = normalizeWork(data); workError = ''; } catch (error) { workData = undefined; workError = error.message; }
-    loaded.add('work'); paintTasks();
+    loaded.add('work'); paintTasks(); paintLeadTree(dashboardData);
   }, error => { workData = undefined; workError = error.message || t('toolFail'); paintTasks(); });
 }
 function shortUpdate(attempt) {
@@ -2069,10 +2075,12 @@ async function openHostLink(url, status) {
   try {
     const result = await request('ui/open-link',{url});
     if (result?.isError) throw uiError('linkFail');
+    return true;
   } catch (error) {
     if (!disposed && expected === generation && tab === currentTab && (tab !== 'chat' || participant === selectedMember?.participant)) {
       put(status, () => error.message);
     }
+    return false;
   }
 }
 function localGit(git) {
@@ -2580,6 +2588,7 @@ function clearProject() {
   updateContext(null);
   retryStart = undefined;
   el('launch').reset();
+  el('team-main-chat').disabled = false;
   el('launcher').open = false;
   briefInvalid = false; el('brief').setCustomValidity('');
   el('receipt').className = '';
@@ -2933,9 +2942,8 @@ function loadChat(before) {
         }));
       }
       const native = el('chat-native'); native.replaceChildren();
-      if (canOpenLinks && page.self === true && m.participant === dashboardData?.conversationMain?.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '')) {
-        native.append(action(() => t('chat.native'), () => openHostLink(page.nativeUri,status)));
-      }
+      const uri = canOpenLinks && m.participant === dashboardData?.conversationMain?.participant && nativeMainUri(page,m);
+      if (uri) native.append(action(() => t('chat.native'), () => openHostLink(uri,status),'primary'));
     } else {
       list.prepend(...items);
       list.scrollTop = top + list.scrollHeight - height;
@@ -3141,6 +3149,7 @@ function renderConversation(d) {
     if (!selectedMember) clearChat();
   }
   renderMemberList(); renderTeam(d);
+  paintLeadTree(d);
   const headerMain = el('header-main');
   headerMain.hidden = !joined;
   if (joined) {
@@ -3150,37 +3159,114 @@ function renderConversation(d) {
   }
   headerMain.onclick = joined ? () => selectMember(members.find(m => m.participant === main.participant),headerMain) : null;
   updateSendButton();
+}
+function paintLeadTree(d) {
+  if (!d) return;
+  const main = d.conversationMain;
+  const joined = !el('room-leads').hidden && !readOnly && main;
   const cards = el('leads');
-  cards.replaceChildren();
   if (!joined && !readOnly) return;
+  const expanded = Array.from(cards.children, card=>card.children[1]).filter(el=>el?.open).map(el=>el.getAttribute('data-lead'));
+  cards.replaceChildren();
+  const scoped = joined && Array.isArray(d.conversationAttempts) && d.conversationAttempts;
+  const records = scoped || [...(d.activeAttempts || []), ...(d.attempts || [])];
+  const mainRecord = joined
+    ? records.find(a => isMain(a) && a.room === main.room && a.participant === main.participant)
+    : d.main;
+  const root = joined ? main : mainRecord, button = el('team-main-chat');
+  el('team-main').hidden = !root;
+  if (root) {
+    paintAvatar(el('team-main-avatar'),root);
+    put('team-main-name',()=>providerName(root.provider)+' Main');
+    put('team-main-task',()=>joinDetails([mainRecord?.state && stateLabel(mainRecord.state),attemptTitle(mainRecord) || t(joined ? 'main.joined' : 'lead.taskUnknown')]));
+    button.hidden = !joined;
+    put(button,()=>choice('Main 채팅','Main chat'));
+    button.onclick = joined ? () => openMainChat(members.find(m=>m.participant===main.participant),button) : null;
+  }
   const active = d.activeAttempts || [];
-  const complete = Array.isArray(d.activeAttempts) && !(d.activeAttemptsTrimmed > 0) && d.active === active.length;
-  const roomLeads = active.filter(attempt => (readOnly || attempt.room === main.room) && isLead(attempt));
+  const partial = scoped
+    ? d.conversationAttemptsOmitted > 0 || d.conversationAttemptsTrimmed > 0 || main.incomplete
+    : !Array.isArray(d.activeAttempts) || d.activeAttemptsTrimmed > 0 || d.active !== active.length;
+  put('team-records',()=>scoped && partial ? choice('일부 작업 기록','Partial work records') : '');
+  const seen = new Set();
+  const roomLeads = (scoped || active).filter(a => {
+    const key = a.participant && JSON.stringify([a.room,a.participant]);
+    if (!isLead(a) || (!readOnly && a.room !== main.room) || (key && seen.has(key))) return false;
+    if (key) seen.add(key);
+    return true;
+  });
   const dot = el('work-dot');
   dot.hidden = !roomLeads.length;
   put(dot, () => roomLeads.length ? formatCount(roomLeads.length) : '');
   put('lead-count', () => roomLeads.length ? ' (' + formatCount(roomLeads.length) + ')' : '');
   if (!roomLeads.length) {
-    cards.append(node('p', () => t(complete ? 'lead.none' : 'lead.unseen'), 'muted'));
+    cards.append(node('p', () => t(partial ? 'lead.unseen' : 'lead.none'), 'muted'));
     return;
   }
   for (const lead of roomLeads) {
-    const member = members.find(m => m.participant === lead.participant);
+    const member = members.find(m => m.room === lead.room && m.participant === lead.participant);
     const card = member ? action('',() => selectMember(member,card)) : node('article','');
     card.className = 'lead';
     const assignee = providerName(lead.provider) + ' Lead';
     const avatar = node('span',''); paintAvatar(avatar,lead);
     const text = node('span','','work-title');
-    const task = workData?.byId.get(lead.task)?.title || lead.task || lead.id;
-    text.append(node('strong',assignee),node('small',() => joinDetails([task || t('lead.taskUnknown'),shortUpdate(lead),isReadOnly && lead.room])));
+    const task = attemptTitle(lead) || lead.id;
+    text.append(node('strong',assignee),node('small',() => joinDetails([task || t('lead.taskUnknown'),shortUpdate(lead),readOnly && lead.room])));
     const state = stateChip(lead.state, {extraClass: 'lead-state'});
     card.append(avatar,text,state);
     if (member) {
       putAttr(card,'aria-label',() => t('lead.aria',{assignee,task:task || '',p:member.participant}));
       const arrow = node('span','›','arrow'); arrow.setAttribute('aria-hidden','true'); card.append(arrow);
     }
-    cards.append(card);
+    const children = leadChildren(records,lead);
+    if (!children.length) { cards.append(card); continue; }
+    const section = document.createElement('div'), disclosure = node('details','','lead-group');
+    const key = JSON.stringify([lead.room,lead.participant || lead.id]);
+    disclosure.setAttribute('data-lead',key);
+    disclosure.open = expanded.includes(key);
+    const rows = node('div','','lead-children');
+    for (const [attempt,worker] of children) {
+      const item = workData?.byId.get(attempt.task);
+      const row = item ? taskRow({...item,state:attempt.state || item.state},'lead-'+attempt.id,workerLabel(worker,attempt)) : node('div','','task-row');
+      if (!item) row.append(node('strong',()=>attemptTitle(attempt) || workerLabel(worker,attempt)),stateChip(attempt.state),
+        node('small',()=>workerLabel(worker,attempt)));
+      rows.append(row);
+    }
+    const count = node('summary',()=>choice(formatCount(children.length)+'개 하위 기록',formatCount(children.length)+' subordinate records'));
+    disclosure.append(count,rows); section.append(card,disclosure); cards.append(section);
   }
+}
+
+function attemptTitle(row) { return workData?.byId.get(row?.task)?.title || row?.task || row?.tool; }
+function workerLabel(member,row) { return joinDetails([providerName(member?.provider || row.provider),member?.participant || row.participant]); }
+function leadChildren(records,lead) {
+  const rows = new Map();
+  for (const row of records) {
+    if (!row.id || row.id === lead.id || (row.room && row.room !== lead.room) || rows.has(row.id) || isMain(row) || isLead(row)) continue;
+    const worker = row.room && row.participant && members.find(m=>m.room===row.room && m.participant===row.participant && m.role==='worker');
+    if (row.parentAttempt ? row.parentAttempt===lead.id : worker?.parent && worker.parent===lead.participant) rows.set(row.id,[row,worker]);
+  }
+  return [...rows.values()];
+}
+
+function nativeMainUri(page,member) {
+  return page?.source==='room' && page.self===true && page.provider==='codex' && page.room===member.room &&
+    page.participant===member.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '') ? page.nativeUri : '';
+}
+async function openMainChat(member,origin) {
+  if (!member || origin.disabled || disposed) return;
+  if (!canOpenLinks) { selectMember(member,origin); return; }
+  const expected = generation, tab = currentTab;
+  const current = () => !disposed && generation===expected && currentTab===tab &&
+    dashboardData?.conversationBinding==='matched' && dashboardData.conversationMain?.room===member.room && dashboardData.conversationMain.participant===member.participant;
+  origin.disabled = true;
+  try {
+    const result = await tool('oms_panel_chat',{room:member.room,participant:member.participant},expected);
+    const uri = nativeMainUri(result._meta?.chat,member);
+    if (current() && uri && await openHostLink(uri,el('status'))) return;
+  } catch {}
+  finally { if (expected===generation) origin.disabled = false; }
+  if (current()) selectMember(member,origin);
 }
 
 function recordedStateLabel(state) {
@@ -3445,7 +3531,7 @@ async function initialize() {
   if (!initializing) {
     initializing = (async () => {
       if (window.parent === window) throw uiError('openApp');
-      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.3'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
+      const info = await request('ui/initialize', {appInfo:{name:'oms-panel', version:'0.8.4'}, appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}, protocolVersion:'2026-01-26'});
       handshake = true;
       hostSurface = surfaceNames.get(String(info?.hostInfo?.name || '').trim().toLowerCase()) || {k:'surf.unknown'};
       hostLocale = typeof info?.hostContext?.locale === 'string' ? info.hostContext.locale : '';
