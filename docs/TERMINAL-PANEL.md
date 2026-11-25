@@ -1668,8 +1668,8 @@ and frontier; an explicit `--to` may select another provider.
 | --- | --- |
 | light | Pi `openrouter/thinkingmachines/inkling:free` (low), `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
 | routine | Pi `openrouter/thinkingmachines/inkling:free` (medium), `claude-sonnet-5-5` (medium), `gpt-6.1-terra` (medium) |
-| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high), Antigravity `gemini-4-carbon-high` (high, read-only) |
-| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high), Antigravity `gemini-4-carbon-high` (high, read-only) |
+| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high), Antigravity `gemini-4-carbon` (high, read-only) |
+| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high), Antigravity `gemini-4-carbon` (high, read-only) |
 
 Tier entries may declare `"access": "read"` to exclude them from every write
 selection, including provider fallback. Antigravity tier entries require this
@@ -1677,10 +1677,12 @@ marker; invalid access values and missing Antigravity markers are refused with
 one line. Its unknown weekly quota does not change native quota or tie-band
 ordering: it follows every eligible native with a known weekly reading, while
 unknown-quota candidates retain their existing order. Independent judges count
-Antigravity as a separate provider from the implementer. Its configured model is
-a catalog selector: routing requires the registry's routable list, preserves the
-configured model level and pins the newest model in that family. A missing or
-unroutable catalog skips the candidate. Existing board and result views display
+Antigravity as a separate provider from the implementer. Its configured model
+names the base Gemini family and effort; routing resolves that pair to the exact
+Antigravity catalog selector from the registry's routable list (pinning the
+newest model in that family) and skips the candidate when catalog evidence or
+the selector for that effort is missing. Older suffixed selectors remain
+accepted. Existing board and result views display
 the selected provider and model. A read fallback to Antigravity also requires
 the registry's `exact_model_override`; otherwise the fallback is recorded as
 `alternate-not-routable`.
@@ -2057,13 +2059,15 @@ rebuttal round means six primary calls for routine (three seats) and ten for dee
 frontier (five seats); two rounds mean nine for routine and twelve for deep or frontier
 after one same-family seat is dropped to fit the 12-primary-call budget.
 
-Its configured Gemini ID selects a name and
-level (for example, `gemini-4-carbon-high` selects `carbon-high`); council routing
+Its configured Gemini ID names the base model and
+effort (for example, `gemini-4-carbon` with effort `high`); council routing
 pins the newest numeric generation of that family in the provider's routable
-catalog, excluding models shown as not routed by `oms models`. Codex and Claude
-seats also pin the newest catalog model in their configured family. If that Gemini
-name is absent, routing may select the newest generation of another Gemini name
-at the same level only when exactly one name is routable there. An installed
+catalog, resolves the exact selector for that effort from catalog `selectors`
+(older suffixed selectors keep working), and excludes models shown as not routed
+by `oms models`. Codex and Claude seats also pin the newest catalog model in
+their configured family. If that Gemini name is absent, routing may select the
+newest generation of another Gemini name only when exactly one name is routable
+there. An installed
 Claude CLI that reports catalog probing as unsupported keeps its configured model.
 Other empty model catalogs are unavailable. Council skips routes marked
 `public_only` and records the reason in its dry-run plan. The plan records

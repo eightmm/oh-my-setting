@@ -859,6 +859,52 @@ fn routing_defaults_order_and_validation_edges() {
     assert_eq!(apply(&data).0, 0);
     data["tiers"]["deep"][2]["effort"] = "max".into();
     assert_ne!(apply(&data).0, 0);
+    // Antigravity base-form routes and Neon/Hydrogen max/ultra refusals work for both forms.
+    for (model, effort, ok) in [
+        ("gemini-4-carbon", "high", true),
+        ("gemini-4-neon", "xhigh", true),
+        ("gemini-4-neon", "max", false),
+        ("gemini-4-neon", "ultra", false),
+        ("gemini-4-neon-high", "max", false),
+        ("gemini-4-neon-high", "ultra", false),
+        ("gemini-4-hydrogen", "xhigh", true),
+        ("gemini-4-hydrogen", "max", false),
+        ("gemini-4-hydrogen", "ultra", false),
+        ("gemini-4-high", "high", false),
+    ] {
+        let mut data = baseline.clone();
+        data["tiers"]["deep"][2]["model"] = model.into();
+        data["tiers"]["deep"][2]["effort"] = effort.into();
+        assert_eq!(apply(&data).0 == 0, ok, "{model} {effort}");
+    }
+    // Claude latest-model aliases validate and render cleanly, and bundled policy loads.
+    for alias in ["opus", "sonnet", "fable", "haiku"] {
+        assert_eq!(
+            oms_command_agent_role::native_model::route_family("claude", alias),
+            Some((alias.to_owned(), vec![u64::MAX]))
+        );
+        assert!(oms_command_agent_role::native_model::valid_role_model(
+            "claude", alias
+        ));
+        let mut data = baseline.clone();
+        data["tiers"]["routine"] = json!([{"provider":"claude","model":alias,"effort":"medium"}]);
+        assert_eq!(apply(&data).0, 0, "{alias}");
+    }
+    assert_eq!(
+        oms_command_agent_role::native_model::route_family("antigravity", "gemini-4-carbon"),
+        Some(("carbon".to_owned(), vec![4]))
+    );
+    assert_eq!(
+        oms_command_agent_role::native_model::route_family("antigravity", "gemini-4-carbon-high"),
+        Some(("carbon-high".to_owned(), vec![4]))
+    );
+    assert_eq!(
+        oms_command_agent_role::native_model::route_family("antigravity", "gemini-4-high"),
+        None
+    );
+    let bundled: Value =
+        serde_json::from_slice(include_bytes!("../../../config/panel-routing.json")).unwrap();
+    assert_eq!(apply(&bundled).0, 0);
     let mut data = baseline.clone();
     data["tiers"]["routine"][2]
         .as_object_mut()

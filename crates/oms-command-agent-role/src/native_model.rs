@@ -121,9 +121,11 @@ pub fn validate_effort(provider: &str, model: &str, effort: &str) -> Result<(), 
     // An unknown profile is not classified from a provider-wide catalog label.
     if provider == "antigravity"
         && matches!(effort, "max" | "ultra")
-        && Regex::new(r"^gemini-\d+(?:\.\d+)?-(?:neon|hydrogen)(?:-(?:low|medium|high|xhigh))?$")
-            .expect("static native model pattern")
-            .is_match(model)
+        && Regex::new(
+            r"^gemini-\d+(?:\.\d+)?-(?:neon|hydrogen)(?:-(?:low|medium|high|xhigh|max|ultra))?$",
+        )
+        .expect("static native model pattern")
+        .is_match(model)
     {
         return Err("Antigravity Neon/Hydrogen does not support the requested effort");
     }
@@ -159,12 +161,13 @@ pub fn route_family(provider: &str, model: &str) -> Option<(String, Vec<u64>)> {
     if let Some(fixed) = fixed_effort_model(provider, model) {
         return Some((fixed.to_owned(), vec![]));
     }
+    if provider == "claude" && matches!(model, "opus" | "sonnet" | "fable" | "haiku") {
+        return Some((model.to_owned(), vec![u64::MAX]));
+    }
     let pattern = match provider {
         "codex" => r"^gpt-(\d+(?:\.\d+)?)-(astra|sol|terra|luna)$",
         "claude" => r"^claude-(opus|sonnet|fable|haiku)-(\d+(?:-\d+)*)$",
-        "antigravity" => {
-            r"^gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(low|medium|high|xhigh)$"
-        }
+        "antigravity" => r"^gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$",
         _ => return None,
     };
     let regex = Regex::new(pattern).ok()?;
@@ -172,7 +175,10 @@ pub fn route_family(provider: &str, model: &str) -> Option<(String, Vec<u64>)> {
     let (family, number) = if provider == "claude" {
         (found[1].to_owned(), &found[2])
     } else if provider == "antigravity" {
-        (format!("{}-{}", &found[2], &found[3]), &found[1])
+        if EFFORTS.contains(&&found[2]) {
+            return None;
+        }
+        (found[2].to_owned(), &found[1])
     } else {
         (found[2].to_owned(), &found[1])
     };
