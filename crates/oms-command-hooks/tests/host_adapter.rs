@@ -1277,7 +1277,7 @@ fn harness_hook_pi_panel_hook_is_silent_outside_a_panel() {
     fs::create_dir_all(repo.join(".oms")).unwrap();
     // A live room that collaboration() would read and advance if it ran.
     seed_room(&repo);
-    let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"pi-2","prompt":"hi"});
+    let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"pi-2","prompt":"implement the requested change"});
     assert_eq!(harness(&tmp, "panel-hook", &payload), (0, String::new()));
     assert_eq!(harness(&tmp, "relay", &payload), (0, String::new()));
     let hooks = repo.join(".oms/hooks");
@@ -1391,7 +1391,28 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
     .unwrap();
     seed_room(&repo);
     strip_group_world_write(tmp.path());
-    assert!(prompt(&tmp).contains("You are a control-tower main"));
+    let assert_main_contract = |hint: &str| {
+        assert!(hint.contains("You are a control-tower main"), "{hint}");
+        for obsolete_permission in [
+            "Direct edits are for local known-cause fixes",
+            "recovery after two failures",
+        ] {
+            assert!(!hint.contains(obsolete_permission), "{hint}");
+        }
+        for required in [
+            "Repository edits stay delegated, including small fixes and integration code",
+            "oms panel --continue TASK_ID --brief-file PATH",
+            "oms panel --dispatch integrator --access write --scope PATH",
+            "oms panel --dispatch researcher --access read",
+            "no worker can start, report the blocker and wait",
+            "specific user instruction for Main to make that change itself",
+            "Room as a --kind status message",
+            "unless the user started the panel with OMS_MAIN_WRITE_GUARD=0",
+        ] {
+            assert!(hint.contains(required), "missing {required}: {hint}");
+        }
+    };
+    assert_main_contract(&prompt(&tmp));
     assert!(
         !prompt(&tmp).contains("You are a control-tower main"),
         "delivered once"
@@ -1418,7 +1439,7 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
             "dedup digest removed"
         );
         let first = prompt(&tmp);
-        assert!(first.contains("You are a control-tower main"), "{source}");
+        assert_main_contract(&first);
         let line = format!("resumed after {source}: ");
         if source == "startup" {
             assert!(!first.contains("resumed after"), "{first}");
@@ -1432,6 +1453,10 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
         }
         let second = prompt(&tmp);
         assert!(!second.contains("resumed after"), "once: {second}");
+        assert!(
+            second.contains("Main manages; repository edits stay delegated"),
+            "short reminder preserves the role contract: {second}"
+        );
     }
     // OMS_ROOM_ID still names the pre-rollover room: the line follows the successor
     room_run(&repo, &["rollover", "--id", "room-test"]);
@@ -1449,6 +1474,7 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
     );
     harness(&tmp, "relay-hint", &start("compact"));
     let rolled = prompt(&tmp);
+    assert_main_contract(&rolled);
     assert!(rolled.contains("resumed after compact: "), "{rolled}");
     assert!(rolled.contains("status: after rollover."), "{rolled}");
     // other sources and other events leave the delivered marker alone
