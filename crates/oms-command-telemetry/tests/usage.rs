@@ -507,6 +507,39 @@ fn pending_admission_bounds_receipt_and_ignore_lock_waits() {
 }
 
 #[test]
+fn settlement_refuses_to_publish_after_losing_the_dispatch_lock() {
+    use oms_command_telemetry::store::{StoreError, dispatch};
+    use std::time::{Duration, Instant};
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let receipt = usage::begin(&root.0, identity("call_settling"), None, &stop).unwrap();
+    let terminal = observe(receipt, 1, 7, Cost::Unpriced);
+    let ledger = root.0.join(usage::RECEIPTS);
+    let pending = std::fs::read(&ledger).unwrap();
+    let lock = root.0.join(dispatch::LOCK);
+    let mut reached = false;
+    let outcome = usage::record_checked(
+        &root.0,
+        &terminal,
+        &stop,
+        Instant::now() + Duration::from_secs(2),
+        // Every earlier check has passed; another admission could now lock
+        // the replacement inode and still read the unsettled ledger.
+        || {
+            std::fs::rename(&lock, lock.with_extension("moved")).unwrap();
+            std::fs::write(&lock, b"").unwrap();
+            reached = true;
+        },
+    );
+    assert!(reached);
+    let error = outcome.unwrap_err();
+    assert_eq!(error.source, StoreError::Lock(oms_lock::Error::Changed));
+    assert_eq!(error.file(), Some(dispatch::LOCK));
+    assert!(!error.publication_uncertain);
+    assert_eq!(std::fs::read(&ledger).unwrap(), pending);
+}
+
+#[test]
 fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability() {
     use oms_command_telemetry::store::{
         dispatch,

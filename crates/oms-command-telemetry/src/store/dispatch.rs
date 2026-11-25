@@ -234,7 +234,7 @@ impl<'a> Transaction<'a> {
             self.check()?;
             self.validate_path(relative)?;
             self.root
-                .atomic_mutate(
+                .atomic_mutate_checked(
                     relative,
                     MutationOptions {
                         read: ByteReadOptions {
@@ -253,6 +253,7 @@ impl<'a> Transaction<'a> {
                         self.check()?;
                         Ok(bytes)
                     },
+                    || self.check(),
                 )
                 .map_err(|error| match error {
                     MutationError::Storage {
