@@ -78,19 +78,6 @@ fn strings(v: &Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-fn review_count(ctx: &Context<'_>) -> Result<usize> {
-    let plan = ctx.plan_value()?;
-    let tasks = &plan["tasks"];
-    let rows: Vec<&Value> = match tasks {
-        Value::Object(map) => map.values().collect(),
-        Value::Array(items) => items.iter().collect(),
-        _ => vec![],
-    };
-    Ok(rows
-        .iter()
-        .filter(|t| value::text(t, "state") == "review")
-        .count())
-}
 /// Claims the exact ready snapshot that fits beside the running ones.
 fn pick(
     ctx: &Context<'_>,
@@ -100,7 +87,7 @@ fn pick(
     backlog: Option<usize>,
 ) -> Result<Pick> {
     let base = ctx.git(&["rev-parse", "HEAD"])?;
-    let out = ctx.action(&Request::new(Action::Ready).flag("json"))?;
+    let out = ctx.ready_snapshot()?;
     require(out.code == 0, "cannot list ready tasks")?;
     let ready = value::parse(&out.stdout)?;
     let candidates = ready["tasks"]
@@ -126,7 +113,10 @@ fn pick(
         return Ok(Pick::Idle);
     }
     if let Some(limit) = backlog
-        && review_count(ctx)? >= limit
+        && ready["review_backlog"]
+            .as_u64()
+            .ok_or_else(|| Error::new(2, "invalid review backlog"))?
+            >= limit as u64
     {
         return Ok(Pick::Backpressure);
     }
