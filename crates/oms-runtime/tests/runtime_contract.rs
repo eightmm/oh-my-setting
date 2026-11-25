@@ -48,6 +48,44 @@ impl Drop for Fixture {
 struct Native;
 
 #[test]
+fn artifact_resolution_replay_keeps_source_and_ordinal_boundaries() {
+    use serde_json::json;
+    let target = json!({
+        "schema":1, "event_id":"failed", "operation_id":"op", "artifact_id":"art",
+        "kind":"delegate", "exit":1, "_source":".oms/artifacts/index.jsonl", "_ordinal":1
+    });
+    let resolver = json!({
+        "schema":1, "event_id":"settled", "operation_id":"op", "artifact_id":"art",
+        "kind":"artifact-resolution", "resolves_event_id":"failed",
+        "parent_event_id":"failed", "resolution":"resolved", "exit":0,
+        "_source":".oms/artifacts/index.jsonl", "_ordinal":2
+    });
+    let replay = |rows: &[serde_json::Value]| {
+        let rows = rows
+            .iter()
+            .map(|row| oms_runtime::value::from_serde(row).unwrap())
+            .collect::<Vec<_>>();
+        oms_runtime::evidence::resolved_ids(&rows)
+    };
+    assert_eq!(
+        replay(&[target.clone(), resolver.clone()]),
+        std::collections::BTreeSet::from(["failed".to_owned()])
+    );
+    let mut foreign = resolver.clone();
+    foreign["_source"] = json!(".oms/lifecycle/events.jsonl");
+    assert!(replay(&[target.clone(), foreign.clone()]).is_empty());
+    assert!(replay(&[target.clone(), resolver.clone(), foreign]).contains("failed"));
+    let mut bad_ordinal = resolver.clone();
+    bad_ordinal["_ordinal"] = json!(1);
+    assert!(replay(&[target.clone(), bad_ordinal]).is_empty());
+    assert!(replay(&[resolver.clone(), target.clone()]).is_empty());
+    let mut legacy = resolver.clone();
+    legacy["schema"] = json!(true);
+    assert!(replay(&[target.clone(), legacy]).is_empty());
+    assert!(replay(&[target.clone(), resolver.clone(), target]).is_empty());
+}
+
+#[test]
 fn external_wait_relations_refuse_foreign_late_results_and_keep_negative_experiments() {
     if child_test(
         "external_wait_relations_refuse_foreign_late_results_and_keep_negative_experiments",

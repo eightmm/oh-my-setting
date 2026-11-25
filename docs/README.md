@@ -42,6 +42,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Run input identity](RUN-INPUT-IDENTITY.md) | Pre-command input identity and metric contract capture |
 | [Work inspection](WORK-INSPECTION.md) | Evidence matrix, next-step explanation and return briefs |
 | [Callable consolidation audit](CALLABLE-CONSOLIDATION-AUDIT.md) | Actual CLI/MCP/core wiring, duplication and boundaries to preserve |
+| [Functional consolidation PR map](FUNCTIONAL-CONSOLIDATION-PR-MAP.md) | November 25 mapping of 27 findings to implementation drafts, specifications, existing PR owners and remaining verification |
 | [Consolidation work packets](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | Ten scoped follow-ups with reusable APIs, callers and canonical fixtures |
 | [Tool context review](TOOL-CONTEXT-REVIEW.md) | November 19 source review, implemented CC-04 output reader and native discovery boundaries |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |

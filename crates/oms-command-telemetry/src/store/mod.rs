@@ -12,6 +12,7 @@ mod paths;
 pub mod physical;
 mod producer;
 mod recovery;
+pub mod resolution;
 pub mod resources;
 mod retention;
 pub mod usage;

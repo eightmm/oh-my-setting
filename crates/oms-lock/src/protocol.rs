@@ -1,7 +1,5 @@
 use crate::identity::{self, Observation};
-use crate::{
-    Cancellation, Error, Lock, Mode as Selection, Status, paths, sleep_interval, wait_until,
-};
+use crate::{Error, Lock, Mode as Selection, Status, paths, sleep_interval, wait_until};
 use rustix::fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags, Stat};
 use rustix::io::Errno;
 use std::collections::HashMap;
@@ -673,10 +671,10 @@ fn flock_file(root: &Root, name: &OsStr) -> Result<(OwnedFd, Stat), Error> {
 
 pub(crate) fn acquire(
     lock: &Lock,
-    cancellation: Option<&Cancellation>,
+    cancellation: Option<&(dyn Fn() -> bool + Sync)>,
     nonblocking: bool,
 ) -> Result<Guard, Error> {
-    if cancellation.is_some_and(Cancellation::is_cancelled) {
+    if cancellation.is_some_and(|cancelled| cancelled()) {
         return Err(Error::Cancelled);
     }
     let start = Instant::now();
@@ -712,7 +710,7 @@ pub(crate) fn acquire(
         None
     };
     loop {
-        if cancellation.is_some_and(Cancellation::is_cancelled) {
+        if cancellation.is_some_and(|cancelled| cancelled()) {
             return Err(Error::Cancelled);
         }
         root.check()?;

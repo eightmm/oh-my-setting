@@ -35,6 +35,46 @@ pub fn fixed_effort_model(provider: &str, model: &str) -> Option<&'static str> {
         .find(|candidate| candidate.eq_ignore_ascii_case(model))
 }
 
+fn split_agy_effort_suffix(model: &str) -> Option<(&str, &'static str)> {
+    let (base, suffix) = model.rsplit_once('-')?;
+    if base.is_empty() {
+        return None;
+    }
+    let effort = EFFORTS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == suffix)?;
+    Some((base, effort))
+}
+
+/// Whether `model` already ends in `-<effort>` for a known effort token.
+pub fn is_agy_suffixed_selector(model: &str) -> bool {
+    split_agy_effort_suffix(model).is_some()
+}
+
+/// Strip a known `-<effort>` suffix from an Antigravity selector, returning
+/// `model` unchanged when no known effort suffix is present.
+pub fn agy_base_model(model: &str) -> &str {
+    split_agy_effort_suffix(model).map_or(model, |(base, _)| base)
+}
+
+/// Derive the exact Antigravity CLI selector `<base>-<effort>` from a base
+/// model and effort. Fixed-effort models, already-suffixed selectors,
+/// `provider-default`, and empty/auto/unknown efforts are returned unchanged.
+pub fn agy_selector(model: &str, effort: &str) -> String {
+    let effort = normalized_effort(effort);
+    if model.is_empty()
+        || model == "provider-default"
+        || effort.is_empty()
+        || !EFFORTS.contains(&effort)
+        || fixed_effort_model("antigravity", model).is_some()
+        || is_agy_suffixed_selector(model)
+    {
+        return model.to_owned();
+    }
+    format!("{model}-{effort}")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgyCatalogRow<'a> {
     pub selector: &'a str,
@@ -72,14 +112,8 @@ pub fn agy_catalog_row(row: &str) -> Option<AgyCatalogRow<'_>> {
     {
         return None;
     }
-    let (base_model, effort) = selector
-        .rsplit_once('-')
-        .filter(|(prefix, _)| !prefix.is_empty())
-        .and_then(|(prefix, suffix)| {
-            let effort = EFFORTS
-                .iter()
-                .copied()
-                .find(|candidate| *candidate == suffix)?;
+    let (base_model, effort) = split_agy_effort_suffix(selector)
+        .and_then(|(prefix, effort)| {
             label
                 .filter(|text| label_agrees_with_effort(text, effort))
                 .map(|_| (prefix, Some(effort)))
@@ -121,9 +155,11 @@ pub fn validate_effort(provider: &str, model: &str, effort: &str) -> Result<(), 
     // An unknown profile is not classified from a provider-wide catalog label.
     if provider == "antigravity"
         && matches!(effort, "max" | "ultra")
-        && Regex::new(r"^gemini-\d+(?:\.\d+)?-(?:neon|hydrogen)(?:-(?:low|medium|high|xhigh))?$")
-            .expect("static native model pattern")
-            .is_match(model)
+        && Regex::new(
+            r"^gemini-\d+(?:\.\d+)?-(?:neon|hydrogen)(?:-(?:low|medium|high|xhigh|max|ultra))?$",
+        )
+        .expect("static native model pattern")
+        .is_match(model)
     {
         return Err("Antigravity Neon/Hydrogen does not support the requested effort");
     }
@@ -159,12 +195,13 @@ pub fn route_family(provider: &str, model: &str) -> Option<(String, Vec<u64>)> {
     if let Some(fixed) = fixed_effort_model(provider, model) {
         return Some((fixed.to_owned(), vec![]));
     }
+    if provider == "claude" && matches!(model, "opus" | "sonnet" | "fable" | "haiku") {
+        return Some((model.to_owned(), vec![u64::MAX]));
+    }
     let pattern = match provider {
         "codex" => r"^gpt-(\d+(?:\.\d+)?)-(astra|sol|terra|luna)$",
         "claude" => r"^claude-(opus|sonnet|fable|haiku)-(\d+(?:-\d+)*)$",
-        "antigravity" => {
-            r"^gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(low|medium|high|xhigh)$"
-        }
+        "antigravity" => r"^gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$",
         _ => return None,
     };
     let regex = Regex::new(pattern).ok()?;
@@ -172,7 +209,10 @@ pub fn route_family(provider: &str, model: &str) -> Option<(String, Vec<u64>)> {
     let (family, number) = if provider == "claude" {
         (found[1].to_owned(), &found[2])
     } else if provider == "antigravity" {
-        (format!("{}-{}", &found[2], &found[3]), &found[1])
+        if EFFORTS.contains(&&found[2]) {
+            return None;
+        }
+        (found[2].to_owned(), &found[1])
     } else {
         (found[2].to_owned(), &found[1])
     };

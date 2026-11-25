@@ -79,7 +79,7 @@ explains overlapping entrypoints.
 | `github` | Show GitHub project mode and cached issue/PR state; refresh, adopt merged PRs, post one evidence comment. | `oms github` | [Verification and release](#verification-and-release) |
 | `change-guard` | Warn about concurrent agent edits. | `oms change-guard` | [Delegating writes](#delegating-writes) |
 | `checkpoint` | Save a reversible snapshot of tracked Git state. | `oms checkpoint` | [Delegating writes](#delegating-writes) |
-| `scratch-worktree` | Manage scratch worktrees around active workers. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
+| `scratch-worktree` | Manage scratch worktrees around active workers, with rate-limited background hygiene on `add`. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
 
 ## State and memory
 
@@ -140,7 +140,7 @@ explains overlapping entrypoints.
 | `update` | Update an installation transactionally. | `oms update` | [Install and ownership](#install-and-ownership) |
 | `auto-update` | Check or apply source updates. | `oms auto-update` | [Install and ownership](#install-and-ownership) |
 | `tick` | Run unattended maintenance for registered repositories. | `oms tick` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
-| `cleanup` | Remove safe install leftovers. | `oms cleanup` | [Install and ownership](#install-and-ownership) |
+| `cleanup` | Preview or remove safe install leftovers, dead residue and idle scratch Cargo build output. | `oms cleanup` | [Install and ownership](#install-and-ownership) |
 | `uninstall` | Remove managed links and restore backups. | `oms uninstall` | [Install and ownership](#install-and-ownership) |
 
 ## Internals
@@ -435,9 +435,13 @@ After the final scan it relies on the dead worktree remaining quiescent until re
 In a dead, otherwise settled delegate worktree, eligible ignored-tree content is
 discarded, including hand edits: names and markers do not establish reproducible bytes.
 The delegate's deliverable is its preserved patch; ignored content was never part of it.
-`oms cleanup --apply` requires explicit invocation and has no tick or automatic caller;
-preserve anything you need before `--apply`. Non-ignored files still need preservation,
-and dry-run lines name any regenerable tree classes in settled delegates.
+`oms cleanup --apply` has no persistent daemon or tick caller; `oms scratch-worktree add`
+starts one best-effort `oms cleanup --apply` pass in the background for the same
+repository after creating the worktree (rate-limited to at most once per hour per managed
+root via an atomic stamp file, skipped for harness children, printing at most one notice
+line on stderr when started and returning immediately).
+Non-ignored files still need preservation, and dry-run lines name any regenerable tree
+classes in settled delegates.
 
 #### Scratch worktrees
 
@@ -446,6 +450,15 @@ on no branch, tag or remote ref, or it holds `.oms/plan/tasks.json`,
 `.oms/failures.jsonl`, `.oms/landings.jsonl` or `.oms/artifacts/index.jsonl`; a clean
 scratch worktree at a referenced HEAD is removable. Worktrees holding other `.oms`
 records stay kept, and every kept item prints its reason.
+
+Across user-owned `oh-my-setting-scratch.*` worktrees under the managed root (dead
+scratch worktrees only — proven dead owner, any repository, including kept worktrees;
+live or unproven owners are skipped), `oms cleanup` also classifies an idle top-level
+Cargo `target/` directory as regenerable build output when it is a real user-owned
+directory containing Cargo's `CACHEDIR.TAG` and none of `target/`, `target/*/` or
+`target/*/.fingerprint` was modified in the last 24 hours. Dry-run lists each match as
+`would remove build output` and `--apply` removes only `target/`, never the worktree
+itself, tracked files or `.oms/`.
 
 </details>
 
@@ -1020,10 +1033,11 @@ and a harness child never starts one.
 
 Cached catalog reads separate tab-delimited model IDs from display labels and discard
 listing banners, so labels cannot leak into automatic recovery routes. `oms models --json`
-lists selector IDs in `models` (and text output), derives per-base-model
-`model_effort_scales` and `selectors` for Antigravity at read time from cached catalog
-rows, and reports Codex's provider-level `effort_values` as the scale-ordered union of
-cached per-model scales when present.
+lists selector IDs in `models`, derives per-base-model `model_effort_scales` and
+`selectors` for Antigravity at read time from cached catalog rows, and reports Codex's
+provider-level `effort_values` as the scale-ordered union of cached per-model scales when
+present. `oms models` text output groups each provider's catalog by base model with its
+effort scale (`fixed` for fixed-effort models, and `(not routed)` when not routable).
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
 and reason.
@@ -1888,8 +1902,10 @@ To refresh panel boards after landing from another clone, use `oms sync-shared
 `git merge`. Calls register a shared lock before canonical snapshots and retain
 it through final guards and receipts; sync takes the same admission gate
 exclusively through fetch and `merge --ff-only`. It returns exit 75 with
-`deferred: N calls running (ids...)` while calls remain, and refuses dirty
-(including untracked files), detached, ahead or diverged trees; any local branch may follow the target.
+`deferred: N calls running (ids...)` while calls remain, and refuses tracked or
+staged edits, detached, ahead or diverged trees; untracked files from other tools may
+stay, and `merge --ff-only` still refuses one the target would overwrite. Any
+local branch may follow the target.
 New calls wait at most five seconds for an active sync, then refuse safely;
 retry them after sync finishes. Dead PID/start identities are reclaimed,
 while incomplete or unprovable lock owners continue to block. This refresh
@@ -1899,18 +1915,11 @@ To request this refresh as a separate step of landing, add
 `--sync-shared /path/to/shared-checkout` to `oms land`. PATH is required and
 independent of `--handoff-receipt-to PATH`; use both to transfer landing evidence
 and then refresh that checkout. Sync runs only after land passes and any handoff
-succeeds. Deferred (exit 75) or refused sync leaves land passed with exit zero;
-the land log and text status show `sync deferred: reason` or
-`sync refused: reason`. Retry the same command when the checkout is idle and
-clean. Omitting the flag preserves the target HEAD, index and worktree during
-handoff.
-
-The refresh outcome is stored in `sync/<request>.json` beside the producer's
-landing receipt, with `sync.state` (`running`, `passed`, `deferred` or `refused`),
-path, exit code and reason. `oms land status` includes this companion's `sync`
-fields in JSON and text output. Keeping this mutable operation separate preserves
-the original landing receipt bytes and handed-off digests, including on retries;
-the companion is not imported as landing evidence.
+succeeds. A deferred (exit 75) or refused sync leaves land passed with exit
+zero and prints `land: sync deferred: reason` or `land: sync refused: reason`;
+run `oms sync-shared` again when the checkout is idle and clean. The sync
+outcome is not written into the landing receipt. Omitting the flag preserves
+the target HEAD, index and worktree during handoff.
 
 `oms land notes --from REV --to REV [--output NEW_FILE]` prints a release-notes skeleton
 for that range: first-parent commit subjects grouped by Conventional Commit type, `!`
@@ -3456,9 +3465,12 @@ keep scheduled/manual runs separate from pushes; newer pushes supersede older
 pushes.
 
 CI is Linux-only. PR and main pushes select affected or full verification. Full
-runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)`, and the
-`native (ubuntu-latest, copy)` install lifecycle fixture. The stable `gate`
-checks the selected jobs and their planned skips.
+runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)` (format,
+Clippy, doctests, migration check), three parallel `rust tests (core|commands|rest)`
+shards, and the `native (ubuntu-latest, copy)` install lifecycle fixture. The
+`rest` shard excludes the packages the other two name, so a new package is
+always tested. Dependency builds are cached and saved only from `main`. The
+stable `gate` checks the selected jobs and their planned skips.
 [CI workflow](../.github/workflows/test.yml)
 
 macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD

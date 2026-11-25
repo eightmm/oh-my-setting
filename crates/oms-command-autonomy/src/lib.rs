@@ -76,6 +76,19 @@ pub fn run_with_services(
         if args.flag("help") {
             return Ok(Output::text(cli::usage(tool)));
         }
+        if tool == "plan-run" && args.has("expected-task-sha256") {
+            require(
+                args.has("id")
+                    && !args.flag("next")
+                    && !args.flag("parallel")
+                    && !args.flag("verify-combined"),
+                "--expected-task-sha256 requires serial --id without --next, --parallel or --verify-combined",
+            )?;
+            require(
+                value::digest(args.required("expected-task-sha256")?),
+                "--expected-task-sha256 must be lowercase SHA-256",
+            )?;
+        }
         for name in [
             "repo",
             "apply",

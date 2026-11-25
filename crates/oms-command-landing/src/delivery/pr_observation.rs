@@ -127,7 +127,7 @@ impl Checkpoint {
                     if started.elapsed() >= timeout {
                         return Err(Error::new(
                             75,
-                            "PR recorded; publication lock busy, final CI receipt deferred",
+                            "PR recorded; publication lock busy, final CI receipt deferred; rerun the same oms land command to resume this receipt",
                         ));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -171,9 +171,12 @@ pub(super) fn validate_destination(r: &Run<'_>, original_pr: &V, base: &str) -> 
     )?;
     require(
         crate::review::remote_tip(r.git, r.destination, r.head_branch)?.as_deref()
-            == Some(&r.snapshot.head)
-            && crate::review::remote_tip(r.git, r.destination, r.target)?.as_deref() == Some(base),
-        "reviewed remote ref changed during CI; final observation withheld",
+            == Some(&r.snapshot.head),
+        "reviewed PR head changed during CI; final observation withheld",
+    )?;
+    require(
+        crate::review::remote_tip(r.git, r.destination, r.target)?.as_deref() == Some(base),
+        "target moved during CI; final observation withheld. Fetch the target, merge it into the PR branch and rerun land with the same head branch so CI checks the combined tree",
     )?;
     Ok(())
 }

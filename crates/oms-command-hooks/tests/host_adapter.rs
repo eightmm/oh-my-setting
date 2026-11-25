@@ -646,6 +646,132 @@ fn codex_handoff_rollout(path: &Path, repo: &Path, sid: &str) {
 }
 
 #[test]
+fn precompact_handoff_keeps_dissent_until_valid_resolution() {
+    use serde_json::{Value, json};
+
+    let tmp = TempDir::new("handoff-resolution");
+    let home = tmp.path().join("home");
+    let active = home.join("codex");
+    if !clean_env_child(
+        "precompact_handoff_keeps_dissent_until_valid_resolution",
+        &[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", ""),
+            ("CODEX_HOME", active.to_str().unwrap()),
+            ("OMS_WORK_JOURNAL", "0"),
+            ("OMS_PRECOMPACT_HANDOFF", "1"),
+        ],
+    ) {
+        return;
+    }
+    let repo = git_repo(&tmp);
+    fs::create_dir_all(repo.join(".oms/artifacts")).unwrap();
+    let active = PathBuf::from(std::env::var_os("CODEX_HOME").unwrap());
+    let sid = "resolution-session";
+    let transcript = active.join("sessions/rollout-resolution.jsonl");
+    codex_handoff_rollout(&transcript, &repo, sid);
+    let input = json!({
+        "hook_event_name": "PreCompact", "cwd": repo, "session_id": sid,
+        "transcript_path": transcript
+    });
+    let target = json!({
+        "schema":1, "event_id":"split", "operation_id":"op", "artifact_id":"art",
+        "ts":"2026-01-01T00:00:00Z", "kind":"review-outcome", "provider":"codex", "exit":1,
+        "review":{"overall":1,"seats":[
+            {"provider":"codex","verdict":"pass"},
+            {"provider":"claude","verdict":"fail"}
+        ]}
+    });
+    let resolver = json!({
+        "schema":1, "event_id":"settled", "operation_id":"op", "artifact_id":"art",
+        "ts":"2026-01-01T00:00:01Z", "kind":"artifact-resolution", "provider":"codex",
+        "resolves_event_id":"split",
+        "parent_event_id":"split", "resolution":"resolved", "exit":0
+    });
+    let changed = |key: &str, value: Value| {
+        let mut row = resolver.clone();
+        row[key] = value;
+        vec![target.clone(), row]
+    };
+    let missing = |key: &str| {
+        let mut target = target.clone();
+        let mut resolver = resolver.clone();
+        target.as_object_mut().unwrap().remove(key);
+        resolver.as_object_mut().unwrap().remove(key);
+        vec![target, resolver]
+    };
+    let cases = [
+        ("valid", vec![target.clone(), resolver.clone()], false),
+        (
+            "malformed",
+            vec![
+                target.clone(),
+                json!({"kind":"artifact-resolution","resolves_event_id":"split"}),
+            ],
+            true,
+        ),
+        ("schema", changed("schema", json!(true)), true),
+        ("parent", changed("parent_event_id", json!("other")), true),
+        ("operation", changed("operation_id", json!("other")), true),
+        ("artifact", changed("artifact_id", json!("other")), true),
+        ("exit", changed("exit", json!(1)), true),
+        ("status", changed("resolution", json!("pending")), true),
+        ("missing-operation", missing("operation_id"), true),
+        ("missing-artifact", missing("artifact_id"), true),
+        ("missing-provider", missing("provider"), true),
+        ("missing-timestamp", missing("ts"), true),
+        ("out-of-order", vec![resolver.clone(), target.clone()], true),
+        (
+            "duplicate-target",
+            vec![target.clone(), resolver.clone(), target.clone()],
+            true,
+        ),
+        (
+            "duplicate-resolver",
+            vec![target.clone(), resolver.clone(), resolver.clone()],
+            true,
+        ),
+        (
+            "invalid-duplicate",
+            vec![target, resolver, json!({"event_id":"settled"})],
+            true,
+        ),
+    ];
+    for (name, rows, open) in cases {
+        let bytes = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        let index = repo.join(".oms/artifacts/index.jsonl");
+        fs::write(&index, &bytes).unwrap();
+        let result = hook(
+            &tmp,
+            "harness-hook",
+            &["precompact-handoff", "codex"],
+            input.to_string().as_bytes(),
+        );
+        assert_eq!(result, (0, String::new(), String::new()), "{name}");
+        let captures = fs::read_dir(repo.join(".oms/handoffs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(captures.len(), 1, "{name}");
+        let capture = fs::read_to_string(&captures[0]).unwrap();
+        assert_eq!(
+            capture.contains("## Open dissents"),
+            open,
+            "{name}: {capture}"
+        );
+        if open {
+            assert!(capture.contains("event: split"), "{name}: {capture}");
+        }
+        assert_eq!(fs::read(&index).unwrap(), bytes.as_bytes(), "{name}");
+        // Remove the capture so the next case is not the 15-minute debounce.
+        fs::remove_file(&captures[0]).unwrap();
+    }
+}
+
+#[test]
 fn codex_precompact_captures_exact_transcript_beyond_discovery_limit() {
     use serde_json::json;
 
@@ -1277,7 +1403,7 @@ fn harness_hook_pi_panel_hook_is_silent_outside_a_panel() {
     fs::create_dir_all(repo.join(".oms")).unwrap();
     // A live room that collaboration() would read and advance if it ran.
     seed_room(&repo);
-    let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"pi-2","prompt":"hi"});
+    let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"pi-2","prompt":"implement the requested change"});
     assert_eq!(harness(&tmp, "panel-hook", &payload), (0, String::new()));
     assert_eq!(harness(&tmp, "relay", &payload), (0, String::new()));
     let hooks = repo.join(".oms/hooks");
@@ -1391,7 +1517,28 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
     .unwrap();
     seed_room(&repo);
     strip_group_world_write(tmp.path());
-    assert!(prompt(&tmp).contains("You are a control-tower main"));
+    let assert_main_contract = |hint: &str| {
+        assert!(hint.contains("You are a control-tower main"), "{hint}");
+        for obsolete_permission in [
+            "Direct edits are for local known-cause fixes",
+            "recovery after two failures",
+        ] {
+            assert!(!hint.contains(obsolete_permission), "{hint}");
+        }
+        for required in [
+            "Repository edits stay delegated, including small fixes and integration code",
+            "oms panel --continue TASK_ID --brief-file PATH",
+            "oms panel --dispatch integrator --access write --scope PATH",
+            "oms panel --dispatch researcher --access read",
+            "no worker can start, report the blocker and wait",
+            "specific user instruction for Main to make that change itself",
+            "Room as a --kind status message",
+            "unless the user started the panel with OMS_MAIN_WRITE_GUARD=0",
+        ] {
+            assert!(hint.contains(required), "missing {required}: {hint}");
+        }
+    };
+    assert_main_contract(&prompt(&tmp));
     assert!(
         !prompt(&tmp).contains("You are a control-tower main"),
         "delivered once"
@@ -1418,7 +1565,7 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
             "dedup digest removed"
         );
         let first = prompt(&tmp);
-        assert!(first.contains("You are a control-tower main"), "{source}");
+        assert_main_contract(&first);
         let line = format!("resumed after {source}: ");
         if source == "startup" {
             assert!(!first.contains("resumed after"), "{first}");
@@ -1432,6 +1579,10 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
         }
         let second = prompt(&tmp);
         assert!(!second.contains("resumed after"), "once: {second}");
+        assert!(
+            second.contains("Main manages; repository edits stay delegated"),
+            "short reminder preserves the role contract: {second}"
+        );
     }
     // OMS_ROOM_ID still names the pre-rollover room: the line follows the successor
     room_run(&repo, &["rollover", "--id", "room-test"]);
@@ -1449,6 +1600,7 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
     );
     harness(&tmp, "relay-hint", &start("compact"));
     let rolled = prompt(&tmp);
+    assert_main_contract(&rolled);
     assert!(rolled.contains("resumed after compact: "), "{rolled}");
     assert!(rolled.contains("status: after rollover."), "{rolled}");
     // other sources and other events leave the delivered marker alone
@@ -1465,6 +1617,19 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
         !events.contains("You are a control-tower main"),
         "rows stay content-free"
     );
+    fs::write(
+        repo.join(".oms/plan/tasks.json"),
+        r#"{"tasks":{"t2":{"id":"t2","state":"ready","depends":[]}}}"#,
+    )
+    .unwrap();
+    let ready = prompt(&tmp);
+    assert!(ready.contains("next ready: t2"), "{ready}");
+    assert!(
+        ready.contains("managed plan-run claims the ready task itself"),
+        "{ready}"
+    );
+    assert!(ready.contains("do not pre-claim"), "{ready}");
+    assert!(!ready.contains("claim it before starting work"), "{ready}");
 }
 
 #[test]

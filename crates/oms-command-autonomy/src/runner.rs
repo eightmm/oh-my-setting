@@ -521,13 +521,31 @@ pub(crate) fn execute_bound(
         "use exactly one of --id or --next",
     )?;
     let wall = preflight(ctx, args)?;
+    // A caller that selected a reviewed task can fence the exact snapshot. Do
+    // this before reclaim: an expired claim still belongs to its prior owner.
+    let pinned = if args.has("expected-task-sha256") {
+        let task = show(ctx, args.required("id")?)?;
+        require(
+            value::text(&task, "task_sha256") == args.required("expected-task-sha256")?,
+            "selected task changed before plan-run; inspect the current Plan before retrying",
+        )?;
+        require(
+            value::text(&task, "state") == "ready",
+            "--expected-task-sha256 requires a ready task; existing custody must be reconciled separately",
+        )?;
+        Some(task)
+    } else {
+        None
+    };
     let provider = ctx.services.normalize_provider(args.required("to")?)?;
-    if !args.flag("dry-run") {
+    if pinned.is_none() && !args.flag("dry-run") {
         let _ = ctx.action(&Request::new(Action::Reclaim));
     }
     let base = ctx.git(&["rev-parse", "HEAD"])?;
     let mut claimed = false;
-    let task = if args.flag("next") {
+    let task = if let Some(task) = pinned {
+        task
+    } else if args.flag("next") {
         let mut request = Request::new(Action::Next)
             .with("provider", &provider)
             .flag("json");

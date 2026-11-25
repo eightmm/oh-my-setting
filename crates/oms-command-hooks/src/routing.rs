@@ -975,13 +975,13 @@ pub(crate) fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             }
         }
         head + &format!(
-            "[oms panel] You are a control-tower main. Keep scope, briefs, review, patch admission, integration and coordination yourself. Delegate implementation, investigation and test repair with oms panel --dispatch ROLE --owner {} --room {} --access write --brief-file PATH --verify COMMAND --scope PATH. Declare shared scope with oms room scope --owns PATH before editing. Direct edits are for local known-cause fixes, admitted-patch integration, or recovery after two failures of the same bounded worker task. Use the same review and landing gates. Start independent non-overlapping ready tasks concurrently; review and integrate each result as it arrives. Serialize shared release bookkeeping. Workers cannot widen authority or publish. Experiments require explicit compute authority. Never commit in a shared checkout. Publication requires explicit authority and oms land. Carry the authorized goal through recovery, integration, checks and owner finalization; a worker exit does not end your turn. Record plan progress in OMS_ROOM_REPO. To inspect a land use oms land status --repo PATH, never pgrep.",
+            "[oms panel] You are a control-tower main. Keep scope, briefs, review, patch admission, verification and coordination yourself. Repository edits stay delegated, including small fixes and integration code. Dispatch implementation with oms panel --dispatch ROLE --owner {} --room {} --access write --brief-file PATH --verify COMMAND --scope PATH; use oms panel --dispatch researcher --access read for source investigation. Return failed checks and review findings to the original writer with oms panel --continue TASK_ID --brief-file PATH. Send conflicts and integration edits to oms panel --dispatch integrator --access write --scope PATH. Declare shared scope with oms room scope --owns PATH before dispatch. Run deterministic checks and apply admitted patches through OMS yourself. Repeated worker failure grants no extra edit authority; if no worker can start, report the blocker and wait. Only a specific user instruction for Main to make that change itself permits a direct edit: record it in the Room as a --kind status message and make only that change within existing permissions. Claude Code Main edit tools remain refused unless the user started the panel with OMS_MAIN_WRITE_GUARD=0; otherwise the user edits. Keep briefs in session scratch or TMPDIR outside the checkout. Use the same review and landing gates. Start independent non-overlapping ready tasks concurrently; review and admit each result as it arrives. Serialize shared release bookkeeping. Workers cannot widen authority or publish. Experiments require explicit compute authority. Never commit in a shared checkout. Publication requires explicit authority and oms land. Carry the authorized goal through recovery, integration, checks and owner finalization; a worker exit does not end your turn. Record plan progress in OMS_ROOM_REPO. To inspect a land use oms land status --repo PATH, never pgrep.",
             agent(v, ctx),
             env("OMS_ROOM_ID")
         )
     } else {
         format!(
-            "[oms panel] control-tower main: full rules in {}.",
+            "[oms panel] control-tower main: Main manages; repository edits stay delegated. Full rules in {}.",
             if agent(v, ctx) == "claude" {
                 "your system prompt"
             } else {
@@ -1028,7 +1028,7 @@ pub(crate) fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
                     .all(|d| d.as_str().is_some_and(|s| done.contains(s)))
         }) {
             hint.push_str(&format!(
-                " · next ready: {}; claim it before starting work",
+                " · next ready: {}; use its reviewed execution route; managed plan-run claims the ready task itself (do not pre-claim)",
                 text(next, "id")
             ));
         }

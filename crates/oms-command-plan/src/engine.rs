@@ -579,6 +579,15 @@ impl<'a> Plan<'a> {
             &mut self.load_from_snapshot(self.read_locked_snapshot()?)?,
         )
     }
+    /// Query ready tasks and their review backlog from one guarded file snapshot.
+    pub fn ready_with_locked_snapshot(&self) -> Result<Response> {
+        let req = Request::new(Action::Ready).flag("json");
+        req.validate()?;
+        self.query(
+            &req,
+            &mut self.load_from_snapshot(self.read_locked_snapshot()?)?,
+        )
+    }
     /// Snapshot the Plan under its writer guard while a sibling publishes Review.
     fn read_locked_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {
         self.locked(false, None, || self.read_snapshot())

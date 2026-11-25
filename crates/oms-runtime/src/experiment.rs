@@ -1,10 +1,10 @@
 //! Experiment contracts reuse native normalization; runtime owns linkage and budgets.
 use crate::parser::Request;
 use crate::services::LedgerRequest;
-use crate::statistics::{mean, stdev};
 use crate::storage::{Runtime, random_id};
 use crate::value::*;
 use crate::{Result, error, require};
+use oms_command_runs::statistics::{mean, stdev};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 mod continuation;

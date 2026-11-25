@@ -9,7 +9,7 @@
 
 <p align="center"><a href="README.md">English</a></p>
 
-**oh-my-setting (`oms`)**은 **Codex**, **Claude Code**, **Antigravity**가 프로젝트 규칙, 작업 계획, 격리된 작업 트리, 독립 리뷰 게이트, 검증된 착지(landing)까지 하나의 하네스에서 공유하도록 만드는 순수 Rust 기반 멀티 에이전트 컨트롤 플레인입니다. 아무 저장소에서나 **`oms`**를 실행하면 진행 중인 작업과 대기 항목을 한눈에 살피고 안전하게 이어 갈 수 있습니다.
+**oh-my-setting (`oms`)**은 **Codex**, **Claude Code**, **Antigravity**가 프로젝트 규칙, 작업 계획, 격리된 작업 트리, 독립 리뷰 게이트, 검증된 착지(landing)까지 하나의 하네스에서 공유하도록 만드는 순수 Rust 기반 멀티 에이전트 컨트롤 플레인입니다. 이 작업은 하나의 **OMS 패널**로 봅니다. 터미널에서도, Codex 데스크톱 앱·ChatGPT Work·Claude Desktop·Antigravity App 안에서는 MCP App으로도 같은 패널을 봅니다.
 
 ---
 
@@ -17,7 +17,7 @@
 
 | 작업 | OMS 명령과 동작 | 안내 문서 |
 |---|---|---|
-| **터미널에서 프로젝트 운영하기** | `oms`로 패널을 엽니다. 설치된 Codex, Claude Code, Antigravity(Agy), 또는 Codex 게이트웨이를 쓰는 Pi를 Main으로 선택할 수 있습니다. tmux 관리 패널은 별도 창에 provider 오케스트레이터를 열고, 실행 중인 Main에 다시 연결할 수 있습니다. Board와 Detail에는 provider 또는 OMS 기록으로 확인할 수 있는 주간 쿼터, 토큰 사용량, 활동이 표시됩니다. | [터미널 패널](docs/TERMINAL-PANEL.md) |
+| **패널에서 프로젝트 운영하기** | `oms`로 터미널에서 패널을 엽니다. Codex 데스크톱 앱과 ChatGPT Work에서는 `@OMS`로 대화에서 같은 Main을 움직이고, 다른 에이전트 앱은 읽기 전용 화면을 보여 줍니다([하나의 패널, 모든 호스트](#하나의-패널-모든-호스트)). 터미널에서는 설치된 Codex, Claude Code, Antigravity(Agy), 또는 Codex 게이트웨이를 쓰는 Pi를 Main으로 선택할 수 있습니다. tmux 관리 패널은 별도 창에 provider 오케스트레이터를 열고, 실행 중인 Main에 다시 연결할 수 있습니다. Board와 Detail에는 provider 또는 OMS 기록으로 확인할 수 있는 주간 쿼터, 토큰 사용량, 활동이 표시됩니다. | [터미널 패널](docs/TERMINAL-PANEL.md) |
 | **작업을 위임하고 배정하기** | Overall Main은 관리만 합니다. 범위를 정해 작업을 위임하고 증거를 검토해 수락을 결정하며 저장소를 직접 수정하지 않습니다. Provider Lead는 배정 하나를 맡는 팀리더로 지원되는 네이티브 워커를 조율합니다. `oms peer-delegate`는 빌더의 수정 작업을 격리합니다. `oms agent-role`로 역할 프로필을, `oms panel --routes`로 쿼터를 고려하는 라우팅 정책을 확인합니다. `oms connect-services`로 Codex, Claude, Pi의 별도 계정 홈을 라우팅에 등록합니다. 패널에서 `L`을 누르거나 `oms connect-services --login PROVIDER`를 실행해 Codex, Claude Code, Antigravity에 로그인할 수 있으며, 이 로그인은 기본 계정 홈을 사용합니다. | [Main 정책](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [라우팅](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [계정](docs/TERMINAL-PANEL.md#provider-accounts) |
 | **독립 자문과 리뷰 받기** | `oms consult`로 한 에이전트에게 묻고, `oms peer-ask --debate`로 provider별 응답을 비교합니다. `oms peer-review`로 독립 diff 리뷰를 요청합니다. Overall Main은 리뷰 결과를 종합해 수락 여부를 판단합니다. | [에이전트 협업](docs/COMPONENTS.md#asking-other-agents) |
 | **프로젝트 의도를 기록하고 영향 범위 찾기** | `oms init`으로 프로젝트 정책을 구성하고, 합의한 범위·결정·검증 조건을 `PROJECT.md`에 기록합니다. `oms graph project`로 심볼·의존 관계·영향 경로를 찾고, `oms runtime context`로 필요한 작업 맥락을 제한된 분량으로 구성합니다. | [프로젝트 맥락](docs/PROJECT-CONTEXT.md) · [그래프 안내](docs/GRAPH-ENGINEERING.md#project-graph) |
@@ -44,7 +44,7 @@ Git 저장소에서 `oms`를 실행하면 터미널 패널을 열 수 있습니�
 
 OMS는 `~/.local/bin/oms`에서 네이티브 Rust CLI로 실행됩니다. 핵심 명령에는 시스템 Python 설정이 필요 없습니다. 기본 `core` 설치는 코딩 에이전트 provider 하나를 구성하며, 관리 패널은 tmux를 사용합니다. [설치 안내](docs/INSTALL.ko.md)
 
-Codex 또는 ChatGPT Work 데스크톱 대화에서 **@OMS**를 불러 Main을 고르고 목표를 전달할 수 있습니다. 같은 대화에서 Lead의 진행 상황과 승인 요청을 확인합니다. ChatGPT Work에서는 대화 옆에 OMS 패널을 열 수 있고, Claude Desktop과 Antigravity App에서도 `oms-panel` MCP App으로 OMS 패널을 열 수 있습니다([플러그인과 연동](#플러그인과-연동)). [프로젝트·SSH 호스트 연결 방법](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)
+에이전트 앱에서도 같은 OMS 패널을 볼 수 있습니다. [하나의 패널, 모든 호스트](#하나의-패널-모든-호스트)를 참고하세요.
 
 <details>
 <summary>설치 시 구성되는 항목</summary>
@@ -64,17 +64,51 @@ oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 
 ---
 
-## 플러그인과 연동
+## 하나의 패널, 모든 호스트
 
-| 이름 | 호스트 | 기능 | 설치 방법 |
-|---|---|---|---|
-| [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) | Codex CLI·데스크톱 앱 | 프롬프트 스킬 라우팅, 압축 전 인수인계, 고위험 턴 가드, 내용 없는 라이프사이클 카운터 | `codex`가 PATH에 있으면 OMS 설치기가 등록 (`oms update`로 유지) |
-| [`oms`](plugins/oms/plugin.json) | Codex 데스크톱, ChatGPT Work | `@OMS`: Main 선택, 목표 전달, Lead 추적, 승인 결정, `oms mcp-server` 기반 패널 도구 | 저장소 루트 마켓플레이스, 항목 `oms@oh-my-setting-local` ([안내](docs/DASHBOARD.md#register-a-marketplace-once)) |
-| [`oms`](plugins/oms-ssh/oms/plugin.json) (SSH 경유) | OpenSSH로 OMS 호스트에 연결하는 PC의 데스크톱 앱 | `oms-runtime` SSH 호스트 별칭으로 동일한 `@OMS` 도구 제공 | 마켓플레이스 경로 `plugins/oms-ssh`, 항목 `oms@oms-ssh` |
-| [`oms-panel`](plugins/oms-app/) (MCP App) | Antigravity App 2.34+, Claude Desktop | 앱 내부 읽기 전용 대화형 OMS 패널(프로젝트, Board, GitHub, 사용량); 호스트가 허용하면 대화 옆이나 위에 확장 표시 요청 | Antigravity: 플러그인 디렉터리 설치; Claude Desktop: [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json)의 `oms-panel` 추가 ([안내](docs/DASHBOARD.md#claude-and-antigravity)) |
-| [`oh-my-setting`](plugins/antigravity/plugin.json) (Antigravity) | Antigravity CLI/IDE | MCP 기반 하네스 상태: 작업 패킷, 실패 기록, 인수인계 요약, Work Journal | Antigravity가 있으면 OMS 설치기가 설치 |
-| [`oms-skills`](.claude-plugin/marketplace.json) | Claude Code | 플러그인에서만 스킬을 불러오는 환경용 `custom-skills/` OMS 스킬 9종; OMS 설치 필요; 훅·MCP·패널 미포함 | 선택 사항: `claude plugin marketplace add eightmm/oh-my-setting` 후 `claude plugin install oms-skills@oh-my-setting` ([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)). 일반 설치에서는 불필요(스킬이 중복 표시됨) |
-| [`oms-panel`](plugins/claude-code/) (Claude Code pane) | Claude Code v2.1.287+ | `oms dashboard --json`으로 그리는 대화 옆 읽기 전용 패널; `/oms-panel` | 미리보기: `claude --plugin-dir plugins/claude-code`; 마켓플레이스 미등록 ([README](plugins/claude-code/README.md)) |
+oh-my-setting의 목표는 어느 에이전트에서 일하든 따라오는 하나의 프로젝트 패널입니다. Rust 런타임이 프로젝트 상태(목표, 계획, 시도, 리뷰, 사용량)를 관리하고 Git·GitHub 상태는 그때그때 읽으며, 모든 호스트는 따로 사본을 두지 않고 OMS에서 화면을 그립니다. 에이전트 앱은 `oms mcp-server`에서 MCP App으로 받고, 터미널 패널과 Claude Code pane은 같은 머신의 OMS를 직접 읽습니다. 호스트마다 보여 주는 범위와 조작 가능 여부는 아래 표처럼 다릅니다.
+
+| 어디서 | 무엇을 볼 수 있나 | 연결 방법 |
+|---|---|---|
+| **Codex 데스크톱, ChatGPT Work** | MCP App 패널과 `@OMS`: 대화에서 Main 선택, 목표 전달, Lead 추적, 승인 결정 | 저장소 루트 마켓플레이스의 [`oms`](plugins/oms/plugin.json) 플러그인, 항목 `oms@oh-my-setting-local`. OMS가 다른 머신에서 돌면 [`plugins/oms-ssh`](plugins/oms-ssh/) 마켓플레이스의 `oms@oms-ssh` 항목을 쓰고, `oms-runtime` OpenSSH 호스트 별칭으로 연결합니다 ([안내](docs/DASHBOARD.md#oms-in-codex-and-chatgpt-work)) |
+| **Claude Desktop, Antigravity App 2.34+** | 읽기 전용 MCP App 패널(프로젝트, Board, Git·GitHub, 사용량, 명령 목록). 호스트가 인라인·확장으로 표시하고, 사이드 패널은 호스트와 계정이 허용할 때만 | Claude Desktop: [`plugins/oms-app/mcp_config.json`](plugins/oms-app/mcp_config.json)의 `oms-panel` 항목 추가. Antigravity App: [`plugins/oms-app`](plugins/oms-app/) 플러그인 디렉터리 설치. 저장소의 설정은 `oms-runtime` OpenSSH 호스트 별칭으로 연결 ([안내](docs/DASHBOARD.md#claude-and-antigravity)) |
+| **터미널** | Main 선택·전환, provider 개요, 쿼터, 결과 리더를 갖춘 Board. tmux 세션 관리 | `oms` ([터미널 패널](docs/TERMINAL-PANEL.md)) |
+| **Claude Code v2.1.287+** | `oms dashboard --json`으로 그리는 대화 옆 읽기 전용 `oms-panel` pane, `/oms-panel` | 미리보기, 마켓플레이스 미등록: `claude --plugin-dir plugins/claude-code` ([README](plugins/claude-code/README.md)) |
+
+패널과 별개로 설치기는 provider를 공유 하네스에 연결합니다. 규칙, 스킬, 훅, MCP 등록 방식은 provider마다 다릅니다([설치 안내](docs/INSTALL.ko.md)). `codex`가 PATH에 있으면 Codex [`oh-my-setting`](plugins/oh-my-setting/.codex-plugin/plugin.json) 플러그인(스킬 라우팅, 압축 전 인수인계, 턴 가드)을 등록하고, Antigravity가 있으면 Antigravity [`oh-my-setting`](plugins/antigravity/plugin.json) 플러그인(MCP 기반 하네스 상태)을 설치합니다. [`oms-skills`](.claude-plugin/marketplace.json)는 플러그인에서만 스킬을 불러오는 Claude Code 환경을 위한 선택적 수동 설치 플러그인입니다. OMS 설치가 필요하고, 일반 설치에서는 스킬이 두 번 보이므로 쓰지 않습니다([참고](docs/COMPONENTS.md#local-skills-and-optional-bundle-operations)).
+
+### 터미널에서
+
+tmux를 쓸 수 있는 터미널에서 `oms`를 실행하고 설치된 Main을 고릅니다. 실행
+중인 Main이 확인되면 Enter로 **Continue current Main**을 선택합니다.
+`oms panel --reopen`은 선택 메뉴 없이 Board를 복원하고, `OMS_PANEL_MAIN`으로
+하네스를 미리 지정합니다. [시작과 복구](docs/TERMINAL-PANEL.md#default-main-selection)
+
+검증된 관리 Codex Main에서는 Board의 `s`로 AGY 등 대상을 고르고 `Y`로
+확정합니다. AGY, Claude, Pi Main에서는 현재 Main을 종료한 뒤 시작 메뉴에서 다음
+하네스를 고릅니다. [Main 전환](docs/TERMINAL-PANEL.md#swap-the-main)
+
+**Direct work**에는 Main이 직접 맡긴 호출이 보이고(Enter로 결과 열기),
+**Needs you**는 입력을 기다리는 항목을, `w`는 보고된 주간 쿼터를 보여 줍니다.
+근거가 없는 값은 미확인으로 둡니다. Board만 보려면 `oms panel --watch`를
+실행합니다. [패널 조작법](docs/TERMINAL-PANEL.md#keys)
+
+`oms list`는 일상 명령을, `oms list --all`은 전체 목록을 보여 줍니다. [명령 목록](docs/COMPONENTS.md)
+
+<p align="center"><img src="docs/assets/panel-board.svg" alt="목표, attention 항목, main과 역할 호출, 상태와 로그 탭을 보여 주는 OMS 패널 보드" width="100%"></p>
+
+<details>
+<summary>결과 리더 및 대시보드 미리보기</summary>
+
+- **결과·diff 리더**에서 보관한 요약, 변경 파일, 마스킹된 diff와 캡처가 있는 대화 기록을 엽니다.
+
+<p align="center"><img src="docs/assets/panel-results.svg" alt="검증을 통과한 결과와 검증 실패 후 결정 대기 중인 결과를 보여 주는 OMS 패널" width="100%"></p>
+
+- **프로젝트 대시보드 (`oms dashboard`)**에서 목표, 계획 준비 상태, 최근 시도, 다음 명령을 확인합니다. [대시보드 안내](docs/DASHBOARD.md)
+
+<p align="center"><img src="docs/assets/dashboard.svg" alt="목표, 계획, 시도, 리뷰 기간과 다음 명령을 보여 주는 OMS 대시보드" width="100%"></p>
+
+</details>
 
 ---
 
@@ -100,45 +134,6 @@ codex에게 맡겨줘: scripts/train.py에 입력 검증 추가.
 Slurm job 12345가 끝나면 로그를 요약해서 알려줘.
 oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 ```
-
-</details>
-
----
-
-## 컨트롤 패널
-
-tmux를 사용할 수 있는 터미널에서 `oms`를 실행합니다. 처음 열 때는 설치된
-Main을 선택합니다. 실행 중인 Main이 확인되면 Enter로 **Continue current Main**을
-선택할 수 있습니다. 선택 메뉴 없이 Board를 복원하려면 기존 창에서
-`oms panel --reopen`을 실행합니다. 새 Main을 미리 지정하려면
-`OMS_PANEL_MAIN`을 설정합니다. [시작과 복구](docs/TERMINAL-PANEL.md#default-main-selection)
-
-검증된 관리 Codex Main에서 Board의 `s`를 누르고 AGY 등 사용 가능한 대상의
-번호를 고른 뒤 `Y`로 확정합니다. Esc로 선택을 취소할 수 있습니다.
-AGY, Claude 또는 Pi Main에서 바꾸려면 현재 Main을 정상 종료한 뒤 시작
-메뉴에서 다음 하네스를 고릅니다. 대화 기록은 provider별로 보관됩니다.
-[Main 전환 조건](docs/TERMINAL-PANEL.md#swap-the-main)
-
-provider별 보기의 **Direct work**에는 Main이 직접 맡긴 활성 호출이 표시됩니다.
-호출을 골라 Enter를 누르면 확인 가능한 결과나 최근 응답을 Board 리더에서 볼 수 있습니다.
-**Needs you**에서 입력이나 검토가 필요한 항목을 열고, `w`로 보고된 주간
-쿼터와 출처, 리셋 시각을 확인할 수 있습니다. 근거가 없는 사용량은 미확인으로
-표시합니다. Board만 보려면 `oms panel --watch`를 실행합니다. [패널 조작법](docs/TERMINAL-PANEL.md#keys)
-
-`oms list`는 일상 명령을 표시합니다. 전체 목록은 `oms list --all`, 옵션은 `oms <명령> --help`에서 확인합니다. [명령 목록](docs/COMPONENTS.md)
-
-<p align="center"><img src="docs/assets/panel-board.svg" alt="목표, attention 항목, main과 역할 호출, 상태와 로그 탭을 보여 주는 OMS 패널 보드" width="100%"></p>
-
-<details>
-<summary>결과 리더 및 대시보드 미리보기</summary>
-
-- **결과·diff 리더**에서 보관한 요약, 변경 파일, 마스킹된 diff와 캡처가 있는 대화 기록을 엽니다.
-
-<p align="center"><img src="docs/assets/panel-results.svg" alt="검증을 통과한 결과와 검증 실패 후 결정 대기 중인 결과를 보여 주는 OMS 패널" width="100%"></p>
-
-- **프로젝트 대시보드 (`oms dashboard`)**에서 목표, 계획 준비 상태, 최근 시도, 다음 명령을 확인합니다. [대시보드 안내](docs/DASHBOARD.md)
-
-<p align="center"><img src="docs/assets/dashboard.svg" alt="목표, 계획, 시도, 리뷰 기간과 다음 명령을 보여 주는 OMS 대시보드" width="100%"></p>
 
 </details>
 
