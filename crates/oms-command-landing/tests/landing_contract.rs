@@ -2380,7 +2380,8 @@ case "$1 $2" in
       git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
     fi ;;
   "pr view")
-    if [ -f '{state}.view' ]; then cat '{state}.view'
+    if [ -f '{state}.view' ]; then
+      IFS= read -rd '' text < '{state}.view'; printf '%s' "$text"
     else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
   "run view")
     if [ -f "{state}.jobs$3" ]; then
@@ -2522,7 +2523,6 @@ impl TargetMoveFixture {
 
     fn land(&self, extra: &[&str]) -> (i32, String, String) {
         let mut args = vec![
-            "--pr",
             "--gate",
             r#"git rev-parse HEAD refs/remotes/origin/main >> "$HOME/land-gates""#,
             "--ignore-siblings",
@@ -2538,6 +2538,15 @@ impl TargetMoveFixture {
             &[
                 ("OMS_GH_BIN", self.gh.to_str().unwrap()),
                 ("OMS_LOCK_TIMEOUT", "2"),
+                (
+                    "OMS_CT_INTERRUPT_AT",
+                    self.iso
+                        .home
+                        .path()
+                        .join("interrupt-update")
+                        .to_str()
+                        .unwrap(),
+                ),
             ],
         )
     }
@@ -2725,6 +2734,11 @@ fn target_update_after_publish_only_merges_successor() {
     let old = f.receipt(&f.head);
     assert_eq!(old.get("state").text(), Some("awaiting-merge"));
     assert_eq!(old.get("merge").get("state").text(), Some("not-requested"));
+    let script = fs::read_to_string(&f.gh).unwrap().replace(
+        "\"pr view\")",
+        "\"pr view\")\n    if [[ \"$*\" == *'--json state' ]]; then echo '{\"state\":\"OPEN\"}'; exit 0; fi",
+    );
+    fs::write(&f.gh, script).unwrap();
     f.advance_target();
     let result = f.land(&["--merge"]);
     assert_eq!(result.0, 0, "{result:?}");
@@ -2738,6 +2752,70 @@ fn target_update_after_publish_only_merges_successor() {
     assert_eq!(old.get("state").text(), Some("superseded"));
     assert_eq!(old.get("successor_request"), successor.get("request"));
     assert_eq!(successor.get("state").text(), Some("passed"));
+}
+
+#[test]
+fn externally_merged_pr_preserves_awaiting_receipt() {
+    let f = TargetMoveFixture::new(1, false);
+    let published = f.land(&[]);
+    assert_eq!(published.0, 0, "{published:?}");
+    let directory = fs::read_dir(f.iso.home.path().join(".local/state/oh-my-setting/land"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let receipt = fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let mut row = V::parse(&fs::read(&receipt).unwrap()).unwrap();
+    row.set("state", "awaiting-merge");
+    row.set("pr_number", 7usize);
+    row.set("merge", obj([("state", "not-requested".into())]));
+    let original = row.json(false).unwrap();
+    fs::write(&receipt, &original).unwrap();
+    f.advance_target();
+    let result = f.land(&["--pr", "--merge"]);
+    assert_refused(&result, "use land reconcile");
+    assert_eq!(fs::read(receipt).unwrap(), original);
+    assert_eq!(f.checkout_head(), f.head);
+}
+
+#[test]
+fn target_update_interruption_preserves_exit_code() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    let hook = f.repo.join(".git/hooks/pre-merge-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!{}\nprintf x > \"$HOME/interrupt-update\"\nwhile :; do :; done\n",
+            which("bash").display()
+        ),
+    )
+    .unwrap();
+    let result = f.land(&["--pr", "--merge"]);
+    assert_eq!(result.0, 130, "{result:?}");
+    assert_eq!(f.checkout_head(), f.head);
+}
+
+#[test]
+fn retry_gate_sees_observed_target_in_tracking_ref() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    fs::remove_file(f.repo.join(".git/hooks/pre-merge-commit")).unwrap();
+    f.iso.git(
+        &f.repo,
+        &["fetch", "-q", f.bare.to_str().unwrap(), &f.tips[0]],
+    );
+    f.iso
+        .git(&f.repo, &["merge", "--no-edit", "--no-ff", &f.tips[0]]);
+    let head = f.checkout_head();
+    let _ = f.land(&["--merge"]);
+    f.assert_gates(&[&head, &f.tips[0]]);
 }
 
 #[test]
@@ -2760,7 +2838,7 @@ fn target_update_refuses_ignored_collision() {
     f.advance_target();
     fs::write(f.repo.join(".git/info/exclude"), "target.txt\n").unwrap();
     fs::write(f.repo.join("target.txt"), "local data\n").unwrap();
-    let result = f.land(&["--merge"]);
+    let result = f.land(&["--pr", "--merge"]);
     assert_ne!(result.0, 0, "{result:?}");
     assert_eq!(f.checkout_head(), f.head);
     assert_eq!(
@@ -2768,6 +2846,28 @@ fn target_update_refuses_ignored_collision() {
         b"local data\n"
     );
     assert!(!f.log.exists());
+    let directory = f.iso.home.path().join(".local/state/oh-my-setting/land");
+    let rows = fs::read_dir(directory)
+        .unwrap()
+        .flat_map(|d| fs::read_dir(d.unwrap().path()).unwrap())
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .count();
+    assert_eq!(rows, 0, "refusal left a receipt");
+}
+
+#[test]
+fn default_pr_mode_attempts_target_update() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    fs::write(f.repo.join(".git/info/exclude"), "target.txt\n").unwrap();
+    fs::write(f.repo.join("target.txt"), "local data\n").unwrap();
+    let result = f.land(&["--merge"]);
+    assert_refused(
+        &result,
+        "target update would overwrite an untracked or ignored path",
+    );
+    assert_eq!(f.checkout_head(), f.head);
 }
 
 #[test]
