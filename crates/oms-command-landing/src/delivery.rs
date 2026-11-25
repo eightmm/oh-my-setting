@@ -1796,6 +1796,7 @@ fn execute_pass(
     previous_update: Option<&HeadUpdate>,
     updates: usize,
 ) -> Result<Pass> {
+    *c.relay_receipt.borrow_mut() = None;
     let env_mode = std::env::var("OMS_LAND_MODE").unwrap_or_default();
     require(
         ["", "direct", "pr"].contains(&env_mode.as_str()),
@@ -2006,7 +2007,6 @@ fn execute_pass(
         )?;
     }
     let receipt = directory.join(format!("{stamp}.json"));
-    *c.relay_receipt.borrow_mut() = Some(receipt.clone());
     let _active = storage::lock(&directory.join("active"), c.interrupted)?;
     if let Some(previous) = previous_update {
         require(
@@ -2111,6 +2111,8 @@ fn execute_pass(
         row.set("head_branch", head_branch.as_str());
     }
     save(&receipt, &row, c.interrupted)?;
+    // Only a receipt this pass validated and saved may name the card's head.
+    *c.relay_receipt.borrow_mut() = Some(receipt.clone());
     let ctx = Run {
         c,
         o,
