@@ -178,6 +178,7 @@ pub struct ProviderEvidence {
     pub effort_mechanism: Option<String>,
     pub provider_reported_efforts: Vec<String>,
     pub model_effort_scales: BTreeMap<String, Vec<String>>,
+    pub selectors: BTreeMap<String, BTreeMap<String, String>>,
     pub capability_evidence: Option<CapabilityEvidence>,
 }
 /// Optional producer-reported scope and lifetime. This record supplies no
@@ -272,37 +273,146 @@ impl CapabilityFreshness {
         matches!(self, Self::Unknown)
     }
 }
+enum ResolvedEffort<'a> {
+    Direct(&'a [String]),
+    Selector {
+        scale: Option<&'a [String]>,
+        effort: &'a String,
+    },
+    None,
+}
+
+fn resolved_effort_support(
+    evidence: Option<&ProviderEvidence>,
+    provider: &str,
+    model: &str,
+    effort: &str,
+    account: Option<&str>,
+) -> native_model::EffortSupport {
+    match evidence {
+        Some(evidence) => evidence.effort_support(provider, model, effort, account),
+        None => native_model::effort_support(provider, model, effort, None),
+    }
+}
+
 impl ProviderEvidence {
+    fn scope_applies(&self, account: Option<&str>) -> bool {
+        let Some(scope) = &self.capability_evidence else {
+            return true;
+        };
+        // Native routes do not yet bind an endpoint. Preserve scoped source
+        // evidence in snapshots, but do not apply it to an unproved target.
+        !(scope.endpoint.is_some()
+            || scope
+                .account_alias
+                .as_deref()
+                .is_some_and(|observed| Some(observed) != account)
+            || scope
+                .observed_at
+                .is_some_and(|observed| self.read_at.is_none_or(|read| observed > read))
+            || scope
+                .expires_at
+                .is_some_and(|expiry| self.read_at.is_none_or(|read| read >= expiry)))
+    }
+
+    fn resolve_effort(&self, model: &str) -> ResolvedEffort<'_> {
+        if let Some(scale) = self
+            .model_effort_scales
+            .get(model)
+            .filter(|values| !values.is_empty())
+        {
+            return ResolvedEffort::Direct(scale.as_slice());
+        }
+        let mut matched = None;
+        for (base, efforts) in &self.selectors {
+            for (effort, selector) in efforts {
+                if selector == model {
+                    if matched.is_some() {
+                        return ResolvedEffort::None;
+                    }
+                    matched = Some((base.as_str(), effort));
+                }
+            }
+        }
+        let Some((base, effort)) = matched else {
+            return ResolvedEffort::None;
+        };
+        let scale = self
+            .model_effort_scales
+            .get(base)
+            .filter(|values| !values.is_empty())
+            .map(Vec::as_slice);
+        ResolvedEffort::Selector { scale, effort }
+    }
+
+    pub(crate) fn exact_model_efforts(&self, model: &str) -> Option<Vec<String>> {
+        match self.resolve_effort(model) {
+            ResolvedEffort::Direct(scale) => Some(scale.to_vec()),
+            ResolvedEffort::Selector { scale, .. } => scale.map(<[String]>::to_vec),
+            ResolvedEffort::None => None,
+        }
+    }
+
     pub(crate) fn applicable_efforts(
         &self,
         model: &str,
         account: Option<&str>,
     ) -> Option<&[String]> {
-        if let Some(scope) = &self.capability_evidence {
-            // Native routes do not yet bind an endpoint. Preserve scoped source
-            // evidence in snapshots, but do not apply it to an unproved target.
-            if scope.endpoint.is_some()
-                || scope
-                    .account_alias
-                    .as_deref()
-                    .is_some_and(|observed| Some(observed) != account)
-                || scope
-                    .observed_at
-                    .is_some_and(|observed| self.read_at.is_none_or(|read| observed > read))
-                || scope
-                    .expires_at
-                    .is_some_and(|expiry| self.read_at.is_none_or(|read| read >= expiry))
-            {
-                return None;
-            }
+        if !self.scope_applies(account) {
+            return None;
         }
-        self.model_effort_scales
-            .get(model)
-            .filter(|values| !values.is_empty())
-            .map(Vec::as_slice)
+        match self.resolve_effort(model) {
+            ResolvedEffort::Direct(scale) => Some(scale),
+            ResolvedEffort::Selector {
+                scale: Some(scale),
+                effort,
+            } if scale.iter().any(|value| value == effort) => Some(std::slice::from_ref(effort)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn effort_support(
+        &self,
+        provider: &str,
+        model: &str,
+        effort: &str,
+        account: Option<&str>,
+    ) -> native_model::EffortSupport {
+        if native_model::fixed_effort_model(provider, model).is_some() {
+            return native_model::EffortSupport::Fixed;
+        }
+        let normalized = native_model::normalized_effort(effort);
+        if normalized.is_empty() {
+            return native_model::EffortSupport::ProviderDefault;
+        }
+        if !self.scope_applies(account) {
+            return native_model::EffortSupport::Unknown;
+        }
+        match self.resolve_effort(model) {
+            ResolvedEffort::Direct(scale) => {
+                native_model::effort_support(provider, model, effort, Some(scale))
+            }
+            ResolvedEffort::Selector {
+                scale,
+                effort: selector_effort,
+            } => {
+                if normalized != selector_effort {
+                    native_model::EffortSupport::ReportedUnsupported
+                } else {
+                    native_model::effort_support(provider, model, effort, scale)
+                }
+            }
+            ResolvedEffort::None => native_model::EffortSupport::Unknown,
+        }
     }
 
     pub fn from_catalog_row(row: &Value) -> Result<Self> {
+        let bounded_key = |key: &str, message: &str| -> Result<()> {
+            require(
+                !key.is_empty() && key.len() <= 256 && !key.chars().any(char::is_control),
+                message,
+            )
+        };
         let bounded_text = |value: Option<&Value>| -> Result<Option<String>> {
             let Some(value) = value.filter(|v| !v.is_null()) else {
                 return Ok(None);
@@ -345,11 +455,30 @@ impl ProviderEvidence {
                 .ok_or_else(|| Error::new("invalid model effort scales"))?;
             require(values.len() <= 2048, "model effort scales exceed bounds")?;
             for (model, scale) in values {
-                require(
-                    !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control),
-                    "invalid model effort identity",
-                )?;
+                bounded_key(model, "invalid model effort identity")?;
                 scales.insert(model.clone(), efforts(Some(scale))?);
+            }
+        }
+        let mut selectors = BTreeMap::new();
+        if let Some(value) = row.get("selectors").filter(|v| !v.is_null()) {
+            let values = value
+                .as_object()
+                .ok_or_else(|| Error::new("invalid model selectors"))?;
+            require(values.len() <= 2048, "model selectors exceed bounds")?;
+            for (base, map) in values {
+                bounded_key(base, "invalid model selector identity")?;
+                let entries = map
+                    .as_object()
+                    .ok_or_else(|| Error::new("invalid model selector map"))?;
+                require(entries.len() <= 16, "model selector map exceeds bounds")?;
+                let mut effort_map = BTreeMap::new();
+                for (effort, selector) in entries {
+                    bounded_key(effort, "invalid model selector effort")?;
+                    let selector = bounded_text(Some(selector))?
+                        .ok_or_else(|| Error::new("invalid model selector"))?;
+                    effort_map.insert(effort.clone(), selector);
+                }
+                selectors.insert(base.clone(), effort_map);
             }
         }
         Ok(Self {
@@ -362,6 +491,7 @@ impl ProviderEvidence {
             effort_mechanism: bounded_text(row.get("effort_mechanism"))?,
             provider_reported_efforts: efforts(row.get("effort_values"))?,
             model_effort_scales: scales,
+            selectors,
             capability_evidence: row
                 .get("capability_evidence")
                 .filter(|v| !v.is_null())
@@ -575,16 +705,13 @@ impl Route {
         let evidence = inputs.and_then(|v| v.provider_evidence.get(&self.candidate.provider));
         let capability = evidence.and_then(|v| v.capability_evidence.as_ref());
         let catalog = inputs.and_then(|v| v.catalogs.get(&self.candidate.provider));
-        let exact_efforts = evidence
-            .and_then(|e| e.model_effort_scales.get(&self.candidate.model))
-            .filter(|v| !v.is_empty())
-            .cloned();
-        let effort_support = match native_model::effort_support(
+        let exact_efforts = evidence.and_then(|e| e.exact_model_efforts(&self.candidate.model));
+        let effort_support = match resolved_effort_support(
+            evidence,
             &self.candidate.provider,
             &self.candidate.model,
             &self.candidate.effort,
-            evidence
-                .and_then(|e| e.applicable_efforts(&self.candidate.model, self.account.as_deref())),
+            self.account.as_deref(),
         ) {
             native_model::EffortSupport::Fixed => EffortSupport::Fixed,
             native_model::EffortSupport::ProviderDefault => EffortSupport::ProviderDefault,
@@ -1104,14 +1231,12 @@ fn allocate_ranked(
                 .map(|v| v.contains(&c.model));
         }
         let effort_allowed = |account: Option<&str>| {
-            native_model::effort_support(
+            resolved_effort_support(
+                inputs.provider_evidence.get(&c.provider),
                 &c.provider,
                 &c.model,
                 &c.effort,
-                inputs
-                    .provider_evidence
-                    .get(&c.provider)
-                    .and_then(|e| e.applicable_efforts(&c.model, account)),
+                account,
             ) != native_model::EffortSupport::ReportedUnsupported
         };
         let mut account = None;
@@ -2479,6 +2604,220 @@ mod tests {
         assert_eq!(snapshot.configured.unwrap().model, "claude-fable-5-1");
         assert_eq!(snapshot.resolved.model, "claude-fable-5-2");
         assert_eq!(snapshot.served_model, None);
+
+        // Antigravity selector-mapped effort scales vs Codex model-keyed scales.
+        let agy_evidence = ProviderEvidence::from_catalog_row(&json!({
+            "model_effort_scales": {
+                "gemini-4-carbon": ["low", "medium", "high"],
+                "gemini-4-neon": ["low", "high"]
+            },
+            "selectors": {
+                "gemini-4-carbon": {
+                    "low": "gemini-4-carbon-low",
+                    "medium": "gemini-4-carbon-medium",
+                    "high": "gemini-4-carbon-high"
+                },
+                "gemini-4-neon": {
+                    "low": "gemini-4-neon-low",
+                    "high": "gemini-4-neon-high"
+                }
+            },
+            "effort_values": ["low", "medium", "high"],
+            "catalog_probe": "ok"
+        }))
+        .unwrap();
+        let mut agy_inputs = RoutingInputs {
+            installed: Some(["antigravity".into()].into()),
+            catalogs: BTreeMap::from([(
+                "antigravity".into(),
+                vec![
+                    "gemini-4-carbon-low".into(),
+                    "gemini-4-carbon-medium".into(),
+                    "gemini-4-carbon-high".into(),
+                    "gemini-4-neon-low".into(),
+                    "gemini-4-neon-high".into(),
+                    "gemini-4-hydrogen-high".into(),
+                ],
+            )]),
+            provider_evidence: BTreeMap::from([("antigravity".into(), agy_evidence)]),
+            preferred: Some("antigravity".into()),
+            explicit_target: true,
+            ..Default::default()
+        };
+        let agy_route = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("deep"),
+            "read",
+            None,
+            &agy_inputs,
+        )
+        .unwrap();
+        assert_eq!(agy_route.candidate.model, "gemini-4-carbon-high");
+        assert_eq!(agy_route.candidate.effort, "high");
+        let agy_snapshot = agy_route.snapshot.as_ref().unwrap();
+        assert_eq!(
+            agy_snapshot.capabilities.effort_support,
+            EffortSupport::ReportedSupported
+        );
+        assert_eq!(
+            agy_snapshot.capabilities.exact_model_efforts,
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+
+        // Selector suffix disagreeing with requested effort is ReportedUnsupported and refused.
+        agy_inputs.requested_model = Some("gemini-4-neon-high".into());
+        agy_inputs.requested_effort = Some("low".into());
+        let mut preview = AllocationEvidence::default();
+        assert!(
+            allocate_preview(
+                &policy,
+                "codex",
+                "scholar",
+                "read",
+                &agy_inputs,
+                &mut preview,
+            )
+            .is_err()
+        );
+        let agy_preview = preview
+            .candidates
+            .iter()
+            .find(|candidate| candidate.provider == "antigravity")
+            .unwrap();
+        assert_eq!(agy_preview.excluded_by, Some("exact_effort_unsupported"));
+        assert!(
+            allocate(
+                &policy,
+                "codex",
+                "worker",
+                Some("deep"),
+                "read",
+                None,
+                &agy_inputs,
+            )
+            .is_err()
+        );
+        let mut mismatched = agy_route.clone();
+        mismatched.candidate.model = "gemini-4-neon-high".into();
+        mismatched.candidate.effort = "low".into();
+        let mismatched_snapshot = mismatched
+            .selection_snapshot(Some(&policy), None, Some(&agy_inputs))
+            .unwrap();
+        assert_eq!(
+            mismatched_snapshot.capabilities.effort_support,
+            EffortSupport::ReportedUnsupported
+        );
+        assert_eq!(
+            mismatched_snapshot.capabilities.exact_model_efforts,
+            Some(vec!["low".into(), "high".into()])
+        );
+        mismatched.snapshot = Some(mismatched_snapshot);
+        assert!(mismatched.freeze_snapshot().is_err());
+
+        // Selector absent from selectors stays Unknown.
+        agy_inputs.requested_model = Some("gemini-4-hydrogen-high".into());
+        agy_inputs.requested_effort = Some("high".into());
+        let unknown_selector = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("deep"),
+            "read",
+            None,
+            &agy_inputs,
+        )
+        .unwrap();
+        let unknown_snapshot = unknown_selector.snapshot.unwrap();
+        assert_eq!(
+            unknown_snapshot.capabilities.effort_support,
+            EffortSupport::Unknown
+        );
+        assert_eq!(unknown_snapshot.capabilities.exact_model_efforts, None);
+
+        // Scoped capability_evidence still blocks applying selector effort scales.
+        agy_inputs.requested_model = None;
+        agy_inputs.requested_effort = Some("low".into());
+        agy_inputs
+            .provider_evidence
+            .get_mut("antigravity")
+            .unwrap()
+            .capability_evidence = Some(
+            CapabilityEvidence::parse(&json!({
+                "schema": 1,
+                "source": "fixture",
+                "account_alias": "other"
+            }))
+            .unwrap(),
+        );
+        let scoped_agy = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("deep"),
+            "read",
+            None,
+            &agy_inputs,
+        )
+        .unwrap();
+        let scoped_snapshot = scoped_agy.snapshot.unwrap();
+        assert_eq!(
+            scoped_snapshot.capabilities.effort_support,
+            EffortSupport::Unknown
+        );
+        assert_eq!(
+            scoped_snapshot.capabilities.exact_model_efforts,
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+
+        // Codex model-keyed scale remains unchanged.
+        let mut codex_inputs = RoutingInputs {
+            installed: Some(["codex".into()].into()),
+            catalogs: BTreeMap::from([("codex".into(), vec!["gpt-6.1-sol".into()])]),
+            provider_evidence: BTreeMap::from([(
+                "codex".into(),
+                ProviderEvidence::from_catalog_row(&json!({
+                    "model_effort_scales": {"gpt-6.1-sol": ["low", "medium", "high"]},
+                    "selectors": {},
+                    "catalog_probe": "ok"
+                }))
+                .unwrap(),
+            )]),
+            ..Default::default()
+        };
+        let codex_route = allocate(
+            &policy,
+            "claude",
+            "worker",
+            Some("deep"),
+            "read",
+            None,
+            &codex_inputs,
+        )
+        .unwrap();
+        let codex_snapshot = codex_route.snapshot.unwrap();
+        assert_eq!(
+            codex_snapshot.capabilities.effort_support,
+            EffortSupport::ReportedSupported
+        );
+        assert_eq!(
+            codex_snapshot.capabilities.exact_model_efforts,
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+        codex_inputs.requested_effort = Some("xhigh".into());
+        assert!(
+            allocate(
+                &policy,
+                "claude",
+                "worker",
+                Some("deep"),
+                "read",
+                None,
+                &codex_inputs,
+            )
+            .is_err()
+        );
     }
     #[test]
     fn capability_freshness_keeps_reported_scope_and_selected_account_separate() {
@@ -2645,10 +2984,31 @@ mod tests {
         let mut snapshot = serde_json::to_value(route.snapshot.unwrap()).unwrap();
         snapshot["new_authority"] = true.into();
         assert!(serde_json::from_value::<RouteSnapshot>(snapshot).is_err());
+        let oversized_selectors: serde_json::Map<String, Value> = (0..2049)
+            .map(|i| {
+                (
+                    format!("base-{i}"),
+                    json!({"high": format!("base-{i}-high")}),
+                )
+            })
+            .collect();
+        let oversized_effort_map: serde_json::Map<String, Value> = (0..17)
+            .map(|i| (format!("effort-{i}"), json!(format!("base-effort-{i}"))))
+            .collect();
         for row in [
             json!({"catalog_age_seconds":-1}),
             json!({"effort_values":vec!["high";17]}),
             json!({"model_effort_scales":{"model":true}}),
+            json!({"selectors":true}),
+            json!({"selectors":{"gemini-4-carbon":true}}),
+            json!({"selectors":{"gemini-4-carbon":{"high":true}}}),
+            json!({"selectors":{"gemini-4-carbon":{"high":null}}}),
+            json!({"selectors":{"gemini-4-carbon":{"high":""}}}),
+            json!({"selectors":{"gemini-4-carbon":{"high":"bad\nselector"}}}),
+            json!({"selectors":{"gemini-4-carbon":{"bad\neffort":"gemini-4-carbon-high"}}}),
+            json!({"selectors":{"":{"high":"gemini-4-carbon-high"}}}),
+            json!({"selectors":{"gemini-4-carbon":Value::Object(oversized_effort_map)}}),
+            json!({"selectors":Value::Object(oversized_selectors)}),
             json!({"version":"bad\nversion"}),
             json!({"capability_evidence":{"schema":2,"source":"fixture"}}),
             json!({"capability_evidence":{"schema":1,"source":"fixture","observed_at":10,"expires_at":10}}),
@@ -2657,7 +3017,7 @@ mod tests {
             json!({"capability_evidence":{"schema":1,"source":"fixture","endpoint":"https://example.invalid/?private=value"}}),
             json!({"capability_evidence":{"schema":1,"source":"fixture","expires_at":-1}}),
         ] {
-            assert!(ProviderEvidence::from_catalog_row(&row).is_err());
+            assert!(ProviderEvidence::from_catalog_row(&row).is_err(), "{row}");
         }
     }
 }
