@@ -427,7 +427,10 @@ fn timeout_and_cancellation_keep_live_authority() {
         guard.check().unwrap();
         assert_eq!(lock.try_acquire().unwrap_err(), Error::Busy);
         guard.release().unwrap();
-        lock.acquire_with_cancel(|| false).unwrap().release().unwrap();
+        lock.acquire_with_cancel(|| false)
+            .unwrap()
+            .release()
+            .unwrap();
         if mode == Mode::Flock {
             fs::remove_file(lock.path()).unwrap();
         }
