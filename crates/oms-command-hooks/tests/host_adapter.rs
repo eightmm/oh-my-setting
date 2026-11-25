@@ -1465,6 +1465,19 @@ fn harness_hook_pi_relay_hint_rearms_the_panel_prompt_after_context_loss() {
         !events.contains("You are a control-tower main"),
         "rows stay content-free"
     );
+    fs::write(
+        repo.join(".oms/plan/tasks.json"),
+        r#"{"tasks":{"t2":{"id":"t2","state":"ready","depends":[]}}}"#,
+    )
+    .unwrap();
+    let ready = prompt(&tmp);
+    assert!(ready.contains("next ready: t2"), "{ready}");
+    assert!(
+        ready.contains("managed plan-run claims the ready task itself"),
+        "{ready}"
+    );
+    assert!(ready.contains("do not pre-claim"), "{ready}");
+    assert!(!ready.contains("claim it before starting work"), "{ready}");
 }
 
 #[test]

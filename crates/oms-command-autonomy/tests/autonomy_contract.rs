@@ -153,6 +153,33 @@ fn owns_help_and_parse_errors_for_every_command() {
     for tool in ["intent", "autopilot"] {
         assert_eq!(repo.call(tool, &[]).0, 2);
     }
+    let sha = "a".repeat(64);
+    for selector in [
+        vec!["--next"],
+        vec!["--id", "one", "--next"],
+        vec!["--id", "one", "--parallel"],
+        vec!["--id", "one", "--verify-combined"],
+    ] {
+        let mut argv = vec!["--to", "codex", "--expected-task-sha256", &sha];
+        argv.extend(selector);
+        let result = repo.call("plan-run", &argv);
+        assert_eq!(result.0, 2);
+        assert!(String::from_utf8_lossy(&result.2).contains("requires serial --id"));
+    }
+    for invalid in ["", "bad", &"A".repeat(64)] {
+        let result = repo.call(
+            "plan-run",
+            &[
+                "--to",
+                "codex",
+                "--id",
+                "one",
+                "--expected-task-sha256",
+                invalid,
+            ],
+        );
+        assert_eq!(result.0, 2);
+    }
 }
 
 struct FeedbackMock {
@@ -406,6 +433,12 @@ impl Services for FeedbackMock {
                 let binding =
                     serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
                 if self.mode.starts_with("unknown-after-start") {
+                    let issued = self.plan(
+                        &call.cwd,
+                        &["evidence-snapshot", "--id", arg("--plan-task").as_str()],
+                    );
+                    assert_eq!(binding["lease_id"], issued["lease_id"]);
+                    assert_eq!(binding["task_sha256"], issued["task_sha256"]);
                     self.plan(
                         &call.cwd,
                         &[
@@ -612,7 +645,12 @@ fn plan_run_retains_exact_running_lease_on_unknown_worker_outcome() {
     if scrubbed_child("plan_run_retains_exact_running_lease_on_unknown_worker_outcome") {
         return;
     }
-    for mode in ["unknown-after-start-error", "unknown-after-start-timeout"] {
+    for (mode, pinned) in [
+        ("unknown-after-start-error", false),
+        ("unknown-after-start-error", true),
+        ("unknown-after-start-timeout", false),
+        ("unknown-after-start-timeout", true),
+    ] {
         let mock = FeedbackMock::new(mode);
         let repo = mock.fixture();
         mock.plan(
@@ -637,7 +675,17 @@ fn plan_run_retains_exact_running_lease_on_unknown_worker_outcome() {
             argv.extend(selector.iter().map(OsString::from));
             run_with_services("plan-run", &argv, &repo.0, &AtomicBool::new(false), &mock)
         };
-        let out = run(&["--id", "fresh"]);
+        let selected = mock.plan(&repo.0, &["evidence-snapshot", "--id", "fresh"]);
+        let out = if pinned {
+            run(&[
+                "--id",
+                "fresh",
+                "--expected-task-sha256",
+                selected["task_sha256"].as_str().unwrap(),
+            ])
+        } else {
+            run(&["--id", "fresh"])
+        };
         assert_ne!(out.0, 0, "{out:?}");
         let running = mock.plan(&repo.0, &["show", "--id", "fresh"]);
         assert_eq!(running["state"], "running");
@@ -690,6 +738,87 @@ fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
         task["state"], "ready",
         "only the newly issued original lease is released"
     );
+
+    // A panel caller pins the canonical selection before entering plan-run.
+    // Reject changed work and pre-existing leases before the legacy reclaim pass.
+    let mock = FeedbackMock::new("pin-preflight");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "Frozen work",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let snapshot = || mock.plan(&repo.0, &["evidence-snapshot", "--id", "fresh"]);
+    let pinned = |sha: &str, dry_run: bool| {
+        let mut argv = vec![
+            "--to",
+            "codex",
+            "--id",
+            "fresh",
+            "--expected-task-sha256",
+            sha,
+        ];
+        if dry_run {
+            argv.push("--dry-run");
+        }
+        run_with_services(
+            "plan-run",
+            &argv.iter().map(OsString::from).collect::<Vec<_>>(),
+            &repo.0,
+            &AtomicBool::new(false),
+            &mock,
+        )
+    };
+    let selected = snapshot();
+    assert_eq!(pinned(selected["task_sha256"].as_str().unwrap(), true).0, 0);
+    assert_eq!(snapshot(), selected, "dry-run preserves the exact ready task");
+    assert_ne!(pinned(&"0".repeat(64), false).0, 0);
+    assert_eq!(snapshot(), selected, "wrong digest cannot claim or reclaim");
+    mock.plan(
+        &repo.0,
+        &[
+            "amend",
+            "--id",
+            "fresh",
+            "--allowed",
+            "src/new",
+            "--reason",
+            "Reviewed scope changed",
+            "--expected-plan-sha256",
+            &value::hash(fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap()),
+            "--expected-task-sha256",
+            selected["task_sha256"].as_str().unwrap(),
+        ],
+    );
+    let changed = snapshot();
+    let refused = pinned(selected["task_sha256"].as_str().unwrap(), false);
+    assert_ne!(refused.0, 0);
+    assert!(String::from_utf8_lossy(&refused.2).contains("selected task changed"));
+    assert_eq!(snapshot(), changed);
+    mock.plan(
+        &repo.0,
+        &["claim", "--id", "fresh", "--provider", "codex", "--ttl", "0"],
+    );
+    let claimed = snapshot();
+    let before = fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap();
+    let refused = pinned(claimed["task_sha256"].as_str().unwrap(), false);
+    assert_ne!(refused.0, 0);
+    assert!(String::from_utf8_lossy(&refused.2).contains("requires a ready task"));
+    assert_eq!(
+        fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap(),
+        before,
+        "expired foreign lease is not reclaimed"
+    );
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
 }
 
 #[test]

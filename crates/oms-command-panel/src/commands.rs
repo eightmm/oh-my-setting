@@ -805,6 +805,11 @@ pub(crate) fn run_mode(
         let exec = exec_opt.unwrap_or_else(|| cwd.to_path_buf());
         return crate::recommend::run(&exec, source, options, services, stop);
     }
+    if options.managed_plan_task() {
+        let repo = repo_opt.ok_or_else(|| Error::new("repository required"))?;
+        let execution = exec_opt.ok_or_else(|| Error::new("execution repository required"))?;
+        return crate::orchestrator::run_managed_plan(&repo, &execution, options, services, stop);
+    }
     if options.has("dry-run")
         && !options.has("dispatch")
         && !options.has("continue")
