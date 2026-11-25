@@ -307,9 +307,9 @@ fn rust_unconditional_item(ts: &[Token<'_>], pairs: &[Option<usize>], keyword: u
     start == 0 || matches!(code(ts, start - 1), ";" | "}")
 }
 
-fn rust_simple_argument(token: &Token<'_>) -> bool {
+fn rust_simple_argument(argument: &Token<'_>) -> bool {
     let keyword = matches!(
-        token.text,
+        argument.text,
         "_" | "as"
             | "async"
             | "await"
@@ -347,7 +347,7 @@ fn rust_simple_argument(token: &Token<'_>) -> bool {
             | "yield"
     );
     let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    token.string || (!keyword && token.text.bytes().all(word))
+    argument.string || (!keyword && argument.text.bytes().all(word))
 }
 
 // Accept exactly `[return] callee(arguments) [;]`, where each argument is one
@@ -499,8 +499,8 @@ fn rust_forwarding_calls(
         // Any header mention may bind the name (and a macro may bind it
         // invisibly). This also excludes self-calls.
         if (keyword..open).any(|i| {
-            let token = code(ts, i);
-            !token.is_ascii() || [name, "!"].contains(&token)
+            let spelling = code(ts, i);
+            !spelling.is_ascii() || [name, "!"].contains(&spelling)
         }) {
             continue;
         }
