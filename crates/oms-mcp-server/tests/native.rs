@@ -310,6 +310,10 @@ fn cross_host_project_reads() {
             .find(|t| t["name"] == "oms_open_panel")
             .unwrap();
         assert_eq!(
+            opener["description"],
+            "Open the OMS panel (expands beside or over the conversation when the host allows it)."
+        );
+        assert_eq!(
             opener["_meta"]["openai/ui"]["entrypoints"][0]["type"],
             "global"
         );
@@ -319,10 +323,10 @@ fn cross_host_project_reads() {
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
         let view = c.call("resources/read", json!({"uri":uri}));
-        assert!(
-            view["result"]["contents"][0]["text"].as_str()
-                == Some(include_str!("../src/conversation-panel.html"))
-        );
+        let html = view["result"]["contents"][0]["text"].as_str().unwrap();
+        assert_eq!(html, include_str!("../src/conversation-panel.html"));
+        assert!(html.contains("ui/request-display-mode"));
+        assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
         assert_eq!(
             view["result"]["contents"][0]["mimeType"],
             "text/html;profile=mcp-app"
@@ -1175,6 +1179,11 @@ fn conversation_panel() {
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
     assert_eq!(tools.as_array().unwrap().len(), 16);
+    assert_eq!(tools[0]["name"], "oms_open_panel");
+    assert_eq!(
+        tools[0]["description"],
+        "Open the OMS panel (expands beside or over the conversation when the host allows it)."
+    );
     assert_eq!(
         tools[0]["_meta"]["openai/ui"]["entrypoints"],
         json!([{"type":"thread"}])
@@ -1194,7 +1203,10 @@ fn conversation_panel() {
     };
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
-    assert!(current["text"].as_str() == Some(include_str!("../src/conversation-panel.html")));
+    let html = current["text"].as_str().unwrap();
+    assert_eq!(html, include_str!("../src/conversation-panel.html"));
+    assert!(html.contains("ui/request-display-mode"));
+    assert!(html.contains("availableDisplayModes:['inline','fullscreen','pip']"));
     assert_eq!(current["mimeType"], "text/html;profile=mcp-app");
     for historical_uri in [
         json!("ui://oms/conversation-panel/v1.html"),
