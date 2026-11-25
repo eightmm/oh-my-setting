@@ -357,6 +357,15 @@ fn route_with_source(
     })
 }
 
+/// The `--model` value the provider CLI receives for `model` on this route.
+fn cli_model(route: &Route, model: &str) -> String {
+    if route.provider == "antigravity" {
+        crate::native_model::agy_selector(model, &route.effort)
+    } else {
+        model.to_owned()
+    }
+}
+
 fn antigravity_catalog() -> Option<BTreeSet<String>> {
     let dir = nonempty_env("OMS_CAPABILITY_DIR")
         .map(PathBuf::from)
@@ -1591,12 +1600,7 @@ impl Transport {
     }
     fn model(&mut self, route: &Route) {
         if route.model != "provider-default" {
-            let model = if route.provider == "antigravity" {
-                crate::native_model::agy_selector(&route.model, &route.effort)
-            } else {
-                route.model.clone()
-            };
-            self.option("--model", model);
+            self.option("--model", cli_model(route, &route.model));
         }
     }
     fn effort(&mut self, route: &Route, flag: &str) {
@@ -2766,8 +2770,10 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
 ) -> Result<Completed> {
     let extra_env = crate::usage::operation_env(extra_env)?;
     let plan_bound = crate::plan_delegate::has_launch_binding(&extra_env);
-    let write_snapshot = (!plan_bound && write && !fallback.is_empty() && fallback != route.model)
-        .then(|| repo_state(context, cwd));
+    // A fallback that reaches the CLI as the same selector is not a retry.
+    let distinct =
+        !fallback.is_empty() && cli_model(route, fallback) != cli_model(route, &route.model);
+    let write_snapshot = (!plan_bound && write && distinct).then(|| repo_state(context, cwd));
     let result = execute_env_with_output(
         route,
         prompt,
@@ -2779,11 +2785,7 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
         output_mode,
         context,
     )?;
-    if !plan_bound
-        && !fallback.is_empty()
-        && fallback != route.model
-        && capacity(&result)
-        && is_clean_retry(&write_snapshot, context, cwd)
+    if !plan_bound && distinct && capacity(&result) && is_clean_retry(&write_snapshot, context, cwd)
     {
         model_name(fallback)?;
         route.model = fallback.into();
@@ -4214,7 +4216,10 @@ mod bridge_route_tests {
                         let mut expanded = pattern
                             .replace(
                                 "{model}",
-                                if exact && !native_model {
+                                if exact && provider == "antigravity" {
+                                    // The CLI receives the exact effort selector.
+                                    "--model|fixture-model-high"
+                                } else if exact && !native_model {
                                     "--model|fixture-model"
                                 } else {
                                     ""
