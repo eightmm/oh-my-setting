@@ -151,8 +151,44 @@ fn patterns() -> Result<&'static Patterns, Error> {
     }).as_ref().map_err(|e| *e)
 }
 
+const KEY_BEGIN: &[u8] = concat!("-----", "begin").as_bytes();
+const KEY_END: &[u8] = b"-----end";
+
 fn contains(h: &[u8], n: &[u8]) -> bool {
     h.windows(n.len()).any(|w| w == n)
+}
+fn find_ascii_ignore_case(haystack: &[u8], needle_lower: &[u8]) -> Option<usize> {
+    haystack.windows(needle_lower.len()).position(|window| {
+        window
+            .iter()
+            .zip(needle_lower)
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
+}
+fn key_block_open_after_line(mut line: &[u8], mut in_block: bool) -> bool {
+    loop {
+        let needle = if in_block { KEY_END } else { KEY_BEGIN };
+        let Some(pos) = find_ascii_ignore_case(line, needle) else {
+            return in_block;
+        };
+        line = &line[pos + needle.len()..];
+        in_block = !in_block;
+    }
+}
+/// Returns the 1-based line number of the first key-block END marker that
+/// appears before any BEGIN marker (for example in a tail-truncated excerpt).
+pub fn first_unpaired_key_end_line(input: &[u8]) -> Option<usize> {
+    for (i, line) in input.split(|b| *b == b'\n').enumerate() {
+        let end = find_ascii_ignore_case(line, KEY_END);
+        let begin = find_ascii_ignore_case(line, KEY_BEGIN);
+        match (end, begin) {
+            (Some(e), Some(b)) if e < b => return Some(i + 1),
+            (Some(_), None) => return Some(i + 1),
+            (_, Some(_)) => return None,
+            (None, None) => {}
+        }
+    }
+    None
 }
 fn in_order(mut text: &[u8], parts: &[&[u8]]) -> bool {
     for part in parts {
@@ -216,7 +252,7 @@ fn class_secret(line: &[u8]) -> &'static str {
         "aws-key"
     } else if has("aiza") {
         "google-key"
-    } else if has(concat!("-----", "begin")) {
+    } else if contains(&l, KEY_BEGIN) {
         "private-key"
     } else {
         "token-like"
@@ -383,10 +419,7 @@ fn find(input: &[u8], env: &[(&[u8], &[u8])], machine: bool) -> Result<Found, Er
         };
         if p.sensitive.is_match(filtered) {
             let class = class_secret(filtered);
-            if contains(
-                &filtered.to_ascii_lowercase(),
-                concat!("-----", "begin").as_bytes(),
-            ) {
+            if find_ascii_ignore_case(filtered, KEY_BEGIN).is_some() {
                 key_blocks.insert(i + 1);
             }
             hits.push(Hit {
@@ -518,16 +551,14 @@ pub fn redact(input: &[u8], env: &[(&[u8], &[u8])]) -> Result<Redacted, Error> {
     let mut skip = false;
     for (i, part) in input.split_inclusive(|b| *b == b'\n').enumerate() {
         if skip {
-            if contains(part, b"-----END") {
-                skip = false;
-            }
+            skip = key_block_open_after_line(part, true);
             continue;
         }
         if let Some(class) = found.redact.get(&(i + 1)) {
             bytes.extend_from_slice(format!("[oms-redacted:{class}]\n").as_bytes());
             count += 1;
-            if found.key_blocks.contains(&(i + 1)) && !contains(part, b"-----END") {
-                skip = true;
+            if found.key_blocks.contains(&(i + 1)) {
+                skip = key_block_open_after_line(part, false);
             }
         } else {
             bytes.extend_from_slice(part);
