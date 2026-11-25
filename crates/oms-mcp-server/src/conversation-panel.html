@@ -1114,6 +1114,7 @@ main.thisConversation	이 대화의 Main	Main of this conversation
 main.repoLeads	저장소의 Lead 활동	Repository Lead activity
 main.roomLead	작업방 Lead	Room Leads
 main.noRepoMain	저장소 실행 기록에서 Main을 확인할 수 없습니다.	Cannot determine Main from repository execution records.
+main.dispatchOnly	Main · 디스패치 {provider}	Main · {provider} dispatch
 main.headerAria	이 대화의 {name} 작업방 대화 보기	View the room conversation of {name} for this conversation
 lead.none	미종료 Lead 기록 없음	No open Lead records
 lead.unseen	조회한 기록에서 미종료 Lead를 확인하지 못했습니다.	No open Lead found in the retrieved records.
@@ -1179,6 +1180,9 @@ cf.authVerified	인증 확인	Authenticated
 cf.yes	예	Yes
 cf.no	아니오	No
 cf.verifiedSession	검증된 세션 필요	Verified session required
+cf.resumeRefusal	재개 거절 코드	Resume refusal code
+cf.bindingUnverified	세션 연결 미검증 (binding_unverified)	Session binding unverified (binding_unverified)
+cf.notApplicable	해당 없음	Not applicable
 cf.unsupported	미지원	Unsupported
 cl.ready	실행 준비	Ready to run
 cl.missingTool	필수 도구 누락	Required tool missing
@@ -3153,12 +3157,16 @@ function renderConversation(d) {
   const headerMain = el('header-main');
   headerMain.hidden = !joined;
   if (joined) {
-    const name = providerName(main.provider) + ' Main', avatar = node('span','');
-    paintAvatar(avatar,main); headerMain.replaceChildren(avatar,node('span',name));
-    putAttr(headerMain,'aria-label',() => t('main.headerAria',{name}));
+    const avatar = node('span','');
+    paintAvatar(avatar,{...main,provider:main.harness || main.provider});
+    headerMain.replaceChildren(avatar,node('span',() => conversationMainName(main)));
+    putAttr(headerMain,'aria-label',() => t('main.headerAria',{name:conversationMainName(main)}));
   }
   headerMain.onclick = joined ? () => selectMember(members.find(m => m.participant === main.participant),headerMain) : null;
   updateSendButton();
+}
+function conversationMainName(main) {
+  return names[main.harness] ? providerName(main.harness) + ' Main' : t('main.dispatchOnly',{provider:providerName(main.provider)});
 }
 function paintLeadTree(d) {
   if (!d) return;
@@ -3176,8 +3184,8 @@ function paintLeadTree(d) {
   const root = joined ? main : mainRecord, button = el('team-main-chat');
   el('team-main').hidden = !root;
   if (root) {
-    paintAvatar(el('team-main-avatar'),root);
-    put('team-main-name',()=>providerName(root.provider)+' Main');
+    paintAvatar(el('team-main-avatar'),{...root,provider:root.harness || root.provider});
+    put('team-main-name',() => joined ? conversationMainName(root) : providerName(root.provider) + ' Main');
     put('team-main-task',()=>joinDetails([mainRecord?.state && stateLabel(mainRecord.state),attemptTitle(mainRecord) || t(joined ? 'main.joined' : 'lead.taskUnknown')]));
     button.hidden = !joined;
     put(button,()=>choice('Main 채팅','Main chat'));
@@ -3458,7 +3466,12 @@ function resetConnectionRows() {
   for (const id of ['connection-prev','connection-next','connection-draft']) el(id).hidden = true;
 }
 function connectionField(key, value) {
-  if (value == null) return t('unknown');
+  if (value == null || value === 'unknown') return t('unknown');
+  if (key === 'resumeRefusalCode') {
+    if (value === 'binding_unverified') return t('cf.bindingUnverified');
+    if (value === 'not_applicable') return t('cf.notApplicable');
+    return t('unknown');
+  }
   if (key === 'observedAt' && Number.isSafeInteger(value)) {
     const date = new Date(value * 1000); return Number.isFinite(date.valueOf()) ? date.toISOString() : t('unknown');
   }
@@ -3484,10 +3497,13 @@ function loadConnection(page = 1) {
     const rows = data.rows.filter(row => view !== 'connections' || row.harness === harness);
     for (const row of rows) {
       const article = node('article',''), fields = node('dl','','connection-fields');
-      for (const {key,label} of data.columns) fields.append(node('dt',String(label).slice(0,48)),node('dd',() => connectionField(key,row[key])));
+      for (const {key,label} of data.columns) fields.append(
+        node('dt',() => key === 'resumeRefusalCode' ? t('cf.resumeRefusal') : String(label).slice(0,48)),
+        node('dd',() => connectionField(key,row[key]))
+      );
       article.append(fields);
       if (view === 'connections') {
-        const bound = !readOnly && dashboardData?.conversationBinding === 'matched' && dashboardData.conversationMain?.provider === harness;
+        const bound = !readOnly && dashboardData?.conversationBinding === 'matched' && dashboardData.conversationMain?.harness === harness;
         const lines = [
           ['cl.ready', () => row.installed === false || row.dependenciesPresent === false ? t('cl.missingTool') : t('unknown')],
           ['cl.observe', () => bound ? t('cl.memberConfirmed') : t('cl.sessionUnknown')],

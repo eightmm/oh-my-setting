@@ -428,6 +428,8 @@ fn alias(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
 }
+const RESUME_REFUSAL_COLUMN: (&str, &str) = ("resumeRefusalCode", "재개 거절 코드");
+
 const CONNECTION_EVIDENCE: [(&str, &str); 4] = [
     ("managedOutgoingSwap", "내보내는 Main 교체 계약"),
     ("swapEvidence", "교체 계약 및 호스트 조건"),
@@ -454,6 +456,7 @@ fn connections(mut data: Value) -> PanelResult<Value> {
         CELLS
             .iter()
             .chain(&CONNECTION_EVIDENCE)
+            .chain([&RESUME_REFUSAL_COLUMN])
             .find(|(k, _)| *k == key)
             .map(|(_, label)| *label)
     };
@@ -501,6 +504,7 @@ fn connections(mut data: Value) -> PanelResult<Value> {
         return Err(INVALID.into());
     }
     let mut harnesses = std::collections::BTreeSet::new();
+    let has_rows = !rows.is_empty();
     let mut legacy = false;
     for row in rows {
         let harness = match row["harness"].as_str() {
@@ -549,10 +553,18 @@ fn connections(mut data: Value) -> PanelResult<Value> {
         {
             return Err(INVALID.into());
         }
-        if CONNECTION_EVIDENCE
+        let old_policy = CONNECTION_EVIDENCE
             .iter()
-            .all(|(k, _)| !shape.contains_key(k))
-        {
+            .all(|(k, _)| !shape.contains_key(k));
+        let (key, _) = RESUME_REFUSAL_COLUMN;
+        match row.get(key).and_then(Value::as_str) {
+            None if row.get(key).is_none() => row[key] = json!("unknown"),
+            Some("unknown") => {}
+            Some("not_applicable") if selectable => {}
+            Some("binding_unverified") if !selectable => {}
+            _ => return Err(INVALID.into()),
+        }
+        if old_policy {
             // A legacy runtime reports no policy evidence. Never infer a
             // permission or swap capability from the harness name or PATH.
             legacy = true;
@@ -603,11 +615,17 @@ fn connections(mut data: Value) -> PanelResult<Value> {
             return Err(INVALID.into());
         }
     }
-    if legacy && let Value::Array(columns) = &mut data["columns"] {
-        for (key, label) in CONNECTION_EVIDENCE {
-            if !columns.iter().any(|column| column["key"] == key) {
-                columns.push(json!({"key":key,"label":label}));
+    if let Value::Array(columns) = &mut data["columns"] {
+        if legacy {
+            for (key, label) in CONNECTION_EVIDENCE {
+                if !columns.iter().any(|column| column["key"] == key) {
+                    columns.push(json!({"key":key,"label":label}));
+                }
             }
+        }
+        let (key, label) = RESUME_REFUSAL_COLUMN;
+        if has_rows && !columns.iter().any(|column| column["key"] == key) {
+            columns.push(json!({"key":key,"label":label}));
         }
     }
     Ok(data)

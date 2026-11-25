@@ -31,10 +31,13 @@ Codex, Claude, Antigravity(AGY), Pi 중 어느 Main을 택하든 CLI·Board·MCP
 | 행 필드 | 실제 의미 |
 |---|---|
 | `managedOutgoingSwap`, `swapEvidence` | Codex의 `supported` / `requires-verified-idle-pane-exit`는 교체 writer가 idle pane을 검증한 뒤 정상 종료를 요청할 수 있다는 계약이다. Claude는 기존 Linux proc 검사 결과에 따라 `supported` / `assisted-exit-linux-proc-available` 또는 `unsupported` / `assisted-exit-linux-proc-unavailable`이다. 이 경로는 운영자의 정상 종료와 세션 증거를 요구한다. AGY와 Pi는 `unsupported` / `no-managed-outgoing-adapter`다. |
+| `resumeRefusalCode` | AGY와 Pi는 `binding_unverified`를 보고한다. Codex와 Claude의 `not_applicable`은 이 정적 거절 사유가 없다는 뜻이다. 실제 재개는 기존 Room과 세션의 검사를 거친다. |
 | `configuredMainPermissions` | 현행 Main 설정 parser의 결과다. 미설정 기본값은 `full`, 명시 가능한 정책은 `full`과 `native`, 잘못된 값은 `unknown`이다. |
 | `fullModeOption` | Codex·Claude·AGY의 native adapter에는 full 모드용 옵션이 있어 `supported`다. Pi gateway에는 해당 옵션이 없어 `unsupported`다. 실제 argv에 옵션을 포함할지는 기동 경로가 당시 정책으로 정한다. |
 
-이 필드가 없는 이전 runtime의 행은 MCP가 네 값을 `unknown`으로 제공한다. 로그인, 설치 완료, 지금 실행 중인 Main의 권한이나 호출자의 실행 승인은 별도의 근거를 요구한다. 아래 공통 메시지 예시는 계속 제안 단계다. [Native 정책](../crates/oms-command-panel/src/native_panel.rs) · [Board 열](../crates/oms-command-panel/src/desktop_board.rs) · [MCP 계약](../crates/oms-mcp-server/src/panel.rs)
+MCP는 이전 runtime에서 누락된 교체·권한 정책과 재개 거절 코드에 `unknown`을 제공한다. 로그인, 설치 완료, 지금 실행 중인 Main의 권한이나 호출자의 실행 승인은 별도의 근거를 요구한다. 아래 공통 메시지 예시는 계속 제안 단계다. [Native 정책](../crates/oms-command-panel/src/native_panel.rs) · [Board 열](../crates/oms-command-panel/src/desktop_board.rs) · [MCP 계약](../crates/oms-mcp-server/src/panel.rs)
+
+`oms panel --launch <agy|pi> --resume <session> --dry-run`은 종료 코드 2와 기존 표준 오류 설명을 유지하며 표준 출력에 schema 1의 `oms-panel-action-result`를 반환한다. 여기에는 `action: "resume"`, `outcome: "refused"`, `code: "binding_unverified"`, `capabilityState: "unsupported"`, `harness`, `dispatchOwner`, `executes: false`가 있다. 이 결과에는 세션 ID나 실행 인자가 포함되지 않는다.
 
 ## 식별자, 제어권, 재접속
 
@@ -70,4 +73,4 @@ Codex, Claude, Antigravity(AGY), Pi 중 어느 Main을 택하든 CLI·Board·MCP
 
 - [#440 §9](https://github.com/eightmm/oh-my-setting/blob/238c332ab734fb971e9d6fe1b3b7453977d94a01/docs/CONTROL-SURFACE-ROADMAP.md)와 같은 용어를 사용한다. 원격 gateway는 MCP 연결과 caller/project 권한을 담당할 후보이고, Pi의 Codex 추론 경로는 별개다. Supervisor/SSH는 host 관측, 기존 native adapter는 공급자 호출, 플러그인은 표시·요청을 담당한다. Plan·Agents·Logs·Review의 후속 화면은 같은 writer의 projection과 receipt를 사용하도록 제안한다.
 - [#334 diff](https://github.com/eightmm/oh-my-setting/pull/334/files)의 `provider_identity::canonical`은 `agy`를 `antigravity`로 정규화하고 `Discovery`는 builtin과 custom adapter의 실행 파일을 찾는다. peer·models·MCP 호출부가 이를 공유한다. [#335 diff](https://github.com/eightmm/oh-my-setting/pull/335/files)는 #334에 쌓여 `provider_accounts`의 ID·home·중복 검사를 공유한다. routing/connect의 `Strict`와 peer의 `PeerLegacy` 해석 차이는 공통 fixture가 보존한다. 이 PR들이 반영되면 해당 parser와 fixture를 재사용하고 Main admission과 계정 파일의 물리적 검증은 기존 owner가 담당한다.
-- 남은 구현은 제안 DTO의 실제 adapter·정형 거절 코드·호환성 fixture, 화면 간 같은 scope·세대·receipt 일치 시험, 그리고 필요한 host/version별 실측이다. 이 문서로 선행 프로젝트의 기능 표나 다른 화면의 실행 검증을 대체하지 않는다. [#432 수락 조건](https://github.com/eightmm/oh-my-setting/issues/432)
+- 현재 Connections와 재개 dry-run에는 위 정책 및 거절 계약을 적용했다. 호환성 fixture는 이전 응답과 미검증 값을 다룬다. 공통 action·event 어댑터와 host/version별 실제 공급자 증거는 각 writer와 해당 통합 작업에서 다룬다. 이 문서로 선행 프로젝트의 기능 표나 다른 화면의 실행 검증을 대체하지 않는다. [#432 수락 조건](https://github.com/eightmm/oh-my-setting/issues/432)

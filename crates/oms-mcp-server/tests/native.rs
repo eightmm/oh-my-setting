@@ -1944,6 +1944,7 @@ fn panel_command_catalog() {
     current["swapEvidence"] = json!("no-managed-outgoing-adapter");
     current["configuredMainPermissions"] = json!("full");
     current["fullModeOption"] = json!("unsupported");
+    current["resumeRefusalCode"] = json!("binding_unverified");
     for (client, args) in [
         (
             &mut desktop,
@@ -1963,6 +1964,7 @@ fn panel_command_catalog() {
         good(&old);
         let old = payload(&old);
         for k in [
+            "resumeRefusalCode",
             "managedOutgoingSwap",
             "swapEvidence",
             "configuredMainPermissions",
@@ -1977,6 +1979,15 @@ fn panel_command_catalog() {
                     .any(|column| column["key"] == k)
             );
         }
+        let mut previous = current.clone();
+        previous
+            .as_object_mut()
+            .unwrap()
+            .remove("resumeRefusalCode");
+        let previous = payload(&read(&previous));
+        assert_eq!(previous["rows"][0]["resumeRefusalCode"], "unknown");
+        assert_eq!(previous["rows"][0]["fullModeOption"], "unsupported");
+
         let ok = read(&current);
         assert_eq!(payload(&ok)["rows"][0], current);
         assert_eq!(ok["result"]["structuredContent"]["rows"][0], current);
@@ -1985,6 +1996,8 @@ fn panel_command_catalog() {
             ("harness", json!("other")),
             ("transport", json!("native")),
             ("fullModeOption", json!("supported")),
+            ("resumeRefusalCode", json!("not_applicable")),
+            ("resumeRefusalCode", json!(null)),
             ("swapEvidence", json!("requires-verified-idle-pane-exit")),
             ("managedOutgoingSwap", json!("ready")),
             ("configuredMainPermissions", json!(["full"])),
@@ -2006,6 +2019,7 @@ fn panel_command_catalog() {
             ("transport", "native"),
             ("dependencies", "claude"),
             ("resumePolicy", "requires verified session"),
+            ("resumeRefusalCode", "not_applicable"),
             ("fullModeOption", "supported"),
         ] {
             claude[key] = json!(value);
