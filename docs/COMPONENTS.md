@@ -1302,6 +1302,40 @@ are never pushed with `oms land` (and `patch-land --recover` landings) are not r
 Field names follow the Agent Trace contributor-type vocabulary (`ai`, `human`, `mixed`,
 `unknown`); this is not a claim of compliance with any spec.
 
+`oms land wait --reviewed-head FULL_SHA --request STAMP [--after CURSOR] [--wait-seconds 0..50] [--json]`
+observes one existing private landing receipt from its issuing checkout. Take an immediate
+snapshot, then pass its cursor and a wait duration for the next observation. The cursor
+binds the checkout, request, receipt revision and observed holder. Each waiter samples independently at
+most once a second. Exit 0 reports a local observation, including an unchanged timeout.
+A running receipt without its matching live process and held lock returns immediately
+with `holder-unconfirmed`. The `activity` field distinguishes a free lock, a different
+holder, an ended process and unavailable evidence. A repeated terminal receipt returns
+immediately. If a publisher resumes that exact request, the current holder and previously
+saved outcome are shown together. `awaiting-merge` records PR publication only. The
+observer never queries GitHub, claims a queued request, starts a publisher, or infers a
+merge, closure or installation. Requests queued before their first receipt are unavailable.
+An interrupt exits 130. A missing or untrusted receipt fails without changing any state.
+
+`oms land reconcile --reviewed-head FULL_SHA [--request STAMP] [--remote NAME] [--target BRANCH] [--json]`
+is the observation-only recovery for a PR landing whose reviewed head was merged after the
+target moved, so the delivery ancestor guard refuses a rerun. It writes no receipt, ref,
+status, install, claim, push or merge. It requires a trusted (owner-only, no-follow, bounded)
+saved receipt whose request identity recomputes from this repo, remote, target and gate, then
+a GitHub PR observed `MERGED` with the receipt's number, URL, same-repository head, ref and
+exact head, a merge commit reachable from the live target, and an identical reviewed tree.
+If the PR merged while its publisher was waiting for CI, the recorded gate, successful
+push, base and PR identity can establish the same result from a still-running receipt.
+The saved receipt keeps its original state.
+The PR gate links to the actual hosted `test.yml` pull-request run and successful gate job
+on that head and run attempt. If GitHub omits the run’s PR membership after merge, the
+source branch must identify a single PR across all states. The complete hosted job list
+must satisfy the full CI policy. A push run, an unrelated green check, ambiguous PR
+membership, missing local objects, or a different merged tree cannot prove delivery.
+Exit 0 emits `verified` / `same-tree`. The observation carries the saved local gate scope
+(`unknown` for a custom command) separately from hosted CI. A Plan consumer still needs
+its own patch and lease evidence. The command never fetches; receipts outside the scan
+limit can be selected with an explicit request stamp.
+
 `oms land blame-session [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE` prints
 each commit's row or `unrecorded` and a summary (`N ai / N human / N mixed / N unknown / N
 unrecorded`). It is a `land` sub-action, beside `notes`, because the rows are written by
@@ -3567,10 +3601,33 @@ Conventional Commit subject, else `oms/land-<sha12>`) and opens a PR whose body 
 `--why TEXT`, else the commit bodies; with neither, land refuses. Without `--merge`,
 land ends after CI in receipt state `awaiting-merge` with exit 0 and installs nothing.
 `--merge [--merge-method squash|merge|rebase]` merges after CI succeeds for the exact
-PR head, then installs. After a squash merge, installation proceeds when the merge
+PR head, then installs. Each merge needs `--merge` on that invocation. While CI runs,
+land releases the repository lock so other requests can publish. A second invocation
+of the same request exits 75. After CI, land waits up to `OMS_LOCK_TIMEOUT` to
+reacquire the writer and checks the original receipt, open PR, source and base.
+A merge samples same-head CI again under publication authority. Both the run
+listing and its details must confirm success. A green project-specific workflow
+can merge with unknown OMS verification scope. Installation keeps its existing
+full-verification requirement. A sibling that started during CI defers the merge
+unless the caller selected `--ignore-siblings`. The merge-request write compares
+the receipt with its saved checkpoint. If a ref or PR changed, the checkpoint
+is preserved. GitHub checks the source SHA in the merge request. A target
+change after the last observation still requires the post-merge tree/base checks.
+PRs observed with a nonzero `--ci-wait` require one exact push URL.
+
+After a squash merge, installation proceeds when the merge
 commit's tree equals the PR head tree on an unchanged base; otherwise it waits for CI
 on the target. On GitHub, `--direct` pushes straight to the target and accepts only a
 change of at most two lines in `.md` files.
+
+To update an existing PR after its target moves, fetch the remote and keep the
+published PR head in the history of the branch you update. For example, with
+`origin` and target `main`, run `git fetch origin` on the local PR branch.
+If the fetched PR head contains commits your branch lacks, first merge that
+remote-tracking PR branch. Then run `git merge origin/main`, resolve any
+conflicts and rerun `oms land` with the same remote, target and PR head branch
+(use `--head-branch` when needed). The new HEAD receives its own gate and
+fast-forwards the source branch of the same open PR.
 
 A moving update target is rejected by the updater. Local CI-parity hides registry
 provider CLIs and adds operator-tools when tier-routing inputs change; it does not parse
@@ -3599,7 +3656,8 @@ It reports sibling worktrees with live autopilot receipts (`proposing`,
 Retrying the same commit, destination and gate resumes CI/install from its
 successful push receipt; successful stages are reused. An installation receipt
 is reused only while the installed checkout is clean and still at the same SHA.
-A repository-wide lock prevents concurrent landing gates; background launches
+A repository-wide lock prevents concurrent landing gates and publication writes (a PR
+landing releases it while observing CI); background launches
 acknowledge lock acquisition before reporting success. CI query errors are recorded immediately,
 and each query is bounded by the remaining polling deadline (at most 30 seconds).
 
