@@ -147,6 +147,10 @@ pub struct Options {
     pub count_rows: bool,
 }
 impl Options {
+    pub(crate) fn managed_plan_task(&self) -> bool {
+        self.has("task-id") && matches!(self.get("orchestrator"), Some("claude" | "antigravity"))
+    }
+
     pub(crate) fn selects_main(&self) -> bool {
         self.command.is_none()
             && !self.count_rows
@@ -517,6 +521,7 @@ impl Options {
         let active_modes: Vec<&str> = modes.iter().copied().filter(|k| self.has(k)).collect();
         require(
             !self.has("dry-run")
+                || self.managed_plan_task()
                 || active_modes.iter().all(|key| {
                     matches!(
                         *key,
@@ -731,15 +736,48 @@ impl Options {
             )?;
         }
         if self.has("task-id") && self.has("orchestrator") {
-            require(
-                self.get("orchestrator") == Some("codex")
-                    && (self.has("task") != self.has("native-result"))
-                    && !self.has("lead")
-                    && !self.has("model")
-                    && !self.has("reasoning-effort")
-                    && !self.has("spread-accounts"),
-                "bound --task-id operations require an existing ordinary Codex lead and either --task or --native-result",
-            )?;
+            if self.managed_plan_task() {
+                require(
+                    !self.has("task"),
+                    "Claude/AGY --task-id runs the frozen Plan task; amend the reviewed Plan or use --task without --task-id for a native conversation",
+                )?;
+                require(
+                    ![
+                        "native-result",
+                        "account",
+                        "lead",
+                        "model",
+                        "reasoning-effort",
+                        "spread-accounts",
+                        "unbound",
+                    ]
+                    .iter()
+                    .any(|key| self.has(key)),
+                    "Claude/AGY --task-id uses managed plan-run with the frozen assignment; native result, account, lead, model and effort overrides are unsupported",
+                )?;
+                require(
+                    self.flags
+                        .iter()
+                        .all(|key| matches!(key.as_str(), "json" | "dry-run"))
+                        && self.values.keys().all(|key| {
+                            matches!(
+                                key.as_str(),
+                                "repo" | "orchestrator" | "task-id" | "owner" | "room"
+                            )
+                        }),
+                    "managed --task-id accepts only --repo, --room, --owner, --json and --dry-run alongside --orchestrator and --task-id",
+                )?;
+            } else {
+                require(
+                    self.get("orchestrator") == Some("codex")
+                        && (self.has("task") != self.has("native-result"))
+                        && !self.has("lead")
+                        && !self.has("model")
+                        && !self.has("reasoning-effort")
+                        && !self.has("spread-accounts"),
+                    "bound Codex --task-id operations require an existing ordinary Codex lead and either --task or --native-result",
+                )?;
+            }
         }
         self.needs(&["result-sha256"], &["native-reconcile", "native-adopt"])?;
         self.needs(&["intent-sha256", "decision"], &["native-reconcile"])?;
@@ -845,6 +883,7 @@ impl Options {
         )?;
         require(
             !self.has("json")
+                || self.managed_plan_task()
                 || self.get("host") == Some("desktop")
                 || !["launch", "orchestrator", "focus-orchestrator"]
                     .iter()
@@ -852,7 +891,9 @@ impl Options {
             "--json is read-only; use --dry-run for a launch plan",
         )?;
         require(
-            !(self.has("json") && self.has("dry-run")) || self.has("open-chat"),
+            !(self.has("json") && self.has("dry-run"))
+                || self.has("open-chat")
+                || self.managed_plan_task(),
             "choose --json or --dry-run",
         )?;
         require(
@@ -988,7 +1029,7 @@ pub fn usage() -> String {
     text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
     text.push_str("Bind a canonical task: --orchestrator codex --task-id ID --task TEXT\nReuses the exact claim and durable intent; an unknown send is never resent automatically.\n\n");
     text.push_str("Retain a native report: --orchestrator codex --task-id ID --native-result FILE\nImports digest-bound findings or candidate evidence; does not confirm consumption, completion or acceptance.\n\n");
-    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nRetire a verified-unsent first intent: --native-reconcile ATTEMPT --intent-sha256 SHA --decision retire-unsent\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical work uses managed --dispatch ROLE --task-id ID until bound native adapters exist.\n\n");
+    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nRetire a verified-unsent first intent: --native-reconcile ATTEMPT --intent-sha256 SHA --decision retire-unsent\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical task: --orchestrator claude|antigravity --task-id ID [--dry-run] [--json].\nUses managed plan-run from the current Main with a pinned ready task and frozen assignment/scope/verifier; no native Lead input, automatic landing or publication.\nRejects --task, account, model, effort and native-result overrides; reconcile existing claims separately.\nDo not pre-claim; this route claims the ready task itself. Inspect retained Plan evidence and checked Plan recovery after an unknown return; panel --continue is for role-dispatch workers.\nIncomplete runner output/cleanup stays unknown (exit 75 if producer exit was zero). --dispatch --task-id only labels work.\n\n");
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("After a canonical Main swap: --native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]\nResults supplies the exact adoption command. Omit result SHA only when no current result exists.\nAdoption preserves the frozen claim, attempt, account and round; it never resends input or grants acceptance.\nSettled tasks permit retirement-only adoption even after the checkout advances.\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
@@ -1071,6 +1112,26 @@ mod tests {
     #[test]
     fn canonical_native_task_requires_the_supported_surface_and_body() {
         let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        for provider in ["claude", "antigravity"] {
+            let managed = ["--orchestrator", provider, "--task-id", "task-one"];
+            assert!(parse(&managed).is_ok());
+            assert!(parse(&[managed.as_slice(), &["--dry-run", "--json"]].concat()).is_ok());
+            for extra in [
+                &["--task", "replace reviewed work"][..],
+                &["--native-result", "return.json"],
+                &["--account", "work"],
+                &["--model", "vendor/model-x"],
+                &["--reasoning-effort", "high"],
+                &["--lead", "alternate", "--account", "work"],
+                &["--spread-accounts"],
+                &["--unbound"],
+                &["--host", "tmux"],
+                &["--layout", "inline"],
+                &["--no-animation"],
+            ] {
+                assert!(parse(&[managed.as_slice(), extra].concat()).is_err());
+            }
+        }
         let bound = [
             "--orchestrator",
             "codex",

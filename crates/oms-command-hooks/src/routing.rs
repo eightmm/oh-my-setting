@@ -1028,7 +1028,7 @@ pub(crate) fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
                     .all(|d| d.as_str().is_some_and(|s| done.contains(s)))
         }) {
             hint.push_str(&format!(
-                " · next ready: {}; claim it before starting work",
+                " · next ready: {}; use its reviewed execution route; managed plan-run claims the ready task itself (do not pre-claim)",
                 text(next, "id")
             ));
         }

@@ -1429,6 +1429,13 @@ impl PanelServices for CollabServices<'_> {
             NativeCommand::Plan => {
                 oms_command_plan::run_with_services(args, repo, interrupted, &self.control)
             }
+            NativeCommand::PlanRun => oms_command_autonomy::run_with_services(
+                verb,
+                args,
+                repo,
+                interrupted,
+                &self.control,
+            ),
             NativeCommand::Task => {
                 // Never lock process stdin: it may be a protocol stream.
                 let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -3336,6 +3343,7 @@ mod tests {
             NativeCommand::Room,
             NativeCommand::Events,
             NativeCommand::Task,
+            NativeCommand::PlanRun,
         ] {
             let out =
                 PanelServices::command(&host, command, dir.path(), &help, &stop).expect("dispatch");
@@ -3620,6 +3628,10 @@ mod tests {
             shape(NativeCommand::Plan),
             ["agent-plan", "--repo", "/repo"]
         );
+        assert_eq!(
+            shape(NativeCommand::PlanRun),
+            ["plan-run", "--repo", "/repo"]
+        );
     }
 
     #[test]
@@ -3651,6 +3663,21 @@ mod tests {
         assert_eq!(
             run(NativeCommand::Bundle, &["show", "--bundle"]),
             format!("agent-events --repo {cwd} show --bundle")
+        );
+        let sha = "a".repeat(64);
+        assert_eq!(
+            run(
+                NativeCommand::PlanRun,
+                &[
+                    "--to",
+                    "claude",
+                    "--id",
+                    "task-one",
+                    "--expected-task-sha256",
+                    &sha,
+                ],
+            ),
+            format!("plan-run --repo {cwd} --to claude --id task-one --expected-task-sha256 {sha}")
         );
     }
 
