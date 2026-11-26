@@ -38,6 +38,11 @@ AH/CP/CC/RF owner를 GitHub Issue·Project와 연결하는 delivery view다. 같
 capability 계약과 읽기 전용 UI부터 진행하며, 이 큐와 기존 lifecycle 우선순위를 대체하지
 않는다. Project 상태는 실행·승인 권한이 아니고 CP-13 원격 mutation은 계약 검토 전 보류한다.
 
+2026-11-26 [단일 프로젝트 상주 구현 인계](RESIDENT-PROJECT-IMPLEMENTATION.md)는
+[#619](https://github.com/eightmm/oh-my-setting/issues/619)와 설계 PR #608의 PIPE 항목에
+headless Main, 기존 tick 재사용, 전달·재시작 복구 형식과 작은 PR의 수용 기준을 연결한다.
+새 실행 큐를 만들거나 기존 PIPE-00/04·panel stack claim을 재할당하지 않는 설계 보충이다.
+
 ## 1. PR 지도
 
 | PR / 작업 | 실제 변경 | 조사 시점 상태 / 후속 |
