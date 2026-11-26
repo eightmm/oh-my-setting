@@ -243,13 +243,63 @@ fn final_runtime_records_replay_the_original_settlement_after_a_crash() {
 #[test]
 fn cancellation_and_legacy_terminal_records_reconcile_without_inventing_success() {
     let f = Fixture::new();
+    assert!(f.ok(&["cancel", "--help"]).contains("[--json]"));
     let id = f.ok(&["submit", "--", "/bin/true"]);
-    f.ok(&["cancel", "--attempt", &id]);
+    let plain = f.call(&["cancel", "--attempt", &id]);
+    assert!(plain.status.success());
+    assert_eq!(plain.stdout, format!("{id}\n").into_bytes());
     f.restore_lifecycle_before("cancelled");
     f.recover(&id, "cancelled", "cancelled_by_owner");
     let child = f.ok(&["resume", "--attempt", &id]);
     assert_eq!(f.job(&child).get("finish"), &V::Null);
     assert_eq!(f.job(&child).get("runtime_state").text(), Some("queued"));
+    let first = f.call(&["cancel", "--attempt", &child, "--json"]);
+    assert!(first.status.success());
+    assert_eq!(first.stdout.iter().filter(|&&b| b == b'\n').count(), 1);
+    assert_eq!(
+        V::parse(&first.stdout).unwrap(),
+        obj([
+            ("schema", 1usize.into()),
+            ("attempt", child.as_str().into()),
+            ("runtime_state", "cancelled".into()),
+            ("delivery", "confirmed".into()),
+            ("replayed", false.into()),
+        ])
+    );
+    let saved_job = std::fs::read(f.job_path(&child)).unwrap();
+    let saved_events = std::fs::read(ops::event_path(&f.0)).unwrap();
+    assert_eq!(
+        V::parse(f.ok(&["cancel", "--attempt", &child, "--json"]).as_bytes()).unwrap(),
+        obj([
+            ("schema", 1usize.into()),
+            ("attempt", child.as_str().into()),
+            ("runtime_state", "cancelled".into()),
+            ("delivery", "confirmed".into()),
+            ("replayed", true.into()),
+        ])
+    );
+    assert_eq!(std::fs::read(f.job_path(&child)).unwrap(), saved_job);
+    assert_eq!(std::fs::read(ops::event_path(&f.0)).unwrap(), saved_events);
+    assert_eq!(f.ok(&["cancel", "--attempt", &child]), child);
+    assert_eq!(std::fs::read(f.job_path(&child)).unwrap(), saved_job);
+    assert_eq!(std::fs::read(ops::event_path(&f.0)).unwrap(), saved_events);
+    let mut non_owner = f.job(&child);
+    non_owner.set(
+        "finish",
+        obj([
+            ("schema", 1usize.into()),
+            ("state", "cancelled".into()),
+            ("reason_code", "external_abort".into()),
+            ("idempotency_key", "external-abort".into()),
+        ]),
+    );
+    f.save_job(&child, &non_owner);
+    let refused = f.call(&["cancel", "--attempt", &child, "--json"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("attempt is no longer cancellable: cancelled")
+    );
 
     for (payload, expected, reason) in [
         ("exit 0", "blocked", "terminal_evidence_missing"),
@@ -283,6 +333,12 @@ fn cancellation_and_legacy_terminal_records_reconcile_without_inventing_success(
         }
         f.save_job(&id, &job);
         f.recover(&id, expected, reason);
+        let refused = f.call(&["cancel", "--attempt", &id, "--json"]);
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("attempt is no longer cancellable: finished")
+        );
         if payload == "exit 0" {
             std::fs::write(ops::event_path(&f.0), completed).unwrap();
             assert_eq!(
@@ -296,6 +352,41 @@ fn cancellation_and_legacy_terminal_records_reconcile_without_inventing_success(
 }
 
 #[test]
+fn active_cancellation_reports_dispatched_and_replays_request() {
+    for active in ["launching", "starting", "running", "cleanup_failed"] {
+        let f = Fixture::new();
+        let id = f.ok(&["submit", "--", "/bin/true"]);
+        let mut job = f.job(&id);
+        job.set("runtime_state", active);
+        f.save_job(&id, &job);
+        assert_eq!(
+            V::parse(f.ok(&["cancel", "--attempt", &id, "--json"]).as_bytes()).unwrap(),
+            obj([
+                ("schema", 1usize.into()),
+                ("attempt", id.as_str().into()),
+                ("runtime_state", "cancel_requested".into()),
+                ("delivery", "dispatched".into()),
+                ("replayed", false.into()),
+            ])
+        );
+        let saved_job = std::fs::read(f.job_path(&id)).unwrap();
+        let saved_events = std::fs::read(ops::event_path(&f.0)).unwrap();
+        assert_eq!(
+            V::parse(f.ok(&["cancel", "--attempt", &id, "--json"]).as_bytes()).unwrap(),
+            obj([
+                ("schema", 1usize.into()),
+                ("attempt", id.as_str().into()),
+                ("runtime_state", "cancel_requested".into()),
+                ("delivery", "dispatched".into()),
+                ("replayed", true.into()),
+            ])
+        );
+        assert_eq!(std::fs::read(f.job_path(&id)).unwrap(), saved_job);
+        assert_eq!(std::fs::read(ops::event_path(&f.0)).unwrap(), saved_events);
+    }
+}
+
+#[test]
 fn cancellation_identity_mismatch_never_signals_an_unrelated_process() {
     let f = Fixture::new();
     let id = f.ok(&["submit", "--", "/bin/true"]);
@@ -305,9 +396,24 @@ fn cancellation_identity_mismatch_never_signals_an_unrelated_process() {
     job.set("pid", unrelated.id() as i64);
     job.set("pid_identity", "different-process-start");
     f.save_job(&id, &job);
-    f.ok(&["cancel", "--attempt", &id]);
+    assert_eq!(
+        V::parse(f.ok(&["cancel", "--attempt", &id, "--json"]).as_bytes()).unwrap(),
+        obj([
+            ("schema", 1usize.into()),
+            ("attempt", id.as_str().into()),
+            ("runtime_state", "interrupted".into()),
+            ("delivery", "outcome_unknown".into()),
+            ("replayed", false.into()),
+        ])
+    );
     f.restore_lifecycle_before("failed");
     f.recover(&id, "failed", "process_identity_mismatch");
+    let refused = f.call(&["cancel", "--attempt", &id, "--json"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("attempt is no longer cancellable: interrupted")
+    );
     assert!(unrelated.try_wait().unwrap().is_none());
     unrelated.kill().unwrap();
     unrelated.wait().unwrap();

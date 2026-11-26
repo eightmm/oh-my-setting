@@ -303,8 +303,12 @@ pub fn run_streaming(
                 Ok(0)
             }
             "cancel" => {
-                cancel(&repo, &store, &parsed, host, interrupted)?;
-                line(out, parsed.text("attempt")?)?;
+                let row = cancel(&repo, &store, &parsed, host, interrupted)?;
+                if parsed.flag("json") {
+                    json_line(out, &row)?;
+                } else {
+                    line(out, text(&row, "attempt"))?;
+                }
                 Ok(0)
             }
             "resume" => {
@@ -374,6 +378,11 @@ fn line(out: &mut dyn Write, s: impl std::fmt::Display) -> Result<()> {
 }
 fn json(out: &mut dyn Write, row: &V) -> Result<()> {
     out.write_all(&row.json(true)?).map_err(|e| e.to_string())
+}
+fn json_line(out: &mut dyn Write, row: &V) -> Result<()> {
+    let mut raw = row.json(false)?;
+    raw.push(b'\n');
+    out.write_all(&raw).map_err(|e| e.to_string())
 }
 fn finish(job: &mut V, state: &str, exit: V, settlement: (&str, &str, &str)) {
     job.set("runtime_state", state);
@@ -935,16 +944,33 @@ fn recorded(
     Ok(process_matches(raw, expected, host, interrupted)?
         && rustix::process::getpgid(Some(pid)).ok() == Some(pid))
 }
+fn owner_cancelled(repo: &Path, id: &str, job: &V) -> Result<bool> {
+    let attempts = life::projection(repo)?;
+    let attempt = attempts.get(id);
+    if job.get("finish") != &V::Null {
+        Ok(finish_facts(job).is_ok_and(|facts| {
+            text(&facts, "state") == "cancelled"
+                && text(&facts, "reason_code") == "cancelled_by_owner"
+        }) && attempt.is_none_or(|a| {
+            !life::terminal(text(a, "state"))
+                || text(a, "state") == "cancelled" && text(a, "reason_code") == "cancelled_by_owner"
+        }))
+    } else {
+        Ok(attempt.is_some_and(|a| {
+            text(a, "state") == "cancelled" && text(a, "reason_code") == "cancelled_by_owner"
+        }))
+    }
+}
 fn cancel(
     repo: &Path,
     store: &Store,
     args: &Args,
     host: &mut CommandHost,
     interrupted: &AtomicBool,
-) -> Result<()> {
+) -> Result<V> {
     let id = args.text("attempt")?;
     let mut identity_failure = false;
-    {
+    let (runtime_state, delivery, replayed) = {
         let _queue = FileLock::acquire(&store.queue_path(), interrupted)?;
         let mut job = store.load(&id)?;
         let state = text(&job, "runtime_state").to_owned();
@@ -964,6 +990,7 @@ fn cancel(
                 "owner-cancelled",
                 interrupted,
             )?;
+            ("cancelled", "confirmed", false)
         } else if ACTIVE.contains(&state.as_str()) {
             let child = integer(&job, "pid");
             if child != 0
@@ -985,19 +1012,26 @@ fn cancel(
                         ("idempotency_key", "process-identity-mismatch".into()),
                     ]),
                 );
+                store.save(&mut job)?;
+                ("interrupted", "outcome_unknown", false)
+            } else if state == "cancel_requested" {
+                ("cancel_requested", "dispatched", true)
             } else {
                 job.set("runtime_state", "cancel_requested");
+                // The live runner owns the unreaped leader and forwards this
+                // monotonic request. An external observer cannot pin a numeric
+                // process group across check/kill, so it never signals by number.
+                store.save(&mut job)?;
+                ("cancel_requested", "dispatched", false)
             }
-            // The live runner owns the unreaped leader and forwards this
-            // monotonic request. An external observer cannot pin a numeric
-            // process group across check/kill, so it never signals by number.
-            store.save(&mut job)?;
+        } else if state == "cancelled" && owner_cancelled(repo, &id, &job)? {
+            ("cancelled", "confirmed", true)
         } else if ["finished", "cancelled", "abandoned", "interrupted"].contains(&state.as_str()) {
             return Err(format!("attempt is no longer cancellable: {state}"));
         } else {
             return Err(format!("unknown runtime state: {state}"));
         }
-    }
+    };
     if identity_failure {
         life::transition(
             repo,
@@ -1008,7 +1042,13 @@ fn cancel(
             interrupted,
         )?;
     }
-    Ok(())
+    Ok(obj([
+        ("schema", 1usize.into()),
+        ("attempt", id.into()),
+        ("runtime_state", runtime_state.into()),
+        ("delivery", delivery.into()),
+        ("replayed", replayed.into()),
+    ]))
 }
 fn dispatch(
     repo: &Path,
