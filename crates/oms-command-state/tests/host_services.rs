@@ -643,6 +643,95 @@ fn artifact_resolution_projection_preserves_invalid_row_accounting() {
 }
 
 #[test]
+fn dashboard_artifacts_share_the_state_observation_for_one_request() {
+    use std::io::Write as _;
+
+    struct AppendDuringRuntime;
+    impl HostServices for AppendDuringRuntime {
+        fn runtime_envelope(
+            &self,
+            repo: &Path,
+            _: &AtomicBool,
+        ) -> Option<oms_command_state::Result<json::Value>> {
+            let mut log = fs::OpenOptions::new()
+                .append(true)
+                .open(repo.join(".oms/artifacts/index.jsonl"))
+                .unwrap();
+            log.write_all(b"{\"event_id\":\"during\",\"kind\":\"review\",\"exit\":0}\n")
+                .unwrap();
+            None
+        }
+    }
+
+    let repo = TempRepo::new();
+    let path = repo.path().join(".oms/artifacts/index.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut rows = (0..10)
+        .map(|i| serde_json::json!({"event_id":format!("row-{i}"), "kind":"delegate", "exit":0}))
+        .collect::<Vec<_>>();
+    rows[1]["kind"] = "review".into();
+    for row in &mut rows[2..5] {
+        row["kind"] = "review-outcome".into();
+    }
+    rows[3]["exit"] = 1.into();
+    rows[4]["exit"] = serde_json::Value::Null;
+    let bytes = rows.iter().map(|r| format!("{r}\n")).collect::<String>() + "malformed\n";
+    fs::write(&path, bytes).unwrap();
+
+    let observed = state(repo.path(), &NoHostServices);
+    let artifacts = observed.get("artifacts");
+    assert_eq!(artifacts.get("invalid_rows").int().unwrap(), 1);
+    let state_recent = artifacts.get("latest").array().unwrap();
+    assert_eq!(
+        state_recent
+            .iter()
+            .map(|r| r.text("event_id"))
+            .collect::<Vec<_>>(),
+        ["row-9", "row-8", "row-7", "row-6", "row-5"]
+    );
+    assert!(state_recent.iter().all(|r| r.text("status") == "success"));
+
+    let (code, out, err) = run_with_host(
+        "dashboard",
+        &args(&["--json", "--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &AtomicBool::new(false),
+        &mut Dummy,
+        &AppendDuringRuntime,
+    );
+    assert_eq!(code, 1, "{}", String::from_utf8_lossy(&err));
+    let dashboard = json::parse(&out).unwrap();
+    let operations = dashboard.get("operations");
+    assert_eq!(operations.get("available"), &json::Value::Bool(false));
+    assert_eq!(operations.get("omitted").int().unwrap(), 2);
+    let dashboard_recent = operations.get("recent").array().unwrap();
+    assert_eq!(
+        dashboard_recent
+            .iter()
+            .map(|r| r.text("event_id"))
+            .collect::<Vec<_>>(),
+        [
+            "row-9", "row-8", "row-7", "row-6", "row-5", "row-4", "row-3", "row-2"
+        ]
+    );
+    assert!(dashboard_recent.iter().all(|r| r.opt("status").is_none()));
+    assert_eq!(
+        dashboard.get("reviews"),
+        &json::parse(br#"{"outcomes":3,"passed":1,"failed":1,"unknown":1,"seat_answers":1}"#)
+            .unwrap()
+    );
+
+    let next = view_json("dashboard", repo.path());
+    let operations = next.get("operations");
+    assert_eq!(
+        operations.get("recent").array().unwrap()[0].text("event_id"),
+        "during"
+    );
+    assert_eq!(operations.get("omitted").int().unwrap(), 3);
+    assert_eq!(next.get("reviews").get("seat_answers").int().unwrap(), 2);
+}
+
+#[test]
 fn artifact_repairs_preserve_inode_and_first_later_success() {
     use std::os::unix::fs::MetadataExt;
     let repo = TempRepo::new();
