@@ -1963,6 +1963,7 @@ struct Planner {
     answer: std::sync::Mutex<String>,
     calls: std::sync::atomic::AtomicUsize,
     issue_reads: std::sync::atomic::AtomicUsize,
+    acceptance_checks: std::sync::atomic::AtomicUsize,
 }
 impl oms_command_plan::Services for Planner {
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
@@ -1982,6 +1983,8 @@ impl oms_command_plan::Services for Planner {
         &self,
         _: &oms_command_plan::services::SupervisedCommand,
     ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+        self.acceptance_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(oms_command_plan::services::Execution {
             exit: 1,
             runner_exit: 1,
@@ -2158,6 +2161,7 @@ impl Repo {
             answer: std::sync::Mutex::new(answer.into()),
             calls: 0.into(),
             issue_reads: 0.into(),
+            acceptance_checks: 0.into(),
         }
     }
 }
@@ -2621,6 +2625,193 @@ fn github_issue_intake_is_stamped_only_by_the_harness() {
             "{owner}"
         );
         assert_eq!(out.contains(pending), carried.is_none(), "{out}");
+    }
+}
+
+#[test]
+fn intent_amendment_replays_exact_publication_across_contract_replacement() {
+    if scrubbed_child("intent_amendment_replays_exact_publication_across_contract_replacement") {
+        return;
+    }
+    use std::sync::atomic::Ordering::SeqCst;
+    let previous = "# Project\n## Status\n- State: confirmed\n## Project\n- Goal: recover old contract\n- Scope: src\n- Non-goals: none\n## Commands\n- Check: bash tests/check.sh\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Acceptance\n- Original requirement [id:changed]\n- Removed requirement [id:removed]\n";
+    let candidate = previous
+        .replace("- State: confirmed", "- State: draft")
+        .replace("recover old contract", "recover amended contract")
+        .replace("Original requirement", "Amended requirement")
+        .replace(
+            "Removed requirement [id:removed]",
+            "New requirement [id:added]",
+        );
+    let staged = candidate.replace("- State: draft", "- State: confirmed");
+    let expected = value::hash(previous);
+    let reason = "Reviewed contract amendment";
+    // Exercise the original lost-reply boundary before the stricter refusals.
+    for (phase, conflicts) in [
+        ("before-replacement", false),
+        ("before-replacement", true),
+        ("after-replacement", true),
+        ("fresh", false),
+    ] {
+        let repo = Repo::github(ORIGIN, Some(previous));
+        let planner = repo.planner(ANSWER);
+        let (code, out, err) = intake("intent", &repo, &planner, &["amend", "--reason", reason]);
+        assert_eq!(code, 0, "{phase}: {err}");
+        let id = out
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("intent: amendment draft ")
+            .unwrap()
+            .split_once(';')
+            .unwrap()
+            .0;
+        let candidate_path = format!(".oms/intents/{id}.md");
+        let binding_path = format!(".oms/intents/{id}.amend.json");
+        let pending_path = format!(".oms/intents/{id}.publish.json");
+        let archive_path = format!(".oms/intents/archive/{expected}.md");
+        let ledger_path = ".oms/intents/amendments.jsonl";
+        repo.write(&candidate_path, &candidate);
+        let changes = oms_command_autonomy::intent::delta(
+            &contract::parse(previous.as_bytes(), &repo.0).unwrap(),
+            &contract::parse(candidate.as_bytes(), &repo.0).unwrap(),
+        );
+        for field in ["sections", "added", "modified", "removed"] {
+            assert!(!changes[field].as_array().unwrap().is_empty());
+        }
+        let receipt = json!({"schema": 1, "kind": "intent-amendment-receipt", "id": id,
+            "ts": "2000-01-01T00:00:00Z", "reason": reason, "previous_sha256": expected,
+            "project_sha256": value::hash(&staged), "archive": format!("archive/{expected}.md"),
+            "sections": changes["sections"], "added": changes["added"],
+            "modified": changes["modified"], "removed": changes["removed"]});
+        // Retained bytes need not use the current writer's whitespace.
+        let pending = serde_json::to_vec(&receipt).unwrap();
+        let run = || {
+            intake(
+                "intent",
+                &repo,
+                &planner,
+                &["adopt", "--id", id, "--expected-project-sha256", &expected],
+            )
+        };
+        let snapshot = || {
+            [
+                "PROJECT.md",
+                &candidate_path,
+                &binding_path,
+                &pending_path,
+                &archive_path,
+                ledger_path,
+            ]
+            .map(|path| fs::read(repo.0.join(path)).ok())
+        };
+        let refused = |case: &str| {
+            let before = snapshot();
+            let (code, _, err) = run();
+            assert_eq!(code, 2, "{phase}/{case}: {err}");
+            assert_eq!(snapshot(), before, "{phase}/{case} changed state");
+            err
+        };
+        if phase != "fresh" {
+            repo.write(&archive_path, previous);
+            repo.write(&pending_path, &pending);
+            if phase == "after-replacement" {
+                repo.write("PROJECT.md", &staged);
+            }
+        }
+        if conflicts {
+            for field in [
+                "schema",
+                "kind",
+                "id",
+                "ts",
+                "reason",
+                "previous_sha256",
+                "project_sha256",
+                "archive",
+                "sections",
+                "added",
+                "modified",
+                "removed",
+                "extra",
+            ] {
+                let mut conflicting = receipt.clone();
+                conflicting[field] = match field {
+                    "schema" => 2.into(),
+                    "sections" | "added" | "modified" | "removed" => json!([]),
+                    _ => "different".into(),
+                };
+                repo.write(&pending_path, value::pretty(&conflicting).unwrap());
+                refused(field);
+            }
+            repo.write(&pending_path, b"{");
+            refused("corrupt receipt");
+            repo.write(&pending_path, &pending);
+            repo.write(&archive_path, b"changed predecessor");
+            refused("changed archive");
+            fs::remove_file(repo.0.join(&archive_path)).unwrap();
+            refused("missing archive");
+            repo.write(&archive_path, previous);
+            repo.write(
+                &candidate_path,
+                candidate.replace("New requirement", "Different requirement"),
+            );
+            refused("changed candidate");
+            repo.write(&candidate_path, &candidate);
+            let binding = json_file(repo.0.join(&binding_path));
+            for field in ["id", "base_project_sha256", "reason"] {
+                let mut conflicting = binding.clone();
+                conflicting[field] = "different".into();
+                repo.write(&binding_path, value::pretty(&conflicting).unwrap());
+                refused("changed amendment binding");
+            }
+            repo.write(&binding_path, value::pretty(&binding).unwrap());
+            let mut conflicting = receipt.clone();
+            conflicting["reason"] = "different".into();
+            let mut row = serde_json::to_vec(&conflicting).unwrap();
+            row.push(b'\n');
+            repo.write(ledger_path, row);
+            assert!(
+                refused("conflicting final receipt")
+                    .contains("conflicting amendment publication receipt")
+            );
+            fs::remove_file(repo.0.join(ledger_path)).unwrap();
+        }
+        let checks = planner.acceptance_checks.load(SeqCst);
+        let (code, _, err) = run();
+        assert_eq!(code, 0, "{phase}: {err}");
+        assert_eq!(
+            planner.acceptance_checks.load(SeqCst) - checks,
+            usize::from(phase != "after-replacement"),
+            "only a pending contract replacement reruns supervised acceptance"
+        );
+        assert_eq!(
+            fs::read(repo.0.join("PROJECT.md")).unwrap(),
+            staged.as_bytes()
+        );
+        assert_eq!(
+            fs::read(repo.0.join(&archive_path)).unwrap(),
+            previous.as_bytes()
+        );
+        if phase != "fresh" {
+            assert_eq!(fs::read(repo.0.join(&pending_path)).unwrap(), pending);
+        }
+        let receipt = json_file(repo.0.join(&pending_path));
+        let ledger = fs::read_to_string(repo.0.join(ledger_path)).unwrap();
+        assert_eq!(ledger.lines().count(), 1);
+        assert_eq!(value::parse(ledger.trim().as_bytes()).unwrap(), receipt);
+        let completed = snapshot();
+        let checks = planner.acceptance_checks.load(SeqCst);
+        for _ in 0..2 {
+            let (code, _, err) = run();
+            assert_eq!(code, 0, "{phase} replay: {err}");
+            assert_eq!(snapshot(), completed, "exact replay changed state");
+            assert_eq!(planner.acceptance_checks.load(SeqCst), checks);
+        }
+        repo.write("PROJECT.md", previous);
+        refused("completed receipt cannot reapply after a later contract reversal");
+        assert_eq!(planner.calls.load(SeqCst), 0);
+        assert_eq!(planner.issue_reads.load(SeqCst), 0);
     }
 }
 
