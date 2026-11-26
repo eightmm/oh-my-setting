@@ -905,7 +905,9 @@ test('a degraded, partial or trimmed snapshot keeps a visible status until a cle
   assert.equal(p.get('status').textContent,'');
   for(const [fields,expected] of [[{degraded:true},/could not be collected/],[{observation:{completeness:'unknown'}},/could not be collected/],
     [{observation:{completeness:'partial'}},/partial status/],[{conversationAttemptsOmitted:2},/partial status/],
-    [{activeAttemptsTrimmed:1},/partial status/],[{degraded:false,observation:{completeness:'complete'}},/^$/]]) {
+    [{activeAttemptsTrimmed:1},/partial status/],
+    [{degraded:false,planProgress:{total:9,verified:9},planReadiness:{available:true,scope:'repository',omitted:1,tasks:Array.from({length:8},(_,i)=>({id:'t'+i,title:'Done '+i,reason:'recorded-done'}))},observation:{completeness:'complete',sources:{plan:'ok',acceptance:'ok'},evidence:{omitted:0,trimmed:0,readinessOmitted:1,evidenceOmitted:2}}},/^$/],
+    [{degraded:false,observation:{completeness:'complete'}},/^$/]]) {
     for(const key of Object.keys(d))delete d[key];
     Object.assign(d,fields);await p.event('refresh','click');
     assert.match(p.get('status').textContent,expected);
@@ -1339,13 +1341,18 @@ test('goal evidence separates repository criteria, task readiness and a scoped c
   assert.match(p.get('criteria-list').textContent,/Saved values persist.*Verified.*artifact:recorded/);
   assert.match(p.get('evidence-note').textContent,/Only part/);assert.equal(p.calls.length,mark);
   await p.event('followup-open','click');assert.match(p.get('followup-text').value,/Review error guidance/);
+  assert.match(html,/#followup-panel\{[^}]*border-radius:var\(--r-sm\)\}/);
+  assert.match(html,/#followup-text\{[^}]*border-radius:var\(--r-xs\)[;}]/);
   const generated=p.get('followup-text').value;
   assert.ok(generated.includes('한'.repeat(400)+'…'));assert.ok(!generated.includes(d.goal));
   assert.ok(Buffer.byteLength(generated,'utf8')<=4000);assert.equal(Boolean(p.get('followup-copy').disabled),false);assert.equal(Boolean(p.get('followup-add').disabled),false);
-  await p.event('followup-copy','click');assert.equal(copied.length,1);assert.ok(copied[0].includes('Project: one'));assert.ok(copied[0].includes('Room: '+main.room));assert.ok(copied[0].includes(key));
+  await p.event('followup-copy','click');assert.equal(copied.length,1);assert.ok(copied[0].includes('Task: task-review'));
+  assert.ok(!copied[0].includes(key) && !copied[0].includes(main.room) && !copied[0].includes(main.participant));
   await p.event('followup-add','click');
   const context=p.host.contexts.at(-1).structuredContent;
-  assert.equal(context.kind,'oms-followup-draft');assert.equal(context.task,'task-review');assert.equal(context.room,main.room);assert.equal(context.owner,main.participant);assert.equal(context.projectKey,key);
+  assert.equal(context.kind,'oms-followup-draft');assert.equal(context.project,'one');assert.equal(context.task,'task-review');
+  assert.match(context.summary,/Review error guidance/);assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(key));
+  assert.equal(Object.hasOwn(context,'projectKey'),false);assert.equal(Object.hasOwn(context,'room'),false);assert.equal(Object.hasOwn(context,'owner'),false);
   assert.match(p.get('followup-status').textContent,/context.*Main receipt and execution are unconfirmed/);
   assert.equal(p.host.messages.length,0);assert.equal(p.calls.length,mark);
   d.acceptance.criteria[0].label='Long criterion '.padEnd(2000,'x');d.nextStep.summary='Long next step '.padEnd(1200,'y');
@@ -1395,9 +1402,11 @@ test('worker result drafts keep the selected task and omit unknown attribution i
     if(tasks[i])assert.match(draft,new RegExp('^Task: '+tasks[i]+'$','m'));else assert.doesNotMatch(draft,/^Task:/m);
     if(i!==0)assert.doesNotMatch(draft,/task-a|Review task A/);
     assert.doesNotMatch(draft,/Private selected output/);
+    assert.match(draft,/Codex Worker · Worker output/);assert.ok(!draft.includes('worker-'+i) && !draft.includes(key));
     await p.event('followup-add','click');
     const context=p.host.contexts.at(-1).structuredContent;
-    assert.equal(context.source.workerAttempt,'worker-'+i);assert.equal(context.source.leadAttempt,'l');
+    assert.equal(context.summary,'Codex Worker · Worker output');
+    assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes('worker-'+i) && !JSON.stringify(p.host.contexts.at(-1)).includes(key));
     assert.equal(context.task,tasks[i]||undefined);assert.equal(Object.hasOwn(context,'task'),Boolean(tasks[i]));
     assert.equal(p.calls.length,mark);assert.equal(p.host.messages.length,0);
   }
@@ -1430,7 +1439,7 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false,wrongHandoff=false;
   const d={...dashboard,goal:'한'.repeat(2000),
     planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
-    conversationAttempts:[...dashboard.conversationAttempts,{room:main.room,id:'other-operation',participant:'lead-reader',provider:'claude',task:'task-a'}]
+    conversationAttempts:[...dashboard.conversationAttempts,{room:main.room,id:'other-operation',participant:askParticipant,provider:'claude',task:'task-a'}]
   };
   const p=await panel(['one','two'],d,{locale:'en',context:true,navigator:{clipboard:{writeText:async text=>copied.push(text)}},tools:{
     oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:'b'.repeat(64),two:'c'.repeat(64)}}),
@@ -1461,13 +1470,16 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   await p.event('answer-followup','click');assert.equal(p.get('conversation').open,false);assert.equal(p.get('followup-panel').hidden,false);
   assert.ok(p.get('followup-text').value.includes('한'.repeat(400)+'…'));assert.ok(Buffer.byteLength(p.get('followup-text').value,'utf8')<=4000);
   assert.equal(Boolean(p.get('followup-copy').disabled),false);assert.equal(Boolean(p.get('followup-add').disabled),false);
-  await p.event('followup-copy','click');assert.ok(copied.at(-1).includes(id));assert.ok(copied.at(-1).includes(digest));assert.ok(copied.at(-1).includes('Room: '+main.room));assert.ok(copied.at(-1).includes('Project: one'));
+  await p.event('followup-copy','click');assert.ok(copied.at(-1).includes(id));assert.ok(copied.at(-1).includes('OMS Lead · Claude · Recorded output'));
+  for(const internal of ['recorded-operation',askParticipant,claudeReq,'b'.repeat(64),digest,main.room])assert.ok(!copied.at(-1).includes(internal),internal);
   assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-followup-draft').length,0);
-  await p.event('followup-add','click');assert.equal(p.host.contexts.at(-1).structuredContent.source.turnId,id);
-  assert.equal(p.host.contexts.at(-1).structuredContent.source.digest,digest);assert.equal(p.host.messages.length,0);
-  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'task'),false);
+  await p.event('followup-add','click');
+  const leadDraft=p.host.contexts.at(-1).structuredContent;
+  assert.equal(leadDraft.turnId,id);assert.equal(leadDraft.summary,'OMS Lead · Claude · Recorded output');assert.equal(p.host.messages.length,0);
+  for(const internal of ['recorded-operation',askParticipant,claudeReq,'b'.repeat(64),digest,main.room])assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(internal),internal);
+  assert.equal(Object.hasOwn(leadDraft,'task'),false);assert.equal(Object.hasOwn(leadDraft,'source'),false);assert.equal(Object.hasOwn(leadDraft,'projectKey'),false);
   assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
-  d.conversationAttempts.push({room:main.room,id:'recorded-operation',participant:'lead-reader',provider:'claude',task:'task-b'});
+  d.conversationAttempts.push({room:main.room,id:'recorded-operation',participant:askParticipant,provider:'claude',task:'task-b'});
   await p.event('refresh','click');open.dispatchEvent(new Event('click'));await setImmediate();
   p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
   await p.event('answer-followup','click');await p.event('followup-add','click');
@@ -1514,6 +1526,8 @@ test('Room result truncation links a bounded evidence read and keeps the reader 
   assert.equal(p.get('full-answer-body').textContent,'last');assert.equal(p.get('answer-more').hidden,true);
   await p.event('answer-followup','click');await p.event('followup-add','click');
   assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-b');
+  assert.equal(p.host.contexts.at(-1).structuredContent.summary,'OMS Lead · Claude · Recorded output');
+  for(const internal of [key,digest,lead.participant,main.room])assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(internal),internal);
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   await p.event('chat-result-full','click');await p.event('answer-more','click');await p.event('answer-preview','click');
@@ -1741,19 +1755,41 @@ test('Inspect drops late views and private scope changes, and clears unverifiabl
 });
 
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{
-  let now=0,state='running';const id=randomUUID(),jobs=new Map(),timers={Date:{now:()=>now},
+  let now=0,state='running',agyTurnState={status:'unavailable',reason:'outbound_withheld'};const id=randomUUID(),jobs=new Map(),timers={Date:{now:()=>now},
     setTimeout(fn,ms){const key=Symbol();jobs.set(key,{fn,ms});return key;},clearTimeout:key=>jobs.delete(key)};
+  assert.ok(!html.includes('"followup.scope"'));
   const p=await panel(['one'],dashboard,{locale:'en',timers,tools:{[managedRead]:a=>{
-    const v=leadStatus(a,'ready');for(const row of v.leads)if(row.provider==='claude')row.latestTurn={turnId:id,status:state,submittedAt:null,lastObservedAt:null};
+    const v=leadStatus(a,'ready');
+    for(const row of v.leads){
+      if(row.provider==='claude')row.latestTurn={turnId:id,status:state,submittedAt:null,lastObservedAt:null};
+      if(row.provider==='agy' && agyTurnState){row.latestTurn=null;row.turnState=agyTurnState;}
+    }
     if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Recorded question',turnId:id,status:state},...(state==='replied'?[{role:'claude',text:'Recorded reply',turnId:id}]:[])]}};
     return v;
   }}});
+  assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
+  assert.match(p.get('leads').children[0].textContent,/Ask Codex/);
   assert.match(p.get('leads').children[1].textContent,/Reply pending/);
+  assert.match(p.get('leads').children[2].textContent,/Ask AGY.*Answer withheld by the safety scan/);
+  await choose(p,'ko');assert.match(p.get('leads').children[2].textContent,/안전 검사로 답변이 보류되었습니다/);
+  await choose(p,'en');
+  for(const [turnState,enRe,koRe] of [
+    [{status:'unavailable',reason:'invalid_answer_range'},/Answer size or range unavailable/,/답변 크기 또는 범위를 읽을 수 없습니다/],
+    [{status:'unavailable',reason:'invalid_turn_record'},/Turn record unreadable/,/전달 기록을 읽을 수 없습니다/],
+    [{status:'unconfirmed',reason:'receipt_changed'},/Receipt changed · delivery unconfirmed/,/접수 상태가 변경되어 전달을 확인할 수 없습니다/]
+  ]){
+    agyTurnState=turnState;await p.event('lead-refresh','click');
+    assert.match(p.get('leads').children[2].textContent,enRe);
+    await choose(p,'ko');assert.match(p.get('leads').children[2].textContent,koRe);
+    await choose(p,'en');
+  }
   const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
   const poll=[...jobs].find(([,v])=>v.ms===8000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
   assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===8000).length,0);
   const mark=p.calls.length;await p.event('chat-check','click');assert.equal(p.calls.length,mark+1);assert.equal(p.calls.at(-1).name,managedRead);
-  await p.event('chat-back','click');state='replied';await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
+  await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
+  state='replied';agyTurnState=null;await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
+  assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
   open.dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-back','click');assert.match(p.get('leads').children[1].textContent,/Reply read/);
   assert.ok(!p.calls.some(c=>c.name==='oms_send_lead_message'));
 });

@@ -1518,14 +1518,7 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         state: &Path,
         plan: &[u8],
     ) -> oms_command_plan::Result<Vec<u8>> {
-        let open = self.plan(repo, state)?;
-        if open.load()?.raw.as_deref() != Some(plan) {
-            return Err(plan_error("plan changed during projection"));
-        }
-        let status = open.status_snapshot()?;
-        if open.load()?.raw.as_deref() != Some(plan) {
-            return Err(plan_error("plan changed during projection"));
-        }
+        let status = self.plan(repo, state)?.status_snapshot_for(plan)?;
         oms_command_plan::json::canonical(&status)
     }
     /// The plan crate's own `ensure-lineage` action: idempotent, writes only

@@ -127,8 +127,13 @@ local instead of paying for a planning council.
 
 The native runtime requests its planning council at initial planning and the
 single permitted remainder proposal. It does not inherit panel council
-customization. Each requested seat gives an initial answer and one rebuttal;
-the configured quorum and required rounds must complete. Registry and physical
+customization. Defaults remain Codex, Claude and Antigravity with one rebuttal.
+When the authorized task calls for a different composition, select unique
+required native seats with `--council-providers claude,codex` and zero through
+three rebuttals with `--council-rounds 0..3`; zero keeps initial judgments and
+synthesis. The reviewed proposal and frozen run retain the versioned selection
+through admission, replay and remainder planning. Every requested seat and
+round must complete; unavailable providers are never silently removed. Registry and physical
 transport checks still apply. Missing, refused or malformed responses stop
 planning; inspect the retained artifacts before retrying. Native mode does not
 automatically restate an incomplete answer. Omission of `--collaboration`

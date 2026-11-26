@@ -153,8 +153,12 @@ or unclear-failure work and low for mechanical edits, within the model's scale.
 `autopilot --collaboration auto` uses this generic router for decomposition,
 workers and reviewers, with no extra GPT-generation name allowlist. It freezes
 resolved model/effort routes, preserves explicit selections and still requires
-actual transport capabilities. The current fixed planning council is Codex,
-Claude and Antigravity. Its synthesis uses the planner's resolved advisor route;
+actual transport capabilities. Planning defaults to Codex, Claude and Antigravity
+with one rebuttal. `--council-providers` explicitly selects unique required seats
+from those native-output transports; `--council-rounds 0..3` selects rebuttals.
+The proposal and run freeze that versioned composition, preserving legacy
+defaults when absent. Unavailable requested seats are never silently removed.
+Its synthesis uses the planner's resolved advisor route;
 other seats keep their own routes. One implementation transport and a different
 gated reviewer remain required. Requested model metadata is not evidence of the
 served model or independent reasoning. This does not configure native app

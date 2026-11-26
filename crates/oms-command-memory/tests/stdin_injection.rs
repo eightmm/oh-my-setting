@@ -275,6 +275,34 @@ fn review_controls_context_without_hiding_source_notes() {
         pending["pending"].as_array().unwrap().len(),
         automatic.len() - 1
     );
+    let attention = oms_command_memory::pending_review(repo, &interrupted).unwrap();
+    assert_eq!(
+        attention.pending,
+        pending["pending"].as_array().unwrap().len()
+    );
+    assert_eq!(attention.candidate_fingerprints.len(), attention.pending);
+    let database = repo.join(".oms/memory/memory.sqlite3");
+    let before_resume = [
+        std::fs::read(&database).unwrap(),
+        std::fs::read(&summary).unwrap(),
+    ];
+    let resumed = output(oms_command_memory::resume_context(
+        repo,
+        "task",
+        &interrupted,
+    ));
+    assert!(resumed.contains("curationtopic explicit pin"), "{resumed}");
+    assert!(
+        !resumed.contains("curationtopic task proposal"),
+        "{resumed}"
+    );
+    assert_eq!(
+        before_resume,
+        [
+            std::fs::read(&database).unwrap(),
+            std::fs::read(&summary).unwrap()
+        ]
+    );
     for command in ["search", "recall"] {
         let audit = run(&[command, "curationtopic"]);
         for (_, _, body) in automatic {
@@ -335,9 +363,37 @@ fn review_controls_context_without_hiding_source_notes() {
     run(&["review", "--accept", "pend-interrupted"]);
     assert_eq!(std::fs::read(&shared).unwrap(), original);
     assert_context(&[0, 3, 4]);
+    let resumed = output(oms_command_memory::resume_context(
+        repo,
+        "task",
+        &interrupted,
+    ));
+    assert!(resumed.contains("curationtopic task proposal"), "{resumed}");
+    assert!(resumed.contains(&ids[0]), "{resumed}");
+    assert_eq!(
+        oms_command_memory::pending_review(repo, &interrupted)
+            .unwrap()
+            .pending,
+        1
+    );
     run(&["review", "--retire", &ids[1], "--reason", "not reusable"]);
     run(&["retire", "--id", &ids[0], "--reason", "outdated"]);
     assert_context(&[3, 4]);
+    assert_eq!(
+        oms_command_memory::pending_review(repo, &interrupted)
+            .unwrap()
+            .pending,
+        0
+    );
+    let resumed = output(oms_command_memory::resume_context(
+        repo,
+        "task",
+        &interrupted,
+    ));
+    assert!(
+        !resumed.contains("curationtopic task proposal"),
+        "{resumed}"
+    );
     assert!(std::fs::read(&shared).unwrap().starts_with(&original));
     let audit = run(&["search", "curationtopic", "--include-superseded"]);
     for (_, _, body) in automatic {
@@ -355,6 +411,103 @@ fn review_controls_context_without_hiding_source_notes() {
     assert!(
         context.contains("journal-distill: failureonly remains visible"),
         "{context}"
+    );
+}
+
+#[test]
+fn resume_context_preserves_scope_filters_global_fallback_and_child_boundary() {
+    if std::env::var_os("OMS_MEMORY_RESUME_TEST").is_none() {
+        for scenario in ["unscoped", "targeted", "child"] {
+            let isolated = TempDir::new("oms-memory-resume-env");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "resume_context_preserves_scope_filters_global_fallback_and_child_boundary",
+                "--nocapture",
+            ]);
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(|key| key.starts_with("OMS_")) {
+                    command.env_remove(key);
+                }
+            }
+            command
+                .env("OMS_MEMORY_RESUME_TEST", scenario)
+                .env(
+                    "OH_MY_SETTING_GLOBAL_MEMORY",
+                    isolated.0.join("global/shared.md"),
+                )
+                .env("OMS_LOCK_DIR", isolated.0.join("locks"));
+            if scenario == "targeted" {
+                command.env("OMS_MEMORY_TARGET_PATHS", "src/lib.rs");
+            } else if scenario == "child" {
+                command.env("OMS_HARNESS_CHILD", "1");
+            }
+            let result = command.output().unwrap();
+            assert!(
+                result.status.success(),
+                "{scenario}: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        return;
+    }
+    let dir = TempDir::new("oms-memory-resume");
+    let repo = &dir.0;
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let flag = AtomicBool::new(false);
+    for (paths, text) in [
+        ("src/*", "scopetopic relevant project source"),
+        ("docs/*", "scopetopic unrelated project documentation"),
+    ] {
+        let args: Vec<_> = ["append", "--paths", paths, "--text", text]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let (code, _, err) = oms_command_memory::run_with_source(&args, repo, repo, &flag);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    }
+    let global = PathBuf::from(std::env::var_os("OH_MY_SETTING_GLOBAL_MEMORY").unwrap());
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global,
+        "## 2026-01-01T00:00:00Z agent\n\nscopetopic global fallback lesson\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.parent().unwrap().join("pins.md"),
+        "- 2026-01-01T00:00:00Z [agent] Global explicit pin\n",
+    )
+    .unwrap();
+    let (code, out, err) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Global explicit pin"), "{text}");
+    assert!(!text.contains("unrelated project documentation"), "{text}");
+    match std::env::var("OMS_MEMORY_RESUME_TEST").unwrap().as_str() {
+        "targeted" => {
+            assert!(text.contains("relevant project source"), "{text}");
+            assert!(!text.contains("global fallback lesson"), "{text}");
+        }
+        "child" => assert!(!text.contains("- recall"), "{text}"),
+        _ => {
+            assert!(text.contains("global fallback lesson"), "{text}");
+            assert!(!text.contains("relevant project source"), "{text}");
+        }
+    }
+    std::fs::write(repo.join(".oms/memory/reviews.jsonl"), b"{invalid}\n").unwrap();
+    let (code, out, _) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_ne!(code, 0);
+    assert!(
+        out.is_empty(),
+        "unavailable review eligibility must withhold recall"
     );
 }
 

@@ -38,6 +38,19 @@ does not change process-global cwd, environment, signal handlers or toolchains.
 | `claude-app-notify` | `send [--wakeup] [--consumer HEX32 or --consumer=HEX32] [--] REPO TEXT` (unknown `-…` options exit 2; text after `--` stays literal) prints the delivery receipt. Without `--wakeup` nothing is posted (a post can start a paid turn); with it, a matching enrolled consumer (default: the caller's exported session) and a safe owned native socket are required. |
 | `codex-turn-notify` | Last argv is the turn-complete JSON; quiet best effort, exit 0; ignores notification-chat/headless/subagent turns and writes sanitized OSC notifications to one selected terminal. |
 
+With `OMS_RESUME_MEMORY=1`, resume recall uses the same objective precedence as
+state: a fresh active task packet, an unfinished Plan, then the project goal.
+Closed, dormant, stale and undated packets cannot select recall. The memory
+owner reserves its 1200-byte view for eligible pins and ranked notes before
+rendering, so unrelated long context cannot displace the current goal's notes.
+
+Prompt journal distillation uses native keyed batch publication and one derived
+refresh. Its report emits safe counts and review/warning pointers. With state
+hints enabled, the existing memory review owner supplies a count-only hint once
+per session and when a new candidate appears; accepting or retiring a candidate
+alone does not repeat the hint. Candidate fingerprints in the hook receipt carry
+no note text or acceptance authority.
+
 The AGY statusline uses the documented `agent_state` values and uses legacy
 `state` only when `agent_state` is absent. It shows `Gemini weekly N% left` from
 `quota.gemini-weekly` when `disabled` is absent or false, `remaining_fraction` is a

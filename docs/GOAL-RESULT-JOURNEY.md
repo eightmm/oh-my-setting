@@ -53,13 +53,15 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 검증하고, 다른 원문 또는 범위의 응답이면 표시된 private 본문과 복사·후속 요청 제어를 지운다.
 프로젝트 전환 뒤 늦게 도착한 응답도 이전 본문을 되살리지 않는다.
 
-Lead 결과의 후속 초안은 서버가 다시 확인한 Room·participant·operation·turn 참조를 사용한다.
-worker와 Room 결과도 reader가 확인한 정확한 쌍과 attempt를 사용한다.
-선택한 결과의 task는 같은 물리 프로젝트·Room의 정확한 worker·attempt 또는 Lead operation과
-연결된 값만 넣으며, 확인되지 않으면 생략한다. 결과를 선택하지 않은 일반 초안은 현재 attention
-task를 사용할 수 있다.
-호스트 문맥 기능이 없거나 실패하면 복사할 수 있으며, 초안 본문에도 프로젝트·Room·결과 식별자를
-남기므로 structured payload 없이도 선택한 범위를 확인할 수 있다.
+패널 메모리의 후속 초안은 서버·reader가 확인한 `projectKey`·`Room`·`owner`와 Lead
+(`participant`·`operation`·`turnId`) 또는 worker·Room attempt 쌍에 고정해 활성 범위와 `task` 귀속만
+검증한다. 선택한 결과의 `task`는 같은 물리 프로젝트·Room의 정확한 worker·attempt 또는 Lead
+operation과 연결된 값만 넣으며, 확인되지 않으면 생략한다. 결과를 선택하지 않은 일반 초안은 현재
+attention `task`를 사용할 수 있다.
+호스트에 전달하는 `oms-followup-draft` 문맥(선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적
+`turnId`·`text`)과 복사 가능한 초안 본문(선택적 `Turn: …`·선택적 `Task: …`·목표 요약·항목 요약)에는
+`projectKey`·`Room`·`owner`·`source` 및 내부 operation·participant·attempt·digest 식별자를 의도적으로
+넣지 않는다.
 초안은 전환·실패 시 비우는 패널 메모리이며 새로운 영구 receipt가 아니다.
 
 선택 공유의 `selection`에는 미리 본 `text`, 원문의 0부터 시작하는 UTF-8 byte `offset`,

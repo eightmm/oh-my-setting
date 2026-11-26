@@ -151,6 +151,7 @@ impl Plan<'_> {
         )?;
         let p = json::parse_legacy(&raw, 1024 * 1024)?;
         if p.opt("discussion").is_some()
+            || p.opt("council").is_some()
             || p.opt("issue_source").is_some()
             || p.get("schema").is_int(2)
         {
@@ -171,7 +172,7 @@ impl Plan<'_> {
                 "acceptance_files",
                 "tasks",
             ],
-            &["issue", "discussion", "issue_source"],
+            &["issue", "discussion", "issue_source", "council"],
         )?;
         require(
             p.get("schema").is_int(if p.opt("issue_source").is_some() {

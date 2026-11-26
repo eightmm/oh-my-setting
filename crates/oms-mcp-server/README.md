@@ -94,7 +94,7 @@ or cancellation grants. No latency, physical-disk or HPC performance claim is ma
 | `resources/list`, `resources/read` | Exact versioned graph template, MIME and CSP metadata; lines 2046–2063 and 914–941 |
 | `tasks/get` | Opt-in modern capability check, live/terminal snapshot and embedded final result; lines 2064–2111 and 1786–1826 |
 | `tasks/update` | Canonical refusal: no outstanding input requests; same handle branch |
-| `tasks/cancel` | Capability, task ancestry, terminal/legacy checks, durable receipt; same handle branch and 1829–1854 |
+| `tasks/cancel` | Capability, task ancestry, terminal/legacy checks, idempotent durable receipt; same handle branch and 1829–1854 |
 
 `tasks/result` and `resources/templates/list` return method-not-found: neither
 exists in the reference handler. Task results are in `tasks/get.result`.
@@ -208,10 +208,22 @@ against another process with the same filesystem rights.
 | `prompt.txt`, `meta.json`, private `launch.json` | Each uses exclusive mode-0600 temporary creation, full write, file sync, rename and directory sync. No child starts before all three are published. A kill can leave `.part` files or a partially prepared run. No automatic relaunch. |
 | `owner.lock` | No-follow, single-link, owned mode-0600 file with nonblocking exclusive `flock`. A second owner refuses; process death releases the lock. The inert file can remain. |
 | `pid`, `status` | Synced atomic publication. An owner death after pid publication without status reads stalled on positive evidence of death. Missing/malformed pid remains unknown/running; malformed status is a failed completion. |
-| `cancel-request.json` | Concurrent cancels atomically replace one valid receipt; last publication supplies the timestamp. A kill leaves the prior complete receipt or no published receipt, plus a possible `.part`. Receiving no RPC response does not prove no receipt was recorded. |
+| `cancel-request.lock` | No-follow, single-link, owned mode-0600 file with blocking exclusive `flock` serializing `cancel-request.json` validation and publication across both fast-path creation and invalid-receipt replacement. Process death releases the lock; the inert per-operation file can remain. |
+| `cancel-request.json` | Idempotent first-wins publication under `cancel-request.lock`: uses `RENAME_NOREPLACE` where supported and falls back to `link` + `unlink` on filesystems that reject rename flags, so the first valid receipt for the task wins and retries preserve its exact bytes. Legacy receipts without `requested_at` remain valid (`requested_at` is `null`); malformed `requested_at`, invalid or foreign files are replaced on cancel and ignored on read. A kill before publication leaves no receipt plus a possible `.part`. Receiving no RPC response does not prove no receipt was recorded. |
 | `cancel-observed.json` | Native owner writes it only for cancellation before launch. Once the CLI starts, its existing supervisor owns observation. A requested receipt alone never proves provider termination. |
 | `run.log` | Separate exclusive log per operation, streamed by the owner/verb. Kill can leave partial logs; logs are not completion receipts and are not claimed durable. |
 | `answers/*`, thread/room records, downstream caches/locks | Fixed OMS verbs own these writes and their existing safety protocols. A second call has their documented effects; this crate neither coalesces writes nor bypasses their locks. |
+
+Task snapshots (`tasks/get`) and peer status/result payloads (`oms_peer_operations`,
+`oms_peer_result`) report a `cancellation` object with `requested_at` (from the
+first valid `cancel-request.json`, or `null` when absent or omitted by a legacy
+receipt) and `state`: `none` (no valid request), `requested` (request recorded
+while running, or in the metadata-only `oms_peer_operations` listing for a
+completed run without observation), `confirmed` (`cancel-observed.json` present),
+`completed_first` (single-task read only: request recorded, and the operation
+finished its own work without observation) or `unknown` (request recorded, and
+the operation stalled or ended without a durable own exit or observation).
+Existing status and compatibility fields remain unchanged.
 
 Mutation opens require owned, real ancestry. Existing directory modes are
 preserved; newly created directories use 0700. Receipt files cannot follow links.

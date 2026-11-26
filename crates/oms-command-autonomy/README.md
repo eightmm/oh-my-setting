@@ -86,9 +86,17 @@ global/system configuration and inherited Git identity overrides.
 
 ## Discussion before decomposition
 
-`plan-from-spec --collaboration auto` runs the existing Codex/Claude/Antigravity
-council through its initial answers and one rebuttal round, then explicitly
-requests synthesis on the planner's resolved advisor route. The synthesis and
+`plan-from-spec --collaboration auto` defaults to the existing
+Codex/Claude/Antigravity council with one rebuttal round. An explicit
+`--council-providers claude,codex --council-rounds 0` selects required seats and
+zero through three rebuttals; zero requests initial judgments and synthesis.
+Providers must be unique native-output transports from Codex, Claude and
+Antigravity. Unavailable seats fail instead of being removed. Autopilot accepts
+the same options and freezes their schema-1 `council` composition in its run
+contract for continuation and remainder planning. Omitted legacy compositions
+retain all three seats and one rebuttal. Panel composition is independent.
+
+The caller explicitly requests synthesis on the planner's resolved advisor route. The synthesis and
 decomposition share the exact requested model and effort; those settings do not
 override the other council seats. Defaults and explicit model names go through
 the existing registry and transport checks, without an extra GPT-generation
@@ -115,7 +123,9 @@ The resulting proposal's optional `discussion` reference binds that manifest to
 its spec, prior plan, base and allowed envelope. Generation revalidates every
 source after decomposition; direct Plan apply, exact replay and autopilot resume
 also validate retained bytes without another provider call. Applied tasks retain
-the same reference. Auto apply/resume require it, while legacy proposals without
+the same reference. The proposal also retains the versioned `council` selection;
+admission requires its exact required seats and rounds, and resume compares it
+with the frozen run. Auto apply/resume require discussion, while legacy proposals without
 the field remain usable outside auto mode. Reviewed proposal SHA/CAS and fresh
 acceptance remain separate authority boundaries; discussion never applies tasks
 or starts an unbounded next cycle.

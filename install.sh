@@ -71,6 +71,8 @@ GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 CAPABILITY_PROFILES="${OH_MY_SETTING_CAPABILITY_PROFILES:-core}"
 PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
+MCP_TOOL_PROFILE=""
+MCP_TOOL_PROFILE_SET=0
 TOOLS_FULL=0
 PLAN_ONLY=0
 CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
@@ -92,7 +94,7 @@ OMS_INSTALL_LIFECYCLE_PROTOCOL=1
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--profile NAME]... [--primary-provider NAME] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--plan] [--help]
+Usage: install.sh [--ref REF] [--profile NAME]... [--primary-provider NAME] [--mcp-tool-profile core|full] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--plan] [--help]
 
 Options:
   --plan              Print what this install would change, step by step, and
@@ -108,6 +110,9 @@ Options:
                       everything else reports as unavailable until selected.
   --primary-provider NAME  codex, claude, or agy for the core provider
                       (default auto: reuse an installed one, else codex).
+  --mcp-tool-profile core|full
+                      Record MCP tool discovery in managed registrations
+                      (omit to preserve each host's stored choice).
   --full              Explicit compatibility install: the historical all-tools
                       council footprint, machine snapshot, and update timer.
   --tools             Install the full council toolset (Node, uv, provider
@@ -192,6 +197,24 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "error: --primary-provider requires a value" >&2; exit 2; }
       PRIMARY_PROVIDER="$2"
       shift
+      ;;
+    --mcp-tool-profile)
+      [ "$#" -ge 2 ] || { echo "error: --mcp-tool-profile requires a value" >&2; exit 2; }
+      [ "$MCP_TOOL_PROFILE_SET" -eq 0 ] || {
+        echo "error: --mcp-tool-profile may be specified only once" >&2
+        exit 2
+      }
+      MCP_TOOL_PROFILE="$2"
+      MCP_TOOL_PROFILE_SET=1
+      shift
+      ;;
+    --mcp-tool-profile=*)
+      [ "$MCP_TOOL_PROFILE_SET" -eq 0 ] || {
+        echo "error: --mcp-tool-profile may be specified only once" >&2
+        exit 2
+      }
+      MCP_TOOL_PROFILE="${1#--mcp-tool-profile=}"
+      MCP_TOOL_PROFILE_SET=1
       ;;
     --connect-services)
       [ "$PROFILE" = "full" ] || PROFILE=custom
@@ -282,6 +305,12 @@ case "$PRIMARY_PROVIDER" in
   auto|codex|claude|agy) ;;
   *) echo "error: --primary-provider must be auto, codex, claude, or agy" >&2; exit 2 ;;
 esac
+if [ "$MCP_TOOL_PROFILE_SET" -eq 1 ]; then
+  case "$MCP_TOOL_PROFILE" in
+    core|full) ;;
+    *) echo "error: --mcp-tool-profile must be core or full" >&2; exit 2 ;;
+  esac
+fi
 # Default service connection is none: the installer never runs a service login
 # the user did not select. --full keeps the historical auto behaviour, and an
 # explicit --connect-services remains an explicit choice.
