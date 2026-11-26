@@ -3202,13 +3202,11 @@ fn review_classification_and_validation() {
         assert_eq!(redacted_rows.len(), 1);
         assert_eq!(redacted_rows[0].get("file").text(), Some("source.rs"));
         assert_eq!(redacted_rows[0].get("line"), &15usize.into());
-        assert!(
-            redacted_rows[0]
-                .get("summary")
-                .text()
-                .unwrap()
-                .contains("[oms-redacted:")
+        assert_eq!(
+            redacted_rows[0].get("summary").text(),
+            Some("summary withheld: redacted by the outbound scanner")
         );
+        assert!(redacted_rows[0].get("redacted").truth());
         let printed = String::from_utf8_lossy(&redacted_output.1);
         assert!(printed.contains("source.rs"), "{printed}");
         assert!(!printed.contains(&sensitive));

@@ -651,7 +651,7 @@ pub(crate) struct Seat {
     pub requested_model: String,
     pub artifact: PathBuf,
     pub answer: String,
-    pub findings: Option<Vec<(crate::V, Option<usize>)>>,
+    pub findings: Option<crate::review::ParsedFindings>,
     pub code: i32,
     pub complete: bool,
     pub quality: String,

@@ -482,14 +482,24 @@ pub fn parse_findings(answer: &str) -> (Vec<V>, usize) {
                     .get("severity")
                     .text()
                     .is_some_and(|s| ["blocking", "advisory"].contains(&s)))
-            && (!row.has("quote") || row.get("quote").text().is_some());
+            && (!row.has("quote") || row.get("quote").text().is_some())
+            && (!row.has("rule") || row.get("rule").text().is_some());
         if !valid || found.len() >= 50 {
             rejected += 1;
             continue;
         }
         if let V::Obj(fields) = &mut row {
-            fields.remove(b"withheld".as_slice());
-            fields.remove(b"redacted".as_slice());
+            fields.retain(|key, _| {
+                [
+                    b"file".as_slice(),
+                    b"line",
+                    b"severity",
+                    b"summary",
+                    b"quote",
+                    b"rule",
+                ]
+                .contains(&key.as_slice())
+            });
         }
         row.set("file", path);
         row.set("summary", clean(text(&row, "summary"), 500));
@@ -505,6 +515,9 @@ pub fn parse_findings(answer: &str) -> (Vec<V>, usize) {
                 == quote,
         );
         row.set("quote", quote);
+        if row.has("rule") {
+            row.set("rule", clean(text(&row, "rule"), 500));
+        }
         if !row.has("severity") {
             row.set("severity", "blocking");
         }
@@ -540,122 +553,91 @@ fn withheld_finding() -> V {
     ])
 }
 
-pub(crate) fn redacted_findings(raw: &str, answer: &str) -> Result<Vec<(V, Option<usize>)>> {
+fn scanner_changes(value: &str) -> Result<bool> {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    Ok(safety::redact(value.as_bytes())? != value.as_bytes()
+        || safety::redact(collapsed.as_bytes())? != collapsed.as_bytes())
+}
+
+fn check_finding(mut row: V, recovered: bool) -> Result<(V, bool)> {
+    let file_changed = scanner_changes(text(&row, "file"))?;
+    let mut changed = scanner_changes(&String::from_utf8_lossy(&json(&row)?))?;
+    for field in ["summary", "quote", "rule"] {
+        changed |= scanner_changes(text(&row, field))?;
+    }
+    if file_changed {
+        return Ok((withheld_finding(), true));
+    }
+    if changed || recovered {
+        row.set(
+            "summary",
+            "summary withheld: redacted by the outbound scanner",
+        );
+        if let V::Obj(fields) = &mut row {
+            fields.remove(b"quote".as_slice());
+            fields.remove(b"rule".as_slice());
+        }
+        row.set("quote_complete", false);
+        row.set("redacted", true);
+    }
+    Ok((row, changed || recovered))
+}
+
+pub(crate) type ParsedFindings = (Vec<(V, Option<usize>)>, usize);
+
+pub(crate) fn redacted_findings(raw: &str, answer: &str) -> Result<ParsedFindings> {
     let raw_blocks = findings_blocks(raw);
     let blocks = findings_blocks(answer);
-    let aligned = raw_blocks.len() == blocks.len()
+    let aligned = raw.lines().count() == answer.lines().count()
+        && raw_blocks.len() == blocks.len()
         && raw_blocks
             .iter()
             .zip(&blocks)
-            .all(|(raw, redacted)| raw.len() == redacted.len());
-    let missing = if aligned {
-        0
-    } else {
-        raw_blocks
-            .iter()
-            .flatten()
-            .filter(|line| !line.is_empty())
-            .count()
-            .saturating_sub(
-                blocks
-                    .iter()
-                    .flatten()
-                    .filter(|line| !line.is_empty())
-                    .count(),
-            )
-    };
+            .all(|(a, b)| a.len() == b.len());
     let mut rows = Vec::new();
+    let mut rejected = 0;
+    if !aligned {
+        for (index, line) in raw_blocks.iter().flatten().enumerate() {
+            if !line.is_empty() {
+                if rows.len() < 50 {
+                    rows.push((withheld_finding(), Some(index)));
+                } else {
+                    rejected += 1;
+                }
+            }
+        }
+        return Ok((rows, rejected));
+    }
     let mut index = 0;
     for (block_index, block) in blocks.iter().enumerate() {
         for (line_index, line) in block.iter().enumerate() {
             let current = index;
             index += 1;
-            if rows.len() >= 50 {
-                break;
+            if line.is_empty() {
+                continue;
             }
-            if marker(line) {
-                let recovered = aligned
-                    .then(|| raw_blocks[block_index][line_index])
-                    .and_then(|line| {
-                        let wrapped = format!("```findings\n{line}\n```");
-                        let parsed = parse_findings(&wrapped).0;
-                        let original = V::parse(line.as_bytes()).ok()?;
-                        parsed.into_iter().next().map(|row| (row, original))
-                    });
-                let safe = if let Some((row, original)) = recovered {
-                    let path = text(&row, "file");
-                    if path.is_empty() || safety::redact(path.as_bytes())? != path.as_bytes() {
-                        withheld_finding()
-                    } else {
-                        let summary = text(&original, "summary");
-                        let redacted = safety::redact(summary.as_bytes())?;
-                        let summary = if summary.chars().any(char::is_control)
-                            || redacted == summary.as_bytes()
-                        {
-                            "summary withheld: redacted by the outbound scanner".to_owned()
-                        } else {
-                            clean(&String::from_utf8_lossy(&redacted), 500)
-                        };
-                        obj([
-                            ("file", path.into()),
-                            ("line", row.get("line").clone()),
-                            ("severity", row.get("severity").clone()),
-                            ("summary", summary.into()),
-                            ("quote_complete", false.into()),
-                            ("redacted", true.into()),
-                        ])
-                    }
-                } else {
-                    withheld_finding()
-                };
-                rows.push((safe, Some(current)));
-            } else if !line.is_empty() {
-                let wrapped = format!("```findings\n{line}\n```");
-                for mut row in parse_findings(&wrapped).0 {
-                    let Ok(original) = V::parse(line.as_bytes()) else {
-                        rows.push((withheld_finding(), Some(current)));
-                        continue;
-                    };
-                    let mut changed = false;
-                    let mut file_changed = false;
-                    for field in ["file", "summary", "quote", "rule"] {
-                        if let Some(value) = original.get(field).text() {
-                            let redacted = safety::redact(value.as_bytes())?;
-                            if redacted != value.as_bytes() {
-                                changed = true;
-                                file_changed |= field == "file";
-                                row.set(field, clean(&String::from_utf8_lossy(&redacted), 500));
-                            }
-                        }
-                    }
-                    if file_changed {
-                        row = withheld_finding();
-                        row.set("redacted", true);
-                        row.set("quote_complete", false);
-                    } else if changed {
-                        if text(&original, "summary").chars().any(char::is_control) {
-                            row.set(
-                                "summary",
-                                "summary withheld: redacted by the outbound scanner",
-                            );
-                        }
-                        if let V::Obj(fields) = &mut row {
-                            fields.remove(b"quote".as_slice());
-                            fields.remove(b"rule".as_slice());
-                        }
-                        row.set("quote_complete", false);
-                        row.set("redacted", true);
-                    }
-                    rows.push((row, changed.then_some(current)));
-                }
+            if rows.len() >= 50 {
+                rejected += 1;
+                continue;
+            }
+            let recovered = marker(line);
+            let source = if recovered {
+                raw_blocks[block_index][line_index]
+            } else {
+                line
+            };
+            let wrapped = format!("```findings\n{source}\n```");
+            if let Some(row) = parse_findings(&wrapped).0.into_iter().next() {
+                let (row, special) = check_finding(row, recovered)?;
+                rows.push((row, special.then_some(current)));
+            } else if recovered {
+                rows.push((withheld_finding(), Some(current)));
+            } else {
+                rejected += 1;
             }
         }
     }
-    for _ in 0..missing {
-        rows.push((withheld_finding(), Some(index)));
-        index += 1;
-    }
-    Ok(rows)
+    Ok((rows, rejected))
 }
 
 fn special_finding_id(run: &str, artifact: &Path, index: usize, finding: &V) -> String {
@@ -949,13 +931,10 @@ pub(crate) fn finish(
         }
         seat_rows.push(seat_row);
         let (findings, _) = if matches!(state, "pass" | "fail") {
-            (
-                match &seat.findings {
-                    Some(findings) => findings.clone(),
-                    None => redacted_findings(&seat.answer, &seat.answer)?,
-                },
-                0,
-            )
+            match &seat.findings {
+                Some(findings) => findings.clone(),
+                None => redacted_findings(&seat.answer, &seat.answer)?,
+            }
         } else {
             (Vec::new(), 0)
         };
@@ -2030,6 +2009,45 @@ mod redaction_regression_tests {
     use super::*;
 
     #[test]
+    fn final_values_and_alignment_contract() {
+        let key = format!("{}{}", "to", "ken");
+        let encoded = format!("{}\\u006f{} = example", &key[..1], &key[2..]);
+        let raw = format!(
+            "```findings\n{{\"file\":\"a.rs\",\"line\":1,\"summary\":\"safe\",\"extra\":\"{encoded}\"}}\n```"
+        );
+        let rows = redacted_findings(&raw, &raw).unwrap().0;
+        assert!(!rows[0].0.has("extra"));
+        let invalid =
+            "```findings\n{\"file\":\"a.rs\",\"line\":1,\"summary\":\"safe\",\"rule\":7}\n```";
+        assert!(redacted_findings(invalid, invalid).unwrap().0.is_empty());
+        let split = format!("{}\\u0001{} = example", &key[..2], &key[2..]);
+        let raw =
+            format!("```findings\n{{\"file\":\"a.rs\",\"line\":1,\"summary\":\"{split}\"}}\n```");
+        let rows = redacted_findings(&raw, &raw).unwrap().0;
+        assert!(rows[0].0.get("redacted").truth());
+        let header = format!("{}{} {} {}{}", "---", "--BEGIN", "PRIVATE", "KEY", "-----");
+        let end = format!("{}{} {} {}{}", "---", "--END", "PRIVATE", "KEY", "-----");
+        let raw = format!("```findings\n{header}\nvisible\n```\n{end}\n");
+        let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap().0;
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|(row, _)| text(row, "withheld") == "redacted")
+        );
+        let raw = format!(
+            "```findings\n{header}\n{}\n```\n{end}\n",
+            "visible\n".repeat(2000)
+        );
+        let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
+        let (rows, rejected) = redacted_findings(&raw, &answer).unwrap();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rejected, 1951);
+        let clean = "```findings\n{\"file\":\"a.rs\",\"line\":1,\"summary\":\"safe\"}\n```";
+        assert!(redacted_findings(clean, clean).unwrap().0[0].1.is_none());
+    }
+
+    #[test]
     fn non_string_severity_is_rejected() {
         let answer =
             "```findings\n{\"file\":\"a.rs\",\"line\":1,\"summary\":\"x\",\"severity\":7}\n```";
@@ -2064,7 +2082,7 @@ mod redaction_regression_tests {
             String::from_utf8(raw_row.json(false).unwrap()).unwrap()
         );
         let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
-        let rows = redacted_findings(&raw, &answer).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap().0;
         assert_eq!(rows.len(), 1);
         let row = &rows[0].0;
         assert!(rows[0].1.is_some());
@@ -2076,7 +2094,7 @@ mod redaction_regression_tests {
     #[test]
     fn provider_cannot_claim_placeholder() {
         let raw = "```findings\n{\"file\":\"a.rs\",\"line\":1,\"summary\":\"x\",\"withheld\":\"redacted\"}\n```";
-        let rows = redacted_findings(raw, raw).unwrap();
+        let rows = redacted_findings(raw, raw).unwrap().0;
         assert_eq!(rows.len(), 1);
         assert!(rows[0].1.is_none());
         assert!(!rows[0].0.has("withheld"));
@@ -2095,7 +2113,7 @@ mod redaction_regression_tests {
             String::from_utf8(row.json(false).unwrap()).unwrap()
         );
         let redacted = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
-        let rows = redacted_findings(&raw, &redacted).unwrap();
+        let rows = redacted_findings(&raw, &redacted).unwrap().0;
         assert_eq!(rows.len(), 1);
         assert!(!text(&rows[0].0, "summary").contains(&sensitive));
         assert!(!rows[0].0.has("extra"));
@@ -2103,7 +2121,7 @@ mod redaction_regression_tests {
             "```findings\n{}\nextra\n```",
             String::from_utf8(row.json(false).unwrap()).unwrap()
         );
-        let rows = redacted_findings(&mismatch, &redacted).unwrap();
+        let rows = redacted_findings(&mismatch, &redacted).unwrap().0;
         assert_eq!(text(&rows[0].0, "withheld"), "redacted");
     }
     #[test]
@@ -2120,7 +2138,7 @@ mod redaction_regression_tests {
             String::from_utf8(row.json(false).unwrap()).unwrap()
         );
         let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
-        let rows = redacted_findings(&raw, &answer).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap().0;
         assert_eq!(
             text(&rows[0].0, "summary"),
             "summary withheld: redacted by the outbound scanner"
@@ -2135,7 +2153,7 @@ mod redaction_regression_tests {
         let raw = format!("```findings\n{json}\n```");
         let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
         assert_eq!(answer, raw);
-        let rows = redacted_findings(&raw, &answer).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap().0;
         assert_eq!(rows.len(), 1);
         assert!(rows[0].1.is_some());
         assert_eq!(
@@ -2161,13 +2179,11 @@ mod redaction_regression_tests {
             let raw = format!("```findings\n{json}\n```");
             let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
             assert_eq!(answer, raw);
-            let rows = redacted_findings(&raw, &answer).unwrap();
+            let rows = redacted_findings(&raw, &answer).unwrap().0;
             assert_eq!(rows.len(), 1);
             assert!(rows[0].1.is_some());
             if field == "file" {
                 assert_eq!(text(&rows[0].0, "withheld"), "redacted");
-                assert!(rows[0].0.get("redacted").truth());
-                assert!(!rows[0].0.get("quote_complete").truth());
             } else {
                 assert!(rows[0].0.get("redacted").truth());
                 assert!(!rows[0].0.has("quote") && !rows[0].0.has("rule"));
@@ -2181,7 +2197,7 @@ mod redaction_regression_tests {
         let header = format!("{}{} {} {}{}", "---", "--BEGIN", "PRIVATE", "KEY", "-----");
         let raw = format!("```findings\n{header}\nfirst\nsecond\n```\n");
         let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
-        let rows = redacted_findings(&raw, &answer).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap().0;
         assert_eq!(rows.len(), 3);
         assert!(
             rows.iter()
