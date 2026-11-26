@@ -72,14 +72,45 @@ optional Project is unavailable; do not silently choose another task. Board
 membership and presentation order alone do not establish a dependency graph.
 
 **Implemented ([#577](https://github.com/eightmm/oh-my-setting/pull/577)).**
-- **Command and MCP field:** `oms github panel-status --project-id NODE_ID --candidates [--repo PATH] [--json]` (requires `--project-id` and cannot combine with `--cursor`, `--drift`, `--issue`, `--pull` or `--inventory`), and the boolean `candidates` field on the `oms_panel_git_status` panel MCP tool (requires `boardId`; `candidates: true` cannot combine with `cursor`, `inventory`, `kind`/`number` or `issuePreview`).
-- **Returned payload and excluded classes:** Under `github.candidates`, it returns `status`, `source` (`explicit_project`), `observed_at`, resolved `board` metadata and verified single-select field IDs (`Status`, `Priority`, `Area`, `Phase`), bounded ranked Issue `items` (at most 25 items and 10,000 encoded bytes, with `total`, `omitted`, `limit` and `recommendation` `{"state": "recommended", "reason": "ready_with_priority"}`), and canonical per-Issue `recommendations` deduplicated across pages by `owner/repo#N` (at most 100 items and 8,000 encoded bytes, with `recommendationsTotal`, `recommendationsOmitted`, `class`, `state` and `reason`). Non-origin-Issue cards (`draft`, `pull_request`, `foreign` repository items with details withheld, and `unknown` malformed items) are omitted from Issue candidates. Origin Issues in excluded classes (`duplicate`, `archived`, `closed`, `closed_board`, `epic`, `blocked`, `plan_linked` in `.oms/plan/tasks.json` or `.oms/task/current.md`, `board_in_progress`, and `status_not_ready`) record `state: "excluded"`, and Issues with unverified evidence or unrecognized priority (`partial_response`, `plan_unverified`, `field_schema_unverified`, `dependencies_unknown`, `item_evidence_incomplete`, `field_selection_unverified`, `priority_unrecognized`) record `state: "unverified"`; neither enters ranked `items`.
-- **Ranking inputs:** Eligible open `Ready` Issues (`Priority` `P0`, `P1` or `P2`, `dependencies` `none_observed`, and verified `Status`, `Priority`, `Area` and `Phase` selections matched by field ID, option ID and exact option name) are ranked deterministically by `(Priority option order, Phase option order, IssueRef)`, independent of board view order, with ties broken by lowercased `owner/repo` and ascending Issue number.
-- **Completeness and incomplete reasons:** Every response reports `pages` (up to 25 board pages of 20 items), `itemsRead`, `incomplete` and `reason` (`null` when complete). When a walk is stopped, partial or truncated, `incomplete` is `true` and `reason` reports the highest-precedence cause: `insufficient_scope`, `rate_limited`, `timeout`, `not_found`, `board_not_in_catalog`, `identity_mismatch`, `page_limit`, `partial_response`, `plan_unverified`, `field_schema_unverified`, `result_limit` or `unavailable`.
-- **Walk time budget:** `CANDIDATES_WALK_BUDGET` is 20 seconds (with a 7-second per-query `READ_TIMEOUT`), and `walk_board_pages` stops with `incomplete: true` and `reason: "timeout"` before starting another page when fewer than 7 seconds remain. Staying at 20 seconds leaves headroom below `oms_panel_git_status`'s 30-second child-process deadline for the initial project-catalog check, process startup and JSON-RPC encoding.
-- **Read-only suggestion boundary:** The path only queries GitHub GraphQL and reads local Git, `.oms/plan/tasks.json` and `.oms/task/current.md` in place; it never mutates the Project board, Issues, PRs, `.oms/` runtime/cache files or Git refs, and sanitized card text is never executed. Returned candidates are suggestions only — execution still goes through re-reading the Issue and the explicit Issue-bound OMS plan, claim and lease flow.
+`oms github panel-status --project-id NODE_ID --candidates [--json]` reads one
+explicitly linked board. It requires `--project-id` and cannot be combined with
+`--cursor`, `--drift`, `--issue`, `--pull` or `--inventory`. The panel MCP tool
+`oms_panel_git_status` exposes the same read as `candidates: true`, which
+requires `boardId` and takes no cursor.
 
-**Verification level.** Fixture-verified by `github_panel_reads_one_explicit_project_board_without_guessing` (`crates/oms-command-landing/tests/landing_contract.rs`) and `conversation_panel` (`crates/oms-mcp-server/tests/native.rs`); not yet verified against the live Project #3 board with a real account.
+| Output | Content |
+|---|---|
+| `items` | Ranked origin Issues, at most 25 |
+| `recommendations` | One row per Issue across all pages, deduplicated by `owner/repo#N`, with `class`, `state` (`recommended`, `excluded` or `unverified`) and `reason` |
+| `pages`, `itemsRead`, `incomplete`, `reason` | Completeness: up to 25 pages of 20 items; `reason` is `null` only for a complete walk |
+
+- **Eligibility.** An Issue is ranked only when it is open, in the origin
+  repository, `Ready`, has priority `P0` to `P2`, and has verified `Status`,
+  `Priority`, `Area` and `Phase` selections. Drafts, PR cards and foreign items
+  never become candidates. Origin Issues that are duplicates, archived, closed,
+  Epics, blocked, already linked to an OMS plan or task, in progress, or not
+  `Ready` are listed with `state: "excluded"` and a reason. Issues with missing
+  or unverified evidence get `state: "unverified"`. The full reason list is in
+  `crates/oms-command-landing/src/github_board.rs`.
+- **Ranking.** Candidates are sorted by Priority option order, then Phase
+  option order, then Issue reference. The board's saved view order is ignored.
+- **Incomplete reads.** A walk that stops early sets `incomplete: true` with a
+  typed `reason`, for example `page_limit`, `timeout`, `rate_limited`,
+  `insufficient_scope` or `unavailable`. When one GraphQL response carries both a
+  rate-limit and a scope error, it reports `rate_limited`.
+- **Time budget.** The walk stops before starting a page it cannot finish
+  within 20 seconds (each page read may take up to 7 seconds). That keeps the
+  reply under the MCP tool's 30-second child deadline.
+- **Read-only.** The read never changes the Project, Issues, PRs, `.oms/` state
+  or Git refs, and card text is never executed. Candidates are only
+  suggestions: work still starts by re-reading the Issue and going through the
+  Issue-bound plan, claim and lease flow.
+
+**Verification level.** Fixture tests cover this:
+`github_panel_reads_one_explicit_project_board_without_guessing` in
+`crates/oms-command-landing/tests/landing_contract.rs` and `conversation_panel`
+in `crates/oms-mcp-server/tests/native.rs`. It has not been verified against
+the live Project #3 board with a real account.
 
 **Phase B: synchronize selected metadata ([#439](https://github.com/eightmm/oh-my-setting/issues/439)).**
 After the read path in #447 is proven, add
