@@ -34,7 +34,7 @@
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--blossom:var(--blossom-white)}}
 *{box-sizing:border-box}
 body{margin:0;background-color:var(--bg);color:var(--ink)}
-main{max-width:45rem;margin:auto;padding:clamp(1rem,3.8vw,1.8rem)}
+main{width:100%;max-width:76rem;margin-inline:auto;padding:clamp(.8rem,3vw,2.25rem)}
 header,.tools,.section-head,.identity,.person,.actions{display:flex;align-items:center;gap:.6rem}
 header,.section-head{justify-content:space-between}
 header{border-bottom:1px solid var(--line);padding-bottom:.75rem;flex-wrap:wrap}
@@ -52,9 +52,24 @@ header button,header select{font-size:.79rem}
 #refresh{font:1.18rem/1 system-ui,sans-serif;width:2.3rem;padding:0}
 h2,h3,p{margin:0}
 h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
-#goal-section{padding:1.35rem 0}
-#goal{font-weight:620;font-size:clamp(1.14rem,3.1vw,1.42rem);line-height:1.4;letter-spacing:-.025em;margin:.35rem 0;word-break:keep-all;text-wrap:pretty;overflow-wrap:anywhere}
-.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#goal-section{--goal-lines:3;padding-block:clamp(.8rem,2vw,1.35rem)}
+.goal-heading{display:flex;align-items:baseline;gap:.5rem;min-width:0;flex-wrap:wrap}
+@media(min-width:36rem){
+  #goal-section{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:1.25rem;align-items:start}
+  #goal-section .section-head{display:contents}
+  .goal-heading{grid-column:1}
+  #new-goal{grid-column:2;grid-row:1 / 3;align-self:center}
+  #goal,#goal-expand,#progress,#progress-track{grid-column:1}
+  #goal-expand{justify-self:start}
+}
+@media(min-width:64rem){
+  #view{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);column-gap:clamp(1.5rem,3vw,3rem);align-items:start}
+  #goal-section,#outcome{grid-column:1 / -1}
+  #goal-section{--goal-lines:4}
+  #view #leads-section{padding-top:0}
+}
+#goal{max-inline-size:64ch;font-weight:620;font-size:clamp(1.14rem,3.1vw,1.42rem);line-height:1.4;letter-spacing:-.025em;margin:.35rem 0;word-break:keep-all;text-wrap:pretty;overflow-wrap:anywhere}
+.clamp{display:-webkit-box;-webkit-line-clamp:var(--goal-lines);-webkit-box-orient:vertical;overflow:hidden}
 .subtle,.note,.state,small{color:var(--soft);font-size:.83rem}
 .subtle{background:transparent;border:0;min-height:2rem;padding:.2rem .25rem}
 #progress{font-size:.82rem;color:var(--soft)}
@@ -103,7 +118,7 @@ button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)
 #receipt.error:not(:empty){color:var(--danger);background-color:var(--danger-bg);border-color:currentColor}
 .progress-track{height:.35rem;margin-top:.4rem;border-radius:999px;background-color:var(--line);overflow:hidden}
 .progress-track span{display:block;height:100%;width:0;background-color:var(--ok)}
-.observed{margin-inline-start:0;margin-inline-end:auto;color:var(--soft);font-size:.75rem;font-variant-numeric:tabular-nums}
+.observed{margin-inline-start:0;color:var(--soft);font-size:.75rem;font-variant-numeric:tabular-nums}
 #auto-refresh[aria-pressed=true]{color:var(--info);background-color:var(--info-bg);border-color:currentColor}
 @media(prefers-reduced-motion:no-preference){.arrow{transition:transform .12s ease}#refresh[aria-busy=true]{animation:spin 1.6s linear infinite}}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -157,9 +172,11 @@ header{gap:.4rem;padding-bottom:.5rem}
 :root[data-compact="true"] main{padding:.7rem}
 :root[data-compact="true"] header{gap:.4rem;padding-bottom:.5rem}
 :root[data-compact="true"] .tools{flex-wrap:wrap;margin-inline-start:auto}
-:root[data-compact="true"] #goal-section{padding:.8rem 0}
+:root[data-compact="true"] #goal-section{display:block;padding:.8rem 0}
+:root[data-compact="true"] #goal-section .section-head{display:flex}
+:root[data-compact="true"] #view{display:block}
 :root[data-compact="true"] #main-card{padding:.75rem}
-:root[data-compact="true"] #leads-section{padding-top:.75rem}
+:root[data-compact="true"] #leads-section,:root[data-compact="true"] #view #leads-section{padding-top:.75rem}
 :root[data-compact="true"] .lead-slot{padding:.45rem 0}
 :root[data-compact="true"] .lead-slot .person{padding-inline-start:1.5rem}
 :root[data-compact="true"] .dialog-body{padding:.8rem}
@@ -174,10 +191,12 @@ header{gap:.4rem;padding-bottom:.5rem}
 <p id="status" class="note" role="status"></p><p id="receipt" class="note" role="status"></p>
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
 <div id="view" hidden>
-<section id="goal-section" aria-labelledby="goal-label"><div class="section-head"><h2 id="goal-label" data-i18n="goalLabel">프로젝트 목표</h2><span id="observed-at" class="observed" hidden></span><button id="new-goal" type="button" data-i18n="newGoal">새 목표</button></div>
-<p id="goal" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div></section>
+<section id="goal-section" aria-labelledby="goal-label"><div class="section-head"><div class="goal-heading"><h2 id="goal-label" data-i18n="goalLabel">프로젝트 목표</h2><span id="observed-at" class="observed" hidden></span></div><button id="new-goal" type="button" data-i18n="newGoal">새 목표</button></div>
+<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div></section>
+<div>
 <section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="openChat" hidden>대화 열기</button></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
+</div>
 <section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Leads</h2><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 열기</button></div><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><p id="lead-control-status" class="note" role="status"></p><button id="lead-auto-off" type="button" class="subtle" data-i18n="autoLeadsOff" hidden>이 프로젝트 자동 열기 해제</button><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
 <p id="outcome" hidden></p>
@@ -1136,7 +1155,9 @@ onClick('goal-expand',()=>{
 });
 function measureGoal() {
   const text=el('goal'),toggle=el('goal-expand');
-  toggle.hidden=!text.textContent || (toggle.getAttribute('aria-expanded')!=='true' && text.scrollHeight<=text.clientHeight+1);
+  const fits=toggle.getAttribute('aria-expanded')!=='true' && text.scrollHeight<=text.clientHeight+1;
+  if(fits && document.activeElement===toggle && !el('view').hidden)text.focus({preventScroll:true});
+  toggle.hidden=!text.textContent || fits;
 }
 window.addEventListener('resize',measureGoal);
 function goalToggleLabel(){put('goal-expand',()=>t(el('goal-expand').getAttribute('aria-expanded')==='true'?'less':'more'));}

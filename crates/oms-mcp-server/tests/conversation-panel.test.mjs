@@ -158,6 +158,28 @@ async function panel(projects, dashboard = {}, options = {}) {
   };
 }
 
+test('goal disclosure follows actual overflow and keeps focus when the collapsed goal fits', async () => {
+  const p = await panel(['one'], {goal:'A measured project goal'});
+  const text=p.get('goal'), toggle=p.get('goal-expand');
+  Object.defineProperty(text,'scrollHeight',{value:100});
+  text.clientHeight=56;
+  p.run('measureGoal()');
+  assert.equal(toggle.hidden,false);
+  await p.event('goal-expand','click');
+  text.clientHeight=100;
+  p.run('measureGoal()');
+  assert.equal(toggle.hidden,false);
+  assert.equal(toggle.getAttribute('aria-expanded'),'true');
+  p.document.activeElement=toggle;
+  await p.event('goal-expand','click');
+  assert.equal(toggle.getAttribute('aria-expanded'),'false');
+  assert.equal(toggle.hidden,true);
+  assert.equal(text.focused,1);
+  p.document.activeElement=p.get('refresh');
+  p.run('measureGoal()');
+  assert.equal(text.focused,1);
+});
+
 async function ambiguousStart(initialStatus = null) {
   const p = await panel(['one']);
   p.host.status = initialStatus;
