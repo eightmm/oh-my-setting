@@ -372,6 +372,9 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let project = json!({"type":"string","description":"Exact alias from oms_list_projects when the host has a project map."});
     let scope = json!({"project":project});
     let mut open_scope = scope.clone();
+    open_scope["project"]["description"] = json!(
+        "Pass the exact alias from oms_list_projects when the host has a project map; the initial view is included only when project names an exact alias from oms_list_projects on hosts with a project map."
+    );
     open_scope["leadConversations"] = json!({"type":"boolean","description":"Explicit intent to open provider Lead conversations. Opening the panel itself only displays it."});
     let mut opener = make(
         OPEN,
@@ -1927,15 +1930,17 @@ impl Server<'_> {
             }
             if !self.open_snapshot {
                 result["snapshotOmitted"] = json!("busy");
-            } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok())
-                && let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta)
-            {
-                let encoded = dashboard.to_string();
-                if encoded.len() > crate::OUTPUT_LIMIT {
-                    result["snapshotOmitted"] = json!("size");
-                } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
-                    result["dashboard"] = dashboard;
+            } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok()) {
+                if let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta) {
+                    let encoded = dashboard.to_string();
+                    if encoded.len() > crate::OUTPUT_LIMIT {
+                        result["snapshotOmitted"] = json!("size");
+                    } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
+                        result["dashboard"] = dashboard;
+                    }
                 }
+            } else {
+                result["snapshotOmitted"] = json!("project");
             }
             return Ok(result);
         }

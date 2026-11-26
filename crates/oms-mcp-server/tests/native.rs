@@ -345,6 +345,14 @@ fn cross_host_project_reads() {
             "Open the OMS panel (expands beside or over the conversation when the host allows it)."
         );
         assert_eq!(
+            opener["inputSchema"]["properties"]["project"]["description"],
+            "Pass the exact alias from oms_list_projects when the host has a project map; the initial view is included only when project names an exact alias from oms_list_projects on hosts with a project map."
+        );
+        assert_eq!(
+            graph_tool["inputSchema"]["properties"]["project"]["description"],
+            "Exact alias from oms_list_projects when the host has a project map."
+        );
+        assert_eq!(
             opener["_meta"]["openai/ui"]["entrypoints"][0]["type"],
             "global"
         );
@@ -378,9 +386,16 @@ fn cross_host_project_reads() {
             view["result"]["contents"][0]["_meta"]["ui"]["preferredDisplayMode"],
             "fullscreen"
         );
-        let unbound_open = payload(&c.tool("oms_open_panel", json!({})));
-        assert_eq!(unbound_open["readOnly"], true);
-        assert!(unbound_open.get("dashboard").is_none());
+        let unbound_open = c.tool("oms_open_panel", json!({}));
+        good(&unbound_open);
+        assert!(unbound_open["result"]["_meta"].get("dashboard").is_none());
+        let expected_unbound_open =
+            json!({"panel":"OMS","project":null,"readOnly":true,"snapshotOmitted":"project"});
+        assert_eq!(
+            unbound_open["result"]["structuredContent"],
+            expected_unbound_open
+        );
+        assert_eq!(payload(&unbound_open), expected_unbound_open);
     }
     assert_eq!(
         payload(&c.tool("oms_list_projects", json!({})))["binding"],
@@ -538,8 +553,13 @@ fn cross_host_project_reads() {
             .is_none()
     );
     assert!(unresolvable["result"]["_meta"].get("dashboard").is_none());
-    assert!(payload(&unresolvable).get("dashboard").is_none());
-    assert!(payload(&unresolvable).get("snapshot").is_none());
+    let expected_unresolvable =
+        json!({"panel":"OMS","project":null,"readOnly":true,"snapshotOmitted":"project"});
+    assert_eq!(
+        unresolvable["result"]["structuredContent"],
+        expected_unresolvable
+    );
+    assert_eq!(payload(&unresolvable), expected_unresolvable);
     fixture_settings(&source, json!({"exit":2,"stderr":"snapshot failed"}));
     let failed_snapshot_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
     good(&failed_snapshot_open);
@@ -555,6 +575,11 @@ fn cross_host_project_reads() {
     );
     assert!(payload(&failed_snapshot_open).get("dashboard").is_none());
     assert!(payload(&failed_snapshot_open).get("snapshot").is_none());
+    assert!(
+        payload(&failed_snapshot_open)
+            .get("snapshotOmitted")
+            .is_none()
+    );
     let oversized_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","goal":"g".repeat(60_000)}});
     fixture_settings(&source, json!({"stdout":oversized_snapshot.to_string()}));
     let oversized_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
@@ -3203,7 +3228,15 @@ fn conversation_panel() {
     );
     let unbound_open = c.tool("oms_open_panel", json!({}));
     good(&unbound_open);
-    assert!(payload(&unbound_open).get("dashboard").is_none());
+    assert!(unbound_open["result"]["_meta"].get("dashboard").is_none());
+    assert_eq!(
+        unbound_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+    );
+    assert_eq!(
+        payload(&unbound_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+    );
     assert!(c.tool("oms_peer_start", json!({}))["error"].is_object());
     assert!(c.tool("oms_panel_snapshot", json!({"repo":source}))["error"].is_object());
     assert!(
@@ -3413,6 +3446,37 @@ fn conversation_panel() {
         json!({"panel":"OMS","project":null,"snapshot":"attached"})
     );
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = source.join("test-config/oh-my-setting");
+        std::fs::create_dir_all(&dir).unwrap();
+        let map = dir.join("desktop-projects.json");
+        std::fs::write(&map, json!({"demo":repo}).to_string()).unwrap();
+        std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let unaliased = c.tool("oms_open_panel", json!({}));
+        good(&unaliased);
+        assert!(unaliased["result"]["_meta"].get("dashboard").is_none());
+        assert_eq!(
+            unaliased["result"]["structuredContent"],
+            json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+        );
+        assert_eq!(
+            payload(&unaliased),
+            json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+        );
+        let aliased = c.tool("oms_open_panel", json!({"project":"demo"}));
+        good(&aliased);
+        assert_eq!(aliased["result"]["_meta"]["dashboard"]["project"], "demo");
+        assert_eq!(
+            aliased["result"]["structuredContent"],
+            json!({"panel":"OMS","project":"demo","snapshot":"attached"})
+        );
+        assert_eq!(
+            payload(&aliased),
+            json!({"panel":"OMS","project":"demo","snapshot":"attached"})
+        );
+        std::fs::remove_file(&map).unwrap();
+    }
     for full in [false, true] {
         let mut regular = Client::new(&source, &repo, full, false, false);
         assert!(
