@@ -516,21 +516,54 @@ fn cross_host_project_reads() {
         opened["result"]["structuredContent"]["dashboard"],
         reply["result"]["structuredContent"]["dashboard"]
     );
-    assert_eq!(payload(&opened)["dashboard"], payload(&reply)["dashboard"]);
-    assert_eq!(payload(&opened)["readOnly"], true);
+    assert!(
+        opened["result"]["structuredContent"]
+            .get("snapshot")
+            .is_none()
+    );
+    let open_text = opened["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!open_text.contains("obs-v1:"));
+    assert!(!open_text.contains("conversationMain"));
+    assert_eq!(
+        payload(&opened),
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshot":"attached"})
+    );
     let unresolvable = c.tool("oms_open_panel", json!({}));
     good(&unresolvable);
+    assert!(
+        unresolvable["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
     assert!(payload(&unresolvable).get("dashboard").is_none());
+    assert!(payload(&unresolvable).get("snapshot").is_none());
     fixture_settings(&source, json!({"exit":2,"stderr":"snapshot failed"}));
     let failed_snapshot_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
     good(&failed_snapshot_open);
+    assert!(
+        failed_snapshot_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
     assert!(payload(&failed_snapshot_open).get("dashboard").is_none());
-    let oversized_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","goal":"g".repeat(132 * 1024)}});
+    assert!(payload(&failed_snapshot_open).get("snapshot").is_none());
+    let oversized_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","goal":"g".repeat(60_000)}});
     fixture_settings(&source, json!({"stdout":oversized_snapshot.to_string()}));
     let oversized_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
     good(&oversized_open);
-    assert!(payload(&oversized_open).get("dashboard").is_none());
-    assert_eq!(payload(&oversized_open)["snapshotOmitted"], "size");
+    assert!(
+        oversized_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert_eq!(
+        oversized_open["result"]["structuredContent"]["snapshotOmitted"],
+        "size"
+    );
+    assert_eq!(
+        payload(&oversized_open),
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshotOmitted":"size"})
+    );
     // Fail-closed: exit-1 partial response contradicting a complete observation cannot claim complete revision.
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     let degraded = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
@@ -3191,9 +3224,21 @@ fn conversation_panel() {
     let opened = c.tool("oms_open_panel", json!({"leadConversations":true}));
     good(&opened);
     assert_eq!(opened["result"]["structuredContent"]["dashboard"], *data);
-    assert_eq!(payload(&opened)["dashboard"], *data);
-    assert_eq!(payload(&opened)["leadConversations"], true);
-    assert!(payload(&opened).get("readOnly").is_none());
+    assert!(
+        opened["result"]["structuredContent"]
+            .get("snapshot")
+            .is_none()
+    );
+    assert!(
+        !opened["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Finish inspection")
+    );
+    assert_eq!(
+        payload(&opened),
+        json!({"panel":"OMS","project":null,"leadConversations":true,"snapshot":"attached"})
+    );
     // Keep one runtime command blocked while the host opens and reads its tab.
     // A queued project call must stay behind the snapshot and emit its own ID.
     fixture_settings(
@@ -3205,6 +3250,18 @@ fn conversation_panel() {
     };
     send(&mut c, 9001, "oms_panel_snapshot");
     until(|| source.join("snapshot-ready").exists());
+    let snapshot_pid = record(&source)["pid"].clone();
+    let busy_open = c.tool("oms_open_panel", json!({}));
+    good(&busy_open);
+    assert_eq!(
+        busy_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(
+        payload(&busy_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(record(&source)["pid"], snapshot_pid);
     for id in 9002..=9009 {
         send(&mut c, id, "oms_list_approvals");
     }
@@ -3212,12 +3269,19 @@ fn conversation_panel() {
     let refused = c.read();
     assert_eq!(refused["id"], 9010);
     assert_eq!(refused["error"]["code"], -32000);
+    let full_open = c.tool("oms_open_panel", json!({}));
+    good(&full_open);
     assert_eq!(
-        c.tool("oms_open_panel", json!({}))["result"]["structuredContent"]["panel"],
-        "OMS"
+        full_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(
+        payload(&full_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
     );
     assert_eq!(read(&mut c, uri)["text"], current["text"]);
     assert_eq!(record(&source)["argv"][0], "dashboard");
+    assert_eq!(record(&source)["pid"], snapshot_pid);
     std::fs::write(source.join("snapshot-release"), "").unwrap();
     let ready = c.read();
     assert_eq!(ready["id"], 9001);
@@ -3227,6 +3291,78 @@ fn conversation_panel() {
         assert_eq!(approvals["id"], id);
         assert_eq!(payload(&approvals)["approvals"], json!([]));
     }
+    let idle_open = c.tool("oms_open_panel", json!({}));
+    good(&idle_open);
+    assert_eq!(
+        idle_open["result"]["structuredContent"]["dashboard"]["project"],
+        "demo"
+    );
+    assert!(
+        idle_open["result"]["structuredContent"]
+            .get("snapshotOmitted")
+            .is_none()
+    );
+    assert_eq!(
+        payload(&idle_open),
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    assert_ne!(record(&source)["pid"], snapshot_pid);
+    // An idle OPEN running on the runtime worker also counts as in-flight: a concurrent OPEN or
+    // resources/read returns immediately on the input thread without spawning a second dashboard.
+    std::fs::remove_file(source.join("snapshot-ready")).unwrap();
+    std::fs::remove_file(source.join("snapshot-release")).unwrap();
+    send(&mut c, 9020, "oms_open_panel");
+    until(|| source.join("snapshot-ready").exists());
+    let open_pid = record(&source)["pid"].clone();
+    assert_eq!(read(&mut c, uri)["text"], current["text"]);
+    let concurrent_open = c.tool("oms_open_panel", json!({}));
+    good(&concurrent_open);
+    assert_eq!(
+        concurrent_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(
+        payload(&concurrent_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(record(&source)["pid"], open_pid);
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    let gated_open = c.read();
+    assert_eq!(gated_open["id"], 9020);
+    good(&gated_open);
+    assert_eq!(
+        gated_open["result"]["structuredContent"]["dashboard"]["project"],
+        "demo"
+    );
+    assert_eq!(
+        payload(&gated_open),
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    let single_open = Command::new(std::env::current_exe().unwrap())
+        .arg("--single-open")
+        .arg(&source)
+        .arg(&repo)
+        .env_remove("OMS_PANEL_REPO")
+        .env_remove("OMS_PANEL_PROJECTS")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env("XDG_CONFIG_HOME", source.join("test-config"))
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .output()
+        .unwrap();
+    assert!(single_open.status.success(), "{single_open:?}");
+    let single_reply: Value = serde_json::from_slice(&single_open.stdout).unwrap();
+    good(&single_reply);
+    assert_eq!(
+        single_reply["result"]["structuredContent"]["dashboard"]["project"],
+        "demo"
+    );
+    assert_eq!(
+        payload(&single_reply),
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     for full in [false, true] {
         let mut regular = Client::new(&source, &repo, full, false, false);
@@ -7195,14 +7331,8 @@ fn fake_oms() {
     }
     if cfg["snapshotGate"] == true {
         if args.first().is_some_and(|v| v == "dashboard") {
-            if std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(source.join("snapshot-ready"))
-                .is_ok()
-            {
-                until(|| source.join("snapshot-release").exists());
-            }
+            std::fs::write(source.join("snapshot-ready"), "").unwrap();
+            until(|| source.join("snapshot-release").exists());
         } else if args.get(1).is_some_and(|v| v == "desktop-requests") {
             println!("{}", json!({"approvals":[],"incomplete":false}));
             return;
@@ -7983,6 +8113,19 @@ fn main() {
         let rec = Path::new(&args[2]).parent().unwrap().join("last-call.json");
         let r: Value = serde_json::from_slice(&std::fs::read(rec).unwrap()).unwrap();
         assert_eq!(r["utf8"], "");
+        return;
+    }
+    if args.get(1).is_some_and(|a| a == "--single-open") {
+        let flag = AtomicBool::new(false);
+        let mut cfg = pinned(Path::new(&args[2]), config(false, false));
+        cfg.profile = ToolProfile::ChatGptPanel;
+        let mut s = Server::new(Path::new(&args[2]), Path::new(&args[3]), &flag, cfg).unwrap();
+        let v = s
+            .handle(
+                &json!({"id":1,"method":"tools/call","params":{"name":"oms_open_panel","arguments":{}}}),
+            )
+            .unwrap();
+        println!("{v}");
         return;
     }
     if args.get(1).is_some_and(|a| a == "--exit") {

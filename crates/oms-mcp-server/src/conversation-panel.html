@@ -154,6 +154,7 @@ button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)
 .muted{color:var(--soft)}
 #status:not(:empty){margin-top:6px;font-size:.8rem;overflow-wrap:anywhere}
 #status:not(:empty)[data-tone=warn]{color:var(--warm);font-weight:600}
+#host-retry{margin-top:8px;font-size:.8rem}
 #receipt:not(:empty){padding:8px 12px;border:1px solid var(--line);border-radius:var(--r-sm);overflow-wrap:anywhere}
 #receipt:not(:empty){color:var(--ink);background-color:var(--surface)}
 #receipt.error:not(:empty){color:var(--danger);background-color:var(--danger-bg);border-color:currentColor}
@@ -300,7 +301,7 @@ header{gap:8px;padding-bottom:8px}
 <select id="language-choice" aria-label="언어 / Language"><option value="ko">한국어</option><option value="en">English</option></select>
 <button id="inspect-open" type="button" aria-haspopup="dialog" data-i18n="inspect.open" disabled>더 살펴보기</button>
 <button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="display-mode" type="button" hidden></button></div></header>
-<p id="status" class="note" role="status"></p><p id="receipt" class="note" role="status"></p>
+<p id="status" class="note" role="status"></p><button id="host-retry" type="button" data-i18n="retry" hidden>다시 시도</button><p id="receipt" class="note" role="status"></p>
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
 <div id="view" hidden>
 <section id="goal-section" aria-labelledby="goal-label"><div class="section-head"><div class="goal-heading"><h2 id="goal-label" data-i18n="goalLabel">프로젝트 목표</h2><span id="observed-at" class="observed" hidden></span></div><button id="new-goal" type="button" data-i18n="newGoal">새 목표</button></div>
@@ -477,6 +478,7 @@ const messages = {
   "recordIssue": ["현재 Main에 이 이슈 전달", "Record this issue for the current Main"],
   "refresh": ["새로고침", "Refresh"],
   "refreshing": ["새로고침 중…", "Refreshing…"],
+  "retry": ["다시 시도", "Retry"],
   "repositoryMain": ["프로젝트 기록", "Project record"],
   "reviewIssue": ["현재 Main에 전달할 이슈 확인", "Review issue for the current Main"],
   "selectProject": ["프로젝트 선택", "Choose a project"],
@@ -709,7 +711,7 @@ let hostOrigin = '*';
 let initializing;
 let busy = false, busyWriting = false;
 let disposed = false;
-let hostToolsUnavailable = false, hostToolsFailedOpen = -1, hostToolsErrorSeq = 0, seenOpenResult = false;
+let hostToolsUnavailable = false, hostToolsSucceeded = false, seenOpenResult = false;
 let snapshotClock = 0, renderedToolSnapshot = {seq:0, generation:-1, project:null};
 const personButtons = [], approvalButtons = [], turnAnswerButtons = [], inspectNodeButtons = [];
 let issueReviewBusy = false, chatReading = false;
@@ -866,14 +868,10 @@ window.addEventListener('message', event => {
         switchProject(target);
       }
       if (target !== invalidProject && requestedProject === target) {
-        const hadSnapshot = priorOpen || renderedToolSnapshot.seq > 0;
-        if (hadSnapshot && hostToolsUnavailable && (!opened || hostToolsFailedOpen < opened.id)) {
-          setHostToolsUnavailable(false);
-        }
         const d = result.dashboard;
         if (d && typeof d === 'object' && !Array.isArray(d)) {
           const scope = target || project || (typeof d.project === 'string' && d.project) || null;
-          const openBaseline = opened ? opened.seq : (priorOpen || hostToolsErrorSeq > renderedToolSnapshot.seq ? snapshotClock : 0);
+          const openBaseline = opened ? opened.seq : (priorOpen ? snapshotClock : 0);
           const hasNewerSnapshot = renderedToolSnapshot.generation === generation &&
             renderedToolSnapshot.project === scope &&
             renderedToolSnapshot.seq > openBaseline;
@@ -906,11 +904,14 @@ window.addEventListener('message', event => {
   if (msg.error) {
     const error = msg.error.message ? new Error(msg.error.message) : uiError('hostFail');
     error.hostRejected = [-32601,-32602].includes(msg.error.code);
-    if (call.method === 'tools/call') setHostToolsUnavailable(true);
+    if (call.method === 'tools/call' && !hostToolsSucceeded && ![-32000,-32601,-32602].includes(msg.error.code)) {
+      setHostToolsUnavailable(true);
+    }
     call.reject(error);
   } else {
-    if (call.method === 'tools/call' && msg.result && !msg.result.isError && hostToolsUnavailable) {
-      setHostToolsUnavailable(false);
+    if (call.method === 'tools/call' && msg.result && !msg.result.isError) {
+      hostToolsSucceeded = true;
+      if (hostToolsUnavailable) setHostToolsUnavailable(false);
     }
     call.resolve(msg.result);
   }
@@ -2513,6 +2514,8 @@ function syncInspectControls() {
 }
 function syncHostTools() {
   const blocked=disposed || hostToolsUnavailable;
+  el('host-retry').hidden=disposed || !hostToolsUnavailable;
+  el('host-retry').disabled=busy || disposed || !hostToolsUnavailable;
   el('refresh').disabled=busy || blocked;
   el('auto-refresh').disabled=blocked;
   el('project-choice').disabled=(busy && busyWriting) || blocked;
@@ -2544,7 +2547,6 @@ function syncHostTools() {
   armAuto();
 }
 function setHostToolsUnavailable(next) {
-  if(next){hostToolsFailedOpen=openSeq;hostToolsErrorSeq=++snapshotClock;}
   if(hostToolsUnavailable===next){
     if(next && !disposed){stopAuto();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);syncHostTools();setStatus('hostToolsUnavailable','warn');}
     return;
@@ -2806,6 +2808,13 @@ on('project-choice','change', () => {
 });
 onClick('display-mode',()=>{const n=nextDisplayMode();if(n)requestDisplayMode(n.mode);});
 onClick('refresh', manualRefresh);
+onClick('host-retry',async()=>{
+  if(!hostToolsUnavailable || busy || disposed)return;
+  const hadFocus=document.activeElement===el('host-retry');
+  autoRetryCount=0;
+  await refresh();
+  if(hadFocus && !hostToolsUnavailable && !disposed && (document.activeElement===document.body || document.activeElement===el('host-retry')))el('refresh').focus();
+});
 onClick('auto-refresh',()=>{
   if(disposed || hostToolsUnavailable)return;
   autoRefresh=!autoRefresh;

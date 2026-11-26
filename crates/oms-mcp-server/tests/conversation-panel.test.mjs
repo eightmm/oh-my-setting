@@ -2028,18 +2028,58 @@ test('auto-refresh pauses while the follow-up preview or finding Share is active
   assert.equal(autos().length,1);
 });
 
-test('a host that rejects every tools/call with a JSON-RPC error renders the initial open dashboard, disables tool controls and clears on a later success',async()=>{
+test('hostToolsUnavailable sets only for host transport refusal before any tools/call succeeds, offers Retry, and clears on Retry success',async()=>{
   const ipcUnavailable={code:-32603,message:'IPC not available for MCP tool call'};
-  const timers=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),key='b'.repeat(64);
+  const serverBusy={code:-32000,message:'OMS panel is busy. The request was not executed.'};
+  const invalidParams={code:-32602,message:'unknown or invalid desktop tool arguments'};
+  const methodNotFound={code:-32601,message:'method not found'};
+  const key='b'.repeat(64);
+
+  // Server's own JSON-RPC errors (-32000 busy, -32602, -32601) and tool isError results must never set hostToolsUnavailable,
+  // even when no panel tools/call has succeeded yet.
+  for(const rpcError of [serverBusy,invalidParams,methodNotFound]){
+    const s=await panel(['one'],{...dashboard,goal:'Live after transient server error'},{
+      locale:'en',
+      tools:{oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}})},
+      toolError:rpcError
+    });
+    assert.equal(s.run('hostToolsUnavailable'),false);
+    assert.equal(s.get('host-retry').hidden,true);
+    assert.equal(s.get('refresh').disabled,false);
+    assert.equal(s.get('auto-refresh').disabled,false);
+    s.host.toolError=null;
+    await s.event('refresh','click');
+    assert.equal(s.run('hostToolsUnavailable'),false);
+    assert.equal(s.get('goal').textContent,'Live after transient server error');
+  }
+
+  let initialToolError=true;
+  const toolIsErrorPanel=await panel(['one'],{...dashboard,goal:'Live after tool isError'},{
+    locale:'en',
+    tools:{oms_list_projects:()=>{if(initialToolError)throw new Error('server tool error');return {projects:['one'],projectKeys:{one:key}};}},
+  });
+  assert.equal(toolIsErrorPanel.run('hostToolsUnavailable'),false);
+  assert.equal(toolIsErrorPanel.get('host-retry').hidden,true);
+  assert.equal(toolIsErrorPanel.get('refresh').disabled,false);
+  initialToolError=false;
+  await toolIsErrorPanel.event('refresh','click');
+  assert.equal(toolIsErrorPanel.get('goal').textContent,'Live after tool isError');
+
+  // A host that refuses every tools/call renders the initial open dashboard, disables regular controls, and offers Retry.
+  const timers=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),attempts=[];
+  let activeError=ipcUnavailable;
   const p=await panel(['one','two'],{...dashboard,goal:'Live snapshot from tools/call'},{
     locale:'en',
     context:true,
     storage:{getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)},
     timers:{setTimeout(fn,ms){const id=Symbol();timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}},
     tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})},
-    toolError:ipcUnavailable
+    toolError:params=>{attempts.push(params.name);return activeError;}
   });
   assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('host-retry').hidden,false);
+  assert.equal(p.get('host-retry').disabled,false);
+  assert.equal(p.get('host-retry').textContent,'Retry');
   assert.equal(p.get('refresh').disabled,true);
   assert.equal(p.get('auto-refresh').disabled,true);
 
@@ -2053,6 +2093,8 @@ test('a host that rejects every tools/call with a JSON-RPC error renders the ini
   assert.equal(p.get('goal').textContent,'Rendered from initial open');
   assert.equal(p.get('main-name').textContent,'OMS Main · Codex');
   assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('host-retry').hidden,false);
+  assert.equal(p.get('host-retry').disabled,false);
   assert.equal(p.get('refresh').disabled,true);
   assert.equal(p.get('auto-refresh').disabled,true);
   assert.equal(p.get('new-goal').disabled,true);
@@ -2064,10 +2106,11 @@ test('a host that rejects every tools/call with a JSON-RPC error renders the ini
   assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);
   assert.match(p.get('status').textContent,/Refresh and actions are unavailable in this host.*Request a refresh in the conversation/);
   await choose(p,'ko');
+  assert.equal(p.get('host-retry').textContent,'다시 시도');
   assert.match(p.get('status').textContent,/새로고침과 작업을 사용할 수 없습니다.*대화에서 새로고침을 요청하세요/);
   await choose(p,'en');
 
-  const mark=p.calls.length;
+  const mark=attempts.length;
   await p.event('refresh','click');
   await p.event('auto-refresh','click');
   await p.event('new-goal','click');
@@ -2075,39 +2118,58 @@ test('a host that rejects every tools/call with a JSON-RPC error renders the ini
   await p.event('inspect-open','click');
   memberButton.dispatchEvent(new Event('click'));await setImmediate();
   p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',altKey:true}));await setImmediate();
-  assert.equal(p.calls.length,mark);
+  assert.equal(attempts.length,mark);
   assert.equal(p.get('goal').textContent,'Rendered from initial open');
   assert.equal(p.get('launcher').open ?? false,false);
   assert.equal(p.get('conversation').open ?? false,false);
   assert.equal(p.get('inspection').open ?? false,false);
 
+  // Clicking Retry while the host still refuses attempts a single refresh, keeps the rendered dashboard, and keeps Retry available.
+  p.document.activeElement=p.get('host-retry');
+  await p.event('host-retry','click');
+  assert.deepEqual(attempts.slice(mark),['oms_list_projects']);
+  assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('goal').textContent,'Rendered from initial open');
+  assert.equal(p.get('host-retry').hidden,false);
+  assert.equal(p.get('host-retry').disabled,false);
+  assert.equal(p.get('refresh').focused ?? 0,0);
+  assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);
+
   // Existing hostRejected classification for -32601/-32602 keeps its meaning.
-  p.host.toolError={code:-32601,message:'Method not found'};
+  activeError={code:-32601,message:'Method not found'};
   const rejected=await p.run(`request('tools/call',{name:'oms_list_projects',arguments:{}}).then(()=>null,e=>({hostRejected:e.hostRejected,message:e.message}))`);
   assert.equal(rejected.hostRejected,true);
-  p.host.toolError=ipcUnavailable;
+  activeError=ipcUnavailable;
   const generic=await p.run(`request('tools/call',{name:'oms_list_projects',arguments:{}}).then(()=>null,e=>({hostRejected:e.hostRejected,message:e.message}))`);
   assert.equal(generic.hostRejected,false);
 
-  // A later successful tools/call clears hostToolsUnavailable, re-enables controls and clears the note.
-  p.host.toolError=null;
-  await p.open('input',{arguments:{project:'two'}});
+  // Retry success clears hostToolsUnavailable, hides Retry, renders live state, re-enables controls, moves focus to refresh, and arms auto-refresh.
+  activeError=null;
+  p.document.activeElement=p.get('host-retry');
+  await p.event('host-retry','click');
   assert.equal(p.run('hostToolsUnavailable'),false);
-  assert.equal(p.get('project').textContent,'two');
+  assert.equal(p.get('host-retry').hidden,true);
+  assert.equal(p.get('host-retry').disabled,true);
+  assert.equal(p.get('refresh').focused,1);
+  assert.equal(p.get('project').textContent,'one');
   assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
   assert.equal(p.get('refresh').disabled,false);
   assert.equal(p.get('auto-refresh').disabled,false);
   assert.equal(p.get('new-goal').disabled,false);
   assert.equal(p.get('inspect-open').disabled,false);
   assert.equal(p.get('status').textContent,'');
+  assert.equal([...timers.values()].filter(t=>t.ms===20000).length,1);
 
   // Once a newer snapshot from a successful tools/call has rendered for the same project and generation,
   // a late open result dashboard does not overwrite it.
+  await p.open('input',{arguments:{project:'two'}});
+  assert.equal(p.get('project').textContent,'two');
+  assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
   await p.open('result',{structuredContent:{panel:'OMS',project:'two',dashboard:{project:'two',goal:'Stale open dashboard'}}});
   assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
 
-  // Tool results with isError do not set hostToolsUnavailable, while a later JSON-RPC error keeps the last snapshot
-  // and a newer open result clears the flag again.
+  // Once any panel tools/call has succeeded, neither server errors (-32000, -32602, -32601, isError) nor later JSON-RPC errors ever set hostToolsUnavailable.
   const approval={id:'r-1',version:1,digest:'a'.repeat(64),summary:'Approve?',action:'Main scope decision',object:main.room};
   const q=await panel(['one'],{...dashboard,goal:'Initial live'},{locale:'en',context:true,tools:{
     oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
@@ -2123,23 +2185,17 @@ test('a host that rejects every tools/call with a JSON-RPC error renders the ini
   q.host.tools.oms_panel_snapshot=args=>({dashboard:{...dashboard,project:args.project,goal:'Recovered live'}});
   await q.event('refresh','click');
   assert.equal(q.get('goal').textContent,'Recovered live');
-  await q.event('followup-open','click');
-  q.host.toolError=ipcUnavailable;
+  for(const laterError of [serverBusy,invalidParams,methodNotFound,ipcUnavailable]){
+    q.host.toolError=laterError;
+    await q.event('refresh','click');
+    assert.equal(q.run('hostToolsUnavailable'),false);
+    assert.equal(q.get('host-retry').hidden,true);
+    assert.equal(q.get('refresh').disabled,false);
+    assert.equal(q.get('auto-refresh').disabled,false);
+  }
+  q.host.toolError=null;
   await q.event('refresh','click');
-  assert.equal(q.run('hostToolsUnavailable'),true);
-  assert.equal(q.get('view').hidden,false);
   assert.equal(q.get('goal').textContent,'Recovered live');
-  assert.equal(q.get('refresh').disabled,true);
-  assert.equal(q.get('inspect-open').disabled,true);
-  assert.equal(q.get('followup-main').disabled,true);
-  assert.equal(approveButton().disabled,true);
-  assert.match(q.get('status').textContent,/Refresh and actions are unavailable in this host/);
-  await q.open('result',{structuredContent:{panel:'OMS',project:'one',dashboard:{...dashboard,project:'one',goal:'Refreshed via conversation'}}});
-  assert.equal(q.run('hostToolsUnavailable'),false);
-  assert.equal(q.get('goal').textContent,'Refreshed via conversation');
-  assert.equal(q.get('refresh').disabled,false);
-  assert.equal(q.get('inspect-open').disabled,false);
-  assert.equal(q.get('followup-main').disabled,false);
   assert.equal(approveButton().disabled,false);
   assert.equal(q.get('status').textContent,'');
 });

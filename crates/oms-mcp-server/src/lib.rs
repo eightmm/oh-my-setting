@@ -17,7 +17,7 @@ mod storage;
 use crate::value::{Text, Value};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
@@ -251,6 +251,7 @@ pub struct Server<'a> {
     pub(crate) config: Config,
     pub(crate) executor: Arc<dyn CommandExecutor>,
     pub(crate) lead_turns: panel::LeadTurnCache,
+    pub(crate) open_snapshot: bool,
     protocol: &'static str,
     info: Value,
     definitions: Value,
@@ -291,6 +292,7 @@ impl<'a> Server<'a> {
             config,
             executor,
             lead_turns: panel::LeadTurnCache::default(),
+            open_snapshot: true,
             protocol: FALLBACK,
             info: json!({"name":"oh-my-setting","version":version.trim_matches(crate::whitespace)}),
             definitions,
@@ -712,6 +714,8 @@ impl Server<'_> {
             return serve_server(&mut self, stop, reader, writer);
         }
         let mut runtime = self.clone();
+        self.open_snapshot = false;
+        let in_flight = AtomicUsize::new(0);
         let writer = std::sync::Mutex::new(writer);
         let write = |response| {
             write_response(
@@ -723,13 +727,22 @@ impl Server<'_> {
         };
         std::thread::scope(|scope| {
             let (queue, pending) = std::sync::mpsc::sync_channel::<(&'static str, Value)>(8);
-            let worker = scope.spawn(move || -> io::Result<()> {
+            let worker = scope.spawn(|| -> io::Result<()> {
                 for (version, request) in pending {
                     if runtime.interrupted.load(Ordering::Relaxed) {
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
                         break;
                     }
                     runtime.protocol = version;
-                    write(runtime.handle_value(&request))?;
+                    let response = runtime.handle_value(&request);
+                    // Decrement under the writer lock before flushing bytes that wake the next client turn.
+                    let mut out = writer
+                        .lock()
+                        .map_err(|_| io::Error::other("MCP writer unavailable"))?;
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                    let written = write_response(*out, response);
+                    drop(out);
+                    written?;
                 }
                 Ok(())
             });
@@ -738,17 +751,28 @@ impl Server<'_> {
                     Ok(message) => message,
                     Err(error) => return write(Some(error)),
                 };
-                if !panel::runtime_request(&request) {
+                let is_runtime = panel::runtime_request(&request);
+                let is_open = !is_runtime && panel::open_request(&request);
+                if !is_runtime && !(is_open && in_flight.load(Ordering::Acquire) == 0) {
                     return write(self.handle_value(&request));
                 }
+                in_flight.fetch_add(1, Ordering::AcqRel);
                 match queue.try_send((self.protocol, request)) {
                     Ok(()) => Ok(()),
-                    Err(std::sync::mpsc::TrySendError::Full((_, message))) => write(Some(error(
-                        &message["id"],
-                        -32000,
-                        "OMS panel is busy. The request was not executed.",
-                    ))),
+                    Err(std::sync::mpsc::TrySendError::Full((_, message))) => {
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        if is_open {
+                            write(self.handle_value(&message))
+                        } else {
+                            write(Some(error(
+                                &message["id"],
+                                -32000,
+                                "OMS panel is busy. The request was not executed.",
+                            )))
+                        }
+                    }
                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
                         Err(io::Error::other("OMS panel worker stopped"))
                     }
                 }

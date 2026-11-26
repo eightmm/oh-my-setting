@@ -307,9 +307,19 @@ fn checked_peer_directory(
     Ok(Some(dir.path))
 }
 
-pub(super) fn runtime_request(request: &Value) -> bool {
+fn valid_call_id(request: &Value) -> bool {
     let id = &request["id"];
-    (matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024))
+    matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024)
+}
+
+pub(super) fn open_request(request: &Value) -> bool {
+    valid_call_id(request)
+        && request["method"] == "tools/call"
+        && request["params"]["name"].as_str() == Some(OPEN)
+}
+
+pub(super) fn runtime_request(request: &Value) -> bool {
+    valid_call_id(request)
         && request["method"] == "tools/call"
         && matches!(
             request["params"]["name"].as_str(),
@@ -1220,8 +1230,7 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                 };
             let mut text = data.to_string();
             let is_git_detail = data["git"].is_object() && data["github"].is_object();
-            if (data.get("panel").is_none() && data["dashboard"]["managedScratch"].is_object()
-                || is_git_detail)
+            if (data["dashboard"]["managedScratch"].is_object() || is_git_detail)
                 && crate::value::encode(
                     &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
                     true,
@@ -1599,6 +1608,34 @@ impl Server<'_> {
                         }
                         Err(e) => response(Err(e)),
                     }
+                } else if name == OPEN {
+                    match result {
+                        Ok(data)
+                            if crate::output::outbound(
+                                data.to_string().as_bytes(),
+                                &Value::Null,
+                            )
+                            .is_ok() =>
+                        {
+                            let mut summary = data.clone();
+                            if summary
+                                .as_object_mut()
+                                .and_then(|o| o.remove("dashboard"))
+                                .is_some()
+                            {
+                                summary["snapshot"] = json!("attached");
+                            }
+                            json!({
+                                "content":[{"type":"text","text":summary.to_string()}],
+                                "structuredContent":data,
+                                "isError":false
+                            })
+                        }
+                        Ok(_) => response(Err(
+                            "OMS withheld this response during its outbound scan".into(),
+                        )),
+                        Err(e) => response(Err(e)),
+                    }
                 } else {
                     response(result)
                 }
@@ -1874,9 +1911,11 @@ impl Server<'_> {
             }));
         }
         if name == OPEN {
-            if args.get("project").is_some() {
-                self.panel_repo(args)?;
-            }
+            let resolved = if args.get("project").is_some() {
+                Some(self.panel_repo(args)?)
+            } else {
+                None
+            };
             let mut result = json!({"panel":"OMS","project":args["project"]});
             if let Some(flag) = args.get("leadConversations") {
                 let requested = flag
@@ -1889,11 +1928,13 @@ impl Server<'_> {
             if self.config.profile == ToolProfile::McpApp {
                 result["readOnly"] = json!(true);
             }
-            if let Ok(repo) = self.panel_repo(args)
+            if !self.open_snapshot {
+                result["snapshotOmitted"] = json!("busy");
+            } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok())
                 && let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta)
             {
                 let encoded = dashboard.to_string();
-                if encoded.len() > 128 * 1024 {
+                if encoded.len() > crate::OUTPUT_LIMIT {
                     result["snapshotOmitted"] = json!("size");
                 } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
                     result["dashboard"] = dashboard;
