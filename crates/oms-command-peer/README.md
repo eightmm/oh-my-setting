@@ -25,6 +25,22 @@ explicit verification commands and provider executables run through the
 execution boundary. Online citation lookup additionally needs `curl`; an
 unavailable request remains unverified.
 
+### Council rounds
+
+Opening answers and rebuttals run through scoped workers with at most four
+active seats. All selected routes are checked before the first seat starts;
+each seat keeps its own account route, disposable worktree, physical-call
+receipts and completed-turn publication. Every seat in a round receives the
+same immutable prompt, and the next round uses only the preceding round's
+settled answers. Larger councils run bounded groups with the same round input.
+Every started worker is joined before a round error returns. A failed thread
+publication can therefore coexist with completed sibling artifacts; it grants
+no retry or invented cleanup acknowledgement.
+
+Typed synthesis may follow the opening round directly, or one through three
+explicit rebuttals. The complete required provider/round matrix remains
+mandatory before synthesis and before automatic decomposition.
+
 ### Session handoff prompt
 
 Explicit `session-handoff prompt` calls the existing autonomy handoff renderer

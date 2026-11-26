@@ -569,14 +569,24 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 ) -> oms_command_peer::Result<Completed> {
                     let binary = request.argv[0].clone();
                     let git = binary == "git";
+                    let workdir = request.cwd.clone();
+                    let git_args = git.then(|| request.argv.clone());
                     let mut result = self.provider.execute(request, stop)?;
                     if git {
+                        if result.code != 0 || !result.complete {
+                            eprintln!("{} git {:?}: {:?}", self.mode, git_args, result);
+                        }
                         return Ok(result);
                     }
                     let calls = self.provider.calls.lock().unwrap();
-                    let prompt = String::from_utf8_lossy(&calls.last().unwrap().prompt);
+                    let own = calls
+                        .iter()
+                        .find(|call| call.request.cwd == workdir)
+                        .unwrap();
+                    let prompt = String::from_utf8_lossy(&own.prompt);
                     let planner = prompt.contains("Decompose remaining work into");
                     let synthesis = prompt.contains("Synthesize these independent answers.");
+                    let rebuttal = prompt.contains("Critique the previous positions");
                     result.stdout = if planner {
                         b"artifact: /fixture/foreign.md\n{\"tasks\":[{\"id\":\"t1\",\"title\":\"inspect ## Output fixture\",\"brief\":\"Inspect the fixture output.\",\"allowed\":[\"src\"],\"verify\":\"bash tests/check.sh\",\"depends\":[]}]}".to_vec()
                     } else if synthesis {
@@ -603,10 +613,23 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                         "cancel" => { result.code = 130; result.complete = false; },
                         _ => {},
                     }
-                    } else if self.mode == "participant-incomplete" && calls.len() == 1 {
+                    } else if [
+                        "participant-incomplete",
+                        "participant-unknown",
+                        "participant-cancel",
+                    ]
+                    .contains(&self.mode)
+                        && binary == "codex"
+                    {
                         result.complete = false;
-                    } else if (self.mode == "participant-malformed-initial" && calls.len() == 1)
-                        || (self.mode == "participant-malformed-rebuttal" && calls.len() == 4)
+                        if self.mode == "participant-unknown" {
+                            result.cleanup_complete = None;
+                        } else if self.mode == "participant-cancel" {
+                            result.code = 130;
+                        }
+                    } else if binary == "codex"
+                        && ((self.mode == "participant-malformed-initial" && !rebuttal)
+                            || (self.mode == "participant-malformed-rebuttal" && rebuttal))
                     {
                         result.stdout =
                             b"A fluent answer missing required discussion sections.".to_vec();
@@ -675,6 +698,9 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                         stop,
                         self,
                     );
+                    if output.0 != 0 {
+                        eprintln!("{}/{}: {}", self.mode, command.tool, message(&output));
+                    }
                     if command.tool == "peer-ask" && output.0 == 0 {
                         if self.mode == "missing-report" {
                             output.1 = b"synthesis: unbound.md\n".to_vec();
@@ -838,10 +864,14 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
             )));
             for (mode, planner, model, expected) in [
                 ("ok", "codex", "gpt-5.6-sol", 0),
+                ("selected-zero", "codex", "gpt-5.6-sol", 0),
+                ("selected-two", "codex", "gpt-5.6-sol", 0),
                 ("ok", "codex", "", 0),
                 ("ok", "claude", "claude-sonnet-5-5", 0),
                 ("ok", "antigravity", "gemini-pro-orchestrator-argon", 0),
                 ("participant-incomplete", "codex", "gpt-5.6-sol", 2),
+                ("participant-unknown", "codex", "gpt-5.6-sol", 2),
+                ("participant-cancel", "codex", "gpt-5.6-sol", 130),
                 ("participant-malformed-initial", "codex", "gpt-5.6-sol", 2),
                 ("participant-malformed-rebuttal", "codex", "gpt-5.6-sol", 2),
                 ("synthesis-no-native-terminal", "codex", "gpt-5.6-sol", 2),
@@ -895,6 +925,29 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 if !model.is_empty() {
                     options.extend(args(&["--model", model]));
                 }
+                let selected = mode.starts_with("selected-");
+                let providers = if selected {
+                    vec!["claude", "codex"]
+                } else {
+                    vec!["codex", "claude", "antigravity"]
+                };
+                let rounds = if mode == "selected-zero" {
+                    0
+                } else if mode == "selected-two" {
+                    2
+                } else {
+                    1
+                };
+                let success_mode = mode == "ok" || selected;
+                let expected_calls = providers.len() * (rounds + 1) + 2;
+                if selected {
+                    options.extend(args(&[
+                        "--council-providers",
+                        &providers.join(","),
+                        "--council-rounds",
+                        &rounds.to_string(),
+                    ]));
+                }
                 let expected_route = oms_command_peer::providers::resolve_route(
                     Path::new(SOURCE),
                     planner,
@@ -916,14 +969,18 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 assert_eq!(
                     planned,
                     usize::from(
-                        ["ok", "mutate-during-plan"].contains(&mode)
+                        success_mode
+                            || mode == "mutate-during-plan"
                             || mode.starts_with("planner-")
                     ),
                     "{mode}"
                 );
                 let calls = host.provider.calls.lock().unwrap().len();
                 match mode {
-                    "participant-incomplete" | "participant-malformed-initial" => {
+                    "participant-incomplete"
+                    | "participant-unknown"
+                    | "participant-cancel"
+                    | "participant-malformed-initial" => {
                         assert_eq!(calls, 3)
                     }
                     "participant-malformed-rebuttal" => assert_eq!(calls, 6),
@@ -954,15 +1011,19 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                     .filter(|entry| entry.file_name().to_string_lossy().starts_with("proposal-"))
                     .map(|entry| entry.path())
                     .collect::<Vec<_>>();
-                assert_eq!(proposals.len(), usize::from(mode == "ok"), "{mode}");
-                if mode != "ok" {
+                assert_eq!(proposals.len(), usize::from(success_mode), "{mode}");
+                if !success_mode {
                     continue;
                 }
-                assert_eq!(host.provider.calls.lock().unwrap().len(), 8);
+                assert_eq!(host.provider.calls.lock().unwrap().len(), expected_calls);
                 let path = &proposals[0];
                 let raw = fs::read(path).unwrap();
                 let proposal = value::parse(&raw).unwrap();
                 assert_eq!(proposal["tasks"][0]["title"], "inspect ## Output fixture");
+                assert_eq!(
+                    proposal["council"],
+                    serde_json::json!({"schema":1,"providers":providers,"rounds":rounds})
+                );
                 let digest = value::hash(&raw);
                 let reference = &proposal["discussion"];
                 let manifest =
@@ -970,7 +1031,7 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                         .unwrap();
                 assert_eq!(
                     manifest["report"]["participants"].as_array().unwrap().len(),
-                    6
+                    providers.len() * (rounds + 1)
                 );
                 assert_eq!(
                     manifest["report"]["synthesis"]["requested_model"],
@@ -1006,9 +1067,29 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 assert_eq!(&plan["tasks"]["t1"]["discussion"], reference);
                 assert_eq!(
                     host.provider.calls.lock().unwrap().len(),
-                    8,
+                    expected_calls,
                     "apply/replay must not rerun the council"
                 );
+                let altered_selection = oms_command_autonomy::run_with_services(
+                    "plan-from-spec",
+                    &args(&[
+                        "--apply",
+                        path.to_str().unwrap(),
+                        "--expected-proposal-sha256",
+                        &digest,
+                        "--council-providers",
+                        "antigravity",
+                    ]),
+                    &repo.0,
+                    &STOP,
+                    &host,
+                );
+                assert_eq!(altered_selection.0, 2, "{}", message(&altered_selection));
+                assert!(message(&altered_selection).contains("reviewed selection"));
+                assert_eq!(host.provider.calls.lock().unwrap().len(), expected_calls);
+                if selected {
+                    continue;
+                }
                 if planner != "codex" || model.is_empty() {
                     continue;
                 }
@@ -1147,6 +1228,9 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 repo: &'a Repo,
                 close_thread: bool,
                 incomplete: bool,
+                arrivals: Mutex<[usize; 2]>,
+                ready: std::sync::Condvar,
+                seat_count: usize,
             }
             impl Executor for CouncilProbe<'_> {
                 fn with_physical_contract(
@@ -1169,9 +1253,24 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                     stop: &AtomicBool,
                 ) -> oms_command_peer::Result<Completed> {
                     let git = request.argv[0] == "git";
+                    let binary = request.argv[0].clone();
+                    let workdir = request.cwd.clone();
                     let mut result = self.provider.execute(request, stop)?;
-                    if !git && self.provider.calls.lock().unwrap().len() == 1 {
-                        if self.close_thread {
+                    if !git {
+                        let round = {
+                            let calls = self.provider.calls.lock().unwrap();
+                            let own = calls
+                                .iter()
+                                .find(|call| call.request.cwd == workdir)
+                                .unwrap();
+                            usize::from(
+                                String::from_utf8_lossy(&own.prompt)
+                                    .contains("Critique the previous positions"),
+                            )
+                        };
+                        let mut arrivals = self.arrivals.lock().unwrap();
+                        arrivals[round] += 1;
+                        if self.close_thread && arrivals[round] == self.seat_count {
                             success(run(
                                 self.repo,
                                 self.repo.0.as_path(),
@@ -1179,7 +1278,46 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                                 &["close", "--id", "fixture-council"],
                             ));
                         }
-                        if self.incomplete {
+                        self.ready.notify_all();
+                        let (arrivals, waited) = self
+                            .ready
+                            .wait_timeout_while(arrivals, Duration::from_secs(5), |arrivals| {
+                                arrivals[round] < self.seat_count
+                            })
+                            .unwrap();
+                        drop(arrivals);
+                        assert!(
+                            !waited.timed_out(),
+                            "every seat must overlap in round {round}"
+                        );
+                        if !self.close_thread && !self.incomplete && binary == "codex" {
+                            // This seat is still executing while another seat's
+                            // completed turn is made available to thread readers.
+                            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                            loop {
+                                let turns = oms_command_peer::storage::load(
+                                    &self.repo.0,
+                                    Path::new(".oms/threads/fixture-council.jsonl"),
+                                )
+                                .unwrap();
+                                let published = turns
+                                    .iter()
+                                    .filter(|turn| {
+                                        turn.get("role").text() == Some("answer")
+                                            && turn.get("provider").text() == Some("antigravity")
+                                    })
+                                    .count();
+                                if published > round {
+                                    break;
+                                }
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "completed turn waited for a slower seat"
+                                );
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                        if self.incomplete && binary == "agy" {
                             result.code = 7;
                         }
                     }
@@ -1187,7 +1325,7 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 }
             }
             for (close_thread, incomplete, expected_code, expected_calls) in [
-                (true, false, 2, 1),
+                (true, false, 2, 2),
                 (false, false, 0, 6),
                 (false, true, 1, 2),
             ] {
@@ -1198,6 +1336,9 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                     repo: &repo,
                     close_thread,
                     incomplete,
+                    arrivals: Mutex::new([0; 2]),
+                    ready: std::sync::Condvar::new(),
+                    seat_count: if !close_thread && !incomplete { 3 } else { 2 },
                 };
                 let mixed = !close_thread && !incomplete;
                 let targets = if mixed {
@@ -1304,18 +1445,18 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                     ];
                     let physical = probe.selected.lock().unwrap();
                     // The peer checks the same route at registration and again at launch.
-                    let expected = selected
-                        .into_iter()
-                        .cycle()
-                        .take(expected_calls)
-                        .flat_map(|seat| [seat, seat]);
-                    assert!(
-                        physical
-                            .iter()
-                            .map(|(model, effort)| (model.as_str(), effort.as_deref()))
-                            .eq(expected),
-                        "{physical:?}"
-                    );
+                    assert_eq!(physical.len(), expected_calls * 2);
+                    for seat in selected {
+                        assert_eq!(
+                            physical
+                                .iter()
+                                .filter(
+                                    |(model, effort)| (model.as_str(), effort.as_deref()) == seat
+                                )
+                                .count(),
+                            4
+                        );
+                    }
                     let receipts = oms_command_telemetry::store::usage::load(&repo.0).unwrap();
                     for (model, _) in selected {
                         assert_eq!(
@@ -1352,10 +1493,11 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 }
                 if close_thread {
                     assert!(output.1.is_empty());
-                    assert_eq!(rows[0].get("provider").text(), Some("antigravity"));
-                    let artifact = repo.0.join(rows[0].get("artifact").text().unwrap());
-                    let body = fs::read_to_string(artifact).unwrap();
-                    assert!(body.contains("## Output\n\nfixture answer"));
+                    for row in &rows {
+                        let artifact = repo.0.join(row.get("artifact").text().unwrap());
+                        let body = fs::read_to_string(artifact).unwrap();
+                        assert!(body.contains("## Output\n\nfixture answer"));
+                    }
                     let turns = oms_command_peer::storage::load(
                         &repo.0,
                         Path::new(".oms/threads/fixture-council.jsonl"),
@@ -1370,6 +1512,31 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 } else {
                     let usable = if incomplete { "1/2" } else { "3/3" };
                     assert!(message(&output).contains(&format!("{usable} target(s) answered")));
+                }
+                let calls = probe.provider.calls.lock().unwrap();
+                let paths = calls
+                    .iter()
+                    .map(|call| &call.request.cwd)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    paths.len(),
+                    expected_calls,
+                    "each seat owns a separate worktree"
+                );
+                for call in calls.iter() {
+                    assert!(
+                        !call.request.cwd.exists(),
+                        "all started seats must finish cleanup"
+                    );
+                }
+                if mixed {
+                    for round in calls.chunks(3) {
+                        assert!(
+                            round.iter().all(|call| call.prompt == round[0].prompt),
+                            "round inputs must be identical despite completion order"
+                        );
+                    }
+                    assert_ne!(calls[0].prompt, calls[3].prompt);
                 }
             }
         },
