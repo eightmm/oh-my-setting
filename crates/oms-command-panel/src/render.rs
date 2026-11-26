@@ -9307,7 +9307,11 @@ mod tests {
         ]}, "plan":{"plan_id":"plan-1", "goal":"長い目標長い目標長い目標長い目標長い目標長い目標", "tasks":{"a":{"state":"queued"},"b":{"state":"queued"}}},
         "provider_status":{"codex":{"weekly_used":18,"five_hour_used":11,"five_hour_resets_at":oms_panel_core::timestamp()+3600},"claude":{"weekly_used":30}}});
         let read = BTreeMap::new();
-        for columns in [19, 28, 40] {
+        for (columns, progress) in [
+            (19, "0/2 tasks"),
+            (28, "0/2 tasks done"),
+            (40, "0/2 tasks done"),
+        ] {
             let frame = frame(
                 &report,
                 &navigation::Navigation::default(),
@@ -9316,6 +9320,10 @@ mod tests {
                 &read,
             )
             .join("\n");
+            assert!(
+                frame.lines().all(|line| width(line) <= columns),
+                "{columns}: {frame}"
+            );
             assert!(
                 frame.contains(if columns < 28 { "L70%" } else { "Cld70%" })
                     && frame.contains("Main Codex")
@@ -9330,7 +9338,7 @@ mod tests {
             assert!(
                 frame
                     .lines()
-                    .any(|s| s.starts_with("Goal:") && s.contains("0/2 tasks done")),
+                    .any(|s| s.starts_with("Goal:") && s.contains(progress)),
                 "{frame}"
             );
             assert!(
