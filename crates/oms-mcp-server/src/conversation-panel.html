@@ -863,9 +863,11 @@ function applyHostAppearance(context){
   if(!('styles' in context))return;
   const vars=context.styles?.variables;
   for(const key of [...hostColors.map(name=>'--color-'+name),...hostTokens]){
-    const value=vars?.[key];
-    // Only take concrete values: colours must parse as colours, and nothing may load a resource.
-    if(safeHostValue(value) && (!key.startsWith('--color-') || CSS.supports('color',value)))root.style.setProperty(key,value);
+    let value=vars?.[key], ok=safeHostValue(value);
+    if(ok && key.startsWith('--color-'))ok=CSS.supports('color',value);
+    else if(ok){value=value.trim();ok=Boolean(value) && CSS.supports(key.startsWith('--font-')?'font-family':'border-radius',value);}
+    // Only take concrete values: each token must parse for its CSS property, and nothing may load a resource.
+    if(ok)root.style.setProperty(key,value);
     else root.style.removeProperty(key);
   }
 }
