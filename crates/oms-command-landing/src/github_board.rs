@@ -8,11 +8,13 @@ use super::{
     valid_cursor, work_item,
 };
 use crate::{Context, V, obj};
+use oms_command_plan::{Action, Context as PlanContext, Plan, Request, UnavailableServices};
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     path::Path,
+    time::Instant,
 };
 
 const BOARD_FIELDS: [&str; 4] = ["Status", "Priority", "Area", "Phase"];
@@ -485,17 +487,51 @@ fn candidate_planned_issues(
     c: &Context<'_>,
     root: &Path,
     slug: &Slug,
+    deadline: Instant,
 ) -> (PlannedEvidence, BTreeMap<String, String>) {
     let mut ready = BTreeMap::new();
     let planned = c.state(root).ok().filter(|p| p == root).and_then(|state| {
-        let (mut links, complete) = candidate_plan_issue_evidence(&state, slug).ok()?;
+        let mut context = PlanContext::from_selected_state_before(
+            &Request::new(Action::Ready),
+            root,
+            c.cwd,
+            &state,
+            c.interrupted,
+            deadline,
+        )
+        .ok()?;
+        context.lock_settings.timeout = context
+            .lock_settings
+            .timeout
+            .min(deadline.saturating_duration_since(Instant::now()));
+        let services = c.services.plan().unwrap_or(&UnavailableServices);
+        let plan = Plan::open(context, services, c.interrupted).ok()?;
+        let snapshot = plan.readiness_with_locked_snapshot().ok()?;
+        let (mut links, complete) =
+            candidate_plan_issue_evidence(snapshot.raw.as_deref(), slug).ok()?;
+        let needs_readiness = links
+            .iter()
+            .any(|(_, _, _, state)| state.as_deref() == Some("ready"));
+        let eligible = match (complete, needs_readiness) {
+            (true, true) => snapshot.ready_ids,
+            (true, false) => Some(BTreeSet::new()),
+            (false, _) => None,
+        }
+        .filter(|_| Instant::now() < deadline);
         links.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         let mut linked = BTreeSet::new();
+        let mut waiting = BTreeSet::new();
         for (_, selectable, issue, state) in links {
             let number = issue.number.to_string();
             match (state.as_deref(), selectable) {
                 (Some("ready"), Some(id)) => {
-                    ready.entry(number).or_insert(id);
+                    if let Some(eligible) = &eligible {
+                        if eligible.contains(&id) {
+                            ready.entry(number).or_insert(id);
+                        } else {
+                            waiting.insert(number);
+                        }
+                    }
                 }
                 (Some("done" | "cancelled" | "failed"), _) => {}
                 _ => {
@@ -503,11 +539,16 @@ fn candidate_planned_issues(
                 }
             }
         }
+        linked.extend(
+            waiting
+                .into_iter()
+                .filter(|number| !ready.contains_key(number)),
+        );
         let (packet, packet_complete) = task_issue_evidence(&state, slug).ok()?;
         if let Some(issue) = packet {
             linked.insert(issue.number.to_string());
         }
-        Some((linked, complete && packet_complete))
+        Some((linked, complete && packet_complete && eligible.is_some()))
     });
     (planned, ready)
 }
@@ -1288,7 +1329,7 @@ pub(super) fn candidates(
         record_reason(&mut reason, "partial_response");
     }
     let schema_ok = schema_consistent && first_schema_ok;
-    let (planned, ready_tasks) = candidate_planned_issues(c, root, slug);
+    let (planned, ready_tasks) = candidate_planned_issues(c, root, slug, deadline);
     if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
         record_reason(&mut reason, "plan_unverified");
     } else if !schema_ok {
