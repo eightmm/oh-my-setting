@@ -1,6 +1,6 @@
 // Run with node --test crates/oms-mcp-server/tests/conversation-panel.test.mjs.
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { setImmediate } from 'node:timers/promises';
 import test from 'node:test';
@@ -145,7 +145,8 @@ async function panel(projects, dashboard = {}, options = {}) {
   const cssSupports=(k,v)=>typeof v==='string' && (k==='color'?/^#[0-9a-f]{6}$/i.test(v):
     k==='border-radius'?v.trim().split(/\s+/).every((p,i)=>i<4 && /^(?:0|(?:\d+|\d*\.\d+)(?:px|r?em|%))$/i.test(p)):
     k==='font-family' && v.split(',').every(f=>/^(?:"[^"]+"|'[^']+'|[a-z_-][a-z0-9_-]*(?:\s+[a-z_-][a-z0-9_-]*)*)$/i.test(f.trim())));
-  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:cssSupports}, setTimeout, clearTimeout, crypto:{randomUUID},
+  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:cssSupports}, setTimeout, clearTimeout,
+    crypto:{randomUUID,subtle:{async digest(algorithm,bytes){assert.equal(algorithm,'SHA-256');return createHash('sha256').update(bytes).digest();}}},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -542,7 +543,7 @@ test('the first screen shows proven participants and only requests registry, sna
   await choose(p,'ko');assert.match(cards[1].textContent,/차단됨.*배정 기록 보기/);assert.match(cards[2].textContent,/배정 대기/);
   assert.ok(!html.includes('role="tablist"'));
   for(const tool of ['oms_panel_project_graph','oms_panel_work_items','oms_panel_usage','oms_panel_capabilities','oms_panel_tui_view'])
-    assert.ok(!script.includes(tool),tool);
+    assert.ok(!p.calls.some(call=>call.name===tool),tool);
   const generic=await panel([],dashboard,{locale:'en',readOnly:true});
   assert.deepEqual(generic.calls.map(c=>c.name),startup.slice(0,2));
   assert.equal(generic.get('new-goal').hidden,true);assert.equal(generic.get('header-main').hidden,true);
@@ -1434,8 +1435,24 @@ test('only an independently confirmed physical binding retains a public stale sn
   assert.equal(p.get('view').hidden,true);assert.equal(p.run('dashboardData'),undefined);
 });
 
+const droppedFindingFields=['projectKey','room','owner','provider','participant','leadRequestId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
+function collectObjectKeys(value,keys=new Set()){
+  if(!value || typeof value!=='object')return keys;
+  if(Array.isArray(value)){for(const item of value)collectObjectKeys(item,keys);return keys;}
+  for(const [k,v] of Object.entries(value)){keys.add(k);collectObjectKeys(v,keys);}
+  return keys;
+}
+function assertPrivateFindingOmitted(delivered,internalValues=[],allowTurnId=false){
+  const keys=collectObjectKeys(delivered);
+  for(const field of droppedFindingFields)assert.equal(keys.has(field),false,field);
+  if(!allowTurnId)assert.equal(keys.has('turnId'),false,'turnId');
+  else if(delivered?.structuredContent?.source)assert.equal(Object.hasOwn(delivered.structuredContent.source,'turnId'),false,'source.turnId');
+  const serialized=JSON.stringify(delivered);
+  for(const internal of internalValues)assert.ok(!serialized.includes(internal),internal);
+}
+
 test('recorded Lead answer pages are lazy, digest-bound and prepare only an exact scoped draft',async()=>{
-  const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false;
+  const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false,wrongHandoff=false;
   const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
   const d={...dashboard,goal:'한'.repeat(2000),
     planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
@@ -1449,7 +1466,7 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
         v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Question',turnId:id,status:'replied'},{role:'claude',text:'Excerpt',turnId:id,truncated:true}]}};
         if(a.answerPage!==undefined)v._private.answer={turnId:id,text:a.answerPage?'tail':'한글',offset:a.answerPage?6:0,bytes:a.answerPage?4:6,totalBytes:10,
           digest:changed?'e'.repeat(64):digest,nextCursor:a.answerPage?null:'next-part',hasMore:!a.answerPage,source:'recorded-answer',
-          handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:'recorded-operation'}};
+          handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:wrongHandoff?'other-operation':'recorded-operation'}};
       }
       return v;
     }
@@ -1485,6 +1502,23 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   await p.event('answer-followup','click');await p.event('followup-add','click');
   assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-b');
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  open.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('answer-more','click');await p.event('answer-preview','click');
+  assert.equal(p.get('finding-text').textContent,'tail');assert.match(p.get('finding-range').textContent,/bytes 7–10 of 10.*partial/);
+  assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'));
+  await p.event('finding-share','click');
+  const deliveredLead=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredLead.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',turnId:id,
+    source:{kind:'lead-answer',summary:'OMS Lead · Claude · Recorded output'},
+    selection:{text:'tail',offset:6,bytes:4,totalBytes:10,truncated:true,displayedBytes:4,
+      excerptSha256:createHash('sha256').update('tail').digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredLead,['recorded-operation',askParticipant,claudeReq,'b'.repeat(64),digest,main.room,main.participant,'next-part'],true);
+  assert.doesNotMatch(JSON.stringify(shared),/Question|Excerpt/);assert.equal(p.host.messages.length,0);
+  wrongHandoff=true;await p.event('finding-share','click');
+  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,1);
+  assert.equal(p.get('finding-text').textContent,'');assert.match(p.get('followup-status').textContent,/Nothing was shared/);wrongHandoff=false;
   open.dispatchEvent(new Event('click'));await setImmediate();const fresh=p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button');
   p.host.delayTool=managedRead;fresh.dispatchEvent(new Event('click'));await setImmediate();
   await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
@@ -1515,6 +1549,17 @@ test('Room result truncation links a bounded evidence read and keeps the reader 
   for(const internal of [key,digest,lead.participant,main.room])assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(internal),internal);
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('chat-result-full','click');await p.event('answer-more','click');await p.event('answer-preview','click');
+  assert.equal(p.get('finding-text').textContent,'last');await p.event('finding-share','click');
+  const deliveredRoom=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredRoom.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
+    source:{kind:'room-result',summary:'OMS Lead · Claude · Recorded output'},
+    selection:{text:'last',offset:5,bytes:4,totalBytes:9,truncated:true,displayedBytes:4,
+      excerptSha256:createHash('sha256').update('last').digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredRoom,[key,digest,lead.participant,main.room,main.participant]);
+  assert.doesNotMatch(JSON.stringify(shared),/Message [12]|Result excerpt/);assert.equal(p.host.messages.length,0);
+  p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   wrongAttempt=true;await p.event('chat-result-full','click');
   assert.equal(p.get('full-answer-body').textContent,'');assert.match(p.get('answer-status').textContent,/changed/);assert.equal(p.get('answer-followup').hidden,true);assert.equal(p.get('answer-copy').hidden,true);
   wrongAttempt=false;wrongKey=true;await p.event('chat-result-full','click');
@@ -1540,6 +1585,336 @@ test('worker full output pages keep the exact pair and reject a changed digest',
   await p.event('output-more','click');assert.equal(p.get('output-body').textContent,'tail');assert.equal(p.get('output-more').hidden,true);
   emptyPrefix=true;await p.event('output-refresh','click');assert.equal(p.get('output-body').textContent,'');assert.equal(p.get('output-copy').hidden,true);
   assert.ok(p.calls.filter(c=>c.name==='oms_worker_output').every(c=>c.args.leadAttempt==='l' && c.args.workerAttempt==='child'));
+});
+
+async function findingFixture(){
+  const key='b'.repeat(64),digest='d'.repeat(64),displayed='한'.repeat(2000),tail='PRIVATE OFF-PAGE CONTENT';
+  const workers=['task-a','task-b'].map((task,i)=>({id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done',task}));
+  const d={...dashboard,goal:'Review selected findings',conversationAttempts:[...dashboard.conversationAttempts,...workers],
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]}};
+  const state={key,readOnly:false,snapshot:d,fault:null};
+  const p=await panel(['one','two'],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:state.key,two:'c'.repeat(64)},readOnly:state.readOnly}),
+    oms_panel_snapshot:()=>{if(state.fault==='offline')throw Error('offline');return {dashboard:state.snapshot};},
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      if(state.fault==='pair')publicData.workerAttempt='worker-0';
+      const text=state.fault==='body'?'x'+displayed.slice(1):answerPage==='next'?tail:displayed;
+      const out={...publicData,text,source:state.fault==='format'?'native-report':'indexed-answer',truncated:answerPage!=='next'};
+      if(answerPage!==undefined)out.page={offset:answerPage==='next'?Buffer.byteLength(displayed):0,bytes:Buffer.byteLength(text),
+        totalBytes:Buffer.byteLength(displayed+tail),digest:(state.fault==='digest'?'e'.repeat(64):digest),nextCursor:answerPage==='next'?null:'next',hasMore:answerPage!=='next'};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const list=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul');
+  const open=list.children.filter(e=>e.tagName==='li')[1].children.find(e=>e.className?.includes('worker-output-link'));
+  open.dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  assert.equal(p.get('finding-preview').hidden,false);assert.equal(p.get('worker-output').open,false);
+  return {p,state,d,key,digest,displayed,tail};
+}
+
+test('selected worker findings stay private through preview and references-only drafts until an exact bounded Share',async()=>{
+  const {p,key,digest,displayed,tail}=await findingFixture(),selection='한'.repeat(1333);
+  assert.match(p.get('attention-summary').textContent,/Review task A/);
+  assert.equal(p.get('finding-text').textContent,selection);assert.equal(Buffer.byteLength(selection),3999);
+  assert.match(p.get('finding-range').textContent,/Sharing bytes 1–3999 of 6024.*partial result/);
+  assert.match(p.get('finding-range').textContent,/first 3999 bytes/);
+  assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/);
+  assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.kind,'oms-followup-draft');
+  assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/);
+  const mark=p.calls.length;await p.event('finding-share','click');
+  const deliveredWorker=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredWorker.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
+    source:{kind:'worker-output',summary:'Codex Worker · Worker output'},
+    selection:{text:selection,offset:0,bytes:3999,totalBytes:Buffer.byteLength(displayed+tail),truncated:true,
+      displayedBytes:6000,excerptSha256:createHash('sha256').update(selection).digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredWorker,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+  assert.deepEqual(p.calls.slice(mark).map(c=>c.name),['oms_list_projects','oms_panel_snapshot','oms_worker_output','oms_list_projects','oms_panel_snapshot']);
+  assert.equal(p.calls.slice(mark)[2].args.answerPage,'');assert.equal(p.host.messages.length,0);
+  assert.doesNotMatch(JSON.stringify(shared),/PRIVATE OFF-PAGE/);assert.match(p.get('followup-status').textContent,/no execution authority/);
+});
+
+test('finding Share rejects changed source, binding, Room, task, read-only state and missing context capability',async()=>{
+  for(const fault of ['digest','body','pair','format','binding','room','owner','task','readOnly','capability','offline']){
+    const {p,state,d}=await findingFixture();
+    if(fault==='binding')state.key='c'.repeat(64);
+    else if(fault==='readOnly')state.readOnly=true;
+    else if(fault==='capability')p.run('contextTypes={};paintFollowup()');
+    else if(['room','owner'].includes(fault))state.snapshot={...d,conversationMain:{...d.conversationMain,[fault==='room'?'room':'participant']:'changed'}};
+    else if(fault==='task')state.snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='worker-1'?{...a,task:'task-a'}:a)};
+    else state.fault=fault;
+    await p.event('finding-share','click');
+    assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'),fault);
+    assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/,fault);assert.equal(p.host.messages.length,0,fault);
+    if(fault==='capability')assert.equal(p.get('finding-share').hidden,true);
+    else {assert.equal(p.get('finding-text').textContent,'',fault);assert.match(p.get('followup-status').textContent,/Nothing was shared/,fault);}
+  }
+});
+
+test('pending finding Share is fenced by project changes, teardown, source-scope changes and draft edits; text-only hosts remain supported',async()=>{
+  for(const change of ['project','teardown','room','draft','stale']){
+    const {p,state,d}=await findingFixture();p.host.delayTool='oms_worker_output';await p.event('finding-share','click');
+    const before=p.calls.length;
+    if(change==='project')await p.open('input',{arguments:{project:'two'}});
+    else if(change==='teardown')p.notify({method:'ui/resource-teardown',id:'close-finding',params:{}});
+    else if(change==='room')state.snapshot={...d,conversationMain:{...d.conversationMain,room:'room-b'}};
+    else if(change==='stale'){state.fault='offline';await p.event('refresh','click');}
+    else {p.get('followup-text').value='Edited after clicking Share';await p.event('followup-text','input');}
+    p.host.release();await setImmediate();
+    assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'),change);
+    assert.equal(p.get('finding-text').textContent,'',change);
+    if(change==='teardown')assert.equal(p.calls.length,before);
+  }
+  const {p,key,digest}=await findingFixture();p.run('contextTypes={text:{}}');await p.event('finding-share','click');
+  const deliveredText=p.host.contexts.at(-1),text=JSON.parse(deliveredText.content[0].text);
+  assert.equal(text.kind,'oms-selected-finding');assert.equal(text.selection.bytes,3999);assert.equal(text.authority,'context-only');
+  assertPrivateFindingOmitted(deliveredText,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+  assertPrivateFindingOmitted(text,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+});
+
+test('worker task attribution falls back to rendered Lead workers for member-parent links and snapshots without conversationAttempts',async()=>{
+  const key='b'.repeat(64),digest='d'.repeat(64);
+  const memberWorkers=[0,1].map(i=>({room:main.room,participant:'member-worker-'+i,parent:lead.participant,role:'worker',provider:'codex',joined:true}));
+  const workerAttempts=[{room:main.room,id:'mw-0',participant:'member-worker-0',role:'worker',provider:'codex',state:'done',task:'task-member'},
+    {room:main.room,id:'mw-1',participant:'member-worker-1',role:'worker',provider:'codex',state:'done',task:null}];
+  const d={...dashboard,conversationMain:{...main,participants:[lead,...memberWorkers]},
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
+    conversationAttempts:[...dashboard.conversationAttempts,...workerAttempts]};
+  let snapshot=d;
+  const p=await panel([],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:[],binding:'pinned',projectKey:key}),
+    oms_panel_snapshot:()=>({dashboard:snapshot}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'},body='Member worker finding';
+      const out={...publicData,text:body,source:'indexed-answer',truncated:false};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(body),totalBytes:Buffer.byteLength(body),digest,nextCursor:null,hasMore:false};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  const open=i=>items[i].children.find(e=>e.className?.includes('worker-output-link'));
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');
+  assert.match(p.get('followup-text').value,/^Task: task-member$/m);
+  assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-member');
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'project'),false);
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  snapshot={conversationBinding:'matched',conversationMain:d.conversationMain};
+  await p.event('finding-share','click');
+  const sharedMember=p.host.contexts.at(-1);
+  assert.equal(sharedMember.structuredContent.kind,'oms-selected-finding');
+  assert.equal(sharedMember.structuredContent.task,'task-member');
+  assert.equal(Object.hasOwn(sharedMember.structuredContent,'project'),false);
+  assertPrivateFindingOmitted(sharedMember,[key,digest,main.room,main.participant,'mw-0','member-worker-0','indexed-answer']);
+  open(1).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
+  await p.event('followup-add','click');
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'task'),false);
+  await p.event('finding-share','click');
+  const sharedUnattributed=p.host.contexts.at(-1);
+  assert.equal(sharedUnattributed.structuredContent.kind,'oms-selected-finding');
+  assert.equal(Object.hasOwn(sharedUnattributed.structuredContent,'task'),false);
+  assertPrivateFindingOmitted(sharedUnattributed,[key,digest,main.room,main.participant,'mw-1','member-worker-1','indexed-answer']);
+  snapshot=d;await p.event('refresh','click');
+  const refreshedItems=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  refreshedItems[0].children.find(e=>e.className?.includes('worker-output-link')).dispatchEvent(new Event('click'));
+  await setImmediate();await p.event('output-preview','click');
+  snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-0'?{...a,task:'task-a'}:a)};
+  const sharedBefore=p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length;
+  await p.event('finding-share','click');
+  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,sharedBefore);
+  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+});
+
+const inspectReads=['oms_panel_usage','oms_panel_tui_view','oms_panel_project_graph'];
+function inspectionTools(state){
+  return {
+    oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:state.key,two:'c'.repeat(64)},readOnly:state.readOnly}),
+    oms_panel_usage:a=>{
+      assert.deepEqual(Object.keys(a),['project']);
+      return {scope:'repository-recent-attempts',providers:[{provider:'codex',contextUsed:0,cacheReadShare:null,windowsOmitted:1,
+        windows:[{name:'5 hour',used:0,source:'cached observation',stale:true,resets_at:null,age_seconds:12}],
+        recent7d:{calls:1,input:0,output:17,cacheRead:null}}],attempts:[
+        {id:'reported-zero',provider:'codex',tokens:0,source:'receipt',reportedCalls:1,calls:1,breakdown:[],costMicrousd:1500000,costSource:'events'},
+        {id:'unreported',provider:'claude',tokens:null,source:null,reportedCalls:null,calls:null,breakdown:[],costMicrousd:null,costSource:null}],
+        attemptsOmitted:0,providerTotals:[],providerTotalsOmitted:0,diagnostic:'PRIVATE DEBUG JSON'};
+    },
+    oms_panel_tui_view:a=>{
+      assert.deepEqual(Object.keys(a).sort(),['page','project','view']);assert.ok(['routes','modelcatalog'].includes(a.view));
+      return {view:a.view,page:a.page,status:'ready',nextPage:a.view==='routes' && a.page===1?2:null,incomplete:false,
+        columns:[{key:a.view==='routes'?'role':'model',label:'항목'}],rows:a.view==='routes'?
+        [{role:'reviewer '+a.page,access:'read-only',tier:'review',status:'ready',provider:'claude',model:'fixture-model',effort:'high',
+          requestedModel:null,requestedEffort:null,requestedAccount:null,selectedAccount:null,versionEvidence:'cached',probeAge:12,inFlight:0,recentAttempts:4,issue:null}]:
+        [{provider:'codex',model:'cached-model',efforts:null,providerEfforts:'low, high',routable:null,source:'oms models · cache',probe:'unavailable',age:null}]};
+    },
+    oms_panel_project_graph:a=>{
+      assert.ok(Object.keys(a).every(k=>['project','node','query','depth','limit'].includes(k)));
+      assert.equal(a.depth,2);assert.equal(a.limit,20);assert.ok(!(a.node && a.query));
+      return {schema:1,kind:'oms-panel-project-graph',status:'ready',completeness:'complete',
+        provenance:{source:'indexed-graph',mode:'indexed',indexState:'present',indexFreshness:'fresh',verifiedRelationships:true,readOnly:true,wroteIndex:false},
+        scope:{repository:'fixture',focusNode:a.node||null,query:a.query||null,includeTests:false,depth:a.depth,limit:a.limit},
+        limits:{maxNodes:20,maxEdges:180,truncated:false},counts:{shown_nodes:2,total_nodes:2,shown_edges:2,total_edges:2,confidence:{EXTRACTED:1,INFERRED:1}},
+        nodes:[{id:'file:src/a.rs',label:'a.rs',kind:'file',path:'src/a.rs'},{id:'file:src/b.rs',label:'b.rs',kind:'file',path:'src/b.rs'}],
+        edges:[{source:'file:src/a.rs',target:'file:src/b.rs',relation:'imports',confidence:'EXTRACTED'},
+          {source:'file:src/b.rs',target:'file:src/a.rs',relation:'related',confidence:'INFERRED'}],selection:null};
+    }
+  };
+}
+
+test('Inspect reads only the selected view and renders usage, paged routes, catalog evidence and graph neighborhoods',async()=>{
+  const state={key:'b'.repeat(64)},p=await panel(['one','two'],dashboard,{locale:'en',tools:inspectionTools(state)});
+  await p.open('input',{arguments:{project:'one'}});
+  assert.ok(!p.calls.some(c=>inspectReads.includes(c.name)));assert.equal(p.get('inspect-open').disabled,false);
+  await p.event('inspect-open','click');
+  assert.deepEqual(p.calls.filter(c=>inspectReads.includes(c.name)).map(c=>c.name),['oms_panel_usage']);
+  const content=p.get('inspect-content');
+  assert.match(content.textContent,/Observed context used0%Cache read shareStatus unknown/);
+  assert.match(content.textContent,/tokens in the last 7 days/);assert.match(content.textContent,/Reported tokens0SourceUsage receipt/);
+  assert.match(content.textContent,/Reported cost \(USD\)1.5/);assert.match(content.textContent,/Reported tokensStatus unknown/);
+  assert.doesNotMatch(content.textContent,/PRIVATE DEBUG JSON|"providers"|"scope"/);
+  assert.match(p.get('inspect-status').textContent,/Only part/);assert.match(p.get('inspect-note').textContent,/not totals for this Room/);
+  p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');
+  assert.match(content.textContent,/reviewer 1/);assert.equal(p.get('inspect-prev').hidden,true);assert.equal(p.get('inspect-next').hidden,false);
+  assert.match(p.get('inspect-note').textContent,/proposals/);await p.event('inspect-next','click');
+  assert.match(content.textContent,/reviewer 2/);assert.equal(p.get('inspect-prev').hidden,false);assert.equal(p.get('inspect-next').hidden,true);
+  await p.event('inspect-prev','click');assert.match(content.textContent,/reviewer 1/);
+  p.get('inspect-kind').value='modelcatalog';await p.event('inspect-kind','change');
+  assert.match(content.textContent,/cached-model/);assert.match(content.textContent,/Model-specific effortsStatus unknownProvider-wide effortslow, high/);
+  assert.match(p.get('inspect-note').textContent,/does not confirm current account access/);assert.equal(p.get('inspect-next').hidden,true);
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-graph-form').hidden,false);assert.match(content.textContent,/Cached project relationships/);
+  assert.match(content.textContent,/imports · Extracted/);assert.match(content.textContent,/related · Inferred/);
+  const nodes=content.children[0].children.find(e=>e.className==='inspect-nodes');nodes.children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...p.calls.filter(c=>c.name==='oms_panel_project_graph').at(-1).args},{project:'one',node:'file:src/a.rs',limit:20,depth:2});
+  p.get('inspect-query').value='src';await p.event('inspect-graph-form','submit');
+  assert.deepEqual({...p.calls.filter(c=>c.name==='oms_panel_project_graph').at(-1).args},{project:'one',query:'src',limit:20,depth:2});
+  await p.event('inspect-root','click');assert.equal(Object.hasOwn(p.calls.filter(c=>c.name==='oms_panel_project_graph').at(-1).args,'query'),false);
+  await choose(p,'ko');assert.match(content.textContent,/추출됨/);assert.match(p.get('inspect-note').textContent,/관계/);
+  await p.event('inspect-close','click');assert.equal(content.textContent,'');assert.equal(p.get('inspection').open,false);
+  assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>/^oms_(start|send|update|open_lead|assign)/.test(c.name)));
+  const readOnly=await panel(['one'],dashboard,{locale:'en',tools:inspectionTools({key:'b'.repeat(64),readOnly:true})});
+  await readOnly.open('input',{arguments:{project:'one'}});await readOnly.event('inspect-open','click');
+  assert.match(readOnly.get('inspect-content').textContent,/provider observation/);assert.equal(readOnly.get('followup-open').hidden,true);
+});
+
+test('Inspect drops late views and private scope changes, and clears unverifiable or malformed results',async()=>{
+  const state={key:'b'.repeat(64)},p=await panel(['one','two'],dashboard,{locale:'en',tools:inspectionTools(state)});
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  p.host.delayTool='oms_panel_project_graph';p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');p.host.release();await setImmediate();
+  assert.match(p.get('inspect-content').textContent,/reviewer 1/);assert.doesNotMatch(p.get('inspect-content').textContent,/a.rs|Cached project/);
+  p.host.delayTool='oms_panel_usage';p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');
+  state.key='d'.repeat(64);p.host.release();await setImmediate();
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
+  state.key='b'.repeat(64);await p.event('inspect-refresh','click');assert.match(p.get('inspect-content').textContent,/provider observation/);
+  p.host.delayTool='oms_panel_usage';await p.event('inspect-refresh','click');const before=p.calls.length;
+  await p.event('inspect-close','click');p.host.release();await setImmediate();
+  assert.equal(p.calls.length,before);assert.equal(p.get('inspect-content').textContent,'');
+  p.host.delayTool='oms_panel_usage';await p.event('inspect-open','click');
+  await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
+  assert.equal(p.get('inspection').open,false);assert.equal(p.get('inspect-content').textContent,'');
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  const good=p.host.tools.oms_panel_tui_view;
+  for(const fault of ['view','page','nextPage','rows']){
+    p.host.tools.oms_panel_tui_view=a=>{const v=good(a);if(fault==='view')v.view='plan';if(fault==='page')v.page++;
+      if(fault==='nextPage')v.nextPage=999;if(fault==='rows')v.rows=Array(21).fill(v.rows[0]);return v;};
+    p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');
+    assert.equal(p.get('inspect-content').textContent,'',fault);assert.match(p.get('inspect-status').textContent,/Could not verify/,fault);
+    assert.equal(p.get('inspect-next').hidden,true,fault);
+  }
+  const graph=p.host.tools.oms_panel_project_graph;p.host.tools.oms_panel_project_graph=a=>({...graph(a),scope:{focusNode:'different',query:null}});
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
+  p.host.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
+  p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');assert.match(p.get('inspect-content').textContent,/No records/);
+});
+
+test('Inspect graph distinguishes unavailable provenance from zero cached relationships',async()=>{
+  const state={key:'b'.repeat(64)},tools=inspectionTools(state),good=tools.oms_panel_project_graph;
+  tools.oms_panel_project_graph=a=>({...good(a),status:'unknown',completeness:'unknown',
+    provenance:{source:'git-ls-files',mode:'unavailable',indexState:'unindexed',indexFreshness:'absent',verifiedRelationships:false,readOnly:true,wroteIndex:false},
+    counts:{shown_nodes:0,total_nodes:0,shown_edges:0,total_edges:0,confidence:{}},nodes:[],edges:[]});
+  const p=await panel(['one'],dashboard,{locale:'en',tools});
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-content').textContent,'');
+  assert.doesNotMatch(p.get('inspect-content').textContent,/Cached project relationships|0 \/ 0|No records/);
+  assert.match(p.get('inspect-status').textContent,/Status unknown/);
+  await choose(p,'ko');assert.match(p.get('inspect-status').textContent,/상태 미확인/);
+});
+
+test('finding preview controls stay hidden on hosts without updateModelContext',async()=>{
+  const key='b'.repeat(64),id=randomUUID(),digest='d'.repeat(64);
+  const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
+  const worker={id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done'};
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,worker]};
+  const p=await panel(['one'],d,{locale:'en',tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,...pair}=a,publicData={...pair,status:'complete'};
+      return {structuredContent:publicData,_meta:{workerOutput:{...publicData,text:'Worker answer',source:'indexed-answer',truncated:false}}};
+    },
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider){
+        v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Q',turnId:id,status:'replied'},{role:'claude',text:'A',turnId:id,truncated:true}]}};
+        if(a.answerPage!==undefined)v._private.answer={turnId:id,text:'Full Lead answer',offset:0,bytes:16,totalBytes:16,digest,nextCursor:null,hasMore:false,
+          source:'recorded-answer',handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:'recorded-operation'}};
+      }
+      return v;
+    },
+    oms_panel_chat:a=>a.section?{...a,projectKey:a.projectKey,source:'room',messages:[],evidence:{attempt:a.attempt,section:a.section,text:'Room full',offset:0,bytes:9,totalBytes:9,digest,nextCursor:null,hasMore:false}}:
+      {...a,source:'room',messages:[],result:{attempt:'l',text:'Room excerpt',truncated:true}}
+  }});
+  const group=p.get('leads').children[1].children[2],list=group.children.find(e=>e.tagName==='ul'),openWorker=list.children.find(e=>e.tagName==='li').children.find(e=>e.className?.includes('worker-output-link'));
+  openWorker.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('output-copy').hidden,false);assert.equal(p.get('output-followup').hidden,false);assert.equal(p.get('output-preview').hidden,true);
+  await p.event('output-close','click');
+  const openLead=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');openLead.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);assert.equal(p.get('answer-preview').hidden,true);
+  await p.event('chat-back','click');
+  group.children.find(e=>e.className==='person').dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-result-full','click');
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);assert.equal(p.get('answer-preview').hidden,true);
+});
+
+test('worker output preview failure hides body and controls, and superseded loads leave newer controls disabled',async()=>{
+  const key='b'.repeat(64),digest='d'.repeat(64);let failPage=true;
+  const workers=[0,1].map(i=>({id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done'}));
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,...workers]};
+  const p=await panel(['one'],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      const text=answerPage!==undefined?(failPage?'changed body':'Previewable output'):'Previewable output';
+      const out={...publicData,text,source:'indexed-answer',truncated:true};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(text),totalBytes:Buffer.byteLength(text)+4,digest,nextCursor:'next',hasMore:true};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  const open=i=>items[i].children.find(e=>e.className?.includes('worker-output-link'));
+  open(0).dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('output-body').hidden,false);assert.equal(p.get('output-limited').hidden,false);assert.equal(p.get('output-more').hidden,false);
+  await p.event('output-preview','click');
+  for(const id of ['output-body','output-limited','output-first','output-more','output-copy','output-followup','output-preview'])
+    assert.equal(p.get(id).hidden,true,id);
+  assert.match(p.get('output-status').textContent,/changed/);assert.equal(p.get('output-refresh').disabled,false);
+  failPage=false;await p.event('output-refresh','click');
+  p.host.delayTool='oms_worker_output';await p.event('output-preview','click');
+  const firstRelease=p.host.release;assert.equal(p.get('output-preview').disabled,true);
+  await p.event('output-close','click');open(1).dispatchEvent(new Event('click'));await setImmediate();
+  p.host.delayTool='oms_worker_output';await p.event('output-preview','click');
+  const secondRelease=p.host.release;assert.equal(p.get('output-preview').disabled,true);assert.equal(p.get('output-refresh').disabled,true);
+  firstRelease();await setImmediate();
+  assert.equal(p.get('output-preview').disabled,true);assert.equal(p.get('output-refresh').disabled,true);
+  secondRelease();await setImmediate();
+  assert.equal(p.get('worker-output').open,false);assert.equal(p.get('finding-preview').hidden,false);
 });
 
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{

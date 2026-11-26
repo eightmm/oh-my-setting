@@ -18,7 +18,8 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v30.html";
+const URI: &str = "ui://oms/conversation-panel/v31.html";
+const V30: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
 const V28: &str = "ui://oms/conversation-panel/v28.html";
 const V27: &str = "ui://oms/conversation-panel/v27.html";
@@ -1373,6 +1374,7 @@ impl Server<'_> {
                             | V27
                             | V28
                             | V29
+                            | V30
                     )
                 ) =>
             {
@@ -2332,8 +2334,19 @@ impl Server<'_> {
                     let text = data["evidence"]["text"]
                         .as_str()
                         .ok_or("Full retained evidence is unavailable.")?;
-                    oms_scrub::check_outbound(text.as_bytes())
-                        .map_err(|_| "OMS withheld this evidence during its outbound scan.")?;
+                    oms_scrub::outbound_page(
+                        text,
+                        oms_scrub::OUTBOUND_PAGE_BYTES,
+                        oms_scrub::PageSelector::Offset(0),
+                    )
+                    .map_err(|e| match e {
+                        oms_scrub::PageError::OutboundWithheld => {
+                            "OMS withheld this evidence during its outbound scan."
+                        }
+                        oms_scrub::PageError::InvalidRange => {
+                            "The recorded output page could not be verified."
+                        }
+                    })?;
                     let page = output_page(&data["evidence"], text, cursor, position, &scope)?;
                     for field in [
                         "offset",
@@ -2680,8 +2693,19 @@ impl Server<'_> {
                                 .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
                     })
                     .ok_or(err)?;
-                oms_scrub::check_outbound(text.as_bytes())
-                    .map_err(|_| "OMS withheld this worker output during its outbound scan.")?;
+                let bound = if page.is_some() {
+                    oms_scrub::OUTBOUND_PAGE_BYTES
+                } else {
+                    crate::PAGE_BYTES
+                };
+                oms_scrub::outbound_page(text, bound, oms_scrub::PageSelector::Offset(0)).map_err(
+                    |e| match e {
+                        oms_scrub::PageError::OutboundWithheld => {
+                            "OMS withheld this worker output during its outbound scan."
+                        }
+                        oms_scrub::PageError::InvalidRange => err,
+                    },
+                )?;
             }
             Some("running" | "not_recorded" | "unavailable")
                 if data.get("text").is_some_and(Value::is_null)
