@@ -2058,6 +2058,53 @@ mod tests {
                     .any(|r| r["section"] == section && r["level"] == "ok")
             );
         }
+        for (env, expected) in [
+            (json!({"OMS_MCP_TOOL_PROFILE":"core"}), "ok"),
+            (json!({"OMS_MCP_TOOL_PROFILE":"full"}), "ok"),
+            (json!({"OMS_MCP_TOOL_PROFILE":"unknown"}), "error"),
+            (
+                json!({"OMS_MCP_TOOL_PROFILE":"full","USER_CUSTOM":"1"}),
+                "error",
+            ),
+        ] {
+            let mut selected = r::parse(&mcp).unwrap();
+            selected["mcpServers"]["oh-my-setting"]["env"] = env;
+            let selected = r::bytes(&selected).unwrap();
+            let mut tx = crate::transaction::Transaction::begin(&paths).unwrap();
+            // Publish the generated directory as installation does. Replacing
+            // one child first would include its temporary undo file in the
+            // directory identity recorded before transaction cleanup.
+            tx.files(
+                &target,
+                &[
+                    ("plugin.json", plugin, 0o600),
+                    ("mcp_config.json", &selected, 0o600),
+                ],
+            )
+            .unwrap();
+            let marker = json!({"schema":1,"kind":"directory","source":source,
+                "sha256":crate::transaction::identity(&target).unwrap()});
+            tx.write(
+                &crate::install::marker(&target),
+                &r::bytes(&marker).unwrap(),
+                0o600,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert!(crate::install::owned(&source, &target).unwrap());
+            let (code, report) = inspect();
+            assert_eq!(code, i32::from(expected == "error"), "{report}");
+            assert_eq!(fs::read(target.join("mcp_config.json")).unwrap(), selected);
+            for (section, level) in [("agy_plugin", "ok"), ("agy_mcp", expected)] {
+                assert!(
+                    report["findings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r["section"] == section && r["level"] == level)
+                );
+            }
+        }
         fs::write(target.join("mcp_config.json"), b"{\"mcpServers\":{}}").unwrap();
         let (code, report) = inspect();
         assert_eq!(code, 1);

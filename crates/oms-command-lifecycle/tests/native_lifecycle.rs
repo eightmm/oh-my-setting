@@ -2964,7 +2964,33 @@ fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServi
     )
     .unwrap();
     assert_eq!(inspect(json!({"mcp":true}))["exit"], 0);
-    for invalid in [json!({"args":[]}), json!({"disabled":true})] {
+    for profile in ["core", "full"] {
+        let mut selected = managed.clone();
+        selected["mcpServers"]["oh-my-setting"]["env"] = json!({"OMS_MCP_TOOL_PROFILE":profile});
+        write(&claude, &selected);
+        fs::write(
+            &codex,
+            format!(
+                "[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                json!(executable)
+            ),
+        )
+        .unwrap();
+        let saved = (fs::read(&claude).unwrap(), fs::read(&codex).unwrap());
+        assert_eq!(inspect(json!({"mcp":true}))["exit"], 0);
+        assert_eq!(
+            (fs::read(&claude).unwrap(), fs::read(&codex).unwrap()),
+            saved
+        );
+    }
+    for invalid in [
+        json!({"args":[]}),
+        json!({"disabled":true}),
+        json!({"env":{"OMS_MCP_TOOL_PROFILE":"unknown"}}),
+        json!({"env":{"OMS_MCP_TOOL_PROFILE":1}}),
+        json!({"env":{"OMS_MCP_TOOL_PROFILE":"full","USER_CUSTOM":"1"}}),
+        json!({"command":"other-mcp","env":{"OMS_MCP_TOOL_PROFILE":"full"}}),
+    ] {
         let mut changed = managed.clone();
         changed["mcpServers"]["oh-my-setting"]
             .as_object_mut()
@@ -2972,6 +2998,31 @@ fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServi
             .extend(invalid.as_object().unwrap().clone());
         write(&claude, &changed);
         assert_eq!(inspect(json!({"mcp":true}))["exit"], 1);
+    }
+    write(&claude, &managed);
+    for env in [
+        "{ OMS_MCP_TOOL_PROFILE = \"unknown\" }",
+        "{ OMS_MCP_TOOL_PROFILE = \"full\", USER_CUSTOM = \"1\" }",
+    ] {
+        fs::write(
+            &codex,
+            format!(
+                "[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\nenv = {env}\n",
+                json!(executable)
+            ),
+        )
+        .unwrap();
+        let report = inspect(json!({"mcp":true}));
+        assert_eq!(report["exit"], 1);
+        for (section, level) in [("claude_mcp", "ok"), ("codex_mcp", "error")] {
+            assert!(
+                report["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["section"] == section && r["level"] == level)
+            );
+        }
     }
     fs::write(
         &claude,
@@ -4229,6 +4280,68 @@ esac
     assert!(check_cron.contains(" auto-update check"));
     assert!(!check_cron.contains(" auto-update apply"));
     success(call("uninstall-autoupdate", &[], &source, &host));
+    let claude_config = home.join(".claude.json");
+    let saved_mcp_files = (fs::read(&claude_config).ok(), fs::read(&codex_config).ok());
+    for tool in ["install", "install-mcp", "install-agy-plugin"] {
+        let preview = if tool == "install" {
+            "--plan"
+        } else {
+            "--dry-run"
+        };
+        for invalid in ["unknown", "FULL", "chatgpt-panel", "mcp-app", ""] {
+            let out = call(
+                tool,
+                &[preview, "--mcp-tool-profile", invalid],
+                &source,
+                &host,
+            );
+            assert_eq!(
+                out.0,
+                2,
+                "{tool}/{invalid}: {}",
+                String::from_utf8_lossy(&out.2)
+            );
+        }
+        if tool != "install" {
+            for profile in ["core", "full"] {
+                let out = success(call(
+                    tool,
+                    &[preview, "--mcp-tool-profile", profile],
+                    &source,
+                    &host,
+                ));
+                assert!(
+                    String::from_utf8_lossy(&out).contains(&format!("MCP tool profile {profile}"))
+                );
+            }
+            assert_eq!(
+                call(
+                    tool,
+                    &["--remove", "--mcp-tool-profile", "full"],
+                    &source,
+                    &host
+                )
+                .0,
+                2
+            );
+        }
+        let help = success(call(tool, &["--help"], &source, &host));
+        assert!(String::from_utf8_lossy(&help).contains("--mcp-tool-profile core|full"));
+    }
+    assert_eq!(
+        call(
+            "install-agy-plugin",
+            &["--probe-surfaces", "--mcp-tool-profile", "full"],
+            &source,
+            &host
+        )
+        .0,
+        2
+    );
+    assert_eq!(
+        (fs::read(&claude_config).ok(), fs::read(&codex_config).ok()),
+        saved_mcp_files
+    );
     write(
         &home.join(".claude.json"),
         &json!({"custom":true,"mcpServers":{"oh-my-setting":{"type":"stdio","command":"python3","args":[source.join("scripts/oms-mcp-server.py")],"env":{"USER_CUSTOM":"1"}}}}),
@@ -4253,9 +4366,36 @@ esac
     let cleaned_toml = fs::read_to_string(&codex_config).unwrap();
     assert!(!cleaned_toml.contains("mcp_servers"));
     assert!(cleaned_toml.contains(custom));
+    for profile in ["core", "full"] {
+        write(
+            &claude_config,
+            &json!({"custom":true,"mcpServers":{"oh-my-setting":{
+                "type":"stdio","command":home.join(".local/bin/oms"),"args":["mcp-server"],
+                "env":{"OMS_MCP_TOOL_PROFILE":profile}
+            }}}),
+        );
+        fs::write(
+            &codex_config,
+            format!(
+                "{custom}\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                json!(home.join(".local/bin/oms"))
+            ),
+        )
+        .unwrap();
+        success(call("install-mcp", &["--remove"], &source, &host));
+        assert_eq!(read(&claude_config)["custom"], true);
+        assert!(
+            read(&claude_config)["mcpServers"]
+                .get("oh-my-setting")
+                .is_none()
+        );
+        let cleaned = fs::read_to_string(&codex_config).unwrap();
+        assert!(cleaned.contains(custom));
+        assert!(!cleaned.contains("mcp_servers"));
+    }
     fs::write(
         &codex_config,
-        format!("{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\n"),
+        format!("{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\nenv = {{ OMS_MCP_TOOL_PROFILE = \"full\" }}\n"),
     )
     .unwrap();
     let refused_mcp = call("install-mcp", &["--remove"], &source, &host);
@@ -4277,7 +4417,7 @@ esac
     );
     write(
         &agy_plugin.join("mcp_config.json"),
-        &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")]}}}),
+        &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")],"env":{"OMS_MCP_TOOL_PROFILE":"full"}}}}),
     );
     write(
         &agy_plugin.join("hooks.json"),
@@ -4314,6 +4454,21 @@ esac
     let plan: Value =
         serde_json::from_slice(&success(call("install", &["--plan"], &source, &host))).unwrap();
     native_only(&plan);
+    assert!(plan.get("mcp_tool_profile").is_none());
+    for profile in ["core", "full"] {
+        let selected: Value = serde_json::from_slice(&success(call(
+            "install",
+            &["--plan", "--mcp-tool-profile", profile],
+            &source,
+            &host,
+        )))
+        .unwrap();
+        assert_eq!(selected["mcp_tool_profile"], profile);
+        assert!(
+            selected["install"].get("mcp_tool_profile").is_none(),
+            "the registration remains the persistent selector"
+        );
+    }
     // Antigravity auto-enables only when its CLI directory exists.
     assert_eq!(plan["install"]["components"]["agy_plugin"], false);
     let agy_dir = home.join(".gemini/antigravity-cli");

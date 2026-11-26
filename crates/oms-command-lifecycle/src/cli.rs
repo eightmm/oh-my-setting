@@ -10,6 +10,27 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum McpToolProfile {
+    Core,
+    Full,
+}
+impl McpToolProfile {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "core" => Ok(Self::Core),
+            "full" => Ok(Self::Full),
+            _ => r::fail("MCP tool profile must be core or full"),
+        }
+    }
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Full => "full",
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Options {
     pub tool: String,
@@ -20,6 +41,7 @@ pub(crate) struct Options {
     pub raw: Vec<OsString>,
     pub claude_capabilities: Option<(bool, bool)>,
     pub hook_protected: bool,
+    pub mcp_tool_profile: Option<McpToolProfile>,
 }
 impl Options {
     pub fn has(&self, k: &str) -> bool {
@@ -124,6 +146,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
                 "--profile",
                 "--primary-provider",
                 "--notion-data-source",
+                "--mcp-tool-profile",
             ],
         ),
         "link" => (&["--plan"], &[]),
@@ -155,8 +178,12 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
             &["--remove", "--print-expected", "--dry-run"],
             &["--settings", "--ownership-receipt"],
         ),
-        "install-mcp" | "install-codex-plugin" => (&["--remove", "--dry-run"], &[]),
-        "install-agy-plugin" => (&["--remove", "--probe-surfaces", "--dry-run"], &[]),
+        "install-mcp" => (&["--remove", "--dry-run"], &["--mcp-tool-profile"]),
+        "install-codex-plugin" => (&["--remove", "--dry-run"], &[]),
+        "install-agy-plugin" => (
+            &["--remove", "--probe-surfaces", "--dry-run"],
+            &["--mcp-tool-profile"],
+        ),
         "install-skills" => (&[], &[]),
         "install-autoupdate" => (&["--apply", "--check-only", "--dry-run"], &["--method"]),
         "uninstall-autoupdate" => (&["--dry-run"], &[]),
@@ -234,6 +261,13 @@ fn usage(tool: &str) -> String {
              --probe-bound SECONDS sets each probe deadline (default 10, range 1-60).\n\
              Conformance returns JSON and does not update capability evidence.\n\
              Run/write, prompt and isolation conformance are not implemented.\n",
+        );
+    }
+    if matches!(tool, "install" | "install-mcp" | "install-agy-plugin") {
+        help.push_str(
+            "\n--mcp-tool-profile core|full records MCP tool discovery in managed registrations.\n\
+             Omit it to preserve each host's stored choice (new registrations default to core).\n\
+             Restart the host's MCP connection after changing the profile.\n",
         );
     }
     help
@@ -316,6 +350,13 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
     }
     if out.has("--help") {
         return Ok(out);
+    }
+    out.mcp_tool_profile = out
+        .get("--mcp-tool-profile")
+        .map(McpToolProfile::parse)
+        .transpose()?;
+    if out.mcp_tool_profile.is_some() && (out.has("--remove") || out.has("--probe-surfaces")) {
+        return r::fail("--mcp-tool-profile cannot be combined with --remove or --probe-surfaces");
     }
     for pair in [
         ["--fingerprint", "--compare"],
