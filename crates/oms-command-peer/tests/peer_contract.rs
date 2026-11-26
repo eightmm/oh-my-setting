@@ -3177,7 +3177,7 @@ fn review_classification_and_validation() {
                 &STOP,
                 &probe,
             );
-            assert!(output.0 == 0 || output.0 == 2, "{output:?}");
+            assert!(output.0 <= 2, "{output:?}");
             let name = storage::names(&repo.0, Path::new(directory), ".jsonl")
                 .unwrap()
                 .into_iter()
@@ -3187,6 +3187,50 @@ fn review_classification_and_validation() {
             (output, rows)
         };
         let (output, rows) = review(&answer, ".oms/review-anchors", 0, false);
+        let sensitive = format!("{}{} = example", "to", "ken");
+        let redacted_answer = format!(
+            "```findings\n{}\n```\nGATE: fail",
+            String::from_utf8(
+                finding("source.rs", 15, &sensitive, "changed();")
+                    .json(false)
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let (redacted_output, redacted_rows) =
+            review(&redacted_answer, ".oms/review-redacted-finding", 0, false);
+        assert_eq!(redacted_rows.len(), 1);
+        assert_eq!(redacted_rows[0].get("file").text(), Some("source.rs"));
+        assert_eq!(redacted_rows[0].get("line"), &15usize.into());
+        assert!(
+            redacted_rows[0]
+                .get("summary")
+                .text()
+                .unwrap()
+                .contains("[oms-redacted:")
+        );
+        let printed = String::from_utf8_lossy(&redacted_output.1);
+        assert!(printed.contains("source.rs"), "{printed}");
+        assert!(!printed.contains(&sensitive));
+        let (fallback_output, fallback_rows) = review(
+            "```findings\n[oms-redacted:token-assignment]\n[oms-redacted:private-key]\n```\nGATE: fail",
+            ".oms/review-withheld-findings",
+            0,
+            false,
+        );
+        assert_eq!(fallback_rows.len(), 2);
+        for row in &fallback_rows {
+            assert_eq!(row.get("withheld").text(), Some("redacted"));
+            assert_eq!(row.get("severity").text(), Some("blocking"));
+            assert!(!row.has("file"));
+            assert!(!row.has("line"));
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&fallback_output.1)
+                .matches("finding: ")
+                .count(),
+            2
+        );
         assert_eq!(output.0, 0, "anchor labels never change GATE: pass");
         assert_eq!(rows.len(), claims.len() - 1, "traversal must be rejected");
         for ((summary, reported, quote, resolved, status, anchor), row) in cases.iter().zip(&rows) {

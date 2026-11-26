@@ -452,6 +452,17 @@ pub fn parse_findings(answer: &str) -> (Vec<V>, usize) {
         if line.is_empty() {
             continue;
         }
+        if line.starts_with("[oms-redacted:") && line.ends_with(']') {
+            if found.len() < 50 {
+                found.push(obj([
+                    ("withheld", "redacted".into()),
+                    ("severity", "blocking".into()),
+                ]));
+            } else {
+                rejected += 1;
+            }
+            continue;
+        }
         let Ok(mut row) = V::parse(line.as_bytes()) else {
             rejected += 1;
             continue;
@@ -492,6 +503,43 @@ pub fn parse_findings(answer: &str) -> (Vec<V>, usize) {
         found.push(row);
     }
     (found, rejected)
+}
+pub(crate) fn redacted_findings(answer: &str) -> Result<Vec<V>> {
+    let (rows, _) = parse_findings(answer);
+    rows.into_iter()
+        .map(|row| {
+            if text(&row, "withheld") == "redacted" {
+                return Ok(row);
+            }
+            let serialized = json(&row)?;
+            if safety::redact(&serialized)? == serialized {
+                return Ok(row);
+            }
+            let path = text(&row, "file");
+            if safety::redact(path.as_bytes())? != path.as_bytes() {
+                return Ok(obj([
+                    ("withheld", "redacted".into()),
+                    ("severity", "blocking".into()),
+                ]));
+            }
+            let mut safe = obj([
+                ("file", path.into()),
+                ("line", row.get("line").clone()),
+                ("severity", row.get("severity").clone()),
+                ("quote_complete", row.get("quote_complete").clone()),
+            ]);
+            for key in ["summary", "quote", "rule"] {
+                if row.has(key) {
+                    let value = safety::redact(text(&row, key).as_bytes())?;
+                    safe.set(key, String::from_utf8_lossy(&value).into_owned());
+                }
+            }
+            if text(&safe, "quote") != text(&row, "quote") {
+                safe.set("quote_complete", false);
+            }
+            Ok(safe)
+        })
+        .collect()
 }
 type Lines = BTreeMap<String, (BTreeSet<usize>, BTreeSet<usize>)>;
 fn diff_lines(patch: &[u8]) -> Lines {
@@ -767,12 +815,17 @@ pub(crate) fn finish(
         }
         seat_rows.push(seat_row);
         let (findings, _) = if matches!(state, "pass" | "fail") {
-            parse_findings(&seat.answer)
+            (
+                seat.findings
+                    .clone()
+                    .unwrap_or_else(|| parse_findings(&seat.answer).0),
+                0,
+            )
         } else {
             (Vec::new(), 0)
         };
         let mut seen = BTreeSet::new();
-        for mut finding in findings {
+        for (index, mut finding) in findings.into_iter().enumerate() {
             let ident = format!(
                 "f-{}",
                 &storage::hash(
@@ -785,10 +838,15 @@ pub(crate) fn finish(
                     .as_bytes()
                 )[..12]
             );
+            let ident = if text(&finding, "withheld") == "redacted" {
+                format!("{ident}-{index}")
+            } else {
+                ident
+            };
             if !seen.insert(ident.clone()) {
                 continue;
             }
-            let citation = if changed {
+            let citation = if changed || text(&finding, "withheld") == "redacted" {
                 Citation::unverified(&finding, "source-changed")
             } else {
                 classify(
@@ -802,8 +860,10 @@ pub(crate) fn finish(
                     tracked.contains(text(&finding, "file").as_bytes()),
                 )
             };
-            finding.set("reported_line", finding.get("line").clone());
-            record_citation(&mut finding, citation);
+            if text(&finding, "withheld") != "redacted" {
+                finding.set("reported_line", finding.get("line").clone());
+                record_citation(&mut finding, citation);
+            }
             for (key, value) in [
                 ("schema", 1usize.into()),
                 ("kind", "review-finding".into()),
@@ -823,10 +883,14 @@ pub(crate) fn finish(
     // to the captured repository generation before publishing positive evidence.
     changed |= scope_changed(&current, &scope(args, repo, context)?.0);
     for mut finding in finding_rows {
-        if changed {
+        if changed && text(&finding, "withheld") != "redacted" {
             let citation = Citation::unverified(&finding, "source-changed");
             record_citation(&mut finding, citation);
         }
+        output.push_str(&format!(
+            "finding: {}\n",
+            String::from_utf8_lossy(&json(&finding)?)
+        ));
         storage::append(
             repo,
             &dir.join(format!("_findings-{run}.jsonl")),
