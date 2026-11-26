@@ -4594,6 +4594,10 @@ fn peer_status_tasks() {
     good(&running);
     assert_eq!(payload(&running)["status"], "running");
     assert_eq!(
+        payload(&running)["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
+    assert_eq!(
         c.call(
             "tasks/get",
             json!({"taskId":op,"_meta":{META:"2026-07-28"}})
@@ -4602,6 +4606,15 @@ fn peer_status_tasks() {
     );
     let get = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}));
     assert_eq!(get["result"]["status"], "working");
+    assert_eq!(get["result"]["cancellation_requested"], false);
+    assert_eq!(
+        get["result"]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
+    assert_eq!(
+        get["result"]["statusMessage"],
+        "Peer consultation is running."
+    );
     assert_eq!(
         c.call("tasks/update", json!({"taskId":op,"_meta":modern()}))["error"]["code"],
         -32602
@@ -4612,30 +4625,148 @@ fn peer_status_tasks() {
         json!({"resultType":"complete"}),
         "{cancel}"
     );
-    let receipt: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("cancel-request.json")).unwrap()).unwrap();
+    let first_bytes = std::fs::read(dir.join("cancel-request.json")).unwrap();
+    let receipt: Value = serde_json::from_slice(&first_bytes).unwrap();
     assert_eq!(receipt["schema"], 1);
     assert_eq!(receipt["task_id"], op);
+    let first_at = receipt["requested_at"].as_str().unwrap().to_owned();
+    let second = c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}));
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation_requested"],
-        true
+        second["result"],
+        json!({"resultType":"complete"}),
+        "{second}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        first_bytes
+    );
+    let pinned_at = "2020-01-01T00:00:05Z";
+    let pinned_bytes = format!(
+        "{{\"kind\":\"mcp-task-cancel-request\",\"requested_at\":\"{pinned_at}\",\"schema\":1,\"task_id\":\"{op}\"}}  \n"
+    )
+    .into_bytes();
+    std::fs::write(dir.join("cancel-request.json"), &pinned_bytes).unwrap();
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        pinned_bytes
+    );
+    std::fs::remove_file(dir.join("pid")).unwrap();
+    let requested_get =
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(requested_get["cancellation_requested"], true);
+    assert_eq!(
+        requested_get["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+    assert_eq!(
+        requested_get["statusMessage"],
+        "Cancellation requested; awaiting provider cleanup."
+    );
+    let waited = payload(&c.tool("oms_peer_result", json!({"operation":op,"wait_seconds":1})));
+    assert_eq!(waited["status"], "running");
+    assert_eq!(waited["cancellation_requested"], true);
+    assert_eq!(
+        waited["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+    let legacy_bytes =
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request"}).to_string();
+    std::fs::write(dir.join("cancel-request.json"), &legacy_bytes).unwrap();
+    let legacy_get = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(legacy_get["cancellation_requested"], true);
+    assert_eq!(
+        legacy_get["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        legacy_get["statusMessage"],
+        "Cancellation requested; awaiting provider cleanup."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":op})))["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("cancel-request.json")).unwrap(),
+        legacy_bytes
     );
     for bytes in [
         "not json".to_owned(),
-        json!({"schema":1,"task_id":"foreign","kind":"mcp-task-cancel-request"}).to_string(),
+        json!({"schema":1,"task_id":"foreign","kind":"mcp-task-cancel-request","requested_at":first_at}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":Value::Null}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":123}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":""}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"not-rfc3339"}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"2020-01-01T09:00:05+09:00"}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"2020-01-01T00:00:05-00:00"}).to_string(),
         "x".repeat(4097),
     ] {
         std::fs::write(dir.join("cancel-request.json"), bytes).unwrap();
+        let ignored = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+        assert_eq!(ignored["cancellation_requested"], false);
         assert_eq!(
-            c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation_requested"],
-            false
+            ignored["cancellation"],
+            json!({"requested_at":Value::Null,"state":"none"})
+        );
+        assert_eq!(ignored["statusMessage"], "Peer consultation is running.");
+        let r = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+        assert!(r.get("cancellation_requested").is_none());
+        assert_eq!(
+            r["cancellation"],
+            json!({"requested_at":Value::Null,"state":"none"})
         );
     }
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    let replaced_bytes = std::fs::read(dir.join("cancel-request.json")).unwrap();
+    let replaced_row: Value = serde_json::from_slice(&replaced_bytes).unwrap();
+    assert!(
+        replaced_row["requested_at"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        replaced_bytes
+    );
     std::fs::remove_file(dir.join("cancel-request.json")).unwrap();
     std::os::unix::fs::symlink(dir.join("meta.json"), dir.join("cancel-request.json")).unwrap();
+    let ignored = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(ignored["cancellation_requested"], false);
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation_requested"],
-        false
+        ignored["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"]["state"],
+        "requested"
     );
     std::fs::remove_file(dir.join("cancel-request.json")).unwrap();
     let dead = Command::new(std::env::current_exe().unwrap())
@@ -4648,32 +4779,160 @@ fn peer_status_tasks() {
     std::fs::write(dir.join("pid"), format!("{pid}\n")).unwrap();
     let r = c.tool("oms_peer_result", json!({"operation":op}));
     bad(&r, "stalled");
+    let stalled_none = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(stalled_none["status"], "failed");
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "failed"
+        stalled_none["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
     );
-    std::fs::write(dir.join("status"), "bad status").unwrap();
     assert_eq!(
-        payload(&c.tool("oms_peer_result", json!({"operation":op})))["exit"],
-        1
+        stalled_none["statusMessage"],
+        "Peer process ended without a durable exit status."
     );
+    for (raw_status, expected_exit) in [("bad status", 1), ("124\n", 124), ("1\n", 1), ("0\n", 0)] {
+        std::fs::write(dir.join("status"), raw_status).unwrap();
+        let snap = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+        assert_eq!(snap["status"], "completed");
+        assert_eq!(
+            snap["cancellation"],
+            json!({"requested_at":Value::Null,"state":"none"})
+        );
+        assert_eq!(
+            snap["statusMessage"],
+            format!("Peer consultation completed with exit {expected_exit}.")
+        );
+    }
+    std::fs::remove_file(dir.join("status")).unwrap();
+    std::fs::write(dir.join("cancel-request.json"), &pinned_bytes).unwrap();
+    let stalled_req = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(stalled_req["status"], "failed");
+    assert_eq!(
+        stalled_req["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        stalled_req["statusMessage"],
+        "Cancellation was requested, but the peer ended without a durable exit or observation."
+    );
+    let stalled_res = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert_eq!(stalled_res["cancellation_requested"], true);
+    assert_eq!(
+        stalled_res["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    for (non_own, expected_msg) in [
+        (
+            "bad status",
+            "Cancellation was requested, but the peer ended without a durable exit or observation.",
+        ),
+        (
+            "124\n",
+            "Cancellation was requested, but the peer ended with exit 124 without a cancellation observation.",
+        ),
+        (
+            "1\n",
+            "Cancellation was requested, but the peer ended with exit 1 without a cancellation observation.",
+        ),
+        (
+            "130\n",
+            "Cancellation was requested, but the peer ended with exit 130 without a cancellation observation.",
+        ),
+        (
+            "-15\n",
+            "Cancellation was requested, but the peer ended with exit -15 without a cancellation observation.",
+        ),
+    ] {
+        std::fs::write(dir.join("status"), non_own).unwrap();
+        let res = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+        if non_own == "bad status" {
+            assert_eq!(res["exit"], 1);
+        }
+        assert_eq!(
+            res["cancellation"],
+            json!({"requested_at":pinned_at,"state":"unknown"})
+        );
+        let snap = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+        assert_eq!(snap["status"], "completed");
+        assert_eq!(
+            snap["cancellation"],
+            json!({"requested_at":pinned_at,"state":"unknown"})
+        );
+        assert_eq!(snap["statusMessage"], expected_msg);
+    }
     std::fs::write(dir.join("status"), "0").unwrap();
+    let completed_first =
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(completed_first["status"], "completed");
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "completed"
+        completed_first["cancellation"],
+        json!({"requested_at":pinned_at,"state":"completed_first"})
+    );
+    assert_eq!(
+        completed_first["statusMessage"],
+        "Peer consultation completed with exit 0 before cancellation took effect."
+    );
+    let embedded: Value = serde_json::from_str(
+        completed_first["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(embedded["cancellation_requested"], true);
+    assert!(embedded.get("termination_reason").is_none());
+    assert_eq!(
+        embedded["cancellation"],
+        json!({"requested_at":pinned_at,"state":"completed_first"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
     );
     assert_eq!(
         c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["error"]["code"],
         -32602
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        pinned_bytes
     );
     std::fs::write(
         dir.join("cancel-observed.json"),
         json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-observed"}).to_string(),
     )
     .unwrap();
+    let confirmed = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(confirmed["status"], "cancelled");
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "cancelled"
+        confirmed["cancellation"],
+        json!({"requested_at":pinned_at,"state":"confirmed"})
+    );
+    assert_eq!(
+        confirmed["statusMessage"],
+        "Provider cancellation was observed and the operation exited. Partial artifacts are retained."
+    );
+    let confirmed_res = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert_eq!(confirmed_res["termination_reason"], "cancelled");
+    assert_eq!(
+        confirmed_res["cancellation"],
+        json!({"requested_at":pinned_at,"state":"confirmed"})
+    );
+    std::fs::remove_file(dir.join("status")).unwrap();
+    assert_eq!(
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"confirmed"})
+    );
+    std::fs::write(dir.join("status"), "0").unwrap();
+    std::fs::remove_file(dir.join("cancel-request.json")).unwrap();
+    let observed_only =
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(observed_only["status"], "cancelled");
+    assert_eq!(
+        observed_only["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
     );
     let legacy = "ask-20190101T000000Z-0badc0de";
     run_dir(&repo, legacy, json!({}), Some("0"));
@@ -4714,6 +4973,240 @@ fn peer_status_tasks() {
             "after must",
         );
     }
+
+    let owner_bin = PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner"));
+    let owner_op = "consult-20200101T000001Z-11111111";
+    let owner_dir = run_dir(
+        &repo,
+        owner_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        owner_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        owner_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":owner_op,"requested_at":pinned_at}).to_string(),
+    )
+    .unwrap();
+    std::fs::create_dir(owner_dir.join("cancel-observed.json")).unwrap();
+    let owner_log = std::fs::File::create(owner_dir.join("run.log")).unwrap();
+    let owner_err = owner_log.try_clone().unwrap();
+    let owner_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            owner_op.as_ref(),
+            source.join("bin/oms").as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(owner_log)
+        .stderr(owner_err)
+        .status()
+        .unwrap();
+    assert!(!owner_out.success());
+    assert_eq!(
+        std::fs::read_to_string(owner_dir.join("status")).unwrap(),
+        "1\n"
+    );
+    let owner_snap =
+        c.call("tasks/get", json!({"taskId":owner_op,"_meta":modern()}))["result"].clone();
+    assert_eq!(owner_snap["status"], "completed");
+    assert_eq!(
+        owner_snap["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        owner_snap["statusMessage"],
+        "Cancellation was requested, but the peer ended with exit 1 without a cancellation observation."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":owner_op})))["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == owner_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let runner_script = source.join("runner-cancel-receipt-fail");
+    std::fs::write(
+        &runner_script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}' > \"$OMS_PEER_CANCEL_DIR/cancel-request.json\"\necho 'error: cancellation handled but receipt publication failed: ReadOnly' >&2\nexit 1\n",
+            json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":"consult-20200101T000002Z-22222222","requested_at":pinned_at})
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let runner_op = "consult-20200101T000002Z-22222222";
+    let runner_dir = run_dir(
+        &repo,
+        runner_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        runner_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    let runner_log = std::fs::File::create(runner_dir.join("run.log")).unwrap();
+    let runner_err = runner_log.try_clone().unwrap();
+    let runner_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            runner_op.as_ref(),
+            runner_script.as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(runner_log)
+        .stderr(runner_err)
+        .status()
+        .unwrap();
+    assert!(runner_out.success());
+    assert_eq!(
+        std::fs::read_to_string(runner_dir.join("status")).unwrap(),
+        "1\n"
+    );
+    let runner_snap =
+        c.call("tasks/get", json!({"taskId":runner_op,"_meta":modern()}))["result"].clone();
+    assert_eq!(runner_snap["status"], "completed");
+    assert_eq!(
+        runner_snap["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        runner_snap["statusMessage"],
+        "Cancellation was requested, but the peer ended with exit 1 without a cancellation observation."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":runner_op})))["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+
+    let seat_op = "consult-20200101T000003Z-33333333";
+    let seat_dir = run_dir(
+        &repo,
+        seat_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        Some("1\n"),
+    );
+    std::fs::write(
+        seat_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":seat_op,"requested_at":pinned_at}).to_string(),
+    )
+    .unwrap();
+    let seat_answer = seat_dir.join("answers/claude.md");
+    std::fs::write(&seat_answer, "## Output\npartial without exit\n").unwrap();
+    std::fs::write(
+        seat_dir.join("run.log"),
+        format!("{}\n", seat_answer.display()),
+    )
+    .unwrap();
+    assert_eq!(
+        c.call("tasks/get", json!({"taskId":seat_op,"_meta":modern()}))["result"]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    std::fs::write(
+        &seat_answer,
+        "## Output\nprovider failed on its own\n## Exit\n1\n",
+    )
+    .unwrap();
+    let seat_snap =
+        c.call("tasks/get", json!({"taskId":seat_op,"_meta":modern()}))["result"].clone();
+    assert_eq!(
+        seat_snap["cancellation"],
+        json!({"requested_at":pinned_at,"state":"completed_first"})
+    );
+    assert_eq!(
+        seat_snap["statusMessage"],
+        "Peer consultation completed with exit 1 before cancellation took effect."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == seat_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+
+    let legacy_guard_op = "consult-20200101T000004Z-44444444";
+    let legacy_guard_dir = run_dir(
+        &repo,
+        legacy_guard_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        legacy_guard_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        legacy_guard_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":legacy_guard_op}).to_string(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let guard_log = std::fs::File::create(legacy_guard_dir.join("run.log")).unwrap();
+    let guard_err = guard_log.try_clone().unwrap();
+    let guard_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            legacy_guard_op.as_ref(),
+            source.join("bin/oms").as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(guard_log)
+        .stderr(guard_err)
+        .status()
+        .unwrap();
+    assert!(guard_out.success());
+    assert!(!source.join("last-call.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(legacy_guard_dir.join("status")).unwrap(),
+        "125\n"
+    );
+    assert!(legacy_guard_dir.join("cancel-observed.json").is_file());
+    let guard_snap = c.call(
+        "tasks/get",
+        json!({"taskId":legacy_guard_op,"_meta":modern()}),
+    )["result"]
+        .clone();
+    assert_eq!(guard_snap["status"], "cancelled");
+    assert_eq!(
+        guard_snap["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == legacy_guard_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
+    );
 }
 fn peer_start_threads() {
     let t = Temp::new();
@@ -5070,32 +5563,83 @@ fn cancellation_concurrency() {
     let t = Temp::new();
     let source = t.source();
     let repo = t.repo();
-    let op = "consult-20200101T000000Z-deadbeef";
-    let dir = run_dir(&repo, op, json!({"cancellation_supported":true}), None);
-    let mut threads = Vec::new();
-    for _ in 0..4 {
-        let s = source.clone();
-        let r = repo.clone();
-        threads.push(std::thread::spawn(move || {
-            let mut c = Client::new(&s, &r, false, true, false);
-            let v = c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}));
-            assert_eq!(v["result"], json!({"resultType":"complete"}), "{v}");
-        }));
+    for (idx, initial) in [
+        None,
+        Some("not json".to_owned()),
+        Some(
+            json!({
+                "schema": 1,
+                "task_id": "foreign",
+                "kind": "mcp-task-cancel-request",
+                "requested_at": "2020-01-01T00:00:05Z"
+            })
+            .to_string(),
+        ),
+        Some(
+            json!({
+                "schema": 1,
+                "task_id": "consult-20200101T000003Z-deadbeef",
+                "kind": "mcp-task-cancel-request",
+                "requested_at": "2020-01-01T09:00:05+09:00"
+            })
+            .to_string(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = format!("consult-20200101T00000{idx}Z-deadbeef");
+        let dir = run_dir(&repo, &op, json!({"cancellation_supported":true}), None);
+        if let Some(invalid) = initial {
+            std::fs::write(dir.join("cancel-request.json"), invalid).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let s = source.clone();
+            let r = repo.clone();
+            let op_id = op.clone();
+            let run = dir.clone();
+            let gate = std::sync::Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                let mut c = Client::new(&s, &r, false, true, false);
+                gate.wait();
+                let v = c.call("tasks/cancel", json!({"taskId":op_id,"_meta":modern()}));
+                assert_eq!(v["result"], json!({"resultType":"complete"}), "{v}");
+                std::fs::read(run.join("cancel-request.json")).unwrap()
+            }));
+        }
+        let seen: Vec<Vec<u8>> = threads.into_iter().map(|h| h.join().unwrap()).collect();
+        let bytes = std::fs::read(dir.join("cancel-request.json")).unwrap();
+        for observed in &seen {
+            assert_eq!(observed, &bytes);
+        }
+        let row: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(row["task_id"], op);
+        assert!(row["requested_at"].as_str().unwrap().ends_with('Z'));
+        let mut c = Client::new(&source, &repo, false, true, false);
+        assert_eq!(
+            c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+            json!({"resultType":"complete"})
+        );
+        assert_eq!(
+            std::fs::read(dir.join("cancel-request.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"],
+            json!({"requested_at":row["requested_at"],"state":"requested"})
+        );
+        assert!(dir.join("cancel-request.lock").is_file());
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                .count(),
+            0
+        );
     }
-    for thread in threads {
-        thread.join().unwrap();
-    }
-    let row: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("cancel-request.json")).unwrap()).unwrap();
-    assert_eq!(row["task_id"], op);
-    assert_eq!(
-        std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
-            .count(),
-        0
-    );
 }
 fn peer_detached_cancel() {
     let t = Temp::new();
@@ -5105,6 +5649,10 @@ fn peer_detached_cancel() {
     let mut c = Client::new(&source, &repo, false, true, false);
     let started=c.call("tools/call",json!({"name":"oms_peer_start","arguments":{"kind":"consult","prompt":"hold"},"_meta":modern()}));
     assert_eq!(started["result"]["resultType"], "task");
+    assert_eq!(
+        started["result"]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
     let op = started["result"]["taskId"].as_str().unwrap().to_owned();
     let dir = repo.join(".oms/artifacts/mcp").join(&op);
     until(|| dir.join("fixture-ready").is_file());
@@ -5119,13 +5667,17 @@ fn peer_detached_cancel() {
         "complete"
     );
     until(|| dir.join("status").is_file());
-    assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "cancelled"
-    );
+    let settled = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(settled["status"], "cancelled");
+    assert_eq!(settled["cancellation"]["state"], "confirmed");
+    assert!(settled["cancellation"]["requested_at"].as_str().is_some());
     assert!(!source.join("release").exists());
     let rows = payload(&c.tool("oms_peer_operations", json!({})));
     assert_eq!(rows["operations"][0]["termination_reason"], "cancelled");
+    assert_eq!(
+        rows["operations"][0]["cancellation"],
+        settled["cancellation"]
+    );
     let target = dir.clone();
     let mut handles = Vec::new();
     for _ in 0..4 {
