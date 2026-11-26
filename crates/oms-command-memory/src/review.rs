@@ -56,13 +56,13 @@ pub(crate) fn context_filter_rows(rows: &[Value]) -> impl Fn(&records::Entry) ->
         }
     }
 }
-fn pending(s: &Store) -> Result<Vec<Value>> {
+fn pending(s: &Store) -> Result<(Vec<Value>, usize)> {
     let (notes, pins) = s.logs()?;
-    Ok(pending_records(
-        &notes,
-        &pins,
-        &s.rows("reviews.jsonl")?,
-        &s.rows("pending.jsonl")?,
+    let (reviews, skipped_reviews) = s.rows_counted("reviews.jsonl")?;
+    let (corrections, skipped_pending) = s.rows_counted("pending.jsonl")?;
+    Ok((
+        pending_records(&notes, &pins, &reviews, &corrections),
+        skipped_reviews + skipped_pending,
     ))
 }
 fn pending_records(
@@ -93,27 +93,39 @@ const VIEW_PENDING_MAX: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingReviewSummary {
     pub pending: usize,
+    pub skipped: usize,
     pub candidate_fingerprints: Vec<String>,
 }
 
-pub(crate) fn bounded_rows(s: &Store, name: &str) -> Result<Vec<Value>> {
-    let bytes = store::read_bounded(&s.shared.parent().unwrap().join(name), VIEW_SOURCE_MAX)?;
-    bytes
+pub(crate) fn parse_review_rows(bytes: &[u8]) -> (Vec<Value>, usize) {
+    let mut rows = Vec::new();
+    let mut skipped = 0;
+    for line in bytes
         .split(|b| *b == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .map(|line| {
-            let row = parse_json(line)
-                .ok_or_else(|| Error(2, "memory review receipt is invalid".into()))?;
-            if row["schema"] != 1 || !row["id"].as_str().is_some_and(review_id) {
-                return err("memory review receipt is invalid");
+    {
+        match parse_json(line) {
+            Some(row)
+                if row.is_object()
+                    && row["schema"] == 1
+                    && row["id"].as_str().is_some_and(review_id) =>
+            {
+                rows.push(row);
             }
-            Ok(row)
-        })
-        .collect()
+            _ => skipped += 1,
+        }
+    }
+    (rows, skipped)
+}
+
+pub(crate) fn bounded_rows(s: &Store, name: &str) -> Result<(Vec<Value>, usize)> {
+    let bytes = store::read_bounded(&s.shared.parent().unwrap().join(name), VIEW_SOURCE_MAX)?;
+    Ok(parse_review_rows(&bytes))
 }
 
 /// Read the existing review queue with bounded, no-follow source reads. An
-/// unreadable, oversized or malformed source is unavailable, never an empty queue.
+/// unreadable or oversized source is unavailable, never an empty queue; invalid
+/// receipt rows are skipped and counted.
 pub fn pending_review(
     repo: &Path,
     flag: &AtomicBool,
@@ -123,12 +135,10 @@ pub fn pending_review(
         let s = Store::new(std::fs::canonicalize(repo)?, None, false);
         let notes = records::parse(&store::read_bounded(&s.shared, VIEW_SOURCE_MAX)?, "shared");
         let pins = records::parse(&store::read_bounded(&s.pins, VIEW_SOURCE_MAX)?, "pins");
-        let items = pending_records(
-            &notes,
-            &pins,
-            &bounded_rows(&s, "reviews.jsonl")?,
-            &bounded_rows(&s, "pending.jsonl")?,
-        );
+        let (reviews, skipped_reviews) = bounded_rows(&s, "reviews.jsonl")?;
+        let (corrections, skipped_pending) = bounded_rows(&s, "pending.jsonl")?;
+        let skipped = skipped_reviews + skipped_pending;
+        let items = pending_records(&notes, &pins, &reviews, &corrections);
         crate::check(flag)?;
         if items.len() > VIEW_PENDING_MAX {
             return err("memory review queue exceeds the attention-view limit");
@@ -141,6 +151,7 @@ pub fn pending_review(
         candidate_fingerprints.dedup();
         Ok(PendingReviewSummary {
             pending: items.len(),
+            skipped,
             candidate_fingerprints,
         })
     })()
@@ -161,7 +172,7 @@ pub(crate) fn review(s: &Store, o: &Options, author: &str, flag: &AtomicBool) ->
     if actions.len() > 1 {
         return err("review takes one of --accept, --retire or --reject");
     }
-    let mut items = pending(s)?;
+    let (mut items, skipped) = pending(s)?;
     if !o.kinds.is_empty() {
         if o.kinds
             .iter()
@@ -182,17 +193,30 @@ pub(crate) fn review(s: &Store, o: &Options, author: &str, flag: &AtomicBool) ->
             }
             return Ok((
                 0,
-                json_line(&json!({"schema":1,"kind":"oms-memory-review","pending":items}))?,
+                json_line(
+                    &json!({"schema":1,"kind":"oms-memory-review","pending":items,"skipped":skipped}),
+                )?,
                 Vec::new(),
             ));
         }
         if items.is_empty() {
-            return Ok(output("memory review: nothing waiting"));
+            return Ok(output(if skipped > 0 {
+                format!("memory review: nothing waiting ({skipped} invalid row(s) skipped)")
+            } else {
+                "memory review: nothing waiting".into()
+            }));
         }
-        let mut out = format!(
-            "memory review: {} waiting (unreviewed; listed, not verified)\n",
-            items.len()
-        );
+        let mut out = if skipped > 0 {
+            format!(
+                "memory review: {} waiting ({skipped} invalid row(s) skipped; unreviewed; listed, not verified)\n",
+                items.len()
+            )
+        } else {
+            format!(
+                "memory review: {} waiting (unreviewed; listed, not verified)\n",
+                items.len()
+            )
+        };
         for r in items {
             out.push_str(&format!(
                 "{:<10} {}  {}\n    {}\n",
@@ -214,7 +238,7 @@ pub(crate) fn review(s: &Store, o: &Options, author: &str, flag: &AtomicBool) ->
     // Serialize eligibility, the optional note append, and its decision receipt.
     let receipt_path = s.shared.parent().unwrap().join("reviews.jsonl");
     let _decision = store::lock(&receipt_path, flag)?;
-    let item = pending(s)?.into_iter().find(|i| i["id"] == id).ok_or_else(|| Error(2,format!("{id} is not waiting for review (unknown, already decided, superseded or retired)")))?;
+    let item = pending(s)?.0.into_iter().find(|i| i["id"] == id).ok_or_else(|| Error(2,format!("{id} is not waiting for review (unknown, already decided, superseded or retired)")))?;
     let correction = item["origin"] == "correction";
     if action == "--retire" && correction {
         return err(format!(

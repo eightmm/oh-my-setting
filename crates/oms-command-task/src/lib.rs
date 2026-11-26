@@ -447,7 +447,7 @@ impl Task<'_> {
             return Ok(Vec::new());
         }
         let id = packet::metadata(raw, "task_id").unwrap_or(b"legacy");
-        if packet::metadata(raw, "status").unwrap_or(b"active") == b"active"
+        if packet::effective_status(raw) == b"active"
             && !packet::stale(raw, &packet::configured_ttl(), utc())
             && !o.has("replace-goal")
         {
@@ -960,7 +960,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
         );
     };
     let id = packet::metadata(&raw, "task_id").unwrap_or(b"legacy");
-    let state = packet::metadata(&raw, "status").unwrap_or(b"active");
+    let state = packet::effective_status(&raw);
     let source = packet::metadata(&raw, "source_session").unwrap_or_default();
     let issue = packet::metadata(&raw, "github_issue").unwrap_or_default();
     let activity = packet::metadata(&raw, "last_activity")
@@ -1031,9 +1031,7 @@ fn status(task: &Task<'_>, out: &mut dyn Write) -> Result<()> {
             ("dormant", Json::Bool(dormant)),
             (
                 "current_goal_eligible",
-                Json::Bool(
-                    state == b"active" && freshness.idle_seconds.is_some() && !stale && !dormant,
-                ),
+                Json::Bool(packet::current_goal_eligible(&raw, freshness)),
             ),
             ("verification", string(verification)),
             ("lifecycle", lifecycle),

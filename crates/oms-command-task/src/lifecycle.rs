@@ -10,9 +10,7 @@ use std::{collections::BTreeSet, sync::OnceLock};
 /// passed bounded no-follow reads. Malformed rows are ignored as in plan_retro;
 /// callers must not turn filesystem uncertainty into proof of absence.
 pub fn lifecycle(task: &[u8], plan: Option<&Json>, rows: &[Json], verification: &str) -> Json {
-    let status = packet::metadata(task, "status")
-        .filter(|v| !v.is_empty())
-        .unwrap_or(b"active");
+    let status = packet::effective_status(task);
     static EXIT: OnceLock<Regex> = OnceLock::new();
     let re = EXIT.get_or_init(|| Regex::new(r"\bexit: ([0-9]+)\b").unwrap());
     let mut last = Json::Null;

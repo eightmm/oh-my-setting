@@ -1,5 +1,5 @@
 use crate::{
-    cli::Options,
+    cli::{McpToolProfile, Options},
     receipt::Paths,
     runtime::{self as r, Result},
     transaction::Transaction,
@@ -425,6 +425,53 @@ fn defaults(paths: &Paths, value: &mut Value, remove: bool, auto_compact: bool) 
     }
     Ok(())
 }
+const MCP_TOOL_PROFILE: &str = "OMS_MCP_TOOL_PROFILE";
+
+fn retained_mcp_profile(current: &Value) -> Result<Option<McpToolProfile>> {
+    let Some(env) = current.get("env") else {
+        return Ok(None);
+    };
+    let env = env
+        .as_object()
+        .ok_or_else(|| r::Error(2, "invalid managed MCP environment".into()))?;
+    if env.is_empty() {
+        return Ok(None);
+    }
+    if env.len() != 1 {
+        return r::fail("unrecognized managed MCP environment");
+    }
+    let profile = env
+        .get(MCP_TOOL_PROFILE)
+        .and_then(Value::as_str)
+        .ok_or_else(|| r::Error(2, "unrecognized managed MCP environment".into()))?;
+    McpToolProfile::parse(profile).map(Some)
+}
+
+/// Preserve the host's selected discovery profile unless explicitly changed.
+/// A selector never grants authority to replace an otherwise unowned entry.
+pub(crate) fn managed_mcp_entry(
+    paths: &Paths,
+    options: &Options,
+    current: Option<&Value>,
+    stdio: bool,
+) -> Result<Value> {
+    let executable = paths.home.join(".local/bin/oms");
+    if let Some(current) = current
+        && !owned_mcp_entry(current, paths, &executable)?
+    {
+        return r::fail("refusing takeover of an unmanaged MCP registration");
+    }
+    let retained = current.map(retained_mcp_profile).transpose()?.flatten();
+    let mut entry = json!({"command":executable,"args":["mcp-server"]});
+    if stdio {
+        entry["type"] = json!("stdio");
+    }
+    if let Some(profile) = options.mcp_tool_profile.or(retained) {
+        entry["env"] = json!({MCP_TOOL_PROFILE:profile.as_str()});
+    }
+    Ok(entry)
+}
+
 /// Recognizes OMS-owned MCP registrations across Claude `.claude.json`, Codex
 /// `config.toml`, and legacy Antigravity `mcp_config.json` manifests.
 pub(crate) fn owned_mcp_entry(current: &Value, paths: &Paths, executable: &Path) -> Result<bool> {
@@ -435,9 +482,7 @@ pub(crate) fn owned_mcp_entry(current: &Value, paths: &Paths, executable: &Path)
         .keys()
         .all(|k| matches!(k.as_str(), "command" | "args" | "type" | "env"))
         || !obj.get("type").is_none_or(|v| v == "stdio")
-        || !obj
-            .get("env")
-            .is_none_or(|v| v.as_object().is_some_and(|m| m.is_empty()))
+        || retained_mcp_profile(current).is_err()
     {
         return Ok(false);
     }
@@ -491,6 +536,121 @@ pub(crate) fn owned_mcp_entry(current: &Value, paths: &Paths, executable: &Path)
     Ok(native || legacy || cached)
 }
 
+fn has_toml_comment(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut string: Option<(u8, bool)> = None;
+    while i < bytes.len() {
+        if let Some((quote, multiline)) = string {
+            if quote == b'"' && bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            let triple = if quote == b'"' { b"\"\"\"" } else { b"'''" };
+            if multiline && bytes[i..].starts_with(triple) {
+                i += 3;
+                for _ in 0..2 {
+                    if bytes.get(i) == Some(&quote) {
+                        i += 1;
+                    }
+                }
+                string = None;
+                continue;
+            }
+            if !multiline && bytes[i] == quote {
+                i += 1;
+                string = None;
+                continue;
+            }
+            i += 1;
+        } else if bytes[i] == b'#' {
+            return true;
+        } else if bytes[i..].starts_with(b"\"\"\"") {
+            string = Some((b'"', true));
+            i += 3;
+        } else if bytes[i..].starts_with(b"'''") {
+            string = Some((b'\'', true));
+            i += 3;
+        } else if matches!(bytes[i], b'"' | b'\'') {
+            string = Some((bytes[i], false));
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+fn strip_owned_toml_sections(base: &str, require_server_header: bool) -> Result<String> {
+    let mut lines = base
+        .split_inclusive('\n')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let server_positions = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            matches!(
+                l.trim(),
+                "[mcp_servers.oh-my-setting]"
+                    | "[mcp_servers.\"oh-my-setting\"]"
+                    | "[mcp_servers.'oh-my-setting']"
+            )
+            .then_some(i)
+        })
+        .collect::<Vec<_>>();
+    let env_positions = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            matches!(
+                l.trim(),
+                "[mcp_servers.oh-my-setting.env]"
+                    | "[mcp_servers.\"oh-my-setting\".env]"
+                    | "[mcp_servers.'oh-my-setting'.env]"
+            )
+            .then_some(i)
+        })
+        .collect::<Vec<_>>();
+    if require_server_header {
+        if server_positions.len() != 1 || env_positions.len() > 1 {
+            return r::fail("an unmanaged TOML table already occupies this registration");
+        }
+    } else if !server_positions.is_empty() || env_positions.len() != 1 {
+        return r::fail("an unmanaged TOML table already occupies this registration");
+    }
+    // Older or manually split registrations can express the one recognized env
+    // as its own table. Remove just these proved sections, including when
+    // another server sits between them; unrelated bytes remain in place.
+    let mut positions = server_positions;
+    positions.extend(env_positions);
+    positions.sort_unstable();
+    for h in positions.into_iter().rev() {
+        let section_end = lines[h + 1..]
+            .iter()
+            .position(|l| {
+                let s = l.trim_start();
+                s.starts_with('[')
+                    || s.starts_with("# >>>")
+                    || s.starts_with("# <<<")
+                    || s.starts_with("# BEGIN")
+                    || s.starts_with("# END")
+            })
+            .map_or(lines.len(), |offset| h + 1 + offset);
+        let last_kv = (h..section_end)
+            .rfind(|&i| {
+                let s = lines[i].trim();
+                !s.is_empty() && !s.starts_with('#')
+            })
+            .unwrap_or(h);
+        if has_toml_comment(&lines[h..=last_kv].concat()) {
+            return r::fail("an unmanaged TOML table already occupies this registration");
+        }
+        lines.drain(h..=last_kv);
+    }
+    Ok(lines.concat())
+}
+
 /// A dedicated managed block leaves all user TOML byte-for-byte intact. If a
 /// same-named user table exists outside that block, installation refuses it
 /// unless it is an unambiguous OMS-owned registration from an earlier version.
@@ -505,11 +665,26 @@ fn toml_block(
     let end = "# END oh-my-setting native";
     let a = raw.match_indices(begin).collect::<Vec<_>>();
     let b = raw.match_indices(end).collect::<Vec<_>>();
-    let mut base = match (a.as_slice(), b.as_slice()) {
-        ([], []) => raw.to_owned(),
+    let (mut base, managed_without_env) = match (a.as_slice(), b.as_slice()) {
+        ([], []) => (raw.to_owned(), false),
         ([(a, _)], [(b, _)]) if a < b => {
+            let inner = crate::config::toml(&raw.as_bytes()[*a + begin.len()..*b])?;
+            let owned_without_env = if inner.as_object().is_some_and(|o| o.len() == 1)
+                && inner["mcp_servers"]
+                    .as_object()
+                    .is_some_and(|o| o.len() == 1)
+                && let Some(entry) = inner["mcp_servers"].get("oh-my-setting")
+                && entry.get("env").is_none()
+            {
+                owned_mcp_entry(entry, paths, executable)?
+            } else {
+                false
+            };
             let finish = b + end.len();
-            format!("{}{}", &raw[..*a], &raw[finish..])
+            (
+                format!("{}{}", &raw[..*a], &raw[finish..]),
+                owned_without_env,
+            )
         }
         _ => return r::fail("malformed native TOML ownership block"),
     };
@@ -521,49 +696,18 @@ fn toml_block(
             .and_then(|m| m.get("oh-my-setting"))
         && owned_mcp_entry(entry, paths, executable)?
     {
-        let mut lines = base
-            .split_inclusive('\n')
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let positions = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| {
-                matches!(
-                    l.trim(),
-                    "[mcp_servers.oh-my-setting]"
-                        | "[mcp_servers.\"oh-my-setting\"]"
-                        | "[mcp_servers.'oh-my-setting']"
-                )
-            })
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>();
-        if positions.len() != 1 {
-            return r::fail("an unmanaged TOML table already occupies this registration");
-        }
-        let h = positions[0];
-        let section_end = lines[h + 1..]
-            .iter()
-            .position(|l| {
-                let s = l.trim_start();
-                s.starts_with('[')
-                    || s.starts_with("# >>>")
-                    || s.starts_with("# <<<")
-                    || s.starts_with("# BEGIN")
-                    || s.starts_with("# END")
-            })
-            .map_or(lines.len(), |offset| h + 1 + offset);
-        let last_kv = (h..section_end)
-            .rfind(|&i| !lines[i].trim().is_empty())
-            .unwrap_or(h);
-        if lines[h + 1..=last_kv]
-            .iter()
-            .any(|l| l.trim_start().starts_with('#'))
-        {
-            return r::fail("an unmanaged TOML table already occupies this registration");
-        }
-        lines.drain(h..=last_kv);
-        base = lines.concat();
+        base = strip_owned_toml_sections(&base, true)?;
+        parsed = crate::config::toml(base.as_bytes())?;
+    } else if managed_without_env
+        && let Some(entry) = parsed
+            .get("mcp_servers")
+            .and_then(|m| m.get("oh-my-setting"))
+        && entry
+            .as_object()
+            .is_some_and(|o| o.len() == 1 && o.contains_key("env"))
+        && retained_mcp_profile(entry).is_ok()
+    {
+        base = strip_owned_toml_sections(&base, false)?;
         parsed = crate::config::toml(base.as_bytes())?;
     }
     if base.lines().any(|s| s.trim() == table)
@@ -576,10 +720,97 @@ fn toml_block(
     }
     Ok(format!("{}\n{begin}\n{block}\n{end}\n", base.trim_end()))
 }
+/// Dry-runs or prepares the Codex `config.toml` MCP registration on `raw` bytes.
+/// `doctor --integrations` and `install-mcp` share this routine so doctor never
+/// reports `codex_mcp` ok for bytes that install, repair, or uninstall refuse.
+pub(crate) fn converge_codex_mcp(
+    paths: &Paths,
+    options: &Options,
+    raw: &[u8],
+) -> Result<(Option<Value>, String)> {
+    let executable = paths.home.join(".local/bin/oms");
+    let raw = std::str::from_utf8(raw)
+        .map_err(|_| r::Error(2, "Codex configuration is not UTF-8".into()))?;
+    let mut expected = crate::config::toml(raw.as_bytes())?;
+    if !expected.is_object() {
+        return r::fail("Codex configuration is not an object");
+    }
+    if expected
+        .get("mcp_servers")
+        .is_some_and(|servers| !servers.is_object())
+    {
+        return r::fail("invalid MCP server table");
+    }
+    let current = expected
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("oh-my-setting"))
+        .cloned();
+    // A marker delimits the bytes to edit; it does not authorize dropping an
+    // unknown environment, launch option, or third-party command in that block.
+    if let Some(ref current) = current
+        && !owned_mcp_entry(current, paths, &executable)?
+    {
+        return r::fail("an unmanaged TOML table already occupies this registration");
+    }
+    let entry = managed_mcp_entry(paths, options, current.as_ref(), false)?;
+    let section = "[mcp_servers.oh-my-setting]";
+    let block = if options.has("--remove") {
+        String::new()
+    } else {
+        let mut block = format!(
+            "{section}\ncommand = {}\nargs = [\"mcp-server\"]",
+            serde_json::to_string(&executable)
+                .map_err(|_| r::Error(2, "invalid native command path".into()))?
+        );
+        if let Some(profile) = entry["env"][MCP_TOOL_PROFILE].as_str() {
+            block.push_str(&format!("\nenv = {{ {MCP_TOOL_PROFILE} = \"{profile}\" }}"));
+        }
+        block
+    };
+    let body = toml_block(raw, &block, section, paths, &executable)?;
+    let candidate = crate::config::toml(body.as_bytes())?;
+    if options.has("--remove") {
+        if let Some(servers) = expected
+            .get_mut("mcp_servers")
+            .and_then(Value::as_object_mut)
+        {
+            servers.remove("oh-my-setting");
+        }
+        if expected["mcp_servers"]
+            .as_object()
+            .is_some_and(|v| v.is_empty())
+            && candidate.get("mcp_servers").is_none()
+        {
+            expected.as_object_mut().unwrap().remove("mcp_servers");
+        }
+    } else {
+        expected
+            .as_object_mut()
+            .ok_or_else(|| r::Error(2, "Codex configuration is not an object".into()))?
+            .entry("mcp_servers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| r::Error(2, "invalid MCP server table".into()))?
+            .insert("oh-my-setting".into(), entry);
+    }
+    if candidate != expected {
+        return r::fail("MCP block edit changed unrelated TOML data; configuration retained");
+    }
+    Ok((current, body))
+}
+
 fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool) -> Result<()> {
     if !options.has("--remove") {
         crate::payload::verify(paths, flag)?.recheck()?;
     }
+    mcp_registrations(paths, options, tx, &paths.codex_config()?)
+}
+fn mcp_registrations(
+    paths: &Paths,
+    options: &Options,
+    tx: &mut Transaction,
+    config: &Path,
+) -> Result<()> {
     let executable = paths.home.join(".local/bin/oms");
     let claude = paths.home.join(".claude.json");
     let mut value = if r::exists(&claude) {
@@ -604,57 +835,20 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
     if options.has("--remove") {
         servers.remove("oh-my-setting");
     } else {
-        servers.insert(
-            "oh-my-setting".into(),
-            json!({"type":"stdio","command":executable,"args":["mcp-server"]}),
-        );
+        let entry = managed_mcp_entry(paths, options, servers.get("oh-my-setting"), true)?;
+        servers.insert("oh-my-setting".into(), entry);
     }
-    let config = paths.codex_config()?;
-    let raw = if r::exists(&config) {
-        String::from_utf8(r::read(&config, r::LIMIT)?)
-            .map_err(|_| r::Error(2, "Codex configuration is not UTF-8".into()))?
+    let raw = if r::exists(config) {
+        r::read(config, r::LIMIT)?
     } else {
-        String::new()
+        Vec::new()
     };
-    let section = "[mcp_servers.oh-my-setting]";
-    let block = if options.has("--remove") {
-        String::new()
-    } else {
-        format!(
-            "{section}\ncommand = {}\nargs = [\"mcp-server\"]",
-            serde_json::to_string(&executable)
-                .map_err(|_| r::Error(2, "invalid native command path".into()))?
-        )
-    };
-    let mut expected = crate::config::toml(raw.as_bytes())?;
-    let body = toml_block(&raw, &block, section, paths, &executable)?;
-    let candidate = crate::config::toml(body.as_bytes())?;
-    if options.has("--remove") {
-        if let Some(servers) = expected
-            .get_mut("mcp_servers")
-            .and_then(Value::as_object_mut)
-        {
-            servers.remove("oh-my-setting");
-        }
-        if expected["mcp_servers"]
-            .as_object()
-            .is_some_and(|v| v.is_empty())
-            && candidate.get("mcp_servers").is_none()
-        {
-            expected.as_object_mut().unwrap().remove("mcp_servers");
-        }
-    } else {
-        expected["mcp_servers"]["oh-my-setting"] =
-            json!({"command":executable,"args":["mcp-server"]});
-    }
-    if candidate != expected {
-        return r::fail("MCP block edit changed unrelated TOML data; configuration retained");
-    }
+    let (_, body) = converge_codex_mcp(paths, options, &raw)?;
     if r::exists(&claude) || !options.has("--remove") {
         tx.write(&claude, &r::bytes(&value)?, 0o600)?;
     }
-    if r::exists(&config) || !options.has("--remove") {
-        tx.write(&config, body.as_bytes(), 0o600)?;
+    if r::exists(config) || !options.has("--remove") {
+        tx.write(config, body.as_bytes(), 0o600)?;
     }
     Ok(())
 }
@@ -941,12 +1135,17 @@ pub(crate) fn run(
     }
     if options.preview() {
         return Ok(r::text(format!(
-            "would {} owned provider configuration",
+            "would {} owned provider configuration{}",
             if options.has("--remove") {
                 "remove"
             } else {
                 "converge"
-            }
+            },
+            options
+                .mcp_tool_profile
+                .map_or_else(String::new, |profile| {
+                    format!(" with MCP tool profile {}", profile.as_str())
+                })
         )));
     }
     r::child_guard()?;
@@ -1042,6 +1241,327 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn mcp_profiles_survive_reapply_migration_and_owned_removal() {
+        let scratch = r::Scratch::new().unwrap();
+        let paths = Paths {
+            home: scratch.0.join("home"),
+            source: scratch.0.join("source"),
+            receipt: scratch.0.join("config/install.json"),
+            config: scratch.0.join("config"),
+            state: scratch.0.join("state"),
+            data: scratch.0.join("data"),
+            cwd: scratch.0.clone(),
+        };
+        let claude = paths.home.join(".claude.json");
+        let codex = paths.home.join(".codex/config.toml");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        let user = "# keep user formatting\ncustom = true\n";
+        fs::write(&codex, user).unwrap();
+        fs::write(&claude, br#"{"custom":true}"#).unwrap();
+        let converge = |args: &[&str]| -> Result<()> {
+            let options = crate::cli::parse(
+                "install-mcp",
+                &args
+                    .iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>(),
+            )?;
+            let mut tx = Transaction::begin(&paths)?;
+            // Exercise the production registration writer after its separate
+            // native-payload gate; no provider or build runs in this fixture.
+            mcp_registrations(&paths, &options, &mut tx, &codex)?;
+            tx.commit()
+        };
+        let entries = || {
+            (
+                r::value(&claude).unwrap()["mcpServers"]["oh-my-setting"].clone(),
+                crate::config::read_toml(&codex).unwrap()["mcp_servers"]["oh-my-setting"].clone(),
+            )
+        };
+        let bytes = || (fs::read(&claude).unwrap(), fs::read(&codex).unwrap());
+        converge(&[]).unwrap();
+        for entry in [entries().0, entries().1] {
+            assert!(entry.get("env").is_none(), "legacy default stays implicit");
+        }
+        for profile in ["full", "core"] {
+            converge(&["--mcp-tool-profile", profile]).unwrap();
+            for entry in [entries().0, entries().1] {
+                assert_eq!(entry["env"][MCP_TOOL_PROFILE], profile);
+            }
+            let saved = bytes();
+            converge(&[]).unwrap();
+            assert_eq!(bytes(), saved, "reapply must preserve {profile}");
+        }
+
+        let mut selected = r::value(&claude).unwrap();
+        selected["mcpServers"]["oh-my-setting"]["env"][MCP_TOOL_PROFILE] = json!("full");
+        fs::write(&claude, r::bytes(&selected).unwrap()).unwrap();
+        converge(&[]).unwrap();
+        assert_eq!(entries().0["env"][MCP_TOOL_PROFILE], "full");
+        assert_eq!(entries().1["env"][MCP_TOOL_PROFILE], "core");
+
+        // Adopt only the exact legacy command while retaining its selection.
+        // The nested env table may be separated from the server by user data.
+        let legacy = paths.source.join("scripts/oms-mcp-server.py");
+        selected["mcpServers"]["oh-my-setting"]["command"] = json!("python3");
+        selected["mcpServers"]["oh-my-setting"]["args"] = json!([legacy]);
+        fs::write(&claude, r::bytes(&selected).unwrap()).unwrap();
+        let sibling = "[mcp_servers.other]\ncommand = \"user-mcp\"\nargs = []\n";
+        fs::write(
+            &codex,
+            format!(
+                "{user}\n[mcp_servers.'oh-my-setting']\ncommand = \"python3\"\nargs = [{}]\n\n{sibling}\n[mcp_servers.'oh-my-setting'.env]\n{MCP_TOOL_PROFILE} = \"full\"\n",
+                json!(legacy)
+            ),
+        )
+        .unwrap();
+        converge(&[]).unwrap();
+        for entry in [entries().0, entries().1] {
+            assert_eq!(entry["command"], json!(paths.home.join(".local/bin/oms")));
+            assert_eq!(entry["args"], json!(["mcp-server"]));
+            assert_eq!(entry["env"][MCP_TOOL_PROFILE], "full");
+        }
+        let raw = fs::read_to_string(&codex).unwrap();
+        assert!(raw.starts_with(user));
+        assert!(raw.contains(sibling));
+        let saved = bytes();
+        converge(&[]).unwrap();
+        assert_eq!(bytes(), saved);
+
+        // Migrate a managed block without env paired with an outside env table
+        // setting OMS_MCP_TOOL_PROFILE = core|full, then remove cleanly without
+        // dropping any unrelated lines or comments.
+        let native = json!(paths.home.join(".local/bin/oms"));
+        let note = "# preserve trailing user comment\n";
+        for profile in ["core", "full"] {
+            let split_managed = format!(
+                "{user}# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {native}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n\n[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = \"{profile}\"\n\n{note}{sibling}"
+            );
+            fs::write(&codex, &split_managed).unwrap();
+            converge(&[]).unwrap();
+            assert_eq!(entries().1["command"], native);
+            assert_eq!(entries().1["args"], json!(["mcp-server"]));
+            assert_eq!(entries().1["env"][MCP_TOOL_PROFILE], profile);
+            let migrated = fs::read_to_string(&codex).unwrap();
+            assert!(migrated.starts_with(user));
+            assert!(migrated.contains(note));
+            assert!(migrated.contains(sibling));
+            assert!(!migrated.contains("[mcp_servers.oh-my-setting.env]"));
+            assert_eq!(migrated.matches("# BEGIN oh-my-setting native").count(), 1);
+            converge(&["--remove"]).unwrap();
+            assert!(entries().0.is_null());
+            assert!(entries().1.is_null());
+            let removed = fs::read_to_string(&codex).unwrap();
+            assert!(removed.starts_with(user));
+            assert!(removed.contains(note));
+            assert!(removed.contains(sibling));
+            assert!(!removed.contains("oh-my-setting"));
+            assert!(!removed.contains(MCP_TOOL_PROFILE));
+            fs::write(&claude, &saved.0).unwrap();
+        }
+        fs::create_dir_all(&paths.config).unwrap();
+        let receipt_bytes = r::bytes(
+            &json!({"schema":1,"source_root":paths.source,"commit":"fixture",
+            "version":"1","channel":"edge","installed_at":"fixture",
+            "plugin":{"name":"oh-my-setting","version":"1","sha256":"fixture"},
+            "components":{"mcp":true}}),
+        )
+        .unwrap();
+        fs::write(&paths.receipt, &receipt_bytes).unwrap();
+        let doctor_opts =
+            crate::cli::parse("doctor", &["--integrations".into(), "--json".into()]).unwrap();
+        let inspect_doctor = || -> Value {
+            let out = crate::doctor::integrations_at(
+                &paths,
+                &doctor_opts,
+                &AtomicBool::new(false),
+                &codex,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&paths.receipt).unwrap(), receipt_bytes);
+            let report = r::parse(&out.1).unwrap();
+            assert_eq!(out.0, report["exit"].as_i64().unwrap() as i32);
+            report
+        };
+        for bad_outside_env in [
+            format!("[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = \"unknown\"\n"),
+            format!(
+                "[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = \"full\"\nUSER_CUSTOM = \"1\"\n"
+            ),
+            format!(
+                "[mcp_servers.oh-my-setting.env]\n# user comment inside env\n{MCP_TOOL_PROFILE} = \"full\"\n"
+            ),
+            format!(
+                "[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = \"full\" # inline user note\n"
+            ),
+            format!(
+                "[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = 'full' # inline single-quoted note\n"
+            ),
+            format!("[mcp_servers.oh-my-setting.\"env\"]\n{MCP_TOOL_PROFILE} = \"full\"\n"),
+        ] {
+            fs::write(
+                &codex,
+                format!(
+                    "{user}# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {native}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n\n{bad_outside_env}"
+                ),
+            )
+            .unwrap();
+            let before = bytes();
+            let err = converge(&[]).unwrap_err();
+            assert_eq!(
+                err.1,
+                "an unmanaged TOML table already occupies this registration"
+            );
+            assert_eq!(bytes(), before);
+            for args in [&["--mcp-tool-profile", "core"][..], &["--remove"][..]] {
+                let other_err = converge(args).unwrap_err();
+                assert_eq!(other_err.1, err.1);
+                assert_eq!(bytes(), before);
+            }
+            let report = inspect_doctor();
+            assert_eq!(report["exit"], 1, "{report}");
+            let codex_finding = report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["section"] == "codex_mcp")
+                .unwrap();
+            assert_eq!(codex_finding["level"], "error");
+            let message = codex_finding["message"].as_str().unwrap();
+            assert!(message.starts_with(&err.1), "{message}");
+            assert!(
+                message.contains("hint: move or delete the outside table by hand"),
+                "{message}"
+            );
+            assert_eq!(bytes(), before);
+        }
+        // Unmarked table migration also refuses trailing inline comments and dotted spellings.
+        for unmarked_refused in [
+            format!(
+                "{user}[mcp_servers.oh-my-setting]\ncommand = {native} # keep inline note\nargs = [\"mcp-server\"]\n"
+            ),
+            format!(
+                "{user}[mcp_servers]\noh-my-setting.command = {native}\noh-my-setting.args = [\"mcp-server\"]\noh-my-setting.env.{MCP_TOOL_PROFILE} = \"full\"\n"
+            ),
+        ] {
+            fs::write(&codex, unmarked_refused).unwrap();
+            let before = bytes();
+            let err = converge(&[]).unwrap_err();
+            assert_eq!(
+                err.1,
+                "an unmanaged TOML table already occupies this registration"
+            );
+            assert_eq!(bytes(), before);
+            assert_eq!(converge(&["--remove"]).unwrap_err().1, err.1);
+            assert_eq!(bytes(), before);
+            let report = inspect_doctor();
+            assert_eq!(report["exit"], 1);
+            assert!(report["findings"].as_array().unwrap().iter().any(|row| {
+                row["section"] == "codex_mcp"
+                    && row["level"] == "error"
+                    && row["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with(&err.1))
+            }));
+            assert_eq!(bytes(), before);
+        }
+        assert!(!has_toml_comment(
+            "command = \"/tmp/user#hash/.local/bin/oms\"\nargs = [\"mcp-server\"]\n"
+        ));
+        assert!(has_toml_comment(
+            "command = \"/tmp/user#hash/.local/bin/oms\" # trailing note\n"
+        ));
+        // Array-of-tables [[mcp_servers]] returns a clean exit-2 error without panicking.
+        fs::write(
+            &codex,
+            format!("{user}\n[[mcp_servers]]\nname = \"other\"\n"),
+        )
+        .unwrap();
+        let before = bytes();
+        for args in [
+            &[][..],
+            &["--mcp-tool-profile", "full"][..],
+            &["--remove"][..],
+        ] {
+            let err = converge(args).unwrap_err();
+            assert_eq!((err.0, err.1.as_str()), (2, "invalid MCP server table"));
+            assert_eq!(bytes(), before);
+        }
+        fs::write(&codex, &saved.1).unwrap();
+
+        // A selector cannot discard unrecognized settings. In particular, an
+        // invalid Codex block must leave the already-read Claude file intact.
+        for env in [
+            "env = { OMS_MCP_TOOL_PROFILE = \"unknown\" }",
+            "env = { OMS_MCP_TOOL_PROFILE = 1 }",
+            "env = { OMS_MCP_TOOL_PROFILE = \"full\", USER_CUSTOM = \"1\" }",
+            "env = { USER_CUSTOM = \"1\" }",
+            "env = []",
+        ] {
+            for marked in [false, true] {
+                let block = format!(
+                    "[mcp_servers.oh-my-setting]\ncommand = {native}\nargs = [\"mcp-server\"]\n{env}\n"
+                );
+                fs::write(
+                    &codex,
+                    if marked {
+                        format!("{user}\n# BEGIN oh-my-setting native\n{block}# END oh-my-setting native\n")
+                    } else {
+                        format!("{user}\n{block}")
+                    },
+                )
+                .unwrap();
+                let before = bytes();
+                assert!(converge(&["--mcp-tool-profile", "core"]).is_err());
+                assert_eq!(bytes(), before);
+                assert!(converge(&["--remove"]).is_err());
+                assert_eq!(bytes(), before);
+            }
+        }
+        fs::write(&codex, &saved.1).unwrap();
+        let valid = r::value(&claude).unwrap();
+        for env in [
+            json!({MCP_TOOL_PROFILE:"unknown"}),
+            json!({MCP_TOOL_PROFILE:1}),
+            json!({MCP_TOOL_PROFILE:"full","USER_CUSTOM":"1"}),
+            json!({"USER_CUSTOM":"1"}),
+            json!(null),
+            json!([]),
+        ] {
+            let mut changed = valid.clone();
+            changed["mcpServers"]["oh-my-setting"]["env"] = env;
+            fs::write(&claude, r::bytes(&changed).unwrap()).unwrap();
+            let before = bytes();
+            assert!(converge(&["--mcp-tool-profile", "full"]).is_err());
+            assert_eq!(bytes(), before);
+        }
+        let mut foreign = valid;
+        foreign["mcpServers"]["oh-my-setting"]["command"] = json!("other-mcp");
+        fs::write(&claude, r::bytes(&foreign).unwrap()).unwrap();
+        let before = bytes();
+        assert!(converge(&["--mcp-tool-profile", "full"]).is_err());
+        assert_eq!(bytes(), before);
+        fs::write(&claude, &saved.0).unwrap();
+        let foreign_block = format!(
+            "{user}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = \"other-mcp\"\nargs = [\"mcp-server\"]\nenv = {{ {MCP_TOOL_PROFILE} = \"full\" }}\n# END oh-my-setting native\n"
+        );
+        fs::write(&codex, foreign_block).unwrap();
+        let before = bytes();
+        assert!(converge(&["--mcp-tool-profile", "full"]).is_err());
+        assert_eq!(bytes(), before);
+        fs::write(&codex, &saved.1).unwrap();
+
+        converge(&["--remove"]).unwrap();
+        assert!(entries().0.is_null());
+        assert!(entries().1.is_null());
+        assert_eq!(r::value(&claude).unwrap()["custom"], true);
+        let raw = fs::read_to_string(&codex).unwrap();
+        assert!(raw.starts_with(user));
+        assert!(raw.contains(sibling));
+        assert!(!raw.contains(MCP_TOOL_PROFILE));
     }
 
     #[test]
