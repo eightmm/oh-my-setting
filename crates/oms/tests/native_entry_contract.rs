@@ -5153,10 +5153,24 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     let old_mtime =
         std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60 + 60);
     let set_mtime = |path: &std::path::Path, mtime: std::time::SystemTime| {
-        std::fs::File::open(path)
+        let secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .set_modified(mtime)
-            .unwrap();
+            .as_secs() as i64;
+        let spec = rustix::fs::Timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &rustix::fs::Timestamps {
+                last_access: spec,
+                last_modification: spec,
+            },
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
     };
     let populate_artifacts = |wt: &std::path::Path, mtime: Option<std::time::SystemTime>| {
         let index = wt.join(".oms/artifacts/index.jsonl");
@@ -5183,6 +5197,35 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         &["commit", "-q", "--allow-empty", "-m", "unmerged"],
     );
     populate_artifacts(&unmerged_wt, Some(old_mtime));
+    let symlink_digest = residue(&managed_root, "scratch", "symdigest", &dead_s, &l.repo);
+    let sym_digests = symlink_digest.join("wt-symdigest").join(capture_dir);
+    std::fs::create_dir_all(&sym_digests).unwrap();
+    let sym_entry = sym_digests.join("20261124T000000Z-300000000000000000000.log");
+    symlink(l.repo.join("a.txt"), &sym_entry).unwrap();
+    set_mtime(&sym_entry, old_mtime);
+    set_mtime(&sym_digests, old_mtime);
+    let unmerged_digest = residue(
+        &managed_root,
+        "scratch",
+        "unmerged-digest",
+        &dead_s,
+        &l.repo,
+    );
+    let unmerged_digest_wt = unmerged_digest.join("wt-unmerged-digest");
+    l.git_in(
+        &unmerged_digest_wt,
+        &["checkout", "-q", "-b", "local-unmerged-digest"],
+    );
+    l.git_in(
+        &unmerged_digest_wt,
+        &["commit", "-q", "--allow-empty", "-m", "unmerged-digest"],
+    );
+    let unmerged_digests = unmerged_digest_wt.join(capture_dir);
+    std::fs::create_dir_all(&unmerged_digests).unwrap();
+    let unmerged_entry = unmerged_digests.join("20261124T000000Z-400000000000000000000.log");
+    std::fs::write(&unmerged_entry, b"ok\n").unwrap();
+    set_mtime(&unmerged_entry, old_mtime);
+    set_mtime(&unmerged_digests, old_mtime);
     let captured = residue(&managed_root, "scratch", "captured", &dead_s, &l.repo);
     let captures = captured.join("wt-captured").join(capture_dir);
     std::fs::create_dir_all(&captures).unwrap();
@@ -5239,18 +5282,25 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         &swapped,
         &fresh,
         &unmerged,
+        &symlink_digest,
+        &unmerged_digest,
         &captured,
         &unsafe_store,
     ] {
         assert!(line("kept", path), "{}: {report}", path.display());
     }
-    assert!(
-        report.lines().any(|l| {
-            l.starts_with(&format!("kept: {} (", fresh.display()))
-                && l.contains("holds .oms/artifacts/index.jsonl")
-        }),
-        "{report}"
-    );
+    for (kept, reason) in [
+        (&fresh, "holds .oms/artifacts/index.jsonl"),
+        (&symlink_digest, "holds .oms/artifacts/output-digest"),
+        (&unmerged_digest, "holds .oms/artifacts/output-digest"),
+    ] {
+        assert!(
+            report.lines().any(|l| {
+                l.starts_with(&format!("kept: {} (", kept.display())) && l.contains(reason)
+            }),
+            "{report}"
+        );
+    }
     assert!(
         report.contains("worktree has uncommitted or untracked files"),
         "{report}"
@@ -5268,7 +5318,7 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         "{report}"
     );
     assert!(
-        report.ends_with("\ncleanup: 4 removable item(s) found, 8 kept with work\n"),
+        report.ends_with("\ncleanup: 4 removable item(s) found, 10 kept with work\n"),
         "{report}"
     );
     assert!(removable.exists() && settled.exists() && ours.symlink_metadata().is_ok());
@@ -5280,7 +5330,7 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
 
     let applied = l.ok(&["cleanup", "--apply"]);
     assert!(
-        applied.ends_with("\ncleanup: removed 4 item(s), 8 kept with work\n"),
+        applied.ends_with("\ncleanup: removed 4 item(s), 10 kept with work\n"),
         "{applied}"
     );
     assert!(
@@ -5290,7 +5340,18 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
             && ours.symlink_metadata().is_err()
     );
     for path in [
-        &live, &unproven, &dirty, &foreign, &swapped, &fresh, &unmerged, &target, &linked, &user,
+        &live,
+        &unproven,
+        &dirty,
+        &foreign,
+        &swapped,
+        &fresh,
+        &unmerged,
+        &symlink_digest,
+        &unmerged_digest,
+        &target,
+        &linked,
+        &user,
     ] {
         assert!(path.symlink_metadata().is_ok(), "{}", path.display());
     }
@@ -5311,6 +5372,8 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
             && registered.contains("wt-dirty")
             && registered.contains("wt-fresh")
             && registered.contains("wt-unmerged")
+            && registered.contains("wt-symdigest")
+            && registered.contains("wt-unmerged-digest")
             && registered.contains("wt-captured")
             && registered.contains("wt-unsafe"),
         "{registered}"

@@ -1295,7 +1295,7 @@ fn stat_mtime(stat: &rustix::fs::Stat) -> Option<std::time::SystemTime> {
 }
 
 fn output_digest_recently_modified(worktree: &Path, now: std::time::SystemTime) -> bool {
-    use rustix::fs::{AtFlags, Dir, fstat, statat};
+    use rustix::fs::{AtFlags, Dir, FileType, fstat, statat};
 
     let Ok(Some(dir)) = open_output_digest(worktree) else {
         return true;
@@ -1320,6 +1320,9 @@ fn output_digest_recently_modified(worktree: &Path, now: std::time::SystemTime) 
         let Ok(stat) = statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) else {
             return true;
         };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return true;
+        }
         let Some(mtime) = stat_mtime(&stat) else {
             return true;
         };
