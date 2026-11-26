@@ -225,6 +225,9 @@ pub(crate) fn validate_owned(path: &Path) -> Result<()> {
     }
 }
 pub(crate) fn read(path: &Path) -> Result<Vec<u8>> {
+    read_bounded(path, MAX)
+}
+pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
     if path.as_os_str().is_empty() {
         return Ok(Vec::new());
     }
@@ -235,7 +238,7 @@ pub(crate) fn read(path: &Path) -> Result<Vec<u8>> {
         path,
         ByteReadOptions {
             missing_ok: true,
-            max_bytes: MAX,
+            max_bytes,
         },
     )
     .map_err(|e| Error(2, format!("memory: unsafe or unreadable source ({e:?})")))

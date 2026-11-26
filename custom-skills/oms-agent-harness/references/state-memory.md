@@ -60,9 +60,13 @@ entry point; follow its pointers
 After a compaction the same block is re-read from state and gains one line
 saying so; `oms runtime context-inspect --injections` sums what hooks injected.
 Shared memory is not in that block by default. `OMS_RESUME_MEMORY=1` appends one
-section of at most 1200 bytes: the three newest pins, then up to three notes
-from shared memory ranked for the active task's goal, one line each with its
-event id. It is reference material, not approval or verification evidence. The section is
+section of at most 1200 bytes: up to three newest eligible pins and three notes
+from shared memory ranked for the current objective, one line each with its
+event id. A fresh active task goal takes precedence, then an unfinished Plan,
+then the project goal; closed, stale, dormant and undated packets do not select
+recall. Pins and ranked notes share a reserved budget before rendering, so long
+unrelated context cannot displace the ranked notes. It is reference material,
+not approval or verification evidence. The section is
 omitted when memory is empty, when the memory scan withholds it, or when the
 lookup takes over two seconds. The lookup uses a temporary index, leaving the
 persistent index and recall receipts unchanged.
@@ -83,7 +87,11 @@ finds records, not meaning, so open the hit before relying on it. For maintenanc
 recorded decisions become pending memory proposals once per local day at the
 prompt tick, deduplicated against stored notes (`OMS_JOURNAL_AUTODISTILL=0`
 opts out); run `oms journal distill` for an off-cycle pass — `--dry-run`
-previews the proposals. `oms agent-memory review --accept ID` makes an automatic
+previews the proposals. `oms inbox` exposes the bounded pending review count and
+the read-only review action; an unavailable source stays unknown. The prompt
+state hint appears once per session and again when a new candidate arrives.
+It does not accept proposals, and accepting or retiring an existing candidate
+alone does not repeat the hint. `oms agent-memory review --accept ID` makes an automatic
 note eligible for summaries and provider context; acceptance does not verify it.
 Manual notes and pins remain eligible, while `show`, `search` and `recall` keep
 stored proposals available for review.

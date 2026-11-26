@@ -6,11 +6,64 @@ use crate::{Result, decision, error, require};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
-/// Automatic planning's fixed council quorum. The producer requests exactly this
-/// and admission pins it, so a retained manifest cannot declare a smaller one.
+/// Legacy automatic planning quorum, used when no versioned selection exists.
 pub const AUTO_COUNCIL_PROVIDERS: [&str; 3] = ["codex", "claude", "antigravity"];
-/// Rebuttal rounds the automatic planning council runs after the initial round.
+/// Legacy rebuttal count after the initial round.
 pub const AUTO_COUNCIL_ROUNDS: u64 = 1;
+
+/// Explicit required seats and rebuttal count, frozen with the reviewed proposal
+/// and automatic run. Omitted legacy selections retain the original quorum.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CouncilComposition {
+    pub providers: Vec<String>,
+    pub rounds: u64,
+}
+impl Default for CouncilComposition {
+    fn default() -> Self {
+        Self {
+            providers: AUTO_COUNCIL_PROVIDERS.map(str::to_owned).to_vec(),
+            rounds: AUTO_COUNCIL_ROUNDS,
+        }
+    }
+}
+impl CouncilComposition {
+    pub fn parse(value: &Value) -> Result<Self> {
+        json::keys(value, &["schema", "providers", "rounds"], &[])?;
+        let providers = value.get("providers").strings()?;
+        require(
+            value.get("schema").is_int(1)
+                && !providers.is_empty()
+                && providers.len() <= AUTO_COUNCIL_PROVIDERS.len()
+                && providers.iter().all(|p| supports_native_output(p))
+                && providers.iter().collect::<BTreeSet<_>>().len() == providers.len(),
+            "council selection requires unique native-output providers",
+        )?;
+        Ok(Self {
+            providers: providers.into_iter().map(str::to_owned).collect(),
+            rounds: integer(value.get("rounds"), 0, 3, "council rounds")?,
+        })
+    }
+    pub fn value(&self) -> Value {
+        object([
+            ("schema", number(1)),
+            (
+                "providers",
+                Value::Array(self.providers.iter().map(string).collect()),
+            ),
+            ("rounds", number(self.rounds)),
+        ])
+    }
+    pub fn provider_names(&self) -> Vec<&str> {
+        self.providers.iter().map(String::as_str).collect()
+    }
+    pub fn retained(owner: &Value) -> Result<Self> {
+        owner
+            .opt("council")
+            .map(Self::parse)
+            .transpose()
+            .map(|selection| selection.unwrap_or_default())
+    }
+}
 
 pub fn supports_native_output(provider: &str) -> bool {
     matches!(provider, "codex" | "claude" | "antigravity")
@@ -530,7 +583,7 @@ pub fn validate_council_synthesis(
             && report.text("kind") == "oms-council-synthesis"
             && id(run, 160)
             && report.text("prompt_sha256") == json::sha(prompt)
-            && (1..=3).contains(&rounds)
+            && rounds <= 3
             && report.get("rounds").is_int(rounds as i128)
             && !providers.is_empty()
             && providers.len() <= 16
@@ -662,9 +715,25 @@ pub fn validate_proposal_for_route(
     proposal: &Value,
     expected_route: Option<(&str, &str)>,
 ) -> Result<Option<ValidatedOutput>> {
+    validate_proposal_for_selection(store, proposal, expected_route, None)
+}
+
+pub fn validate_proposal_for_selection(
+    store: &Store,
+    proposal: &Value,
+    expected_route: Option<(&str, &str)>,
+    expected_council: Option<&CouncilComposition>,
+) -> Result<Option<ValidatedOutput>> {
+    let council = CouncilComposition::retained(proposal)?;
+    require(
+        expected_council.is_none_or(|expected| expected == &council),
+        "discussion council differs from the frozen selection",
+    )?;
     let Some(reference) = proposal.opt("discussion") else {
         require(
-            expected_route.is_none(),
+            expected_route.is_none()
+                && expected_council.is_none()
+                && proposal.opt("council").is_none(),
             "auto collaboration requires retained planning discussion evidence",
         )?;
         return Ok(None);
@@ -733,8 +802,8 @@ pub fn validate_proposal_for_route(
     let route = manifest.get("synthesis_route");
     json::keys(route, &["provider", "requested_model"], &[])?;
     require(
-        manifest.get("providers").strings()? == AUTO_COUNCIL_PROVIDERS
-            && integer(manifest.get("rounds"), 1, 3, "discussion rounds")? == AUTO_COUNCIL_ROUNDS,
+        manifest.get("providers").strings()? == council.provider_names()
+            && integer(manifest.get("rounds"), 0, 3, "discussion rounds")? == council.rounds,
         "discussion council differs from the automatic planning quorum",
     )?;
     let retained_route = (route.text("provider"), route.text("requested_model"));
@@ -746,9 +815,9 @@ pub fn validate_proposal_for_route(
     validate_council_synthesis(
         &json::canonical(manifest.get("report"))?,
         question_text,
-        &AUTO_COUNCIL_PROVIDERS,
+        &council.provider_names(),
         expected_route.unwrap_or(retained_route),
-        AUTO_COUNCIL_ROUNDS,
+        council.rounds,
         |name| store.read(directory.join(name), MAX_JSON),
     )
     .map(Some)
