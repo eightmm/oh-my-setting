@@ -885,22 +885,39 @@ fn inbox_projects_pending_memory_review_without_accepting_or_copying_notes() {
             .any(|c| c == "pending-memory-review")
     );
 
-    fs::write(
-        repo.path().join(".oms/memory/reviews.jsonl"),
-        b"{malformed receipt}\n",
-    )
-    .unwrap();
+    let (code, second_id, error) = oms_command_memory::append_project_note(
+        repo.path(),
+        "agent",
+        "task_close",
+        "second-private-fixture remains visible beside a bad receipt row",
+        &flag,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    let _second_id = String::from_utf8(second_id).unwrap().trim().to_owned();
+    let mut receipts = fs::read(repo.path().join(".oms/memory/reviews.jsonl")).unwrap();
+    receipts.extend_from_slice(b"{malformed receipt}\n");
+    fs::write(repo.path().join(".oms/memory/reviews.jsonl"), receipts).unwrap();
     let snapshot = view_json("state", repo.path());
     assert!(!snapshot.get("memory_review").get("healthy").truth());
-    assert_eq!(
-        snapshot.get("memory_review").get("pending"),
-        &json::Value::Null
-    );
+    assert_eq!(snapshot.get("memory_review").text("status"), "partial");
+    assert!(snapshot.get("memory_review").get("pending").is_int(1));
+    assert!(snapshot.get("memory_review").get("skipped").is_int(1));
+    let (_, rendered_state, _) = view("state", repo.path(), &[]);
     assert!(
-        inbox_codes(repo.path())
+        rendered_state.contains(
+            "1 proposal(s) await explicit review (partial: 1 invalid row(s) skipped); unverified"
+        ),
+        "{rendered_state}"
+    );
+    let partial_codes = inbox_codes(repo.path());
+    assert!(partial_codes.iter().any(|c| c == "pending-memory-review"));
+    assert!(partial_codes.iter().any(|c| c == "memory-review-partial"));
+    assert!(
+        !partial_codes
             .iter()
             .any(|c| c == "memory-review-unavailable")
     );
+
     fs::remove_file(repo.path().join(".oms/memory/reviews.jsonl")).unwrap();
     fs::File::options()
         .write(true)
@@ -909,6 +926,21 @@ fn inbox_projects_pending_memory_review_without_accepting_or_copying_notes() {
         .set_len(4 * 1024 * 1024 + 1)
         .unwrap();
     assert!(oms_command_memory::pending_review(repo.path(), &flag).is_err());
+    let unavailable = view_json("state", repo.path());
+    assert!(!unavailable.get("memory_review").get("healthy").truth());
+    assert_eq!(
+        unavailable.get("memory_review").get("pending"),
+        &json::Value::Null
+    );
+    assert_eq!(
+        unavailable.get("memory_review").get("skipped"),
+        &json::Value::Null
+    );
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "memory-review-unavailable")
+    );
     fs::remove_file(&shared).unwrap();
     let target = repo.path().join("untrusted-memory.md");
     fs::write(&target, &before).unwrap();

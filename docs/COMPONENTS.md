@@ -1535,9 +1535,10 @@ Explicitly authored notes, pins and legacy manual notes keep their existing
 eligibility. `show`, `search` and explicit `recall` still expose stored proposals
 for review; no source notes are deleted. Acceptance does not verify a claim.
 
-`oms state` reports the bounded pending-review count; `oms inbox` provides a
-`pending-memory-review` action pointing to `oms agent-memory review`. Invalid,
-unsafe or oversized review sources remain unavailable with an unknown count.
+`oms state` reports the bounded pending-review count and skipped invalid rows;
+`oms inbox` provides a `pending-memory-review` action pointing to
+`oms agent-memory review`. Unsafe or oversized review sources remain unavailable
+with an unknown count.
 The prompt state hint appears once per session and when a new candidate arrives,
 without repeating merely because an existing candidate was decided. Neither the
 hint nor `inbox --fix-safe` accepts a proposal.
