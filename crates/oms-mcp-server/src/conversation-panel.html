@@ -1241,13 +1241,13 @@ function clearSettings(){
 function settingsScope(c){return {projectKey:c.ctl.projectKey,room:c.ctl.room,provider:c.provider,leadRequestId:c.requestId};}
 function confirmedSettings(c,response){
   const meta=response._meta?.leadSettings, data=response.structuredContent, scope=settingsScope(c);
-  const token=v=>typeof v==='string' && v.length>0 && v.length<=256 && !/\p{Cc}/u.test(v);
+  const validOptionText=v=>typeof v==='string' && v.length>0 && v.length<=256 && !/\p{Cc}/u.test(v);
   if(!meta || !data || Object.keys(scope).some(key=>meta[key]!==scope[key] || data[key]!==scope[key]) ||
     !/^[a-f0-9]{64}$/.test(meta.revision) || meta.revision!==data.revision || !meta.selection ||
-    !(meta.selection.model===null || token(meta.selection.model)) || !(meta.selection.effort===null || token(meta.selection.effort)) ||
+    !(meta.selection.model===null || validOptionText(meta.selection.model)) || !(meta.selection.effort===null || validOptionText(meta.selection.effort)) ||
     !meta.selection.model && meta.selection.effort || !Array.isArray(meta.options) ||
-    !meta.options.every(o=>o && token(o.model) && ['catalog','policy'].includes(o.source) && typeof o.fixed==='boolean' &&
-      typeof o.requiresEffort==='boolean' && Array.isArray(o.efforts) && o.efforts.every(token)) ||
+    !meta.options.every(o=>o && validOptionText(o.model) && ['catalog','policy'].includes(o.source) && typeof o.fixed==='boolean' &&
+      typeof o.requiresEffort==='boolean' && Array.isArray(o.efforts) && o.efforts.every(validOptionText)) ||
     new Set(meta.options.map(o=>o.model)).size!==meta.options.length)throw uiError('prefs.failed');
   return meta;
 }
