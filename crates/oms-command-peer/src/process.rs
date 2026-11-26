@@ -474,6 +474,12 @@ impl TeamLaunchBinding<'_> {
     }
 }
 pub trait Executor: Sync {
+    /// Maximum independent Council seats whose child cleanup this host can
+    /// preserve concurrently. Sync alone does not grant process-wide subreaper
+    /// ownership; embedded/default executors retain serial calls.
+    fn council_parallelism(&self) -> usize {
+        1
+    }
     /// Native Plan mutation services supplied only by the owning host. The
     /// read-only peer projections never implement this delegation authority.
     fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {

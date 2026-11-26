@@ -159,15 +159,14 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     if args.has("synthesis-json")
         && (tool != "peer-ask"
             || !args.has("synthesize")
-            || !args.has("deliberation")
             || !args.has("require-complete")
-            || !args.has("debate")
+            || args.has("deliberation") != args.has("debate")
             || args.has("until-agreement")
             || args.has("dry-run")
             || args.has("export-only"))
     {
         return fail(
-            "--synthesis-json requires peer-ask --synthesize TARGET --deliberation --require-complete --debate N",
+            "--synthesis-json requires peer-ask --synthesize TARGET --require-complete, with both --debate N and --deliberation for rebuttals",
         );
     }
     if args.has("output-json")
@@ -642,6 +641,110 @@ fn validate_council_round(seats: &[Seat]) -> Result<()> {
             .map_err(|e| Error::new(e.code, e.message))?;
     }
     Ok(())
+}
+
+// Bound the number of disposable worktrees and supervised provider calls. Each
+// seat publishes its own completed turn before the round barrier is released.
+const COUNCIL_CONCURRENCY: usize = 4;
+
+#[allow(clippy::too_many_arguments)]
+fn call_round(
+    tool: &str,
+    args: &Args,
+    repo: &Path,
+    dir: &Path,
+    run: &str,
+    targets: &[Target],
+    routes: &[providers::Route],
+    body: &crate::request_context::Prompt,
+    round: usize,
+    warnings: &mut Vec<u8>,
+    context: &Context<'_>,
+) -> Result<Vec<Seat>> {
+    let mut seats = Vec::with_capacity(targets.len());
+    let parallelism = context
+        .executor
+        .council_parallelism()
+        .clamp(1, COUNCIL_CONCURRENCY);
+    for (targets, routes) in targets.chunks(parallelism).zip(routes.chunks(parallelism)) {
+        crate::check(context.interrupted)?;
+        if targets.len() == 1 {
+            seats.push(call_routed(
+                tool,
+                args,
+                repo,
+                dir,
+                run,
+                &targets[0],
+                body,
+                round,
+                warnings,
+                context,
+                routes[0].clone(),
+            )?);
+            continue;
+        }
+        let outcomes = std::thread::scope(|scope| {
+            let mut workers = Vec::with_capacity(targets.len());
+            let mut launch_error = None;
+            for (target, route) in targets.iter().zip(routes) {
+                let worker = std::thread::Builder::new().spawn_scoped(scope, move || {
+                    let mut warnings = Vec::new();
+                    let seat = call_routed(
+                        tool,
+                        args,
+                        repo,
+                        dir,
+                        run,
+                        target,
+                        body,
+                        round,
+                        &mut warnings,
+                        context,
+                        route.clone(),
+                    );
+                    (seat, warnings)
+                });
+                match worker {
+                    Ok(worker) => workers.push(worker),
+                    Err(_) => {
+                        launch_error = Some(Error::new(75, "council worker could not start"));
+                        break;
+                    }
+                }
+            }
+            // Join every started call even after a sibling's error. Dropping a
+            // result must never detach provider supervision or invent cleanup.
+            let outcomes = workers
+                .into_iter()
+                .map(|worker| {
+                    worker.join().unwrap_or_else(|_| {
+                        (
+                            Err(Error::new(
+                                75,
+                                "council seat outcome unknown; reconcile before retrying",
+                            )),
+                            Vec::new(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            (outcomes, launch_error)
+        });
+        let (outcomes, mut error) = outcomes;
+        for (result, diagnostics) in outcomes {
+            warnings.extend(diagnostics);
+            match result {
+                Ok(seat) => seats.push(seat),
+                Err(err) if error.is_none() || err.code == 130 => error = Some(err),
+                Err(_) => {}
+            }
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+    }
+    Ok(seats)
 }
 
 #[derive(Clone)]
@@ -1474,12 +1577,16 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         route.account_pinned |= !route.account.is_empty();
         synthesis_route = Some((target, route));
     }
+    let mut routes = Vec::with_capacity(targets.len());
     if !dry(args, tool) && !args.has("export-only") {
         let mut valid = Vec::new();
         for target in targets {
             let checked = call_route(tool, args, &repo, &target, context);
             match checked {
-                Ok(_) => valid.push(target),
+                Ok(route) => {
+                    valid.push(target);
+                    routes.push(route);
+                }
                 Err(error) if target.optional => warnings.extend_from_slice(
                     format!(
                         "warning: optional {} seat unavailable: {}\n",
@@ -1491,6 +1598,11 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             }
         }
         targets = valid;
+    } else {
+        routes = targets
+            .iter()
+            .map(|target| call_route(tool, args, &repo, target, context))
+            .collect::<Result<Vec<_>>>()?;
     }
     if args.has("thread") && !dry(args, tool) && !args.has("export-only") {
         // Background callers already seeded their own explicit live thread.
@@ -1531,7 +1643,6 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         captured.as_ref().map(|(_, patch)| patch.as_slice()),
         context,
     )?;
-    let mut seats = Vec::new();
     let mut output = args.get("_review-incremental-note").to_owned();
     if tool == "consult" && args.has("thread") {
         output.push_str(&format!("{}\n", args.get("thread")));
@@ -1546,20 +1657,19 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         }
         crate::review::prepare(expected, &repo, &dir, &run, context)?;
     }
-    for target in &targets {
-        seats.push(call(
-            tool,
-            args,
-            &repo,
-            &dir,
-            &run,
-            target,
-            &body,
-            0,
-            &mut warnings,
-            context,
-        )?);
-    }
+    let mut seats = call_round(
+        tool,
+        args,
+        &repo,
+        &dir,
+        &run,
+        &targets,
+        &routes,
+        &body,
+        0,
+        &mut warnings,
+        context,
+    )?;
     if args.has("output-json") {
         let result = &seats[0];
         if result.code == 130 {
@@ -1629,21 +1739,19 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                 debate.push_str(crate::review::GATE_INSTRUCTION);
             }
             let debate = crate::request_context::Prompt::unknown(debate);
-            let mut next = Vec::new();
-            for target in &targets {
-                next.push(call(
-                    tool,
-                    args,
-                    &repo,
-                    &dir,
-                    &run,
-                    target,
-                    &debate,
-                    round,
-                    &mut warnings,
-                    context,
-                )?);
-            }
+            let next = call_round(
+                tool,
+                args,
+                &repo,
+                &dir,
+                &run,
+                &targets,
+                &routes,
+                &debate,
+                round,
+                &mut warnings,
+                context,
+            )?;
             let stable = next.iter().all(|s| {
                 s.answer
                     .to_lowercase()

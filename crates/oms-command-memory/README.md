@@ -27,6 +27,15 @@ committed citations, and provenance.
 - `provider_context` composes global and project memory, compact/full/relevant
   modes, query-ranked recall, path scopes, screening, and existing byte budgets.
   It replaces `ma_write_shared_memory_context` used by peer context assembly.
+- `resume_context` selects up to three eligible pins and three objective-ranked
+  notes before dividing its 1200-byte budget between them. It omits unrelated
+  recent summaries, uses a transient in-memory index, and leaves persistent
+  indexes and access receipts untouched. Project recall precedes global fallback;
+  review, retirement, citation, path-scope and child restrictions still apply.
+- `pending_review` projects the existing project review queue as a count and
+  candidate fingerprints, without copying note text or making a decision. Its
+  no-follow reads cap each source at 4 MiB and the queue at 4096 candidates;
+  invalid, unsafe or oversized sources return unavailable, never zero pending.
 
 Automatic task-close, distill and imported notes wait for `review --accept`
 before compact summaries or provider context can include them. The same rule
@@ -39,8 +48,9 @@ for its acceptance receipt. Review reads the existing receipt log; no notes
 are deleted or new database schema introduced.
 
 Current consumers include peer consultation/delegation through `provider_context`,
-the task service through `append_project_note`, and the root journal adapter's
-memory callback. They are wired in [peer](../oms-command-peer/src/peer.rs),
+resume hooks through `resume_context`, state/inbox and prompt attention through
+`pending_review`, the task service through `append_project_note`, and both the
+root journal adapter and prompt hook through `append_journal_batch`. They are wired in [peer](../oms-command-peer/src/peer.rs),
 [delegate](../oms-command-peer/src/delegate.rs), [task services](../oms/src/services_control.rs)
 and the root CLI. Script/helper names in the entry-point descriptions are
 historical porting anchors, not current runtime backends or missing router work.
