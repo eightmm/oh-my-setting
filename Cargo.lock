@@ -774,6 +774,7 @@ dependencies = [
  "oms-command-attempt-bundle",
  "oms-context",
  "oms-json",
+ "oms-lock",
  "oms-safe-fs",
  "regex",
  "rustix",
