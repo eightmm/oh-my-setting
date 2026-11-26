@@ -1063,7 +1063,7 @@ fn stale_lifecycle(report: &Value, row: &Value) -> bool {
     oms_panel_core::release::heartbeat_fresh(&evidence, now).is_ok_and(|fresh| !fresh)
 }
 
-fn attempt_room(row: &Value) -> oms_command_room::AttemptRoom<'_> {
+pub(crate) fn attempt_room(row: &Value) -> oms_command_room::AttemptRoom<'_> {
     use oms_command_room::AttemptRoom;
     let Some(refs) = row.get("refs") else {
         return AttemptRoom::Unspecified;

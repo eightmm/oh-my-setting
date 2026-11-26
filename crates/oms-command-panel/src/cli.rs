@@ -9,6 +9,7 @@ const FLAGS: &[&str] = &[
     "health",
     "desktop-usage",
     "desktop-chat",
+    "desktop-worker-output",
     "desktop-work-items",
     "sessions",
     "next-attention",
@@ -92,6 +93,8 @@ const VALUES: &[&str] = &[
     "conversation-digest",
     "evidence-section",
     "evidence-attempt",
+    "lead-attempt",
+    "worker-attempt",
     "before",
     "accept",
     "allow-floor-change",
@@ -414,6 +417,44 @@ impl Options {
             )?;
             self.integer("page", 1, 1, crate::desktop_board::MAX_PAGE)?;
         }
+        self.needs(
+            &["lead-attempt", "worker-attempt"],
+            &["desktop-worker-output"],
+        )?;
+        if self.has("desktop-worker-output") {
+            require(
+                self.has("json")
+                    && self
+                        .flags
+                        .iter()
+                        .all(|s| matches!(s.as_str(), "json" | "desktop-worker-output"))
+                    && self.values.keys().all(|s| {
+                        matches!(
+                            s.as_str(),
+                            "repo"
+                                | "room"
+                                | "lead-attempt"
+                                | "worker-attempt"
+                                | "conversation-digest"
+                        )
+                    })
+                    && self.has("repo"),
+                "invalid worker output selectors",
+            )?;
+            for field in ["room", "lead-attempt", "worker-attempt"] {
+                oms_command_room::identifier(&self.required(field)?, field).map_err(Error::new)?;
+            }
+            require(
+                {
+                    let digest = self.required("conversation-digest")?;
+                    digest.len() == 32
+                        && digest
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                },
+                "invalid conversation digest",
+            )?;
+        }
         if self.has("desktop-work-items") {
             require(
                 self.has("json")
@@ -467,7 +508,8 @@ impl Options {
             (!self.has("before") || self.has("desktop-chat"))
                 && (!self.has("conversation-digest")
                     || self.has("desktop-chat")
-                    || self.has("desktop-view")),
+                    || self.has("desktop-view")
+                    || self.has("desktop-worker-output")),
             "desktop reader selectors require a compatible desktop view",
         )?;
         if self.has("desktop-chat") || self.has("desktop-usage") {
@@ -499,6 +541,7 @@ impl Options {
             "metrics",
             "desktop-usage",
             "desktop-chat",
+            "desktop-worker-output",
             "desktop-work-items",
             "sessions",
             "usage",
