@@ -161,8 +161,9 @@ mod linux {
     pub(super) const LEAD_WINDOW: u64 = 4 * 1024 * 1024;
     pub(super) const CHILD_WINDOW: u64 = 1024 * 1024;
     pub(super) const LINE_LIMIT: usize = 256 * 1024;
-    /// Child tails a Board sample may read for usage, newest spawns first: at
+    /// Child tails a test sample may read for usage, newest spawns first: at
     /// most `USAGE_TAILS * (CHILD_WINDOW + 1)` bytes beyond the lead's window.
+    #[cfg(test)]
     pub(super) const USAGE_TAILS: usize = 2;
 
     #[cfg(test)]
@@ -204,8 +205,9 @@ mod linux {
         .ok()
     }
 
-    /// The ordinary roster and up to two usage tails, plus one exact selected
-    /// child outside that sample. The selected response stays out of the roster.
+    /// The ordinary roster, plus one exact selected child when requested.
+    /// Ordinary refreshes read zero child transcripts; the selected response
+    /// stays out of the roster.
     pub(crate) fn claude_board_children(
         pid: u32,
         repo: &Path,
@@ -217,7 +219,7 @@ mod linux {
             board_children(
                 &Lead::new(pid, birth, &config),
                 repo,
-                USAGE_TAILS,
+                0,
                 selected,
                 after_read,
             )
@@ -2295,6 +2297,22 @@ mod tests {
             (2, vec![false, true, true])
         );
         assert_eq!(read(0), [false; 3]);
+        CHILD_READS.with(|n| n.set(0));
+        let plain = board_children(&fixture.lead(), &fixture.repo, 0, None, || {}).unwrap();
+        assert_eq!(CHILD_READS.with(|n| n.get()), 0);
+        assert!(plain.selected.is_none());
+        assert!(plain.children.iter().all(|c| c.usage.is_none()));
+        let newest = fixture.locator(&id(2));
+        let on_demand = board_children(
+            &fixture.lead(),
+            &fixture.repo,
+            0,
+            Some(ClaudeSelection::Read(&newest)),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(CHILD_READS.with(|n| n.get()), 1);
+        assert_eq!(on_demand.selected.as_ref().unwrap().1.id, "msg_2");
 
         let oldest = fixture.locator(&id(0));
         let selected = |locator| {

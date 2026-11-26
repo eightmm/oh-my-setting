@@ -59,6 +59,7 @@ pub(crate) const TASK_PREFIX: &str =
 pub(crate) struct ObservedChildren {
     pub(crate) rows: Vec<Value>,
     pub(crate) codex: BTreeMap<String, CodexLocator>,
+    pub(crate) codex_selected_usage: Option<(Value, Option<String>)>,
     #[cfg(target_os = "linux")]
     pub(crate) codex_wake: Option<CodexWake>,
 }
@@ -73,6 +74,13 @@ pub(crate) struct CodexLocator {
     /// The observation clock: the chat proof re-selects children at this
     /// instant, so later interactions cannot reorder the shown rows.
     observed_ms: u64,
+}
+
+impl CodexLocator {
+    pub(crate) fn detail_participant(&self) -> Option<String> {
+        (!self.turn.is_empty() && !self.child.id.is_empty())
+            .then(|| participant_id("codex", &self.child.id))
+    }
 }
 
 /// Identity of the bound child only: re-observing an unchanged child at a later
@@ -492,10 +500,16 @@ pub(crate) fn observe_codex(
     terminal: &str,
     home: &Path,
     root: &OwnedFd,
+    selected: Option<&CodexLocator>,
     stop: &AtomicBool,
     #[cfg(target_os = "linux")] wake: Option<CodexWakeRequest<'_>>,
 ) -> Option<ObservedChildren> {
     let turn = codex_current_turn(terminal)?;
+    let selected = selected.filter(|expected| {
+        expected.turn == turn
+            && expected.home == home
+            && codex_root_identity(home, root).is_some_and(|actual| actual == expected.root)
+    });
     let mut remaining = CODEX_READ_BUDGET;
     let rollouts = codex_candidates_at(
         home.to_path_buf(),
@@ -510,6 +524,10 @@ pub(crate) fn observe_codex(
                 .map(|before| &before.source),
         }),
     )?;
+    let target = match selected {
+        Some(locator) => CodexUsageTarget::Selected(locator),
+        None => CodexUsageTarget::None,
+    };
     let (observed, _) = codex_rows_checked(
         &rollouts,
         repo,
@@ -517,7 +535,7 @@ pub(crate) fn observe_codex(
         &mut remaining,
         stop,
         codex_now_ms(),
-        true,
+        target,
     )?;
     #[cfg(target_os = "linux")]
     let observed = {
@@ -1195,6 +1213,14 @@ fn codex_rows(
     codex_rows_at(rollouts, repo, turn, remaining, codex_now_ms())
 }
 
+#[derive(Clone, Copy)]
+enum CodexUsageTarget<'a> {
+    None,
+    #[cfg(test)]
+    All,
+    Selected(&'a CodexLocator),
+}
+
 #[cfg(test)]
 fn codex_rows_at(
     rollouts: &CodexRollouts,
@@ -1210,7 +1236,7 @@ fn codex_rows_at(
         remaining,
         &AtomicBool::new(false),
         now_ms,
-        true,
+        CodexUsageTarget::All,
     )
 }
 
@@ -1229,7 +1255,7 @@ fn codex_rows_checked(
     remaining: &mut usize,
     stop: &AtomicBool,
     now_ms: u64,
-    project_usage: bool,
+    usage_target: CodexUsageTarget<'_>,
 ) -> Option<(ObservedChildren, CodexParentSample)> {
     let mut parent: Option<(String, CodexParentSample)> = None;
     let mut children = Vec::new();
@@ -1446,7 +1472,16 @@ fn codex_rows_checked(
         if !child.started.is_empty() {
             child_row["started_at"] = json!(child.started);
         }
-        if project_usage
+        let locator = CodexLocator {
+            home: rollouts.home.clone(),
+            root,
+            turn: turn.to_owned(),
+            parent: parent.clone(),
+            child: CodexAnchor::new(id, child.rollout),
+            observed_ms: now_ms,
+        };
+        #[cfg(test)]
+        if matches!(usage_target, CodexUsageTarget::All)
             && counts[id] == 1
             && let Some(usage) = codex_child_usage(
                 rollouts,
@@ -1466,7 +1501,14 @@ fn codex_rows_checked(
         let participant = text(&child_row, "participant").to_owned();
         let participant = participant.as_str();
         if !seen_participants.insert(participant.to_owned()) {
-            observed.codex.remove(participant);
+            if observed.codex.remove(participant).is_some()
+                && matches!(
+                    usage_target,
+                    CodexUsageTarget::Selected(expected) if expected.child.id == id
+                )
+            {
+                observed.codex_selected_usage = None;
+            }
             child_row
                 .as_object_mut()
                 .unwrap()
@@ -1493,9 +1535,34 @@ fn codex_rows_checked(
                 child_row["codex_recent_creation"] =
                     json!({"at_ms": created, "observed_ms": now_ms});
             }
-            observed.codex.insert(
-                participant.to_owned(),
-                CodexLocator {
+            if let CodexUsageTarget::Selected(expected) = usage_target
+                && locator == *expected
+                && let Some((usage, model)) = codex_child_usage(
+                    rollouts,
+                    child.rollout,
+                    repo,
+                    id,
+                    parent_id,
+                    &parent_sample.header,
+                    &mut usage_budget,
+                )
+            {
+                observed.codex_selected_usage = Some((usage["response"].clone(), model));
+            }
+            observed.codex.insert(participant.to_owned(), locator);
+        }
+        observed.rows.push(child_row);
+    }
+    if let CodexUsageTarget::Selected(expected) = usage_target
+        && observed.codex_selected_usage.is_none()
+    {
+        let id = expected.child.id.as_str();
+        let participant = participant_id("codex", id);
+        if !seen_participants.contains(&participant)
+            && counts.get(id).copied() == Some(1)
+            && let Some(child) = children.iter().find(|child| child.id == id)
+            && CodexLocator::eq(
+                &CodexLocator {
                     home: rollouts.home.clone(),
                     root,
                     turn: turn.to_owned(),
@@ -1503,15 +1570,27 @@ fn codex_rows_checked(
                     child: CodexAnchor::new(id, child.rollout),
                     observed_ms: now_ms,
                 },
-            );
+                expected,
+            )
+            && let Some((usage, model)) = codex_child_usage(
+                rollouts,
+                child.rollout,
+                repo,
+                id,
+                parent_id,
+                &parent_sample.header,
+                &mut usage_budget,
+            )
+        {
+            observed.codex_selected_usage = Some((usage["response"].clone(), model));
         }
-        observed.rows.push(child_row);
     }
     *remaining -= usage_initial - usage_budget;
-    let has_usage = observed
-        .rows
-        .iter()
-        .any(|row| row.get("native_response_usage").is_some());
+    let has_usage = observed.codex_selected_usage.is_some()
+        || observed
+            .rows
+            .iter()
+            .any(|row| row.get("native_response_usage").is_some());
     if rollouts.root_unchanged()? != root {
         return None;
     }
@@ -1534,6 +1613,7 @@ fn codex_rows_checked(
         }
         parent_now = rollouts.status(&parent_sample.rollout, &parent_sample.file)?;
         if !confirmed {
+            observed.codex_selected_usage = None;
             for row in &mut observed.rows {
                 let fields = row.as_object_mut().unwrap();
                 fields.remove("native_response_usage");
@@ -1686,7 +1766,7 @@ fn codex_chat_checked(
         &mut remaining,
         stop,
         expected.observed_ms,
-        false,
+        CodexUsageTarget::None,
     )?;
     if stop.load(Ordering::Acquire) || !current.codex.values().any(|locator| locator == expected) {
         return None;
@@ -3928,6 +4008,7 @@ mod tests {
             &terminal,
             &home,
             &root,
+            None,
             stop,
             Some(CodexWakeRequest { previous: prior }),
         )?;
@@ -4282,7 +4363,7 @@ mod tests {
             &mut baseline,
             &AtomicBool::new(false),
             0,
-            false,
+            CodexUsageTarget::None,
         )
         .unwrap();
         let proof = sample.header.len() + sample.body.len();
@@ -4296,7 +4377,7 @@ mod tests {
             &mut remaining,
             &AtomicBool::new(false),
             0,
-            true,
+            CodexUsageTarget::All,
         )
         .expect("parent append proof must retain roster");
         assert_eq!(observed.rows.len(), 1);
@@ -4318,7 +4399,7 @@ mod tests {
             &mut remaining,
             &AtomicBool::new(false),
             0,
-            true,
+            CodexUsageTarget::All,
         )
         .expect("exhausted optional reserve must retain roster");
         assert_eq!(observed.rows.len(), 1);
@@ -6276,7 +6357,7 @@ mod tests {
                 &mut remaining,
                 &AtomicBool::new(true),
                 0,
-                true,
+                CodexUsageTarget::All,
             )
             .is_none()
         );

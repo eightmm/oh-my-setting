@@ -124,6 +124,7 @@ fn run_with_source_writer(
     let mut switch = MainSwitch::default();
     let mut pending_detail_usage: Option<DetailUsageRequest> = None;
     let mut retained_detail_usage: Option<DetailUsageEvidence> = None;
+    let mut last_known_usage = std::collections::BTreeMap::<String, DetailUsageEvidence>::new();
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
@@ -146,6 +147,7 @@ fn run_with_source_writer(
         let mut scope_changed = false;
         let mut detail_usage_frame = DetailUsageFrame::Unchanged;
         let mut checked_agy = None;
+        let mut incoming_detail_usage_requested = None;
         let mut incoming_detail_usage = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
@@ -218,6 +220,7 @@ fn run_with_source_writer(
                 }
                 // A queued same-scope refresh restricts actions, while this
                 // completed and generation-checked reading can still paint.
+                incoming_detail_usage_requested = reading.detail_usage_requested;
                 incoming_detail_usage = reading.detail_usage_evidence;
                 observations = reading.observations;
                 main_footer = reading.footer;
@@ -395,12 +398,25 @@ fn run_with_source_writer(
         }) {
             pending_detail_usage = None;
         }
+        let failed_detail_usage = incoming_detail_usage_requested
+            .as_ref()
+            .filter(|_| incoming_detail_usage.is_none());
         reconcile_detail_usage_evidence(
             &mut retained_detail_usage,
             incoming_detail_usage,
             board.as_ref().and_then(|board| board.scope.as_ref()),
             &report,
             &nav,
+            &observations,
+            detail_usage_frame,
+            scope_changed,
+        );
+        reconcile_last_known_usage(
+            &mut last_known_usage,
+            retained_detail_usage.as_ref(),
+            failed_detail_usage,
+            board.as_ref().and_then(|board| board.scope.as_ref()),
+            &report,
             &observations,
             detail_usage_frame,
             scope_changed,
@@ -445,7 +461,12 @@ fn run_with_source_writer(
                 crate::layout::reflow(repo, &room, services, interrupted);
                 size = crate::layout::dimensions();
             }
-            let display_report = report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+            let display_report = report_for_frame_with_last_known(
+                &report,
+                &nav,
+                retained_detail_usage.as_ref(),
+                &last_known_usage,
+            );
             let frame = frame_with_native_activity(
                 &display_report,
                 &nav,
@@ -1037,6 +1058,7 @@ fn run_with_source_writer(
                 if scope.changed {
                     pending_detail_usage = None;
                     retained_detail_usage = None;
+                    last_known_usage.clear();
                 } else if pending_detail_usage.is_some() || retained_detail_usage.is_some() {
                     let current_visible;
                     let selected_call = if calls_key.as_ref()
@@ -1105,8 +1127,12 @@ fn run_with_source_writer(
                         crate::layout::reflow(repo, &room, services, interrupted);
                     }
                     let size = pane_size(repo, services, interrupted);
-                    let display_report =
-                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+                    let display_report = report_for_frame_with_last_known(
+                        &report,
+                        &nav,
+                        retained_detail_usage.as_ref(),
+                        &last_known_usage,
+                    );
                     let frame = frame(
                         &display_report,
                         &nav,
@@ -1140,8 +1166,12 @@ fn run_with_source_writer(
                     || ((detail_repaint || scope.checkout_repaint) && !dock_moved))
                     && !scope.changed
                 {
-                    let display_report =
-                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+                    let display_report = report_for_frame_with_last_known(
+                        &report,
+                        &nav,
+                        retained_detail_usage.as_ref(),
+                        &last_known_usage,
+                    );
                     let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
@@ -1178,8 +1208,12 @@ fn run_with_source_writer(
                     }
                     let size = crate::layout::dimensions();
                     last_size = size;
-                    let display_report =
-                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+                    let display_report = report_for_frame_with_last_known(
+                        &report,
+                        &nav,
+                        retained_detail_usage.as_ref(),
+                        &last_known_usage,
+                    );
                     let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
@@ -2281,42 +2315,135 @@ fn reconcile_detail_usage_evidence(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reconcile_last_known_usage(
+    last_known: &mut std::collections::BTreeMap<String, DetailUsageEvidence>,
+    admitted: Option<&DetailUsageEvidence>,
+    failed_request: Option<&ChatBinding>,
+    scope: Option<&BoardScope>,
+    report: &Value,
+    observations: &Observations,
+    frame: DetailUsageFrame,
+    scope_changed: bool,
+) {
+    if last_known.is_empty() && admitted.is_none() {
+        return;
+    }
+    if scope_changed || frame == DetailUsageFrame::Rejected {
+        last_known.clear();
+        return;
+    }
+    let Some(scope) = scope else {
+        last_known.clear();
+        return;
+    };
+    let Some(main) = scope.main.as_ref() else {
+        last_known.clear();
+        return;
+    };
+    if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
+        last_known.clear();
+        return;
+    }
+    if frame == DetailUsageFrame::Observed
+        && let Some(failed) = failed_request
+        && let Some((_, participant)) = failed.detail_target()
+    {
+        last_known.remove(participant.as_ref());
+    }
+    let valid = |participant: &str, ev: &DetailUsageEvidence| {
+        !ev.requires_group
+            && same_footer_scope(&ev.scope, scope)
+            && ev.binding.matches_detail_scope(
+                &scope.room,
+                &main.attempt,
+                &main.owner,
+                &main.pane,
+                main.pid,
+                &main.birth,
+                participant,
+            )
+            && observations.chat_binding(participant) == Some(&ev.binding)
+    };
+    last_known.retain(|participant, ev| valid(participant, ev));
+    if let Some(ev) = admitted
+        && let Some((_, participant)) = ev.binding.detail_target()
+        && valid(participant.as_ref(), ev)
+    {
+        last_known.insert(participant.into_owned(), ev.clone());
+    }
+}
+
+#[cfg(test)]
 fn report_for_frame<'a>(
     report: &'a Value,
     nav: &navigation::Navigation,
     retained: Option<&DetailUsageEvidence>,
 ) -> std::borrow::Cow<'a, Value> {
-    if !nav.detail {
+    report_for_frame_with_last_known(report, nav, retained, &std::collections::BTreeMap::new())
+}
+
+fn report_for_frame_with_last_known<'a>(
+    report: &'a Value,
+    nav: &navigation::Navigation,
+    retained: Option<&DetailUsageEvidence>,
+    last_known: &std::collections::BTreeMap<String, DetailUsageEvidence>,
+) -> std::borrow::Cow<'a, Value> {
+    let active_detail = nav.detail.then_some(retained).flatten();
+    if active_detail.is_none() && last_known.is_empty() {
         return std::borrow::Cow::Borrowed(report);
     }
-    let Some(ev) = retained else {
-        return std::borrow::Cow::Borrowed(report);
-    };
-    let Some((provider, participant)) = ev.binding.detail_target() else {
-        return std::borrow::Cow::Borrowed(report);
-    };
+    let selected_participant = nav
+        .detail
+        .then(|| {
+            let visible = render::visible(report, nav);
+            visible
+                .get(nav.selected)
+                .map(|call| crate::text(call, "participant").to_owned())
+        })
+        .flatten();
     let mut cloned = report.clone();
+    let mut changed = false;
     if let Some(rows) = cloned["native_children"].as_array_mut() {
-        let mut matching = rows.iter_mut().filter(|row| {
-            row["native_child"] == true
-                && row["provider"] == provider
-                && row["participant"] == participant.as_ref()
-        });
-        if let (Some(row), None) = (matching.next(), matching.next())
-            && !row["native_response_usage"]["response"].is_object()
-        {
-            if let Some(model) = &ev.observed_model
-                && row.get("observed_model").is_none()
-            {
-                row["observed_model"] = json!(model);
-            }
-            row["native_response_usage"] = json!({
-                "scope": "latest_child_response",
-                "response": ev.response,
+        let mut apply = |ev: &DetailUsageEvidence| {
+            let Some((provider, participant)) = ev.binding.detail_target() else {
+                return;
+            };
+            let mut matching = rows.iter_mut().filter(|row| {
+                row["native_child"] == true
+                    && row["provider"] == provider
+                    && row["participant"] == participant.as_ref()
             });
+            if let (Some(row), None) = (matching.next(), matching.next())
+                && !row["native_response_usage"]["response"].is_object()
+            {
+                if let Some(model) = &ev.observed_model
+                    && row.get("observed_model").is_none()
+                {
+                    row["observed_model"] = json!(model);
+                }
+                row["native_response_usage"] = json!({
+                    "scope": "latest_child_response",
+                    "response": ev.response,
+                });
+                changed = true;
+            }
+        };
+        if let Some(ev) = active_detail {
+            apply(ev);
+        }
+        for (participant, ev) in last_known {
+            if selected_participant.as_deref() == Some(participant.as_str()) {
+                continue;
+            }
+            apply(ev);
         }
     }
-    std::borrow::Cow::Owned(cloned)
+    if changed {
+        std::borrow::Cow::Owned(cloned)
+    } else {
+        std::borrow::Cow::Borrowed(report)
+    }
 }
 
 struct NativeSeed {
@@ -2354,6 +2481,7 @@ pub(crate) struct NativeReading {
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
+    detail_usage_requested: Option<ChatBinding>,
     detail_usage_evidence: Option<DetailUsageEvidence>,
 }
 
@@ -2432,6 +2560,7 @@ impl NativeRequest {
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
         let detail_usage_req = self.authorized_detail_usage(report);
+        let detail_usage_requested = detail_usage_req.map(|req| req.binding.clone());
         let detail_usage_evidence = panel
             .observe_passively(
                 &mut observations,
@@ -2487,6 +2616,7 @@ impl NativeRequest {
             observations,
             footer,
             agy,
+            detail_usage_requested,
             detail_usage_evidence,
         })
     }
@@ -8513,7 +8643,8 @@ mod tests {
             BoardScope, BoardTarget, DetailUsageEvidence, DetailUsageFrame, InteractiveRefresh,
             LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
             SelectionFence, apply_selection_key, detail_usage_request,
-            reconcile_detail_usage_evidence, report_for_frame,
+            reconcile_detail_usage_evidence, reconcile_last_known_usage, report_for_frame,
+            report_for_frame_with_last_known,
         };
         use crate::board_refresh::BoardRefresh;
         use crate::input::Key;
@@ -8770,6 +8901,83 @@ mod tests {
             !detail_after_ambient.contains("1240"),
             "{detail_after_ambient}"
         );
+
+        // Plain Board refresh (no selected agent detail) shows "not loaded" before any
+        // counters are known, then preserves the last known usage counters after D closes,
+        // and clears them back to "not loaded" on Turn change or rejected native frames.
+        let mut board_nav = nav.clone();
+        board_nav.detail = false;
+        let render_board =
+            |last_known: &std::collections::BTreeMap<String, DetailUsageEvidence>| {
+                let display =
+                    report_for_frame_with_last_known(&report, &board_nav, None, last_known);
+                super::frame(
+                    &display,
+                    &board_nav,
+                    (120, 18),
+                    &Default::default(),
+                    false,
+                    Some(&mut DockSplit::default()),
+                    None,
+                    None,
+                )
+                .lines
+                .join("\n")
+            };
+        let mut last_known = std::collections::BTreeMap::new();
+        let unloaded_board = render_board(&last_known);
+        assert!(unloaded_board.contains("not loaded"), "{unloaded_board}");
+        reconcile_last_known_usage(
+            &mut last_known,
+            retained.as_ref(),
+            None,
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert_eq!(last_known.len(), 1);
+        reconcile_last_known_usage(
+            &mut last_known,
+            None,
+            None,
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        let retained_board = render_board(&last_known);
+        assert!(
+            retained_board.contains("rsp in 1.2K out 40") && !retained_board.contains("not loaded"),
+            "{retained_board}"
+        );
+        let mut failed_reopen_known = last_known.clone();
+        reconcile_last_known_usage(
+            &mut failed_reopen_known,
+            None,
+            Some(&binding),
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(failed_reopen_known.is_empty());
+        let mut turn_changed_known = last_known.clone();
+        reconcile_last_known_usage(
+            &mut turn_changed_known,
+            None,
+            None,
+            Some(&current_scope),
+            &report,
+            &spy.agy_observations(&child, NEW_TURN),
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(turn_changed_known.is_empty());
+        assert!(render_board(&turn_changed_known).contains("not loaded"));
 
         let mut group = ev.clone();
         group.requires_group = true;
@@ -11130,30 +11338,13 @@ fi
             (1, run1_captures_p, 0, 0),
             "expected cold-only custody check (1) and exact 1 parent read per observe, 0 candidates, 0 child reads; log:\n{pre_click_tmux_log}"
         );
-        // Usage is a bounded per-refresh scan: each accepted Board refresh does
-        // 2 strict custody checks, 1 parent scan and one suffix read per unique
-        // painted child, capped at orchestrator's AGY_USAGE_ROWS (3). Run 1
-        // accepts every observe (cold, reply wake, `u`), one lead capture each.
-        let accepted = run1_captures_p;
-        let painted = lead_rows
-            .iter()
-            .filter_map(|row| {
-                let body = row["content"]
-                    .as_str()?
-                    .strip_prefix("Created the following subagent:\n")?;
-                let created: Value = serde_json::from_str(body).ok()?;
-                created["conversationId"].as_str().map(str::to_owned)
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            .min(3);
+        // Ordinary Board refreshes (no selected agent detail) do zero strict
+        // custody checks, zero usage scans and zero child transcript reads.
         assert_eq!(
             (pre_custody, pre_scans, pre_strict_reads, pre_legacy_reads),
-            (2 * accepted, accepted, painted * accepted, 0),
-            "before Click, each of {accepted} accepted refreshes does 2 strict custody checks, 1 usage scan and \
-             1 bounded suffix read per {painted} painted child (never a whole transcript); no legacy reads"
+            (0, 0, 0, 0),
+            "before Click, ordinary refreshes must open zero usage transcripts and zero child bodies"
         );
-        assert!(pre_strict_reads <= 3 * accepted);
 
         // Run 2: Click -> Escape -> Enter -> Inode-swap close -> Re-click -> Live Turn-change close -> 0775 Unbound fallback & Silent Legacy Unavailable.
         let (run2_counters, tmux_log) =
@@ -11381,25 +11572,19 @@ fi
             .lines()
             .filter(|l| *l == "capture-pane -p -t %4")
             .count();
-        // Every observe but the NEW_TURN drift (absent from the lead transcript)
-        // and the 0775 legacy refresh is a usage refresh; those two read nothing.
-        let usage_refreshes = observes - 2;
+        assert!(observes >= 3);
         let dock_reads = 3;
         assert!(
-            custody >= 7 + 2 * usage_refreshes && scans >= 3 + usage_refreshes,
-            "custody={custody} scans={scans} usage_refreshes={usage_refreshes}"
+            custody >= 7 && scans >= 3,
+            "custody={custody} scans={scans}"
         );
         assert_eq!(
             (legacy_reads, strict_reads, leg_cand, leg_child),
-            (0, dock_reads + painted * usage_refreshes, 2, 0),
-            "expected legacy_reads=0, strict_reads = {dock_reads} dock opens + {painted} painted children x \
-             {usage_refreshes} usage refreshes ({observes} observes less Turn drift and 0775), leg_cand=2, \
-             leg_child=0; custody={custody} scans={scans}"
+            (0, dock_reads, 2, 0),
+            "expected legacy_reads=0, strict_reads = {dock_reads} dock opens (zero ordinary refresh reads), \
+             leg_cand=2, leg_child=0; custody={custody} scans={scans}"
         );
-        assert_eq!(
-            legacy_reads + strict_reads,
-            dock_reads + painted * usage_refreshes
-        );
+        assert_eq!(legacy_reads + strict_reads, dock_reads);
 
         std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o700))
             .unwrap();
@@ -11481,13 +11666,8 @@ fi
         assert_eq!(censuses, 3 * (stalled_accepted + 1) + 1);
         assert_eq!(
             stalled[..4],
-            [
-                2 * stalled_accepted,
-                stalled_accepted,
-                painted * stalled_accepted,
-                0
-            ],
-            "{stalled_accepted} accepted refreshes each read usage; the moved-pane frame reads none"
+            [0, 0, 0, 0],
+            "{stalled_accepted} accepted ordinary refreshes and the moved-pane frame read zero usage transcripts"
         );
 
         set_model("First same-scope observation");
@@ -11621,7 +11801,11 @@ fi
                     screen,
                     rx,
                     "fourth child on fresh Board",
-                    &mut |s| s.iter().any(|line| line.contains("Fourth Usage")),
+                    &mut |s| {
+                        s.iter().any(|line| {
+                            line.contains("Fourth Usage") && line.contains("not loaded")
+                        })
+                    },
                 );
                 child_in.write_all(b"/Fourth Usage\r\x1b[B").unwrap();
                 child_in.flush().unwrap();
@@ -11675,13 +11859,19 @@ fi
                     stream,
                     screen,
                     rx,
-                    "detail closed and usage hidden",
-                    &mut |s| !detail_visible(s) && !has_detail_usage(s),
+                    "detail closed and last known usage retained",
+                    &mut |s| {
+                        !detail_visible(s)
+                            && !has_detail_usage(s)
+                            && s.iter().any(|line| {
+                                line.contains("Fourth Usage Refreshed")
+                                    && line.contains("rsp in 1.2K out 40")
+                            })
+                    },
                 );
             });
         assert!(!detail_log.contains("UNEXPECTED:"), "{detail_log}");
-        assert_eq!(detail_counts[2], 3 * detail_counts[1] + 1);
-        assert_eq!(detail_counts[3], 0);
+        assert_eq!(detail_counts[..4], [2, 1, 1, 0]);
 
         // A markerless typed Turn opens the exact bounded parent roster.
         // It starts empty so only a provider-native write can reveal its first child.

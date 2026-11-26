@@ -430,6 +430,9 @@ impl ChatBinding {
                     std::borrow::Cow::Borrowed(&child.participant),
                 ))
             }
+            NativeLocator::Codex(child) => child
+                .detail_participant()
+                .map(|participant| ("codex", participant.into())),
             NativeLocator::Claude(child)
                 if !child.turn.is_empty()
                     && child.pid == self.pane.lead.pid
@@ -442,6 +445,16 @@ impl ChatBinding {
             }
             _ => None,
         }
+    }
+
+    fn codex_usage_locator(
+        &self,
+        pane: &ChatPane,
+    ) -> Option<&crate::native_children::CodexLocator> {
+        let NativeLocator::Codex(child) = &self.locator else {
+            return None;
+        };
+        (self.pane == *pane && self.detail_target().is_some()).then_some(child)
     }
 
     fn claude_usage_locator(
@@ -1385,10 +1398,19 @@ impl<'a> Panel<'a> {
                                     .filter(|(previous, _)| *previous == pane)
                                     .map(|(_, wake)| wake),
                             });
+                        let selected = chat_current
+                            .then(|| {
+                                selection
+                                    .requested
+                                    .and_then(|binding| binding.codex_usage_locator(&pane))
+                            })
+                            .flatten()
+                            .filter(|_| self.has_live_report_scope(report));
                         self.observe_codex_children(
                             pane,
                             report,
                             host,
+                            selected,
                             #[cfg(target_os = "linux")]
                             wake,
                         )
@@ -1398,6 +1420,15 @@ impl<'a> Panel<'a> {
                             readings.codex_child_watch = Some((chat_pane.clone(), wake));
                         }
                         if chat_current {
+                            if let Some((response, observed_model)) = observed.codex_selected_usage
+                            {
+                                selected_usage_result = Some(SelectedResponseUsage {
+                                    response,
+                                    observed_model,
+                                    claude_version: None,
+                                    requires_group: false,
+                                });
+                            }
                             readings.chats.extend(observed.codex.into_iter().map(
                                 |(participant, locator)| {
                                     (
@@ -1577,40 +1608,41 @@ impl<'a> Panel<'a> {
                         let selected_participant = selection
                             .requested
                             .and_then(|binding| binding.agy_usage_participant(&pane, shown_turn));
-                        let private_group = lead_delivery::group_check(self);
-                        let pane_current = || {
-                            !self.stop.load(Ordering::Acquire)
-                                && self
-                                    .chat_pane_with_host("antigravity", host)
-                                    .is_ok_and(|again| again == pane)
-                                && (selected_participant.is_none()
-                                    || self
+                        if selected_participant.is_some() {
+                            let private_group = lead_delivery::group_check(self);
+                            let pane_current = || {
+                                !self.stop.load(Ordering::Acquire)
+                                    && self
+                                        .chat_pane_with_host("antigravity", host)
+                                        .is_ok_and(|again| again == pane)
+                                    && self
                                         .capture_recent(&pane.lead.id)
                                         .ok()
                                         .as_deref()
                                         .and_then(crate::native_children::agy_current_turn)
-                                        == Some(shown_turn))
-                                && !self.stop.load(Ordering::Acquire)
-                        };
-                        if let Some(usage) = agy_usage_sighting(
-                            &mut observed.rows,
-                            shown_turn,
-                            selected_participant,
-                            |painted, selected| {
-                                crate::agy_child_chat::agy_board_child_usage(
-                                    pane.lead.pid,
-                                    &pane.lead.birth,
-                                    &pane.repo,
-                                    shown_turn,
-                                    painted,
-                                    selected.map(|participant| {
-                                        (participant, &private_group as &dyn Fn(u32) -> bool)
-                                    }),
-                                    pane_current,
-                                )
-                            },
-                        ) {
-                            selected_usage_result = Some(usage);
+                                        == Some(shown_turn)
+                                    && !self.stop.load(Ordering::Acquire)
+                            };
+                            if let Some(usage) = agy_usage_sighting(
+                                &mut observed.rows,
+                                shown_turn,
+                                selected_participant,
+                                |painted, selected| {
+                                    crate::agy_child_chat::agy_board_child_usage(
+                                        pane.lead.pid,
+                                        &pane.lead.birth,
+                                        &pane.repo,
+                                        shown_turn,
+                                        painted,
+                                        selected.map(|participant| {
+                                            (participant, &private_group as &dyn Fn(u32) -> bool)
+                                        }),
+                                        pane_current,
+                                    )
+                                },
+                            ) {
+                                selected_usage_result = Some(usage);
+                            }
                         }
                         readings
                             .chats
@@ -2250,6 +2282,7 @@ impl<'a> Panel<'a> {
         pane: ChatPane,
         report: &Value,
         host: &dyn AccountHost,
+        selected: Option<&crate::native_children::CodexLocator>,
         #[cfg(target_os = "linux")] wake: Option<crate::native_children::CodexWakeRequest<'_>>,
     ) -> Option<(ChatPane, crate::native_children::ObservedChildren)> {
         if pane.codex_source != Some(CodexChatSource::Ambient)
@@ -2265,6 +2298,7 @@ impl<'a> Panel<'a> {
             &terminal,
             home,
             fd,
+            selected,
             self.stop,
             #[cfg(target_os = "linux")]
             wake,
@@ -6434,25 +6468,19 @@ fn unique_agy_rows(rows: &[Value]) -> impl Iterator<Item = &str> {
         .filter_map(|(participant, count)| (count == 1).then_some(participant))
 }
 
-/// Unique painted AGY rows whose child transcript one sample may read for usage.
-const AGY_USAGE_ROWS: usize = 3;
-
-/// Attach `native_response_usage` = `{"scope": "latest_child_response",
-/// "response": <the AGY reader's latest-response object, counters verbatim>}`
-/// to an AGY child's only row of any kind; AGY reports no total and none is
-/// summed. Only the first [`AGY_USAGE_ROWS`] such participants in participant
-/// order are attached onto `rows`; at most one additional proven
-/// `selected_participant` (when eligible and outside the first
-/// [`AGY_USAGE_ROWS`]) is offered to the same single `scan` and returned
-/// separately as detail-only evidence without mutating `rows`.
-/// The scan re-proves the lead pane while it still holds the evidence. Nothing
-/// is attached or returned unless that scan names the shown Turn.
+/// Read attributable latest-response usage ONLY when one unique painted AGY
+/// child row is explicitly selected for Call Detail (`selected_participant` is
+/// `Some`). Ordinary Board refreshes (`selected_participant` is `None`) never
+/// invoke `scan` and never mutate `rows`. AGY reports no total and none is
+/// summed; the scan re-proves the lead pane while it still holds the evidence
+/// and returns nothing unless it names `shown_turn`.
 fn agy_usage_sighting(
     rows: &mut [Value],
     shown_turn: &str,
     selected_participant: Option<&str>,
     scan: impl FnOnce(&BTreeSet<String>, Option<&str>) -> Option<crate::agy_child_chat::AgyBoardUsage>,
 ) -> Option<SelectedResponseUsage> {
+    let selected = selected_participant?;
     if shown_turn.is_empty() || rows.is_empty() {
         return None;
     }
@@ -6468,49 +6496,24 @@ fn agy_usage_sighting(
             agy_rows.insert(participant);
         }
     }
-    let ambient: BTreeSet<String> = agy_rows
-        .iter()
-        .copied()
-        .filter(|&p| total_counts.get(p).copied() == Some(1))
-        .take(AGY_USAGE_ROWS)
-        .map(str::to_owned)
-        .collect();
-    let selected = selected_participant.filter(|selected| {
-        agy_rows.contains(selected) && total_counts.get(selected).copied() == Some(1)
-    });
-    let selected_only = selected.filter(|selected| !ambient.contains(*selected));
-    let mut painted = ambient.clone();
-    if let Some(selected) = selected_only {
-        painted.insert(selected.to_owned());
-    }
-    if painted.is_empty() {
+    if !agy_rows.contains(selected) || total_counts.get(selected).copied() != Some(1) {
         return None;
     }
-    let usage = scan(&painted, selected)?;
+    let painted = BTreeSet::from([selected.to_owned()]);
+    let usage = scan(&painted, Some(selected))?;
     if usage.turn != shown_turn {
         return None;
     }
-    let mut detail_response = usage.selected.and_then(|(participant, value)| {
-        (selected == Some(participant.as_str())).then_some((value, true))
-    });
-    for (participant, value) in usage.rows {
-        if ambient.contains(&participant) {
-            let mut named = rows
-                .iter_mut()
-                .filter(|row| row["participant"] == participant.as_str());
-            if let (Some(row), None) = (named.next(), named.next()) {
-                if let Some(model) = value["model"]
-                    .as_str()
-                    .and_then(crate::native_children::observed_model)
-                {
-                    row["observed_model"] = json!(model);
-                }
-                row["native_response_usage"] =
-                    json!({"scope": "latest_child_response", "response": value});
-            }
-        } else if selected_only == Some(participant.as_str()) {
-            detail_response = Some((value, false));
-        }
+    let mut detail_response = usage
+        .selected
+        .and_then(|(participant, value)| (participant == selected).then_some((value, true)));
+    if detail_response.is_none()
+        && let Some(value) = usage
+            .rows
+            .into_iter()
+            .find_map(|(participant, value)| (participant == selected).then_some(value))
+    {
+        detail_response = Some((value, false));
     }
     detail_response.map(|(response, requires_group)| SelectedResponseUsage {
         claude_version: None,
@@ -17714,7 +17717,6 @@ pub(crate) mod tests {
                 .zip(1..)
                 .map(|(p, n)| (p.clone(), usage(n)))
                 .collect();
-            let field = |n: u64| json!({"scope": "latest_child_response", "response": usage(n)});
             // One sample: the rows after it, detail-only usage, offered sets, and proofs run.
             let sample_selected = |mut rows: Vec<Value>,
                                    shown: &str,
@@ -17752,23 +17754,27 @@ pub(crate) mod tests {
             let set = |ps: &[&String]| ps.iter().map(|p| (*p).clone()).collect::<BTreeSet<_>>();
             let unrelated = json!({"participant": "native-claude-x", "state": "working"});
 
-            // Exact participant only; the helper's object goes on as `response`
-            // verbatim, with no total computed from its counters.
+            // Plain refresh (`selected == None`): zero scans, zero proofs, rows untouched.
             let rows = vec![row(&b), unrelated.clone()];
-            let (got, offered, proofs) = sample(rows.clone(), turn, turn, true);
-            assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
-            assert_eq!(got[0]["native_response_usage"], field(2));
-            assert_eq!(got[0]["observed_model"], "gemini");
-            assert!(
-                got[0]["native_response_usage"]["response"]
-                    .get("total_tokens")
-                    .is_none()
+            assert_eq!(
+                sample(rows.clone(), turn, turn, true),
+                (rows.clone(), vec![], 0)
             );
-            assert_eq!(got[1], unrelated);
-            // Repeating the same sample gives the same rows with one scan each.
-            assert_eq!(sample(rows, turn, turn, true).0, got);
 
-            // Group-only proof belongs to the detail even in an ambient slot.
+            // Selected detail (`selected == Some(&b)`): exact participant only; the
+            // helper's object is returned verbatim, with no total computed and `rows`
+            // left unmutated.
+            let (got, detail, offered, proofs) =
+                sample_selected(rows.clone(), turn, Some(&b), turn, true);
+            assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
+            assert_eq!(got, rows);
+            let detail = detail.expect("selected AGY child should return detail-only usage");
+            assert_eq!(detail.response, usage(2));
+            assert_eq!(detail.observed_model.as_deref(), Some("gemini"));
+            assert!(!detail.requires_group);
+            assert!(detail.response.get("total_tokens").is_none());
+
+            // Group-only proof sets `requires_group = true` and leaves `rows` untouched.
             let mut rows = vec![row(&b)];
             let before = rows.clone();
             let detail = agy_usage_sighting(&mut rows, turn, Some(&b), |painted, selected| {
@@ -17782,10 +17788,11 @@ pub(crate) mod tests {
             })
             .unwrap();
             assert_eq!(detail.response, usage(2));
+            assert!(detail.requires_group);
             assert_eq!(rows, before);
 
             // A participant on two rows (painted twice, or also named by another row)
-            // is never offered or attached, even if the scan returns it.
+            // is never offered or returned, while a unique sibling remains selectable.
             let rows = vec![
                 row(&a),
                 row(&a),
@@ -17793,53 +17800,37 @@ pub(crate) mod tests {
                 row(&c),
                 json!({"participant": c}),
             ];
-            let (got, offered, _) = sample(rows.clone(), turn, turn, true);
-            assert_eq!(offered, vec![set(&[&b])]);
-            assert!(got[0] == rows[0] && got[1] == rows[1] && got[3] == rows[3]);
-            assert_eq!(got[2]["native_response_usage"], field(2));
-            assert_eq!(got[2]["observed_model"], "gemini");
-            assert!(
-                got.iter()
-                    .enumerate()
-                    .all(|(i, r)| i == 2 || r.get("observed_model").is_none())
+            assert_eq!(
+                sample(rows.clone(), turn, turn, true),
+                (rows.clone(), vec![], 0)
             );
+            let (got, detail, offered, proofs) =
+                sample_selected(rows.clone(), turn, Some(&b), turn, true);
+            assert_eq!((offered, proofs), (vec![set(&[&b])], 1));
+            assert_eq!(got, rows);
+            assert_eq!(detail.unwrap().response, usage(2));
 
-            // More than three eligible: only the first three in participant order.
+            // Every unique painted AGY child (including the 4th+) is selectable on demand
+            // with one single-child scan and zero ambient row mutation.
             let mut order = [&a, &b, &c, &d];
             order.sort();
             let rows: Vec<Value> = order.iter().rev().map(|p| row(p)).collect();
-            let (got, offered, _) = sample(rows.clone(), turn, turn, true);
-            assert_eq!(offered, vec![set(&order[..3])]);
-            assert_eq!(got[0], rows[0]);
-            assert!(
-                got[1..]
-                    .iter()
-                    .all(|r| r.get("native_response_usage").is_some())
+            assert_eq!(
+                sample(rows.clone(), turn, turn, true),
+                (rows.clone(), vec![], 0)
             );
+            for target in order {
+                let (got, detail, offered, proofs) =
+                    sample_selected(rows.clone(), turn, Some(target.as_str()), turn, true);
+                assert_eq!((offered, proofs), (vec![set(&[target])], 1));
+                assert_eq!(got, rows);
+                let detail = detail.expect("selected eligible child should return usage");
+                assert_eq!(detail.observed_model.as_deref(), Some("gemini"));
+                assert_eq!(detail.response, all[target]);
+                assert!(detail.response.get("total_tokens").is_none());
+            }
 
-            // Selecting the 4th eligible AGY child includes it in the same single scan
-            // and returns detail-only evidence WITHOUT mutating child #4's row in `rows`.
-            let (got, detail, offered, proofs) =
-                sample_selected(rows.clone(), turn, Some(order[3].as_str()), turn, true);
-            assert_eq!((offered, proofs), (vec![set(&order)], 1));
-            assert_eq!(got[0], rows[0]);
-            assert!(
-                got[1..]
-                    .iter()
-                    .all(|r| r.get("native_response_usage").is_some())
-            );
-            let detail = detail.expect("4th eligible child should return detail-only usage");
-            assert_eq!(detail.observed_model.as_deref(), Some("gemini"));
-            assert_eq!(detail.response, all[order[3]]);
-            assert!(detail.response.get("total_tokens").is_none());
-
-            // Selecting an already-covered child adds no extra participant and returns None.
-            let (_, detail, offered, proofs) =
-                sample_selected(rows.clone(), turn, Some(order[0].as_str()), turn, true);
-            assert!(detail.is_none());
-            assert_eq!((offered, proofs), (vec![set(&order[..3])], 1));
-
-            // Foreign, non-AGY, or duplicated participants are rejected with no extra read.
+            // Foreign, non-AGY, or duplicated participants are rejected with no scan.
             let dup_rows = vec![
                 row(&a),
                 row(&a),
@@ -17854,10 +17845,14 @@ pub(crate) mod tests {
                 a.as_str(),
                 c.as_str(),
             ] {
-                let (_, detail, offered, _) =
+                let (got, detail, offered, proofs) =
                     sample_selected(dup_rows.clone(), turn, Some(rejected), turn, true);
                 assert!(detail.is_none(), "{rejected}");
-                assert_eq!(offered, vec![set(&[&b])], "{rejected}");
+                assert_eq!(
+                    (got, offered, proofs),
+                    (dup_rows.clone(), vec![], 0),
+                    "{rejected}"
+                );
             }
 
             // Identity validation for selected AGY detail usage fails closed on wrong
@@ -17951,20 +17946,19 @@ pub(crate) mod tests {
                 order[3],
             ));
 
-            // A scan of another Turn, a failed after-fence, or no scan attaches nothing.
+            // A scan of another Turn, a failed after-fence, or no scan returns nothing.
             let rows = vec![row(&a)];
             assert_eq!(
-                sample(rows.clone(), turn, "0000000000000000dead", true),
-                (rows.clone(), vec![set(&[&a])], 0)
+                sample_selected(rows.clone(), turn, Some(&a), "0000000000000000dead", true),
+                (rows.clone(), None, vec![set(&[&a])], 0)
             );
             assert_eq!(
-                sample(rows.clone(), turn, turn, false),
-                (rows.clone(), vec![set(&[&a])], 1)
+                sample_selected(rows.clone(), turn, Some(&a), turn, false),
+                (rows.clone(), None, vec![set(&[&a])], 1)
             );
             let mut none = rows.clone();
-            agy_usage_sighting(&mut none, turn, None, |_, _| None);
+            assert!(agy_usage_sighting(&mut none, turn, Some(&a), |_, _| None).is_none());
             assert_eq!(none, rows);
-            assert!(none[0].get("observed_model").is_none());
 
             // A model the shared validator rejects is omitted; the usage is unchanged.
             for bad in ["<synthetic>", "\u{1b}[31mgemini", " gemini"] {
@@ -17972,18 +17966,16 @@ pub(crate) mod tests {
                 invalid["model"] = json!(bad);
                 let scan = BTreeMap::from([(b.clone(), invalid.clone())]);
                 let mut rows = vec![row(&b)];
-                agy_usage_sighting(&mut rows, turn, None, |_, _| {
+                let detail = agy_usage_sighting(&mut rows, turn, Some(&b), |_, _| {
                     Some(crate::agy_child_chat::AgyBoardUsage {
                         turn: turn.to_owned(),
                         rows: scan.clone(),
                         selected: None,
                     })
-                });
-                assert!(rows[0].get("observed_model").is_none(), "{bad:?}");
-                assert_eq!(
-                    rows[0]["native_response_usage"],
-                    json!({"scope": "latest_child_response", "response": invalid})
-                );
+                })
+                .unwrap();
+                assert!(detail.observed_model.is_none(), "{bad:?}");
+                assert_eq!(detail.response, invalid);
             }
 
             // No eligible row or no shown Turn: neither the scan nor the fence runs.
@@ -17993,7 +17985,10 @@ pub(crate) mod tests {
                 (vec![], turn),
                 (vec![row(&a)], ""),
             ] {
-                assert_eq!(sample(rows.clone(), shown, turn, true), (rows, vec![], 0));
+                assert_eq!(
+                    sample_selected(rows.clone(), shown, Some(&a), turn, true),
+                    (rows, None, vec![], 0)
+                );
             }
         }
 
@@ -18245,8 +18240,8 @@ pub(crate) mod tests {
             let mut obs = Observations::default();
             let mut report = accepted_codex_scope();
 
-            // Cold + warm accepted refreshes: ZERO legacy child reads, ONE fenced parent scan
-            // with ONE bounded usage-suffix read per sample, and ONLY 2 capture-pane calls.
+            // Cold + warm accepted plain refreshes: ZERO usage transcript opens, ZERO
+            // child reads, and ONLY 2 capture-pane calls.
             let panel = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
             let expected_passive_tmux = vec![
                 vec![
@@ -18270,11 +18265,32 @@ pub(crate) mod tests {
             crate::agy_child_chat::reset_all_agy_counters();
             spy.calls.borrow_mut().clear();
             panel.observe_with_host(&mut obs, &mut report, true, &host);
+            assert_eq!(
+                crate::agy_child_chat::transcript_opens(),
+                0,
+                "plain Board refresh must open zero usage transcripts"
+            );
             assert_eq!(crate::agy_child_chat::legacy_agy_read_index(), (1, 1, 0, 0));
-            assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
-            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 1));
-            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 1);
+            assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
+            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
             assert_eq!(*spy.calls.borrow(), expected_passive_tmux);
+            assert!(
+                !report["native_children"]
+                    .to_string()
+                    .contains("native_response_usage")
+            );
+            let all_tasks_nav = crate::navigation::Navigation {
+                view: crate::layout::View::Auto.next(),
+                ..Default::default()
+            };
+            let plain_board =
+                crate::render::frame(&report, &all_tasks_nav, 120, 24, &Default::default())
+                    .join("\n");
+            assert!(
+                plain_board.contains("not loaded"),
+                "plain refresh without known counters must show 'not loaded':\n{plain_board}"
+            );
             let accepted = report["native_children"].clone();
 
             // Rejected sightings (not chat-current, pending scope, stopping) make ZERO
@@ -18290,6 +18306,7 @@ pub(crate) mod tests {
                 crate::agy_child_chat::reset_all_agy_counters();
                 panel.observe_with_host(&mut obs, &mut rejected, current, &host);
                 spy.stop.store(false, Ordering::Release);
+                assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
                 assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
                 assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
                 // The child's row is still painted, just without usage.
@@ -18307,21 +18324,21 @@ pub(crate) mod tests {
                 );
             }
 
-            // The same accepted sample again: the same rows, one scan, no extra reads.
+            // The same accepted plain sample again: same rows, zero usage transcript opens.
             crate::agy_child_chat::reset_all_agy_counters();
             spy.calls.borrow_mut().clear();
             panel.observe_with_host(&mut obs, &mut report, true, &host);
+            assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
             assert_eq!(crate::agy_child_chat::legacy_agy_read_index(), (0, 1, 0, 0));
-            assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
-            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 1));
-            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 1);
+            assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
+            assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
             assert_eq!(*spy.calls.borrow(), expected_passive_tmux);
             assert_eq!(report["native_children"], accepted);
 
             // A Board read expecting the generation the render fence requires:
-            // when the lead already left it (another window), the fresh census
-            // stops the sighting before custody, scans, reads or chat binding; the
-            // matching generation keeps the accepted caps. Each costs one census.
+            // plain refreshes open zero usage transcripts in both cases, while
+            // chat bindings are retained only when the generation matches.
             spy.leads.borrow_mut()[0].window = "@5".into();
             let moved = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop)
                 .unwrap()
@@ -18348,9 +18365,7 @@ pub(crate) mod tests {
             ]
             .map(|call| call.iter().map(|word| (*word).to_owned()).collect())
             .into();
-            for (expected, counters, accepted_frame) in
-                [(&moved, (0, 0, 0), false), (&current, (2, 1, 1), true)]
-            {
+            for (expected, accepted_frame) in [(&moved, false), (&current, true)] {
                 let mut fenced_obs = obs.clone();
                 let mut fenced = accepted_codex_scope();
                 crate::agy_child_chat::reset_all_agy_counters();
@@ -18364,8 +18379,9 @@ pub(crate) mod tests {
                     Some(expected),
                     DetailUsageSelection::default(),
                 );
-                assert_eq!(crate::agy_child_chat::test_counters(), counters);
-                assert_eq!(crate::agy_child_chat::total_agy_child_reads(), counters.2);
+                assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
+                assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+                assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
                 assert_eq!(
                     *spy.calls.borrow(),
                     [expected_passive_tmux.clone(), census.clone()].concat()
@@ -18381,14 +18397,11 @@ pub(crate) mod tests {
                         .iter()
                         .any(|row| row["participant"] == participant)
                 );
-                assert_eq!(
-                    rows.to_string().contains("native_response_usage"),
-                    accepted_frame
-                );
+                assert!(!rows.to_string().contains("native_response_usage"));
                 assert!(!accepted_frame || *rows == accepted);
             }
 
-            // With a Claude lead too, both providers are fenced from one census.
+            // With a Claude lead too, both providers are fenced from one census with zero usage opens.
             let claude_pid = 4_194_305; // above Linux's pid_max, so it reads nothing
             spy.leads.borrow_mut().push(FakeLead {
                 window: "@5".into(),
@@ -18417,7 +18430,8 @@ pub(crate) mod tests {
                     expected,
                     DetailUsageSelection::default(),
                 );
-                assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
+                assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
+                assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
                 assert_eq!(
                     *spy.calls.borrow(),
                     [
@@ -18440,12 +18454,7 @@ pub(crate) mod tests {
             assert_eq!(row_strict["provider"], "antigravity");
             assert_eq!(row_strict["state"], "done");
             assert_eq!(row_strict["native_answer"], "PARENT_DELIVERED_SUMMARY");
-            assert_eq!(
-                row_strict["native_response_usage"],
-                json!({"scope": "latest_child_response",
-                       "response": {"model": "gemini-x", "created_at": "2026-11-18T18:00:30Z",
-                       "input_tokens": 7, "cached_input_tokens": 3, "output_tokens": 2}})
-            );
+            assert!(row_strict.get("native_response_usage").is_none());
             let row_legacy = rows
                 .iter()
                 .find(|r| r["participant"] == legacy_participant)
@@ -18462,6 +18471,63 @@ pub(crate) mod tests {
             let binding = obs.chat_binding(&participant).unwrap().clone();
             assert!(matches!(binding.locator, NativeLocator::Antigravity(_)));
             let legacy_binding = obs.chat_binding(&legacy_participant).unwrap().clone();
+
+            // Opening selected agent detail reads attributable usage on demand (1 parent + 1 child open)
+            // with the exact same bounds and authority checks, without mutating `native_children`.
+            crate::agy_child_chat::reset_all_agy_counters();
+            let mut detail_report = accepted_codex_scope();
+            let current_gen = panel.observation_generation_with_host(&host).unwrap();
+            let selected_usage = panel
+                .observe_reading(
+                    &mut obs.clone(),
+                    &mut detail_report,
+                    true,
+                    &host,
+                    |_, _, _| None,
+                    Some(&current_gen),
+                    DetailUsageSelection {
+                        requested: Some(&binding),
+                        active: None,
+                    },
+                )
+                .expect("selected strict 0700 AGY child should return attributable usage");
+            assert_eq!(crate::agy_child_chat::transcript_opens(), 2);
+            assert_eq!(crate::agy_child_chat::test_counters(), (2, 1, 1));
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 1));
+            assert_eq!(selected_usage.observed_model.as_deref(), Some("gemini-x"));
+            assert!(!selected_usage.requires_group);
+            assert_eq!(
+                selected_usage.response,
+                json!({"model": "gemini-x", "created_at": "2026-11-18T18:00:30Z",
+                       "input_tokens": 7, "cached_input_tokens": 3, "output_tokens": 2})
+            );
+            assert!(
+                !detail_report["native_children"]
+                    .to_string()
+                    .contains("native_response_usage")
+            );
+
+            // Selecting negative 0775-wt legacy child for detail returns None with 0 child reads.
+            crate::agy_child_chat::reset_all_agy_counters();
+            let mut legacy_detail_report = accepted_codex_scope();
+            assert!(
+                panel
+                    .observe_reading(
+                        &mut obs.clone(),
+                        &mut legacy_detail_report,
+                        true,
+                        &host,
+                        |_, _, _| None,
+                        Some(&current_gen),
+                        DetailUsageSelection {
+                            requested: Some(&legacy_binding),
+                            active: None,
+                        },
+                    )
+                    .is_none()
+            );
+            assert_eq!(crate::agy_child_chat::transcript_opens(), 1);
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
 
             // Panel::open_agy_chat returns OwnChat on strict 0700 child with (custody=2, scans=1, reads=1).
             crate::agy_child_chat::reset_all_agy_counters();
@@ -18532,17 +18598,18 @@ pub(crate) mod tests {
             assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
             assert_eq!(crate::agy_child_chat::total_agy_child_reads(), 0);
 
-            // If .git becomes 0o775, observe's one usage scan stops at custody (1, 0, 0) with
-            // 0 reads and no usage, and open_agy_chat returns Unbound (0 reads).
+            // If .git becomes 0o775, plain observe still opens 0 transcripts, selected detail
+            // stops at custody (1, 0, 0) with 0 opens/reads, and open_agy_chat returns Unbound.
             std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o775))
                 .unwrap();
             let mut fallback_obs = Observations::default();
             let mut fallback_report = accepted_codex_scope();
             crate::agy_child_chat::reset_all_agy_counters();
-            Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop)
-                .unwrap()
-                .observe_with_host(&mut fallback_obs, &mut fallback_report, true, &host);
-            assert_eq!(crate::agy_child_chat::test_counters(), (1, 0, 0));
+            let fallback_panel =
+                Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
+            fallback_panel.observe_with_host(&mut fallback_obs, &mut fallback_report, true, &host);
+            assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
+            assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
             assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
             assert!(
                 !fallback_report["native_children"]
@@ -18550,6 +18617,29 @@ pub(crate) mod tests {
                     .contains("native_response_usage")
             );
             let fallback_binding = fallback_obs.chat_binding(&participant).unwrap().clone();
+            crate::agy_child_chat::reset_all_agy_counters();
+            let fallback_gen = fallback_panel
+                .observation_generation_with_host(&host)
+                .unwrap();
+            assert!(
+                fallback_panel
+                    .observe_reading(
+                        &mut fallback_obs.clone(),
+                        &mut accepted_codex_scope(),
+                        true,
+                        &host,
+                        |_, _, _| None,
+                        Some(&fallback_gen),
+                        DetailUsageSelection {
+                            requested: Some(&fallback_binding),
+                            active: None,
+                        },
+                    )
+                    .is_none()
+            );
+            assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
+            assert_eq!(crate::agy_child_chat::test_counters(), (1, 0, 0));
+            assert_eq!(crate::agy_child_chat::agy_child_read_counts(), (0, 0));
             crate::agy_child_chat::reset_all_agy_counters();
             assert!(matches!(
                 open_panel.open_agy_chat(&fallback_binding, None, &attempts),
