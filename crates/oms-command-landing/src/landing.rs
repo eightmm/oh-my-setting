@@ -346,6 +346,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         ),
         ("ts", now().into()),
         ("kind", "patch-land".into()),
+        // Owner-produced receipt: index readers require these lineage ids.
+        ("operation_id", landing.clone().into()),
+        ("provider", "local".into()),
+        ("artifact_id", format!("sha256:{sha}").into()),
         ("exit", 0usize.into()),
         ("landing_id", landing.clone().into()),
         ("artifact", "".into()),
