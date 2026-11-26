@@ -211,6 +211,28 @@ fn plan_issue_evidence(root: &Path, origin: &Slug) -> Result<(Vec<(String, Issue
 }
 
 fn plan_issue_links(raw: &[u8], origin: &Slug) -> Result<(Vec<(String, IssueRef)>, bool)> {
+    let (links, complete) = plan_issue_links_with_state(raw, origin)?;
+    Ok((
+        links
+            .into_iter()
+            .map(|(id, _, issue, _)| (id, issue))
+            .collect(),
+        complete,
+    ))
+}
+
+/// (display id, verbatim selectable id, issue, state).
+type StatefulIssueLinks = Vec<(String, Option<String>, IssueRef, Option<String>)>;
+
+fn candidate_plan_issue_evidence(root: &Path, origin: &Slug) -> Result<(StatefulIssueLinks, bool)> {
+    let Some(raw) = read_optional(root, PLAN_REL, PLAN_MAX)? else {
+        return Ok((vec![], true));
+    };
+    let (links, complete) = plan_issue_links_with_state(&raw, origin)?;
+    Ok((links, complete && oms_json::parse_strict(&raw).is_ok()))
+}
+
+fn plan_issue_links_with_state(raw: &[u8], origin: &Slug) -> Result<(StatefulIssueLinks, bool)> {
     if raw.is_empty() {
         return Ok((vec![], false));
     }
@@ -218,14 +240,24 @@ fn plan_issue_links(raw: &[u8], origin: &Slug) -> Result<(Vec<(String, IssueRef)
     let V::Obj(tasks) = plan.get("tasks") else {
         return Ok((vec![], false));
     };
+    // A selectable task id must match Plan's grammar verbatim; any other key
+    // is a plan Plan itself refuses to load, so the read is incomplete.
+    let task_id = |id: &[u8]| {
+        (!id.is_empty()
+            && id
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(b)))
+        .then(|| String::from_utf8_lossy(id).into_owned())
+    };
     let complete = tasks
         .iter()
-        .all(|(id, task)| !id.is_empty() && matches!(task, V::Obj(_)));
+        .all(|(id, task)| task_id(id).is_some() && matches!(task, V::Obj(_)));
     let mut out = vec![];
     for (id, task) in tasks {
         if !task.has("issue") {
             continue;
         }
+        let selectable = task_id(id);
         let id = freshness::sanitize(&String::from_utf8_lossy(id), 100);
         let issue = task
             .get("issue")
@@ -237,7 +269,12 @@ fn plan_issue_links(raw: &[u8], origin: &Slug) -> Result<(Vec<(String, IssueRef)
                     format!("plan task {id} carries an invalid issue reference"),
                 )
             })?;
-        out.push((id, issue));
+        out.push((
+            id,
+            selectable,
+            issue,
+            task.get("state").text().map(str::to_owned),
+        ));
     }
     Ok((out, complete))
 }
