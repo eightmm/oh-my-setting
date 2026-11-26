@@ -133,16 +133,27 @@ pub(crate) fn meta(dir: &Path) -> Value {
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}))
 }
-pub(crate) fn valid_receipt(dir: &Path, name: &str) -> bool {
+pub(crate) fn receipt(dir: &Path, name: &str) -> Option<Value> {
     read_run(dir, &format!("{name}.json"), 4096)
         .ok()
         .and_then(|b| crate::value::from_slice(&b).ok())
-        .is_some_and(|v| {
+        .filter(|v| {
             v.is_object()
                 && v["schema"] == 1
                 && v["task_id"].as_str() == dir.file_name().and_then(|s| s.to_str())
                 && v["kind"] == format!("mcp-task-{name}")
         })
+}
+pub(crate) fn valid_receipt(dir: &Path, name: &str) -> bool {
+    receipt(dir, name).is_some()
+}
+pub(crate) fn cancel_request(dir: &Path) -> Option<Option<String>> {
+    receipt(dir, "cancel-request").map(|v| {
+        v.get("requested_at")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
 }
 pub(crate) fn sections(data: &[u8]) -> (String, String) {
     let mut offset = 0;
@@ -322,6 +333,46 @@ impl Directory {
     }
     pub fn publish_new(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.publish(name, data, true)
+    }
+    pub fn record_cancel_request(&self, data: &[u8]) -> Result<(), String> {
+        if cancel_request(&self.path).is_some() {
+            return Ok(());
+        }
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let name = "cancel-request.json";
+        let temp = format!(
+            ".{name}.{}.{}.part",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let result = (|| {
+            let mut file = self.exclusive(&temp)?;
+            file.write_all(data).map_err(err)?;
+            file.sync_all().map_err(err)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let first = fs::renameat_with(
+                &self.fd,
+                temp.as_str(),
+                &self.fd,
+                name,
+                fs::RenameFlags::NOREPLACE,
+            );
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let first = fs::linkat(&self.fd, temp.as_str(), &self.fd, name, AtFlags::empty());
+            match first {
+                Ok(()) => (),
+                Err(e) if e == rustix::io::Errno::EXIST => {
+                    if cancel_request(&self.path).is_none() {
+                        fs::renameat(&self.fd, temp.as_str(), &self.fd, name).map_err(err)?;
+                    }
+                }
+                Err(e) => return Err(err(e)),
+            }
+            fs::fsync(&self.fd).map_err(err)?;
+            Ok(())
+        })();
+        let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
+        result
     }
     fn publish(&self, name: &str, data: &[u8], create_only: bool) -> Result<(), String> {
         static SEQ: AtomicU64 = AtomicU64::new(0);

@@ -953,7 +953,7 @@ impl Server<'_> {
     fn peer_result_snapshot(
         &self,
         args: &Value,
-        captured: Option<(&Value, &'static str, Option<i64>)>,
+        captured: Option<(&Value, &'static str, Option<i64>, &CancellationView)>,
     ) -> ToolResult {
         let wait = integer(args, "wait_seconds", 0, 0, 50)
             .map_err(|_| "error: wait_seconds must be an integer from 0 to 50")?;
@@ -1025,8 +1025,8 @@ impl Server<'_> {
             .path;
         let mut payload = json!({"operation":op,"log":dir.join("run.log")});
         let deadline = Instant::now() + Duration::from_secs(wait as u64);
-        let (mut state, mut code) = captured.map_or_else(|| status(&dir), |(_, s, c)| (s, c));
-        let meta = captured.map_or_else(|| storage::meta(&dir), |(m, _, _)| m.clone());
+        let (mut state, mut code) = captured.map_or_else(|| status(&dir), |(_, s, c, _)| (s, c));
+        let meta = captured.map_or_else(|| storage::meta(&dir), |(m, _, _, _)| m.clone());
         let owned = meta["answer_storage"] == "operation";
         if page {
             if state != "done" || !owned {
@@ -1045,7 +1045,11 @@ impl Server<'_> {
             std::thread::sleep(remaining.min(Duration::from_millis(100)));
             (state, code) = status(&dir);
         }
-        cancellation(&dir, state, &mut payload);
+        if let Some((_, _, _, view)) = captured {
+            apply_cancellation(view, state, &mut payload);
+        } else {
+            cancellation(&dir, state, &mut payload);
+        }
         if let Some(n) = age(&dir).filter(|_| {
             std::fs::symlink_metadata(dir.join("prompt.txt")).is_ok_and(|m| m.file_type().is_file())
         }) {
@@ -1194,37 +1198,60 @@ impl Server<'_> {
         let updated = crate::value::Text::from(updated_stamp(dir, created.as_str().unwrap_or("")));
         let mut value = json!({"resultType":"complete","taskId":id,"createdAt":created,"lastUpdatedAt":updated,"ttlMs":null,"pollIntervalMs":5000});
         let (state, code) = status(dir);
-        if state == "done" && storage::valid_receipt(dir, "cancel-observed") {
+        let cancel = cancellation_view(dir, state);
+        value["cancellation"] = cancel.to_json();
+        if state == "done" && cancel.observed {
             value["status"] = json!("cancelled");
             value["statusMessage"] = json!(
                 "Provider cancellation was observed and the operation exited. Partial artifacts are retained."
             );
         } else if state == "running" {
-            let cancelled = storage::valid_receipt(dir, "cancel-request");
             value["status"] = json!("working");
-            value["cancellation_requested"] = json!(cancelled);
-            value["statusMessage"] = json!(if cancelled {
-                "Cancellation requested; awaiting provider cleanup."
-            } else {
-                "Peer consultation is running."
+            value["cancellation_requested"] = json!(cancel.requested);
+            value["statusMessage"] = json!(match cancel.state {
+                "confirmed" => {
+                    "Provider cancellation was observed; awaiting final operation exit."
+                }
+                "requested" => "Cancellation requested; awaiting provider cleanup.",
+                _ => "Peer consultation is running.",
             });
         } else if state == "stalled" {
             value["status"] = json!("failed");
-            value["statusMessage"] = json!("Peer process ended without a durable exit status.");
+            value["statusMessage"] = json!(match cancel.state {
+                "confirmed" => {
+                    "Provider cancellation was observed before the peer ended without a durable exit status."
+                }
+                "unknown" => {
+                    "Cancellation was requested, but the peer ended without a durable exit or observation."
+                }
+                _ => "Peer process ended without a durable exit status.",
+            });
             value["error"] = json!({"code":-32603,"message":"peer operation stalled"});
         } else {
-            let result =
-                self.peer_result_snapshot(&json!({"operation":id}), Some((&meta, state, code)));
+            let result = self.peer_result_snapshot(
+                &json!({"operation":id}),
+                Some((&meta, state, code, &cancel)),
+            );
             let (text, bad) = match result {
                 Ok(s) => (s, false),
                 Err(crate::ToolError::Text(s)) => (s, true),
                 Err(crate::ToolError::InvalidField) => return Err(crate::FIELD_ERROR.into()),
             };
             value["status"] = json!("completed");
-            value["statusMessage"] = json!(format!(
-                "Peer consultation completed with exit {}.",
-                code.unwrap_or(1)
-            ));
+            value["statusMessage"] = json!(match cancel.state {
+                "completed_first" => format!(
+                    "Peer consultation completed with exit {} before cancellation took effect.",
+                    code.unwrap_or(1)
+                ),
+                "unknown" => {
+                    "Cancellation was requested, but the peer ended without a durable exit or observation."
+                        .into()
+                }
+                _ => format!(
+                    "Peer consultation completed with exit {}.",
+                    code.unwrap_or(1)
+                ),
+            });
             value["result"] = json!({"resultType":"complete","content":[{"type":"text","text":text}],"isError":bad});
         }
         Ok(value)
@@ -1249,18 +1276,72 @@ impl Server<'_> {
             .map_err(|e| (-32603, format!("could not record cancellation: {e}")))?;
         let row = json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":id,"requested_at":storage::now()});
         target
-            .atomic("cancel-request.json", format!("{row}\n").as_bytes())
+            .record_cancel_request(format!("{row}\n").as_bytes())
             .map_err(|e| (-32603, format!("could not record cancellation: {e}")))?;
         Ok(json!({"resultType":"complete"}))
     }
 }
-fn cancellation(dir: &Path, state: &str, payload: &mut Value) {
-    if storage::valid_receipt(dir, "cancel-request") {
+struct CancellationView {
+    requested: bool,
+    observed: bool,
+    requested_at: Option<String>,
+    state: &'static str,
+}
+impl CancellationView {
+    fn to_json(&self) -> Value {
+        json!({
+            "requested_at": self.requested_at.as_deref().map_or(Value::Null, |s| json!(s)),
+            "state": self.state,
+        })
+    }
+}
+fn durable_own_exit(dir: &Path) -> bool {
+    storage::read_run(dir, "status", 4096)
+        .ok()
+        .and_then(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()?
+                .trim_matches(crate::whitespace)
+                .parse::<i64>()
+                .ok()
+        })
+        .is_some_and(|code| code >= 0 && code != 124)
+}
+fn cancellation_view(dir: &Path, state: &str) -> CancellationView {
+    let request = storage::cancel_request(dir);
+    let requested = request.is_some();
+    let requested_at = request.flatten();
+    let observed = storage::valid_receipt(dir, "cancel-observed");
+    let cancel_state = if observed {
+        "confirmed"
+    } else if !requested {
+        "none"
+    } else if state == "running" {
+        "requested"
+    } else if state == "done" && durable_own_exit(dir) {
+        "completed_first"
+    } else {
+        "unknown"
+    };
+    CancellationView {
+        requested,
+        observed,
+        requested_at,
+        state: cancel_state,
+    }
+}
+fn apply_cancellation(view: &CancellationView, state: &str, payload: &mut Value) {
+    if view.requested {
         payload["cancellation_requested"] = json!(true);
     }
-    if state == "done" && storage::valid_receipt(dir, "cancel-observed") {
+    if state == "done" && view.observed {
         payload["termination_reason"] = json!("cancelled");
     }
+    payload["cancellation"] = view.to_json();
+}
+fn cancellation(dir: &Path, state: &str, payload: &mut Value) {
+    let view = cancellation_view(dir, state);
+    apply_cancellation(&view, state, payload);
 }
 fn truthy(v: &Value) -> bool {
     match v {
