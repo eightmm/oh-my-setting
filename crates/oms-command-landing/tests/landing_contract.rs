@@ -7385,6 +7385,43 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
 
     // Candidate links distinguish reusable ready work from in-flight and terminal work.
     fs::write(r.dir.join("panel-board"), board_page(false, "", &linked7)).unwrap();
+    for (prerequisite, writer_scope, runnable) in [
+        ("ready", "docs/", false),
+        ("done", "crates/", false),
+        ("done", "docs/", true),
+    ] {
+        fs::write(
+            &plan_file,
+            format!(
+                r##"{{"tasks":{{
+                    "prerequisite":{{"id":"prerequisite","state":"{prerequisite}","depends":[],"allowed_paths":["misc/"]}},
+                    "a-waiting":{{"id":"a-waiting","issue":"#7","state":"ready","depends":["writer"],"allowed_paths":["examples/"]}},
+                    "follow-up":{{"id":"follow-up","issue":"#7","state":"ready","depends":["prerequisite"],"allowed_paths":["crates/"],"brief":"Apply the selected change"}},
+                    "writer":{{"id":"writer","state":"running","allowed_paths":["{writer_scope}"]}}
+                }}}}"##
+            ),
+        )
+        .unwrap();
+        let doc = run_candidates();
+        let candidates = doc.get("github").get("candidates");
+        let rec = &candidates.get("recommendations").array()[0];
+        assert_eq!(
+            rec.get("state").text(),
+            Some(if runnable { "recommended" } else { "excluded" }),
+            "prerequisite {prerequisite}, writer scope {writer_scope}"
+        );
+        if runnable {
+            assert_eq!(rec.get("plan_task").text(), Some("follow-up"));
+            assert_eq!(
+                candidates.get("items").array()[0].get("plan_task").text(),
+                Some("follow-up")
+            );
+        } else {
+            assert_eq!(rec.get("reason").text(), Some("plan_linked"));
+            assert_eq!(rec.get("plan_task"), &V::Null);
+            assert!(candidates.get("items").array().is_empty());
+        }
+    }
     for (state, excluded, reusable) in [
         ("ready", false, true),
         ("claimed", true, false),
@@ -7396,7 +7433,10 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         ("failed", false, false),
         ("unknown", true, false),
     ] {
-        fs::write(&plan_file, format!(r##"{{"tasks":{{"z_task":{{"issue":"#7","state":"{state}"}},"a_task":{{"issue":"#7","state":"{state}"}}}}}}"##)).unwrap();
+        fs::write(&plan_file, format!(r##"{{"tasks":{{
+            "z_task":{{"id":"z_task","issue":"#7","state":"{state}","depends":[],"allowed_paths":["z/"]}},
+            "a_task":{{"id":"a_task","issue":"#7","state":"{state}","depends":[],"allowed_paths":["a/"]}}
+        }}}}"##)).unwrap();
         let doc = run_candidates();
         let candidates = doc.get("github").get("candidates");
         let rec = &candidates.get("recommendations").array()[0];
@@ -7420,7 +7460,7 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     let long_id = "t".repeat(150);
     fs::write(
         &plan_file,
-        format!(r##"{{"tasks":{{"{long_id}":{{"issue":"#7","state":"ready"}}}}}}"##),
+        format!(r##"{{"tasks":{{"{long_id}":{{"id":"{long_id}","issue":"#7","state":"ready","depends":[],"allowed_paths":["docs/"]}}}}}}"##),
     )
     .unwrap();
     let long = run_candidates();
@@ -7451,6 +7491,21 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
                 .is_none(),
             "{bad}"
         );
+    }
+    for unverified in [
+        r##"{"tasks":{"linked":{"issue":"#7"},"linked":{"id":"linked","issue":"#7","state":"ready","depends":[],"allowed_paths":["src/"]}}}"##,
+        r##"{"tasks":{"linked":{"id":"linked","issue":"foreign/repository#7","state":"ready","depends":[],"allowed_paths":["src/"]}}}"##,
+        r##"{"tasks":{"linked":{"id":"linked","issue":7,"state":"ready","depends":[],"allowed_paths":["src/"]}}}"##,
+        r##"{"tasks":{"linked":{"id":"different","issue":"#7","state":"ready","depends":[],"allowed_paths":["src/"]}}}"##,
+    ] {
+        fs::write(&plan_file, unverified).unwrap();
+        let doc = run_candidates();
+        let candidates = doc.get("github").get("candidates");
+        assert_eq!(candidates.get("reason").text(), Some("plan_unverified"));
+        assert!(candidates.get("items").array().is_empty());
+        let rec = &candidates.get("recommendations").array()[0];
+        assert_eq!(rec.get("state").text(), Some("unverified"));
+        assert_eq!(rec.get("plan_task"), &V::Null);
     }
     fs::write(&plan_file, r##"{"tasks":{"missing":{"issue":"#7"}}}"##).unwrap();
     let missing = run_candidates();
