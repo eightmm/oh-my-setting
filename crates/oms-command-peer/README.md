@@ -290,6 +290,14 @@ not established by compilation:
   artifacts/worktrees exist. Rendered pointers are untrusted orientation and
   do not widen write scope. A supplied pack takes precedence over automatic
   graph orientation.
+- Reviewed Lead context uses the same pack path and an exact
+  `--expected-context-pack-sha256`. Its versioned `lead_findings` member carries
+  at most 4096 UTF-8 bytes, answer/page/range digests and the reviewed ready task
+  identity. The Plan owner validates the reference contract; the peer compares
+  its frozen task fields, provider, physical project and Room with the issued
+  binding before making a worktree or calling a provider. Rendering quotes the
+  selected excerpt as reference data and preserves the frozen brief, model,
+  scope, verifier and lease checks. Legacy graph-only packs remain supported.
 - Account spread ties now use native operations projections for attempts with
   explicit `panel_account` references, using the source repository rather than
   the disposable worker checkout. Quota ordering and explicit-route behavior

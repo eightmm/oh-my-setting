@@ -597,9 +597,11 @@ fn install(
         .map(|selected| crate::tools::plan(paths, selected))
         .transpose()?;
     if options.preview() {
-        return r::json(
-            &json!({"schema":1,"install":row,"capabilities":plan,"actions":["stage native payload","converge owned targets and components","publish install receipt"]}),
-        );
+        let mut preview = json!({"schema":1,"install":row,"capabilities":plan,"actions":["stage native payload","converge owned targets and components","publish install receipt"]});
+        if let Some(profile) = options.mcp_tool_profile {
+            preview["mcp_tool_profile"] = json!(profile.as_str());
+        }
+        return r::json(&preview);
     }
     r::child_guard()?;
     let prepared = if row["components"]["claude_hooks"] == true {

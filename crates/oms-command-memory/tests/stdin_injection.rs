@@ -280,7 +280,45 @@ fn review_controls_context_without_hiding_source_notes() {
         attention.pending,
         pending["pending"].as_array().unwrap().len()
     );
+    assert_eq!(attention.skipped, 0);
     assert_eq!(attention.candidate_fingerprints.len(), attention.pending);
+    // One bad receipt line among good ones skips and counts the bad line without hiding good rows.
+    std::fs::write(
+        repo.join(".oms/memory/reviews.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"schema": 1, "id": ids[2], "decision": "rejected"}),
+            serde_json::json!({"schema": 2, "id": "missing-schema-1", "decision": "accepted"}),
+        ),
+    )
+    .unwrap();
+    let degraded_attention = oms_command_memory::pending_review(repo, &interrupted).unwrap();
+    assert_eq!(degraded_attention.pending, attention.pending);
+    assert_eq!(degraded_attention.skipped, 1);
+    let degraded_json: serde_json::Value =
+        serde_json::from_str(&run(&["review", "--json"])).unwrap();
+    assert_eq!(
+        degraded_json["pending"].as_array().unwrap().len(),
+        attention.pending
+    );
+    assert_eq!(degraded_json["skipped"], 1);
+    let degraded_text = run(&["review"]);
+    assert!(
+        degraded_text.contains("1 invalid row(s) skipped"),
+        "{degraded_text}"
+    );
+    assert!(
+        degraded_text.contains("curationtopic task proposal"),
+        "{degraded_text}"
+    );
+    std::fs::write(
+        repo.join(".oms/memory/reviews.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"schema": 1, "id": ids[2], "decision": "rejected"})
+        ),
+    )
+    .unwrap();
     let database = repo.join(".oms/memory/memory.sqlite3");
     let before_resume = [
         std::fs::read(&database).unwrap(),
@@ -503,11 +541,127 @@ fn resume_context_preserves_scope_filters_global_fallback_and_child_boundary() {
         }
     }
     std::fs::write(repo.join(".oms/memory/reviews.jsonl"), b"{invalid}\n").unwrap();
-    let (code, out, _) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
-    assert_ne!(code, 0);
+    let (code, out, err) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let project_broken = String::from_utf8(out).unwrap();
     assert!(
-        out.is_empty(),
-        "unavailable review eligibility must withhold recall"
+        !project_broken.contains("relevant project source"),
+        "unavailable review eligibility must withhold project recall: {project_broken}"
+    );
+    assert!(
+        project_broken.contains("- unavailable project: memory review receipt is invalid"),
+        "{project_broken}"
+    );
+    assert!(
+        project_broken.contains("Global explicit pin"),
+        "{project_broken}"
+    );
+
+    std::fs::remove_file(repo.join(".oms/memory/reviews.jsonl")).unwrap();
+    let pin_args: Vec<_> = [
+        "pin",
+        "--text",
+        "Project explicit pin survives broken global",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let (code, _, err) = oms_command_memory::run_with_source(&pin_args, repo, repo, &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+
+    std::fs::write(
+        global.parent().unwrap().join("reviews.jsonl"),
+        b"{invalid}\n",
+    )
+    .unwrap();
+    let (code, out, err) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let malformed_global = String::from_utf8(out).unwrap();
+    assert!(
+        malformed_global.contains("Project explicit pin survives broken global"),
+        "{malformed_global}"
+    );
+    assert!(
+        malformed_global.contains("- unavailable global: memory review receipt is invalid"),
+        "{malformed_global}"
+    );
+    assert!(
+        !malformed_global.contains("Global explicit pin"),
+        "{malformed_global}"
+    );
+
+    std::fs::remove_file(global.parent().unwrap().join("reviews.jsonl")).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&global)
+        .unwrap()
+        .set_len(4 * 1024 * 1024 + 1)
+        .unwrap();
+    let (code, out, err) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let oversized_global = String::from_utf8(out).unwrap();
+    assert!(
+        oversized_global.contains("Project explicit pin survives broken global"),
+        "{oversized_global}"
+    );
+    assert!(
+        oversized_global
+            .contains("- unavailable global: memory: source exceeds 4194304-byte limit"),
+        "{oversized_global}"
+    );
+    if std::env::var("OMS_MEMORY_RESUME_TEST").unwrap() == "targeted" {
+        assert!(
+            oversized_global.contains("relevant project source"),
+            "{oversized_global}"
+        );
+    }
+
+    // When recall fails for project after pin selection, project pins are dropped before
+    // truncating to RESUME_RECORDS so all three surviving global pins still appear.
+    std::fs::write(
+        &global,
+        "## 2026-01-01T00:00:00Z agent\n\nscopetopic global fallback lesson\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.parent().unwrap().join("pins.md"),
+        "- 2026-01-01T00:00:00Z [agent] Global explicit pin one\n\
+         - 2026-01-02T00:00:00Z [agent] Global explicit pin two\n\
+         - 2026-01-03T00:00:00Z [agent] Global explicit pin three\n",
+    )
+    .unwrap();
+    for extra in ["Project newer pin two", "Project newer pin three"] {
+        let args: Vec<_> = ["pin", "--text", extra]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let (code, _, err) = oms_command_memory::run_with_source(&args, repo, repo, &flag);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    }
+    let project_shared = repo.join(".oms/memory/shared.md");
+    let shared_bytes = std::fs::read(&project_shared).unwrap();
+    let mut duplicated = shared_bytes.clone();
+    duplicated.push(b'\n');
+    duplicated.extend_from_slice(&shared_bytes);
+    std::fs::write(&project_shared, duplicated).unwrap();
+    let (code, out, err) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let recall_failed_project = String::from_utf8(out).unwrap();
+    for expected in [
+        "Global explicit pin three",
+        "Global explicit pin two",
+        "Global explicit pin one",
+        "- unavailable project:",
+    ] {
+        assert!(
+            recall_failed_project.contains(expected),
+            "missing {expected:?}: {recall_failed_project}"
+        );
+    }
+    assert!(
+        !recall_failed_project.contains("Project explicit pin")
+            && !recall_failed_project.contains("Project newer pin"),
+        "{recall_failed_project}"
     );
 }
 

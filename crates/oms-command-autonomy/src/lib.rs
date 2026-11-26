@@ -90,6 +90,13 @@ pub fn run_with_services(
                 "--expected-task-sha256 must be lowercase SHA-256",
             )?;
         }
+        if args.has("expected-context-pack-sha256") {
+            require(
+                args.has("context-pack")
+                    && value::digest(args.required("expected-context-pack-sha256")?),
+                "--expected-context-pack-sha256 requires --context-pack and a lowercase SHA-256",
+            )?;
+        }
         for name in [
             "repo",
             "apply",

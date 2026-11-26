@@ -1171,7 +1171,11 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
             .unwrap_or_default()
     };
     let task_id = meta("task_id");
-    let status = meta("status");
+    let status = if task.is_empty() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(oms_command_task::packet::effective_status(&task)).into_owned()
+    };
     let section = |key: &str| {
         String::from_utf8_lossy(&oms_command_task::packet::section(&task, key))
             .lines()
@@ -1333,12 +1337,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         lines.push("- after compaction: the lines above were re-read from .oms state, not from the summary; OMS skills are invoked by name (/oms-<skill>), and oms state shows the rest".into());
     }
     if env("OMS_RESUME_MEMORY") == "1" {
-        let task_goal = if !task_id.is_empty()
-            && status == "active"
-            && freshness.idle_seconds.is_some()
-            && !freshness.stale
-            && !freshness.dormant
-        {
+        let task_goal = if oms_command_task::packet::current_goal_eligible(&task, freshness) {
             let (sections, _) =
                 oms_contract_markdown::sections(std::str::from_utf8(&task).unwrap_or(""));
             oms_contract_markdown::task_goal(&sections)
@@ -2131,6 +2130,59 @@ mod tests {
             "{resumed}"
         );
         assert!(!resumed.contains("vectorbridge"), "{resumed}");
+        // A packet without a `- status:` line is active in both resume and state.
+        fs::write(
+            repo.join(".oms/task/current.md"),
+            format!(
+                "# Active Task\n\
+                 - task_id: statusless-packet\n\
+                 - updated: {fresh}\n\
+                 - last_activity: {fresh}\n\
+                 - closed_at:\n\n\
+                 ## Goal\n\nclosedbeacon\n\n\
+                 ## Verify\n\ncurrent verify\n\n\
+                 ## Next Step\n\ncurrent next\n"
+            ),
+        )
+        .unwrap();
+        let statusless_resume = resume(&json!({"cwd": &repo}), &ctx);
+        assert_eq!(statusless_resume.0, 0);
+        let statusless_body = String::from_utf8(statusless_resume.1).unwrap();
+        assert!(
+            statusless_body.contains("- task statusless-packet (active): closedbeacon"),
+            "{statusless_body}"
+        );
+        let statusless_memory = resume_memory();
+        assert!(
+            statusless_memory.contains("closedbeacon archived packet lesson"),
+            "{statusless_memory}"
+        );
+        assert!(
+            !statusless_memory.contains("vectorbridge"),
+            "{statusless_memory}"
+        );
+        let statusless_state = oms_command_state::run_with_source(
+            "state",
+            &["--repo".into(), repo.as_os_str().into(), "--json".into()],
+            &repo,
+            &repo,
+            &cancel,
+        );
+        assert_eq!(statusless_state.0, 0);
+        let state_doc = document(&statusless_state.1).expect("state json");
+        assert_eq!(state_doc["task"]["status"], "active", "{state_doc}");
+        assert_eq!(
+            state_doc["task"]["current_goal_eligible"], true,
+            "{state_doc}"
+        );
+        assert_eq!(
+            state_doc["runtime"]["objective"]["source"], "task",
+            "{state_doc}"
+        );
+        assert_eq!(
+            state_doc["runtime"]["objective"]["text"], "closedbeacon",
+            "{state_doc}"
+        );
         write_packet(
             &repo,
             "closed-packet",
