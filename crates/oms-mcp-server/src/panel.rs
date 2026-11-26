@@ -3390,14 +3390,7 @@ impl Server<'_> {
                     }
                 }
                 Err(crate::ToolError::Text(raw))
-                    if raw
-                        .as_str()
-                        .and_then(|v| crate::value::from_str(v).ok())
-                        .is_some_and(|v| {
-                            v["answer_errors"]
-                                .as_array()
-                                .is_some_and(|errors| !errors.is_empty())
-                        }) =>
+                    if lead_turns::confirmed_oversize_answer(repo, op, &raw) =>
                 {
                     return Err(LIMIT_ERR.into());
                 }

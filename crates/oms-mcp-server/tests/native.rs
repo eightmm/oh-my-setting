@@ -2617,7 +2617,7 @@ fn desktop_assignment() {
         "OMS withheld this conversation during its outbound scan.",
     );
     assert!(!withheld_omitted.to_string().contains(&machine));
-    std::fs::write(&assign_artifact, assign_original).unwrap();
+    std::fs::write(&assign_artifact, &assign_original).unwrap();
 
     // Fallback transcript turns also scan the whole joined body before cutting 6000 chars.
     let role_prefix = "claude: ";
@@ -2655,6 +2655,63 @@ fn desktop_assignment() {
         &source,
         json!({"stdout":chat.to_string(),"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
     );
+
+    // Non-oversize answer artifact failures (missing, incomplete, hard-linked or symlinked
+    // `answer_errors`) fall back to the transcript turns instead of returning LIMIT_ERR.
+    let assert_transcript_fallback = |c: &mut Client| {
+        let fallback = call(
+            c,
+            "oms_panel_chat",
+            json!({"room":"r","participant":format!("ask-{req}")}),
+            json!({"threadId":thread}),
+        );
+        good(&fallback);
+        assert_eq!(
+            fallback["result"]["_meta"]["chat"]["result"]["text"],
+            "claude: callers found"
+        );
+    };
+    let write_private_assign = |bytes: &[u8]| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&assign_artifact, bytes).unwrap();
+        std::fs::set_permissions(&assign_artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+
+    std::fs::remove_file(&assign_artifact).unwrap();
+    assert_transcript_fallback(&mut c);
+
+    write_private_assign(b"## Output\nchanged without exit\n");
+    assert_transcript_fallback(&mut c);
+
+    write_private_assign(&assign_original);
+    let linked_copy = opdir.join("answers/changed-link.md");
+    std::fs::hard_link(&assign_artifact, &linked_copy).unwrap();
+    assert_transcript_fallback(&mut c);
+    std::fs::remove_file(&linked_copy).unwrap();
+
+    std::fs::remove_file(&assign_artifact).unwrap();
+    std::os::unix::fs::symlink(opdir.join("status"), &assign_artifact).unwrap();
+    assert_transcript_fallback(&mut c);
+    std::fs::remove_file(&assign_artifact).unwrap();
+
+    // Confirmed oversize answers still fail closed with LIMIT_ERR rather than falling back.
+    for extra in [64usize, 65 * 1024] {
+        let oversized_assign = "b".repeat(8 * 1024 * 1024 + extra);
+        write_private_assign(format!("## Output\n{oversized_assign}\n## Exit\n0\n").as_bytes());
+        let oversized_chat = call(
+            &mut c,
+            "oms_panel_chat",
+            json!({"room":"r","participant":format!("ask-{req}")}),
+            json!({"threadId":thread}),
+        );
+        bad(
+            &oversized_chat,
+            "OMS desktop detail exceeds the response limit.",
+        );
+        let wire = oversized_chat.to_string();
+        assert!(!wire.contains("callers found") && !wire.contains(&"b".repeat(32)));
+    }
+    write_private_assign(&assign_original);
     bad(
         &call(
             &mut c,

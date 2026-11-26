@@ -106,6 +106,22 @@ fn oversized_lead_answer(repo: &Path, op: &str, artifact: &str) -> bool {
     }
 }
 
+pub(super) fn confirmed_oversize_answer(repo: &Path, op: &str, raw: &crate::value::Text) -> bool {
+    if let Some(err_payload) = raw.as_str().and_then(|s| crate::value::from_str(s).ok())
+        && err_payload["operation"] == op
+        && err_payload["exit"] == 0
+        && err_payload["answer_errors"]
+            .as_array()
+            .is_some_and(|e| !e.is_empty())
+        && let Some([artifact]) = err_payload["artifacts"].as_array().map(Vec::as_slice)
+        && let Some(path) = artifact.as_str()
+    {
+        oversized_lead_answer(repo, op, path)
+    } else {
+        false
+    }
+}
+
 type CachedTurns = BTreeMap<(String, String), (String, Result<&'static str, TurnLookupError>)>;
 
 #[derive(Clone, Default)]
@@ -416,18 +432,7 @@ impl<'a> Conversation<'a> {
                 let proof = match &raw_result {
                     Ok(r) => r.as_str().and_then(|s| crate::value::from_str(s).ok()),
                     Err(crate::ToolError::Text(r)) => {
-                        if let Some(err_payload) =
-                            r.as_str().and_then(|s| crate::value::from_str(s).ok())
-                            && err_payload["operation"] == op
-                            && err_payload["exit"] == 0
-                            && err_payload["answer_errors"]
-                                .as_array()
-                                .is_some_and(|e| !e.is_empty())
-                            && let Some([artifact]) =
-                                err_payload["artifacts"].as_array().map(Vec::as_slice)
-                            && let Some(path) = artifact.as_str()
-                            && oversized_lead_answer(self.repo, &op, path)
-                        {
+                        if confirmed_oversize_answer(self.repo, &op, r) {
                             return Err((
                                 TurnLookupError::InvalidAnswerRange,
                                 INVALID_ANSWER_RANGE.to_owned(),
