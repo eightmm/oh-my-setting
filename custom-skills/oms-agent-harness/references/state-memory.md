@@ -60,9 +60,13 @@ entry point; follow its pointers
 After a compaction the same block is re-read from state and gains one line
 saying so; `oms runtime context-inspect --injections` sums what hooks injected.
 Shared memory is not in that block by default. `OMS_RESUME_MEMORY=1` appends one
-section of at most 1200 bytes: the three newest pins, then up to three notes
-from shared memory ranked for the active task's goal, one line each with its
-event id. It is reference material, not approval or verification evidence. The section is
+section of at most 1200 bytes: up to three newest eligible pins and three notes
+from shared memory ranked for the current objective, one line each with its
+event id. A fresh active task goal takes precedence, then an unfinished Plan,
+then the project goal; closed, stale, dormant and undated packets do not select
+recall. Pins and ranked notes share a reserved budget before rendering, so long
+unrelated context cannot displace the ranked notes. It is reference material,
+not approval or verification evidence. The section is
 omitted when memory is empty, when the memory scan withholds it, or when the
 lookup takes over two seconds. The lookup uses a temporary index, leaving the
 persistent index and recall receipts unchanged.
@@ -83,7 +87,11 @@ finds records, not meaning, so open the hit before relying on it. For maintenanc
 recorded decisions become pending memory proposals once per local day at the
 prompt tick, deduplicated against stored notes (`OMS_JOURNAL_AUTODISTILL=0`
 opts out); run `oms journal distill` for an off-cycle pass — `--dry-run`
-previews the proposals. `oms agent-memory review --accept ID` makes an automatic
+previews the proposals. `oms inbox` exposes the bounded pending review count and
+the read-only review action; an unavailable source stays unknown. The prompt
+state hint appears once per session and again when a new candidate arrives.
+It does not accept proposals, and accepting or retiring an existing candidate
+alone does not repeat the hint. `oms agent-memory review --accept ID` makes an automatic
 note eligible for summaries and provider context; acceptance does not verify it.
 Manual notes and pins remain eligible, while `show`, `search` and `recall` keep
 stored proposals available for review.
@@ -155,8 +163,15 @@ id and repository. Do not join unrelated work through the global CURRENT pointer
   not again through the hook. A hook must run for
   delivery to happen: it cannot interrupt a model thinking or a long tool call.
   Clients without those hooks use the same explicit incremental read.
-- Reuse plan leases, isolated worktrees, change guards, and exact patch landing
-  for overlap; write dispatches refuse overlapping write scopes of calls whose results are undelivered and unread, and omitted scope uses plan paths or the repository. A message cannot grant a worker another path, lease, or permission.
+- Run one-off work with `oms panel --dispatch ROLE --task-id LABEL`. A write
+  dispatch needs a brief and verification command, refuses overlapping write
+  scopes, and defaults to the whole repository (`.`) when `--scope` is omitted.
+  Inspect the recorded result with `oms panel --results --task-id LABEL --json`.
+  Continue a recorded write dispatch with `oms panel --continue LABEL --brief-file F`.
+  For canonical Plan work, choose a ready task and let `oms plan-run --to PROVIDER --id TASK`
+  or the supported panel route claim it. Keep the issued scope, verification,
+  worktree isolation, and patch admission through landing. A message cannot
+  grant a worker another path, lease, or permission.
   Delegated workers retain their existing restrictions; the parent coordinates
   their results. Independent worktrees use explicit `--repo` to read the chosen
   canonical log; separate machines still require an authorized transport.

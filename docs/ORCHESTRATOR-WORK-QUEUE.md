@@ -38,11 +38,15 @@ AH/CP/CC/RF owner를 GitHub Issue·Project와 연결하는 delivery view다. 같
 capability 계약과 읽기 전용 UI부터 진행하며, 이 큐와 기존 lifecycle 우선순위를 대체하지
 않는다. Project 상태는 실행·승인 권한이 아니고 CP-13 원격 mutation은 계약 검토 전 보류한다.
 
-2026-11-26 [Platform API 경계 제안](PLATFORM-API-ARCHITECTURE.md)은 기존 producer를
-재사용하는 typed facade, remote contract와 platform adapter의 상세 설계다. 문서 내
-OMS-01~16은 이 큐와 위 로드맵의 기존 owner에 연결하는 추적 ID이며 별도 필수 큐가 아니다.
-첫 원격 변경 후보는 #437의 scoped cancellation이다. Persistent host·broker·SDK·multi-tenant
-운영은 수요와 앞선 검증에 따른 조건부이며 이 문서 추가는 runtime 구현 완료를 뜻하지 않는다.
+2026-11-26 [Platform API 경계 제안](PLATFORM-API-ARCHITECTURE.md)과
+[전체 파이프라인 구현 인계서](PLATFORM-PIPELINE-IMPLEMENTATION.md)는 기존 producer를
+이슈→현재 Main→Plan→실행→검증·수용→결과 전달로 연결한다. PIPE-00~11과 기존 OMS-01~16은
+이 큐·epic #431·각 기존 Issue에 연결하는 추적 ID이며 독립 실행 큐가 아니다.
+[추적 Issue #619](https://github.com/eightmm/oh-my-setting/issues/619)가 구현 PR·검증·재개 지점을 모은다.
+로컬 완주를 먼저 확인하고, 원격 제어는 #437의 조건 또는 명시적으로 검토한 동등한 pilot
+증거를 따른다. Jira 선택 시 최소 A2A 계약은 첫 adapter에 포함한다. Broker·SDK·지속 event replay·
+multi-tenant 확장은 실제 수요에 따른 조건부이며 기존 #436의 세션 요구를 삭제하지 않는다.
+문서 등록과 runtime 구현·fixture·live 검증의 완료를 구분한다.
 
 ## 1. PR 지도
 

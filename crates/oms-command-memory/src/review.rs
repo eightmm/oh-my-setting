@@ -23,27 +23,29 @@ fn origin(e: &records::Entry) -> &str {
         _ => "distill",
     }
 }
-fn decided(s: &Store) -> Result<HashSet<String>> {
-    Ok(s.rows("reviews.jsonl")?
-        .iter()
+fn decided(rows: &[Value]) -> HashSet<String> {
+    rows.iter()
         .filter(|r| ["accepted", "rejected"].contains(&text(r, "decision").as_str()))
         .map(|r| text(r, "id"))
-        .collect())
+        .collect()
 }
 pub(crate) fn context_filter(s: &Store) -> Result<impl Fn(&records::Entry) -> bool> {
+    Ok(context_filter_rows(&s.rows("reviews.jsonl")?))
+}
+pub(crate) fn context_filter_rows(rows: &[Value]) -> impl Fn(&records::Entry) -> bool + use<> {
     let mut accepted = HashSet::new();
-    for row in s.rows("reviews.jsonl")? {
-        match text(&row, "decision").as_str() {
+    for row in rows {
+        match text(row, "decision").as_str() {
             "accepted" => {
-                accepted.insert(text(&row, "id"));
+                accepted.insert(text(row, "id"));
             }
             "rejected" => {
-                accepted.remove(&text(&row, "id"));
+                accepted.remove(&text(row, "id"));
             }
             _ => {}
         }
     }
-    Ok(move |e: &records::Entry| {
+    move |e: &records::Entry| {
         let correction = e.field("accepted_correction");
         if !correction.is_empty() {
             // The correction note can survive a crash before its decision receipt.
@@ -52,20 +54,97 @@ pub(crate) fn context_filter(s: &Store) -> Result<impl Fn(&records::Entry) -> bo
             // Explicitly authored and legacy manual notes need no review migration.
             !auto(e) || accepted.contains(&e.event_id)
         }
-    })
+    }
 }
 fn pending(s: &Store) -> Result<Vec<Value>> {
-    let decisions = decided(s)?;
-    let mut items: Vec<_> = s.active()?.iter().filter(|e| auto(e) && !decisions.contains(&e.event_id)).map(|e| json!({"id":e.event_id,"origin":origin(e),"recorded":e.occurred_at,"agent":e.agent,"text":preview(&e.body,160)})).collect();
+    let (notes, pins) = s.logs()?;
+    Ok(pending_records(
+        &notes,
+        &pins,
+        &s.rows("reviews.jsonl")?,
+        &s.rows("pending.jsonl")?,
+    ))
+}
+fn pending_records(
+    notes: &[records::Entry],
+    pins: &[records::Entry],
+    reviews: &[Value],
+    corrections: &[Value],
+) -> Vec<Value> {
+    let decisions = decided(reviews);
+    let states = records::states(notes, pins);
+    let mut items: Vec<_> = notes.iter().filter(|e| e.kind != "retirement" && !states.contains_key(&e.event_id) && auto(e) && !decisions.contains(&e.event_id)).map(|e| json!({"id":e.event_id,"origin":origin(e),"recorded":e.occurred_at,"agent":e.agent,"text":preview(&e.body,160)})).collect();
     let mut seen = HashSet::new();
-    for row in s.rows("pending.jsonl")? {
-        let id = text(&row, "id");
+    for row in corrections {
+        let id = text(row, "id");
         if decisions.contains(&id) || !row["text"].is_string() || !seen.insert(id.clone()) {
             continue;
         }
-        items.push(json!({"id":id,"origin":"correction","recorded":text(&row,"ts"),"agent":"","text":preview(&text(&row,"text"),160),"_full":row["text"]}));
+        items.push(json!({"id":id,"origin":"correction","recorded":text(row,"ts"),"agent":"","text":preview(&text(row,"text"),160),"_full":row["text"]}));
     }
-    Ok(items)
+    items
+}
+
+pub(crate) const VIEW_SOURCE_MAX: usize = 4 * 1024 * 1024;
+const VIEW_PENDING_MAX: usize = 4096;
+
+/// A read-only attention projection. Fingerprints identify candidates without
+/// copying their text into state or hook receipts; they grant no review authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReviewSummary {
+    pub pending: usize,
+    pub candidate_fingerprints: Vec<String>,
+}
+
+pub(crate) fn bounded_rows(s: &Store, name: &str) -> Result<Vec<Value>> {
+    let bytes = store::read_bounded(&s.shared.parent().unwrap().join(name), VIEW_SOURCE_MAX)?;
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .map(|line| {
+            let row = parse_json(line)
+                .ok_or_else(|| Error(2, "memory review receipt is invalid".into()))?;
+            if row["schema"] != 1 || !row["id"].as_str().is_some_and(review_id) {
+                return err("memory review receipt is invalid");
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+/// Read the existing review queue with bounded, no-follow source reads. An
+/// unreadable, oversized or malformed source is unavailable, never an empty queue.
+pub fn pending_review(
+    repo: &Path,
+    flag: &AtomicBool,
+) -> std::result::Result<PendingReviewSummary, String> {
+    (|| -> Result<PendingReviewSummary> {
+        crate::check(flag)?;
+        let s = Store::new(std::fs::canonicalize(repo)?, None, false);
+        let notes = records::parse(&store::read_bounded(&s.shared, VIEW_SOURCE_MAX)?, "shared");
+        let pins = records::parse(&store::read_bounded(&s.pins, VIEW_SOURCE_MAX)?, "pins");
+        let items = pending_records(
+            &notes,
+            &pins,
+            &bounded_rows(&s, "reviews.jsonl")?,
+            &bounded_rows(&s, "pending.jsonl")?,
+        );
+        crate::check(flag)?;
+        if items.len() > VIEW_PENDING_MAX {
+            return err("memory review queue exceeds the attention-view limit");
+        }
+        let mut candidate_fingerprints: Vec<_> = items
+            .iter()
+            .map(|r| hash(text(r, "id").as_bytes()))
+            .collect();
+        candidate_fingerprints.sort();
+        candidate_fingerprints.dedup();
+        Ok(PendingReviewSummary {
+            pending: items.len(),
+            candidate_fingerprints,
+        })
+    })()
+    .map_err(|Error(_, message)| message)
 }
 pub(crate) fn review(s: &Store, o: &Options, author: &str, flag: &AtomicBool) -> Result<Output> {
     if ["--from", "--select"]
@@ -597,7 +676,7 @@ pub(crate) fn capture(s: &Store, stdin: Option<&[u8]>, flag: &AtomicBool) -> Res
     let result = (|| -> Result<()> {
         let _g = store::lock(&path, flag)?;
         let rows = s.rows("pending.jsonl")?;
-        let decisions = decided(s)?;
+        let decisions = decided(&s.rows("reviews.jsonl")?);
         let ids: HashSet<_> = rows.iter().map(|r| text(r, "id")).collect();
         if ids.contains(&id) || decisions.contains(&id) || ids.difference(&decisions).count() >= 200
         {

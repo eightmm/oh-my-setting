@@ -1861,6 +1861,7 @@ fn claude_app_notify_other_notify_values_do_not_disable_delivery() {
 
 #[test]
 fn skill_router_debounces_session_state_rewrites_within_a_minute() {
+    use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
     let name = "skill_router_debounces_session_state_rewrites_within_a_minute";
     if !clean_env_child(name, &[("OMS_SESSION_BUDGET_TURNS", "10")]) {
@@ -1869,29 +1870,35 @@ fn skill_router_debounces_session_state_rewrites_within_a_minute() {
     let tmp = TempDir::new("debounce");
     let repo = git_repo(&tmp);
     fs::create_dir_all(repo.join(".oms")).unwrap();
+    strip_group_world_write(tmp.path());
+    let (code, _, err) = oms_command_memory::append_project_note(
+        &repo,
+        "agent",
+        "task_close",
+        "Pending memory proposal for the session debounce fixture",
+        &AtomicBool::new(false),
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
     let payload = |id: &str| {
         serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":id,"prompt":"inspect src/lib.rs"})
             .to_string()
     };
     let sessions = repo.join(".oms/hooks/sessions");
-    let only = |dir: &Path| -> PathBuf {
-        let mut files: Vec<_> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            .collect();
-        assert_eq!(files.len(), 1, "{files:?}");
-        files.remove(0)
-    };
+    let digest = format!("{:x}", Sha256::digest(b"s1"));
+    let session = &digest[..32];
+    // Budget and memory attention receipts have separate owners in this directory.
+    let file = sessions.join(format!("{session}.json"));
+    let memory_file = sessions.join(format!("{session}.memory-review.json"));
     assert_eq!(
         hook(&tmp, "skill-router", &[], payload("s1").as_bytes()).0,
         0
     );
-    let file = only(&sessions);
     let first = fs::read(&file).unwrap();
     // `updated_at` has one-second granularity, so age the stamp to prove the
     // debounce rather than an identical-bytes no-op.
     let mut row: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(row["schema"], 1);
+    assert_eq!(row["session"], session);
     let recent = chrono::DateTime::<chrono::Utc>::from(
         std::time::SystemTime::now() - std::time::Duration::from_secs(30),
     );
@@ -1899,6 +1906,13 @@ fn skill_router_debounces_session_state_rewrites_within_a_minute() {
     let seeded = format!("{row}\n");
     fs::write(&file, &seeded).unwrap();
     let ino = fs::metadata(&file).unwrap().ino();
+    let mut memory: serde_json::Value =
+        serde_json::from_slice(&fs::read(&memory_file).unwrap()).unwrap();
+    assert_eq!(memory["candidates"].as_array().unwrap().len(), 1);
+    memory["updated_at"] = row["updated_at"].clone();
+    let memory_seeded = format!("{memory}\n");
+    fs::write(&memory_file, &memory_seeded).unwrap();
+    let memory_ino = fs::metadata(&memory_file).unwrap().ino();
     assert_eq!(
         hook(&tmp, "skill-router", &[], payload("s1").as_bytes()).0,
         0
@@ -1909,6 +1923,12 @@ fn skill_router_debounces_session_state_rewrites_within_a_minute() {
         "30s-old stamp kept"
     );
     assert_eq!(fs::metadata(&file).unwrap().ino(), ino, "no rewrite");
+    assert_eq!(fs::read_to_string(&memory_file).unwrap(), memory_seeded);
+    assert_eq!(
+        fs::metadata(&memory_file).unwrap().ino(),
+        memory_ino,
+        "an unchanged memory candidate set does not rewrite its receipt"
+    );
 
     // A stale stamp refreshes updated_at and keeps the budget fields.
     let mut row: serde_json::Value = serde_json::from_slice(&first).unwrap();

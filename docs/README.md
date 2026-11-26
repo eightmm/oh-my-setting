@@ -36,6 +36,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
 | [Control surface and plugins roadmap](CONTROL-SURFACE-ROADMAP.md) | One-repository delivery plan for shared UI, provider session adapters, host plugins and GitHub Project tracking over existing owners |
 | [Platform API architecture](PLATFORM-API-ARCHITECTURE.md) | Design only: typed facade over existing producers, remote API and platform adapter boundaries, staged acceptance and conditional infrastructure |
+| [Issue-to-result pipeline implementation](PLATFORM-PIPELINE-IMPLEMENTATION.md) | Agent handoff: existing PR reuse, PIPE-00–11 dependencies, native owners, acceptance/fault tests, local and Jira pilot gates |
 | [MCP host compatibility](MCP-HOST-COMPATIBILITY.md) | Official Codex/ChatGPT, Claude and Antigravity UI paths, host-specific limits and separate document/fixture/live evidence |
 | [Multi-agent and multi-host plan](MULTI-AGENT-MULTI-HOST-PLAN.md) | Proposed behavior, staged delivery and acceptance for parallel agents, Git integration and remote clusters and opt-in Stages A–F runtime implementation |
 | [Context inspection](CONTEXT-INSPECTION.md) | Saved context manifest inspection and digest verification |

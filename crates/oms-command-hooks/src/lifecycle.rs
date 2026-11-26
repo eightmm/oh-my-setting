@@ -614,23 +614,52 @@ pub(crate) fn journal(repo: &Path, prompt: bool, ctx: &Context<'_>) -> Vec<u8> {
             output.push('\n');
         }
         if distill && store.distill_due_today(now)? {
-            let append = |repo: &Path, agent: &str, body: &str| {
-                let result = oms_command_memory::append_project_note(
-                    repo,
-                    agent,
-                    "journal",
-                    body,
-                    ctx.interrupted,
-                );
-                Ok(if result.0 == 0 {
-                    oms_command_journal::MemoryAppendOutcome::Appended
-                } else {
-                    oms_command_journal::MemoryAppendOutcome::Refused(
-                        "native memory producer refused".into(),
-                    )
-                })
-            };
-            let _ = store.distill(false, Some(&append), now);
+            let append =
+                |repo: &Path, batch: &str, proposals: &[oms_command_journal::MemoryProposal]| {
+                    let notes: Vec<_> = proposals
+                        .iter()
+                        .map(|p| oms_command_memory::JournalProposal {
+                            key: &p.key,
+                            source_sha256: &p.source_sha256,
+                            body: &p.lesson,
+                            source_current: p.source_current,
+                        })
+                        .collect();
+                    let result = oms_command_memory::append_journal_batch(
+                        repo,
+                        batch,
+                        &notes,
+                        ctx.interrupted,
+                    )?;
+                    Ok(oms_command_journal::MemoryBatchReport {
+                        outcomes: proposals
+                            .iter()
+                            .zip(result.outcomes)
+                            .map(|(p, result)| {
+                                let outcome = match result {
+                                    oms_command_memory::JournalPublication::Appended(_) => {
+                                        oms_command_journal::MemoryBatchOutcome::Appended
+                                    }
+                                    oms_command_memory::JournalPublication::AlreadyPresent(_) => {
+                                        oms_command_journal::MemoryBatchOutcome::AlreadyPresent
+                                    }
+                                    oms_command_memory::JournalPublication::Refused(reason) => {
+                                        oms_command_journal::MemoryBatchOutcome::Refused(reason)
+                                    }
+                                };
+                                (p.key.clone(), outcome)
+                            })
+                            .collect(),
+                        warnings: String::from_utf8_lossy(&result.warnings)
+                            .lines()
+                            .map(|line| line.strip_prefix("warning: ").unwrap_or(line).to_owned())
+                            .collect(),
+                    })
+                };
+            match store.distill_batch(false, Some(&append), now) {
+                Ok(report) => output.push_str(&report.prompt_summary()),
+                Err(_) => output.push_str("[work-journal] distill unavailable; inspect `oms journal status` before retrying.\n"),
+            }
         }
         store.write_prompt_stamp(&signature, distill, now)?;
         Ok(output)
@@ -1050,6 +1079,8 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         return empty();
     };
     let mut lines = Vec::new();
+    let mut current_plan_goal = String::new();
+    let mut plan_unfinished = false;
     let plan_path = repo.join(".oms/plan/tasks.json");
     if plan_path.is_file() {
         let plan = load(&plan_path);
@@ -1059,6 +1090,11 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
             if let Ok(plan_state) = oms_command_state::plan_status(&repo, ctx.interrupted)
                 && plan_state.object().is_ok()
             {
+                current_plan_goal = oms_contract_markdown::bounded_line(plan_goal, 1000);
+                plan_unfinished = matches!(
+                    plan_state.get("has_unfinished"),
+                    oms_command_state::Value::Bool(true)
+                );
                 if !matches!(
                     plan_state.get("all_closed"),
                     oms_command_state::Value::Bool(true)
@@ -1145,9 +1181,9 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
             .to_owned()
     };
     let goal = section("Goal");
+    let now = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time());
+    let freshness = oms_command_task::packet::freshness_from_env(&task, now);
     if !task_id.is_empty() && status != "closed" {
-        let now = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time());
-        let freshness = oms_command_task::packet::freshness_from_env(&task, now);
         let days = freshness.idle_days().unwrap_or(0);
         let goal_text = if goal.is_empty() {
             "no goal recorded"
@@ -1297,8 +1333,29 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         lines.push("- after compaction: the lines above were re-read from .oms state, not from the summary; OMS skills are invoked by name (/oms-<skill>), and oms state shows the rest".into());
     }
     if env("OMS_RESUME_MEMORY") == "1" {
-        let result =
-            oms_command_memory::provider_context(&repo, &clip(&flat(&goal), 300), ctx.interrupted);
+        let task_goal = if !task_id.is_empty()
+            && status == "active"
+            && freshness.idle_seconds.is_some()
+            && !freshness.stale
+            && !freshness.dormant
+        {
+            let (sections, _) =
+                oms_contract_markdown::sections(std::str::from_utf8(&task).unwrap_or(""));
+            oms_contract_markdown::task_goal(&sections)
+        } else {
+            String::new()
+        };
+        let project = read(&repo.join("PROJECT.md"), 1024 * 1024).unwrap_or_default();
+        let (sections, _) =
+            oms_contract_markdown::sections(std::str::from_utf8(&project).unwrap_or(""));
+        let project_goal = oms_contract_markdown::project_goal(&sections);
+        let (objective, _) = oms_work_inspect::current_objective(
+            &task_goal,
+            &current_plan_goal,
+            plan_unfinished,
+            &project_goal,
+        );
+        let result = oms_command_memory::resume_context(&repo, objective, ctx.interrupted);
         if result.0 == 0 && !result.1.is_empty() {
             lines.push(format!(
                 "- memory (reference only; not approval or verification evidence):\n{}",
@@ -1891,6 +1948,278 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         true
+    }
+
+    fn run_isolated_memory_test(test_name: &str) -> bool {
+        if std::env::var_os("OMS_HOOK_MEMORY_ISOLATED").is_some() {
+            return false;
+        }
+        let tmp = TempDir::new("memory-env");
+        let mut cmd = std::process::Command::new(std::env::current_exe().expect("exe"));
+        cmd.args(["--exact", test_name, "--nocapture"]);
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(|k| k.starts_with("OMS_")) {
+                cmd.env_remove(key);
+            }
+        }
+        let result = cmd
+            .env("OMS_HOOK_MEMORY_ISOLATED", "1")
+            .env("OMS_RESUME_MEMORY", "1")
+            .env(
+                "OH_MY_SETTING_GLOBAL_MEMORY",
+                tmp.0.join("global/shared.md"),
+            )
+            .env("OMS_LOCK_DIR", tmp.0.join("locks"))
+            .output()
+            .expect("spawn memory fixture");
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        true
+    }
+
+    #[test]
+    fn resume_memory_uses_current_objective_and_reserves_recall_budget() {
+        if run_isolated_memory_test(
+            "lifecycle::tests::resume_memory_uses_current_objective_and_reserves_recall_budget",
+        ) {
+            return;
+        }
+        let tmp = TempDir::new("resume-memory");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancel = AtomicBool::new(false);
+        let memory = |args: &[&str]| {
+            let args: Vec<_> = args.iter().map(OsString::from).collect();
+            let (code, out, err) =
+                oms_command_memory::run_with_source(&args, &repo, &repo, &cancel);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            String::from_utf8(out).unwrap()
+        };
+        memory(&[
+            "append",
+            "--text",
+            "vectorbridge preserve the calibrated recall lesson",
+        ]);
+        memory(&["append", "--text", "closedbeacon archived packet lesson"]);
+        memory(&["append", "--text", "projectsignal declared project lesson"]);
+        memory(&[
+            "append",
+            "--text",
+            &"unrelated recent observation ".repeat(140),
+        ]);
+        memory(&["pin", "--text", "Explicit project pin stays eligible"]);
+        let global =
+            std::path::PathBuf::from(std::env::var_os("OH_MY_SETTING_GLOBAL_MEMORY").unwrap());
+        fs::create_dir_all(global.parent().unwrap()).unwrap();
+        fs::write(
+            &global,
+            format!(
+                "## 2026-01-01T00:00:00Z agent\n\n{}\n",
+                "Unrelated global history ".repeat(180)
+            ),
+        )
+        .unwrap();
+        let global_pins: String = (0..12)
+            .map(|n| {
+                format!(
+                    "- 2026-01-01T00:00:00Z [agent] Older global pin {n}: {}\n",
+                    "keep unrelated preference ".repeat(12)
+                )
+            })
+            .collect();
+        fs::write(global.parent().unwrap().join("pins.md"), global_pins).unwrap();
+        let old_view = oms_command_memory::provider_context(&repo, "vectorbridge", &cancel);
+        assert_eq!(old_view.0, 0);
+        assert!(old_view.1.len() > 1200);
+        assert!(!String::from_utf8_lossy(&old_view.1[..1200]).contains("vectorbridge"));
+        let database = repo.join(".oms/memory/memory.sqlite3");
+        let summary = repo.join(".oms/memory/summary.md");
+        let before = [fs::read(&database).unwrap(), fs::read(&summary).unwrap()];
+        let fresh = rfc3339_secs_ago(30);
+        write_plan(&repo, "vectorbridge", &["resume-target"], &fresh);
+        let host = MockHost::default();
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let resume_memory = || {
+            let output = resume(&json!({"cwd":repo}), &ctx);
+            assert_eq!(output.0, 0);
+            let body = String::from_utf8(output.1).unwrap();
+            assert!(body.len() <= 4096, "{body}");
+            body.split("- memory (reference only; not approval or verification evidence):\n")
+                .nth(1)
+                .unwrap_or("")
+                .split("- more:")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        for (status, activity) in [
+            ("", ""),
+            ("closed", fresh.as_str()),
+            ("active", ""),
+            ("active", &rfc3339_secs_ago(6 * 86400)),
+            ("active", &rfc3339_secs_ago(8 * 86400)),
+        ] {
+            if !status.is_empty() {
+                write_packet(
+                    &repo,
+                    "old-packet",
+                    status,
+                    activity,
+                    "closedbeacon",
+                    "old next",
+                    "old verify",
+                );
+            }
+            let resumed = resume_memory();
+            assert!(
+                resumed.contains("vectorbridge preserve the calibrated recall lesson"),
+                "{status}: {resumed}"
+            );
+            assert!(
+                resumed.contains("Explicit project pin stays eligible"),
+                "{resumed}"
+            );
+            assert!(!resumed.contains("closedbeacon"), "{status}: {resumed}");
+            assert!(
+                !resumed.contains("unrelated recent observation"),
+                "{resumed}"
+            );
+            assert!(resumed.len() <= 1201, "{resumed}");
+        }
+        write_packet(
+            &repo,
+            "fresh-packet",
+            "active",
+            &fresh,
+            "closedbeacon",
+            "current next",
+            "current verify",
+        );
+        let resumed = resume_memory();
+        assert!(
+            resumed.contains("closedbeacon archived packet lesson"),
+            "{resumed}"
+        );
+        assert!(!resumed.contains("vectorbridge"), "{resumed}");
+        write_packet(
+            &repo,
+            "closed-packet",
+            "closed",
+            &fresh,
+            "closedbeacon",
+            "old next",
+            "old verify",
+        );
+        write_plan(&repo, "vectorbridge", &[], &fresh);
+        fs::write(
+            repo.join("PROJECT.md"),
+            "# Project\n\n## Goal\n\nprojectsignal\n",
+        )
+        .unwrap();
+        let resumed = resume_memory();
+        assert!(
+            resumed.contains("projectsignal declared project lesson"),
+            "{resumed}"
+        );
+        fs::remove_file(repo.join("PROJECT.md")).unwrap();
+        let resumed = resume_memory();
+        assert!(
+            resumed.contains("Explicit project pin stays eligible"),
+            "{resumed}"
+        );
+        assert!(!resumed.contains("- recall"), "{resumed}");
+        assert_eq!(
+            before,
+            [fs::read(&database).unwrap(), fs::read(&summary).unwrap()]
+        );
+    }
+
+    #[test]
+    fn prompt_journal_uses_native_batch_publication_and_safe_report() {
+        if run_isolated_memory_test(
+            "lifecycle::tests::prompt_journal_uses_native_batch_publication_and_safe_report",
+        ) {
+            return;
+        }
+        let tmp = TempDir::new("journal-memory");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let now = chrono::DateTime::<chrono::Utc>::from(snapshot.time());
+        let store =
+            oms_command_journal::store::JournalStore::open_for_write(&repo, Some("UTC")).unwrap();
+        for n in 0..2 {
+            let event = serde_json::to_vec(&json!({"event_type":"run","verification_status":"not_verified","occurred_at":snapshot.now(),"source":{"type":"manual","id":format!("hook-lesson-{n}")},"decision":format!("Preserve native hook lesson {n}")})).unwrap();
+            store
+                .record_event(&oms_json::parse_python_ordered(&event).unwrap(), now)
+                .unwrap();
+        }
+        // One failed derived summary refresh proves that the prompt publishes
+        // both candidates as one batch and surfaces one refresh warning.
+        fs::create_dir_all(repo.join(".oms/memory/summary.md")).unwrap();
+        let first = String::from_utf8(journal(&repo, true, &ctx)).unwrap();
+        assert!(first.contains("2 queued for memory review"), "{first}");
+        assert!(first.contains("1 warning(s)"), "{first}");
+        assert!(!first.contains("unsafe or unreadable source"), "{first}");
+        let shared = repo.join(".oms/memory/shared.md");
+        let before = fs::read_to_string(&shared).unwrap();
+        assert_eq!(before.matches("kind: distill").count(), 2);
+        assert_eq!(before.matches("journal_candidate:").count(), 2);
+        assert_eq!(before.matches("journal_source_sha256:").count(), 2);
+        let batches: std::collections::BTreeSet<_> = before
+            .lines()
+            .filter_map(|line| line.strip_prefix("journal_batch: "))
+            .collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            oms_command_memory::pending_review(&repo, &cancel)
+                .unwrap()
+                .pending,
+            2
+        );
+        assert!(journal(&repo, true, &ctx).is_empty());
+        assert_eq!(fs::read_to_string(&shared).unwrap(), before);
+        let recall = oms_command_memory::resume_context(&repo, "native hook", &cancel);
+        assert_eq!(recall.0, 0);
+        assert!(recall.1.is_empty());
     }
 
     #[test]

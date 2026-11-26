@@ -675,6 +675,92 @@ fn inbox_codes(repo: &Path) -> Vec<String> {
         .map(|i| i.text("code").to_owned())
         .collect()
 }
+
+#[test]
+fn inbox_projects_pending_memory_review_without_accepting_or_copying_notes() {
+    let repo = TempRepo::new();
+    seed(repo.path());
+    let flag = AtomicBool::new(false);
+    let (code, id, error) = oms_command_memory::append_project_note(
+        repo.path(),
+        "agent",
+        "task_close",
+        "private-review-fixture body stays in its owner",
+        &flag,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    let id = String::from_utf8(id).unwrap().trim().to_owned();
+    let shared = repo.path().join(".oms/memory/shared.md");
+    let before = fs::read(&shared).unwrap();
+    let snapshot = view_json("state", repo.path());
+    assert!(snapshot.get("memory_review").get("healthy").truth());
+    assert!(snapshot.get("memory_review").get("pending").is_int(1));
+    assert!(!serde_like(&snapshot).contains("private-review-fixture"));
+    let inbox = view_json("inbox", repo.path());
+    let item = inbox
+        .get("items")
+        .array()
+        .unwrap()
+        .iter()
+        .find(|r| r.text("code") == "pending-memory-review")
+        .unwrap();
+    assert!(item.get("count").is_int(1));
+    assert!(item.text("command").starts_with("oms agent-memory --repo "));
+    assert!(item.text("command").ends_with(" review"));
+    assert!(!item.text("command").contains("--accept"));
+    let (_, _, _) = view("inbox", repo.path(), &["--fix-safe", "--json"]);
+    assert_eq!(fs::read(&shared).unwrap(), before);
+    assert!(!repo.path().join(".oms/memory/reviews.jsonl").exists());
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "pending-memory-review")
+    );
+    let (code, _, error) = oms_command_memory::run_with_source(
+        &args(&["review", "--accept", &id]),
+        repo.path(),
+        repo.path(),
+        &flag,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    assert_eq!(fs::read(&shared).unwrap(), before);
+    assert!(
+        !inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "pending-memory-review")
+    );
+
+    fs::write(
+        repo.path().join(".oms/memory/reviews.jsonl"),
+        b"{malformed receipt}\n",
+    )
+    .unwrap();
+    let snapshot = view_json("state", repo.path());
+    assert!(!snapshot.get("memory_review").get("healthy").truth());
+    assert_eq!(
+        snapshot.get("memory_review").get("pending"),
+        &json::Value::Null
+    );
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "memory-review-unavailable")
+    );
+    fs::remove_file(repo.path().join(".oms/memory/reviews.jsonl")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&shared)
+        .unwrap()
+        .set_len(4 * 1024 * 1024 + 1)
+        .unwrap();
+    assert!(oms_command_memory::pending_review(repo.path(), &flag).is_err());
+    fs::remove_file(&shared).unwrap();
+    let target = repo.path().join("untrusted-memory.md");
+    fs::write(&target, &before).unwrap();
+    std::os::unix::fs::symlink(&target, &shared).unwrap();
+    assert!(oms_command_memory::pending_review(repo.path(), &flag).is_err());
+}
+
 fn put(repo: &Path, rel: &str, body: &str, mode: u32) {
     let path = repo.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

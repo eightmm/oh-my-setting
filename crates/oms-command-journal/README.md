@@ -30,7 +30,9 @@ The CLI (`run`), `MemoryAppendFn`, canonical v1 schema, and cold manifest layout
 retain their compatibility entry points. The native root uses the additive
 `run_with_batch_services` adapter: `distill.json` fixes a bounded prepared batch,
 then the memory writer publishes candidate keys with the source records before
-the journal completes its receipt. Legacy callbacks keep content-based retry
+the journal completes its receipt. Prompt hooks use the same keyed batch writer
+and one summary/index refresh, with the shared count-only distill report.
+Legacy callbacks keep content-based retry
 reconciliation. Source/payload collisions and changed sources cannot authorize
 new appends; automatic notes still wait for memory review. Existing locks,
 append/recovery, atomic replacement, cold pending
