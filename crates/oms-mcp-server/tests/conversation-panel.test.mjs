@@ -142,7 +142,10 @@ async function panel(projects, dashboard = {}, options = {}) {
     Object.assign(document, {hidden:false, addEventListener:(...args) => events.addEventListener(...args),
       show(visible) { document.hidden = !visible; events.dispatchEvent(new Event('visibilitychange')); }});
   }
-  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:(_k,v)=>/^#[0-9a-f]{6}$/i.test(v)}, setTimeout, clearTimeout, crypto:{randomUUID},
+  const cssSupports=(k,v)=>typeof v==='string' && (k==='color'?/^#[0-9a-f]{6}$/i.test(v):
+    k==='border-radius'?v.trim().split(/\s+/).every((p,i)=>i<4 && /^(?:0|(?:\d+|\d*\.\d+)(?:px|r?em|%))$/i.test(p)):
+    k==='font-family' && v.split(',').every(f=>/^(?:"[^"]+"|'[^']+'|[a-z_-][a-z0-9_-]*(?:\s+[a-z_-][a-z0-9_-]*)*)$/i.test(f.trim())));
+  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:cssSupports}, setTimeout, clearTimeout, crypto:{randomUUID},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -499,7 +502,21 @@ test('host appearance follows initialization and partial updates without reloadi
   change({theme:'light'});assert.equal(root.getAttribute('data-theme'),'light');assert.equal(color(ink),'#ffffff');
   change({styles:{variables:{[primary]:'url(https://invalid.example)',[ink]:'#222222'}}});
   assert.equal(color(primary),'');assert.equal(color(ink),'#222222');
-  change({theme:null,styles:null});assert.equal(root.getAttribute('data-theme'),null);assert.equal(color(ink),'');
+  const tokens={'--border-radius-lg':'12px','--font-mono':'"Host Mono", monospace','--color-background-inverse':'#0d0d0d','--color-text-inverse':'#fafafa'};
+  const unsafe={'--font-display':'Serif','--border-radius-md':'url(x)','--border-radius-sm':'1px;color:red','--font-sans':'x'.repeat(201),'--font-mono':5};
+  change({styles:{variables:{...tokens,...unsafe,'--font-mono':'expression(alert(1))'}}});
+  for(const k of Object.keys(unsafe))assert.equal(color(k),'',k);
+  change({styles:{variables:{...tokens,...unsafe,'--font-mono':tokens['--font-mono']}}});
+  for(const [k,v] of Object.entries(tokens))assert.equal(color(k),v);
+  for(const prior of [false,true]){
+    if(prior){change({styles:{variables:{...tokens,'--font-sans':'system-ui, sans-serif','--border-radius-md':'8px'}}});
+      assert.equal(color('--font-sans'),'system-ui, sans-serif');assert.equal(color('--border-radius-md'),'8px');}
+    change({styles:{variables:{...tokens,'--font-sans':'   ','--border-radius-md':'none'}}});
+    assert.equal(color('--font-sans'),'');assert.equal(color('--border-radius-md'),'');
+    for(const [k,v] of Object.entries(tokens))assert.equal(color(k),v);
+  }
+  change({styles:{variables:{...tokens,'--font-mono':5}}});assert.equal(color('--font-mono'),'');
+  change({theme:null,styles:null});assert.equal(root.getAttribute('data-theme'),null);assert.equal(color(ink),'');assert.equal(color('--border-radius-lg'),'');
   assert.equal(p.calls.length,calls);assert.equal(brief.value,'Keep keyboard focus');assert.equal(p.document.activeElement,brief);
   const malformed=await panel(['one'],dashboard,{hostContext:'unrecognized'});
   assert.equal(malformed.document.documentElement.getAttribute('data-theme'),null);
@@ -1128,11 +1145,20 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'attention');
   assert.equal(badge(claude.children[2]).textContent,'! Blocked');
   assert.equal(agy.children[1].children.find(e=>e.className==='state').getAttribute('data-tone'),'muted');
+  const presence=slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.className==='avatar').getAttribute('data-presence');
+  assert.deepEqual([codex,claude,agy].map(presence),['working','attention','idle']);
+  assert.equal(p.get('avatar').getAttribute('data-presence'),'working');
   assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
   assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
   d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
+  d.planProgress={total:5,verified:2};await p.event('refresh','click');
+  const segments=p.get('progress-track').children.filter(e=>e.className?.startsWith('seg'));
+  assert.equal(segments.length,5);assert.equal(p.get('progress-track').getAttribute('data-segments'),'true');
+  assert.deepEqual(['seg done','seg current'].map(c=>segments.filter(e=>e.className===c).length),[2,1]);
   d.planProgress={total:0,verified:0};await p.event('refresh','click');
   assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
+  d.conversationMain=undefined;await p.event('refresh','click');
+  assert.equal(p.get('avatar').textContent,'–');assert.equal(p.get('avatar').getAttribute('data-presence'),null);
 });
 test('the observed time localizes beside the goal while a clean status stays empty',async()=>{
   const stamp='2026-06-01T03:04:00Z', local=new Date(stamp);
@@ -1345,6 +1371,37 @@ test('individual Lead connection sends only the selected provider and never save
   assert.equal(p.get('lead-auto').checked,false);assert.equal(memory.size,0);
 });
 
+test('worker result drafts keep the selected task and omit unknown attribution instead of using another attention item',async()=>{
+  const key='b'.repeat(64),tasks=['task-a','task-b',null],d={...dashboard,
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
+    conversationAttempts:[...dashboard.conversationAttempts,...tasks.map((task,i)=>({room:null,id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done',task}))]};
+  const p=await panel(['one'],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,...pair}=a,data={...pair,status:'complete'};
+      return {structuredContent:data,_meta:{workerOutput:{...data,text:'Private selected output',source:'indexed-answer',truncated:false}}};
+    }
+  }});
+  const group=p.get('leads').children[1].children[2],list=group.children.find(e=>e.tagName==='ul'),items=list.children.filter(e=>e.tagName==='li');
+  assert.match(p.get('attention-summary').textContent,/Review task A/);
+  for(const i of [1,0,2]){
+    const open=items[i].children.find(e=>e.className?.includes('worker-output-link'));
+    open.dispatchEvent(new Event('click'));await setImmediate();
+    assert.equal(p.get('output-body').textContent,'Private selected output');
+    const mark=p.calls.length;await p.event('output-followup','click');
+    const draft=p.get('followup-text').value;
+    assert.equal(p.get('worker-output').open,false);assert.equal(p.get('followup-panel').hidden,false);
+    if(tasks[i])assert.match(draft,new RegExp('^Task: '+tasks[i]+'$','m'));else assert.doesNotMatch(draft,/^Task:/m);
+    if(i!==0)assert.doesNotMatch(draft,/task-a|Review task A/);
+    assert.doesNotMatch(draft,/Private selected output/);
+    await p.event('followup-add','click');
+    const context=p.host.contexts.at(-1).structuredContent;
+    assert.equal(context.source.workerAttempt,'worker-'+i);assert.equal(context.source.leadAttempt,'l');
+    assert.equal(context.task,tasks[i]||undefined);assert.equal(Object.hasOwn(context,'task'),Boolean(tasks[i]));
+    assert.equal(p.calls.length,mark);assert.equal(p.host.messages.length,0);
+  }
+});
+
 test('only an independently confirmed physical binding retains a public stale snapshot and every write is fenced',async()=>{
   let failing=false,key='b'.repeat(64);
   const d={...dashboard,goal:'Last confirmed goal',updated:'2026-06-01T03:04:00Z'};
@@ -1370,7 +1427,12 @@ test('only an independently confirmed physical binding retains a public stale sn
 
 test('recorded Lead answer pages are lazy, digest-bound and prepare only an exact scoped draft',async()=>{
   const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false;
-  const p=await panel(['one','two'],{...dashboard,goal:'한'.repeat(2000)},{locale:'en',context:true,navigator:{clipboard:{writeText:async text=>copied.push(text)}},tools:{
+  const d={...dashboard,goal:'한'.repeat(2000),
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
+    conversationAttempts:[...dashboard.conversationAttempts,{room:main.room,id:'other-operation',participant:'lead-reader',provider:'claude',task:'task-a'}]
+  };
+  const p=await panel(['one','two'],d,{locale:'en',context:true,navigator:{clipboard:{writeText:async text=>copied.push(text)}},tools:{
+    oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:'b'.repeat(64),two:'c'.repeat(64)}}),
     [managedRead]:a=>{
       const v=leadStatus(a,'ready');
       if(a.provider){
@@ -1402,6 +1464,14 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-followup-draft').length,0);
   await p.event('followup-add','click');assert.equal(p.host.contexts.at(-1).structuredContent.source.turnId,id);
   assert.equal(p.host.contexts.at(-1).structuredContent.source.digest,digest);assert.equal(p.host.messages.length,0);
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'task'),false);
+  assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
+  d.conversationAttempts.push({room:main.room,id:'recorded-operation',participant:'lead-reader',provider:'claude',task:'task-b'});
+  await p.event('refresh','click');open.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('answer-followup','click');await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-b');
+  assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   open.dispatchEvent(new Event('click'));await setImmediate();const fresh=p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button');
   p.host.delayTool=managedRead;fresh.dispatchEvent(new Event('click'));await setImmediate();
   await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
@@ -1409,7 +1479,9 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
 });
 
 test('Room result truncation links a bounded evidence read and keeps the reader position for new messages',async()=>{
-  let version=1,wrongAttempt=false,wrongKey=false;const digest='e'.repeat(64),key='b'.repeat(64),p=await panel(['one'],dashboard,{locale:'en',tools:{
+  const d={...dashboard,planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
+    conversationAttempts:dashboard.conversationAttempts.map(r=>r.id==='l'?{...r,task:'task-b'}:r)};
+  let version=1,wrongAttempt=false,wrongKey=false;const digest='e'.repeat(64),key='b'.repeat(64),p=await panel(['one'],d,{locale:'en',context:true,tools:{
     oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
     oms_panel_chat:a=>a.section?{...a,projectKey:wrongKey?'c'.repeat(64):a.projectKey,source:'room',messages:[],evidence:{attempt:wrongAttempt?'another-attempt':a.attempt,section:a.section,text:a.evidenceCursor?'last':'first',offset:a.evidenceCursor?5:0,bytes:a.evidenceCursor?4:5,totalBytes:9,digest,nextCursor:a.evidenceCursor?null:'next',hasMore:!a.evidenceCursor}}:
       {...a,source:'room',messages:Array.from({length:version},(_,i)=>({seq:i+1,text:'Message '+(i+1)})),result:{attempt:'l',text:'Result excerpt',truncated:true}}
@@ -1424,6 +1496,10 @@ test('Room result truncation links a bounded evidence read and keeps the reader 
   assert.deepEqual({...p.calls.at(-1).args},{project:'one',projectKey:key,room:main.room,participant:lead.participant,section:'transcript',attempt:'l',evidenceCursor:''});
   assert.equal(p.get('full-answer-body').textContent,'first');await p.event('answer-more','click');
   assert.equal(p.get('full-answer-body').textContent,'last');assert.equal(p.get('answer-more').hidden,true);
+  await p.event('answer-followup','click');await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-b');
+  assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   wrongAttempt=true;await p.event('chat-result-full','click');
   assert.equal(p.get('full-answer-body').textContent,'');assert.match(p.get('answer-status').textContent,/changed/);assert.equal(p.get('answer-followup').hidden,true);assert.equal(p.get('answer-copy').hidden,true);
   wrongAttempt=false;wrongKey=true;await p.event('chat-result-full','click');

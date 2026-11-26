@@ -30,10 +30,38 @@ struct Inventory {
     shared: bool,
 }
 
+/// Names only the marketplaces Codex reports as broken; its paths and reasons
+/// stay withheld. At most three hints, so they survive the update gate's
+/// four-line bound together with the error line.
+fn inventory_failure(stderr: &[u8]) -> r::Error {
+    let mut names: Vec<String> = Vec::new();
+    for line in r::plain_lines(&String::from_utf8_lossy(stderr)) {
+        if let Some((name, _)) = line
+            .trim()
+            .strip_prefix("- `")
+            .and_then(|rest| rest.split_once("` at "))
+            && r::safe_name(name)
+            && !name.starts_with('-')
+            && names.len() < 3
+            && !names.iter().any(|seen| seen == name)
+        {
+            names.push(name.into());
+        }
+    }
+    let mut message = "Codex plugin inventory unavailable; no configuration changed".to_owned();
+    if !names.is_empty() {
+        message.push_str(&format!("; failed marketplace(s): {}", names.join(", ")));
+        for name in &names {
+            message.push_str(&format!("\nhint: codex plugin marketplace remove {name}"));
+        }
+    }
+    r::Error(2, message)
+}
+
 fn inventory(paths: &Paths, flag: &AtomicBool) -> Result<Inventory> {
     let out = codex(paths, &["plugin", "list", "--json"], flag)?;
     if out.0 != 0 {
-        return r::fail("Codex plugin inventory unavailable; no configuration changed");
+        return Err(inventory_failure(&out.2));
     }
     let value = r::parse(&out.1)?;
     let rows = value["installed"]

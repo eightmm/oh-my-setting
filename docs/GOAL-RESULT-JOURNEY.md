@@ -27,6 +27,9 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 
 ## 기존 API와 연결
 
+패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v30.html`을 사용하며,
+이전 버전의 리소스 읽기 별칭을 유지한다.
+
 | 경로 | 추가 입력·출력 | UI 사용 |
 |---|---|---|
 | `oms_list_projects` | alias별 `projectKeys`, pinned/cwd의 `projectKey` | 마지막 정상 화면과 private 선택의 물리 프로젝트 범위를 확인한다. |
@@ -36,7 +39,7 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 | `oms_lead_settings` / `oms_update_lead_settings` | `scope`, `catalogAgeSeconds`, selection과 lastServed | 다음 메시지 설정과 실제 답변 증거를 구분하고 기존 revision-checked 저장을 유지한다. |
 | `oms_panel_chat` | transcript/diff·attempt에 `evidenceCursor`; 이 모드는 exact `projectKey` 필수 | 선택한 Room 결과를 읽는다. public/private projectKey와 Room·participant·attempt·section이 모두 일치해야 표시한다. 기존 메시지·legacy page 읽기는 유지한다. |
 | `oms_worker_output` | `answerPage`, private `page` metadata | 확인된 projectKey·Room·Lead attempt·worker attempt 쌍의 원문만 읽는다. |
-| `ui/update-model-context` | `oms-followup-draft`의 projectKey·Room·owner·task·source·text | 명시적인 클릭으로 현재 호스트 대화의 문맥에 초안을 추가한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
+| `ui/update-model-context` | `oms-followup-draft`의 projectKey·Room·owner·source·text와 확인된 task | 명시적인 클릭으로 현재 호스트 대화의 문맥에 초안을 추가한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
 
 답변은 private `_meta` 경로로 전달하며 초기 public snapshot에 본문을 넣지 않는다.
 페이지는 scope와 원문 digest에 결합한다. UI는 바이트 길이·offset 연속성·전체 크기·digest·cursor를
@@ -45,6 +48,9 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 
 Lead 결과의 후속 초안은 서버가 다시 확인한 Room·participant·operation·turn 참조를 사용한다.
 worker와 Room 결과도 reader가 확인한 정확한 쌍과 attempt를 사용한다.
+선택한 결과의 task는 같은 물리 프로젝트·Room의 정확한 worker·attempt 또는 Lead operation과
+연결된 값만 넣으며, 확인되지 않으면 생략한다. 결과를 선택하지 않은 일반 초안은 현재 attention
+task를 사용할 수 있다.
 호스트 문맥 기능이 없거나 실패하면 복사할 수 있으며, 초안 본문에도 프로젝트·Room·결과 식별자를
 남기므로 structured payload 없이도 선택한 범위를 확인할 수 있다.
 초안은 전환·실패 시 비우는 패널 메모리이며 새로운 영구 receipt가 아니다.
@@ -52,7 +58,7 @@ worker와 Room 결과도 reader가 확인한 정확한 쌍과 attempt를 사용�
 ## 검증과 남은 확인
 
 프런트엔드의 기존 `node:test` + VM/DOM fixture를 확장했다.
-다음 명령으로 69개 테스트를 실행한다(기존 62개 확장 및 7개 시나리오 추가).
+다음 명령으로 70개 테스트를 실행한다(기존 62개 확장 및 8개 시나리오 추가).
 
 ```sh
 node --test crates/oms-mcp-server/tests/conversation-panel.test.mjs
@@ -63,7 +69,7 @@ alias 재매핑·프로젝트 전환·늦은 응답의 private purge, 전송 중
 개별 Lead 선택과 미래 자동 연결 분리, 부분 완료 기준과 Plan 구분, 긴 기준·다음 단계 문구,
 UTF-8 한도·목표 prefix, Room 읽기 위치, 긴 원문의 scope/digest 검증,
 공백만 있는 중간 페이지를 지나 끝까지 읽기, 다른 Room attempt 또는 물리 projectKey 응답 거부,
-복사할 초안의 결과 범위 보존이다.
+복사할 초안의 결과 범위 보존, 서로 다른 worker·Lead 결과의 task 귀속과 미확인 task 생략이다.
 
 이 fixture는 실제 브라우저의 layout·scroll 계산·접근성 트리와 native host capability를 대체하지 않는다.
 320px와 736px의 실제 브라우저 렌더, 키보드·스크린리더 상호작용,
