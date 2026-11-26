@@ -74,7 +74,7 @@ pub(crate) fn plan_status(
 }
 
 pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Value> {
-    collect_snapshot(ctx, host, None)
+    collect_snapshot(ctx, host, None, false).map(|(state, _)| state)
 }
 
 fn attempt_room(row: &Value) -> AttemptRoom<'_> {
@@ -186,7 +186,8 @@ fn collect_snapshot(
     ctx: &Context<'_>,
     host: &dyn HostServices,
     consumer: Option<&str>,
-) -> Result<Value> {
+    include_dashboard: bool,
+) -> Result<(Value, Option<projection::DashboardArtifacts>)> {
     let mut state = object([
         ("schema", number(1)),
         ("project", helpers::project(&ctx.repo)),
@@ -467,8 +468,8 @@ fn collect_snapshot(
     }
     state.set("room_mail", mail)?;
     state.set("repo", string(ctx.repo.to_string_lossy()))?;
-    projection::enrich(ctx, host, &mut state)?;
-    Ok(state)
+    let artifacts = projection::enrich(ctx, host, &mut state, include_dashboard)?;
+    Ok((state, artifacts))
 }
 
 fn quote(raw: &str) -> String {
@@ -686,9 +687,9 @@ pub(crate) fn run(
     let mut code = 0;
     for i in 0..count {
         crate::checkpoint(ctx.interrupted)?;
-        let mut state = match cached.take() {
-            Some(state) => state,
-            None => collect_snapshot(&ctx, host, consumer)?,
+        let (mut state, artifacts) = match cached.take() {
+            Some(state) => (state, None),
+            None => collect_snapshot(&ctx, host, consumer, tool == "dashboard")?,
         };
         if matches!(tool, "state" | "dashboard")
             && let Some(observed) = host.scratch_activity(&ctx.repo, ctx.interrupted)
@@ -738,7 +739,9 @@ pub(crate) fn run(
                 ])
             }
             "dashboard" => {
-                let mut report = projection::dashboard(&ctx, &state)?;
+                let artifacts =
+                    artifacts.ok_or_else(|| error(2, "dashboard artifact observation missing"))?;
+                let mut report = projection::dashboard(&ctx, &state, artifacts)?;
                 code = i32::from(!report.get("collection").get("ok").truth());
                 let panel =
                     projection::panel_snapshot(&ctx.repo, &report, state.get("conversation"));
