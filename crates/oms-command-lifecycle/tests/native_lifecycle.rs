@@ -2271,7 +2271,11 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         let stop = AtomicBool::new(false);
         let narrow = oms_command_providers_skills::run_with_source(
             "model-doctor",
-            &["--providers".into(), "claude".into(), "--json".into()],
+            &[
+                "--providers".into(),
+                "claude,antigravity,vibe".into(),
+                "--json".into(),
+            ],
             &root,
             source,
             &stop,
@@ -2290,6 +2294,16 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         );
         let report: Value = serde_json::from_slice(&narrow.1).unwrap();
         assert_eq!(report["providers"][0]["usable"], expected, "{report}");
+        for provider in ["antigravity", "vibe"] {
+            let row = report["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["provider"] == provider)
+                .unwrap();
+            assert_eq!(row["family"], "unknown", "{row}");
+            assert_eq!(row["usable"], expected, "{row}");
+        }
         let cache = root.join("capabilities");
         let fields = |file: &Path| -> std::collections::BTreeMap<String, String> {
             fs::read_to_string(file)
@@ -2365,6 +2379,59 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
             assert_eq!(agy_cache["effort_values"], "low medium high xhigh max");
         }
         assert_eq!(agy_cache["models_probe"], "ok");
+        if expected {
+            let distinct = std::env::var("OMS_TEST_DISTINCT_FAMILIES").unwrap() == "1";
+            let providers = if distinct {
+                "codex,claude,antigravity,vibe"
+            } else {
+                "claude,antigravity,vibe"
+            };
+            let narrow = oms_command_providers_skills::run_with_source(
+                "model-doctor",
+                &[
+                    "--providers".into(),
+                    providers.into(),
+                    "--strict-diversity".into(),
+                    "--json".into(),
+                ],
+                &root,
+                source,
+                &stop,
+            );
+            assert!(narrow.2.is_empty(), "{:?}", narrow.2);
+            let report: Value = serde_json::from_slice(&narrow.1).unwrap();
+            assert_eq!(narrow.0, i32::from(!distinct), "{report}");
+            assert_eq!(report["ok"], distinct, "{report}");
+            let diversity_error = "model-family diversity needs at least two usable families";
+            assert_eq!(
+                report["errors"],
+                if distinct {
+                    json!([])
+                } else {
+                    json!([diversity_error])
+                }
+            );
+            let aggregate = run_with_services(
+                "doctor",
+                &["--json".into(), "--strict-diversity".into()],
+                &root,
+                source,
+                &stop,
+                &NativeServices::default(),
+            );
+            assert!(aggregate.2.is_empty(), "{:?}", aggregate.2);
+            let report: Value = serde_json::from_slice(&aggregate.1).unwrap();
+            let failures = report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["section"] == "model doctor" && row["message"] == diversity_error)
+                .collect::<Vec<_>>();
+            assert_eq!(failures.is_empty(), distinct, "{report}");
+            for failure in failures {
+                assert_eq!(failure["level"], "error");
+            }
+        }
         return;
     }
     let root = std::env::temp_dir().join(format!("oms-probe-parity-{}", std::process::id()));
@@ -2382,11 +2449,23 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
     let executable = bin.join("claude");
     fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '--effort (low|medium|high|xhigh)'; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(&executable, bin.join("vibe")).unwrap();
     let agy_exec = bin.join("agy");
     fs::write(&agy_exec, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '  --effort  Reasoning effort (low|medium|high|xhigh|max)' >&2; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
     fs::set_permissions(&agy_exec, fs::Permissions::from_mode(0o700)).unwrap();
-    for (version, help, mode) in [(0, 0, "auto"), (1, 0, "auto"), (0, 1, "1"), (1, 1, "1")] {
-        let case = root.join(format!("{version}-{help}"));
+    let codex_bin = root.join("codex-bin");
+    fs::create_dir(&codex_bin).unwrap();
+    let codex_exec = codex_bin.join("codex");
+    fs::write(&codex_exec, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\nexec) [ \"$2\" = --help ] || exit 2; echo fixture; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
+    fs::set_permissions(&codex_exec, fs::Permissions::from_mode(0o700)).unwrap();
+    for (version, help, mode, distinct) in [
+        (0, 0, "auto", false),
+        (0, 0, "auto", true),
+        (1, 0, "auto", false),
+        (0, 1, "1", false),
+        (1, 1, "1", false),
+    ] {
+        let case = root.join(format!("{version}-{help}-{distinct}"));
         let cache = case.join("capabilities");
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("claude.env"), "binary_key=previous-binary\neffort_mechanism=none\neffort_values=low\nmodels_probe=failed\nprobed_at=1\n").unwrap();
@@ -2394,6 +2473,10 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         fs::write(cache.join("claude.efforts"), "cached-model\tlow high\n").unwrap();
         fs::write(cache.join("antigravity.env"), "binary_key=previous-agy\neffort_mechanism=none\neffort_values=\nmodels_probe=ok\nprobed_at=1\n").unwrap();
         fs::write(cache.join("antigravity.models"), "gemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-pro-orchestrator\tOrchestrator (Carbon)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n").unwrap();
+        let mut provider_paths = vec![bin.clone()];
+        if distinct {
+            provider_paths.push(codex_bin.clone());
+        }
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -2401,7 +2484,7 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
                 "--nocapture",
             ])
             .env_clear()
-            .env("PATH", &bin)
+            .env("PATH", std::env::join_paths(provider_paths).unwrap())
             .env("HOME", &case)
             .env("TMPDIR", &case)
             .env("OMS_PROBE_PARITY_ROOT", &case)
@@ -2410,11 +2493,15 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
             .env("OH_MY_SETTING_MODEL_DOCTOR", mode)
             .env("OMS_TEST_VERSION_EXIT", version.to_string())
             .env("OMS_TEST_HELP_EXIT", help.to_string())
+            .env(
+                "OMS_TEST_DISTINCT_FAMILIES",
+                if distinct { "1" } else { "0" },
+            )
             .output()
             .unwrap();
         assert!(
             child.status.success(),
-            "version={version}, help={help}: {} {}",
+            "version={version}, help={help}, distinct={distinct}: {} {}",
             String::from_utf8_lossy(&child.stdout),
             String::from_utf8_lossy(&child.stderr)
         );

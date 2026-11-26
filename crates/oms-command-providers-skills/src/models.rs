@@ -426,6 +426,7 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             ));
         }
         if doctor {
+            let family = model_probe::diagnostic_family(&provider);
             if !present {
                 let item = format!("{provider}: provider binary '{bin}' is not installed");
                 if args.has("--require-all") {
@@ -436,10 +437,10 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             } else if usable != Some(true) {
                 errors.push(format!("{provider}: provider binary is present but its bounded version/help probe failed"));
             }
-            if usable == Some(true) && reachable {
-                families.insert(model_probe::provider_family(&provider).to_owned());
+            if usable == Some(true) && reachable && family != "unknown" {
+                families.insert(family.to_owned());
             }
-            rows.push(json!({"provider":provider,"binary":bin,"installed":present,"usable":usable.unwrap_or(false),"version":version,"provider_default_reachable":reachable,"family":model_probe::provider_family(&provider),"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"configured_default":configured,"configured_default_routable":configured_standing,"routable":routable}));
+            rows.push(json!({"provider":provider,"binary":bin,"installed":present,"usable":usable.unwrap_or(false),"version":version,"provider_default_reachable":reachable,"family":family,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"configured_default":configured,"configured_default_routable":configured_standing,"routable":routable}));
         } else {
             rows.push(json!({"provider":provider,"binary":bin,"present":present,"usable":usable,"exact_model_override":supports_exact_model_override(&provider),"catalog_models":catalog,"models":models,"routable":routable,"not_routed":not_routed,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"model_effort_scales":scales,"selectors":selectors,"catalog_probe":if ["codex","antigravity","opencode"].contains(&provider.as_str()){fields.get("models_probe").map(String::as_str).unwrap_or("unknown")}else{"unsupported"},"snapshot_age_seconds":snapshot_age,"catalog_age_seconds":age(&models_file)}));
         }
@@ -459,7 +460,6 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             efforts.join(" ")
         ));
     }
-    families.remove("unknown");
     if doctor && args.has("--strict-diversity") && families.len() < 2 {
         errors.push("model-family diversity needs at least two usable families".into());
     }
