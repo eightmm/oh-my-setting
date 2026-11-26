@@ -3071,7 +3071,7 @@ Lead chat is connected) counts the calls the board draws and adds `N past` for t
 tab; with none drawn, a dim row says `No active calls` or `No calls yet`. In the default Overview, a
 call whose printed row repeats an earlier one (same provider, role, label, title, state and
 model) folds into it: the kept row ends with `×N` and the rest count toward `N folded (Tab
-all)`. Rows that need attention never fold, so each stays reachable to act on, and neither do native children, since identical ones mark an ambiguous roster match. Selection walks the same folded rows; Tab All and filters list every attempt. Past rows dim the call
+all)`. Identical rows that need attention fold too, keeping the oldest attempt in view; the Attention list (`b`) still lists each one. Native children never fold, since identical ones mark an ambiguous roster match. Selection walks the same folded rows; Tab All and filters list every attempt. Past rows dim the call
 name and keep the state tag's color.
 
 ### Single-main and recovery guards
