@@ -7333,6 +7333,51 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     assert_eq!(cand_b.get("items"), cand_a.get("items"));
     assert_eq!(cand_b.get("recommendations"), cand_a.get("recommendations"));
 
+    // Candidate links distinguish reusable ready work from in-flight and terminal work.
+    fs::write(r.dir.join("panel-board"), board_page(false, "", &linked7)).unwrap();
+    for (state, excluded, reusable) in [
+        ("ready", false, true),
+        ("claimed", true, false),
+        ("running", true, false),
+        ("review", true, false),
+        ("blocked", true, false),
+        ("done", false, false),
+        ("cancelled", false, false),
+        ("failed", false, false),
+        ("unknown", true, false),
+    ] {
+        fs::write(&plan_file, format!(r##"{{"tasks":{{"z_task":{{"issue":"#7","state":"{state}"}},"a_task":{{"issue":"#7","state":"{state}"}}}}}}"##)).unwrap();
+        let doc = run_candidates();
+        let candidates = doc.get("github").get("candidates");
+        let rec = &candidates.get("recommendations").array()[0];
+        assert_eq!(
+            rec.get("state").text(),
+            Some(if excluded { "excluded" } else { "recommended" }),
+            "{state}"
+        );
+        if excluded {
+            assert_eq!(rec.get("reason").text(), Some("plan_linked"), "{state}");
+            assert!(candidates.get("items").array().is_empty(), "{state}");
+        } else {
+            let item = &candidates.get("items").array()[0];
+            let expected = if reusable { Some("a_task") } else { None };
+            assert_eq!(rec.get("plan_task").text(), expected, "{state}");
+            assert_eq!(item.get("plan_task").text(), expected, "{state}");
+        }
+    }
+    fs::write(&plan_file, r##"{"tasks":{"missing":{"issue":"#7"}}}"##).unwrap();
+    let missing = run_candidates();
+    assert_eq!(
+        missing
+            .get("github")
+            .get("candidates")
+            .get("recommendations")
+            .array()[0]
+            .get("reason")
+            .text(),
+        Some("plan_linked")
+    );
+
     // Option ID mismatch is never guessed by option name.
     let mismatched_id_card = issue(
         50,

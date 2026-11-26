@@ -91,8 +91,11 @@ only when no higher-precedence cause, such as `page_limit`, was already recorded
   repository, `Ready`, has priority `P0` to `P2`, and has verified `Status`,
   `Priority`, `Area` and `Phase` selections. Drafts, PR cards and foreign items
   never become candidates. Origin Issues that are duplicates, archived, closed,
-  Epics, blocked, already linked to an OMS plan or task, in progress, or not
-  `Ready` are listed with `state: "excluded"` and a reason. Issues with missing
+  Epics, blocked, in progress, not `Ready`, or linked to a claimed, running,
+  review or blocked Plan task or to the active task packet are listed with
+  `state: "excluded"` and a reason. A link from a `ready` Plan task keeps the
+  Issue ranked and adds `plan_task`, so selecting it reuses that task; links
+  from done, cancelled or failed tasks are ignored. Issues with missing
   or unverified evidence get `state: "unverified"`. The full reason list is in
   `crates/oms-command-landing/src/github_board.rs`.
 - **Ranking.** Candidates are sorted by Priority option order, then Phase

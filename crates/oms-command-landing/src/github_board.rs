@@ -1,5 +1,8 @@
 //! Read a page of cards, whole-board ranked candidates, or a drift report from a board linked to this repository.
-use super::super::{IssueRef, digits, plan_issue_evidence, spawn, strict, task_issue_evidence};
+use super::super::{
+    IssueRef, candidate_plan_issue_evidence, digits, plan_issue_evidence, spawn, strict,
+    task_issue_evidence,
+};
 use super::{
     Kind, Number, READ_TIMEOUT, Slug, WEB, bound_rows, display, project_error, projects, stable_id,
     valid_cursor, work_item,
@@ -474,6 +477,39 @@ fn planned_issues(c: &Context<'_>, root: &Path, slug: &Slug) -> Option<(BTreeSet
         }
         Some((linked, complete && packet_complete))
     })
+}
+
+type PlannedEvidence = Option<(BTreeSet<String>, bool)>;
+
+fn candidate_planned_issues(
+    c: &Context<'_>,
+    root: &Path,
+    slug: &Slug,
+) -> (PlannedEvidence, BTreeMap<String, String>) {
+    let mut ready = BTreeMap::new();
+    let planned = c.state(root).ok().filter(|p| p == root).and_then(|state| {
+        let (mut links, complete) = candidate_plan_issue_evidence(&state, slug).ok()?;
+        links.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut linked = BTreeSet::new();
+        for (id, issue, state) in links {
+            let number = issue.number.to_string();
+            match state.as_deref() {
+                Some("ready") => {
+                    ready.entry(number).or_insert(id);
+                }
+                Some("done" | "cancelled" | "failed") => {}
+                _ => {
+                    linked.insert(number);
+                }
+            }
+        }
+        let (packet, packet_complete) = task_issue_evidence(&state, slug).ok()?;
+        if let Some(issue) = packet {
+            linked.insert(issue.number.to_string());
+        }
+        Some((linked, complete && packet_complete))
+    });
+    (planned, ready)
 }
 
 fn card_evidence_gap(
@@ -1252,7 +1288,7 @@ pub(super) fn candidates(
         record_reason(&mut reason, "partial_response");
     }
     let schema_ok = schema_consistent && first_schema_ok;
-    let planned = planned_issues(c, root, slug);
+    let (planned, ready_tasks) = candidate_planned_issues(c, root, slug);
     if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
         record_reason(&mut reason, "plan_unverified");
     } else if !schema_ok {
@@ -1453,16 +1489,21 @@ pub(super) fn candidates(
                 "unverified" => 1,
                 _ => 2,
             };
-            all_recommendations.push((
-                (state_rank, priority_idx, phase_idx, number),
-                obj([
-                    ("issue", issue_ref.to_string().into()),
-                    ("number", V::Num(number.to_string())),
-                    ("class", row.get("class").clone()),
-                    ("state", state.as_str().into()),
-                    ("reason", why.as_str().into()),
-                ]),
-            ));
+            let mut candidate_rec = obj([
+                ("issue", issue_ref.to_string().into()),
+                ("number", V::Num(number.to_string())),
+                ("class", row.get("class").clone()),
+                ("state", state.as_str().into()),
+                ("reason", why.as_str().into()),
+            ]);
+            if state == "recommended"
+                && let Some(task) = ready_tasks.get(&number_str)
+            {
+                candidate_rec.set("plan_task", task.as_str());
+                row.set("plan_task", task.as_str());
+            }
+            all_recommendations
+                .push(((state_rank, priority_idx, phase_idx, number), candidate_rec));
             if state == "recommended" {
                 row.set("issue", issue_ref.to_string());
                 row.set("recommendation", advice);
