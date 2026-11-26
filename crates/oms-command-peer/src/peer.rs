@@ -52,6 +52,7 @@ pub(crate) const VALUES: &[&str] = &[
     "plan-task",
     "plan-binding",
     "context-pack",
+    "expected-context-pack-sha256",
     "max-turns",
     "idle-timeout",
     "team-id",

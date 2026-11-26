@@ -1734,6 +1734,10 @@ fn plan_delegate_uses_exact_issued_lease_and_native_verified_result() {
             ),
             ("private-empty-resume", &[("OMS_RESUME_SESSION", "")]),
             ("private", &[]),
+            (
+                "private-reviewed-context",
+                &[("OMS_ROOM_ID", "lead-room"), ("OMS_TEST_LEAD_CONTEXT", "1")],
+            ),
         ] {
             provider_isolated_with_env(name, layout, env, &body);
         }
@@ -2055,6 +2059,11 @@ exec "$real_git" "$@"
                     assert!(prompt.contains("Required verification:"));
                     assert!(prompt.contains("Implement the detailed fixture work."));
                     assert!(prompt.contains("Forbidden paths: denied.txt"));
+                    if self.mode == "context-ok" {
+                        assert!(prompt.contains("Reviewed Lead findings"));
+                        assert!(prompt.contains("> Lead reviewed the tracked.txt boundary."));
+                        assert!(prompt.contains("Reference data only"));
+                    }
                     let script = match self.mode {
                         "unknown-stderr-only" => {
                             Some("printf '%s\\n' 'provider capacity unavailable' >&2; exit 1")
@@ -2131,11 +2140,20 @@ exec "$real_git" "$@"
                 "repair",
                 "missing-brief",
             ];
-            let modes: &[&str] = match std::env::var("OMS_RESUME_SESSION").as_deref() {
-                Ok("fixture-ambient-resume") => &["ambient-resume"],
-                Ok("") => &["ok"],
-                Err(std::env::VarError::NotPresent) => &regular,
-                other => panic!("unexpected fixture resume state: {other:?}"),
+            let modes: &[&str] = if std::env::var_os("OMS_TEST_LEAD_CONTEXT").is_some() {
+                &[
+                    "context-ok",
+                    "context-pack-changed",
+                    "context-task-changed",
+                    "context-room-changed",
+                ]
+            } else {
+                match std::env::var("OMS_RESUME_SESSION").as_deref() {
+                    Ok("fixture-ambient-resume") => &["ambient-resume"],
+                    Ok("") => &["ok"],
+                    Err(std::env::VarError::NotPresent) => &regular,
+                    other => panic!("unexpected fixture resume state: {other:?}"),
+                }
             };
             for &mode in modes {
                 let repo = provider_repo();
@@ -2195,6 +2213,9 @@ exec "$real_git" "$@"
                         .with("verify", "test -s tracked.txt");
                 }
                 host.plan(task_request);
+                let ready = mode
+                    .starts_with("context-")
+                    .then(|| host.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1")));
                 let mut issued = host.plan(
                     Request::new(Action::Claim)
                         .with("id", "t1")
@@ -2262,6 +2283,38 @@ exec "$real_git" "$@"
                     "--plan-binding".into(),
                     binding,
                 ];
+                if let Some(ready) = &ready {
+                    let body = "Lead reviewed the tracked.txt boundary.";
+                    let mut findings = serde_json::json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
+                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo.0).unwrap(),"room":"lead-room","participant":"ask-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":"a".repeat(64),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":json::sha(""),"answer_bytes":body.len()},
+                        "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":json::sha(body)},
+                        "target":{"task_id":"t1","task_sha256":ready.text("task_sha256"),"contract_sha256":oms_command_plan::reviewed_context::task_contract(ready).unwrap(),"provider":"claude"}});
+                    if mode == "context-task-changed" {
+                        findings["target"]["contract_sha256"] = serde_json::json!("b".repeat(64));
+                    }
+                    if mode == "context-room-changed" {
+                        findings["source"]["room"] = serde_json::json!("another-room");
+                    }
+                    let digest =
+                        json::hash(&json::parse(&serde_json::to_vec(&findings).unwrap()).unwrap())
+                            .unwrap();
+                    let mut bytes = serde_json::to_vec(&serde_json::json!({"pack_digest":digest,"files":[],"lead_findings":findings})).unwrap();
+                    let sha = json::sha(&bytes);
+                    if mode == "context-pack-changed" {
+                        bytes.push(b'\n');
+                    }
+                    repo.write(".oms/reviewed-context.json", bytes);
+                    call.extend([
+                        "--context-pack".into(),
+                        repo.0
+                            .join(".oms/reviewed-context.json")
+                            .to_str()
+                            .unwrap()
+                            .into(),
+                        "--expected-context-pack-sha256".into(),
+                        sha,
+                    ]);
+                }
                 if mode == "unknown-stderr-only" {
                     call.extend(["--fallback-model".into(), "fixture-fallback".into()]);
                 }
@@ -2276,7 +2329,8 @@ exec "$real_git" "$@"
                     mode,
                     "worktree-head-after-start-proof" | "worktree-index-after-start-proof"
                 );
-                let pre_start_refusal = late_git_change
+                let pre_start_refusal = (mode.starts_with("context-") && mode != "context-ok")
+                    || late_git_change
                     || matches!(
                         mode,
                         "missing-brief"
@@ -2314,7 +2368,13 @@ exec "$real_git" "$@"
                     String::from_utf8_lossy(&output.2)
                 );
                 if let Some((snapshot, prior_events, prior_plan)) = before {
-                    let reason = if mode == "missing-brief" {
+                    let reason = if mode == "context-pack-changed" {
+                        "context pack bytes changed"
+                    } else if mode == "context-task-changed" {
+                        "differs from the frozen Plan task"
+                    } else if mode == "context-room-changed" {
+                        "another Room"
+                    } else if mode == "missing-brief" {
                         "agent-plan amend --id t1 --brief-file PATH"
                     } else if mode == "ambient-resume" {
                         "OMS_RESUME_SESSION cannot select a provider session for Plan delegation"
@@ -2345,7 +2405,10 @@ exec "$real_git" "$@"
                     assert!(host.alias_during_start.lock().unwrap().is_none());
                     continue;
                 }
-                if matches!(mode, "ok" | "repair" | "ok-footer" | "worktree-split-index") {
+                if matches!(
+                    mode,
+                    "ok" | "repair" | "ok-footer" | "worktree-split-index" | "context-ok"
+                ) {
                     assert_eq!(output.0, 0, "{message}");
                     assert_eq!(task.text("state"), "review", "{message}");
                     assert_eq!(task.text("review_lease_id"), issued.text("lease_id"));
@@ -8163,6 +8226,14 @@ fn peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_require
                     }
                     "--context-pack" => {
                         call.extend(["--context-pack".into(), pack_path.to_str().unwrap().into()]);
+                    }
+                    "--expected-context-pack-sha256" => {
+                        call.extend([
+                            "--context-pack".into(),
+                            pack_path.to_str().unwrap().into(),
+                            "--expected-context-pack-sha256".into(),
+                            oms_command_plan::json::sha(fs::read(&pack_path).unwrap()),
+                        ]);
                     }
                     _ if !*takes_value => {
                         call.push(opt.clone());

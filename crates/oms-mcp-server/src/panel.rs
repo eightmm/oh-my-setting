@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+#[path = "lead_plan_context.rs"]
+mod lead_plan_context;
 #[path = "lead_turns.rs"]
 mod lead_turns;
 
@@ -88,6 +90,7 @@ const SETTINGS: &str = "oms_lead_settings";
 const UPDATE_SETTINGS: &str = "oms_update_lead_settings";
 const SEND_LEAD: &str = "oms_send_lead_message";
 const LEAD_STATUS: &str = "oms_lead_conversation_status";
+const PREPARE_LEAD_CONTEXT: &str = "oms_prepare_lead_plan_context";
 const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
 pub(crate) const LEAD_PROMPT: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
 const ASSIGN: &str = "oms_assign_provider";
@@ -330,6 +333,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | SEND_LEAD
                     | SETTINGS
                     | UPDATE_SETTINGS
+                    | PREPARE_LEAD_CONTEXT
             )
         )
 }
@@ -349,7 +353,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
                 write: bool| {
         json!({"name":name,"description":description,
           "inputSchema":{"type":"object","properties":properties,"required":required.to_vec(),"additionalProperties":false},
-          "annotations":{"readOnlyHint":!write,"destructiveHint":write,"idempotentHint":!write,"openWorldHint":matches!(name, START | ASSIGN)},
+          "annotations":{"readOnlyHint":!write,"destructiveHint":write && name != PREPARE_LEAD_CONTEXT,"idempotentHint":!write || name == PREPARE_LEAD_CONTEXT,"openWorldHint":matches!(name, START | ASSIGN)},
           "_meta":{"ui":{"visibility":["app","model"]}}})
     };
     let project = json!({"type":"string","description":"Exact alias from oms_list_projects when the host has a project map."});
@@ -480,6 +484,28 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         settings,
         update,
         make(
+            PREPARE_LEAD_CONTEXT,
+            "Prepare a context pack from an explicitly reviewed Lead answer excerpt for one exact ready Plan task. Supply the observed answer page, answer digest, UTF-8 byte range and excerpt digest, plus the reviewed task digest and execution provider. Rechecks source ownership and task state. Returns the exact excerpt, provenance and separate managed Plan preview/run commands; never claims, starts, accepts or lands a task.",
+            json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"answerPage":{"type":"string","maxLength":100},"answerSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"offset":{"type":"integer","minimum":0,"maximum":8388608},"bytes":{"type":"integer","minimum":1,"maximum":4096},"excerptSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"excerpt":{"type":"string","minLength":1,"maxLength":4096,"description":"The exact text already selected and reviewed; metadata alone cannot export private text."},"taskId":ident,"taskSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"executionProvider":{"type":"string","enum":["claude","antigravity"]}}),
+            &[
+                "projectKey",
+                "room",
+                "provider",
+                "leadRequestId",
+                "turnId",
+                "answerPage",
+                "answerSha256",
+                "offset",
+                "bytes",
+                "excerptSha256",
+                "excerpt",
+                "taskId",
+                "taskSha256",
+                "executionProvider"
+            ],
+            true
+        ),
+        make(
             LEAD_STATUS,
             "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
             json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"turnId":turn_id,"before":{"type":"string","description":"An older-page cursor returned by this conversation."},"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"leadRequestId":{"type":"string","format":"uuid"},"answerPage":{"type":"string","maxLength":100,"description":"Read a completed turn's full answer. Requires exact projectKey, leadRequestId and turnId. Empty starts; otherwise use nextCursor."}}),
@@ -544,7 +570,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             WORK_ITEMS,
-            "Read bounded, strictly read-only task-focused work items for the selected project from the canonical plan and verified result bindings.",
+            "Read bounded, strictly read-only task-focused work items for the selected project from the canonical plan and verified result bindings. Ready-state items may include a checked planSelection with taskId/taskSha256/provider for explicit reviewed Lead-context preparation; this is a read reference, not approval or scheduling authority.",
             scope.clone(),
             &[],
             false
@@ -916,7 +942,12 @@ fn valid_work_items_receipt(data: &Value) -> bool {
             || v.as_str()
                 .is_some_and(|s| s.chars().count() <= max && !s.chars().any(char::is_control))
     };
-    let optional = ["claimExpired", "issueCache", "prReviewCandidate"];
+    let optional = [
+        "claimExpired",
+        "issueCache",
+        "prReviewCandidate",
+        "planSelection",
+    ];
     data.as_object().is_some_and(|obj| obj.keys().count() == 4)
         && data["schema"] == 1
         && data["omitted"].as_i64().is_some_and(|n| n >= 0)
@@ -948,6 +979,33 @@ fn valid_work_items_receipt(data: &Value) -> bool {
                         })
                         && row.get("prReviewCandidate").is_none_or(|candidate| {
                             row["state"] == "review" && valid_pr_candidate(candidate)
+                        })
+                        && row.get("planSelection").is_none_or(|selection| {
+                            row["state"] == "ready"
+                                && selection.as_object().is_some_and(|fields| {
+                                    fields.keys().count() == 6
+                                        && [
+                                            "source",
+                                            "readOnly",
+                                            "planId",
+                                            "taskId",
+                                            "taskSha256",
+                                            "provider",
+                                        ]
+                                        .iter()
+                                        .all(|key| fields.contains_key(key))
+                                })
+                                && selection["source"] == "canonical-plan"
+                                && selection["readOnly"] == true
+                                && selection["taskId"] == row["id"]
+                                && selection["planId"]
+                                    .as_str()
+                                    .is_some_and(|s| crate::matches("plan_[0-9a-f]{32}", s))
+                                && selection["taskSha256"]
+                                    .as_str()
+                                    .is_some_and(|s| crate::matches("[0-9a-f]{64}", s))
+                                && (selection["provider"].is_null()
+                                    || selection["provider"].as_str().is_some_and(id))
                         })
                         && (row["owner"].is_null() || row["owner"].as_str().is_some_and(id))
                         && (row["revision"].is_null()
@@ -1330,6 +1388,23 @@ impl Server<'_> {
                     PROJECTS => &[],
                     OPEN => &["project", "leadConversations"],
                     OPEN_LEADS => &["project", "room", "projectKey", "providers"],
+                    PREPARE_LEAD_CONTEXT => &[
+                        "project",
+                        "projectKey",
+                        "room",
+                        "provider",
+                        "leadRequestId",
+                        "turnId",
+                        "answerPage",
+                        "answerSha256",
+                        "offset",
+                        "bytes",
+                        "excerptSha256",
+                        "excerpt",
+                        "taskId",
+                        "taskSha256",
+                        "executionProvider",
+                    ],
                     LEAD_STATUS => &[
                         "project",
                         "room",
@@ -1820,6 +1895,9 @@ impl Server<'_> {
         }
         if name == WORKER_OUTPUT {
             return self.worker_output(&repo, args, meta);
+        }
+        if name == PREPARE_LEAD_CONTEXT {
+            return self.prepare_lead_plan_context(&repo, args, meta);
         }
         if name == CAPABILITIES {
             return self.panel_capabilities(&repo, args);
@@ -2497,15 +2575,7 @@ impl Server<'_> {
         if self.panel_repo(args)? != repo {
             return Err(BINDING.into());
         }
-        let stat = fs::symlink_metadata(repo).map_err(|_| BINDING.to_owned())?;
-        if !stat.is_dir() {
-            return Err(BINDING.into());
-        }
-        let mut identity = b"oms-lead-project-v1\0".to_vec();
-        identity.extend_from_slice(repo.as_os_str().as_encoded_bytes());
-        identity.extend_from_slice(&stat.dev().to_be_bytes());
-        identity.extend_from_slice(&stat.ino().to_be_bytes());
-        Ok(crate::storage::hash(identity))
+        oms_command_plan::reviewed_context::project_key(repo).map_err(|_| BINDING.to_owned())
     }
 
     fn worker_output(&self, repo: &Path, args: &Value, meta: &Value) -> PanelResult<Value> {
@@ -3475,6 +3545,19 @@ mod work_items_tests {
         };
         let inconsistent = change_item(2, |item| item["state"] = json!("stale"));
         assert!(!valid_work_items_receipt(&inconsistent));
+        let mut selection = task("selected", "ready", false);
+        selection["planSelection"] = json!({"source":"canonical-plan","readOnly":true,"planId":format!("plan_{}","a".repeat(32)),"taskId":"selected","taskSha256":"b".repeat(64),"provider":"claude"});
+        let selection_snapshot =
+            json!({"schema":1,"omitted":0,"availability":"ready","items":[selection]});
+        assert!(valid_work_items_receipt(&selection_snapshot));
+        for field in ["taskId", "readOnly", "source", "taskSha256"] {
+            let mut changed = selection_snapshot.clone();
+            let Value::Array(items) = &mut changed["items"] else {
+                unreachable!();
+            };
+            items[0]["planSelection"][field] = json!("invalid");
+            assert!(!valid_work_items_receipt(&changed));
+        }
         let inconsistent = change_item(3, |item| {
             item["issueCache"].as_object_mut().unwrap().remove("reason");
         });

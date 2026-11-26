@@ -57,6 +57,15 @@ checks at admission, Land and Finish. Neither this bridge nor
 an indexed worker exit grants completion or publication; changed and late
 results remain evidence without replacing a newer claimant.
 
+`reviewed_context` validates the optional context-pack `lead_findings` contract
+used by the desktop preparation tool and managed Plan execution. It bounds a
+quoted excerpt to 4096 UTF-8 bytes and retains its exact source/page/range and
+reviewed ready-task SHA. `task_contract` owns the existing plan-run frozen-field
+identity so a claimed task can be checked after its full task SHA changes.
+The original ready SHA remains the Claim CAS input; the issued binding still
+owns Start/Review. Context adds no task, model, scope, Room or completion
+authority and never changes the canonical task record.
+
 `discussion` is the shared producer/consumer contract for native advisory
 councils. A proposal may carry `discussion: {path, sha256}` pointing to an
 immutable `decision::retain_native` manifest. Apply validates strict JSON,

@@ -787,6 +787,7 @@ name = "oms-command-panel"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "oms-command-graph",
  "oms-command-operations",
  "oms-command-peer",
  "oms-command-plan",
@@ -1151,6 +1152,7 @@ dependencies = [
  "chrono",
  "oms-command-agent-role",
  "oms-command-operations",
+ "oms-command-plan",
  "oms-context",
  "oms-output",
  "oms-output-capture",

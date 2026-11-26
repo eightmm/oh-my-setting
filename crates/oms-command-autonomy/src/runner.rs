@@ -322,6 +322,9 @@ fn delegate(
     head: &str,
     wall: Duration,
 ) -> Result<(Output, Option<Value>)> {
+    if let Some(excerpt) = context_pack(ctx, args)? {
+        excerpt.check_task(&value::plan(task)?, value::text(route, "provider"), false)?;
+    }
     let id = value::text(task, "id");
     require(
         ctx.git(&["rev-parse", "HEAD"])? == head,
@@ -361,6 +364,12 @@ fn delegate(
     if args.has("context-pack") {
         call.push("--context-pack".into());
         call.push(args.values["context-pack"].clone());
+    }
+    if args.has("expected-context-pack-sha256") {
+        call.extend([
+            "--expected-context-pack-sha256".into(),
+            args.values["expected-context-pack-sha256"].clone(),
+        ]);
     }
     if let Some(artifact) = artifact {
         call.extend([
@@ -476,6 +485,48 @@ fn land(
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     execute_bound(ctx, args, None)
 }
+fn context_pack(
+    ctx: &Context<'_>,
+    args: &Args,
+) -> Result<Option<oms_command_plan::reviewed_context::LeadExcerpt>> {
+    if !args.has("context-pack") {
+        return Ok(None);
+    }
+    let pack = ctx.services.validate_context_pack(
+        &ctx.repo,
+        &args.path("context-pack", &ctx.repo),
+        ctx.interrupted,
+    )?;
+    if args.has("expected-context-pack-sha256") {
+        require(
+            value::text(&pack, "sha256") == args.required("expected-context-pack-sha256")?,
+            "context pack bytes changed before Plan claim or dispatch",
+        )?;
+    }
+    let Some(findings) = pack.get("lead_findings") else {
+        return Ok(None);
+    };
+    require(
+        args.has("expected-context-pack-sha256")
+            && args.has("expected-task-sha256")
+            && args.has("id")
+            && !args.flag("parallel")
+            && !args.flag("next"),
+        "reviewed Lead context requires an exact serial task and pinned context pack",
+    )?;
+    let excerpt =
+        oms_command_plan::reviewed_context::LeadExcerpt::parse(&value::canonical(findings)?)?;
+    excerpt.check_project(&ctx.repo)?;
+    excerpt.check_room(&std::env::var("OMS_ROOM_ID").unwrap_or_default())?;
+    require(
+        excerpt.target().text("task_id") == args.required("id")?
+            && excerpt.target().text("task_sha256") == args.required("expected-task-sha256")?
+            && excerpt.target().text("provider")
+                == ctx.services.normalize_provider(args.required("to")?)?,
+        "reviewed Lead context differs from the selected Plan task or provider",
+    )?;
+    Ok(Some(excerpt))
+}
 /// Validation shared by the serial and parallel entry points; returns the
 /// provider wall bound.
 pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
@@ -496,13 +547,7 @@ pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
     if args.has("allow-floor-change") {
         verify::reason(args.required("allow-floor-change")?)?;
     }
-    if args.has("context-pack") {
-        ctx.services.validate_context_pack(
-            &ctx.repo,
-            &args.path("context-pack", &ctx.repo),
-            ctx.interrupted,
-        )?;
-    }
+    context_pack(ctx, args)?;
     ctx.git(&["rev-parse", "--git-dir"])?;
     ctx.peer_wall.map_or_else(
         || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "5m".into())),
@@ -624,6 +669,9 @@ pub(crate) fn run_task(
         route["reasoning_effort"] = resolved.effort.clone().into();
         route["fallback_effort"] = resolved.fallback_effort.clone().into();
         let provider = value::text(&route, "provider");
+        if let Some(excerpt) = context_pack(ctx, args)? {
+            excerpt.check_task(&value::plan(&task)?, provider, true)?;
+        }
         let state = value::text(&task, "state");
         let resume = state == "claimed"
             && task["repair_count"].as_u64() == Some(1)
@@ -682,30 +730,11 @@ pub(crate) fn run_task(
             .is_empty(),
             "floor_incompatible_verifier: task verify reads content it may modify",
         )?;
-        let mut stable = serde_json::Map::new();
-        for key in [
-            "id",
-            "title",
-            "brief",
-            "depends",
-            "allowed_paths",
-            "forbidden_paths",
-            "verify",
-            "role",
-            "assignment",
-        ] {
-            if key != "assignment"
-                || task
-                    .get(key)
-                    .is_some_and(|v| v.as_object().is_some_and(|o| !o.is_empty()))
-            {
-                stable.insert(key.into(), task.get(key).cloned().unwrap_or(Value::Null));
-            }
-        }
+        let contract = oms_command_plan::reviewed_context::task_contract(&value::plan(&task)?)?;
         let identity = format!(
             "plan-run task={id} base={base} provider={provider} verify={} contract={} route={}",
             &value::hash(&verify)[..16],
-            &value::hash(value::canonical(&Value::Object(stable))?)[..16],
+            &contract[..16],
             &value::hash(resolved.contract())[..16]
         );
         let failure = invoke(

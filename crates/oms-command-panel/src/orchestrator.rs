@@ -6055,7 +6055,38 @@ pub(crate) fn run_managed_plan(
             && !text(&selected, "verify").trim().is_empty(),
         "managed Plan task requires frozen allowed paths and a verifier",
     )?;
-    let argv = commands::strings(&[
+    let context = || -> Result<Option<Value>> {
+        let Some(path) = options.get("context-pack") else {
+            return Ok(None);
+        };
+        let path = execution.join(path);
+        let pack = oms_command_graph::project::context::validate_context_pack(&path, repo)
+            .map_err(Error::new)?;
+        require(
+            pack["sha256"].as_str() == options.get("expected-context-pack-sha256"),
+            "reviewed context pack changed before managed Plan dispatch",
+        )?;
+        if let Some(findings) = pack.get("lead_findings") {
+            let excerpt = oms_command_plan::reviewed_context::LeadExcerpt::parse(
+                &serde_json::to_vec(findings).map_err(Error::new)?,
+            )
+            .map_err(Error::new)?;
+            excerpt.check_room(&room).map_err(Error::new)?;
+            excerpt
+                .check_task(
+                    &oms_command_plan::json::parse(
+                        &serde_json::to_vec(&selected).map_err(Error::new)?,
+                    )
+                    .map_err(Error::new)?,
+                    &provider,
+                    true,
+                )
+                .map_err(Error::new)?;
+        }
+        Ok(Some(pack))
+    };
+    let pack = context()?;
+    let mut argv = commands::strings(&[
         "--to",
         &provider,
         "--id",
@@ -6063,6 +6094,14 @@ pub(crate) fn run_managed_plan(
         "--expected-task-sha256",
         sha,
     ]);
+    if let Some(path) = options.get("context-pack") {
+        argv.extend([
+            "--context-pack".into(),
+            execution.join(path).into_os_string(),
+            "--expected-context-pack-sha256".into(),
+            options.required("expected-context-pack-sha256")?.into(),
+        ]);
+    }
     let mut value = json!({
         "mode": "managed-plan-run",
         "transport": "managed",
@@ -6083,6 +6122,14 @@ pub(crate) fn run_managed_plan(
         "allowed_paths": selected["allowed_paths"],
         "verify": selected["verify"],
     });
+    if let Some(pack) = &pack {
+        value["context_pack"] = json!({"sha256":pack["sha256"],"source":if pack.get("lead_findings").is_some() {"reviewed-lead-answer"} else {"project-graph"}});
+        if let Some(findings) = pack.get("lead_findings") {
+            value["context_pack"]["provenance"] = findings["source"].clone();
+            value["context_pack"]["target"] = findings["target"].clone();
+            value["context_pack"]["excerpt"] = json!({"offset":findings["selection"]["offset"],"bytes":findings["selection"]["bytes"],"sha256":findings["selection"]["sha256"]});
+        }
+    }
     if options.has("dry-run") {
         value["status"] = "preview".into();
         value["command"] = json!("plan-run");
@@ -6107,6 +6154,7 @@ pub(crate) fn run_managed_plan(
     // Never hold the native provider-session transaction while a managed worker
     // runs. Plan's exact claim CAS and issued binding own execution authority.
     panel.require_main_with_cache(options.get("owner"), &AttemptCache::default())?;
+    context()?;
     let result = services.command_context(NativeCommand::PlanRun, &request(argv), stop)?;
     let complete = result.cleanup_complete && result.output_complete && !result.limited;
     let code = if result.code == 0 && !complete {
@@ -14296,6 +14344,112 @@ pub(crate) mod tests {
                     assert_eq!(plain.1, b"partial output");
                     assert!(String::from_utf8_lossy(&plain.2).contains("completion is unknown"));
                     assert!(spy.mutating_calls().is_empty());
+                    assert_eq!(
+                        std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+                        plan_bytes
+                    );
+                    let selected: Value = serde_json::from_slice(&plan(&[
+                        "evidence-snapshot",
+                        "--id",
+                        "managed-frozen",
+                    ]))
+                    .unwrap();
+                    let contract = oms_command_plan::reviewed_context::task_contract(
+                        &oms_command_plan::json::parse(&serde_json::to_vec(&selected).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let body = "Lead reviewed a bounded implementation detail.";
+                    let findings = json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
+                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo).unwrap(),"room":ROOM,"participant":"ask-fixture","provider":"codex","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":"a".repeat(64),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":oms_command_plan::json::sha(""),"answer_bytes":body.len()},
+                        "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":oms_command_plan::json::sha(body)},
+                        "target":{"task_id":"managed-frozen","task_sha256":selected["task_sha256"],"contract_sha256":contract,"provider":"claude"}});
+                    let pack_path = repo.join(".oms/reviewed-context.json");
+                    let write_pack = |findings: &Value| {
+                        let digest = oms_command_plan::json::hash(
+                            &oms_command_plan::json::parse(&serde_json::to_vec(findings).unwrap())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        let bytes = serde_json::to_vec(
+                            &json!({"pack_digest":digest,"files":[],"lead_findings":findings}),
+                        )
+                        .unwrap();
+                        std::fs::write(&pack_path, &bytes).unwrap();
+                        oms_command_plan::json::sha(bytes)
+                    };
+                    let sha = write_pack(&findings);
+                    let with_context = |sha: &str, dry: bool| {
+                        let mut args = vec![
+                            "--context-pack",
+                            pack_path.to_str().unwrap(),
+                            "--expected-context-pack-sha256",
+                            sha,
+                        ];
+                        if dry {
+                            args.push("--dry-run");
+                        }
+                        run("claude", "managed-frozen", &args)
+                    };
+                    let preview = with_context(&sha, true);
+                    assert_eq!(preview.0, 0, "{}", String::from_utf8_lossy(&preview.2));
+                    let preview: Value = serde_json::from_slice(&preview.1).unwrap();
+                    assert_eq!(preview["context_pack"]["source"], "reviewed-lead-answer");
+                    assert_eq!(preview["context_pack"]["sha256"], sha);
+                    assert_eq!(preview["native_lead_input"], false);
+                    assert_eq!(preview["assignment"]["model"], "frozen-model");
+                    assert_eq!(with_context(&sha, false).0, 75);
+                    let calls = spy.managed_requests.borrow();
+                    let (_, call) = calls
+                        .iter()
+                        .rev()
+                        .find(|(kind, _)| *kind == NativeCommand::PlanRun)
+                        .unwrap();
+                    assert!(call.argv.windows(2).any(
+                        |args| args[0] == "--context-pack" && args[1] == pack_path.as_os_str()
+                    ));
+                    assert!(
+                        call.argv
+                            .windows(2)
+                            .any(|args| args[0] == "--expected-context-pack-sha256"
+                                && args[1] == sha.as_str())
+                    );
+                    drop(calls);
+                    assert_ne!(with_context(&"0".repeat(64), true).0, 0);
+                    std::fs::write(&pack_path, b"changed pack").unwrap();
+                    assert_ne!(with_context(&sha, true).0, 0);
+                    write_pack(&findings);
+                    for field in ["task_sha256", "verify", "allowed_paths", "assignment"] {
+                        let mut changed = selected.clone();
+                        changed[field] = match field {
+                            "task_sha256" => json!("b".repeat(64)),
+                            "verify" => json!("false"),
+                            "allowed_paths" => json!(["different-scope"]),
+                            _ => json!({"provider":"claude","model":"different-model"}),
+                        };
+                        spy.task_snapshot_override.replace(Some(changed));
+                        assert_ne!(with_context(&sha, true).0, 0, "{field}");
+                        spy.task_snapshot_override.replace(None);
+                    }
+                    for field in ["room", "project_key"] {
+                        let mut changed = findings.clone();
+                        changed["source"][field] = if field == "room" {
+                            json!("different-room")
+                        } else {
+                            json!("b".repeat(64))
+                        };
+                        let sha = write_pack(&changed);
+                        assert_ne!(with_context(&sha, true).0, 0, "{field}");
+                    }
+                    let legacy = serde_json::to_vec(
+                        &json!({"pack_digest":"c".repeat(64),"files":["src/lib.rs"]}),
+                    )
+                    .unwrap();
+                    std::fs::write(&pack_path, &legacy).unwrap();
+                    assert_eq!(
+                        with_context(&oms_command_plan::json::sha(legacy), true).0,
+                        0
+                    );
                     assert_eq!(
                         std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
                         plan_bytes

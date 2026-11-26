@@ -82,6 +82,19 @@ pub(crate) struct BoundDelegate {
 }
 
 impl BoundDelegate {
+    pub(crate) fn check_context(
+        &self,
+        excerpt: &oms_command_plan::reviewed_context::LeadExcerpt,
+    ) -> Result<()> {
+        excerpt.check_project(&self.state).map_err(domain)?;
+        excerpt
+            .check_room(&std::env::var("OMS_ROOM_ID").unwrap_or_default())
+            .map_err(domain)?;
+        excerpt
+            .check_task(&self.task, self.task.text("provider"), false)
+            .map_err(domain)
+    }
+
     fn plan<'a>(&self, context: &'a Context<'_>) -> Result<Plan<'a>> {
         self.plan_before(context, Instant::now() + Duration::from_secs(20))
     }
