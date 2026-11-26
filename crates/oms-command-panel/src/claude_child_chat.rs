@@ -148,7 +148,9 @@ mod linux {
     use crate::claude_lead_usage::linux::{
         DIR, FILE, config_root, environ, open_dir, start_time, unchanged,
     };
-    use crate::native_children::{CLAUDE_ROSTER_LIMIT, TASK_PREFIX, chat_tail, claude_completion};
+    use crate::native_children::{
+        CLAUDE_ROSTER_LIMIT, TASK_PREFIX, chat_tail, claude_completion, claude_project_key,
+    };
     use crate::{rows, text};
     use oms_panel_core::{Value, digest, terminals};
     use rustix::fs::{self, FileType, Mode, Stat};
@@ -654,18 +656,6 @@ mod linux {
         (8..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
     }
 
-    /// Claude Code's project folder name: every non-alphanumeric becomes `-`.
-    fn project_key(repo: &Path) -> Stage<String> {
-        let key: String = repo
-            .to_str()
-            .ok_or("project-key")?
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        gate(!key.is_empty() && key.len() <= 255, "project-key")?;
-        Ok(key)
-    }
-
     /// A row's `timestamp` when it parses as RFC 3339, kept as recorded.
     fn stamp(entry: &Value) -> Option<(&str, chrono::DateTime<chrono::FixedOffset>)> {
         let raw = entry["timestamp"].as_str()?;
@@ -724,7 +714,7 @@ mod linux {
         )?;
         let project = config
             .dir("projects", "projects")?
-            .dir(&project_key(repo)?, "project")?;
+            .dir(&claude_project_key(repo).ok_or("project-key")?, "project")?;
         let transcript = project.file(
             &format!("{session}.jsonl"),
             TRANSCRIPT_LIMIT,

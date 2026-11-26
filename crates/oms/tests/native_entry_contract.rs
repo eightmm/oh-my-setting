@@ -2359,6 +2359,20 @@ fn child_input_runs_natively_with_child_restrictions() {
 #[cfg(target_os = "linux")]
 #[test]
 fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
+    native_peer_cancellation_reaps_setsid_descendants("codex:model=gpt-5.4", &["codex"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_on_concurrent_native_council_reaps_every_setsid_descendant() {
+    native_peer_cancellation_reaps_setsid_descendants(
+        "codex:model=gpt-5.4,claude:model=claude-sonnet-4-6",
+        &["codex", "claude"],
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn native_peer_cancellation_reaps_setsid_descendants(providers: &str, seats: &[&str]) {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::os::unix::process::CommandExt;
     use std::time::{Duration, Instant};
@@ -2399,33 +2413,48 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     }
     let grand_pid_file = f.0.join("grand.pid");
     let grand_ready_file = f.0.join("grand.ready");
-    std::fs::write(
-        bin.join("codex"),
-        "#!/bin/sh\nsetsid /bin/sh -c 'trap \"\" TERM; exec sleep 30' </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > \"$OMS_GRAND_PID\"; : > \"$OMS_GRAND_READY\"; exec sleep 30\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    for seat in seats {
+        std::fs::write(
+            bin.join(seat),
+            "#!/bin/sh\nOMS_CANCEL_SEAT=${0##*/}; export OMS_CANCEL_SEAT\nsetsid /bin/sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > \"$OMS_GRAND_PID.$OMS_CANCEL_SEAT\"; : > \"$OMS_GRAND_READY.$OMS_CANCEL_SEAT\"; exec sleep 30' </dev/null >/dev/null 2>&1 &\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join(seat), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let seat_file = |base: &std::path::Path, seat: &str| {
+        base.with_file_name(format!(
+            "{}.{seat}",
+            base.file_name().unwrap().to_string_lossy()
+        ))
+    };
+    let ready = |base: &std::path::Path| seats.iter().all(|seat| seat_file(base, seat).exists());
+    let pids = |base: &std::path::Path| {
+        seats
+            .iter()
+            .map(|seat| {
+                std::fs::read_to_string(seat_file(base, seat))
+                    .unwrap()
+                    .trim()
+                    .parse::<i32>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
 
     let mut cmd = f.private(&bin, "--oms-dispatch");
-    cmd.args([
-        "peer-ask",
-        "--providers",
-        "codex",
-        "--model",
-        "gpt-5.4",
-        "--prompt",
-        "ping",
-    ])
-    .env("OMS_GRAND_PID", &grand_pid_file)
-    .env("OMS_GRAND_READY", &grand_ready_file)
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .process_group(0);
+    cmd.args(["peer-ask", "--providers", providers, "--prompt", "ping"])
+        .env("OMS_GRAND_PID", &grand_pid_file)
+        .env("OMS_GRAND_READY", &grand_ready_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
 
     let mut child = cmd.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !grand_ready_file.exists() {
+    // Every seat must be running before cancellation. A serial implementation
+    // cannot reach this barrier while the first fixture provider sleeps.
+    while !ready(&grand_ready_file) {
         if let Some(status) = child.try_wait().unwrap() {
             let out = child.wait_with_output().unwrap();
             panic!(
@@ -2434,14 +2463,13 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
                 String::from_utf8_lossy(&out.stderr),
             );
         }
-        assert!(Instant::now() < deadline, "codex fixture did not start");
+        assert!(
+            Instant::now() < deadline,
+            "all Council fixture seats did not start concurrently"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let grand_pid: i32 = std::fs::read_to_string(&grand_pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let grand_pids = pids(&grand_pid_file);
 
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(child.id() as i32),
@@ -2463,17 +2491,19 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     };
     assert_eq!(status.code(), Some(130));
     std::thread::sleep(Duration::from_millis(50));
-    let alive = Command::new("kill")
-        .args(["-0", &grand_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(
-        !alive,
-        "setsid TERM-ignoring grandchild {grand_pid} survived SIGTERM on native oms"
-    );
+    for grand_pid in grand_pids {
+        let alive = Command::new("kill")
+            .args(["-0", &grand_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !alive,
+            "setsid TERM-ignoring grandchild {grand_pid} survived SIGTERM on native oms"
+        );
+    }
 
     // Also verify nested `Scope::ProcessGroup` supervision (`5s` grace, matching
     // `ControlServices::invoke_with_scope`) cleanly cancels and reaps the child `oms`
@@ -2488,9 +2518,7 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
         "--".into(),
         "peer-ask".into(),
         "--providers".into(),
-        "codex".into(),
-        "--model".into(),
-        "gpt-5.4".into(),
+        providers.into(),
         "--prompt".into(),
         "ping".into(),
     ]);
@@ -2545,7 +2573,7 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     let mut reactor = oms_supervisor::process::Reactor::new();
     let job = reactor.start(request).unwrap();
     let ready2_deadline = Instant::now() + Duration::from_secs(10);
-    while !grand2_ready_file.exists() {
+    while !ready(&grand2_ready_file) {
         match reactor.poll(job, Duration::from_millis(20)).unwrap() {
             oms_supervisor::process::Progress::Pending(_) => {}
             oms_supervisor::process::Progress::Complete(done) => {
@@ -2559,14 +2587,10 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
         }
         assert!(
             Instant::now() < ready2_deadline,
-            "nested codex fixture did not start"
+            "all nested Council fixture seats did not start concurrently"
         );
     }
-    let grand2_pid: i32 = std::fs::read_to_string(&grand2_pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let grand2_pids = pids(&grand2_pid_file);
     reactor
         .stop(job, oms_supervisor::process::StopReason::Cancelled)
         .unwrap();
@@ -2588,17 +2612,19 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     );
     assert!(done.cleanup_complete());
     std::thread::sleep(Duration::from_millis(50));
-    let alive2 = Command::new("kill")
-        .args(["-0", &grand2_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(
-        !alive2,
-        "setsid TERM-ignoring grandchild {grand2_pid} survived nested ProcessGroup cancellation"
-    );
+    for grand2_pid in grand2_pids {
+        let alive2 = Command::new("kill")
+            .args(["-0", &grand2_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !alive2,
+            "setsid TERM-ignoring grandchild {grand2_pid} survived nested ProcessGroup cancellation"
+        );
+    }
 }
 
 // ---- native landing services through the real binary -----------------------
@@ -5143,12 +5169,92 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         "{empty}"
     );
 
+    l.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     let dead_s = dead.to_string();
     let live_s = std::process::id().to_string();
     let removable = residue(&tmp, "delegate", "dead", &dead_s, &l.repo);
     let delegate_root = residue(&l.f.0.join("wtroot"), "admit", "root", &dead_s, &l.repo);
     let capture_dir = ".oms/artifacts/output-digest";
     let managed_root = l.f.0.join("wtroot");
+    let old_mtime =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60 + 60);
+    let set_mtime = |path: &std::path::Path, mtime: std::time::SystemTime| {
+        let secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let spec = rustix::fs::Timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &rustix::fs::Timestamps {
+                last_access: spec,
+                last_modification: spec,
+            },
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    };
+    let populate_artifacts = |wt: &std::path::Path, mtime: Option<std::time::SystemTime>| {
+        let index = wt.join(".oms/artifacts/index.jsonl");
+        let digests = wt.join(capture_dir);
+        std::fs::create_dir_all(&digests).unwrap();
+        std::fs::write(&index, "{\"kind\":\"artifact\"}\n").unwrap();
+        let digest = digests.join("20261124T000000Z-200000000000000000000.log");
+        std::fs::write(&digest, b"ok\n").unwrap();
+        if let Some(t) = mtime {
+            set_mtime(&index, t);
+            set_mtime(&digest, t);
+            set_mtime(&digests, t);
+        }
+    };
+    let settled = residue(&managed_root, "scratch", "settled", &dead_s, &l.repo);
+    populate_artifacts(&settled.join("wt-settled"), Some(old_mtime));
+    let fresh = residue(&managed_root, "scratch", "fresh", &dead_s, &l.repo);
+    populate_artifacts(&fresh.join("wt-fresh"), None);
+    let unmerged = residue(&managed_root, "scratch", "unmerged", &dead_s, &l.repo);
+    let unmerged_wt = unmerged.join("wt-unmerged");
+    l.git_in(&unmerged_wt, &["checkout", "-q", "-b", "local-unmerged"]);
+    l.git_in(
+        &unmerged_wt,
+        &["commit", "-q", "--allow-empty", "-m", "unmerged"],
+    );
+    populate_artifacts(&unmerged_wt, Some(old_mtime));
+    let symlink_digest = residue(&managed_root, "scratch", "symdigest", &dead_s, &l.repo);
+    let sym_digests = symlink_digest.join("wt-symdigest").join(capture_dir);
+    std::fs::create_dir_all(&sym_digests).unwrap();
+    let sym_target = l.f.0.join("old-digest-target.log");
+    std::fs::write(&sym_target, b"ok\n").unwrap();
+    set_mtime(&sym_target, old_mtime);
+    let sym_entry = sym_digests.join("20261124T000000Z-300000000000000000000.log");
+    symlink(&sym_target, &sym_entry).unwrap();
+    set_mtime(&sym_entry, old_mtime);
+    set_mtime(&sym_digests, old_mtime);
+    let unmerged_digest = residue(
+        &managed_root,
+        "scratch",
+        "unmerged-digest",
+        &dead_s,
+        &l.repo,
+    );
+    let unmerged_digest_wt = unmerged_digest.join("wt-unmerged-digest");
+    l.git_in(
+        &unmerged_digest_wt,
+        &["checkout", "-q", "-b", "local-unmerged-digest"],
+    );
+    l.git_in(
+        &unmerged_digest_wt,
+        &["commit", "-q", "--allow-empty", "-m", "unmerged-digest"],
+    );
+    let unmerged_digests = unmerged_digest_wt.join(capture_dir);
+    std::fs::create_dir_all(&unmerged_digests).unwrap();
+    let unmerged_entry = unmerged_digests.join("20261124T000000Z-400000000000000000000.log");
+    std::fs::write(&unmerged_entry, b"ok\n").unwrap();
+    set_mtime(&unmerged_entry, old_mtime);
+    set_mtime(&unmerged_digests, old_mtime);
     let captured = residue(&managed_root, "scratch", "captured", &dead_s, &l.repo);
     let captures = captured.join("wt-captured").join(capture_dir);
     std::fs::create_dir_all(&captures).unwrap();
@@ -5195,7 +5301,7 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
             .lines()
             .any(|l| l.starts_with(&format!("{verb}: {} (", path.display())))
     };
-    for path in [&removable, &delegate_root, &ours] {
+    for path in [&removable, &delegate_root, &settled, &ours] {
         assert!(line("would remove", path), "{}: {report}", path.display());
     }
     for path in [
@@ -5203,10 +5309,26 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         &dirty,
         &foreign,
         &swapped,
+        &fresh,
+        &unmerged,
+        &symlink_digest,
+        &unmerged_digest,
         &captured,
         &unsafe_store,
     ] {
         assert!(line("kept", path), "{}: {report}", path.display());
+    }
+    for (kept, reason) in [
+        (&fresh, "holds .oms/artifacts/index.jsonl"),
+        (&symlink_digest, "holds .oms/artifacts/output-digest"),
+        (&unmerged_digest, "holds .oms/artifacts/output-digest"),
+    ] {
+        assert!(
+            report.lines().any(|l| {
+                l.starts_with(&format!("kept: {} (", kept.display())) && l.contains(reason)
+            }),
+            "{report}"
+        );
     }
     assert!(
         report.contains("worktree has uncommitted or untracked files"),
@@ -5225,10 +5347,10 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
         "{report}"
     );
     assert!(
-        report.ends_with("\ncleanup: 3 removable item(s) found, 6 kept with work\n"),
+        report.ends_with("\ncleanup: 4 removable item(s) found, 10 kept with work\n"),
         "{report}"
     );
-    assert!(removable.exists() && ours.symlink_metadata().is_ok());
+    assert!(removable.exists() && settled.exists() && ours.symlink_metadata().is_ok());
     assert_eq!(std::fs::read(&capture).unwrap(), proof);
 
     let (code, _, err) = l.oms_env(&["cleanup", "--apply"], &[("OMS_HARNESS_CHILD", "1")]);
@@ -5237,12 +5359,28 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
 
     let applied = l.ok(&["cleanup", "--apply"]);
     assert!(
-        applied.ends_with("\ncleanup: removed 3 item(s), 6 kept with work\n"),
+        applied.ends_with("\ncleanup: removed 4 item(s), 10 kept with work\n"),
         "{applied}"
     );
-    assert!(!removable.exists() && !delegate_root.exists() && ours.symlink_metadata().is_err());
+    assert!(
+        !removable.exists()
+            && !delegate_root.exists()
+            && !settled.exists()
+            && ours.symlink_metadata().is_err()
+    );
     for path in [
-        &live, &unproven, &dirty, &foreign, &swapped, &target, &linked, &user,
+        &live,
+        &unproven,
+        &dirty,
+        &foreign,
+        &swapped,
+        &fresh,
+        &unmerged,
+        &symlink_digest,
+        &unmerged_digest,
+        &target,
+        &linked,
+        &user,
     ] {
         assert!(path.symlink_metadata().is_ok(), "{}", path.display());
     }
@@ -5259,7 +5397,12 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     assert!(
         !registered.contains("wt-dead")
             && !registered.contains("wt-root")
+            && !registered.contains("wt-settled")
             && registered.contains("wt-dirty")
+            && registered.contains("wt-fresh")
+            && registered.contains("wt-unmerged")
+            && registered.contains("wt-symdigest")
+            && registered.contains("wt-unmerged-digest")
             && registered.contains("wt-captured")
             && registered.contains("wt-unsafe"),
         "{registered}"

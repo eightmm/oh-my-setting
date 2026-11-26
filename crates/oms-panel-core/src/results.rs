@@ -1016,8 +1016,28 @@ pub fn verified_bound_result(store: &Store, plan: &Value, row: &Value) -> Result
 
 const MAX_NATIVE_RETURNS: usize = 20;
 
-fn native_action(kind: &str, reason: &str, commands: Vec<Value>) -> Value {
+fn native_action<const N: usize>(kind: &str, reason: &str, commands: [Option<Value>; N]) -> Value {
+    let commands: Vec<_> = commands.into_iter().flatten().collect();
     serde_json::json!({"kind":kind,"reason":reason,"commands":commands})
+}
+
+// JSON argv cannot express a non-UTF-8 checkout. Omit the command instead of
+// substituting a different path or letting the consuming process choose a repo.
+fn native_command(mut command: Value, repo: Option<&str>, room: Option<&str>) -> Option<Value> {
+    let argv = command["argv"].as_array_mut()?;
+    argv.extend(["--repo".into(), repo?.into()]);
+    if let Some(room) = room {
+        argv.extend(["--room".into(), room.into()]);
+    }
+    Some(command)
+}
+
+fn native_inspect(task: &str, repo: Option<&str>) -> Option<Value> {
+    native_command(
+        serde_json::json!({"argv":["oms","panel","--results","--task-id",task,"--json"]}),
+        repo,
+        None,
+    )
 }
 
 fn native_plan_task<'a>(report: &Value, plan: &'a Value) -> Option<&'a Value> {
@@ -1425,9 +1445,16 @@ fn native_landing_chain(
     )
 }
 
-fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Result<Value> {
+fn native_guidance(
+    operation: &Value,
+    report: &mut Value,
+    plan: &Value,
+    repo: Option<&str>,
+    room: &str,
+) -> Result<Value> {
     use crate::native_contract::NextAction;
-    let inspect = || serde_json::json!({"argv":["oms","panel","--results","--task-id",operation["task_id"],"--json"]});
+    let inspect = || native_inspect(&text(operation, "task_id"), repo);
+    let main = |argv| native_command(argv, repo, Some(room));
     let resolution = text(&operation["refs"], "native_resolution");
     let sha = text(report, "artifact_sha256");
     let resolved = text(&operation["refs"], "native_resolution_result_sha256");
@@ -1460,33 +1487,41 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
         return Ok(native_action(
             "inspect",
             "Current canonical task or lease is unavailable or changed",
-            vec![inspect()],
+            [inspect()],
         ));
     };
     report["plan_state"] = task["state"].clone();
-    let reconcile = |decision: &str| serde_json::json!({"argv":["oms","panel","--native-reconcile",operation["attempt_id"],"--result-sha256",sha,"--decision",decision]});
+    let reconcile = |decision: &str| {
+        main(
+            serde_json::json!({"argv":["oms","panel","--native-reconcile",operation["attempt_id"],"--result-sha256",sha,"--decision",decision]}),
+        )
+    };
     if matches!(task["state"].as_str(), Some("done" | "cancelled"))
         && task["completion_verified"] != false
     {
-        let ready = serde_json::json!({"argv":["oms","agent-plan","ready","--json"]});
+        let ready = native_command(
+            serde_json::json!({"argv":["oms","agent-plan","ready","--json"]}),
+            repo,
+            None,
+        );
         return Ok(
             if resolution == "retired" && operation["terminal"] == true {
                 native_action(
                     "next",
                     "Canonical task is settled; inspect the next ready task",
-                    vec![ready],
+                    [ready],
                 )
             } else if sha.is_empty() {
                 native_action(
                     "retire",
                     "Canonical task is settled without a result; the next bound assignment must reconcile its reservation",
-                    vec![ready],
+                    [ready],
                 )
             } else {
                 native_action(
                     "retire",
                     "Canonical task is settled; retire this assignment reservation before the next task",
-                    vec![reconcile("reviewed")],
+                    [reconcile("reviewed")],
                 )
             },
         );
@@ -1503,7 +1538,7 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
         return Ok(native_action(
             "inspect",
             "Canonical task state needs reconciliation before another native action",
-            vec![inspect()],
+            [inspect()],
         ));
     }
     if sha.is_empty() {
@@ -1512,14 +1547,14 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
             Some("submitted") => NextAction::Wait,
             _ => NextAction::Reconcile,
         };
-        let mut next = native_action(action.name(), action.reason(), vec![inspect()]);
+        let mut next = native_action(action.name(), action.reason(), [inspect()]);
         if report["pending_input"] == true && operation["refs"]["native_transport"] != "intent" {
             next = native_action(
                 "import",
                 "An untrusted native return manifest is present; Main must import and validate it",
-                vec![
+                [main(
                     serde_json::json!({"argv":["oms","panel","--orchestrator","codex","--task-id",report["task_id"],"--native-result",report["input_paths"]["manifest"]]}),
-                ],
+                )],
             );
         }
         return Ok(next);
@@ -1528,9 +1563,9 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
         return Ok(native_action(
             "continue",
             "Main requested another round of the same frozen task and lease",
-            vec![
+            [main(
                 serde_json::json!({"argv":["oms","panel","--orchestrator","codex","--task-id",report["task_id"],"--after-native-result",sha,"--task","<reviewed-revision-brief>"],"required_input":["task"]}),
-            ],
+            )],
         ));
     }
     if resolution == "reviewed" {
@@ -1543,24 +1578,26 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
                 native_action(
                     "inspect",
                     "Main review is recorded but its canonical Plan patch binding needs reconciliation",
-                    vec![reconcile("reviewed")],
+                    [reconcile("reviewed")],
                 )
             } else {
                 native_action(
                     "admit",
                     "Main reviewed this candidate; run canonical admission from a clean integration checkout",
-                    vec![
+                    [Some(
                         serde_json::json!({"argv":["oms","patch-admit","--patch",report["patch"]["path"],"--plan-task",report["task_id"],"--repo","<clean-integration-checkout>"],"required_input":["repo"]}),
-                    ],
+                    )],
                 )
             }
         } else {
             native_action(
                 "verify",
                 "Main reviewed report-only claims; completion still needs the canonical verified Plan path",
-                vec![
+                [native_command(
                     serde_json::json!({"argv":["oms","agent-plan","evidence-snapshot","--id",report["task_id"]]}),
-                ],
+                    repo,
+                    None,
+                )],
             )
         });
     }
@@ -1574,7 +1611,7 @@ fn native_guidance(operation: &Value, report: &mut Value, plan: &Value) -> Resul
     Ok(native_action(
         action.name(),
         action.reason(),
-        vec![
+        [
             reconcile("request-revision"),
             reconcile("blocked"),
             reconcile("reviewed"),
@@ -1594,6 +1631,7 @@ fn native_succession_guidance(
     operation: &Value,
     report: &mut Value,
     attempts: &Value,
+    room: &str,
 ) -> Result<Option<Value>> {
     let succession = crate::native_succession::metadata(store, operation)?;
     let custodian = succession.as_ref().map_or_else(
@@ -1618,7 +1656,8 @@ fn native_succession_guidance(
     if mains.is_empty() {
         return Ok(None);
     }
-    let inspect = serde_json::json!({"argv":["oms","panel","--results","--task-id",operation["task_id"],"--json"]});
+    let repo = store.repo().to_str();
+    let inspect = native_inspect(&text(operation, "task_id"), repo);
     let old = array(attempts)
         .iter()
         .find(|row| row["attempt_id"] == custodian);
@@ -1633,26 +1672,28 @@ fn native_succession_guidance(
         return Ok(Some(native_action(
             "inspect",
             "Native owner succession is unconfirmed; inspect the canonical Main handoff",
-            vec![inspect],
+            [inspect],
         )));
     }
-    let mut argv = serde_json::json!([
-        "oms",
-        "panel",
-        "--native-adopt",
-        operation["attempt_id"],
-        "--assignment-sha256",
-        report["binding_sha256"]
-    ]);
+    let mut argv = vec![
+        "oms".into(),
+        "panel".into(),
+        "--native-adopt".into(),
+        operation["attempt_id"].clone(),
+        "--assignment-sha256".into(),
+        report["binding_sha256"].clone(),
+    ];
     if let Some(digest) = report["artifact_sha256"].as_str() {
-        argv.as_array_mut()
-            .unwrap()
-            .extend(["--result-sha256".into(), digest.into()]);
+        argv.extend(["--result-sha256".into(), digest.into()]);
     }
     Ok(Some(native_action(
         "adopt",
         "A successor Main must explicitly adopt this exact frozen assignment before continuing",
-        vec![serde_json::json!({"argv":argv})],
+        [native_command(
+            serde_json::json!({"argv":argv}),
+            repo,
+            Some(room),
+        )],
     )))
 }
 /// Canonical task rows, paged after participant filtering. Missing or corrupt
@@ -2121,10 +2162,24 @@ pub fn results_page(
                             )
                             .unwrap_or(Value::Null)
                         });
-                        let next = native_guidance(operation, &mut report, plan)?;
-                        let next =
-                            native_succession_guidance(&store, operation, &mut report, &attempts)?
-                                .unwrap_or(next);
+                        let room = operation["refs"]["panel_room_id"]
+                            .as_str()
+                            .ok_or_else(|| Error::new("verified native Room is unavailable"))?;
+                        let next = native_guidance(
+                            operation,
+                            &mut report,
+                            plan,
+                            store.repo().to_str(),
+                            room,
+                        )?;
+                        let next = native_succession_guidance(
+                            &store,
+                            operation,
+                            &mut report,
+                            &attempts,
+                            room,
+                        )?
+                        .unwrap_or(next);
                         Ok((report, next))
                     })
                 };
@@ -2133,7 +2188,7 @@ pub fn results_page(
                     let reason = if error.code == 75 { "native return evidence is unavailable or beyond this bounded view" } else { "native return binding, identity or result evidence is invalid" };
                     let reason = if error.message == "native return read limit reached; inspect this task directly" || error.message == "native return schema is unsupported" { error.message.as_str() } else { reason };
                     (serde_json::json!({"status":"unavailable","return_state":state,"acceptance_eligible":false,"issue":reason}),
-                        native_action("inspect",reason,vec![serde_json::json!({"argv":["oms","panel","--results","--task-id",task,"--json"]})]))
+                        native_action("inspect", reason, [native_inspect(&task, store.repo().to_str())]))
                 });
                 let landing = native_plan.as_ref().and_then(|plan| {
                     native_landing(&report, plan, &indexed, &store, &mut landings)
@@ -3622,6 +3677,9 @@ mod tests {
         let repo = crate::git::Scratch::new().unwrap();
         let (mut operation, task, assignment) =
             crate::native_results::tests::fixture(&repo.0, &repo.0, "native-settle", TASK);
+        let physical_repo = repo.0.canonicalize().unwrap();
+        let physical_repo = physical_repo.to_str().unwrap();
+        let room = operation["refs"]["panel_room_id"].clone();
         let paths = crate::native_results::input_paths(&assignment);
         crate::native_results::tests::write(
             &repo.0,
@@ -3629,7 +3687,7 @@ mod tests {
             b"untrusted pending manifest",
         );
         let view = typed_view(
-            &repo.0,
+            &repo.0.join("."),
             ResultsRequest::default(),
             vec![operation.clone()],
             vec![task.clone()],
@@ -3641,6 +3699,23 @@ mod tests {
         assert_eq!(
             view["rows"][0]["native_assignment"]["next_action"]["kind"],
             "import"
+        );
+        assert_eq!(
+            view["rows"][0]["native_assignment"]["next_action"]["commands"][0]["argv"],
+            serde_json::json!([
+                "oms",
+                "panel",
+                "--orchestrator",
+                "codex",
+                "--task-id",
+                TASK,
+                "--native-result",
+                paths["manifest"],
+                "--repo",
+                physical_repo,
+                "--room",
+                room
+            ])
         );
         assert_eq!(view["rows"][0]["acceptance"], false);
         let mut source = assignment.report_template();
@@ -3661,22 +3736,45 @@ mod tests {
             let row = &view["rows"][0];
             assert_eq!(row["native_assignment"]["next_action"]["kind"], "retire");
             assert_eq!(
-                row["native_assignment"]["next_action"]["commands"][0]["argv"][5],
-                operation["refs"]["native_result_sha256"]
+                row["native_assignment"]["next_action"]["commands"][0]["argv"],
+                serde_json::json!([
+                    "oms",
+                    "panel",
+                    "--native-reconcile",
+                    operation["attempt_id"],
+                    "--result-sha256",
+                    operation["refs"]["native_result_sha256"],
+                    "--decision",
+                    "reviewed",
+                    "--repo",
+                    physical_repo,
+                    "--room",
+                    room
+                ])
             );
             assert_eq!(row["acceptance"], false);
             assert_eq!(row["stages"]["verify"]["state"], "not_run");
             let mut retired = operation.clone();
             retired["terminal"] = true.into();
             retired["refs"]["native_resolution"] = "retired".into();
+            let settled = typed_view(
+                &repo.0,
+                ResultsRequest::default(),
+                vec![retired],
+                vec![current.clone()],
+            );
+            let next = &settled["rows"][0]["native_assignment"]["next_action"];
+            assert_eq!(next["kind"], "next");
             assert_eq!(
-                typed_view(
-                    &repo.0,
-                    ResultsRequest::default(),
-                    vec![retired],
-                    vec![current.clone()]
-                )["rows"][0]["native_assignment"]["next_action"]["kind"],
-                "next"
+                next["commands"][0]["argv"],
+                serde_json::json!([
+                    "oms",
+                    "agent-plan",
+                    "ready",
+                    "--json",
+                    "--repo",
+                    physical_repo
+                ])
             );
             current["completion_verified"] = false.into();
             assert_eq!(
@@ -3690,14 +3788,26 @@ mod tests {
             );
         }
         operation["refs"]["native_resolution_result_sha256"] = "a".repeat(64).into();
+        let invalid = typed_view(
+            &repo.0,
+            ResultsRequest::default(),
+            vec![operation],
+            vec![task],
+        );
+        let assignment = &invalid["rows"][0]["native_assignment"];
+        assert_eq!(assignment["return_state"], "invalid");
         assert_eq!(
-            typed_view(
-                &repo.0,
-                ResultsRequest::default(),
-                vec![operation],
-                vec![task]
-            )["rows"][0]["native_assignment"]["return_state"],
-            "invalid"
+            assignment["next_action"]["commands"][0]["argv"],
+            serde_json::json!([
+                "oms",
+                "panel",
+                "--results",
+                "--task-id",
+                TASK,
+                "--json",
+                "--repo",
+                physical_repo
+            ])
         );
     }
 
