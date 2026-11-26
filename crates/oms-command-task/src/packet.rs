@@ -58,6 +58,13 @@ pub fn metadata<'a>(raw: &'a [u8], key: &str) -> Option<&'a [u8]> {
         .take_while(|l| !l.starts_with(b"## "))
         .find_map(|l| value(l, key))
 }
+/// Canonical packet status: an omitted or blank `- status:` line is `active`.
+pub fn effective_status(raw: &[u8]) -> &[u8] {
+    metadata(raw, "status")
+        .map(trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(b"active")
+}
 pub fn section(raw: &[u8], name: &str) -> Vec<u8> {
     let heading = format!("## {name}");
     let mut inside = false;
@@ -440,6 +447,15 @@ pub fn freshness(raw: &[u8], ttl: &[u8], now: DateTime<Utc>) -> PacketFreshness 
 /// Evaluate packet freshness using `OMS_AGENT_TASK_TTL` from the environment.
 pub fn freshness_from_env(raw: &[u8], now: DateTime<Utc>) -> PacketFreshness {
     freshness(raw, &configured_ttl(), now)
+}
+
+/// Whether a non-empty packet is eligible to supply the current objective.
+pub fn current_goal_eligible(raw: &[u8], freshness: PacketFreshness) -> bool {
+    !raw.is_empty()
+        && effective_status(raw) == b"active"
+        && freshness.idle_seconds.is_some()
+        && !freshness.stale
+        && !freshness.dormant
 }
 
 pub fn stale(raw: &[u8], ttl: &[u8], now: DateTime<Utc>) -> bool {

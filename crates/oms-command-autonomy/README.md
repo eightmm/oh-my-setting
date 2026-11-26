@@ -29,7 +29,7 @@ that producer's approval, lifecycle, room, publication and acceptance interfaces
 | `work_repository`, `state_repository` | Resolve physical execution and canonical state roots, including managed scratch checkouts. |
 | `resolve_route` | Return the native registry's exact `ModelRoute` without a provider call. Its class, primary/fallback and effort fields bind unchanged-failure identity. |
 | `invoke` | Dispatch the requested native OMS command and preserve exit/stdout/stderr. Honor the invocation's cwd, environment, wall and output bounds. Never fall back to a script backend. |
-| `validate_context_pack` | Validate the typed graph orientation pack before any task claim. The pack grants no scope. |
+| `validate_context_pack` | Validate the typed graph orientation pack before any task claim. An optional reviewed Lead excerpt is bounded and tied to one physical project, Room and frozen Plan task. The pack grants no scope. |
 | `provider_names` | Return canonical transport names for campaign manifest validation. Local defaults cover Codex, Claude and Antigravity. |
 | `read_issue` | One bounded GitHub GET, without linked-content traversal. The local implementation uses `gh api` with a 20-second, 512-KiB bound. |
 | `repair_feedback`, `revalidate_repair_feedback` | Native landing feedback observations and fresh exact-PR/head/run-attempt or comment-revision checks. Defaults refuse; evidence never grants task, provider or publication authority. |

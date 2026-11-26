@@ -31,11 +31,13 @@ committed citations, and provenance.
   notes before dividing its 1200-byte budget between them. It omits unrelated
   recent summaries, uses a transient in-memory index, and leaves persistent
   indexes and access receipts untouched. Project recall precedes global fallback;
-  review, retirement, citation, path-scope and child restrictions still apply.
-- `pending_review` projects the existing project review queue as a count and
-  candidate fingerprints, without copying note text or making a decision. Its
-  no-follow reads cap each source at 4 MiB and the queue at 4096 candidates;
-  invalid, unsafe or oversized sources return unavailable, never zero pending.
+  review, retirement, citation, path-scope and child restrictions still apply,
+  and each source degrades independently when oversized, unsafe or invalid.
+- `pending_review` projects the existing project review queue as a count,
+  skipped invalid-row count, and candidate fingerprints, without copying note
+  text or making a decision. Its no-follow reads cap each source at 4 MiB and
+  the queue at 4096 candidates; unsafe or oversized sources return unavailable,
+  never zero pending, while invalid receipt rows are skipped and counted.
 
 Automatic task-close, distill and imported notes wait for `review --accept`
 before compact summaries or provider context can include them. The same rule
