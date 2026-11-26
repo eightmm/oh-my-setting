@@ -6,7 +6,11 @@ use crate::storage::{Directory, byte_prefix, hash};
 use crate::value::Value;
 use crate::{RUN_ROOT, Server};
 use rustix::fs::{self, AtFlags, FileType};
-use std::path::Path;
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 #[path = "lead_observation.rs"]
 mod observation;
@@ -17,6 +21,29 @@ mod settings;
 const INVALID: &str = "The Lead conversation receipt is unavailable or changed.";
 const HEAD: &str = "lead-turn-head.json";
 const PAGE: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TurnLookupError {
+    OutboundWithheld,
+    InvalidRecord,
+    ReceiptChanged,
+}
+
+impl TurnLookupError {
+    pub fn marker(self) -> Value {
+        let (status, reason) = match self {
+            Self::OutboundWithheld => ("unavailable", "outbound_withheld"),
+            Self::InvalidRecord => ("unavailable", "invalid_turn_record"),
+            Self::ReceiptChanged => ("unconfirmed", "receipt_changed"),
+        };
+        json!({"status":status,"reason":reason})
+    }
+}
+
+type CachedTurns = BTreeMap<(String, String), (String, Result<&'static str, TurnLookupError>)>;
+
+#[derive(Clone, Default)]
+pub(crate) struct LeadTurnCache(Arc<Mutex<CachedTurns>>);
 
 fn turn_id(id: &str) -> bool {
     uuid(id) && id.as_bytes()[14] == b'4' && matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
@@ -216,20 +243,79 @@ impl<'a> Conversation<'a> {
             Err(_) => Err(INVALID.into()),
         }
     }
-    fn observe(
+    fn completed_fingerprint(&self, op: &str) -> Option<String> {
+        let stamp = |s: &rustix::fs::Stat| {
+            json!([
+                s.st_dev,
+                s.st_ino,
+                s.st_mode,
+                s.st_size,
+                s.st_mtime,
+                s.st_mtime_nsec
+            ])
+        };
+        let op_dir = Directory::run(self.repo, op, true).ok()?;
+        let dir_stat = fs::fstat(&op_dir.fd)
+            .ok()
+            .filter(|s| s.st_mode & 0o077 == 0)?;
+        let status_stat = fs::statat(&op_dir.fd, "status", AtFlags::SYMLINK_NOFOLLOW)
+            .ok()
+            .filter(|s| FileType::from_raw_mode(s.st_mode) == FileType::RegularFile)?;
+        let meta_stat = fs::statat(&op_dir.fd, "meta.json", AtFlags::SYMLINK_NOFOLLOW)
+            .ok()
+            .filter(|s| FileType::from_raw_mode(s.st_mode) == FileType::RegularFile)?;
+        if crate::peer::status(&op_dir.path) != ("done", Some(0)) {
+            return None;
+        }
+        let answers =
+            match Directory::open(self.repo, &format!("{RUN_ROOT}/{op}/answers"), false, true) {
+                Ok(dir) => {
+                    let dstat = fs::fstat(&dir.fd).ok()?;
+                    let mut entries = Vec::new();
+                    for entry in std::fs::read_dir(&dir.path).ok()? {
+                        let entry = entry.ok()?;
+                        let name = entry.file_name();
+                        let st = fs::statat(&dir.fd, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+                            .ok()?;
+                        entries.push((name, stamp(&st)));
+                    }
+                    entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    let files: Vec<Value> = entries
+                        .into_iter()
+                        .map(|(n, st)| json!([n.to_string_lossy().into_owned(), st]))
+                        .collect();
+                    json!([stamp(&dstat), files])
+                }
+                Err(_) => Value::Null,
+            };
+        Some(hash(
+            json!([
+                op,
+                stamp(&dir_stat),
+                stamp(&status_stat),
+                stamp(&meta_stat),
+                answers
+            ])
+            .to_string(),
+        ))
+    }
+    fn observe_classified(
         &self,
         server: &Server<'_>,
         record: &Value,
-    ) -> PanelResult<(&'static str, Option<Value>)> {
-        let binding = record["binding"].as_str().ok_or(INVALID)?;
-        let op = assignment_address(self.lead, binding).ok_or(INVALID)?;
-        let rejected = self.read(&format!(
-            "lead-refused-{}.json",
-            record["id"].as_str().ok_or(INVALID)?
-        ))?;
+    ) -> Result<(&'static str, Option<Value>), (TurnLookupError, String)> {
+        let invalid = || (TurnLookupError::InvalidRecord, INVALID.to_owned());
+        let binding = record["binding"].as_str().ok_or_else(invalid)?;
+        let op = assignment_address(self.lead, binding).ok_or_else(invalid)?;
+        let rejected = self
+            .read(&format!(
+                "lead-refused-{}.json",
+                record["id"].as_str().ok_or_else(invalid)?
+            ))
+            .map_err(|_| invalid())?;
         let expected = json!({"id":record["id"],"binding":binding,"phase":"before-operation"});
         if rejected.as_ref().is_some_and(|v| v != &expected) {
-            return Err(INVALID.into());
+            return Err(invalid());
         }
         let Some(dir) = checked_peer_directory(
             self.repo,
@@ -238,10 +324,14 @@ impl<'a> Conversation<'a> {
             self.thread,
             binding,
             true,
-            Some((record["digest"].as_str().ok_or(INVALID)?, &record["route"])),
-        )?
+            Some((
+                record["digest"].as_str().ok_or_else(invalid)?,
+                &record["route"],
+            )),
+        )
+        .map_err(|_| invalid())?
         else {
-            let absent = self.absent(&op)?;
+            let absent = self.absent(&op).map_err(|_| invalid())?;
             let status = match (absent, rejected.is_some()) {
                 (true, true) => "failed",
                 (true, false) => "reserved",
@@ -274,8 +364,12 @@ impl<'a> Conversation<'a> {
                     .and_then(|v| v["answer"].as_str())
                     .filter(|s| !s.trim().is_empty());
                 if let Some(answer) = answer {
-                    crate::output::outbound(answer.as_bytes(), &Value::Null)
-                        .map_err(|_| "OMS withheld this Lead answer during its outbound scan.")?;
+                    crate::output::outbound(answer.as_bytes(), &Value::Null).map_err(|_| {
+                        (
+                            TurnLookupError::OutboundWithheld,
+                            "OMS withheld this Lead answer during its outbound scan.".to_owned(),
+                        )
+                    })?;
                     Ok((
                         "replied",
                         Some(
@@ -289,6 +383,14 @@ impl<'a> Conversation<'a> {
             ("done", Some(_)) => Ok(("failed", None)),
             _ => Ok(("unconfirmed", None)),
         }
+    }
+    fn observe(
+        &self,
+        server: &Server<'_>,
+        record: &Value,
+    ) -> PanelResult<(&'static str, Option<Value>)> {
+        self.observe_classified(server, record)
+            .map_err(|(_, msg)| msg)
     }
     fn submit(
         &self,
@@ -377,19 +479,70 @@ impl<'a> Conversation<'a> {
     pub fn latest(
         &self,
         server: &Server<'_>,
+        force_refresh: bool,
         check: impl Fn() -> PanelResult<()>,
-    ) -> PanelResult<Value> {
-        let Some(id) = self.head()? else {
+    ) -> Result<Value, TurnLookupError> {
+        let Some(id) = self.head().map_err(|_| TurnLookupError::InvalidRecord)? else {
             return Ok(Value::Null);
         };
-        let record = self.record(&id)?.ok_or(INVALID)?;
-        let status = self.observe(server, &record)?.0;
-        self.bound()?;
-        check()?;
-        if self.head()?.as_deref() != Some(id.as_str())
-            || self.record(&id)?.as_ref() != Some(&record)
+        let record = self
+            .record(&id)
+            .map_err(|_| TurnLookupError::InvalidRecord)?
+            .ok_or(TurnLookupError::InvalidRecord)?;
+        let binding = record["binding"]
+            .as_str()
+            .ok_or(TurnLookupError::InvalidRecord)?;
+        let op = assignment_address(self.lead, binding).ok_or(TurnLookupError::InvalidRecord)?;
+        let cache_key = (self.scope.to_owned(), id.clone());
+        let cached = if !force_refresh {
+            let rejected = self
+                .read(&format!("lead-refused-{id}.json"))
+                .map_err(|_| TurnLookupError::InvalidRecord)?;
+            if rejected.is_none()
+                && let Some(fp) = self.completed_fingerprint(&op)
+                && let Ok(guard) = server.lead_turns.0.lock()
+                && let Some((saved_fp, outcome)) = guard.get(&cache_key)
+                && saved_fp == &fp
+            {
+                Some(*outcome)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let status = match cached {
+            Some(outcome) => outcome?,
+            None => {
+                let outcome = self
+                    .observe_classified(server, &record)
+                    .map(|(s, _)| s)
+                    .map_err(|(e, _)| e);
+                if let Some(fp) = self.completed_fingerprint(&op)
+                    && let Ok(mut guard) = server.lead_turns.0.lock()
+                {
+                    if guard.len() >= 64 && !guard.contains_key(&cache_key) {
+                        guard.clear();
+                    }
+                    guard.insert(cache_key, (fp, outcome));
+                }
+                outcome?
+            }
+        };
+        self.bound().map_err(|_| TurnLookupError::ReceiptChanged)?;
+        check().map_err(|_| TurnLookupError::ReceiptChanged)?;
+        if self
+            .head()
+            .map_err(|_| TurnLookupError::ReceiptChanged)?
+            .as_deref()
+            != Some(id.as_str())
+            || self
+                .record(&id)
+                .map_err(|_| TurnLookupError::ReceiptChanged)?
+                .as_ref()
+                != Some(&record)
         {
-            return Err(INVALID.into());
+            return Err(TurnLookupError::ReceiptChanged);
         }
         Ok(
             json!({"turnId":id,"status":status,"submittedAt":record["at"],"lastObservedAt":crate::storage::now()}),

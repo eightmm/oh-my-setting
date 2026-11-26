@@ -1931,6 +1931,134 @@ fn desktop_lead_conversations() {
     assert_eq!(runs(), 9);
 }
 
+fn lead_turn_failure_degrades_per_row() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    fixture_settings(&source, json!({"leadRoom":true}));
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let read = "oms_lead_conversation_status";
+    let open = "oms_open_lead_conversations";
+    let send = "oms_send_lead_message";
+    let owner = "01900000-0000-7000-8000-0000000000bb";
+    let args = json!({"room":"lead-room"});
+    let call = |c: &mut Client, name: &str, params: &Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":params,"_meta":{"threadId":owner}}),
+        )
+    };
+    let initial = payload(&call(&mut c, open, &args));
+    let key = initial["projectKey"].as_str().unwrap().to_owned();
+    until(|| {
+        std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+            .unwrap()
+            .all(|e| e.unwrap().path().join("status").exists())
+    });
+    let ready = payload(&call(&mut c, open, &args));
+    assert!(
+        ready["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["status"] == "ready")
+    );
+    let send_turn = |c: &mut Client, seat: usize, n: usize| {
+        let turn_id = format!("20000000-0000-4000-8000-{n:012x}");
+        let m = json!({
+            "room":"lead-room",
+            "projectKey":key,
+            "provider":ready["leads"][seat]["provider"],
+            "leadRequestId":ready["leads"][seat]["requestId"],
+            "turnId":turn_id,
+            "text":format!("Check seat {n}"),
+        });
+        good(&call(c, send, &m));
+        until(|| {
+            let r = call(
+                c,
+                read,
+                &json!({"room":"lead-room","provider":m["provider"],"turnId":m["turnId"]}),
+            );
+            payload(&r)["turn"]["status"] == "replied"
+        });
+        turn_id
+    };
+    let codex_turn = send_turn(&mut c, 0, 1);
+    let _claude_turn = send_turn(&mut c, 1, 2);
+    let claude_child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p.join("prompt.txt"))
+                .ok()
+                .as_deref()
+                == Some("Check seat 2\n")
+        })
+        .unwrap();
+    let leaked = ["gh", "p_", &"9".repeat(36)].concat();
+    let claude_artifact = claude_child.join("answers/fixture.md");
+    std::fs::write(
+        &claude_artifact,
+        format!("## Output\nsecret {leaked}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude_artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    for tool in [read, open] {
+        let res = call(&mut c, tool, &args);
+        good(&res);
+        let wire = res.to_string();
+        assert!(!wire.contains(&leaked) && !wire.contains("withheld during"));
+        let leads = payload(&res)["leads"].as_array().unwrap().clone();
+        assert_eq!(leads.len(), 3);
+        assert_eq!(leads[0]["provider"], "codex");
+        assert_eq!(leads[0]["status"], "ready");
+        assert_eq!(leads[0]["latestTurn"]["turnId"], codex_turn);
+        assert_eq!(leads[0]["latestTurn"]["status"], "replied");
+        assert!(leads[0].get("turnState").is_none());
+
+        assert_eq!(leads[1]["provider"], "claude");
+        assert_eq!(leads[1]["status"], "ready");
+        assert_eq!(leads[1]["latestTurn"], Value::Null);
+        assert_eq!(
+            leads[1]["turnState"],
+            json!({"status":"unavailable","reason":"outbound_withheld"})
+        );
+
+        assert_eq!(leads[2]["provider"], "agy");
+        assert_eq!(leads[2]["status"], "ready");
+        assert_eq!(leads[2]["latestTurn"], Value::Null);
+        assert!(leads[2].get("turnState").is_none());
+    }
+
+    // A corrupt head record on Claude also degrades only Claude's turn row.
+    let claude_receipt: Value =
+        serde_json::from_slice(&std::fs::read(source.join("lead-fixture-claude")).unwrap())
+            .unwrap();
+    let claude_kickoff = repo
+        .join(".oms/artifacts/mcp")
+        .join(claude_receipt["operation"].as_str().unwrap());
+    let head_path = claude_kickoff.join("lead-turn-head.json");
+    std::fs::write(&head_path, "{corrupt").unwrap();
+    std::fs::set_permissions(&head_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let corrupt_res = call(&mut c, read, &args);
+    good(&corrupt_res);
+    let leads = payload(&corrupt_res)["leads"].as_array().unwrap().clone();
+    assert_eq!(leads[0]["latestTurn"]["turnId"], codex_turn);
+    assert_eq!(leads[0]["latestTurn"]["status"], "replied");
+    assert_eq!(leads[1]["status"], "ready");
+    assert_eq!(leads[1]["latestTurn"], Value::Null);
+    assert_eq!(
+        leads[1]["turnState"],
+        json!({"status":"unavailable","reason":"invalid_turn_record"})
+    );
+    assert_eq!(leads[2]["status"], "ready");
+    assert_eq!(leads[2]["latestTurn"], Value::Null);
+}
+
 // Provider assignment: the Room store is proven in room_contract; here the
 // MCP side must launch exactly once per requestId and trust only the host binding.
 fn desktop_assignment() {
@@ -6595,7 +6723,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 37] = [
+    let cases: [(&str, fn()); 38] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -6606,6 +6734,10 @@ fn main() {
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
         ("desktop_lead_conversations", desktop_lead_conversations),
+        (
+            "lead_turn_failure_degrades_per_row",
+            lead_turn_failure_degrades_per_row,
+        ),
         ("desktop_assignment", desktop_assignment),
         ("panel_command_catalog", panel_command_catalog),
         ("environment_authority", environment_authority),

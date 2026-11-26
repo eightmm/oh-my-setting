@@ -14,6 +14,7 @@ use std::{
 
 #[path = "lead_turns.rs"]
 mod lead_turns;
+pub(crate) use lead_turns::LeadTurnCache;
 
 const URI: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
@@ -2896,31 +2897,32 @@ impl Server<'_> {
                     .ok_or("The original Lead receipt is unavailable.")?;
                 let binding =
                     crate::storage::hash(json!([&digest[..32], room, request]).to_string());
-                let conversation =
-                    lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)?;
-                let current = || {
-                    let live = run("desktop-lead-status", Some(request), &provider_arg)?;
-                    if !valid(&live)
-                        || live["operation"] != kickoff
-                        || live["assignedAt"] != prior["assignedAt"]
-                        || ((settings || full_answer) && !self.lead_thread_open(repo, kickoff)?)
-                    {
-                        return Err("The original Lead receipt changed.".into());
-                    }
-                    Ok(())
-                };
-                if settings {
-                    let mut detail =
-                        conversation.settings(self, name == UPDATE_SETTINGS, args, &current)?;
-                    let mut summary = json!({"projectKey":key,"room":room,"provider":provider,"leadRequestId":request,"revision":detail["revision"]});
-                    for key in ["projectKey", "room", "provider", "leadRequestId"] {
-                        detail[key] = summary[key].clone();
-                    }
-                    summary["leadSettings"] = detail;
-                    bound()?;
-                    return Ok(summary);
-                }
                 if selected.is_some() {
+                    let conversation =
+                        lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)?;
+                    let current = || {
+                        let live = run("desktop-lead-status", Some(request), &provider_arg)?;
+                        if !valid(&live)
+                            || live["operation"] != kickoff
+                            || live["assignedAt"] != prior["assignedAt"]
+                            || ((settings || full_answer)
+                                && !self.lead_thread_open(repo, kickoff)?)
+                        {
+                            return Err("The original Lead receipt changed.".into());
+                        }
+                        Ok(())
+                    };
+                    if settings {
+                        let mut detail =
+                            conversation.settings(self, name == UPDATE_SETTINGS, args, &current)?;
+                        let mut summary = json!({"projectKey":key,"room":room,"provider":provider,"leadRequestId":request,"revision":detail["revision"]});
+                        for key in ["projectKey", "room", "provider", "leadRequestId"] {
+                            detail[key] = summary[key].clone();
+                        }
+                        summary["leadSettings"] = detail;
+                        bound()?;
+                        return Ok(summary);
+                    }
                     if full_answer {
                         let answer = conversation.answer_page(self, args, current)?;
                         transcript = json!({"turns":[],"cursor":Value::Null,"hasMore":false});
@@ -2931,8 +2933,25 @@ impl Server<'_> {
                     } else {
                         turn = conversation.exchange(self, name, args, &mut transcript, current)?;
                     }
+                    match conversation.latest(self, true, bound) {
+                        Ok(latest) => row["latestTurn"] = latest,
+                        Err(err) => {
+                            row["latestTurn"] = Value::Null;
+                            row["turnState"] = err.marker();
+                        }
+                    }
+                } else {
+                    match lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)
+                        .map_err(|_| lead_turns::TurnLookupError::InvalidRecord)
+                        .and_then(|conversation| conversation.latest(self, false, bound))
+                    {
+                        Ok(latest) => row["latestTurn"] = latest,
+                        Err(err) => {
+                            row["latestTurn"] = Value::Null;
+                            row["turnState"] = err.marker();
+                        }
+                    }
                 }
-                row["latestTurn"] = conversation.latest(self, current)?;
             }
             row["status"] = json!(status);
             if selected.is_some() && private.is_none() {
